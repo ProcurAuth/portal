@@ -199,6 +199,18 @@ On some vendor ROMs (Xiaomi, Huawei, Samsung…), also allow background activity
 "no restrictions" for Inbox. "Force stop" kills the app until it is opened again.
 The server then reports the device as unreachable.
 
+### Testing without a phone
+
+`tools/android/emulator.sh start` boots an Android 14 emulator in Docker (needs
+`/dev/kvm`), installs `dist/inbox-<version>.apk`, grants the onboarding
+permissions and prints the address of its screen, shown in the browser at
+<http://localhost:6080>. With Inbox running on the host (`docker compose up`
+in `deploy/`), add the server `172.17.0.1:8080` in the app: that is the host,
+seen through the Docker bridge. `emulator.sh logs` follows the app logs,
+`emulator.sh install` reinstalls a new build and `emulator.sh stop` removes
+the emulator. Sound, vibration and OEM battery savers can only be judged on a
+real phone.
+
 ## Operations
 
 - **Back up** the SQLite database (`/var/lib/inbox/inbox.db`, use `sqlite3 .backup`

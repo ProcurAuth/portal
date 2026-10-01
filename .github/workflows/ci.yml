@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep docker/build-push-action from uploading build records as artifacts.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
