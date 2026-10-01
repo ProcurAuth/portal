@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Inbox</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="favicon.svg" alt="" width="22" height="22">
+      <span class="brand-name">Inbox</span>
+      <span id="server-name" class="server-name"></span>
+    </div>
+    <div class="topbar-right">
+      <span id="server-version" class="muted small"></span>
+      <span id="conn-state" class="pill hidden"></span>
+      <button id="logout" class="btn btn-ghost hidden" type="button">Déconnexion</button>
+    </div>
+  </header>
+
+  <div id="http-warning" class="banner banner-warn hidden" role="alert">
+    Cette page est servie en HTTP clair. Le mot de passe admin ne transite jamais et les requêtes
+    sont signées, mais un attaquant actif sur le réseau pourrait modifier la page elle-même.
+    Placez l’interface admin derrière TLS ou sur un réseau privé.
+  </div>
+
+  <main>
+    <section id="login-view" class="login hidden">
+      <form id="login-form" class="card login-card" autocomplete="off">
+        <h1>Administration</h1>
+        <p class="muted">Connexion par mot de passe admin (OPAQUE : le mot de passe ne quitte pas ce navigateur).</p>
+        <label for="password">Mot de passe admin</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <button id="login-submit" class="btn btn-primary" type="submit">Se connecter</button>
+        <p id="login-error" class="error hidden" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="app-view" class="hidden">
+      <div class="stats" id="stats">
+        <div class="stat"><span class="stat-label">En ligne</span><span class="stat-value" id="st-online">–</span></div>
+        <div class="stat"><span class="stat-label">Enrôlés</span><span class="stat-value" id="st-enrolled">–</span></div>
+        <div class="stat" id="st-unreachable-box"><span class="stat-label">Injoignables</span><span class="stat-value" id="st-unreachable">–</span></div>
+        <div class="stat" id="st-pending-box"><span class="stat-label">Livraisons en attente</span><span class="stat-value" id="st-pending">–</span></div>
+        <div class="stat"><span class="stat-label">Plus ancienne en attente</span><span class="stat-value" id="st-oldest">–</span></div>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="devices" role="tab" type="button">Appareils</button>
+        <button class="tab" data-tab="send" role="tab" type="button">Envoyer une alerte</button>
+        <button class="tab" data-tab="alerts" role="tab" type="button">Alertes</button>
+        <button class="tab" data-tab="connections" role="tab" type="button">Connexions</button>
+      </nav>
+
+      <div id="global-error" class="banner banner-error hidden" role="alert"></div>
+
+      <section class="panel" data-panel="devices">
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Appareil</th><th>État</th><th>IP</th><th>Version</th><th>Connecté / vu</th>
+                <th>Abonnements</th><th class="num">En attente</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="devices-body"></tbody>
+          </table>
+        </div>
+        <p id="devices-empty" class="muted empty hidden">Aucun appareil enrôlé. Installez l’app Android et connectez-la à ce serveur.</p>
+      </section>
+
+      <section class="panel hidden" data-panel="send">
+        <form id="send-form" class="card send-card" autocomplete="off">
+          <label for="send-group">Groupe</label>
+          <select id="send-group" required></select>
+          <p id="send-group-desc" class="muted small"></p>
+          <label for="send-title">Titre <span class="muted">(facultatif)</span></label>
+          <input id="send-title" type="text" maxlength="1024">
+          <label for="send-message">Message <span class="muted">(facultatif)</span></label>
+          <textarea id="send-message" rows="5"></textarea>
+          <p class="muted small">L’action déclenchée (alarme, sonnerie, notification) est choisie par chaque abonné pour ce groupe.</p>
+          <button id="send-submit" class="btn btn-danger" type="submit">Envoyer l’alerte</button>
+          <div id="send-result" class="result hidden" role="status"></div>
+        </form>
+      </section>
+
+      <section class="panel hidden" data-panel="alerts">
+        <div class="split">
+          <div class="table-wrap">
+            <table class="table clickable">
+              <thead>
+                <tr><th>Date</th><th>Groupe</th><th>Alerte</th><th>Source</th><th class="num">Cibles</th><th class="num">Reçue</th><th class="num">Affichée</th><th class="num">Acquittée</th></tr>
+              </thead>
+              <tbody id="alerts-body"></tbody>
+            </table>
+            <p id="alerts-empty" class="muted empty hidden">Aucune alerte.</p>
+          </div>
+          <aside id="alert-detail" class="card detail hidden"></aside>
+        </div>
+      </section>
+
+      <section class="panel hidden" data-panel="connections">
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>Appareil</th><th>IP</th><th>Version</th><th>Connexion</th><th>Déconnexion</th><th>Durée</th><th>Raison</th></tr>
+            </thead>
+            <tbody id="connections-body"></tbody>
+          </table>
+        </div>
+        <p id="connections-empty" class="muted empty hidden">Aucune connexion enregistrée.</p>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="confirm-dialog" class="card">
+    <p id="confirm-text"></p>
+    <div class="dialog-actions">
+      <button id="confirm-cancel" class="btn btn-ghost" type="button">Annuler</button>
+      <button id="confirm-ok" class="btn btn-danger" type="button">Confirmer</button>
+    </div>
+  </dialog>
+</body>
+</html>

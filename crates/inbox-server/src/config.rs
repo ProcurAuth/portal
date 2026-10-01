@@ -221,7 +221,10 @@ impl Config {
         check(s.shutdown_grace >= Duration::from_secs(1), "server.shutdown_grace must be >= 1s");
 
         let st = &self.storage;
-        check(st.alert_retention >= Duration::from_secs(3600), "storage.alert_retention must be >= 1h");
+        check(
+            st.alert_retention >= Duration::from_secs(3600),
+            "storage.alert_retention must be >= 1h",
+        );
         check(
             st.connection_log_retention >= Duration::from_secs(3600),
             "storage.connection_log_retention must be >= 1h",
@@ -255,7 +258,10 @@ impl Config {
         );
 
         let sec = &self.security;
-        check((1..=1000).contains(&sec.max_auth_failures), "security.max_auth_failures must be in 1..1000");
+        check(
+            (1..=1000).contains(&sec.max_auth_failures),
+            "security.max_auth_failures must be in 1..1000",
+        );
         check(
             sec.auth_failure_window >= Duration::from_secs(1),
             "security.auth_failure_window must be >= 1s",
@@ -292,9 +298,14 @@ impl Config {
             match t.export_interval {
                 Some(i) if i >= Duration::from_secs(1) => {}
                 Some(_) => errors.push("telemetry.export_interval must be >= 1s".to_string()),
-                None => errors.push("telemetry.export_interval is required when enabled".to_string()),
+                None => {
+                    errors.push("telemetry.export_interval is required when enabled".to_string())
+                }
             }
-        } else if t.otlp_endpoint.is_some() || t.service_name.is_some() || t.export_interval.is_some() {
+        } else if t.otlp_endpoint.is_some()
+            || t.service_name.is_some()
+            || t.export_interval.is_some()
+        {
             errors.push("telemetry: remove endpoint settings or set enabled = true".to_string());
         }
 
@@ -331,14 +342,20 @@ impl Config {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(format!("invalid config:\n  - {}", errors.join("\n  - "))) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("invalid config:\n  - {}", errors.join("\n  - ")))
+        }
     }
 }
 
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]
@@ -360,8 +377,11 @@ pub(crate) mod tests {
         let lines: Vec<&str> = EXAMPLE.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
-            if t.starts_with('#') || !t.contains(" = ") || t.starts_with("otlp_endpoint")
-                || t.starts_with("service_name") || t.starts_with("export_interval")
+            if t.starts_with('#')
+                || !t.contains(" = ")
+                || t.starts_with("otlp_endpoint")
+                || t.starts_with("service_name")
+                || t.starts_with("export_interval")
             {
                 continue;
             }
@@ -381,7 +401,8 @@ pub(crate) mod tests {
 
     #[test]
     fn producer_groups_must_exist() {
-        let text = EXAMPLE.replace("groups                = [\"infra\"]", "groups                = [\"nope\"]");
+        let text = EXAMPLE
+            .replace("groups                = [\"infra\"]", "groups                = [\"nope\"]");
         let err = Config::parse(&text).unwrap_err();
         assert!(err.contains("unknown group"), "{err}");
     }

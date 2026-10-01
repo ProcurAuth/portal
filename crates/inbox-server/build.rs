@@ -43,7 +43,10 @@ fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 }
 
 fn main() {
-    let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web").canonicalize().expect("web/ directory");
+    let web = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../web")
+        .canonicalize()
+        .expect("web/ directory");
     println!("cargo:rerun-if-changed={}", web.display());
     println!("cargo:rerun-if-env-changed=INBOX_GIT_SHA");
 
@@ -58,8 +61,13 @@ fn main() {
     for (rel, path) in &files {
         let bytes = std::fs::read(path).expect("read asset");
         let etag: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-        writeln!(code, "    ({rel:?}, {:?}, include_bytes!({:?}), {etag:?}),", mime(path), path.display().to_string())
-            .unwrap();
+        writeln!(
+            code,
+            "    ({rel:?}, {:?}, include_bytes!({:?}), {etag:?}),",
+            mime(path),
+            path.display().to_string()
+        )
+        .unwrap();
     }
     code.push_str("];\n");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("assets.rs");

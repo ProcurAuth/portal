@@ -31,26 +31,39 @@ pub fn serve(config: Config) -> Result<(), String> {
     // Everything that can be checked is checked before anything starts.
     let secrets = Secrets::load(&config)?;
     let (guard, meter) = telemetry::init(&config)?;
+    let (db, db_closed) = Db::open(&config.storage.path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("inbox")
         .build()
         .map_err(|e| format!("cannot start runtime: {e}"))?;
-    let result = runtime.block_on(run(config, secrets, meter));
+    let result = runtime.block_on(run(config, secrets, db, meter));
+    // Dropping the runtime drops every task, hence every database handle.
     runtime.shutdown_timeout(Duration::from_secs(5));
+    if !db_closed.wait(Duration::from_secs(10)) {
+        tracing::warn!(event = "database_close_timeout");
+    }
     guard.shutdown();
     result
 }
 
-async fn run(config: Config, secrets: Secrets, meter: opentelemetry::metrics::Meter) -> Result<(), String> {
-    let db = Db::open(&config.storage.path)?;
+async fn run(
+    config: Config,
+    secrets: Secrets,
+    db: Db,
+    meter: opentelemetry::metrics::Meter,
+) -> Result<(), String> {
     let group_ids: Vec<String> = config.group.keys().cloned().collect();
     let pruned = db
         .call(move |c| Ok(db::prune_subscriptions(c, &group_ids)?))
         .await
         .map_err(|e| format!("storage: {e}"))?;
     if pruned > 0 {
-        tracing::warn!(event = "subscriptions_pruned", count = pruned, reason = "group removed from config");
+        tracing::warn!(
+            event = "subscriptions_pruned",
+            count = pruned,
+            reason = "group removed from config"
+        );
     }
 
     let public = TcpListener::bind(config.server.listen)
@@ -63,14 +76,21 @@ async fn run(config: Config, secrets: Secrets, meter: opentelemetry::metrics::Me
     let groups: Vec<GroupInfo> = config
         .group
         .iter()
-        .map(|(id, g)| GroupInfo { id: id.clone(), name: g.name.clone(), description: g.description.clone() })
+        .map(|(id, g)| GroupInfo {
+            id: id.clone(),
+            name: g.name.clone(),
+            description: g.description.clone(),
+        })
         .collect();
     let group_names = config.group.iter().map(|(id, g)| (id.clone(), g.name.clone())).collect();
     let gauges = Arc::new(Gauges::default());
     telemetry::register_gauges(&meter, gauges.clone());
     let shutdown = Shutdown::new();
     let app = Arc::new(AppState {
-        limiter: AuthLimiter::new(config.security.max_auth_failures, config.security.auth_failure_window),
+        limiter: AuthLimiter::new(
+            config.security.max_auth_failures,
+            config.security.auth_failure_window,
+        ),
         secrets,
         db,
         hub: Hub::default(),
@@ -96,7 +116,7 @@ async fn run(config: Config, secrets: Secrets, meter: opentelemetry::metrics::Me
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/api/version", get(version))
-        .layer(body_limit.clone())
+        .layer(body_limit)
         .with_state(app.clone());
     let admin_router = Router::new()
         .route("/api/admin/login/start", post(admin::login_start))
@@ -136,10 +156,14 @@ async fn run(config: Config, secrets: Secrets, meter: opentelemetry::metrics::Me
             }
         }
     };
-    let public_srv = axum::serve(public, public_router.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(stop());
-    let admin_srv = axum::serve(admin_listener, admin_router.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(stop());
+    let public_srv =
+        axum::serve(public, public_router.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(stop());
+    let admin_srv = axum::serve(
+        admin_listener,
+        admin_router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(stop());
     let servers = async { tokio::try_join!(async { public_srv.await }, async { admin_srv.await }) };
     tokio::pin!(servers);
 
@@ -173,11 +197,14 @@ async fn readyz(State(app): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn version() -> impl IntoResponse {
-    axum::Json(json!({ "version": VERSION, "git_sha": GIT_SHA, "protocol": inbox_core::PROTOCOL_VERSION }))
+    axum::Json(
+        json!({ "version": VERSION, "git_sha": GIT_SHA, "protocol": inbox_core::PROTOCOL_VERSION }),
+    )
 }
 
 async fn flush_last_seen(app: &AppState) {
-    let seen: Vec<(String, i64)> = app.hub.snapshot().into_iter().map(|(id, l)| (id, l.last_seen_at)).collect();
+    let seen: Vec<(String, i64)> =
+        app.hub.snapshot().into_iter().map(|(id, l)| (id, l.last_seen_at)).collect();
     if seen.is_empty() {
         return;
     }
@@ -199,12 +226,17 @@ fn spawn_background(app: Arc<AppState>) {
                 _ = a.shutdown.wait() => return,
             }
             n += 1;
-            if n % 4 == 0 {
+            if n.is_multiple_of(4) {
                 flush_last_seen(&a).await;
             }
-            let stats = a
-                .db
-                .call(|c| Ok((db::pending_stats(c)?, db::subscribed_devices(c)?, db::count_active_devices(c)?)))
+            let stats =
+                a.db.call(|c| {
+                    Ok((
+                        db::pending_stats(c)?,
+                        db::subscribed_devices(c)?,
+                        db::count_active_devices(c)?,
+                    ))
+                })
                 .await;
             match stats {
                 Ok(((pending, oldest), subscribed, enrolled)) => {
@@ -212,7 +244,9 @@ fn spawn_background(app: Arc<AppState>) {
                     let cutoff = now_ms() - a.config.devices.unreachable_after.as_millis() as i64;
                     let unreachable = subscribed
                         .iter()
-                        .filter(|(id, seen)| !live.contains_key(id) && seen.is_none_or(|t| t < cutoff))
+                        .filter(|(id, seen)| {
+                            !live.contains_key(id) && seen.is_none_or(|t| t < cutoff)
+                        })
                         .count();
                     a.gauges.pending_deliveries.store(pending, Relaxed);
                     a.gauges.oldest_pending_ms.store(oldest, Relaxed);

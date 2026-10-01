@@ -107,20 +107,31 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
             let out = PathBuf::from(f.required("--out")?);
             let key = ServerKey::generate(&mut Rng::os()).map_err(|e| e.to_string())?;
             write_new_secret(&out, &key.encode())?;
-            eprintln!("server key written to {} (back it up: replacing it invalidates every device)", out.display());
+            eprintln!(
+                "server key written to {} (back it up: replacing it invalidates every device)",
+                out.display()
+            );
             Ok(())
         }
         "credential" => {
-            let f = Flags::parse(rest, &["--server-key", "--role", "--out"], &["--password-stdin"])?;
+            let f =
+                Flags::parse(rest, &["--server-key", "--role", "--out"], &["--password-stdin"])?;
             let key_path = PathBuf::from(f.required("--server-key")?);
             let role_text = f.required("--role")?;
-            let role = Role::parse(&role_text)
-                .ok_or_else(|| Failure::Usage(format!("--role must be device or admin, not {role_text:?}")))?;
+            let role = Role::parse(&role_text).ok_or_else(|| {
+                Failure::Usage(format!("--role must be device or admin, not {role_text:?}"))
+            })?;
             let out = PathBuf::from(f.required("--out")?);
-            let key = ServerKey::decode(&read_secret(&key_path, "--server-key")?).map_err(|e| format!("--server-key: {e}"))?;
+            let key = ServerKey::decode(&read_secret(&key_path, "--server-key")?)
+                .map_err(|e| format!("--server-key: {e}"))?;
             let password = read_password(role, f.has("--password-stdin"))?;
-            let record = inbox_core::login::register(&key.opaque, role, password.as_bytes(), &mut Rng::os())
-                .map_err(|e| e.to_string())?;
+            let record = inbox_core::login::register(
+                &key.opaque,
+                role,
+                password.as_bytes(),
+                &mut Rng::os(),
+            )
+            .map_err(|e| e.to_string())?;
             write_new_secret(&out, &inbox_core::b64::encode(&record))?;
             eprintln!("{} credential written to {}", role.as_str(), out.display());
             Ok(())
@@ -156,7 +167,10 @@ fn read_password(role: Role, from_stdin: bool) -> Result<Zeroizing<String>, Fail
     let min = min_password_len(role);
     let password = if from_stdin || !std::io::stdin().is_terminal() {
         let mut line = Zeroizing::new(String::new());
-        std::io::stdin().lock().read_line(&mut line).map_err(|e| format!("cannot read password: {e}"))?;
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| format!("cannot read password: {e}"))?;
         Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string())
     } else {
         let first = prompt_hidden(&format!("{} password: ", role.as_str()))?;
@@ -167,7 +181,10 @@ fn read_password(role: Role, from_stdin: bool) -> Result<Zeroizing<String>, Fail
         first
     };
     if password.chars().count() < min {
-        return Err(Failure::Fatal(format!("{} password must be at least {min} characters", role.as_str())));
+        return Err(Failure::Fatal(format!(
+            "{} password must be at least {min} characters",
+            role.as_str()
+        )));
     }
     Ok(password)
 }
@@ -208,7 +225,10 @@ fn healthcheck(listen: SocketAddr) -> Result<(), String> {
         .map_err(|e| format!("connect {target}: {e}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
     stream
-        .write_all(format!("GET /readyz HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET /readyz HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .map_err(|e| format!("write: {e}"))?;
     let mut status = String::new();
     std::io::BufReader::new(stream).read_line(&mut status).map_err(|e| format!("read: {e}"))?;

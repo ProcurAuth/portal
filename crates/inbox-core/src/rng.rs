@@ -11,7 +11,7 @@ use rand_core::{CryptoRng, RngCore, SeedableRng};
 pub enum Rng {
     #[cfg(feature = "os-rng")]
     Os(rand_core::OsRng),
-    Seeded(ChaCha20Rng),
+    Seeded(Box<ChaCha20Rng>),
 }
 
 impl Rng {
@@ -22,7 +22,7 @@ impl Rng {
 
     /// `seed` must come from a cryptographically secure source.
     pub fn from_seed(seed: [u8; 32]) -> Rng {
-        Rng::Seeded(ChaCha20Rng::from_seed(seed))
+        Rng::Seeded(Box::new(ChaCha20Rng::from_seed(seed)))
     }
 
     pub fn bytes<const N: usize>(&mut self) -> [u8; N] {

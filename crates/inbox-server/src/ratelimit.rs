@@ -1,4 +1,7 @@
-//! Failed-authentication limiter keyed by client address.
+//! Authentication attempt limiter keyed by client address.
+//!
+//! Password attempts are recorded when they start (OPAQUE detects a wrong password
+//! on the client, so the server never sees the failure) and cleared on success.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -16,7 +19,11 @@ pub struct AuthLimiter {
 
 impl AuthLimiter {
     pub fn new(max_failures: u32, window: Duration) -> AuthLimiter {
-        AuthLimiter { max_failures: max_failures as usize, window, failures: Mutex::new(HashMap::new()) }
+        AuthLimiter {
+            max_failures: max_failures as usize,
+            window,
+            failures: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Whether `ip` may attempt to authenticate now.

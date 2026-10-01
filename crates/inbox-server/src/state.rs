@@ -43,7 +43,8 @@ impl Secrets {
         let key_text = read_secret(&config.server.server_key_file, "server.server_key_file")?;
         let server_key = ServerKey::decode(&key_text)
             .map_err(|e| format!("server.server_key_file: {e} (generate with `inbox keygen`)"))?;
-        let device_record = load_record(&config.devices.credential_file, "devices.credential_file")?;
+        let device_record =
+            load_record(&config.devices.credential_file, "devices.credential_file")?;
         let admin_record = load_record(&config.admin.credential_file, "admin.credential_file")?;
         if device_record.serialize() == admin_record.serialize() {
             return Err("devices.credential_file and admin.credential_file must differ".into());
@@ -54,7 +55,9 @@ impl Secrets {
             let label = format!("producer.{name}.token_file");
             let token = read_secret(&p.token_file, &label)?;
             if token.len() < MIN_TOKEN_LEN || !token.bytes().all(|b| b.is_ascii_graphic()) {
-                return Err(format!("{label}: token must be >= {MIN_TOKEN_LEN} printable characters (use `inbox token`)"));
+                return Err(format!(
+                    "{label}: token must be >= {MIN_TOKEN_LEN} printable characters (use `inbox token`)"
+                ));
             }
             let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
             if !hashes.insert(token_hash) {

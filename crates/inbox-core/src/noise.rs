@@ -32,9 +32,7 @@ pub struct Keypair {
 }
 
 pub fn generate_keypair() -> Result<Keypair> {
-    let kp = builder()
-        .generate_keypair()
-        .map_err(|_| Error::Internal("keypair generation"))?;
+    let kp = builder().generate_keypair().map_err(|_| Error::Internal("keypair generation"))?;
     Ok(Keypair { private: Zeroizing::new(kp.private), public: kp.public })
 }
 
@@ -66,10 +64,8 @@ impl Session {
             return Err(Error::Malformed("frame too large"));
         }
         let mut out = vec![0u8; message.len()];
-        let n = self
-            .state
-            .read_message(message, &mut out)
-            .map_err(|_| Error::AuthenticationFailed)?;
+        let n =
+            self.state.read_message(message, &mut out).map_err(|_| Error::AuthenticationFailed)?;
         out.truncate(n);
         Ok(out)
     }
@@ -82,7 +78,11 @@ pub struct Initiator {
 
 impl Initiator {
     /// Returns the initiator and handshake message 1 carrying `hello`.
-    pub fn start(device_private: &[u8], server_public: &[u8], hello: &[u8]) -> Result<(Initiator, Vec<u8>)> {
+    pub fn start(
+        device_private: &[u8],
+        server_public: &[u8],
+        hello: &[u8],
+    ) -> Result<(Initiator, Vec<u8>)> {
         check_key(device_private)?;
         check_key(server_public)?;
         let mut hs = builder()
@@ -92,7 +92,8 @@ impl Initiator {
             .and_then(|b| b.build_initiator())
             .map_err(|_| Error::Internal("noise initiator"))?;
         let mut msg = vec![0u8; MAX_MESSAGE];
-        let n = hs.write_message(hello, &mut msg).map_err(|_| Error::Internal("noise message 1"))?;
+        let n =
+            hs.write_message(hello, &mut msg).map_err(|_| Error::Internal("noise message 1"))?;
         msg.truncate(n);
         Ok((Initiator { hs }, msg))
     }
@@ -100,10 +101,8 @@ impl Initiator {
     /// Consumes handshake message 2. Fails unless it comes from the pinned server key.
     pub fn finish(mut self, message: &[u8]) -> Result<(Session, Vec<u8>)> {
         let mut payload = vec![0u8; message.len()];
-        let n = self
-            .hs
-            .read_message(message, &mut payload)
-            .map_err(|_| Error::AuthenticationFailed)?;
+        let n =
+            self.hs.read_message(message, &mut payload).map_err(|_| Error::AuthenticationFailed)?;
         payload.truncate(n);
         let state = self.hs.into_transport_mode().map_err(|_| Error::Internal("noise split"))?;
         Ok((Session { state }, payload))
@@ -126,14 +125,10 @@ impl Responder {
             .and_then(|b| b.build_responder())
             .map_err(|_| Error::Internal("noise responder"))?;
         let mut payload = vec![0u8; message.len()];
-        let n = hs
-            .read_message(message, &mut payload)
-            .map_err(|_| Error::AuthenticationFailed)?;
+        let n = hs.read_message(message, &mut payload).map_err(|_| Error::AuthenticationFailed)?;
         payload.truncate(n);
-        let remote = hs
-            .get_remote_static()
-            .ok_or(Error::Internal("missing remote static"))?
-            .to_vec();
+        let remote =
+            hs.get_remote_static().ok_or(Error::Internal("missing remote static"))?.to_vec();
         Ok((Responder { hs }, remote, payload))
     }
 

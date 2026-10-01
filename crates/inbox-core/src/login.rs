@@ -5,8 +5,8 @@ use hmac::{Hmac, Mac};
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
     ClientRegistrationFinishParameters, CredentialFinalization, CredentialRequest,
-    CredentialResponse, Identifiers, RegistrationRequest, RegistrationUpload,
-    ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
+    CredentialResponse, Identifiers, RegistrationRequest, RegistrationUpload, ServerLogin,
+    ServerLoginParameters, ServerRegistration, ServerSetup,
 };
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
@@ -80,7 +80,8 @@ pub fn register(
 
 /// Validates a credential record read from disk.
 pub fn parse_record(bytes: &[u8]) -> Result<ServerRegistration<Suite>> {
-    ServerRegistration::<Suite>::deserialize(bytes).map_err(|_| Error::Malformed("credential record"))
+    ServerRegistration::<Suite>::deserialize(bytes)
+        .map_err(|_| Error::Malformed("credential record"))
 }
 
 /// Client side of a login.
@@ -96,11 +97,8 @@ impl LoginClient {
         let start = ClientLogin::<Suite>::start(rng, password)
             .map_err(|_| Error::Internal("login start"))?;
         let request = start.message.serialize().to_vec();
-        let client = LoginClient {
-            role,
-            password: Zeroizing::new(password.to_vec()),
-            state: start.state,
-        };
+        let client =
+            LoginClient { role, password: Zeroizing::new(password.to_vec()), state: start.state };
         Ok((client, request))
     }
 
@@ -168,10 +166,8 @@ impl LoginServer {
             context: Some(self.role.context()),
             identifiers: Identifiers::default(),
         };
-        let finish = self
-            .state
-            .finish(finalization, params)
-            .map_err(|_| Error::AuthenticationFailed)?;
+        let finish =
+            self.state.finish(finalization, params).map_err(|_| Error::AuthenticationFailed)?;
         Ok(SessionKey(Zeroizing::new(finish.session_key.to_vec())))
     }
 }

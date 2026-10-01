@@ -7,11 +7,11 @@
 use opaque_ke::ServerSetup;
 use zeroize::Zeroizing;
 
+use crate::b64;
 use crate::error::{Error, Result};
 use crate::noise;
 use crate::rng::Rng;
 use crate::suite::Suite;
-use crate::b64;
 
 const VERSION: u8 = 1;
 

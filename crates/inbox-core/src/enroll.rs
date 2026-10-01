@@ -15,6 +15,7 @@
 
 use zeroize::Zeroizing;
 
+use crate::PROTOCOL_VERSION;
 use crate::error::{Error, Result};
 use crate::login::{self, LoginClient, LoginServer, SessionKey};
 use crate::noise;
@@ -22,7 +23,6 @@ use crate::proto::{EnrollClientMsg, EnrollServerMsg};
 use crate::rng::Rng;
 use crate::server_key::ServerKey;
 use crate::suite::Role;
-use crate::PROTOCOL_VERSION;
 
 const CLIENT_MAC: &str = "enroll/client-mac";
 const SERVER_MAC: &str = "enroll/server-mac";
@@ -46,7 +46,7 @@ pub enum ClientStep {
 }
 
 enum ClientState {
-    AwaitChallenge(LoginClient),
+    AwaitChallenge(Box<LoginClient>),
     AwaitAccepted { key: SessionKey, device: noise::Keypair },
     Finished,
 }
@@ -72,14 +72,21 @@ fn encode<T: serde::Serialize>(msg: &T) -> String {
 
 impl EnrollClient {
     /// Returns the client and the first message to send.
-    pub fn start(password: &[u8], device_name: &str, mut rng: Rng) -> Result<(EnrollClient, String)> {
+    pub fn start(
+        password: &[u8],
+        device_name: &str,
+        mut rng: Rng,
+    ) -> Result<(EnrollClient, String)> {
         let device_name = validate_device_name(device_name)?;
         let (login, request) = LoginClient::start(Role::Device, password, &mut rng)?;
         let msg = encode(&EnrollClientMsg::Start {
             protocol: PROTOCOL_VERSION,
             credential_request: request,
         });
-        Ok((EnrollClient { device_name, state: ClientState::AwaitChallenge(login), rng }, msg))
+        Ok((
+            EnrollClient { device_name, state: ClientState::AwaitChallenge(Box::new(login)), rng },
+            msg,
+        ))
     }
 
     /// Feeds one server message.
@@ -91,7 +98,10 @@ impl EnrollClient {
             return Err(Error::Rejected { code, message });
         }
         match (std::mem::replace(&mut self.state, ClientState::Finished), msg) {
-            (ClientState::AwaitChallenge(login), EnrollServerMsg::Challenge { credential_response }) => {
+            (
+                ClientState::AwaitChallenge(login),
+                EnrollServerMsg::Challenge { credential_response },
+            ) => {
                 let (finalization, key) = login.finish(&credential_response, &mut self.rng)?;
                 let device = noise::generate_keypair()?;
                 let mac = login::mac(
@@ -113,7 +123,12 @@ impl EnrollClient {
             ) => {
                 login::verify_mac(
                     &key.derive(SERVER_MAC),
-                    &[device_id.as_bytes(), server_name.as_bytes(), &server_public_key, &device.public],
+                    &[
+                        device_id.as_bytes(),
+                        server_name.as_bytes(),
+                        &server_public_key,
+                        &device.public,
+                    ],
                     &mac,
                 )?;
                 if server_public_key.len() != 32 {
@@ -170,15 +185,25 @@ impl<'a> EnrollServer<'a> {
         if protocol != PROTOCOL_VERSION {
             return Err(Error::UnsupportedProtocol(protocol));
         }
-        let (login, response) =
-            LoginServer::start(&self.key.opaque, self.record, Role::Device, &credential_request, rng)?;
+        let (login, response) = LoginServer::start(
+            &self.key.opaque,
+            self.record,
+            Role::Device,
+            &credential_request,
+            rng,
+        )?;
         self.login = Some(login);
         Ok(encode(&EnrollServerMsg::Challenge { credential_response: response }))
     }
 
     /// Handles `Finish`. Fails with [`Error::AuthenticationFailed`] on a wrong password.
     pub fn on_finish(&mut self, msg: EnrollClientMsg) -> Result<VerifiedDevice> {
-        let EnrollClientMsg::Finish { credential_finalization, device_name, device_public_key, mac } = msg
+        let EnrollClientMsg::Finish {
+            credential_finalization,
+            device_name,
+            device_public_key,
+            mac,
+        } = msg
         else {
             return Err(Error::UnexpectedMessage("expected finish"));
         };
@@ -223,9 +248,13 @@ impl<'a> EnrollServer<'a> {
 mod tests {
     use super::*;
 
-    fn run(server_pw: &[u8], client_pw: &[u8]) -> Result<(EnrolledDevice, VerifiedDevice, Vec<u8>)> {
+    fn run(
+        server_pw: &[u8],
+        client_pw: &[u8],
+    ) -> Result<(EnrolledDevice, VerifiedDevice, Vec<u8>)> {
         let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let record_bytes = login::register(&key.opaque, Role::Device, server_pw, &mut Rng::os()).unwrap();
+        let record_bytes =
+            login::register(&key.opaque, Role::Device, server_pw, &mut Rng::os()).unwrap();
         let record = login::parse_record(&record_bytes).unwrap();
         let mut server = EnrollServer::new(&key, &record);
         let (mut client, m1) = EnrollClient::start(client_pw, " Pixel de garde ", Rng::os())?;
@@ -254,7 +283,8 @@ mod tests {
     #[test]
     fn tampered_accept_is_rejected() {
         let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let record_bytes = login::register(&key.opaque, Role::Device, b"pw", &mut Rng::os()).unwrap();
+        let record_bytes =
+            login::register(&key.opaque, Role::Device, b"pw", &mut Rng::os()).unwrap();
         let record = login::parse_record(&record_bytes).unwrap();
         let mut server = EnrollServer::new(&key, &record);
         let (mut client, m1) = EnrollClient::start(b"pw", "phone", Rng::os()).unwrap();

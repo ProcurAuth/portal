@@ -22,6 +22,17 @@ pub struct Db {
     tx: mpsc::Sender<Job>,
 }
 
+/// Signals when the database thread has checkpointed and closed the connection,
+/// which happens once every [`Db`] handle is dropped.
+pub struct Closed(std::sync::mpsc::Receiver<()>);
+
+impl Closed {
+    /// Waits for the database thread to finish, at most `limit`.
+    pub fn wait(self, limit: std::time::Duration) -> bool {
+        self.0.recv_timeout(limit).is_ok()
+    }
+}
+
 #[derive(Debug)]
 pub enum DbError {
     Sqlite(rusqlite::Error),
@@ -108,11 +119,12 @@ CREATE INDEX connections_time ON connections(connected_at);
 
 impl Db {
     /// Opens (creating if needed) and migrates the database, then starts its thread.
-    pub fn open(path: &Path) -> Result<Db, String> {
-        if let Some(dir) = path.parent() {
-            if !dir.as_os_str().is_empty() && !dir.is_dir() {
-                return Err(format!("storage.path: directory {} does not exist", dir.display()));
-            }
+    pub fn open(path: &Path) -> Result<(Db, Closed), String> {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+            && !dir.is_dir()
+        {
+            return Err(format!("storage.path: directory {} does not exist", dir.display()));
         }
         let mut conn = Connection::open(path)
             .map_err(|e| format!("storage.path: cannot open {}: {e}", path.display()))?;
@@ -130,6 +142,7 @@ impl Db {
         }
 
         let (tx, mut rx) = mpsc::channel::<Job>(1024);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("inbox-db".into())
             .spawn(move || {
@@ -139,10 +152,12 @@ impl Db {
                 if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
                     tracing::warn!(event = "wal_checkpoint_failed", error = %e);
                 }
+                drop(conn);
                 tracing::info!(event = "database_closed");
+                let _ = done_tx.send(());
             })
             .map_err(|e| format!("cannot start database thread: {e}"))?;
-        Ok(Db { tx })
+        Ok((Db { tx }, Closed(done_rx)))
     }
 
     /// Runs `f` on the database thread.
@@ -166,9 +181,14 @@ fn configure(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
-        return Err(rusqlite::Error::InvalidParameterName(format!("journal_mode is {mode}, expected wal")));
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "journal_mode is {mode}, expected wal"
+        )));
     }
-    conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;")
+    // temp_store: the container root filesystem is read-only.
+    conn.execute_batch(
+        "PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;",
+    )
 }
 
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -201,7 +221,12 @@ pub fn count_active_devices(conn: &Connection) -> rusqlite::Result<u32> {
     conn.query_row("SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL", [], |r| r.get(0))
 }
 
-pub fn insert_device(conn: &Connection, name: &str, public_key: &[u8], ip: &str) -> rusqlite::Result<String> {
+pub fn insert_device(
+    conn: &Connection,
+    name: &str,
+    public_key: &[u8],
+    ip: &str,
+) -> rusqlite::Result<String> {
     let id = random_id();
     conn.execute(
         "INSERT INTO devices (id, name, public_key, enrolled_at, enrolled_ip) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -232,7 +257,12 @@ pub fn revoke_device(conn: &mut Connection, id: &str) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
-pub fn record_connect(conn: &Connection, device_id: &str, ip: &str, app_version: &str) -> rusqlite::Result<i64> {
+pub fn record_connect(
+    conn: &Connection,
+    device_id: &str,
+    ip: &str,
+    app_version: &str,
+) -> rusqlite::Result<i64> {
     let now = now_ms();
     conn.execute(
         "UPDATE devices SET last_connected_at = ?2, last_seen_at = ?2, last_ip = ?3, app_version = ?4 WHERE id = ?1",
@@ -245,7 +275,12 @@ pub fn record_connect(conn: &Connection, device_id: &str, ip: &str, app_version:
     Ok(conn.last_insert_rowid())
 }
 
-pub fn record_disconnect(conn: &Connection, connection_id: i64, device_id: &str, reason: &str) -> rusqlite::Result<()> {
+pub fn record_disconnect(
+    conn: &Connection,
+    connection_id: i64,
+    device_id: &str,
+    reason: &str,
+) -> rusqlite::Result<()> {
     let now = now_ms();
     conn.execute(
         "UPDATE connections SET disconnected_at = ?2, close_reason = ?3 WHERE id = ?1",
@@ -258,7 +293,9 @@ pub fn record_disconnect(conn: &Connection, connection_id: i64, device_id: &str,
 pub fn touch_seen(conn: &mut Connection, seen: &[(String, i64)]) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     {
-        let mut stmt = tx.prepare_cached("UPDATE devices SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2) WHERE id = ?1")?;
+        let mut stmt = tx.prepare_cached(
+            "UPDATE devices SET last_seen_at = MAX(COALESCE(last_seen_at, 0), ?2) WHERE id = ?1",
+        )?;
         for (id, at) in seen {
             stmt.execute(params![id, at])?;
         }
@@ -274,12 +311,20 @@ pub fn subscriptions(conn: &Connection, device_id: &str) -> rusqlite::Result<Vec
     )?;
     let rows = stmt.query_map(params![device_id], |r| {
         let action: String = r.get(1)?;
-        Ok(Subscription { group: r.get(0)?, action: Action::parse(&action).unwrap_or(Action::Notify) })
+        Ok(Subscription {
+            group: r.get(0)?,
+            action: Action::parse(&action).unwrap_or(Action::Notify),
+        })
     })?;
     rows.collect()
 }
 
-pub fn set_subscription(conn: &Connection, device_id: &str, group: &str, action: Action) -> rusqlite::Result<()> {
+pub fn set_subscription(
+    conn: &Connection,
+    device_id: &str,
+    group: &str,
+    action: Action,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO subscriptions (device_id, group_id, action, updated_at) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (device_id, group_id) DO UPDATE SET action = excluded.action, updated_at = excluded.updated_at",
@@ -288,7 +333,11 @@ pub fn set_subscription(conn: &Connection, device_id: &str, group: &str, action:
     Ok(())
 }
 
-pub fn delete_subscription(conn: &Connection, device_id: &str, group: &str) -> rusqlite::Result<()> {
+pub fn delete_subscription(
+    conn: &Connection,
+    device_id: &str,
+    group: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM subscriptions WHERE device_id = ?1 AND group_id = ?2",
         params![device_id, group],
@@ -316,8 +365,14 @@ pub struct NewAlert {
 }
 
 pub enum InsertOutcome {
-    Created { alert_id: String, devices: Vec<String> },
-    Duplicate { alert_id: String, devices: Vec<String> },
+    Created {
+        alert_id: String,
+        devices: Vec<String>,
+    },
+    Duplicate {
+        alert_id: String,
+        devices: Vec<String>,
+    },
     /// Same idempotency key, different content.
     Conflict,
 }
@@ -353,7 +408,15 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     tx.execute(
         "INSERT INTO alerts (id, group_id, title, message, source, idempotency_key, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, alert.group, alert.title, alert.message, alert.source, alert.idempotency_key, now],
+        params![
+            id,
+            alert.group,
+            alert.title,
+            alert.message,
+            alert.source,
+            alert.idempotency_key,
+            now
+        ],
     )?;
     tx.execute(
         "INSERT INTO deliveries (alert_id, device_id, action)
@@ -369,7 +432,9 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
 }
 
 fn delivery_devices(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare_cached("SELECT device_id FROM deliveries WHERE alert_id = ?1 ORDER BY device_id")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT device_id FROM deliveries WHERE alert_id = ?1 ORDER BY device_id",
+    )?;
     let rows = stmt.query_map(params![alert_id], |r| r.get(0))?;
     rows.collect()
 }
@@ -385,7 +450,11 @@ pub struct PendingDelivery {
 }
 
 /// Oldest deliveries of `device_id` not yet acknowledged as received.
-pub fn pending_deliveries(conn: &Connection, device_id: &str, limit: u32) -> rusqlite::Result<Vec<PendingDelivery>> {
+pub fn pending_deliveries(
+    conn: &Connection,
+    device_id: &str,
+    limit: u32,
+) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
         "SELECT d.seq, a.id, a.group_id, a.title, a.message, a.created_at, d.action
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
@@ -431,7 +500,12 @@ pub struct AckOutcome {
 
 /// Records a device acknowledgement. Later stages imply earlier ones. Repeated acks
 /// are idempotent. Returns `None` if the device has no such delivery.
-pub fn ack(conn: &Connection, device_id: &str, alert_id: &str, stage: AckStage) -> rusqlite::Result<Option<AckOutcome>> {
+pub fn ack(
+    conn: &Connection,
+    device_id: &str,
+    alert_id: &str,
+    stage: AckStage,
+) -> rusqlite::Result<Option<AckOutcome>> {
     let now = now_ms();
     let row = conn
         .query_row(
@@ -443,7 +517,9 @@ pub fn ack(conn: &Connection, device_id: &str, alert_id: &str, stage: AckStage) 
         .optional()?;
     let Some((seq, not_received, created_at)) = row else { return Ok(None) };
     let sql = match stage {
-        AckStage::Received => "UPDATE deliveries SET received_at = COALESCE(received_at, ?2) WHERE seq = ?1",
+        AckStage::Received => {
+            "UPDATE deliveries SET received_at = COALESCE(received_at, ?2) WHERE seq = ?1"
+        }
         AckStage::Displayed => {
             "UPDATE deliveries SET received_at = COALESCE(received_at, ?2),
                  displayed_at = COALESCE(displayed_at, ?2) WHERE seq = ?1"
@@ -653,9 +729,15 @@ pub fn subscribed_devices(conn: &Connection) -> rusqlite::Result<Vec<(String, Op
 
 /// Deletes delivered history past retention. An alert is only removed once no
 /// delivery to a non-revoked device is still waiting for it.
-pub fn purge(conn: &mut Connection, alert_cutoff: i64, connection_cutoff: i64) -> rusqlite::Result<(usize, usize)> {
+pub fn purge(
+    conn: &mut Connection,
+    alert_cutoff: i64,
+    connection_cutoff: i64,
+) -> rusqlite::Result<(usize, usize)> {
     let tx = conn.transaction()?;
-    tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS purge_ids (id TEXT PRIMARY KEY); DELETE FROM purge_ids;")?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS purge_ids (id TEXT PRIMARY KEY); DELETE FROM purge_ids;",
+    )?;
     tx.execute(
         "INSERT INTO purge_ids SELECT a.id FROM alerts a WHERE a.created_at < ?1 AND NOT EXISTS (
              SELECT 1 FROM deliveries d JOIN devices v ON v.id = d.device_id
@@ -703,7 +785,10 @@ mod tests {
         set_subscription(&c, &b, "other", Action::Ring).unwrap();
         set_subscription(&c, &r, "infra", Action::Ring).unwrap();
         revoke_device(&mut c, &r).unwrap();
-        let InsertOutcome::Created { devices, .. } = insert_alert(&mut c, &alert("k1")).unwrap() else { panic!() };
+        let InsertOutcome::Created { devices, .. } = insert_alert(&mut c, &alert("k1")).unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(devices, vec![a.clone()]);
         let p = pending_deliveries(&c, &a, 10).unwrap();
         assert_eq!(p.len(), 1);
@@ -716,8 +801,15 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra", Action::Notify).unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap() else { panic!() };
-        let InsertOutcome::Duplicate { alert_id: again, .. } = insert_alert(&mut c, &alert("k")).unwrap() else { panic!() };
+        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        else {
+            panic!()
+        };
+        let InsertOutcome::Duplicate { alert_id: again, .. } =
+            insert_alert(&mut c, &alert("k")).unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(alert_id, again);
         let mut other = alert("k");
         other.title = Some("different".into());
@@ -730,7 +822,10 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra", Action::Notify).unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap() else { panic!() };
+        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        else {
+            panic!()
+        };
         let first = ack(&c, &a, &alert_id, AckStage::Received).unwrap().unwrap();
         assert!(first.first_receipt_latency_ms.is_some());
         let second = ack(&c, &a, &alert_id, AckStage::Received).unwrap().unwrap();
@@ -747,7 +842,10 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra", Action::Notify).unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap() else { panic!() };
+        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        else {
+            panic!()
+        };
         let future = now_ms() + 1_000_000;
         assert_eq!(purge(&mut c, future, future).unwrap().0, 0);
         ack(&c, &a, &alert_id, AckStage::Received).unwrap();

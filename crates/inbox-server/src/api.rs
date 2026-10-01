@@ -32,7 +32,11 @@ impl ApiError {
 
     pub fn storage(e: impl std::fmt::Display) -> ApiError {
         tracing::error!(event = "storage_error", error = %e);
-        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable", "storage error, retry")
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            "storage error, retry",
+        )
     }
 }
 
@@ -52,9 +56,17 @@ pub struct Accepted {
 }
 
 /// Validates, stores and fans out an alert. Returns only once it is durable.
-pub async fn accept_alert(app: &AppState, alert: NewAlert, source_kind: &'static str) -> Result<Accepted, ApiError> {
+pub async fn accept_alert(
+    app: &AppState,
+    alert: NewAlert,
+    source_kind: &'static str,
+) -> Result<Accepted, ApiError> {
     if !app.group_names.contains_key(&alert.group) {
-        return Err(ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "unknown_group", format!("unknown group {:?}", alert.group)));
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_group",
+            format!("unknown group {:?}", alert.group),
+        ));
     }
     let limits = &app.config.limits;
     let clean = |field: &str, v: &Option<String>, max: usize| -> Result<Option<String>, ApiError> {
@@ -65,11 +77,13 @@ pub async fn accept_alert(app: &AppState, alert: NewAlert, source_kind: &'static
                 "too_large",
                 format!("{field} exceeds {max} bytes"),
             )),
-            Some(t) if t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_text",
-                format!("{field} contains control characters"),
-            )),
+            Some(t) if t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => {
+                Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_text",
+                    format!("{field} contains control characters"),
+                ))
+            }
             Some(t) => Ok(Some(t.to_string())),
         }
     };
@@ -88,7 +102,11 @@ pub async fn accept_alert(app: &AppState, alert: NewAlert, source_kind: &'static
         action: Action::Notify,
     });
     if serde_json::to_vec(&probe).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_PLAINTEXT {
-        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "alert too large once encoded"));
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "alert too large once encoded",
+        ));
     }
 
     let span = tracing::info_span!("alert.accept", alert.group = %alert.group, alert.source = %alert.source);
@@ -128,7 +146,9 @@ fn producer<'a>(app: &'a AppState, headers: &HeaderMap) -> Result<&'a Producer, 
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim);
-    let unauthorized = || ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid bearer token");
+    let unauthorized = || {
+        ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid bearer token")
+    };
     let token = token.ok_or_else(unauthorized)?;
     match app.producer_for_token(token) {
         Some(p) => Ok(p),
@@ -143,7 +163,11 @@ fn check_group(p: &Producer, group: &str) -> Result<(), ApiError> {
     if p.groups.iter().any(|g| g == group) {
         Ok(())
     } else {
-        Err(ApiError::new(StatusCode::FORBIDDEN, "forbidden_group", format!("producer may not alert group {group:?}")))
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden_group",
+            format!("producer may not alert group {group:?}"),
+        ))
     }
 }
 
@@ -163,19 +187,32 @@ pub struct AlertRequest {
 }
 
 pub fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
-    let key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "missing_idempotency_key", "Idempotency-Key header is required"))?;
+    let key =
+        headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(str::trim).ok_or_else(
+            || {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "missing_idempotency_key",
+                    "Idempotency-Key header is required",
+                )
+            },
+        )?;
     if key.is_empty() || key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_idempotency_key", "Idempotency-Key must be 1..128 printable ASCII characters"));
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must be 1..128 printable ASCII characters",
+        ));
     }
     Ok(key.to_string())
 }
 
 /// `POST /api/v1/alerts`
-pub async fn post_alert(State(app): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Result<Response, ApiError> {
+pub async fn post_alert(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
     let p = producer(&app, &headers)?;
     let key = idempotency_key(&headers)?;
     let req: AlertRequest = parse_json(&body)?;
@@ -197,13 +234,18 @@ pub async fn post_alert(State(app): State<Arc<AppState>>, headers: HeaderMap, bo
 }
 
 /// `GET /api/v1/alerts/{id}`: delivery status, for producers that escalate elsewhere.
-pub async fn get_alert(State(app): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, ApiError> {
+pub async fn get_alert(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
     let p = producer(&app, &headers)?;
     let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such alert");
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail = app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
+    let detail =
+        app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
     let detail = detail.ok_or_else(not_found)?;
     if !p.groups.contains(&detail.summary.group) {
         return Err(not_found());
@@ -226,10 +268,9 @@ pub async fn alertmanager(
     let p = producer(&app, &headers)?;
     check_group(p, &group)?;
     let payload: Value = parse_json(&body)?;
-    let alerts = payload
-        .get("alerts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid_payload", "missing alerts array"))?;
+    let alerts = payload.get("alerts").and_then(Value::as_array).ok_or_else(|| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_payload", "missing alerts array")
+    })?;
 
     let limits = &app.config.limits;
     let (mut created, mut duplicates, mut skipped) = (0usize, 0usize, 0usize);
@@ -260,7 +301,8 @@ pub async fn alertmanager(
         let starts_at = text(a, "startsAt").unwrap_or_default();
         let key = format!("{}:{}:{}", fingerprint, status, starts_at);
         let key = if key.len() > 128 { hex(&Sha256::digest(key.as_bytes())) } else { key };
-        let message: String = message.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+        let message: String =
+            message.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
         let accepted = accept_alert(
             &app,
             NewAlert {
@@ -275,5 +317,6 @@ pub async fn alertmanager(
         .await?;
         if accepted.duplicate { duplicates += 1 } else { created += 1 }
     }
-    Ok(Json(json!({ "created": created, "duplicates": duplicates, "skipped": skipped })).into_response())
+    Ok(Json(json!({ "created": created, "duplicates": duplicates, "skipped": skipped }))
+        .into_response())
 }

@@ -1,0 +1,30 @@
+# Grafana alerting provisioning: a "Webhook" contact point that pages through Inbox.
+# Place it in /etc/grafana/provisioning/alerting/ and set INBOX_URL / INBOX_TOKEN
+# in Grafana's environment (Grafana expands $__env{...} in provisioning files).
+#
+# Grafana contact points are built into Grafana and cannot be extended by plugins,
+# so Inbox accepts the Alertmanager-compatible payload of the Webhook contact point.
+# The last path element is the Inbox group to page; the producer owning the token
+# must be allowed to alert it.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: inbox-oncall
+    receivers:
+      - uid: inbox-oncall
+        type: webhook
+        settings:
+          url: $__env{INBOX_URL}/api/v1/webhooks/alertmanager/oncall
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: $__env{INBOX_TOKEN}
+          maxAlerts: 50
+        disableResolveMessage: true
+
+policies:
+  - orgId: 1
+    receiver: inbox-oncall
+    group_by: ["alertname"]
+    group_wait: 10s
+    group_interval: 1m
+    repeat_interval: 4h

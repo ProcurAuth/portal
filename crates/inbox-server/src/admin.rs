@@ -113,7 +113,11 @@ pub struct LoginFinish {
 }
 
 fn too_many() -> ApiError {
-    ApiError::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "too many failed attempts, retry later")
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        "too many failed attempts, retry later",
+    )
 }
 
 pub async fn login_start(
@@ -133,7 +137,12 @@ pub async fn login_start(
         &req.credential_request,
         &mut Rng::os(),
     )
-    .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", "malformed credential request"))?;
+    .map_err(|_| {
+        ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", "malformed credential request")
+    })?;
+    // A wrong password is detected by the browser, which then never calls finish:
+    // every started login counts as a failure until it succeeds.
+    app.limiter.record_failure(ip);
     let login_id = random_id();
     {
         let mut pending = app.admin_sessions.pending.lock().expect("admin lock");
@@ -163,7 +172,11 @@ pub async fn login_finish(
     }
     let pending = app.admin_sessions.pending.lock().expect("admin lock").remove(&req.login_id);
     let Some((server, expires)) = pending.filter(|(_, exp)| *exp > Instant::now()) else {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "login_expired", "login expired, start again"));
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "login_expired",
+            "login expired, start again",
+        ));
     };
     let _ = expires;
     let key = match server.finish(&req.credential_finalization) {
@@ -187,18 +200,30 @@ pub async fn login_finish(
         }
         sessions.insert(
             session_id.clone(),
-            Session { key: key.derive("admin/request-mac"), expires: now + ttl, nonces: HashMap::new() },
+            Session {
+                key: key.derive("admin/request-mac"),
+                expires: now + ttl,
+                nonces: HashMap::new(),
+            },
         );
     }
     tracing::info!(event = "admin_login", client.address = %ip);
-    Ok(Json(json!({ "session_id": session_id, "expires_in_ms": ttl.as_millis() as u64 })).into_response())
+    Ok(Json(json!({ "session_id": session_id, "expires_in_ms": ttl.as_millis() as u64 }))
+        .into_response())
 }
 
 // ---------------------------------------------------------------- signed requests
 
 /// Verifies the request signature. Returns the session id.
-fn authorize(app: &AppState, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Result<String, ApiError> {
-    let unauthorized = |m: &str| ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", m.to_string());
+fn authorize(
+    app: &AppState,
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<String, ApiError> {
+    let unauthorized =
+        |m: &str| ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", m.to_string());
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
     let (Some(sid), Some(ts), Some(nonce), Some(sig)) = (
         get("x-inbox-session"),
@@ -216,15 +241,26 @@ fn authorize(app: &AppState, method: &Method, uri: &Uri, headers: &HeaderMap, bo
     if nonce.len() < 16 || nonce.len() > 64 {
         return Err(unauthorized("bad nonce"));
     }
-    let sig = inbox_core::b64::decode(&sig).ok_or_else(|| unauthorized("bad signature encoding"))?;
+    let sig =
+        inbox_core::b64::decode(&sig).ok_or_else(|| unauthorized("bad signature encoding"))?;
     let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
 
     let mut sessions = app.admin_sessions.sessions.lock().expect("admin lock");
     let now = Instant::now();
-    let session = sessions.get_mut(&sid).filter(|s| s.expires > now).ok_or_else(|| unauthorized("session expired"))?;
+    let session = sessions
+        .get_mut(&sid)
+        .filter(|s| s.expires > now)
+        .ok_or_else(|| unauthorized("session expired"))?;
     verify_mac(
         &session.key,
-        &[b"inbox/v1/admin-request", method.as_str().as_bytes(), path.as_bytes(), ts.as_bytes(), nonce.as_bytes(), body],
+        &[
+            b"inbox/v1/admin-request",
+            method.as_str().as_bytes(),
+            path.as_bytes(),
+            ts.as_bytes(),
+            nonce.as_bytes(),
+            body,
+        ],
         &sig,
     )
     .map_err(|_| unauthorized("bad signature"))?;
@@ -331,7 +367,8 @@ pub async fn alerts(
 ) -> Result<Response, ApiError> {
     authorize(&app, &method, &uri, &headers, &body)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    let list = app.db.call(move |c| Ok(db::recent_alerts(c, limit)?)).await.map_err(ApiError::storage)?;
+    let list =
+        app.db.call(move |c| Ok(db::recent_alerts(c, limit)?)).await.map_err(ApiError::storage)?;
     Ok(no_store(json!({ "alerts": list })))
 }
 
@@ -348,7 +385,8 @@ pub async fn alert(
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail = app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
+    let detail =
+        app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
     Ok(no_store(serde_json::to_value(detail.ok_or_else(not_found)?).expect("serializes")))
 }
 
@@ -362,7 +400,11 @@ pub async fn connections(
 ) -> Result<Response, ApiError> {
     authorize(&app, &method, &uri, &headers, &body)?;
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
-    let list = app.db.call(move |c| Ok(db::recent_connections(c, limit)?)).await.map_err(ApiError::storage)?;
+    let list = app
+        .db
+        .call(move |c| Ok(db::recent_connections(c, limit)?))
+        .await
+        .map_err(ApiError::storage)?;
     Ok(no_store(json!({ "connections": list })))
 }
 
@@ -388,7 +430,11 @@ pub async fn send_alert(
     let req: AdminAlert = serde_json::from_slice(&body)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()))?;
     if req.idempotency_key.is_empty() || req.idempotency_key.len() > 128 {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_idempotency_key", "idempotency_key must be 1..128 bytes"));
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "idempotency_key must be 1..128 bytes",
+        ));
     }
     let accepted = accept_alert(
         &app,
@@ -419,7 +465,11 @@ pub async fn revoke(
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such device"));
     }
     let device = id.clone();
-    let revoked = app.db.call(move |c| Ok(db::revoke_device(c, &device)?)).await.map_err(ApiError::storage)?;
+    let revoked = app
+        .db
+        .call(move |c| Ok(db::revoke_device(c, &device)?))
+        .await
+        .map_err(ApiError::storage)?;
     if revoked {
         app.hub.kick(&id, inbox_core::proto::close::REVOKED);
         tracing::info!(event = "device_revoked", device.id = %id);

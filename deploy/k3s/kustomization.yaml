@@ -1,0 +1,19 @@
+# kubectl apply -k deploy/k3s
+# Create the secret first (files from deploy/init-secrets.sh):
+#   kubectl -n apps create secret generic inbox-secrets \
+#     --from-file=server_key=deploy/secrets/server_key \
+#     --from-file=device_credential=deploy/secrets/device_credential \
+#     --from-file=admin_credential=deploy/secrets/admin_credential \
+#     --from-file=alerting_token=deploy/secrets/alerting_token
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generatorOptions:
+  disableNameSuffixHash: true
+resources:
+- statefulset.yaml
+- ingress.yaml
+configMapGenerator:
+- name: inbox-config
+  namespace: apps
+  files:
+  - config.hcl=config.hcl

@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# Release image built from the verified release binaries (no compilation, so no
+# emulation is needed for arm64). The context is prepared by .github/workflows/release.yml:
+#   bin/inbox_linux_<arch>, rootfs/{var/lib/inbox,etc/inbox,tmp}
+FROM scratch
+ARG TARGETARCH
+COPY --chown=10001:10001 rootfs/ /
+COPY --chmod=0755 bin/inbox_linux_${TARGETARCH} /inbox
+USER 10001:10001
+EXPOSE 8080 8081
+VOLUME ["/var/lib/inbox"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/inbox", "healthcheck", "--config", "/etc/inbox/config.hcl"]
+ENTRYPOINT ["/inbox"]
+CMD ["serve", "--config", "/etc/inbox/config.hcl"]

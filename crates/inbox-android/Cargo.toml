@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 inbox-core = { path = "../inbox-core" }

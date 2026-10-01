@@ -17,6 +17,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
+use opentelemetry::KeyValue;
 use inbox_core::enroll::EnrollServer;
 use inbox_core::noise::{self, Responder, Session};
 use inbox_core::proto::{
@@ -24,7 +25,6 @@ use inbox_core::proto::{
 };
 use inbox_core::rng::Rng;
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
-use opentelemetry::KeyValue;
 use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, timeout};
 use tracing::Instrument;
@@ -47,11 +47,12 @@ pub async fn enroll_ws(
     ws: WebSocketUpgrade,
 ) -> Response {
     let ip = client_ip(peer, &headers, &app.config.server.trusted_proxies);
-    ws.max_message_size(ENROLL_MAX_MESSAGE)
-        .max_frame_size(ENROLL_MAX_MESSAGE)
-        .on_upgrade(move |socket| {
-            run_enroll(app, socket, ip).instrument(tracing::info_span!("device.enroll", client.address = %ip))
-        })
+    ws.max_message_size(ENROLL_MAX_MESSAGE).max_frame_size(ENROLL_MAX_MESSAGE).on_upgrade(
+        move |socket| {
+            run_enroll(app, socket, ip)
+                .instrument(tracing::info_span!("device.enroll", client.address = %ip))
+        },
+    )
 }
 
 pub async fn session_ws(
@@ -91,7 +92,8 @@ async fn recv_binary(socket: &mut WebSocket, limit: Duration) -> Option<Vec<u8>>
 // ---------------------------------------------------------------- enrollment
 
 async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
-    let reject = |code: &str, message: &str| Message::Text(EnrollServer::rejected(code, message).into());
+    let reject =
+        |code: &str, message: &str| Message::Text(EnrollServer::rejected(code, message).into());
     if !app.limiter.allowed(ip) {
         let _ = socket.send(reject("rate_limited", "too many failed attempts, retry later")).await;
         close_with(&mut socket, close::RATE_LIMITED, "rate limited").await;
@@ -100,18 +102,24 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     let mut server = EnrollServer::new(&app.secrets.server_key, &app.secrets.device_record);
 
     let Some(text) = recv_text(&mut socket, HANDSHAKE_TIMEOUT).await else { return };
-    let challenge = match EnrollServer::parse(&text).and_then(|m| server.on_start(m, &mut Rng::os())) {
-        Ok(c) => c,
-        Err(CoreError::UnsupportedProtocol(v)) => {
-            let _ = socket.send(reject("protocol", &format!("protocol {v} unsupported, update the app"))).await;
-            return;
-        }
-        Err(e) => {
-            tracing::info!(event = "enroll_rejected", reason = %e);
-            let _ = socket.send(reject("protocol", "malformed enrollment")).await;
-            return;
-        }
-    };
+    let challenge =
+        match EnrollServer::parse(&text).and_then(|m| server.on_start(m, &mut Rng::os())) {
+            Ok(c) => c,
+            Err(CoreError::UnsupportedProtocol(v)) => {
+                let _ = socket
+                    .send(reject("protocol", &format!("protocol {v} unsupported, update the app")))
+                    .await;
+                return;
+            }
+            Err(e) => {
+                tracing::info!(event = "enroll_rejected", reason = %e);
+                let _ = socket.send(reject("protocol", "malformed enrollment")).await;
+                return;
+            }
+        };
+    // With OPAQUE a wrong password is detected by the client, which may never come
+    // back: every started attempt counts as a failure until it succeeds.
+    app.limiter.record_failure(ip);
     if socket.send(Message::Text(challenge.into())).await.is_err() {
         return;
     }
@@ -148,7 +156,9 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     let device_id = match stored {
         Ok(Some(id)) => id,
         Ok(None) => {
-            let _ = socket.send(reject("too_many_devices", "device limit reached, revoke unused devices")).await;
+            let _ = socket
+                .send(reject("too_many_devices", "device limit reached, revoke unused devices"))
+                .await;
             return;
         }
         Err(e) => {
@@ -195,7 +205,11 @@ impl End {
     }
 }
 
-async fn send_msg(socket: &mut WebSocket, session: &mut Session, msg: &ServerMsg) -> Result<(), End> {
+async fn send_msg(
+    socket: &mut WebSocket,
+    session: &mut Session,
+    msg: &ServerMsg,
+) -> Result<(), End> {
     let json = serde_json::to_vec(msg).expect("protocol messages serialize");
     let frame = session.encrypt(&json).map_err(|_| End::Protocol("frame too large"))?;
     socket.send(Message::Binary(frame.into())).await.map_err(|_| End::Send)
@@ -255,7 +269,8 @@ async fn run_session(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
         }
     };
 
-    let accept = SessionAccept { protocol: PROTOCOL_VERSION, server_name: app.config.server.name.clone() };
+    let accept =
+        SessionAccept { protocol: PROTOCOL_VERSION, server_name: app.config.server.name.clone() };
     let accept = serde_json::to_vec(&accept).expect("serializes");
     let Ok((mut session, m2)) = responder.finish(&accept) else { return };
     if socket.send(Message::Binary(m2.into())).await.is_err() {
@@ -263,7 +278,9 @@ async fn run_session(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     }
     // The session only counts once the device proves it holds the transport keys.
     let ready = match recv_binary(&mut socket, HANDSHAKE_TIMEOUT).await {
-        Some(frame) => session.decrypt(&frame).ok().and_then(|p| serde_json::from_slice::<ClientMsg>(&p).ok()),
+        Some(frame) => {
+            session.decrypt(&frame).ok().and_then(|p| serde_json::from_slice::<ClientMsg>(&p).ok())
+        }
         None => return,
     };
     if !matches!(ready, Some(ClientMsg::Ready)) {
@@ -293,7 +310,8 @@ async fn established(
     let (kick_tx, mut kick_rx) = watch::channel(None);
     let wake = Arc::new(Notify::new());
     let last_seen = Arc::new(AtomicI64::new(now_ms()));
-    let app_version = inbox_core::enroll::validate_device_name(&app_version).unwrap_or_else(|_| "unknown".into());
+    let app_version = inbox_core::enroll::validate_device_name(&app_version)
+        .unwrap_or_else(|_| "unknown".into());
     app.hub.register(
         &device_id,
         Live {
@@ -308,26 +326,30 @@ async fn established(
         close::REPLACED,
     );
     let (id, ip_text, ver) = (device_id.clone(), ip.to_string(), app_version.clone());
-    let connection_id = match app.db.call(move |c| Ok(db::record_connect(c, &id, &ip_text, &ver)?)).await {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(event = "session_record_failed", error = %e);
-            app.hub.unregister(&device_id, session_id);
-            close_with(&mut socket, 1011, "storage error").await;
-            return;
-        }
-    };
+    let connection_id =
+        match app.db.call(move |c| Ok(db::record_connect(c, &id, &ip_text, &ver)?)).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(event = "session_record_failed", error = %e);
+                app.hub.unregister(&device_id, session_id);
+                close_with(&mut socket, 1011, "storage error").await;
+                return;
+            }
+        };
     app.metrics.sessions_active.add(1, &[]);
     tracing::info!(event = "device_connected");
 
-    let end = deliver(&app, &mut socket, &mut session, &device_id, &mut kick_rx, &wake, &last_seen).await;
+    let end =
+        deliver(&app, &mut socket, &mut session, &device_id, &mut kick_rx, &wake, &last_seen).await;
 
     app.hub.unregister(&device_id, session_id);
     app.metrics.sessions_active.add(-1, &[]);
     app.metrics.session_closes.add(1, &[KeyValue::new("reason", end.reason())]);
     let reason = end.reason();
     let id = device_id.clone();
-    if let Err(e) = app.db.call(move |c| Ok(db::record_disconnect(c, connection_id, &id, reason)?)).await {
+    if let Err(e) =
+        app.db.call(move |c| Ok(db::record_disconnect(c, connection_id, &id, reason)?)).await
+    {
         tracing::error!(event = "session_disconnect_record_failed", error = %e);
     }
     match &end {
@@ -456,7 +478,12 @@ async fn handle(
         }
         ClientMsg::Subscribe { group, action } => {
             if !app.group_names.contains_key(&group) {
-                send_msg(socket, session, &ServerMsg::Error { code: "unknown_group".into(), message: group }).await?;
+                send_msg(
+                    socket,
+                    session,
+                    &ServerMsg::Error { code: "unknown_group".into(), message: group },
+                )
+                .await?;
                 return Ok(false);
             }
             let id = device_id.to_string();

@@ -160,10 +160,20 @@ pub struct AlertMsg {
 pub enum ClientMsg {
     /// First transport frame; proves the device completed the handshake.
     Ready,
-    Ack { alert_id: String, stage: AckStage },
-    Subscribe { group: String, action: Action },
-    Unsubscribe { group: String },
-    Ping { nonce: u64 },
+    Ack {
+        alert_id: String,
+        stage: AckStage,
+    },
+    Subscribe {
+        group: String,
+        action: Action,
+    },
+    Unsubscribe {
+        group: String,
+    },
+    Ping {
+        nonce: u64,
+    },
 }
 
 /// Server -> device, inside the Noise session.
@@ -179,9 +189,16 @@ pub enum ServerMsg {
         server_time_ms: i64,
     },
     Alert(AlertMsg),
-    Subscriptions { subscriptions: Vec<Subscription> },
-    Pong { nonce: u64 },
-    Error { code: String, message: String },
+    Subscriptions {
+        subscriptions: Vec<Subscription>,
+    },
+    Pong {
+        nonce: u64,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 /// WebSocket close codes used on `/v1/session`.
@@ -205,7 +222,10 @@ mod tests {
     #[test]
     fn json_shapes_are_stable() {
         let m = ClientMsg::Ack { alert_id: "ab".into(), stage: AckStage::Received };
-        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"t":"ack","alert_id":"ab","stage":"received"}"#);
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"t":"ack","alert_id":"ab","stage":"received"}"#
+        );
         let a = ServerMsg::Alert(AlertMsg {
             alert_id: "ab".into(),
             group: "g".into(),
@@ -219,6 +239,11 @@ mod tests {
         assert!(s.starts_with(r#"{"t":"alert","alert_id":"ab""#), "{s}");
         let back: ServerMsg = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, ServerMsg::Alert(ref x) if x.action == Action::Alarm));
-        assert!(serde_json::from_str::<ClientMsg>(r#"{"t":"ack","alert_id":"a","stage":"received","x":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"t":"ack","alert_id":"a","stage":"received","x":1}"#
+            )
+            .is_err()
+        );
     }
 }

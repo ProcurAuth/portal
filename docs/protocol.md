@@ -1,0 +1,122 @@
+# Device protocol (version 1)
+
+The code is the reference: [`crates/inbox-core/src/proto.rs`](../crates/inbox-core/src/proto.rs),
+[`enroll.rs`](../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../crates/inbox-core/src/noise.rs).
+The same crate runs on the server, in the Android app (JNI) and in the admin front
+(WebAssembly), so there is a single implementation of the cryptography.
+
+All messages are JSON. Binary fields are standard base64 with padding.
+
+## Keys
+
+| Key | Where | Created by |
+|---|---|---|
+| OPAQUE server setup | server key file | `inbox keygen` |
+| Server Noise static key (X25519) | server key file | `inbox keygen` |
+| Device credential record | server, `devices.credential_file` | `inbox credential --role device` (offline) |
+| Device Noise static key (X25519) | phone only | generated during enrollment |
+
+OPAQUE uses ristretto255, 3DH with SHA-512 and Argon2id. The two roles (`device`
+and `admin`) have distinct credential identifiers and contexts, so a device
+password cannot log into the admin front.
+
+## Enrollment: `GET /v1/enroll` (WebSocket, text frames)
+
+```text
+device                                              server
+  {"type":"start","protocol":1,
+   "credential_request":b64}                   ->
+                                               <-  {"type":"challenge","credential_response":b64}
+  {"type":"finish","credential_finalization":b64,
+   "device_name":s,"device_public_key":b64,
+   "mac":b64}                                  ->   verifies OPAQUE, then mac
+                                               <-  {"type":"accepted","device_id":hex32,
+                                                    "server_name":s,"server_public_key":b64,"mac":b64}
+```
+
+- `K = HKDF-SHA256(salt="inbox/v1", ikm=OPAQUE session key, info=label)`.
+- Client MAC: `HMAC-SHA256(K("enroll/client-mac"), device_name ‖ device_public_key)`.
+- Server MAC: `HMAC-SHA256(K("enroll/server-mac"), device_id ‖ server_name ‖ server_public_key ‖ device_public_key)`.
+- Every MAC input part is prefixed by its length as a big-endian u64.
+- On failure the server sends `{"type":"rejected","code":c,"message":m}`. Codes are
+  `bad_password`, `rate_limited`, `protocol`, `too_many_devices` and `internal`.
+
+A passive observer learns nothing. An active attacker who does not hold the
+credential record cannot complete OPAQUE. It therefore cannot substitute its
+own server key, and it cannot register a device.
+
+## Session: `GET /v1/session` (WebSocket, binary frames)
+
+`Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue `inbox/v1/session`. Each WebSocket
+binary frame carries exactly one Noise message (at most 65535 bytes).
+
+1. Device to server, Noise message 1, carrying
+   `{"protocol":1,"device_id":hex32,"app_version":s}`.
+2. Server to device, Noise message 2, carrying `{"protocol":1,"server_name":s}`.
+   The device rejects any key other than the pinned server key.
+3. Device to server, first transport frame `{"t":"ready"}`. Only after this does
+   the server count the session as established, so a replayed message 1 cannot
+   displace a live session.
+4. Server to device: `welcome`, then alerts.
+
+### Device to server
+
+| `t` | Fields | Meaning |
+|---|---|---|
+| `ready` | | First transport frame. |
+| `ack` | `alert_id`, `stage` (`received` / `displayed` / `acknowledged`) | Later stages imply earlier ones. Idempotent. |
+| `subscribe` | `group`, `action` (`alarm` / `ring` / `notify`) | Create or replace the subscription. |
+| `unsubscribe` | `group` | |
+| `ping` | `nonce` (u64) | Heartbeat; the server answers `pong`. |
+
+### Server to device
+
+| `t` | Fields |
+|---|---|
+| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[] {group,action}`, `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms` |
+| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title?`, `message?`, `created_at_ms`, `action` |
+| `subscriptions` | `subscriptions[]`, sent after each change |
+| `pong` | `nonce` |
+| `error` | `code`, `message` (for example `unknown_group`) |
+
+### Delivery rules
+
+- **Fan-out at acceptance.** When an alert is accepted, one delivery row is created
+  for every device subscribed to the group at that instant. The device's chosen
+  `action` is copied into the row.
+- **Retransmission.** The server sends rows not yet acknowledged as `received`,
+  oldest first, with at most `max_inflight` outstanding. A row that stays
+  unacknowledged for `resend_after` is sent again, and the whole backlog is resent
+  after every reconnection.
+- **Order on the device.** The app stores the alert durably *before* sending
+  `ack received`, and deduplicates on `alert_id`. Notifications use an identifier
+  derived from `alert_id`, so a retransmission never shows twice.
+- **No expiry.** Undelivered rows are never purged. A revoked device's rows are
+  abandoned.
+
+### Close codes
+
+| Code | Meaning | App behaviour |
+|---|---|---|
+| 1012 | Server restarting | Reconnect immediately. |
+| 1001 | Session timeout | Reconnect. |
+| 4401 | Unknown device or key mismatch | Enroll again. |
+| 4403 | Device revoked | Enroll again. |
+| 4409 | Replaced by a newer session of the same device | Do not fight it. |
+| 4426 | Unsupported protocol | Update the app. |
+| 4429 | Rate limited | Back off. |
+
+## Admin front
+
+The admin front logs in with OPAQUE (role `admin`) over
+`POST /api/admin/login/start` and `/api/admin/login/finish`. The browser runs the
+same core compiled to WebAssembly. Each later request carries these headers:
+
+```text
+x-inbox-session, x-inbox-timestamp (unix ms), x-inbox-nonce,
+x-inbox-signature = base64(HMAC-SHA256(K("admin/request-mac"),
+    "inbox/v1/admin-request" ‖ method ‖ path?query ‖ timestamp ‖ nonce ‖ body))
+```
+
+Parts are length-prefixed as above. The server rejects timestamps outside
+`security.admin_request_max_skew` and nonces it has already seen.

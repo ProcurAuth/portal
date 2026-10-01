@@ -71,7 +71,10 @@ pub fn init(config: &Config) -> Result<(Guard, Meter), String> {
 
     let t = &config.telemetry;
     if !t.enabled {
-        tracing_subscriber::registry().with(fmt.with_filter(filter)).try_init().map_err(|e| e.to_string())?;
+        tracing_subscriber::registry()
+            .with(fmt.with_filter(filter))
+            .try_init()
+            .map_err(|e| e.to_string())?;
         let meter = opentelemetry::global::meter("inbox");
         return Ok((Guard { tracer: None, meter: None, logger: None }, meter));
     }
@@ -92,7 +95,10 @@ pub fn init(config: &Config) -> Result<(Guard, Meter), String> {
         .with_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| err("trace", &e))?;
-    let tracer = SdkTracerProvider::builder().with_batch_exporter(spans).with_resource(resource.clone()).build();
+    let tracer = SdkTracerProvider::builder()
+        .with_batch_exporter(spans)
+        .with_resource(resource.clone())
+        .build();
 
     let metrics = opentelemetry_otlp::MetricExporter::builder()
         .with_http()
@@ -102,7 +108,8 @@ pub fn init(config: &Config) -> Result<(Guard, Meter), String> {
         .build()
         .map_err(|e| err("metric", &e))?;
     let reader = PeriodicReader::builder(metrics).with_interval(interval).build();
-    let meter_provider = SdkMeterProvider::builder().with_reader(reader).with_resource(resource.clone()).build();
+    let meter_provider =
+        SdkMeterProvider::builder().with_reader(reader).with_resource(resource.clone()).build();
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     let logs = opentelemetry_otlp::LogExporter::builder()
@@ -112,7 +119,8 @@ pub fn init(config: &Config) -> Result<(Guard, Meter), String> {
         .with_timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| err("log", &e))?;
-    let logger = SdkLoggerProvider::builder().with_batch_exporter(logs).with_resource(resource).build();
+    let logger =
+        SdkLoggerProvider::builder().with_batch_exporter(logs).with_resource(resource).build();
 
     let otel_traces = tracing_opentelemetry::layer().with_tracer(tracer.tracer("inbox"));
     let otel_logs = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger);
@@ -169,7 +177,9 @@ impl Metrics {
                 .f64_histogram("inbox_delivery_latency_seconds")
                 .with_description("Time from alert acceptance to first device receipt")
                 .with_unit("s")
-                .with_boundaries(vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0, 300.0, 3600.0])
+                .with_boundaries(vec![
+                    0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0, 300.0, 3600.0,
+                ])
                 .build(),
             auth_failures: meter
                 .u64_counter("inbox_auth_failures_total")
