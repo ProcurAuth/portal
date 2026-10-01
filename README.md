@@ -244,8 +244,10 @@ Releases are built by `.github/workflows/release.yml`, on a `vX.Y.Z` tag that
 matches the workspace version. They contain:
 - static Linux amd64 and arm64 binaries;
 - the APK signed with the release key from repository secrets;
-- `SHA256SUMS`;
-- a multi-arch image on GHCR.
+- `SHA256SUMS`.
+
+No container image is ever published to a registry (GHCR or other): build it
+locally with `tools/build.sh image` or `docker compose up --build`.
 
 ## Limitations
 

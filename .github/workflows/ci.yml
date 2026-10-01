@@ -20,6 +20,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Policy - never publish container images
+        # Images are built locally only. No workflow may log in to or push to a registry.
+        run: |
+          # The pattern is split so that this line does not match itself.
+          if grep -rnE 'ghcr''\.io|docker/login''-action|packages: *wr''ite|push: *tr''ue' .github/workflows; then
+            echo "::error::workflows must not publish container images"
+            exit 1
+          fi
       - name: Toolchain image
         run: docker build -q -t inbox-dev tools/dev
       - uses: actions/cache@v4
