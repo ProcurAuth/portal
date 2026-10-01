@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/inbox-core", "crates/inbox-server", "crates/inbox-android", "crates/inbox-wasm"]
+# The JNI and wasm crates only build for their own targets.
+default-members = ["crates/inbox-core", "crates/inbox-server"]
 
 [workspace.package]
 version = "0.1.0"
