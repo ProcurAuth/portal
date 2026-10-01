@@ -24,18 +24,18 @@ French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
  Alertmanager / Grafana ──webhook──┐
  scripts, CI ──── POST /api/v1/alerts ─┤        ┌──────────────── inbox ────────────────┐
                                       ├──8080──▶│ producer API   device sessions (Noise) │◀── WebSocket ── Android app
- admin browser ── OPAQUE + signed ───────8081──▶│ admin API + embedded front (wasm)       │      (foreground service)
-                  requests                      │ SQLite (WAL, synchronous=FULL)          │
+ admin browser ── no password, ─────────8081──▶│ admin API + embedded front              │      (foreground service)
+                  private network               │ SQLite (WAL, synchronous=FULL)          │
                                                 │ OTLP/HTTP ──▶ collector (optional)      │
                                                 └─────────────────────────────────────────┘
 ```
 
 | Path | Contents |
 |---|---|
-| `crates/inbox-core` | Protocol and cryptography, with no I/O. Shared by the server, the app (JNI) and the front (wasm). |
+| `crates/inbox-core` | Protocol and cryptography, with no I/O. Shared by the server and the app (JNI). |
 | `crates/inbox-server` | The `inbox` binary. |
 | `crates/inbox-android`, `android/` | JNI bridge and the Android app. |
-| `crates/inbox-wasm`, `web/` | Admin front. |
+| `web/` | Admin front (plain HTML, CSS and JavaScript, embedded in the binary). |
 | `deploy/` | Docker Compose and k3s. |
 | `docs/` | Specification, configuration, protocol, integrations. |
 
@@ -43,15 +43,15 @@ French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
 
 ```sh
 git clone git@github.com:SCcagg5/Inbox.git && cd Inbox/deploy
-./init-secrets.sh            # builds the image, asks for the device and admin passwords
+./init-secrets.sh            # builds the image, asks for the device password
 $EDITOR config.hcl           # name, groups, producers
 docker compose up -d --build
 docker compose ps            # wait for "healthy"
 ```
 
-1. **Admin front.** It listens on `127.0.0.1:8081`. Reach it with
-   `ssh -L 8081:127.0.0.1:8081 <host>` or put it behind a TLS reverse proxy. Log in
-   with the admin password.
+1. **Admin front.** It has no password and listens on `127.0.0.1:8081`. Reach it
+   with `ssh -L 8081:127.0.0.1:8081 <host>`, or put it behind a reverse proxy that
+   authenticates users (and add the proxy's hostname to `admin.allowed_hosts`).
 2. **Phone.** Install the APK from the GitHub release (`inbox-<version>.apk`). Add
    a server with its address (`host:8080`, a domain, or an `https://` URL behind a
    proxy), the device password and a device name. Grant the permissions the app
@@ -69,19 +69,19 @@ curl -fsS -X POST http://localhost:8080/api/v1/alerts \
 
 ### Démarrage rapide (FR)
 
-1. `cd deploy && ./init-secrets.sh` crée la clé serveur, les mots de passe (appareils
-   et admin) et le token d'émetteur.
+1. `cd deploy && ./init-secrets.sh` crée la clé serveur, le mot de passe des
+   appareils et le token d'émetteur.
 2. Adapter `config.hcl` (nom, groupes, émetteurs), puis lancer `docker compose up -d --build`.
-3. Ouvrir le front admin (port 8081, accessible en local uniquement, via tunnel SSH
-   ou TLS). Installer l'APK, ajouter le serveur (adresse, mot de passe appareils,
-   nom), puis choisir l'action de chaque groupe.
+3. Ouvrir le front admin (port 8081, sans mot de passe, accessible en local
+   uniquement : tunnel SSH ou reverse proxy authentifiant). Installer l'APK,
+   ajouter le serveur (adresse, mot de passe appareils, nom), puis choisir
+   l'action de chaque groupe. L'app gère plusieurs serveurs Inbox.
 
 Without Compose, the binary needs only a config file and its secret files:
 
 ```sh
 inbox keygen --out /etc/inbox/server_key
-inbox credential --server-key /etc/inbox/server_key --role device --out /etc/inbox/device_credential
-inbox credential --server-key /etc/inbox/server_key --role admin  --out /etc/inbox/admin_credential
+inbox credential --server-key /etc/inbox/server_key --out /etc/inbox/device_credential
 inbox token --out /etc/inbox/alerting_token
 inbox check-config --config /etc/inbox/config.hcl
 inbox serve --config /etc/inbox/config.hcl
@@ -118,14 +118,21 @@ Reusing a key with different content returns `409`.
   key the phone pinned at enrollment. This gives mutual authentication,
   encryption and forward secrecy. The phone does not store the password, and
   each device is revocable from the front.
-- **Admin front.**
-  - It has its own password and logs in with OPAQUE in the browser (WebAssembly).
-  - Every later request is HMAC-signed with a timestamp and a nonce, so passive
-    capture allows neither forging nor replaying a request.
-  - **Caveat:** over plain HTTP, an *active* attacker can tamper with the
-    JavaScript the server sends. Keep port 8081 private or behind TLS.
+- **Admin front: no password, by design.** Anyone who can reach
+  `server.admin_listen` can send alerts and revoke devices, so access control is
+  where it listens:
+  - Bind it to localhost or a private network (Compose publishes it on
+    `127.0.0.1` only), or put a reverse proxy that authenticates users in front
+    (for example Traefik forward-auth).
+  - **DNS rebinding:** requests whose `Host` header is not listed in
+    `admin.allowed_hosts` are refused, so a malicious web page cannot reach a
+    localhost-bound admin front through a hostname it controls.
+  - **CSRF:** every `POST` must carry `Content-Type: application/json` and the
+    `X-Inbox-Request: 1` header, which a cross-site page cannot send without a
+    CORS preflight that Inbox never grants. Requests marked
+    `Sec-Fetch-Site: cross-site` are refused.
 - **Hardening.**
-  - Failed attempts are rate-limited per client address.
+  - Device password attempts are rate-limited per client address.
   - Producer tokens are compared in constant time.
   - The front has a strict CSP.
   - The image is `scratch`, runs as non-root with a read-only root filesystem,
@@ -183,9 +190,10 @@ Alertmanager's repeat notifications of the same firing are deduplicated.
 
 ## Android app
 
-The app is Android-only and receives alerts only. It keeps one persistent,
-encrypted connection per server inside a foreground service. It does not use
-Firebase. It asks for these permissions:
+The app is Android-only and receives alerts only. One app can enroll in and
+manage several Inbox servers: it keeps one persistent, encrypted connection per
+server inside a foreground service, and group subscriptions are chosen per
+server. It does not use Firebase. It asks for these permissions:
 
 | Permission | Why |
 |---|---|
@@ -209,7 +217,9 @@ in `deploy/`), add the server `172.17.0.1:8080` in the app: that is the host,
 seen through the Docker bridge. `emulator.sh logs` follows the app logs,
 `emulator.sh install` reinstalls a new build and `emulator.sh stop` removes
 the emulator. Sound, vibration and OEM battery savers can only be judged on a
-real phone.
+real phone. If the noVNC page reports a JavaScript error coming from a
+`chrome-extension://` script, a browser extension is injecting code into the
+page: open it in a private window or with extensions disabled.
 
 ## Operations
 

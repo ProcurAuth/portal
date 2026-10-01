@@ -14,7 +14,7 @@ use inbox_core::proto::GroupInfo;
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::admin::{self, AdminSessions};
+use crate::admin;
 use crate::api;
 use crate::config::Config;
 use crate::db::{self, Db};
@@ -94,7 +94,6 @@ async fn run(
         secrets,
         db,
         hub: Hub::default(),
-        admin_sessions: AdminSessions::default(),
         metrics: Metrics::new(&meter),
         gauges,
         shutdown: shutdown.clone(),
@@ -119,9 +118,6 @@ async fn run(
         .layer(body_limit)
         .with_state(app.clone());
     let admin_router = Router::new()
-        .route("/api/admin/login/start", post(admin::login_start))
-        .route("/api/admin/login/finish", post(admin::login_finish))
-        .route("/api/admin/logout", post(admin::logout))
         .route("/api/admin/overview", get(admin::overview))
         .route("/api/admin/alerts", get(admin::alerts).post(admin::send_alert))
         .route("/api/admin/alerts/{id}", get(admin::alert))
@@ -129,7 +125,7 @@ async fn run(
         .route("/api/admin/devices/{id}/revoke", post(admin::revoke))
         .route("/api/version", get(version))
         .fallback(get(admin::static_asset))
-        .layer(axum::middleware::from_fn(admin::security_headers))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), admin::guard))
         .layer(body_limit)
         .with_state(app.clone());
 

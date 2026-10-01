@@ -21,7 +21,7 @@ usage:
   inbox check-config --config <file>
   inbox healthcheck  --config <file>
   inbox keygen       --out <file>
-  inbox credential   --server-key <file> --role <device|admin> --out <file> [--password-stdin]
+  inbox credential   --server-key <file> --out <file> [--password-stdin]
   inbox token        --out <file>
   inbox version";
 
@@ -114,26 +114,21 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
             Ok(())
         }
         "credential" => {
-            let f =
-                Flags::parse(rest, &["--server-key", "--role", "--out"], &["--password-stdin"])?;
+            let f = Flags::parse(rest, &["--server-key", "--out"], &["--password-stdin"])?;
             let key_path = PathBuf::from(f.required("--server-key")?);
-            let role_text = f.required("--role")?;
-            let role = Role::parse(&role_text).ok_or_else(|| {
-                Failure::Usage(format!("--role must be device or admin, not {role_text:?}"))
-            })?;
             let out = PathBuf::from(f.required("--out")?);
             let key = ServerKey::decode(&read_secret(&key_path, "--server-key")?)
                 .map_err(|e| format!("--server-key: {e}"))?;
-            let password = read_password(role, f.has("--password-stdin"))?;
+            let password = read_password(f.has("--password-stdin"))?;
             let record = inbox_core::login::register(
                 &key.opaque,
-                role,
+                Role::Device,
                 password.as_bytes(),
                 &mut Rng::os(),
             )
             .map_err(|e| e.to_string())?;
             write_new_secret(&out, &inbox_core::b64::encode(&record))?;
-            eprintln!("{} credential written to {}", role.as_str(), out.display());
+            eprintln!("device credential written to {}", out.display());
             Ok(())
         }
         "token" => {
@@ -156,15 +151,11 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-fn min_password_len(role: Role) -> usize {
-    match role {
-        Role::Device => 8,
-        Role::Admin => 12,
-    }
-}
+/// Minimum length of the shared device password.
+const MIN_PASSWORD_LEN: usize = 8;
 
-fn read_password(role: Role, from_stdin: bool) -> Result<Zeroizing<String>, Failure> {
-    let min = min_password_len(role);
+fn read_password(from_stdin: bool) -> Result<Zeroizing<String>, Failure> {
+    let min = MIN_PASSWORD_LEN;
     let password = if from_stdin || !std::io::stdin().is_terminal() {
         let mut line = Zeroizing::new(String::new());
         std::io::stdin()
@@ -173,7 +164,7 @@ fn read_password(role: Role, from_stdin: bool) -> Result<Zeroizing<String>, Fail
             .map_err(|e| format!("cannot read password: {e}"))?;
         Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string())
     } else {
-        let first = prompt_hidden(&format!("{} password: ", role.as_str()))?;
+        let first = prompt_hidden("device password: ")?;
         let second = prompt_hidden("again: ")?;
         if *first != *second {
             return Err(Failure::Fatal("passwords differ".into()));
@@ -181,10 +172,7 @@ fn read_password(role: Role, from_stdin: bool) -> Result<Zeroizing<String>, Fail
         first
     };
     if password.chars().count() < min {
-        return Err(Failure::Fatal(format!(
-            "{} password must be at least {min} characters",
-            role.as_str()
-        )));
+        return Err(Failure::Fatal(format!("device password must be at least {min} characters")));
     }
     Ok(password)
 }

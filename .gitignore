@@ -1,7 +1,6 @@
 /target*/
 /dist/
 /secrets/
-/web/inbox.wasm
 *.jks
 *.keystore
 .env

@@ -2,8 +2,8 @@
 
 The code is the reference: [`crates/inbox-core/src/proto.rs`](../crates/inbox-core/src/proto.rs),
 [`enroll.rs`](../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../crates/inbox-core/src/noise.rs).
-The same crate runs on the server, in the Android app (JNI) and in the admin front
-(WebAssembly), so there is a single implementation of the cryptography.
+The same crate runs on the server and in the Android app (JNI), so there is a
+single implementation of the cryptography.
 
 All messages are JSON. Binary fields are standard base64 with padding.
 
@@ -13,12 +13,13 @@ All messages are JSON. Binary fields are standard base64 with padding.
 |---|---|---|
 | OPAQUE server setup | server key file | `inbox keygen` |
 | Server Noise static key (X25519) | server key file | `inbox keygen` |
-| Device credential record | server, `devices.credential_file` | `inbox credential --role device` (offline) |
+| Device credential record | server, `devices.credential_file` | `inbox credential` (offline) |
 | Device Noise static key (X25519) | phone only | generated during enrollment |
 
-OPAQUE uses ristretto255, 3DH with SHA-512 and Argon2id. The two roles (`device`
-and `admin`) have distinct credential identifiers and contexts, so a device
-password cannot log into the admin front.
+OPAQUE uses ristretto255, 3DH with SHA-512 and Argon2id, with a fixed credential
+identifier and context for device enrollment. A wrong password is detected by the
+phone, which then never sends `finish`; the server therefore counts every started
+enrollment as a failed attempt until it succeeds (`security.max_auth_failures`).
 
 ## Enrollment: `GET /v1/enroll` (WebSocket, text frames)
 
@@ -106,17 +107,20 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 | 4426 | Unsupported protocol | Update the app. |
 | 4429 | Rate limited | Back off. |
 
-## Admin front
+## Admin API (`server.admin_listen`)
 
-The admin front logs in with OPAQUE (role `admin`) over
-`POST /api/admin/login/start` and `/api/admin/login/finish`. The browser runs the
-same core compiled to WebAssembly. Each later request carries these headers:
+The admin front and its API have **no password**, by design: network placement,
+or an authenticating reverse proxy, is the access control. The server still
+protects a front bound to localhost or a private network against hostile web
+pages opened in the operator's browser:
 
-```text
-x-inbox-session, x-inbox-timestamp (unix ms), x-inbox-nonce,
-x-inbox-signature = base64(HMAC-SHA256(K("admin/request-mac"),
-    "inbox/v1/admin-request" ‖ method ‖ path?query ‖ timestamp ‖ nonce ‖ body))
-```
+| Check | Refused with | Protects against |
+|---|---|---|
+| `Host` must be one of `admin.allowed_hosts` (exact match) | 403 | DNS rebinding |
+| `POST` requires `Content-Type: application/json` and `X-Inbox-Request: 1` | 403 | Cross-site request forgery: a cross-origin page cannot set these without a CORS preflight, which Inbox never grants |
+| `Sec-Fetch-Site: cross-site` | 403 | Cross-site requests from browsers that send fetch metadata |
 
-Parts are length-prefixed as above. The server rejects timestamps outside
-`security.admin_request_max_skew` and nonces it has already seen.
+Endpoints: `GET /api/admin/overview`, `GET /api/admin/alerts?limit=`,
+`GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=`,
+`POST /api/admin/alerts` (`{group, title?, message?, idempotency_key}`) and
+`POST /api/admin/devices/{id}/revoke` (`{}`).

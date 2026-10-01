@@ -56,7 +56,7 @@ impl ServerKey {
     }
 }
 
-#[cfg(all(test, feature = "os-rng"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -1,110 +1,13 @@
 // Inbox admin front. Vanilla JS, no dependencies.
 //
-// Login runs OPAQUE inside inbox.wasm: the admin password never leaves the
-// browser. Every API request is then signed with a key derived from the OPAQUE
-// session (HMAC over method, path, timestamp, nonce and body).
+// The interface has no password: access control is the network exposure of the
+// admin listener (localhost, private network or an authenticating proxy).
 'use strict';
 
 (() => {
   const POLL_MS = 3000;
-  const STORE_KEY = 'inbox.session';
 
-  // ------------------------------------------------------------ wasm bridge
-
-  let wasm = null;
-
-  async function loadWasm() {
-    if (wasm) return wasm;
-    const res = await fetch('inbox.wasm', { cache: 'no-cache' });
-    if (!res.ok) throw new Error('inbox.wasm introuvable');
-    let instance;
-    if (WebAssembly.instantiateStreaming && (res.headers.get('content-type') || '').startsWith('application/wasm')) {
-      instance = (await WebAssembly.instantiateStreaming(res, {})).instance;
-    } else {
-      instance = (await WebAssembly.instantiate(await res.arrayBuffer(), {})).instance;
-    }
-    wasm = instance.exports;
-    reseed();
-    return wasm;
-  }
-
-  function reseed() {
-    const seed = crypto.getRandomValues(new Uint8Array(32));
-    const p = put(seed);
-    wasm.pm_seed(p.ptr);
-    p.free();
-  }
-
-  // Copies bytes into wasm memory. The caller frees (which wipes) the buffer.
-  function put(bytes) {
-    const len = bytes.length;
-    const ptr = wasm.pm_alloc(len);
-    new Uint8Array(wasm.memory.buffer, ptr, len).set(bytes);
-    return { ptr, len, free: () => wasm.pm_free(ptr, len) };
-  }
-
-  function takeOut() {
-    const ptr = wasm.pm_out_ptr();
-    const len = wasm.pm_out_len();
-    const copy = new Uint8Array(wasm.memory.buffer, ptr, len).slice();
-    wasm.pm_out_clear();
-    return copy;
-  }
-
-  const enc = new TextEncoder();
-
-  function b64(bytes) {
-    let s = '';
-    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s);
-  }
-
-  function unb64(text) {
-    const s = atob(text);
-    const out = new Uint8Array(s.length);
-    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-    return out;
-  }
-
-  function hex(bytes) {
-    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  // ------------------------------------------------------------ session
-
-  let session = loadSession();
-
-  function loadSession() {
-    try {
-      const raw = sessionStorage.getItem(STORE_KEY);
-      if (!raw) return null;
-      const s = JSON.parse(raw);
-      if (!s.sid || !s.key || Date.now() > s.exp) return null;
-      return { sid: s.sid, key: unb64(s.key), exp: s.exp };
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function saveSession(s) {
-    session = s;
-    try {
-      if (s) sessionStorage.setItem(STORE_KEY, JSON.stringify({ sid: s.sid, key: b64(s.key), exp: s.exp }));
-      else sessionStorage.removeItem(STORE_KEY);
-    } catch (_) { /* storage unavailable: session lives in memory only */ }
-  }
-
-  async function postJson(path, body) {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      cache: 'no-store',
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw apiError(res.status, data);
-    return data;
-  }
+  // ------------------------------------------------------------ API
 
   function apiError(status, data) {
     const e = new Error((data && data.error && data.error.message) || ('HTTP ' + status));
@@ -113,69 +16,30 @@
     return e;
   }
 
-  async function login(password) {
-    await loadWasm();
-    reseed();
-    const pw = put(enc.encode(password));
-    const handle = wasm.pm_login_start(pw.ptr, pw.len);
-    pw.free();
-    if (handle < 0) throw new Error('échec de l’initialisation du login (' + handle + ')');
-    const request = takeOut();
-    const start = await postJson('/api/admin/login/start', { credential_request: b64(request) });
-    const resp = put(unb64(start.credential_response));
-    const rc = wasm.pm_login_finish(handle, resp.ptr, resp.len);
-    resp.free();
-    if (rc === -3) throw new Error('Mot de passe incorrect');
-    if (rc < 0) throw new Error('réponse du serveur invalide (' + rc + ')');
-    const out = takeOut();
-    const finalization = out.slice(0, out.length - 32);
-    const key = out.slice(out.length - 32);
-    const fin = await postJson('/api/admin/login/finish', {
-      login_id: start.login_id,
-      credential_finalization: b64(finalization),
-    });
-    saveSession({ sid: fin.session_id, key, exp: Date.now() + fin.expires_in_ms });
-  }
-
-  function sign(method, path, ts, nonce, body) {
-    const parts = [session.key, enc.encode(method), enc.encode(path), enc.encode(ts), enc.encode(nonce), body];
-    const bufs = parts.map(put);
-    const rc = wasm.pm_sign(
-      bufs[0].ptr,
-      bufs[1].ptr, bufs[1].len,
-      bufs[2].ptr, bufs[2].len,
-      bufs[3].ptr, bufs[3].len,
-      bufs[4].ptr, bufs[4].len,
-      bufs[5].ptr, bufs[5].len,
-    );
-    bufs.forEach((b) => b.free());
-    if (rc < 0) throw new Error('signature impossible');
-    return b64(takeOut());
-  }
-
-  // Signed admin API call. `path` includes the query string, exactly as sent.
+  // Admin API call. POSTs carry a JSON body and the X-Inbox-Request header: a
+  // cross-site page cannot send either without a CORS preflight, which the
+  // server never grants (anti-CSRF; the interface has no password).
   async function api(method, path, body) {
-    if (!session) throw apiError(401, {});
-    await loadWasm();
-    const bodyText = body === undefined ? '' : JSON.stringify(body);
-    const bodyBytes = enc.encode(bodyText);
-    const ts = String(Date.now());
-    const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
-    const headers = {
-      'x-inbox-session': session.sid,
-      'x-inbox-timestamp': ts,
-      'x-inbox-nonce': nonce,
-      'x-inbox-signature': sign(method, path, ts, nonce, bodyBytes),
-    };
-    if (body !== undefined) headers['content-type'] = 'application/json';
-    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : bodyBytes, cache: 'no-store' });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401) {
-      onLoggedOut('Session expirée, reconnectez-vous.');
-      throw apiError(401, data);
+    const opts = { method, cache: 'no-store', headers: {} };
+    if (method !== 'GET') {
+      opts.headers['content-type'] = 'application/json';
+      opts.headers['x-inbox-request'] = '1';
+      opts.body = JSON.stringify(body === undefined ? {} : body);
     }
-    if (!res.ok) throw apiError(res.status, data);
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const e = apiError(res.status, data);
+      if (e.code === 'host_not_allowed') showHostError();
+      throw e;
+    }
+    show('host-error', false);
     return data;
+  }
+
+  function showHostError() {
+    $('host-error-host').textContent = location.host;
+    show('host-error', true);
   }
 
   // ------------------------------------------------------------ DOM helpers
@@ -335,10 +199,10 @@
     const ok = await confirmDialog('Révoquer « ' + d.name + ' » ? L’appareil sera déconnecté et ne recevra plus aucune alerte. Il devra être ré-enrôlé avec le mot de passe.');
     if (!ok) return;
     try {
-      await api('POST', '/api/admin/devices/' + encodeURIComponent(d.id) + '/revoke');
+      await api('POST', '/api/admin/devices/' + encodeURIComponent(d.id) + '/revoke', {});
       await refresh();
     } catch (e) {
-      if (e.status !== 401) showError('Révocation impossible : ' + e.message);
+      if (e.code !== 'host_not_allowed') showError('Révocation impossible : ' + e.message);
     }
   }
 
@@ -407,7 +271,7 @@
       box.parentElement.classList.add('with-detail');
     } catch (e) {
       if (e.status === 404) { selectedAlert = null; show('alert-detail', false); }
-      else if (e.status !== 401) showError('Détail indisponible : ' + e.message);
+      else if (e.code !== 'host_not_allowed') showError('Détail indisponible : ' + e.message);
     }
   }
 
@@ -430,7 +294,6 @@
   }
 
   async function refresh() {
-    if (!session) return;
     try {
       const overview = await api('GET', '/api/admin/overview');
       renderOverview(overview);
@@ -443,9 +306,9 @@
       setConnState(true);
       showError('');
     } catch (e) {
-      if (e.status === 401) return;
       setConnState(false);
-      showError('Serveur injoignable ou en erreur : ' + e.message);
+      if (e.code === 'host_not_allowed') showError('');
+      else showError('Serveur injoignable ou en erreur : ' + e.message);
     }
   }
 
@@ -467,28 +330,6 @@
   }
 
   // ------------------------------------------------------------ views
-
-  function onLoggedIn() {
-    show('login-view', false);
-    show('app-view', true);
-    show('logout', true);
-    show('conn-state', true);
-    startPolling();
-  }
-
-  function onLoggedOut(message) {
-    stopPolling();
-    saveSession(null);
-    show('app-view', false);
-    show('logout', false);
-    show('conn-state', false);
-    show('login-view', true);
-    const err = $('login-error');
-    err.textContent = message || '';
-    show('login-error', !!message);
-    $('password').value = '';
-    $('password').focus();
-  }
 
   function selectTab(name) {
     activeTab = name;
@@ -540,7 +381,6 @@
       pendingFingerprint = null;
       selectedAlert = r.alert_id;
     } catch (e) {
-      if (e.status === 401) return;
       result.className = 'result bad';
       result.textContent = 'Échec de l’envoi : ' + e.message + '. Vous pouvez réessayer sans risque de doublon.';
     } finally {
@@ -550,43 +390,12 @@
   }
 
   function init() {
-    const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
-    show('http-warning', location.protocol === 'http:' && !local);
-
-    $('login-form').addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const btn = $('login-submit');
-      btn.disabled = true;
-      btn.textContent = 'Vérification…';
-      show('login-error', false);
-      try {
-        await login($('password').value);
-        $('password').value = '';
-        onLoggedIn();
-      } catch (e) {
-        const err = $('login-error');
-        err.textContent = e.code === 'rate_limited' ? 'Trop de tentatives, réessayez plus tard.' : (e.code === 'bad_password' ? 'Mot de passe incorrect' : e.message);
-        show('login-error', true);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = 'Se connecter';
-      }
-    });
-
-    $('logout').addEventListener('click', async () => {
-      try { await api('POST', '/api/admin/logout'); } catch (_) { /* best effort */ }
-      onLoggedOut('');
-    });
-
     document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
     $('send-group').addEventListener('change', renderGroupSelect);
     $('send-form').addEventListener('submit', sendAlert);
     $('confirm-ok').addEventListener('click', () => $('confirm-dialog').close('ok'));
     $('confirm-cancel').addEventListener('click', () => $('confirm-dialog').close('cancel'));
-
-    loadWasm().catch((e) => showError('Module cryptographique indisponible : ' + e.message));
-    if (session) onLoggedIn();
-    else onLoggedOut('');
+    startPolling();
   }
 
   document.addEventListener('DOMContentLoaded', init);

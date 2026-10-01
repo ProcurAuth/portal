@@ -1,4 +1,4 @@
-//! OPAQUE password login, shared by device enrollment and admin login.
+//! OPAQUE password login, used by device enrollment.
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -172,7 +172,7 @@ impl LoginServer {
     }
 }
 
-#[cfg(all(test, feature = "os-rng"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -209,13 +209,6 @@ mod tests {
         let setup = setup();
         let record = register(&setup, Role::Device, b"correct horse", &mut Rng::os()).unwrap();
         assert!(login(&setup, &record, Role::Device, b"battery staple").is_err());
-    }
-
-    #[test]
-    fn roles_are_not_interchangeable() {
-        let setup = setup();
-        let record = register(&setup, Role::Device, b"pw", &mut Rng::os()).unwrap();
-        assert!(login(&setup, &record, Role::Admin, b"pw").is_err());
     }
 
     #[test]

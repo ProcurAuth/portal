@@ -1,8 +1,7 @@
 //! Inbox wire protocol and cryptography.
 //!
-//! This crate performs no I/O. The server, the Android app (through JNI) and the
-//! web front (through WebAssembly) drive the same state machines so that the
-//! security-sensitive code exists exactly once.
+//! This crate performs no I/O. The server and the Android app (through JNI) drive
+//! the same state machines so that the security-sensitive code exists exactly once.
 //!
 //! Security model:
 //! - A password is only ever used inside OPAQUE: it never leaves the client and a
@@ -19,11 +18,8 @@ pub mod proto;
 pub mod rng;
 pub mod suite;
 
-#[cfg(feature = "noise")]
 pub mod enroll;
-#[cfg(feature = "noise")]
 pub mod noise;
-#[cfg(feature = "noise")]
 pub mod server_key;
 
 pub use error::{Error, Result};

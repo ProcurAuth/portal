@@ -35,6 +35,8 @@ spec:
   - kind: Rule
     match: Host(`inbox-admin.example.org`)
     services: [{name: inbox, port: 8081}]
+    # Inbox's admin front has no password: this chain must authenticate users.
+    # Keep the host in admin.allowed_hosts (config.hcl) in sync with this rule.
     middlewares: [{name: root-only-chain}]
   tls:
     secretName: traefik-tls

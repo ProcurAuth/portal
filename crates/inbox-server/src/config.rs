@@ -60,7 +60,7 @@ pub struct Storage {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Devices {
-    /// OPAQUE record of the shared device password (`inbox credential --role device`).
+    /// OPAQUE record of the shared device password (`inbox credential`).
     pub credential_file: PathBuf,
     /// The app sends a ping at this interval.
     #[serde(deserialize_with = "duration")]
@@ -82,25 +82,24 @@ pub struct Devices {
     pub max_devices: u32,
 }
 
+/// The admin front has no password: whoever reaches `server.admin_listen` can send
+/// alerts and revoke devices. Expose it on localhost, a private network or behind
+/// an authenticating reverse proxy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admin {
-    /// OPAQUE record of the admin password (`inbox credential --role admin`).
-    pub credential_file: PathBuf,
-    #[serde(deserialize_with = "duration")]
-    pub session_ttl: Duration,
+    /// Accepted `Host` header values (e.g. `localhost:8081`). Any other host is
+    /// refused, which defeats DNS rebinding from a malicious web page.
+    pub allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Security {
-    /// Failed password attempts per client address within `auth_failure_window`.
+    /// Device password attempts per client address within `auth_failure_window`.
     pub max_auth_failures: u32,
     #[serde(deserialize_with = "duration")]
     pub auth_failure_window: Duration,
-    /// Accepted clock skew on signed admin requests.
-    #[serde(deserialize_with = "duration")]
-    pub admin_request_max_skew: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,10 +250,13 @@ impl Config {
         );
         check((1..=100_000).contains(&d.max_devices), "devices.max_devices must be in 1..100000");
 
+        let hosts = &self.admin.allowed_hosts;
+        check(!hosts.is_empty(), "admin.allowed_hosts must not be empty");
         check(
-            self.admin.session_ttl >= Duration::from_secs(60)
-                && self.admin.session_ttl <= Duration::from_secs(7 * 86_400),
-            "admin.session_ttl must be in 1m..7d",
+            hosts.iter().all(|h| {
+                !h.is_empty() && h.len() <= 255 && h.bytes().all(|b| b.is_ascii_graphic())
+            }),
+            "admin.allowed_hosts entries must be host[:port] values",
         );
 
         let sec = &self.security;
@@ -265,11 +267,6 @@ impl Config {
         check(
             sec.auth_failure_window >= Duration::from_secs(1),
             "security.auth_failure_window must be >= 1s",
-        );
-        check(
-            sec.admin_request_max_skew >= Duration::from_secs(5)
-                && sec.admin_request_max_skew <= Duration::from_secs(600),
-            "security.admin_request_max_skew must be in 5s..10m",
         );
 
         let l = &self.limits;

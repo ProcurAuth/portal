@@ -11,7 +11,6 @@ use inbox_core::suite::Suite;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::admin::AdminSessions;
 use crate::config::Config;
 use crate::db::Db;
 use crate::hub::Hub;
@@ -31,7 +30,6 @@ pub struct Producer {
 pub struct Secrets {
     pub server_key: ServerKey,
     pub device_record: ServerRegistration<Suite>,
-    pub admin_record: ServerRegistration<Suite>,
     pub producers: Vec<Producer>,
 }
 
@@ -45,10 +43,6 @@ impl Secrets {
             .map_err(|e| format!("server.server_key_file: {e} (generate with `inbox keygen`)"))?;
         let device_record =
             load_record(&config.devices.credential_file, "devices.credential_file")?;
-        let admin_record = load_record(&config.admin.credential_file, "admin.credential_file")?;
-        if device_record.serialize() == admin_record.serialize() {
-            return Err("devices.credential_file and admin.credential_file must differ".into());
-        }
         let mut producers = Vec::new();
         let mut hashes = std::collections::HashSet::new();
         for (name, p) in &config.producer {
@@ -70,7 +64,7 @@ impl Secrets {
                 webhook_send_resolved: p.webhook_send_resolved,
             });
         }
-        Ok(Secrets { server_key, device_record, admin_record, producers })
+        Ok(Secrets { server_key, device_record, producers })
     }
 }
 
@@ -89,7 +83,6 @@ pub struct AppState {
     pub db: Db,
     pub hub: Hub,
     pub limiter: AuthLimiter,
-    pub admin_sessions: AdminSessions,
     pub metrics: Metrics,
     pub gauges: Arc<Gauges>,
     pub shutdown: Shutdown,

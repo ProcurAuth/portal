@@ -9,8 +9,9 @@ server {
   name = "Inbox"
   # Devices (/v1/enroll, /v1/session), producer API, webhooks, /healthz, /readyz.
   listen = "0.0.0.0:8080"
-  # Admin front and admin API. Keep it on a private network or behind TLS.
-  admin_listen = "0.0.0.0:8081"
+  # Admin front and admin API. It has NO password: bind it to localhost or a
+  # private network, or put an authenticating reverse proxy in front of it.
+  admin_listen = "127.0.0.1:8081"
   # Peers whose X-Forwarded-For / X-Real-IP headers are trusted. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
   shutdown_grace  = "10s"
@@ -27,7 +28,7 @@ storage {
 }
 
 devices {
-  # Shared device password, from `inbox credential --role device`.
+  # Shared device password, from `inbox credential`.
   credential_file       = "/run/secrets/inbox_device_credential"
   heartbeat_interval    = "20s"
   session_timeout       = "60s"
@@ -39,15 +40,16 @@ devices {
 }
 
 admin {
-  # Admin password for the web front, from `inbox credential --role admin`.
-  credential_file = "/run/secrets/inbox_admin_credential"
-  session_ttl     = "12h"
+  # No password: anyone who reaches server.admin_listen can send alerts and
+  # revoke devices. Host headers accepted by the admin listener; any other host
+  # is refused (protection against DNS rebinding from a malicious web page).
+  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
 }
 
 security {
-  max_auth_failures      = 5
-  auth_failure_window    = "10m"
-  admin_request_max_skew = "60s"
+  # Device password attempts per client address and window.
+  max_auth_failures   = 5
+  auth_failure_window = "10m"
 }
 
 limits {

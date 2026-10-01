@@ -9,17 +9,14 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use inbox_core::enroll::{ClientStep, EnrollClient, EnrolledDevice};
-use inbox_core::login::{LoginClient, mac};
 use inbox_core::noise::{Initiator, Session};
 use inbox_core::proto::{AckStage, Action, AlertMsg, ClientMsg, ServerMsg, SessionHello};
 use inbox_core::rng::Rng;
-use inbox_core::suite::Role;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 const BIN: &str = env!("CARGO_BIN_EXE_inbox");
 const DEVICE_PW: &str = "device-password";
-const ADMIN_PW: &str = "admin-password-long";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -58,22 +55,11 @@ impl Server {
         let p = |n: &str| dir.join(n).to_string_lossy().to_string();
         assert!(inbox(&["keygen", "--out", &p("server_key")], None).status.success());
         let key = p("server_key");
-        for (role, pw) in [("device", DEVICE_PW), ("admin", ADMIN_PW)] {
-            let out = inbox(
-                &[
-                    "credential",
-                    "--server-key",
-                    &key,
-                    "--role",
-                    role,
-                    "--out",
-                    &p(&format!("{role}_cred")),
-                    "--password-stdin",
-                ],
-                Some(&format!("{pw}\n")),
-            );
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        }
+        let out = inbox(
+            &["credential", "--server-key", &key, "--out", &p("device_cred"), "--password-stdin"],
+            Some(&format!("{DEVICE_PW}\n")),
+        );
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert!(inbox(&["token", "--out", &p("token")], None).status.success());
         // Refuses to overwrite an existing secret.
         assert!(!inbox(&["token", "--out", &p("token")], None).status.success());
@@ -107,13 +93,11 @@ devices {{
   max_devices = 10
 }}
 admin {{
-  credential_file = "{ac}"
-  session_ttl = "1h"
+  allowed_hosts = ["localhost:{admin_port}"]
 }}
 security {{
   max_auth_failures = 10
   auth_failure_window = "1m"
-  admin_request_max_skew = "30s"
 }}
 limits {{
   max_title_bytes = 100
@@ -143,7 +127,6 @@ producer "ci" {{
 "#,
             db = p("inbox.db"),
             dc = p("device_cred"),
-            ac = p("admin_cred"),
             tok = p("token"),
         );
         std::fs::write(dir.join("config.hcl"), config).unwrap();
@@ -212,13 +195,24 @@ fn http(
     headers: &[(&str, String)],
     body: &str,
 ) -> (u16, String) {
+    http_host(port, &format!("localhost:{port}"), method, path, headers, body)
+}
+
+fn http_host(
+    port: u16,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: &str,
+) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
-    if !body.is_empty() {
+    if !body.is_empty() && !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
         req.push_str("Content-Type: application/json\r\n");
     }
     for (k, v) in headers {
@@ -394,74 +388,15 @@ impl Conn {
     }
 }
 
-struct Admin {
-    port: u16,
-    session_id: String,
-    key: zeroize::Zeroizing<[u8; 32]>,
-}
-
-impl Admin {
-    fn login(port: u16, password: &str) -> Result<Admin, u16> {
-        let mut rng = Rng::os();
-        let (client, request) =
-            LoginClient::start(Role::Admin, password.as_bytes(), &mut rng).unwrap();
-        let (st, body) = http(
-            port,
-            "POST",
-            "/api/admin/login/start",
-            &[],
-            &json!({ "credential_request": inbox_core::b64::encode(&request) }).to_string(),
-        );
-        assert_eq!(st, 200, "{body}");
-        let v: Value = serde_json::from_str(&body).unwrap();
-        let response =
-            inbox_core::b64::decode(v["credential_response"].as_str().unwrap()).unwrap();
-        let Ok((finalization, key)) = client.finish(&response, &mut rng) else { return Err(0) };
-        let (st, body) = http(
-            port,
-            "POST",
-            "/api/admin/login/finish",
-            &[],
-            &json!({ "login_id": v["login_id"], "credential_finalization": inbox_core::b64::encode(&finalization) }).to_string(),
-        );
-        if st != 200 {
-            return Err(st);
-        }
-        let v: Value = serde_json::from_str(&body).unwrap();
-        Ok(Admin {
-            port,
-            session_id: v["session_id"].as_str().unwrap().into(),
-            key: key.derive("admin/request-mac"),
-        })
-    }
-
-    fn call(&self, method: &str, path: &str, body: &str) -> (u16, Value) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .to_string();
-        let nonce = inbox_core::b64::encode(&Rng::os().bytes::<18>());
-        let sig = mac(
-            &self.key,
-            &[
-                b"inbox/v1/admin-request",
-                method.as_bytes(),
-                path.as_bytes(),
-                ts.as_bytes(),
-                nonce.as_bytes(),
-                body.as_bytes(),
-            ],
-        );
-        let headers = [
-            ("x-inbox-session", self.session_id.clone()),
-            ("x-inbox-timestamp", ts),
-            ("x-inbox-nonce", nonce),
-            ("x-inbox-signature", inbox_core::b64::encode(&sig)),
-        ];
-        let (st, text) = http(self.port, method, path, &headers, body);
-        (st, serde_json::from_str(&text).unwrap_or(Value::Null))
-    }
+/// Admin API call as the front makes it: no credentials, anti-CSRF headers on POST.
+fn admin(port: u16, method: &str, path: &str, body: &str) -> (u16, Value) {
+    let headers: Vec<(&str, String)> = if method == "POST" {
+        vec![("Content-Type", "application/json".into()), ("X-Inbox-Request", "1".into())]
+    } else {
+        Vec::new()
+    };
+    let (st, text) = http(port, method, path, &headers, body);
+    (st, serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
 #[test]
@@ -632,18 +567,9 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["duplicates"], 1);
     ca.no_alert(Duration::from_millis(2000)).await;
 
-    // Admin: wrong password, then signed requests, replay protection, revocation.
-    assert_eq!(
-        Admin::login(s.admin_port, "wrong-admin-password").err(),
-        Some(0),
-        "detected client-side"
-    );
-    assert!(
-        Admin::login(s.admin_port, DEVICE_PW).is_err(),
-        "device password must not open the admin front"
-    );
-    let admin = Admin::login(s.admin_port, ADMIN_PW).unwrap();
-    let (st, v) = admin.call("GET", "/api/admin/overview", "");
+    // Admin: no password; host allow-list and CSRF protections; revocation.
+    let ap = s.admin_port;
+    let (st, v) = admin(ap, "GET", "/api/admin/overview", "");
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["stats"]["enrolled"], 2);
     assert_eq!(v["stats"]["online"], 1);
@@ -651,24 +577,41 @@ async fn delivery_guarantees_end_to_end() {
     let a_row = devices.iter().find(|d| d["device"]["name"] == "phone-a").unwrap();
     assert_eq!(a_row["status"], "online");
     assert_eq!(a_row["live"]["ip"], "127.0.0.1");
-    let (st, _) = http(s.admin_port, "GET", "/api/admin/overview", &[], "");
-    assert_eq!(st, 401, "unsigned admin request");
-    let (st, v) = admin.call(
-        "POST",
-        "/api/admin/alerts",
-        &json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string(),
-    );
+    let (st, body) = http_host(ap, "evil.example:8081", "GET", "/api/admin/overview", &[], "");
+    assert_eq!(st, 403, "DNS rebinding: unknown Host refused");
+    assert!(body.contains("host_not_allowed"));
+    let (st, body) = http_host(ap, "evil.example:8081", "GET", "/", &[], "");
+    assert_eq!(st, 403);
+    assert!(body.contains("admin.allowed_hosts"), "readable page for humans: {body}");
+    let send = json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string();
+    let json_only = [("Content-Type", "application/json".to_string())];
+    let (st, _) = http(ap, "POST", "/api/admin/alerts", &json_only, &send);
+    assert_eq!(st, 403, "POST without X-Inbox-Request");
+    let text_plain =
+        [("X-Inbox-Request", "1".to_string()), ("Content-Type", "text/plain".to_string())];
+    let (st, _) = http(ap, "POST", "/api/admin/alerts", &text_plain, &send);
+    assert_eq!(st, 403, "POST without JSON content type");
+    let cross = [
+        ("Content-Type", "application/json".to_string()),
+        ("X-Inbox-Request", "1".to_string()),
+        ("Sec-Fetch-Site", "cross-site".to_string()),
+    ];
+    let (st, _) = http(ap, "POST", "/api/admin/alerts", &cross, &send);
+    assert_eq!(st, 403, "cross-site request");
+    let (st, v) = admin(ap, "POST", "/api/admin/alerts", &send);
     assert_eq!(st, 201, "{v}");
     assert_eq!(v["targets"], 0);
-    let (st, v) = admin.call("POST", &format!("/api/admin/devices/{}/revoke", a.device_id), "");
+    let (st, v) = admin(ap, "POST", &format!("/api/admin/devices/{}/revoke", a.device_id), "{}");
     assert_eq!((st, v["revoked"].as_bool()), (200, Some(true)));
     assert_eq!(ca.closed_code().await, Some(inbox_core::proto::close::REVOKED));
     assert_eq!(Conn::open(port, &a).await.err(), Some(inbox_core::proto::close::REVOKED));
-    let (st, v) = admin.call("GET", "/api/admin/connections?limit=10", "");
+    let (st, v) = admin(ap, "GET", "/api/admin/connections?limit=10", "");
     assert_eq!(st, 200);
     assert!(v["connections"].as_array().unwrap().len() >= 4);
-    let (_, v) = admin.call("GET", "/api/admin/alerts", "");
+    let (_, v) = admin(ap, "GET", "/api/admin/alerts", "");
     assert!(v["alerts"].as_array().unwrap().len() >= 4);
+    let (st, _) = admin(ap, "POST", "/api/admin/login/start", "{}");
+    assert_eq!(st, 405, "no login endpoint any more");
 
     // Assets are served with security headers.
     let (st, _) = http(s.admin_port, "GET", "/", &[], "");
@@ -698,13 +641,5 @@ async fn password_guessing_is_rate_limited() {
         Err(inbox_core::Error::Rejected { code, .. }) => assert_eq!(code, "rate_limited"),
         other => panic!("expected rate_limited, got {:?}", other.err()),
     }
-    let (st, _) = http(
-        s.admin_port,
-        "POST",
-        "/api/admin/login/start",
-        &[],
-        r#"{"credential_request":"AAAA"}"#,
-    );
-    assert_eq!(st, 429);
     s.stop();
 }

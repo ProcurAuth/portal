@@ -40,7 +40,8 @@ l'émission.
 - L'app ne peut **pas** émettre d'alerte : le serveur n'expose aucune route
   d'émission à une identité d'appareil.
 - L'utilisateur peut **acquitter** une alerte (arrête l'alarme ; visible dans le front).
-- Plusieurs serveurs peuvent être ajoutés dans l'app.
+- Plusieurs serveurs Inbox peuvent être ajoutés et gérés dans l'app (une
+  connexion et des abonnements par serveur).
 
 ### 3.2 Alerte
 - Groupe obligatoire ; titre et message **facultatifs**.
@@ -57,6 +58,9 @@ l'émission.
   (envoyée, reçue, affichée, acquittée, nombre d'envois).
 - Révocation d'un appareil, envoi manuel d'une alerte.
 - Aucune configuration modifiable : la configuration est déclarative (HCL).
+- **Pas de mot de passe** (décision du 2026-10-01) : l'accès au front admin est
+  contrôlé par l'endroit où il écoute (localhost, réseau privé) ou par un reverse
+  proxy authentifiant placé devant.
 
 ## 4. Garantie de livraison
 
@@ -99,12 +103,21 @@ réseau ne permet aucune attaque hors ligne.
   épinglée à l'enrôlement — authentification mutuelle, chiffrement, confidentialité
   persistante. Le mot de passe n'est pas stocké sur le téléphone ; chaque appareil
   est révocable.
-- **Front admin** : mot de passe admin distinct, login OPAQUE dans le navigateur
-  (WebAssembly), puis requêtes signées HMAC (horodatage + nonce anti-rejeu).
-  Limite : sur HTTP en clair un attaquant actif peut modifier le JavaScript servi ;
-  le listener admin doit être privé ou derrière TLS.
-- Limitation des tentatives par adresse, tokens d'émetteur comparés en temps
-  constant, en-têtes de sécurité (CSP stricte), image `scratch` non-root.
+- **Front admin** : **sans mot de passe** (décision du 2026-10-01). Quiconque
+  atteint `server.admin_listen` peut envoyer des alertes et révoquer des
+  appareils : il doit donc écouter sur localhost / un réseau privé, ou être
+  derrière un reverse proxy authentifiant (ex. Traefik forward-auth). Protections
+  conservées contre les pages web hostiles ouvertes dans le navigateur de
+  l'opérateur :
+  - `Host` limité à `admin.allowed_hosts` (anti DNS rebinding) ;
+  - tout `POST` exige `Content-Type: application/json` et `X-Inbox-Request: 1`
+    (anti-CSRF : impossible depuis une autre origine sans pré-requête CORS, que
+    Inbox n'accorde jamais) ;
+  - requêtes `Sec-Fetch-Site: cross-site` refusées.
+- Limitation des tentatives de mot de passe appareil par adresse (chaque tentative
+  démarrée compte, car OPAQUE détecte le mauvais mot de passe côté téléphone),
+  tokens d'émetteur comparés en temps constant, en-têtes de sécurité (CSP
+  stricte), image `scratch` non-root.
 - TLS est assuré par un reverse proxy (Traefik…) ; l'app accepte `https://`.
 
 ## 6. Exigences techniques
@@ -123,8 +136,9 @@ réseau ne permet aucune attaque hors ligne.
   à la main, front en JavaScript natif sans npm.
 - **Livraison** : un seul dépôt GitHub (`SCcagg5/Inbox`, privé) ; une release
   GitHub publie les binaires Linux amd64/arm64, l'APK signé et `SHA256SUMS` ;
-  image conteneur `FROM scratch` ; `docker compose` prêt à l'emploi ; manifestes
-  k3s inspirés du dépôt Home.
+  image conteneur `FROM scratch` construite localement, **jamais publiée sur un
+  registre** (GHCR ou autre) ; `docker compose` prêt à l'emploi ; manifestes k3s
+  inspirés du dépôt Home.
 
 ## 7. Architecture
 
@@ -132,8 +146,7 @@ réseau ne permet aucune attaque hors ligne.
 crates/inbox-core     protocole + crypto sans I/O (OPAQUE, Noise, messages)
 crates/inbox-server   binaire `inbox` (axum, SQLite, OTel, front embarqué)
 crates/inbox-android  pont JNI vers inbox-core
-crates/inbox-wasm     login admin OPAQUE + signature des requêtes (navigateur)
-web/                   front admin (HTML/CSS/JS natif)
+web/                   front admin (HTML/CSS/JS natif, sans mot de passe)
 android/               app Android (Kotlin, Views, SQLite plateforme, OkHttp)
 deploy/                docker compose, k3s
 ```

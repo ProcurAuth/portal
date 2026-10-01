@@ -82,7 +82,7 @@ body {
 main { max-width: 1280px; margin: 0 auto; padding: 16px; }
 
 .banner { padding: 10px 16px; font-size: 13px; }
-.banner-warn { background: var(--warn-bg); color: var(--warn); border-bottom: 1px solid var(--border); }
+.open-warning { margin: 0; padding: 6px 16px; font-size: 12px; color: var(--warn); background: var(--warn-bg); border-bottom: 1px solid var(--border); }
 .banner-error { background: var(--bad-bg); color: var(--bad); border-radius: var(--radius); margin: 0 0 12px; }
 
 .card {
@@ -93,9 +93,10 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px; }
   padding: 16px;
 }
 
-.login { display: flex; justify-content: center; padding-top: 8vh; }
-.login-card { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 8px; }
-.login-card h1 { margin: 0; font-size: 20px; }
+.host-error { max-width: 640px; margin: 0 auto 16px; border-color: var(--bad); }
+.host-error h1 { margin: 0 0 8px; font-size: 18px; color: var(--bad); }
+.host-error pre, .host-error code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.host-error pre { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; overflow-x: auto; }
 
 label { font-weight: 600; font-size: 13px; margin-top: 6px; }
 input, select, textarea {
@@ -126,7 +127,7 @@ textarea { resize: vertical; }
 .btn-danger { background: var(--danger); color: var(--danger-text); }
 .btn-ghost { background: transparent; color: var(--text); border-color: var(--border); }
 .btn-small { padding: 4px 10px; font-size: 12px; }
-.login-card .btn, .send-card .btn { margin-top: 10px; }
+.send-card .btn { margin-top: 10px; }
 
 .stats {
   display: grid;

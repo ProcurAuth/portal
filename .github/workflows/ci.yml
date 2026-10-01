@@ -39,16 +39,12 @@ jobs:
           path: target
           key: target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'tools/dev/Dockerfile') }}
           restore-keys: target-${{ runner.os }}-
-      - name: Admin front WebAssembly module
-        run: tools/build.sh wasm
       - name: Format
         run: tools/dev/cargo.sh fmt --all -- --check
-      - name: Clippy (core, server)
+      - name: Clippy (core, server, JNI bridge)
         run: tools/dev/cargo.sh clippy --locked -p inbox-core -p inbox-server -p inbox-android --all-targets -- -D warnings
-      - name: Clippy (wasm)
-        run: tools/dev/cargo.sh clippy --locked -p inbox-wasm --target wasm32-unknown-unknown -- -D warnings
       - name: Tests
-        run: tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server
+        run: tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server -p inbox-android
 
   image:
     name: Image and compose smoke test
@@ -72,13 +68,19 @@ jobs:
         env:
           INBOX_IMAGE_TAG: ci
           INBOX_DEVICE_PASSWORD: ci-device-password
-          INBOX_ADMIN_PASSWORD: ci-admin-password-long
         run: |
           deploy/init-secrets.sh
           docker compose -f deploy/docker-compose.yml up -d --no-build --wait --wait-timeout 60
           curl -fsS http://127.0.0.1:8080/readyz
           curl -fsS http://127.0.0.1:8080/api/version
           curl -fsS -o /dev/null http://127.0.0.1:8081/
+          # The admin API has no password; it is protected by allowed_hosts and an anti-CSRF header.
+          curl -fsS -o /dev/null http://127.0.0.1:8081/api/admin/overview
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"group":"infra","idempotency_key":"ci"}' http://127.0.0.1:8081/api/admin/alerts)
+          [ "$code" = 403 ] || { echo "POST without X-Inbox-Request returned $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example' http://127.0.0.1:8081/api/admin/overview)
+          [ "$code" != 200 ] || { echo "foreign Host header accepted"; exit 1; }
       - name: Logs
         if: always()
         env:

@@ -5,15 +5,14 @@
 #   docker build -t inbox .                                    # runtime image
 #   docker build --target artifact --output type=local,dest=out .  # binary only (releases)
 #
-# The admin front (web/) and its WebAssembly module are built here from source and
-# embedded in the binary; the build context needs no pre-built artifact.
+# The admin front (web/, plain HTML/CSS/JS) is embedded in the binary at build
+# time; the build context needs no pre-built artifact.
 
 ARG RUST_IMAGE=rust:1.98-alpine3.24
 
 # ------------------------------------------------------------------ toolchain
 FROM ${RUST_IMAGE} AS toolchain
-RUN apk add --no-cache musl-dev gcc make perl binutils \
- && rustup target add wasm32-unknown-unknown
+RUN apk add --no-cache musl-dev gcc make perl binutils
 ENV CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/src/target \
     CARGO_NET_RETRY=5
@@ -26,16 +25,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/inbox-core/Cargo.toml crates/inbox-core/
 COPY crates/inbox-server/Cargo.toml crates/inbox-server/build.rs crates/inbox-server/
 COPY crates/inbox-android/Cargo.toml crates/inbox-android/
-COPY crates/inbox-wasm/Cargo.toml crates/inbox-wasm/
 RUN set -eu; \
-    for c in inbox-core inbox-android inbox-wasm; do \
+    for c in inbox-core inbox-android; do \
       mkdir -p crates/$c/src && echo '' > crates/$c/src/lib.rs; \
     done; \
     mkdir -p crates/inbox-server/src web \
  && echo 'fn main() {}' > crates/inbox-server/src/main.rs \
- && touch web/index.html web/app.js web/style.css web/inbox.wasm \
+ && touch web/index.html web/app.js web/style.css \
  && cargo fetch --locked \
- && cargo build --release --locked -p inbox-wasm --target wasm32-unknown-unknown \
  && cargo build --release --locked -p inbox-server
 
 # ------------------------------------------------------------------ build
@@ -48,8 +45,6 @@ COPY config.example.hcl ./
 # COPY keeps the context mtimes, which are older than the stubs: force a rebuild.
 RUN set -eu; \
     find crates web -type f -exec touch {} +; \
-    cargo build --release --locked -p inbox-wasm --target wasm32-unknown-unknown; \
-    cp target/wasm32-unknown-unknown/release/inbox_wasm.wasm web/inbox.wasm; \
     cargo build --release --locked -p inbox-server; \
     bin=target/release/inbox; \
     if readelf -l "$bin" | grep -q INTERP; then echo "inbox is dynamically linked" >&2; exit 1; fi; \

@@ -18,30 +18,33 @@
     </div>
     <div class="topbar-right">
       <span id="server-version" class="muted small"></span>
-      <span id="conn-state" class="pill hidden"></span>
-      <button id="logout" class="btn btn-ghost hidden" type="button">Déconnexion</button>
+      <span id="conn-state" class="pill"></span>
     </div>
   </header>
 
-  <div id="http-warning" class="banner banner-warn hidden" role="alert">
-    Cette page est servie en HTTP clair. Le mot de passe admin ne transite jamais et les requêtes
-    sont signées, mais un attaquant actif sur le réseau pourrait modifier la page elle-même.
-    Placez l’interface admin derrière TLS ou sur un réseau privé.
-  </div>
+  <p class="open-warning" role="note">
+    Interface sans mot de passe : toute personne qui accède à ce port peut envoyer des alertes
+    et révoquer des appareils. Exposez-la uniquement en local, sur un réseau privé ou derrière
+    un proxy authentifiant.
+  </p>
 
   <main>
-    <section id="login-view" class="login hidden">
-      <form id="login-form" class="card login-card" autocomplete="off">
-        <h1>Administration</h1>
-        <p class="muted">Connexion par mot de passe admin (OPAQUE : le mot de passe ne quitte pas ce navigateur).</p>
-        <label for="password">Mot de passe admin</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-        <button id="login-submit" class="btn btn-primary" type="submit">Se connecter</button>
-        <p id="login-error" class="error hidden" role="alert"></p>
-      </form>
+    <section id="host-error" class="card host-error hidden" role="alert">
+      <h1>Hôte non autorisé</h1>
+      <p>
+        Le serveur refuse les requêtes adressées à <strong class="mono" id="host-error-host"></strong>
+        (protection contre le DNS rebinding).
+      </p>
+      <p>
+        Ajoutez cet hôte, port compris, à <code>admin.allowed_hosts</code> dans la configuration
+        du serveur, puis redémarrez-le. Exemple :
+      </p>
+      <pre>admin {
+  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
+}</pre>
     </section>
 
-    <section id="app-view" class="hidden">
+    <section id="app-view">
       <div class="stats" id="stats">
         <div class="stat"><span class="stat-label">En ligne</span><span class="stat-value" id="st-online">–</span></div>
         <div class="stat"><span class="stat-label">Enrôlés</span><span class="stat-value" id="st-enrolled">–</span></div>

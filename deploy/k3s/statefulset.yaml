@@ -46,7 +46,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: inbox
-        image: registry:5000/custom.infra/inbox:v0.1.0
+        image: registry:5000/custom.infra/inbox:v0.2.0
         imagePullPolicy: IfNotPresent
         args: ["serve", "--config", "/etc/inbox/config.hcl"]
         ports:
@@ -101,7 +101,6 @@ spec:
           items:
           - {key: server_key, path: inbox_server_key}
           - {key: device_credential, path: inbox_device_credential}
-          - {key: admin_credential, path: inbox_admin_credential}
           - {key: alerting_token, path: inbox_alerting_token}
       - name: tmp
         emptyDir:

@@ -1,10 +1,13 @@
 # Inbox with Docker Compose.
 #
-#   ./init-secrets.sh                 # once: server key, passwords, producer token
+#   ./init-secrets.sh                 # once: server key, device password, producer token
 #   docker compose up -d --build
 #
-# Devices and the producer API use port 8080. The admin front (8081) is bound to
-# localhost: reach it through an SSH tunnel or a TLS reverse proxy.
+# Devices and the producer API use port 8080. The admin front (8081) has no
+# password: anyone who reaches it can send alerts and revoke devices. It is bound
+# to localhost; reach it through an SSH tunnel, or put an authenticating reverse
+# proxy in front. If you change INBOX_ADMIN_PORT or the hostname used in the
+# browser, update admin.allowed_hosts in config.hcl to match the Host header.
 name: inbox
 
 services:
@@ -32,8 +35,6 @@ services:
         target: inbox_server_key
       - source: inbox_device_credential
         target: inbox_device_credential
-      - source: inbox_admin_credential
-        target: inbox_admin_credential
       - source: inbox_alerting_token
         target: inbox_alerting_token
     volumes:
@@ -71,8 +72,6 @@ secrets:
     file: ./secrets/server_key
   inbox_device_credential:
     file: ./secrets/device_credential
-  inbox_admin_credential:
-    file: ./secrets/admin_credential
   inbox_alerting_token:
     file: ./secrets/alerting_token
 

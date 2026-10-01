@@ -30,6 +30,14 @@ impl ApiError {
         ApiError { status, code, message: message.into() }
     }
 
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn storage(e: impl std::fmt::Display) -> ApiError {
         tracing::error!(event = "storage_error", error = %e);
         ApiError::new(

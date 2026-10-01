@@ -29,14 +29,20 @@ devices {
 }
 
 admin {
-  credential_file = "/run/secrets/inbox_admin_credential"
-  session_ttl     = "12h"
+  # No password: anyone who can reach server.admin_listen can send alerts and
+  # revoke devices. The IngressRoute must keep an authenticating middleware.
+  # Exact Host header values accepted (DNS-rebinding protection): the ingress
+  # host, the in-cluster service name and `kubectl port-forward`.
+  allowed_hosts = [
+    "inbox-admin.example.org",
+    "inbox.apps.svc.cluster.local:8081",
+    "localhost:8081",
+  ]
 }
 
 security {
-  max_auth_failures      = 5
-  auth_failure_window    = "10m"
-  admin_request_max_skew = "60s"
+  max_auth_failures   = 5
+  auth_failure_window = "10m"
 }
 
 limits {

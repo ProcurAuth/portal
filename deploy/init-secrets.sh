@@ -1,14 +1,16 @@
 #!/bin/sh
 # Creates the secrets used by docker-compose.yml in deploy/secrets/:
 #   server_key         OPAQUE server setup + Noise static key (inbox keygen)
-#   device_credential  shared device password record   (inbox credential --role device)
-#   admin_credential   admin front password record     (inbox credential --role admin)
+#   device_credential  shared device password record   (inbox credential)
 #   alerting_token     producer API / webhook token     (inbox token)
 #
-# Existing files are never overwritten: delete one explicitly to regenerate it.
-# Replacing server_key invalidates every enrolled device and every credential.
+# The admin front has no password: it is protected by where it listens (see
+# docker-compose.yml, bound to localhost) and by admin.allowed_hosts.
 #
-# Non-interactive use: INBOX_DEVICE_PASSWORD and INBOX_ADMIN_PASSWORD.
+# Existing files are never overwritten: delete one explicitly to regenerate it.
+# Replacing server_key invalidates every enrolled device and the device credential.
+#
+# Non-interactive use: INBOX_DEVICE_PASSWORD.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -53,16 +55,9 @@ fi
 
 if [ ! -f "$dir/device_credential" ]; then
   pw=$(ask "device (shared by every phone, >= 8 characters)" "${INBOX_DEVICE_PASSWORD:-}")
-  printf '%s\n' "$pw" | inbox credential --server-key /out/server_key --role device \
+  printf '%s\n' "$pw" | inbox credential --server-key /out/server_key \
     --out /out/device_credential --password-stdin
   seal device_credential
-fi
-
-if [ ! -f "$dir/admin_credential" ]; then
-  pw=$(ask "admin (web front, >= 12 characters)" "${INBOX_ADMIN_PASSWORD:-}")
-  printf '%s\n' "$pw" | inbox credential --server-key /out/server_key --role admin \
-    --out /out/admin_credential --password-stdin
-  seal admin_credential
 fi
 
 if [ ! -f "$dir/alerting_token" ]; then

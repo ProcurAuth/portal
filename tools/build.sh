@@ -2,7 +2,6 @@
 # Inbox build entry point. Everything runs in containers; the host only needs
 # Docker (with BuildKit), POSIX sh and python3.
 #
-#   tools/build.sh wasm     web/inbox.wasm (admin front login module)
 #   tools/build.sh server   dist/inbox_<version>_linux_<arch>   (static musl)
 #   tools/build.sh image    docker image inbox:<version> (and inbox:local)
 #   tools/build.sh apk      dist/inbox-<version>.apk           (see tools/android)
@@ -24,17 +23,6 @@ case "$(uname -m)" in
   aarch64 | arm64) arch=arm64 ;;
   *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
-
-build_wasm() {
-  if [ -x tools/web/build-wasm.sh ]; then
-    tools/web/build-wasm.sh
-  else
-    INBOX_TARGET_DIR=${INBOX_TARGET_DIR:-target} tools/dev/cargo.sh build --release --locked \
-      -p inbox-wasm --target wasm32-unknown-unknown
-    cp "${INBOX_TARGET_DIR:-target}/wasm32-unknown-unknown/release/inbox_wasm.wasm" web/inbox.wasm
-  fi
-  echo "web/inbox.wasm ready"
-}
 
 build_server() {
   out="$root/dist/.artifact-$arch"
@@ -84,11 +72,10 @@ build_dist() {
 }
 
 case "${1:-}" in
-  wasm) build_wasm ;;
   server) build_server ;;
   image) build_image ;;
   apk) build_apk ;;
   dist) build_dist ;;
   all) build_server; build_image; build_apk; build_dist ;;
-  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

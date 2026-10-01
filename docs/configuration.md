@@ -48,7 +48,7 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
-| `credential_file` | path | must differ from the admin record | Shared device password, from `inbox credential --role device`. |
+| `credential_file` | path | readable credential record | Shared device password, from `inbox credential`. |
 | `heartbeat_interval` | duration | ≥ 5s | The app pings at this interval (sent to the app at session start). |
 | `session_timeout` | duration | ≥ 2 × `heartbeat_interval` | A session with no frame for this long is closed. |
 | `resend_after` | duration | ≥ 1s | An alert sent but not acknowledged as received is sent again after this. |
@@ -61,16 +61,21 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
-| `credential_file` | path | must differ from the device record | Admin password, from `inbox credential --role admin`. |
-| `session_ttl` | duration | 1m..7d | Lifetime of an admin front session. |
+| `allowed_hosts` | list of strings | non-empty | Exact `Host` header values accepted on `server.admin_listen` (host, plus `:port` when the browser sends one). Anything else is refused, which blocks DNS rebinding. |
+
+The admin front has **no password**: anyone who can reach `server.admin_listen`
+can send alerts and revoke devices. Bind it to localhost or a private network, or
+put a reverse proxy that authenticates users in front of it and list the proxy's
+hostname in `allowed_hosts`. Every admin `POST` must also carry
+`Content-Type: application/json` and `X-Inbox-Request: 1` (CSRF protection), and
+requests marked `Sec-Fetch-Site: cross-site` are refused.
 
 ## `security`
 
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
-| `max_auth_failures` | integer | 1..1000 | Failed password or key attempts allowed per client address within the window. |
+| `max_auth_failures` | integer | 1..1000 | Device password attempts (counted when they start, cleared on success) and device key failures allowed per client address within the window. |
 | `auth_failure_window` | duration | ≥ 1s | Sliding window of the limiter. |
-| `admin_request_max_skew` | duration | 5s..10m | Accepted clock difference on signed admin requests. Replay protection covers twice this window. |
 
 ## `limits`
 
@@ -128,8 +133,7 @@ start (logged as `subscriptions_pruned`).
 | File | Command | Notes |
 |---|---|---|
 | server key | `inbox keygen --out <file>` | One line of base64. Back it up. |
-| device credential | `inbox credential --server-key <key> --role device --out <file>` | OPAQUE registration record; the password (≥ 8 chars) never reaches the server. |
-| admin credential | `inbox credential --server-key <key> --role admin --out <file>` | Same, ≥ 12 chars. |
+| device credential | `inbox credential --server-key <key> --out <file>` | OPAQUE registration record; the password (≥ 8 chars) never reaches the server. |
 | producer token | `inbox token --out <file>` | 64 hex characters. |
 
 These commands refuse to overwrite an existing file and create it with mode 0600.

@@ -30,14 +30,16 @@ devices {
 }
 
 admin {
-  credential_file = "/run/secrets/inbox_admin_credential"
-  session_ttl     = "12h"
+  # No password: anyone who can reach server.admin_listen can send alerts and
+  # revoke devices. docker-compose.yml publishes it on 127.0.0.1 only.
+  # Exact Host header values accepted (DNS-rebinding protection): add the
+  # hostname of an authenticating reverse proxy here if you use one.
+  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
 }
 
 security {
-  max_auth_failures      = 5
-  auth_failure_window    = "10m"
-  admin_request_max_skew = "60s"
+  max_auth_failures   = 5
+  auth_failure_window = "10m"
 }
 
 limits {

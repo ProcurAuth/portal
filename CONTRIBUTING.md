@@ -15,10 +15,9 @@
 Everything runs in containers (Docker only on the host):
 
 ```sh
-tools/build.sh wasm                      # web/inbox.wasm, needed by the server build
 tools/dev/cargo.sh fmt --all -- --check
-tools/dev/cargo.sh clippy --locked -p inbox-core -p inbox-server --all-targets -- -D warnings
-tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server
+tools/dev/cargo.sh clippy --locked -p inbox-core -p inbox-server -p inbox-android --all-targets -- -D warnings
+tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server -p inbox-android
 tools/build.sh image
 ```
 
