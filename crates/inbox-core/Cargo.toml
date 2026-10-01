@@ -1,0 +1,28 @@
+[package]
+name = "inbox-core"
+description = "Inbox wire protocol and cryptography (sans-IO), shared by the server, the Android app and the web front."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["noise", "os-rng"]
+# Device sessions (Noise IK). Not needed by the web front.
+noise = ["dep:snow"]
+# Operating-system randomness. Disabled for wasm32-unknown-unknown, where the host injects a seed.
+os-rng = ["rand_core/getrandom"]
+
+[dependencies]
+opaque-ke = { workspace = true }
+snow = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+zeroize = { workspace = true }
+base64 = { workspace = true }
