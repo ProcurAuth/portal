@@ -170,8 +170,8 @@ impl Metrics {
                 .with_description("Alert frames sent to devices, including retransmissions")
                 .build(),
             acks: meter
-                .u64_counter("inbox_acks_total")
-                .with_description("Device acknowledgements, by stage")
+                .u64_counter("inbox_delivery_receipts_total")
+                .with_description("Delivery receipts sent by devices")
                 .build(),
             delivery_latency: meter
                 .f64_histogram("inbox_delivery_latency_seconds")

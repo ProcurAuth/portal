@@ -20,9 +20,7 @@ use axum::response::Response;
 use opentelemetry::KeyValue;
 use inbox_core::enroll::EnrollServer;
 use inbox_core::noise::{self, Responder, Session};
-use inbox_core::proto::{
-    AckStage, AlertMsg, ClientMsg, ServerMsg, SessionAccept, SessionHello, close,
-};
+use inbox_core::proto::{AlertMsg, ClientMsg, ServerMsg, SessionAccept, SessionHello, close};
 use inbox_core::rng::Rng;
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
 use tokio::sync::{Notify, watch};
@@ -144,13 +142,20 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     let max_devices = app.config.devices.max_devices;
     let ip_text = ip.to_string();
     let name = verified.name.clone();
+    let user = verified.user_name.clone().unwrap_or_default();
     let stored = app
         .db
         .call(move |c| {
             if db::count_active_devices(c)? >= max_devices {
                 return Ok(None);
             }
-            Ok(Some(db::insert_device(c, &verified.name, &verified.public_key, &ip_text)?))
+            Ok(Some(db::insert_device(
+                c,
+                &verified.name,
+                verified.user_name.as_deref(),
+                &verified.public_key,
+                &ip_text,
+            )?))
         })
         .await;
     let device_id = match stored {
@@ -176,7 +181,13 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     };
     app.limiter.record_success(ip);
     app.metrics.enrollments.add(1, &[]);
-    tracing::info!(event = "device_enrolled", device.id = %device_id, device.name = %name, client.address = %ip);
+    tracing::info!(
+        event = "device_enrolled",
+        device.id = %device_id,
+        device.name = %name,
+        user.name = %user,
+        client.address = %ip
+    );
     let _ = socket.send(Message::Text(accepted.into())).await;
     close_with(&mut socket, 1000, "enrolled").await;
 }
@@ -292,6 +303,7 @@ async fn run_session(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
         "device.session",
         device.id = %device_id,
         device.name = %device.name,
+        user.name = %device.user_name.as_deref().unwrap_or(""),
         client.address = %ip,
         app.version = %hello.app_version
     );
@@ -376,8 +388,12 @@ async fn deliver(
 ) -> End {
     let cfg = &app.config.devices;
     let id = device_id.to_string();
-    let subscriptions = match app.db.call(move |c| Ok(db::subscriptions(c, &id)?)).await {
-        Ok(s) => s,
+    let profile = app.db.call(move |c| {
+        let user_name = db::find_device(c, &id)?.and_then(|d| d.user_name);
+        Ok((db::subscriptions(c, &id)?, user_name))
+    });
+    let (subscriptions, user_name) = match profile.await {
+        Ok(p) => p,
         Err(e) => return End::Storage(e),
     };
     let welcome = ServerMsg::Welcome {
@@ -387,6 +403,7 @@ async fn deliver(
         heartbeat_interval_ms: cfg.heartbeat_interval.as_millis() as u64,
         offline_warning_after_ms: cfg.offline_warning_after.as_millis() as u64,
         server_time_ms: now_ms(),
+        user_name,
     };
     if let Err(e) = send_msg(socket, session, &welcome).await {
         return e;
@@ -455,24 +472,24 @@ async fn handle(
             send_msg(socket, session, &ServerMsg::Pong { nonce }).await?;
             Ok(false)
         }
-        ClientMsg::Ack { alert_id, stage } => {
+        // Every stage is a delivery receipt: legacy apps also send displayed and
+        // acknowledged, which only ever follow a receipt.
+        ClientMsg::Ack { alert_id, stage: _ } => {
             if !is_hex_id(&alert_id) {
                 return Err(End::Protocol("malformed alert id"));
             }
             let id = device_id.to_string();
             let outcome = app
                 .db
-                .call(move |c| Ok(db::ack(c, &id, &alert_id, stage)?))
+                .call(move |c| Ok(db::ack(c, &id, &alert_id)?))
                 .await
                 .map_err(End::Storage)?;
-            app.metrics.acks.add(1, &[KeyValue::new("stage", stage.as_str())]);
+            app.metrics.acks.add(1, &[]);
             if let Some(o) = outcome {
                 if let Some(ms) = o.first_receipt_latency_ms {
                     app.metrics.delivery_latency.record(ms.max(0) as f64 / 1000.0, &[]);
                 }
-                if inflight.remove(&o.seq).is_some() && stage != AckStage::Received {
-                    tracing::debug!(event = "ack_implied_receipt", stage = stage.as_str());
-                }
+                inflight.remove(&o.seq);
             }
             Ok(true)
         }
@@ -497,6 +514,24 @@ async fn handle(
                 .map_err(End::Storage)?;
             tracing::info!(event = "subscription_changed", action = action.as_str());
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
+            Ok(false)
+        }
+        ClientMsg::SetUserName { user_name } => {
+            let Ok(user_name) = inbox_core::enroll::validate_user_name(&user_name) else {
+                let error = ServerMsg::Error {
+                    code: "invalid_user_name".into(),
+                    message: "1..64 bytes without control characters".into(),
+                };
+                send_msg(socket, session, &error).await?;
+                return Ok(false);
+            };
+            let (id, name) = (device_id.to_string(), user_name.clone());
+            app.db
+                .call(move |c| Ok(db::set_user_name(c, &id, &name)?))
+                .await
+                .map_err(End::Storage)?;
+            tracing::info!(event = "user_name_changed", user.name = %user_name);
+            send_msg(socket, session, &ServerMsg::UserName { user_name }).await?;
             Ok(false)
         }
         ClientMsg::Unsubscribe { group } => {

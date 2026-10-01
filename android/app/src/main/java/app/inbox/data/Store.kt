@@ -16,6 +16,8 @@ data class Server(
     val reenrollReason: String?,
     val heartbeatMs: Long,
     val offlineWarningMs: Long,
+    /** Pseudo under which this phone is tracked on that server (null: none). */
+    val userName: String?,
 )
 
 data class Group(val id: String, val name: String, val description: String)
@@ -31,18 +33,20 @@ data class Alert(
     val receivedAtMs: Long,
     val action: String,
     val notified: Boolean,
-    val ackedAtMs: Long?,
+    /** When the alarm sound was stopped on this phone (local only, never sent). */
+    val stoppedAtMs: Long?,
 )
 
 data class OutboxItem(val id: Long, val serverId: Long, val alertId: String, val stage: String)
 
 /**
  * Local durable state. Alerts are keyed by (server, alert_id): storing an alert is
- * the deduplication point that guarantees each alert is shown exactly once, and
- * acknowledgements go through an outbox so they survive disconnections and reboots.
+ * the deduplication point that guarantees each alert is shown exactly once.
+ * Alerts are one-way: the only thing sent back is the automatic transport receipt.
+ * The `acked_at_ms` column holds the local "alarm stopped" time.
  */
 class Store private constructor(context: Context) :
-    SQLiteOpenHelper(context, "inbox.db", null, 1) {
+    SQLiteOpenHelper(context, "inbox.db", null, 2) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -74,7 +78,8 @@ class Store private constructor(context: Context) :
                 reenroll_reason TEXT,
                 heartbeat_ms INTEGER NOT NULL,
                 offline_warning_ms INTEGER NOT NULL,
-                created_at INTEGER NOT NULL)"""
+                created_at INTEGER NOT NULL,
+                user_name TEXT)"""
         )
         db.execSQL(
             """CREATE TABLE groups (
@@ -116,16 +121,18 @@ class Store private constructor(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Schema version 1 only.
+        // v2: pseudo per server. Existing servers keep working without one.
+        if (oldVersion < 2) db.execSQL("ALTER TABLE servers ADD COLUMN user_name TEXT")
     }
 
     // ------------------------------------------------------------ servers
 
     fun addServer(
         address: String, serverName: String, deviceId: String, deviceName: String,
-        deviceKeySealed: ByteArray, serverPublicKey: ByteArray,
+        deviceKeySealed: ByteArray, serverPublicKey: ByteArray, userName: String?,
     ): Long {
         val v = ContentValues().apply {
+            if (userName == null) putNull("user_name") else put("user_name", userName)
             put("address", address)
             put("server_name", serverName)
             put("device_id", deviceId)
@@ -145,7 +152,7 @@ class Store private constructor(context: Context) :
 
     fun servers(): List<Server> = readableDatabase.rawQuery(
         "SELECT id, address, server_name, device_id, device_name, device_key, server_public_key, " +
-            "reenroll_reason, heartbeat_ms, offline_warning_ms FROM servers ORDER BY id", null
+            "reenroll_reason, heartbeat_ms, offline_warning_ms, user_name FROM servers ORDER BY id", null
     ).use { c ->
         buildList {
             while (c.moveToNext()) {
@@ -153,7 +160,7 @@ class Store private constructor(context: Context) :
                     Server(
                         c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4),
                         c.getBlob(5), c.getBlob(6), if (c.isNull(7)) null else c.getString(7),
-                        c.getLong(8), c.getLong(9),
+                        c.getLong(8), c.getLong(9), if (c.isNull(10)) null else c.getString(10),
                     )
                 )
             }
@@ -161,6 +168,11 @@ class Store private constructor(context: Context) :
     }
 
     fun server(id: Long): Server? = servers().firstOrNull { it.id == id }
+
+    fun setUserName(id: Long, userName: String?) {
+        val v = ContentValues().apply { if (userName == null) putNull("user_name") else put("user_name", userName) }
+        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+    }
 
     fun setReenroll(id: Long, reason: String?) {
         val v = ContentValues().apply { if (reason == null) putNull("reenroll_reason") else put("reenroll_reason", reason) }
@@ -247,8 +259,8 @@ class Store private constructor(context: Context) :
         )
     }
 
-    /** Marks the alert acknowledged by the human. Returns false if it already was. */
-    fun markAcked(serverId: Long, alertId: String): Boolean =
+    /** Records that the alarm sound was stopped on this phone. Returns false if it already was. */
+    fun markStopped(serverId: Long, alertId: String): Boolean =
         writableDatabase.update(
             "alerts", ContentValues().apply { put("acked_at_ms", System.currentTimeMillis()) },
             "server_id = ? AND alert_id = ? AND acked_at_ms IS NULL", arrayOf(serverId.toString(), alertId)
@@ -279,9 +291,10 @@ class Store private constructor(context: Context) :
         arrayOf(serverId.toString(), alertId)
     ).firstOrNull()
 
-    fun recentAlerts(serverId: Long, limit: Int): List<Alert> = readAlerts(
-        "SELECT $alertColumns FROM alerts WHERE server_id = ? ORDER BY received_at_ms DESC LIMIT ?",
-        arrayOf(serverId.toString(), limit.toString())
+    /** The `limit` most recent alerts of every server received since `sinceMs`, newest first. */
+    fun recentAlerts(sinceMs: Long, limit: Int): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ? ORDER BY received_at_ms DESC, id DESC LIMIT ?",
+        arrayOf(sinceMs.toString(), limit.toString())
     )
 
     /** Stored but never shown: the app died between storing and notifying. */
@@ -289,8 +302,8 @@ class Store private constructor(context: Context) :
         "SELECT $alertColumns FROM alerts WHERE notified = 0 ORDER BY received_at_ms", emptyArray()
     )
 
-    /** Alarms that are still waiting for a human acknowledgement. */
-    fun unackedAlarms(): List<Alert> = readAlerts(
+    /** Alarms whose sound has not been stopped on this phone. */
+    fun ringingAlarms(): List<Alert> = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE action = 'alarm' AND acked_at_ms IS NULL ORDER BY received_at_ms",
         emptyArray()
     )
@@ -312,7 +325,7 @@ class Store private constructor(context: Context) :
         writableDatabase.delete("outbox", "id = ?", arrayOf(id.toString()))
     }
 
-    /** Keeps the local history bounded. Unacknowledged alarms are never removed. */
+    /** Keeps the local history bounded. Alarms still ringing are never removed. */
     fun prune(olderThanMs: Long) {
         writableDatabase.delete(
             "alerts", "received_at_ms < ? AND notified = 1 AND (action != 'alarm' OR acked_at_ms IS NOT NULL)",

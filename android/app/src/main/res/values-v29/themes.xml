@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.Inbox" parent="@android:style/Theme.DeviceDefault.DayNight">
-        <item name="android:colorAccent">#E53935</item>
-        <item name="android:colorPrimary">#B71C1C</item>
-        <item name="android:colorPrimaryDark">#7F0000</item>
-    </style>
-</resources>

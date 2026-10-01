@@ -28,9 +28,9 @@ import kotlin.random.Random
  * One persistent session to one server, on its own thread.
  *
  * Delivery contract (device side): an alert is written to the local database
- * before `received` is acknowledged; a retransmitted alert is recognised by its
- * id and only re-acknowledged; the notification is posted once, then `displayed`
- * goes through the durable outbox.
+ * before the transport receipt (`received`) is sent; a retransmitted alert is
+ * recognised by its id and only receipted again; the notification is posted once.
+ * Alerts are one-way: nothing else is ever sent about an alert.
  */
 class ServerConnection(private val context: Context, val serverId: Long) {
     private sealed interface Event {
@@ -68,6 +68,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private var nonce = 0L
     /** Outbox rows sent on this session, deleted once a later pong proves the server processed them. */
     private val outboxInFlight = mutableSetOf<Long>()
+    /** Servers older than the pseudo feature reject `set_user_name`: only send it when Welcome has the field. */
+    @Volatile private var supportsUserName = false
     private val confirmOnPong = sortedMapOf<Long, List<Long>>()
     private val thread = Thread({ loop() }, "inbox-server-$serverId")
 
@@ -90,6 +92,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     fun isConnected() = connected
 
     /** Returns false when offline: subscriptions can only change on a live session. */
+    /** Asks the server to track this phone under `userName`; sent again after each Welcome if needed. */
+    fun setUserName(userName: String) {
+        if (connected && supportsUserName) events.offer(Event.Command(JSONObject().put("t", "set_user_name").put("user_name", userName)))
+    }
+
     fun subscribe(group: String, action: String?): Boolean {
         if (!connected) return false
         val msg = if (action == null) {
@@ -240,6 +247,10 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 connected = true
                                 failures = 0
                                 Registry.setStatus(serverId, LinkState.CONNECTED, msg.optString("server_name"))
+                                supportsUserName = msg.has("user_name")
+                                if (supportsUserName) {
+                                    syncUserName(if (msg.isNull("user_name")) null else msg.optString("user_name", "").ifEmpty { null })
+                                }
                                 flushPendingAcks()
                             }
                             "alert" -> onAlert(msg)
@@ -248,6 +259,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 Registry.changed()
                             }
                             "pong" -> onPong(msg.getLong("nonce"))
+                            "user_name" -> Registry.changed()
                             "error" -> Log.w(TAG, "server error ${msg.optString("code")}: ${msg.optString("message")}")
                             else -> Log.w(TAG, "unknown message ${msg.getString("t")}")
                         }
@@ -346,6 +358,12 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         }
     }
 
+    /** The local pseudo for this server wins: older enrollments have none on the server. */
+    private fun syncUserName(recorded: String?) {
+        val local = store.server(serverId)?.userName ?: return
+        if (local != recorded) send(JSONObject().put("t", "set_user_name").put("user_name", local))
+    }
+
     private fun onWelcome(msg: JSONObject) {
         val groups = msg.getJSONArray("groups")
         val list = (0 until groups.length()).map {
@@ -374,7 +392,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             receivedAtMs = System.currentTimeMillis(),
             action = msg.getString("action"),
             notified = false,
-            ackedAtMs = null,
+            stoppedAtMs = null,
         )
         // 1. Durable before acknowledging: if we die after this, it is shown at restart.
         val isNew = store.insertAlertIfNew(alert)
@@ -384,8 +402,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         // 3. Show it exactly once.
         Alerter.present(context, alert)
         store.markNotified(serverId, alert.alertId)
-        store.enqueueAck(serverId, alert.alertId, "displayed")
-        flushPendingAcks()
         Registry.changed()
     }
 
@@ -393,6 +409,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         val sent = mutableListOf<Long>()
         for (item in store.outbox(serverId)) {
             if (item.id in outboxInFlight) continue
+            // Older versions queued "displayed"/"acknowledged": alerts are one-way now.
+            if (item.stage != "received") {
+                store.removeOutbox(item.id)
+                continue
+            }
             send(JSONObject().put("t", "ack").put("alert_id", item.alertId).put("stage", item.stage))
             outboxInFlight.add(item.id)
             sent.add(item.id)

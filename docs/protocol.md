@@ -29,14 +29,16 @@ device                                              server
    "credential_request":b64}                   ->
                                                <-  {"type":"challenge","credential_response":b64}
   {"type":"finish","credential_finalization":b64,
-   "device_name":s,"device_public_key":b64,
+   "device_name":s,"user_name":s?,"device_public_key":b64,
    "mac":b64}                                  ->   verifies OPAQUE, then mac
                                                <-  {"type":"accepted","device_id":hex32,
                                                     "server_name":s,"server_public_key":b64,"mac":b64}
 ```
 
 - `K = HKDF-SHA256(salt="inbox/v1", ikm=OPAQUE session key, info=label)`.
-- Client MAC: `HMAC-SHA256(K("enroll/client-mac"), device_name ‖ device_public_key)`.
+- Client MAC: `HMAC-SHA256(K("enroll/client-mac"), device_name ‖ device_public_key [‖ "user" ‖ user_name])`.
+  `user_name` is the pseudonym of the person using the device (1..64 bytes, no
+  control characters). It is optional for apps 0.1 / 0.2, which omit it.
 - Server MAC: `HMAC-SHA256(K("enroll/server-mac"), device_id ‖ server_name ‖ server_public_key ‖ device_public_key)`.
 - Every MAC input part is prefixed by its length as a big-endian u64.
 - On failure the server sends `{"type":"rejected","code":c,"message":m}`. Codes are
@@ -65,16 +67,18 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 | `t` | Fields | Meaning |
 |---|---|---|
 | `ready` | | First transport frame. |
-| `ack` | `alert_id`, `stage` (`received` / `displayed` / `acknowledged`) | Later stages imply earlier ones. Idempotent. |
+| `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way: there is no human acknowledgement. Idempotent. Legacy apps (0.1, 0.2) may send `displayed` / `acknowledged`: the server treats them as `received`. |
 | `subscribe` | `group`, `action` (`alarm` / `ring` / `notify`) | Create or replace the subscription. |
 | `unsubscribe` | `group` | |
+| `set_user_name` | `user_name` | Changes the pseudonym of this device (per server, any time). The server answers `user_name`, or `error` `invalid_user_name`. |
 | `ping` | `nonce` (u64) | Heartbeat; the server answers `pong`. |
 
 ### Server to device
 
 | `t` | Fields |
 |---|---|
-| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[] {group,action}`, `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms` |
+| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[] {group,action}`, `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym or null) |
+| `user_name` | `user_name` | Confirms `set_user_name`. |
 | `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title?`, `message?`, `created_at_ms`, `action` |
 | `subscriptions` | `subscriptions[]`, sent after each change |
 | `pong` | `nonce` |
@@ -85,9 +89,9 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 - **Fan-out at acceptance.** When an alert is accepted, one delivery row is created
   for every device subscribed to the group at that instant. The device's chosen
   `action` is copied into the row.
-- **Retransmission.** The server sends rows not yet acknowledged as `received`,
+- **Retransmission.** The server sends rows whose receipt has not arrived yet,
   oldest first, with at most `max_inflight` outstanding. A row that stays
-  unacknowledged for `resend_after` is sent again, and the whole backlog is resent
+  without receipt for `resend_after` is sent again, and the whole backlog is resent
   after every reconnection.
 - **Order on the device.** The app stores the alert durably *before* sending
   `ack received`, and deduplicates on `alert_id`. Notifications use an identifier
@@ -121,6 +125,6 @@ pages opened in the operator's browser:
 | `Sec-Fetch-Site: cross-site` | 403 | Cross-site requests from browsers that send fetch metadata |
 
 Endpoints: `GET /api/admin/overview`, `GET /api/admin/alerts?limit=`,
-`GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=`,
+`GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=&user=<pseudonym>`,
 `POST /api/admin/alerts` (`{group, title?, message?, idempotency_key}`) and
 `POST /api/admin/devices/{id}/revoke` (`{}`).

@@ -263,9 +263,18 @@ async fn enroll(
     password: &str,
     name: &str,
 ) -> Result<EnrolledDevice, inbox_core::Error> {
+    enroll_as(port, password, name, None).await
+}
+
+async fn enroll_as(
+    port: u16,
+    password: &str,
+    name: &str,
+    user: Option<&str>,
+) -> Result<EnrolledDevice, inbox_core::Error> {
     let (mut ws, _) =
         tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/enroll")).await.unwrap();
-    let (mut client, first) = EnrollClient::start(password.as_bytes(), name, Rng::os())?;
+    let (mut client, first) = EnrollClient::start_as(password.as_bytes(), name, user, Rng::os())?;
     ws.send(Message::Text(first.into())).await.unwrap();
     loop {
         let msg = ws.next().await.expect("enroll stream").unwrap();
@@ -431,7 +440,7 @@ async fn delivery_guarantees_end_to_end() {
         enroll(port, "not-the-password", "intruder").await.err(),
         Some(inbox_core::Error::AuthenticationFailed)
     );
-    let a = enroll(port, DEVICE_PW, "phone-a").await.unwrap();
+    let a = enroll_as(port, DEVICE_PW, "phone-a", Some("alice")).await.unwrap();
     let b = enroll(port, DEVICE_PW, "phone-b").await.unwrap();
     assert_eq!(a.server_name, "E2E");
 
@@ -446,6 +455,16 @@ async fn delivery_guarantees_end_to_end() {
     {
         let (mut cb, _) = Conn::open(port, &b).await.unwrap();
         cb.subscribe("infra", Action::Notify).await;
+        // Enrolled without a pseudonym (older app): it sets one in session.
+        cb.send(&ClientMsg::SetUserName { user_name: " bob ".into() }).await;
+        loop {
+            if let Recv::Msg(ServerMsg::UserName { user_name }) =
+                cb.recv(Duration::from_secs(5)).await
+            {
+                assert_eq!(user_name, "bob");
+                break;
+            }
+        }
     } // b goes offline
 
     // Producer API checks.
@@ -482,7 +501,6 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(got.action, Action::Alarm);
     assert_eq!(got.title.as_deref(), Some("Disk full"));
     ca.ack(&k1, AckStage::Received).await;
-    ca.ack(&k1, AckStage::Displayed).await;
     let (st, v) = post_alert(
         &s,
         "k1",
@@ -493,13 +511,14 @@ async fn delivery_guarantees_end_to_end() {
     ca.no_alert(Duration::from_millis(2500)).await;
     assert_eq!(post_alert(&s, "k1", json!({"group": "infra", "title": "changed"})).0, 409);
 
-    // Not acknowledged: retransmitted with the same id until it is.
+    // No receipt: retransmitted with the same id until the device confirms.
     let (_, v) = post_alert(&s, "k2", json!({"group": "infra"}));
     let k2 = v["alert_id"].as_str().unwrap().to_string();
     assert_eq!(ca.alert().await.alert_id, k2);
     let again = ca.alert().await;
     assert_eq!(again.alert_id, k2, "retransmission keeps the alert id");
     assert!(again.title.is_none() && again.message.is_none(), "title and message are optional");
+    // A legacy app (0.1 / 0.2) may send this stage: it counts as a receipt.
     ca.ack(&k2, AckStage::Acknowledged).await;
     ca.no_alert(Duration::from_millis(2500)).await;
 
@@ -541,7 +560,14 @@ async fn delivery_guarantees_end_to_end() {
     let detail: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(detail["targets"], 2);
     assert_eq!(detail["received"], 2);
-    assert_eq!(detail["displayed"], 1);
+    assert!(detail.get("acknowledged").is_none(), "alerts are one-way");
+    let users: Vec<&str> = detail["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["user_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["alice", "bob"]);
 
     // Alertmanager / Grafana webhook: resolved skipped, repeats deduplicated.
     let payload = json!({
@@ -577,6 +603,9 @@ async fn delivery_guarantees_end_to_end() {
     let a_row = devices.iter().find(|d| d["device"]["name"] == "phone-a").unwrap();
     assert_eq!(a_row["status"], "online");
     assert_eq!(a_row["live"]["ip"], "127.0.0.1");
+    assert_eq!(a_row["device"]["user_name"], "alice");
+    let b_row = devices.iter().find(|d| d["device"]["name"] == "phone-b").unwrap();
+    assert_eq!(b_row["device"]["user_name"], "bob");
     let (st, body) = http_host(ap, "evil.example:8081", "GET", "/api/admin/overview", &[], "");
     assert_eq!(st, 403, "DNS rebinding: unknown Host refused");
     assert!(body.contains("host_not_allowed"));
@@ -608,8 +637,23 @@ async fn delivery_guarantees_end_to_end() {
     let (st, v) = admin(ap, "GET", "/api/admin/connections?limit=10", "");
     assert_eq!(st, 200);
     assert!(v["connections"].as_array().unwrap().len() >= 4);
+    let (_, v) = admin(ap, "GET", "/api/admin/connections?user=alice", "");
+    let mine = v["connections"].as_array().unwrap();
+    assert!(!mine.is_empty() && mine.iter().all(|c| c["user_name"] == "alice"), "{v}");
+    let (_, v) = admin(ap, "GET", "/api/admin/connections?user=bob", "");
+    assert!(v["connections"].as_array().unwrap().iter().all(|c| c["user_name"] == "bob"));
+    assert!(!v["connections"].as_array().unwrap().is_empty(), "bob's later sessions are tracked");
     let (_, v) = admin(ap, "GET", "/api/admin/alerts", "");
-    assert!(v["alerts"].as_array().unwrap().len() >= 4);
+    let all = v["alerts"].as_array().unwrap().clone();
+    assert!(all.len() >= 4);
+    let (_, v) = admin(ap, "GET", "/api/admin/alerts?limit=2", "");
+    assert_eq!(v["alerts"].as_array().unwrap().len(), 2);
+    assert_eq!(v["alerts"][0]["id"], all[0]["id"], "newest first");
+    let newest = all[0]["created_at"].as_i64().unwrap();
+    let (_, v) = admin(ap, "GET", &format!("/api/admin/alerts?since_ms={}", newest + 1), "");
+    assert!(v["alerts"].as_array().unwrap().is_empty(), "since_ms filters older alerts");
+    let (_, v) = admin(ap, "GET", &format!("/api/admin/alerts?since_ms={newest}"), "");
+    assert!(!v["alerts"].as_array().unwrap().is_empty());
     let (st, _) = admin(ap, "POST", "/api/admin/login/start", "{}");
     assert_eq!(st, 405, "no login endpoint any more");
 

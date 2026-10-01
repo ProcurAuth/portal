@@ -51,8 +51,8 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 | `credential_file` | path | readable credential record | Shared device password, from `inbox credential`. |
 | `heartbeat_interval` | duration | ≥ 5s | The app pings at this interval (sent to the app at session start). |
 | `session_timeout` | duration | ≥ 2 × `heartbeat_interval` | A session with no frame for this long is closed. |
-| `resend_after` | duration | ≥ 1s | An alert sent but not acknowledged as received is sent again after this. |
-| `max_inflight` | integer | 1..1024 | Alerts sent and not yet acknowledged, per session. |
+| `resend_after` | duration | ≥ 1s | An alert sent without a delivery receipt from the device is sent again after this. |
+| `max_inflight` | integer | 1..1024 | Alerts sent and still waiting for their delivery receipt, per session. |
 | `unreachable_after` | duration | ≥ `session_timeout` | A subscribed device unseen for this long is reported *unreachable* (front, metric). |
 | `offline_warning_after` | duration | ≥ 2 × `heartbeat_interval` | The app warns its user after being disconnected this long. |
 | `max_devices` | integer | 1..100000 | Non-revoked devices. Enrollment is refused beyond it. |

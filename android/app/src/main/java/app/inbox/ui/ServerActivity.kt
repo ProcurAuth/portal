@@ -1,36 +1,36 @@
 package app.inbox.ui
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.os.Bundle
-import android.view.View
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
+import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
-import android.widget.Spinner
 import android.widget.Toast
-import app.inbox.alert.Alerter
+import app.inbox.R
 import app.inbox.data.Store
 import app.inbox.service.LinkState
 import app.inbox.service.InboxService
 import app.inbox.service.Registry
 
-/** Groups and per-group action of one server, and its recent alerts. */
-class ServerActivity : Activity() {
+/** One server: status, pseudo, and what each group does on this phone. */
+class ServerActivity : BaseActivity() {
     companion object {
         const val EXTRA_SERVER = "server_id"
         private val ACTIONS = listOf<String?>(null, "notify", "ring", "alarm")
     }
 
     private var serverId = -1L
-    private lateinit var root: LinearLayout
+    private lateinit var body: LinearLayout
     private val onChange: () -> Unit = { render() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         serverId = intent.getLongExtra(EXTRA_SERVER, -1)
-        root = column()
-        setContentView(scroll(root))
+        val root = lin()
+        val server = Store.get(this).server(serverId) ?: return finish()
+        root.addView(topBar(server.serverName, R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }))
+        body = lin(padH = 16, padV = 8)
+        root.addView(scroll(body), lp(MATCH, 0, 1f))
+        setScreen(root)
     }
 
     override fun onResume() {
@@ -47,77 +47,104 @@ class ServerActivity : Activity() {
     private fun render() {
         val store = Store.get(this)
         val server = store.server(serverId) ?: return finish()
-        title = server.serverName
-        root.removeAllViews()
-        val st = Registry.status(serverId)
-        root.addView(text(server.serverName, 22f, bold = true))
-        root.addView(text("${server.address} · appareil « ${server.deviceName} »", 13f, color = GREY))
-        val (label, color) = when (st.state) {
-            LinkState.CONNECTED -> "Connecté" to GREEN
-            LinkState.CONNECTING -> "Connexion…" to ORANGE
-            LinkState.DISCONNECTED -> "Déconnecté" to RED
-            LinkState.REENROLL -> "Ré-enrôlement requis" to RED
-        }
-        root.addView(text(label + (st.detail?.let { " — $it" } ?: ""), bold = true, color = color))
+        body.removeAllViews()
 
-        root.addView(text("Groupes", 18f, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) })
-        root.addView(text("Choisissez ce que fait le téléphone quand une alerte du groupe arrive.", 13f, color = GREY))
+        // Status
+        val st = Registry.status(serverId)
+        val (text, fg, bg) = when (st.state) {
+            LinkState.CONNECTED -> Triple(getString(R.string.status_connected), color(R.color.success), color(R.color.success_soft))
+            LinkState.CONNECTING -> Triple(getString(R.string.status_connecting), color(R.color.warning), color(R.color.warning_soft))
+            LinkState.DISCONNECTED -> Triple(
+                getString(R.string.status_disconnected_since, formatSince(System.currentTimeMillis() - st.sinceMs)),
+                color(R.color.danger), color(R.color.danger_soft),
+            )
+            LinkState.REENROLL -> Triple(getString(R.string.status_reenroll), color(R.color.danger), color(R.color.danger_soft))
+        }
+        val head = card(16).apply { orientation = LinearLayout.HORIZONTAL }
+        head.addView(iconBadge(R.drawable.ic_server, color(R.color.primary), color(R.color.primary_soft), 44), lp(dp(44), dp(44)).margins(this, r = 14))
+        val col = lin()
+        col.addView(label(server.serverName, 17f, color(R.color.text_strong), MEDIUM))
+        col.addView(label(server.address, 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
+        col.addView(label(getString(R.string.server_device, server.deviceName), 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
+        col.addView(pill(text, fg, bg, dot = true), lp(WRAP, WRAP).margins(this, t = 10))
+        if (st.state != LinkState.CONNECTED && st.detail != null) {
+            col.addView(label(st.detail, 12f, color(R.color.text_muted)), lp().margins(this, t = 6))
+        }
+        head.addView(col, lp(0, WRAP, 1f))
+        body.addView(head, lp().margins(this, t = 8))
+
+        // Pseudo on this server
+        body.addView(sectionLabel(getString(R.string.server_pseudo)))
+        val p = card(16)
+        p.addView(label(getString(R.string.server_pseudo_help), 13f, color(R.color.text_muted)))
+        val input = textField(server.userName ?: "", getString(R.string.pseudo_hint))
+        p.addView(input, lp().margins(this, t = 12))
+        val save = {
+            val v = cleanUserName(input.text.toString())
+            if (v == null) {
+                input.error = getString(R.string.pseudo_invalid)
+            } else {
+                store.setUserName(serverId, v)
+                Registry.connections[serverId]?.setUserName(v)
+                Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
+            }
+        }
+        input.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_DONE) { save(); true } else false }
+        p.addView(button(getString(R.string.save), ButtonKind.SECONDARY) { save() }, lp().margins(this, t = 12))
+        body.addView(p)
+
+        // Groups
+        body.addView(sectionLabel(getString(R.string.server_groups)))
+        body.addView(label(getString(R.string.server_groups_hint), 13f, color(R.color.text_muted)).apply { setPadding(dp(4), 0, dp(4), dp(10)) })
         val subs = store.subscriptions(serverId)
         val groups = store.groups(serverId)
-        if (groups.isEmpty()) root.addView(text("Connectez-vous une première fois pour voir les groupes.", color = GREY))
+        if (groups.isEmpty()) {
+            body.addView(label(getString(R.string.server_groups_none), 14f, color(R.color.text_muted)).apply { setPadding(dp(4), 0, 0, dp(8)) })
+        }
+        val labels = listOf(
+            getString(R.string.action_off_short), getString(R.string.action_notify_short),
+            getString(R.string.action_ring), getString(R.string.action_alarm),
+        )
+        val helps = listOf(R.string.action_off_help, R.string.action_notify_help, R.string.action_ring_help, R.string.action_alarm_help)
         for (g in groups) {
-            val c = card()
-            c.addView(text(g.name, 16f, bold = true))
-            if (g.description.isNotEmpty()) c.addView(text(g.description, 13f, color = GREY))
-            val spinner = Spinner(this)
-            spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, ACTIONS.map { actionLabel(it) })
             val current = ACTIONS.indexOf(subs[g.id]).coerceAtLeast(0)
-            spinner.setSelection(current, false)
-            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    if (position == current) return
-                    val ok = Registry.connections[serverId]?.subscribe(g.id, ACTIONS[position]) ?: false
-                    if (!ok) {
-                        Toast.makeText(this@ServerActivity, "Hors ligne : réessayez une fois connecté", Toast.LENGTH_LONG).show()
-                        spinner.setSelection(current, false)
-                    }
+            val c = card(16)
+            val top = lin(vertical = false)
+            val style = actionStyle(ACTIONS[current])
+            top.addView(iconBadge(style.icon, style.fg, style.bg, 36), lp(dp(36), dp(36)).margins(this, r = 12))
+            val t = lin()
+            t.addView(label(g.name, 15f, color(R.color.text_strong), MEDIUM))
+            if (g.description.isNotEmpty()) t.addView(label(g.description, 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
+            top.addView(t, lp(0, WRAP, 1f))
+            c.addView(top)
+            c.addView(segmented(labels, current, accent = { i ->
+                val s = actionStyle(ACTIONS[i])
+                s.fg to s.bg
+            }) { i ->
+                if (Registry.connections[serverId]?.subscribe(g.id, ACTIONS[i]) != true) {
+                    Toast.makeText(this, getString(R.string.server_offline_change), Toast.LENGTH_LONG).show()
                 }
-
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
-            c.addView(spinner)
-            root.addView(c)
+            }, lp().margins(this, t = 12))
+            c.addView(label(getString(helps[current]), 12f, color(R.color.text_muted)), lp().margins(this, t = 8))
+            body.addView(c, lp().margins(this, b = 10))
         }
 
-        root.addView(text("Alertes récentes", 18f, bold = true).apply { setPadding(0, dp(12), 0, dp(4)) })
-        val alerts = store.recentAlerts(serverId, 50)
-        if (alerts.isEmpty()) root.addView(text("Aucune alerte reçue.", color = GREY))
-        for (a in alerts) {
-            val c = card(if (a.action == "alarm" && a.ackedAtMs == null) RED else null)
-            c.addView(text(a.title ?: a.groupName, 16f, bold = true))
-            a.message?.let { c.addView(text(it)) }
-            c.addView(text("${a.groupName} · ${actionLabel(a.action)} · ${formatTime(a.createdAtMs)}", 12f, color = GREY))
-            if (a.ackedAtMs == null) {
-                c.addView(button("Acquitter") { Alerter.acknowledge(this, a.serverId, a.alertId) })
-            } else {
-                c.addView(text("Acquittée ${formatTime(a.ackedAtMs)}", 12f, color = GREEN))
-            }
-            root.addView(c)
-        }
+        body.addView(button(getString(R.string.server_remove), ButtonKind.DANGER) { confirmRemove(server.serverName) },
+            lp().margins(this, t = 16, b = 24))
+    }
 
-        root.addView(button("Supprimer ce serveur") {
-            AlertDialog.Builder(this)
-                .setTitle("Supprimer ${server.serverName} ?")
-                .setMessage("Ce téléphone ne recevra plus ses alertes. Il faudra le mot de passe pour l'ajouter à nouveau.")
-                .setPositiveButton("Supprimer") { _, _ ->
-                    Registry.connections.remove(serverId)?.stop()
-                    store.deleteServer(serverId)
-                    Registry.forget(serverId)
-                    InboxService.start(this)
-                    finish()
-                }
-                .setNegativeButton("Annuler", null)
-                .show()
-        })
+    private fun confirmRemove(name: String) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.server_remove_title, name))
+            .setMessage(getString(R.string.server_remove_body))
+            .setPositiveButton(getString(R.string.server_remove_confirm)) { _, _ ->
+                Registry.connections.remove(serverId)?.stop()
+                Store.get(this).deleteServer(serverId)
+                Registry.forget(serverId)
+                InboxService.start(this)
+                finish()
+            }
+            .setNegativeButton(getString(R.string.cancel), null)
+            .show()
     }
 }

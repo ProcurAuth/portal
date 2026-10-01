@@ -18,6 +18,8 @@ pub fn error_json(e: &Error) -> Value {
         Error::Rejected { code, message } => (code.clone(), message.clone()),
         Error::AuthenticationFailed => ("auth_failed".to_string(), e.to_string()),
         Error::UnsupportedProtocol(_) => ("protocol".to_string(), e.to_string()),
+        // Local validation of what the user typed.
+        Error::Malformed("user name" | "device name") => ("malformed".to_string(), e.to_string()),
         Error::Malformed(_) | Error::UnexpectedMessage(_) => {
             ("protocol".to_string(), e.to_string())
         }
@@ -32,9 +34,15 @@ pub struct Enroll {
     client: Mutex<Option<EnrollClient>>,
 }
 
-/// Starts an enrollment. Returns the handle and the first text frame to send.
-pub fn enroll_start(password: &[u8], device_name: &str) -> Result<(Box<Enroll>, String), Error> {
-    let (client, msg) = EnrollClient::start(password, device_name, Rng::os())?;
+/// Starts an enrollment under the user's pseudonym (empty: none). Returns the
+/// handle and the first text frame to send.
+pub fn enroll_start(
+    password: &[u8],
+    device_name: &str,
+    user_name: &str,
+) -> Result<(Box<Enroll>, String), Error> {
+    let user = Some(user_name.trim()).filter(|u| !u.is_empty());
+    let (client, msg) = EnrollClient::start_as(password, device_name, user, Rng::os())?;
     Ok((Box::new(Enroll { client: Mutex::new(Some(client)) }), msg))
 }
 
@@ -147,11 +155,12 @@ mod tests {
         let rec = login::parse_record(&rec).unwrap();
         let mut server = EnrollServer::new(&key, &rec);
 
-        let (h, m1) = enroll_start(b"secret-pw", "Pixel").unwrap();
+        let (h, m1) = enroll_start(b"secret-pw", "Pixel", "alice").unwrap();
         let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
         let out = enroll_on_message(&h, &m2);
         let m3 = out["send"].as_str().unwrap().to_string();
-        server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
+        let verified = server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
+        assert_eq!(verified.user_name.as_deref(), Some("alice"), "pseudo reaches the server");
         let m4 = server.accepted("0123456789abcdef0123456789abcdef", "Prod").unwrap();
         let done = enroll_on_message(&h, &m4);
         let done = &done["done"];
@@ -176,18 +185,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_pseudo_enrolls_without_user_name() {
+        let key = ServerKey::generate(&mut Rng::os()).unwrap();
+        let rec = login::register(&key.opaque, Role::Device, b"secret-pw", &mut Rng::os()).unwrap();
+        let rec = login::parse_record(&rec).unwrap();
+        let mut server = EnrollServer::new(&key, &rec);
+        let (h, m1) = enroll_start(b"secret-pw", "Pixel", "  ").unwrap();
+        let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
+        let m3 = enroll_on_message(&h, &m2)["send"].as_str().unwrap().to_string();
+        let verified = server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
+        assert!(verified.user_name.is_none());
+        let err =
+            enroll_start(b"pw", "Pixel", "bad\u{7}name").err().expect("control characters refused");
+        assert_eq!(error_json(&err)["error"]["code"], "malformed");
+    }
+
+    #[test]
     fn wrong_password_reports_error_code() {
         let key = ServerKey::generate(&mut Rng::os()).unwrap();
         let rec = login::register(&key.opaque, Role::Device, b"secret-pw", &mut Rng::os()).unwrap();
         let rec = login::parse_record(&rec).unwrap();
         let mut server = EnrollServer::new(&key, &rec);
-        let (h, m1) = enroll_start(b"wrong-pw", "Pixel").unwrap();
+        let (h, m1) = enroll_start(b"wrong-pw", "Pixel", "alice").unwrap();
         let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
         // Client cannot finish OPAQUE with a wrong password.
         let out = enroll_on_message(&h, &m2);
         assert_eq!(out["error"]["code"], "auth_failed");
         let rejected = EnrollServer::rejected("bad_password", "wrong password");
-        let (h2, _) = enroll_start(b"x", "Pixel").unwrap();
+        let (h2, _) = enroll_start(b"x", "Pixel", "alice").unwrap();
         assert_eq!(enroll_on_message(&h2, &rejected)["error"]["code"], "bad_password");
     }
 }

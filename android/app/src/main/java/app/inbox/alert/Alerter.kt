@@ -18,23 +18,26 @@ import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
 import app.inbox.R
 import app.inbox.data.Alert
 import app.inbox.data.Store
 import app.inbox.service.Registry
 import app.inbox.ui.AlarmActivity
-import app.inbox.ui.ServerActivity
+import app.inbox.ui.MainActivity
 
 /**
  * Turns a stored alert into what the subscriber asked for:
  * - `alarm`: full-screen alert, looping alarm sound at full alarm volume through
- *   silent / vibrate / do-not-disturb, vibration, until a human acknowledges it;
+ *   silent / vibrate / do-not-disturb, vibration, until stopped on the phone;
  * - `ring`: one sound on the alarm stream (audible in silent / vibrate) + vibration;
  * - `notify`: a standard notification that follows the phone sound mode.
  */
 object Alerter {
     const val CH_ALARM = "alarm"
+    /** Alarm already on screen (phone in use): no heads-up hiding the alarm page. */
+    const val CH_ALARM_ACTIVE = "alarm_active"
     const val CH_RING = "ring"
     const val CH_NOTIFY = "notify"
     const val CH_STATUS = "status"
@@ -49,10 +52,16 @@ object Alerter {
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
         val alarm = NotificationChannel(CH_ALARM, "Alarmes", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Alertes critiques : sonnent jusqu'à l'acquittement, même en silencieux"
+            description = "Alertes critiques : sonnent jusqu'à ce que vous coupiez l'alarme, même en silencieux"
             setSound(null, null) // played by AlarmPlayer on the alarm stream
             enableVibration(false) // vibration handled by AlarmPlayer
             setBypassDnd(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val active = NotificationChannel(CH_ALARM_ACTIVE, "Alarme affichée", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Alarme en cours déjà ouverte en plein écran"
+            setSound(null, null)
+            enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
         val ring = NotificationChannel(CH_RING, "Sonneries", NotificationManager.IMPORTANCE_HIGH).apply {
@@ -72,7 +81,7 @@ object Alerter {
         val warning = NotificationChannel(CH_WARNING, "Perte de connexion", NotificationManager.IMPORTANCE_HIGH).apply {
             description = "Prévient quand Inbox ne peut plus recevoir d'alertes"
         }
-        nm.createNotificationChannels(listOf(alarm, ring, notify, status, warning))
+        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning))
     }
 
     /** Notification tag/id: unique per alert, so re-posting replaces instead of duplicating. */
@@ -87,18 +96,15 @@ object Alerter {
         val body = a.message ?: "Alerte ${a.groupName}"
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),
-            Intent(context, ServerActivity::class.java).putExtra(ServerActivity.EXTRA_SERVER, a.serverId),
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val ack = PendingIntent.getBroadcast(
-            context, requestCode(a, 2),
-            Intent(context, AckReceiver::class.java)
-                .putExtra(AckReceiver.EXTRA_SERVER, a.serverId)
-                .putExtra(AckReceiver.EXTRA_ALERT, a.alertId),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        // Phone in use and allowed to draw over apps: the alarm page is opened directly,
+        // so the notification must not add a heads-up on top of it. Otherwise the
+        // full-screen intent (locked / screen off) or its heads-up fallback is used.
+        val direct = a.action == "alarm" && phoneInUse(context) && Settings.canDrawOverlays(context)
         val channel = when (a.action) {
-            "alarm" -> CH_ALARM
+            "alarm" -> if (direct) CH_ALARM_ACTIVE else CH_ALARM
             "ring" -> CH_RING
             else -> CH_NOTIFY
         }
@@ -112,17 +118,24 @@ object Alerter {
             .setContentIntent(open)
             .setAutoCancel(a.action != "alarm")
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .addAction(Notification.Action.Builder(null, "Acquitter", ack).build())
         if (a.action == "alarm") {
             val full = PendingIntent.getActivity(
                 context, requestCode(a, 3), AlarmActivity.intent(context, a.serverId, a.alertId),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
+            val stop = PendingIntent.getBroadcast(
+                context, requestCode(a, 2),
+                Intent(context, StopReceiver::class.java)
+                    .putExtra(StopReceiver.EXTRA_SERVER, a.serverId)
+                    .putExtra(StopReceiver.EXTRA_ALERT, a.alertId),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
             b.setCategory(Notification.CATEGORY_ALARM)
                 .setOngoing(true)
-                .setFullScreenIntent(full, true)
+                .addAction(Notification.Action.Builder(null, context.getString(R.string.alert_stop), stop).build())
                 .setContentIntent(full)
-                .setColor(0xFFB71C1C.toInt())
+                .setColor(0xFFB42318.toInt())
+            if (!direct) b.setFullScreenIntent(full, true)
         } else {
             b.setCategory(Notification.CATEGORY_MESSAGE)
         }
@@ -132,23 +145,55 @@ object Alerter {
             Log.w(TAG, "notification permission missing", e)
         }
         when (a.action) {
-            "alarm" -> AlarmPlayer.start(context, a)
+            "alarm" -> {
+                AlarmPlayer.start(context, a)
+                openAlarmScreen(context, a)
+            }
             "ring" -> playOnce(context)
             else -> {}
         }
     }
 
-    /** Called when the human acknowledges an alert, from any entry point. */
-    fun acknowledge(context: Context, serverId: Long, alertId: String) {
+    /**
+     * The full-screen intent only launches the alarm page when the phone is locked or
+     * the screen is off; while the phone is in use it degrades to a heads-up. With the
+     * overlay permission a background activity start is allowed, so the alarm page
+     * opens in every case.
+     */
+    private fun phoneInUse(context: Context): Boolean {
+        val pm = context.getSystemService(PowerManager::class.java)
+        val km = context.getSystemService(android.app.KeyguardManager::class.java)
+        return pm.isInteractive && !km.isKeyguardLocked
+    }
+
+    private fun openAlarmScreen(context: Context, a: Alert) {
+        if (!Settings.canDrawOverlays(context)) return
+        try {
+            context.startActivity(
+                AlarmActivity.intent(context, a.serverId, a.alertId).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "cannot open the alarm screen", e)
+        }
+    }
+
+    /**
+     * Stops an alarm on this phone: sound, vibration and the ongoing notification.
+     * Purely local: alerts are one-way and nothing is sent to the server.
+     */
+    /** Stops every alarm still ringing on this phone (local only). */
+    fun stopAllAlarms(context: Context) {
+        for (a in Store.get(context).ringingAlarms()) stopAlarm(context, a.serverId, a.alertId)
+    }
+
+    fun stopAlarm(context: Context, serverId: Long, alertId: String) {
         val store = Store.get(context)
-        store.markAcked(serverId, alertId)
-        store.enqueueAck(serverId, alertId, "acknowledged")
+        store.markStopped(serverId, alertId)
         val a = store.alert(serverId, alertId)
         if (a != null) {
             context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
         }
         AlarmPlayer.stop(context, serverId, alertId)
-        Registry.connections[serverId]?.flushOutbox()
         Registry.changed()
     }
 
@@ -214,7 +259,7 @@ object Alerter {
 }
 
 /**
- * The looping alarm. Keeps ringing while at least one alarm is unacknowledged.
+ * The looping alarm. Keeps ringing while at least one alarm has not been stopped.
  */
 object AlarmPlayer {
     private const val TAG = "Inbox.AlarmPlayer"
@@ -293,8 +338,8 @@ object AlarmPlayer {
     fun isRinging(): Boolean = active.isNotEmpty()
 }
 
-/** "Acquitter" action on alert notifications. */
-class AckReceiver : BroadcastReceiver() {
+/** "Couper l'alarme" action on alarm notifications (local only). */
+class StopReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_SERVER = "server_id"
         const val EXTRA_ALERT = "alert_id"
@@ -304,6 +349,6 @@ class AckReceiver : BroadcastReceiver() {
         val serverId = intent.getLongExtra(EXTRA_SERVER, -1)
         val alertId = intent.getStringExtra(EXTRA_ALERT) ?: return
         if (serverId < 0) return
-        Alerter.acknowledge(context, serverId, alertId)
+        Alerter.stopAlarm(context, serverId, alertId)
     }
 }

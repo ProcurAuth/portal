@@ -12,7 +12,7 @@ use crate::b64::serde_bytes;
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     /// Loops the alarm sound at full alarm volume, overrides silent / vibrate / do
-    /// not disturb and shows a full-screen alert until acknowledged.
+    /// not disturb and shows a full-screen alert until stopped on the device.
     Alarm,
     /// Plays one notification sound even when the phone is silent or on vibrate.
     Ring,
@@ -39,15 +39,19 @@ impl Action {
     }
 }
 
-/// Delivery stages acknowledged by a device, in order.
+/// Delivery receipt sent by a device.
+///
+/// Alerts are one-way: there is no human acknowledgement. The only thing a device
+/// sends back is this automatic receipt, once the alert is stored durably, so the
+/// server knows when to stop retransmitting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AckStage {
     /// Stored durably on the device. Stops server retransmission.
     Received,
-    /// Shown to the user (notification posted / alarm started).
+    /// Legacy (app 0.1 / 0.2). Treated as `Received`.
     Displayed,
-    /// Explicitly acknowledged by a human.
+    /// Legacy (app 0.1 / 0.2). Treated as `Received`.
     Acknowledged,
 }
 
@@ -75,6 +79,9 @@ pub enum EnrollClientMsg {
         #[serde(with = "serde_bytes")]
         credential_finalization: Vec<u8>,
         device_name: String,
+        /// Pseudonym of the person using the device. Absent for apps 0.1 / 0.2.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_name: Option<String>,
         #[serde(with = "serde_bytes")]
         device_public_key: Vec<u8>,
         /// Binds the device key and name to the OPAQUE session.
@@ -171,6 +178,10 @@ pub enum ClientMsg {
     Unsubscribe {
         group: String,
     },
+    /// Changes the pseudonym under which this device is tracked.
+    SetUserName {
+        user_name: String,
+    },
     Ping {
         nonce: u64,
     },
@@ -187,6 +198,13 @@ pub enum ServerMsg {
         heartbeat_interval_ms: u64,
         offline_warning_after_ms: u64,
         server_time_ms: i64,
+        /// Pseudonym recorded for this device, if any.
+        #[serde(default)]
+        user_name: Option<String>,
+    },
+    /// Confirms a `SetUserName`.
+    UserName {
+        user_name: String,
     },
     Alert(AlertMsg),
     Subscriptions {

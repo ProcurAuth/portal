@@ -1,12 +1,10 @@
 package app.inbox.ui
 
-import android.app.Activity
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
-import android.widget.Button
-import android.widget.EditText
 import android.widget.TextView
+import app.inbox.R
 import app.inbox.data.KeyVault
 import app.inbox.data.Store
 import app.inbox.net.Enroller
@@ -14,58 +12,68 @@ import app.inbox.net.EnrollmentError
 import app.inbox.net.ServerAddress
 import app.inbox.service.InboxService
 
-/** Enrolls this phone on a server with the shared device password. */
-class AddServerActivity : Activity() {
+/** Enrolls this phone on a server with the shared device password and the user's pseudo. */
+class AddServerActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "Ajouter un serveur"
-        val root = column()
-        root.addView(text("Adresse du serveur", bold = true))
-        val address = EditText(this).apply {
-            hint = "ex. 192.168.1.10:8080 ou https://inbox.example.com"
+        val root = lin()
+        root.addView(topBar(getString(R.string.add_title), R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }))
+        val body = lin(padH = 16, padV = 8)
+        root.addView(scroll(body), lp(MATCH, 0, 1f))
+
+        val form = card(16)
+        fun field(title: Int, help: String? = null) {
+            form.addView(label(getString(title), 14f, color(R.color.text), MEDIUM), lp().margins(this, t = if (form.childCount == 0) 0 else 16))
+            help?.let { form.addView(label(it, 12f, color(R.color.text_muted)), lp().margins(this, t = 2)) }
+        }
+        field(R.string.add_address)
+        val address = textField("", getString(R.string.add_address_hint)).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            isSingleLine = true
         }
-        root.addView(address)
-        root.addView(text("Mot de passe des appareils", bold = true))
-        val password = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            isSingleLine = true
-        }
-        root.addView(password)
-        root.addView(text("Nom de cet appareil (visible par l'administrateur)", bold = true))
-        val name = EditText(this).apply {
-            setText(Build.MODEL)
-            isSingleLine = true
-        }
-        root.addView(name)
-        root.addView(
-            text(
-                "Le mot de passe ne quitte jamais le téléphone (protocole OPAQUE), même sur une connexion http non chiffrée.",
-                12f, color = GREY,
-            )
-        )
-        val status = TextView(this).apply { setPadding(0, dp(8), 0, dp(8)) }
-        lateinit var connect: Button
-        connect = button("Connecter") {
+        form.addView(address, lp().margins(this, t = 8))
+        field(R.string.add_password)
+        val password = textField("", "", password = true)
+        form.addView(password, lp().margins(this, t = 8))
+        field(R.string.add_pseudo)
+        val pseudo = textField(Prefs.defaultUserName(this) ?: "", getString(R.string.pseudo_hint))
+        form.addView(pseudo, lp().margins(this, t = 8))
+        field(R.string.add_device_name, getString(R.string.add_device_name_help))
+        val name = textField(Build.MODEL, "")
+        form.addView(name, lp().margins(this, t = 8))
+        body.addView(form, lp().margins(this, t = 8))
+
+        body.addView(lin(vertical = false, padH = 4, padV = 12).apply {
+            addView(icon(R.drawable.ic_info, color(R.color.text_muted), 18), lp(dp(18), dp(18)).margins(this@AddServerActivity, r = 10))
+            addView(label(getString(R.string.add_security_note), 12f, color(R.color.text_muted)), lp(0, WRAP, 1f))
+        })
+
+        val status = label("", 14f, color(R.color.text_muted)).apply { setPadding(dp(4), dp(10), dp(4), dp(10)) }
+        lateinit var connect: TextView
+        connect = button(getString(R.string.add_connect)) {
             val addr = ServerAddress.parse(address.text.toString())
             if (addr == null) {
-                status.setTextColor(RED)
-                status.text = "Adresse invalide"
+                status.setTextColor(color(R.color.danger))
+                status.text = getString(R.string.add_invalid_address)
+                return@button
+            }
+            val user = cleanUserName(pseudo.text.toString())
+            if (user == null) {
+                pseudo.error = getString(R.string.pseudo_invalid)
                 return@button
             }
             val pw = password.text.toString().toByteArray(Charsets.UTF_8)
             password.text.clear()
             val deviceName = name.text.toString().trim()
             connect.isEnabled = false
-            status.setTextColor(GREY)
-            status.text = "Connexion et vérification du mot de passe…"
+            connect.alpha = 0.6f
+            status.setTextColor(color(R.color.text_muted))
+            status.text = getString(R.string.add_connecting)
             Thread {
                 val result = try {
-                    val e = Enroller.enroll(addr, pw, deviceName)
+                    val e = Enroller.enroll(addr, pw, deviceName, user)
                     val sealed = KeyVault.seal(e.devicePrivateKey)
                     e.devicePrivateKey.fill(0)
-                    Store.get(this).addServer(addr.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey)
+                    Store.get(this).addServer(addr.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, user)
                     null
                 } catch (e: EnrollmentError) {
                     e.message
@@ -78,14 +86,20 @@ class AddServerActivity : Activity() {
                         finish()
                     } else {
                         connect.isEnabled = true
-                        status.setTextColor(RED)
+                        connect.alpha = 1f
+                        status.setTextColor(color(R.color.danger))
                         status.text = result
                     }
                 }
             }.start()
         }
-        root.addView(connect)
-        root.addView(status)
-        setContentView(scroll(root))
+        body.addView(connect, lp().margins(this, t = 4))
+        body.addView(status)
+        setScreen(root)
+
+        if (Prefs.defaultUserName(this) == null) {
+            status.setTextColor(color(R.color.warning))
+            status.text = getString(R.string.add_pseudo_required)
+        }
     }
 }

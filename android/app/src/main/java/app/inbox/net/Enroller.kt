@@ -31,7 +31,7 @@ object Enroller {
         class Failure(val t: Throwable) : Ev
     }
 
-    fun enroll(address: ServerAddress, password: ByteArray, deviceName: String): Enrollment {
+    fun enroll(address: ServerAddress, password: ByteArray, deviceName: String, userName: String): Enrollment {
         val q = LinkedBlockingQueue<Ev>()
         val ws = Http.client.newWebSocket(
             Request.Builder().url(address.ws("/v1/enroll")).build(),
@@ -49,7 +49,7 @@ object Enroller {
                 is Ev.Failure -> throw EnrollmentError("Serveur injoignable : ${e.t.message ?: e.t.javaClass.simpleName}")
                 else -> throw EnrollmentError("Serveur injoignable")
             }
-            val start = JSONObject(Native.enrollStart(password, deviceName))
+            val start = JSONObject(Native.enrollStart(password, deviceName, userName))
             start.optJSONObject("error")?.let { throw EnrollmentError(describe(it)) }
             handle = start.getLong("handle")
             ws.send(start.getString("send"))
@@ -86,6 +86,7 @@ object Enroller {
         "too_many_devices" -> "Nombre maximal d'appareils atteint sur ce serveur"
         "protocol" -> "Version incompatible avec ce serveur : ${err.optString("message")}"
         "internal" -> "Erreur interne du serveur"
+        "malformed" -> "Pseudo ou nom d'appareil invalide"
         else -> err.optString("message", "Erreur inconnue")
     }
 }

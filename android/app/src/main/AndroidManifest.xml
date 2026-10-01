@@ -14,6 +14,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Lets an Alarme open the full-screen alert while the phone is in use. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:name=".InboxApp"
@@ -50,6 +52,7 @@
             android:launchMode="singleTask"
             android:showWhenLocked="true"
             android:taskAffinity="app.inbox.alarm"
+            android:theme="@style/Theme.Inbox.Alarm"
             android:turnScreenOn="true" />
 
         <service
@@ -73,7 +76,7 @@
             android:name=".service.WatchdogReceiver"
             android:exported="false" />
         <receiver
-            android:name=".alert.AckReceiver"
+            android:name=".alert.StopReceiver"
             android:exported="false" />
     </application>
 </manifest>

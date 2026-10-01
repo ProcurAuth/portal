@@ -3,130 +3,212 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
   <title>Inbox</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
-  <script src="app.js" defer></script>
+  <script src="theme.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <img src="favicon.svg" alt="" width="22" height="22">
+    <button id="menu-btn" class="icon-btn" type="button" aria-label="Ouvrir le menu" aria-controls="drawer" aria-expanded="false">
+      <span class="mdi mdi-menu"></span>
+    </button>
+    <a class="brand" href="#alerts">
+      <img src="favicon.svg" alt="" class="brand-mark" width="24" height="24">
       <span class="brand-name">Inbox</span>
-      <span id="server-name" class="server-name"></span>
-    </div>
-    <div class="topbar-right">
-      <span id="server-version" class="muted small"></span>
-      <span id="conn-state" class="pill"></span>
-    </div>
+      <span id="server-name" class="brand-server"></span>
+    </a>
+    <span class="topbar-spacer"></span>
+    <button id="status-pill" class="status-pill" type="button" title="Appareils">
+      <span class="dot"></span><span id="status-text">…</span>
+    </button>
   </header>
 
-  <p class="open-warning" role="note">
-    Interface sans mot de passe : toute personne qui accède à ce port peut envoyer des alertes
-    et révoquer des appareils. Exposez-la uniquement en local, sur un réseau privé ou derrière
-    un proxy authentifiant.
-  </p>
+  <div id="scrim" class="scrim" hidden></div>
+  <aside id="drawer" class="drawer" aria-label="Menu" aria-hidden="true">
+    <div class="drawer-head">
+      <img src="favicon.svg" alt="" class="brand-mark" width="28" height="28">
+      <div>
+        <div class="drawer-title">Inbox</div>
+        <div id="drawer-version" class="drawer-sub"></div>
+      </div>
+      <button id="drawer-close" class="icon-btn" type="button" aria-label="Fermer le menu">
+        <span class="mdi mdi-close"></span>
+      </button>
+    </div>
+    <nav class="drawer-nav">
+      <a href="#alerts" data-view="alerts"><span class="mdi mdi-bell-outline"></span>Alertes</a>
+      <a href="#send" data-view="send"><span class="mdi mdi-send"></span>Envoyer une alerte</a>
+      <a href="#devices" data-view="devices"><span class="mdi mdi-cellphone"></span>Appareils<span id="nav-devices-badge" class="nav-badge" hidden></span></a>
+      <a href="#connections" data-view="connections"><span class="mdi mdi-swap-horizontal"></span>Connexions</a>
+      <a href="#settings" data-view="settings"><span class="mdi mdi-cogs"></span>Réglages</a>
+    </nav>
+  </aside>
 
-  <main>
-    <section id="host-error" class="card host-error hidden" role="alert">
-      <h1>Hôte non autorisé</h1>
-      <p>
-        Le serveur refuse les requêtes adressées à <strong class="mono" id="host-error-host"></strong>
-        (protection contre le DNS rebinding).
-      </p>
-      <p>
-        Ajoutez cet hôte, port compris, à <code>admin.allowed_hosts</code> dans la configuration
-        du serveur, puis redémarrez-le. Exemple :
-      </p>
-      <pre>admin {
-  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
-}</pre>
+  <main class="page">
+    <div id="host-error" class="banner danger" hidden>
+      <span class="mdi mdi-alert-circle-outline"></span>
+      <div>
+        <strong>Hôte non autorisé.</strong>
+        Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur, puis redémarrez Inbox.
+      </div>
+    </div>
+    <div id="global-error" class="banner danger" hidden></div>
+
+    <!-- Alertes -->
+    <section id="view-alerts" class="view" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Dernières alertes</h1>
+          <p id="alerts-scope" class="muted"></p>
+        </div>
+        <button id="alerts-refresh" class="icon-btn" type="button" aria-label="Actualiser"><span class="mdi mdi-refresh"></span></button>
+      </div>
+      <div id="alerts-list" class="stack"></div>
+      <div id="alerts-empty" class="empty" hidden>
+        <span class="mdi mdi-bell-outline"></span>
+        <p id="alerts-empty-text">Aucune alerte</p>
+      </div>
+      <p class="view-foot muted"><span id="alerts-foot"></span> · <a href="#settings">modifier</a></p>
     </section>
 
-    <section id="app-view">
-      <div class="stats" id="stats">
-        <div class="stat"><span class="stat-label">En ligne</span><span class="stat-value" id="st-online">–</span></div>
-        <div class="stat"><span class="stat-label">Enrôlés</span><span class="stat-value" id="st-enrolled">–</span></div>
-        <div class="stat" id="st-unreachable-box"><span class="stat-label">Injoignables</span><span class="stat-value" id="st-unreachable">–</span></div>
-        <div class="stat" id="st-pending-box"><span class="stat-label">Livraisons en attente</span><span class="stat-value" id="st-pending">–</span></div>
-        <div class="stat"><span class="stat-label">Plus ancienne en attente</span><span class="stat-value" id="st-oldest">–</span></div>
+    <!-- Envoyer -->
+    <section id="view-send" class="view" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Envoyer une alerte</h1>
+          <p class="muted">Chaque appareil abonné au groupe la reçoit selon l'action qu'il a choisie.</p>
+        </div>
       </div>
-
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="devices" role="tab" type="button">Appareils</button>
-        <button class="tab" data-tab="send" role="tab" type="button">Envoyer une alerte</button>
-        <button class="tab" data-tab="alerts" role="tab" type="button">Alertes</button>
-        <button class="tab" data-tab="connections" role="tab" type="button">Connexions</button>
-      </nav>
-
-      <div id="global-error" class="banner banner-error hidden" role="alert"></div>
-
-      <section class="panel" data-panel="devices">
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Appareil</th><th>État</th><th>IP</th><th>Version</th><th>Connecté / vu</th>
-                <th>Abonnements</th><th class="num">En attente</th><th></th>
-              </tr>
-            </thead>
-            <tbody id="devices-body"></tbody>
-          </table>
-        </div>
-        <p id="devices-empty" class="muted empty hidden">Aucun appareil enrôlé. Installez l’app Android et connectez-la à ce serveur.</p>
-      </section>
-
-      <section class="panel hidden" data-panel="send">
-        <form id="send-form" class="card send-card" autocomplete="off">
-          <label for="send-group">Groupe</label>
+      <form id="send-form" class="panel form" novalidate>
+        <label class="field">
+          <span>Groupe</span>
           <select id="send-group" required></select>
-          <p id="send-group-desc" class="muted small"></p>
-          <label for="send-title">Titre <span class="muted">(facultatif)</span></label>
-          <input id="send-title" type="text" maxlength="1024">
-          <label for="send-message">Message <span class="muted">(facultatif)</span></label>
-          <textarea id="send-message" rows="5"></textarea>
-          <p class="muted small">L’action déclenchée (alarme, sonnerie, notification) est choisie par chaque abonné pour ce groupe.</p>
-          <button id="send-submit" class="btn btn-danger" type="submit">Envoyer l’alerte</button>
-          <div id="send-result" class="result hidden" role="status"></div>
-        </form>
-      </section>
+        </label>
+        <label class="field">
+          <span>Titre <em>facultatif</em></span>
+          <input id="send-title" type="text" maxlength="200" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Message <em>facultatif</em></span>
+          <textarea id="send-message" rows="4" maxlength="4000"></textarea>
+        </label>
+        <div class="form-actions">
+          <button id="send-btn" class="btn primary" type="submit"><span class="mdi mdi-send"></span>Envoyer</button>
+        </div>
+        <div id="send-result" class="banner" hidden></div>
+      </form>
+    </section>
 
-      <section class="panel hidden" data-panel="alerts">
-        <div class="split">
-          <div class="table-wrap">
-            <table class="table clickable">
-              <thead>
-                <tr><th>Date</th><th>Groupe</th><th>Alerte</th><th>Source</th><th class="num">Cibles</th><th class="num">Reçue</th><th class="num">Affichée</th><th class="num">Acquittée</th></tr>
-              </thead>
-              <tbody id="alerts-body"></tbody>
-            </table>
-            <p id="alerts-empty" class="muted empty hidden">Aucune alerte.</p>
+    <!-- Appareils -->
+    <section id="view-devices" class="view" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Appareils</h1>
+          <p id="devices-summary" class="muted"></p>
+        </div>
+      </div>
+      <div id="devices-filter" class="filter-chips" role="group" aria-label="Filtrer par utilisateur"></div>
+      <div id="devices-list" class="device-grid"></div>
+      <div id="devices-empty" class="empty" hidden>
+        <span class="mdi mdi-cellphone"></span>
+        <p>Aucun appareil enrôlé. Installez l'application et ajoutez ce serveur.</p>
+      </div>
+    </section>
+
+    <!-- Connexions -->
+    <section id="view-connections" class="view" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Connexions</h1>
+          <p class="muted">100 dernières sessions d'appareils.</p>
+        </div>
+      </div>
+      <div id="connections-filter" class="filter-chips" role="group" aria-label="Filtrer par utilisateur"></div>
+      <div id="connections-list" class="panel list"></div>
+      <div id="connections-empty" class="empty" hidden>
+        <span class="mdi mdi-swap-horizontal"></span>
+        <p>Aucune connexion enregistrée.</p>
+      </div>
+    </section>
+
+    <!-- Réglages -->
+    <section id="view-settings" class="view" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Réglages</h1>
+          <p class="muted">Enregistrés dans ce navigateur.</p>
+        </div>
+      </div>
+      <form id="settings-form" class="panel form">
+        <label class="field">
+          <span>Nombre d'alertes affichées</span>
+          <input id="set-limit" type="number" min="1" max="50" step="1" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span>Fenêtre de temps</span>
+          <select id="set-window">
+            <option value="3600000">1 heure</option>
+            <option value="21600000">6 heures</option>
+            <option value="43200000">12 heures</option>
+            <option value="86400000">24 heures</option>
+            <option value="172800000">48 heures</option>
+            <option value="604800000">7 jours</option>
+          </select>
+        </label>
+        <fieldset class="field">
+          <legend>Thème</legend>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="theme" value="system"><span>Système</span></label>
+            <label><input type="radio" name="theme" value="light"><span>Clair</span></label>
+            <label><input type="radio" name="theme" value="dark"><span>Sombre</span></label>
           </div>
-          <aside id="alert-detail" class="card detail hidden"></aside>
+        </fieldset>
+        <label class="field">
+          <span>Actualisation</span>
+          <select id="set-refresh">
+            <option value="2000">2 secondes</option>
+            <option value="3000">3 secondes</option>
+            <option value="5000">5 secondes</option>
+            <option value="10000">10 secondes</option>
+            <option value="30000">30 secondes</option>
+          </select>
+        </label>
+        <div class="form-actions">
+          <span id="settings-saved" class="muted" hidden>Enregistré</span>
+          <button id="settings-reset" class="btn" type="button">Valeurs par défaut</button>
         </div>
-      </section>
-
-      <section class="panel hidden" data-panel="connections">
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr><th>Appareil</th><th>IP</th><th>Version</th><th>Connexion</th><th>Déconnexion</th><th>Durée</th><th>Raison</th></tr>
-            </thead>
-            <tbody id="connections-body"></tbody>
-          </table>
-        </div>
-        <p id="connections-empty" class="muted empty hidden">Aucune connexion enregistrée.</p>
-      </section>
+      </form>
     </section>
   </main>
 
-  <dialog id="confirm-dialog" class="card">
-    <p id="confirm-text"></p>
-    <div class="dialog-actions">
-      <button id="confirm-cancel" class="btn btn-ghost" type="button">Annuler</button>
-      <button id="confirm-ok" class="btn btn-danger" type="button">Confirmer</button>
+  <dialog id="detail-dialog" class="sheet">
+    <div class="sheet-head">
+      <div>
+        <div id="detail-group" class="chip"></div>
+        <h2 id="detail-title"></h2>
+        <p id="detail-meta" class="muted"></p>
+      </div>
+      <button id="detail-close" class="icon-btn" type="button" aria-label="Fermer"><span class="mdi mdi-close"></span></button>
     </div>
+    <p id="detail-message" class="detail-message"></p>
+    <h3 class="sheet-section">Livraison par appareil</h3>
+    <div id="detail-deliveries" class="list"></div>
   </dialog>
+
+  <dialog id="confirm-dialog" class="confirm">
+    <form method="dialog">
+      <p id="confirm-text"></p>
+      <div class="form-actions">
+        <button value="cancel" class="btn" type="submit">Annuler</button>
+        <button id="confirm-ok" value="ok" class="btn primary" type="submit">Confirmer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
 </body>
 </html>

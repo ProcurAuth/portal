@@ -78,11 +78,13 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollStart<'l>(
     _class: JClass<'l>,
     password: JByteArray<'l>,
     device_name: JString<'l>,
+    user_name: JString<'l>,
 ) -> jstring {
     guard(&mut env, std::ptr::null_mut(), |env| {
         let password = bytes(env, &password)?;
         let name = string(env, &device_name)?;
-        let out = match bridge::enroll_start(&password, &name) {
+        let user = string(env, &user_name)?;
+        let out = match bridge::enroll_start(&password, &name, &user) {
             Ok((handle, msg)) => {
                 let ptr = Box::into_raw(handle) as jlong;
                 json!({ "handle": ptr, "send": msg })

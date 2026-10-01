@@ -185,6 +185,10 @@ pub async fn overview(State(app): State<Arc<AppState>>) -> Result<Response, ApiE
 #[derive(Deserialize)]
 pub struct LimitQuery {
     limit: Option<u32>,
+    /// Only connections of this user pseudonym.
+    user: Option<String>,
+    /// Only alerts created at or after this Unix time in milliseconds.
+    since_ms: Option<i64>,
 }
 
 pub async fn alerts(
@@ -192,8 +196,12 @@ pub async fn alerts(
     Query(q): Query<LimitQuery>,
 ) -> Result<Response, ApiError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    let list =
-        app.db.call(move |c| Ok(db::recent_alerts(c, limit)?)).await.map_err(ApiError::storage)?;
+    let since = q.since_ms.unwrap_or(0).max(0);
+    let list = app
+        .db
+        .call(move |c| Ok(db::recent_alerts(c, limit, since)?))
+        .await
+        .map_err(ApiError::storage)?;
     Ok(no_store(json!({ "alerts": list })))
 }
 
@@ -215,9 +223,10 @@ pub async fn connections(
     Query(q): Query<LimitQuery>,
 ) -> Result<Response, ApiError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let user = q.user.filter(|u| !u.trim().is_empty());
     let list = app
         .db
-        .call(move |c| Ok(db::recent_connections(c, limit)?))
+        .call(move |c| Ok(db::recent_connections(c, limit, user.as_deref())?))
         .await
         .map_err(ApiError::storage)?;
     Ok(no_store(json!({ "connections": list })))

@@ -31,7 +31,7 @@ l'émission.
 
 | Action | Comportement Android |
 |---|---|
-| `alarm` | Sonnerie d'alarme en boucle, volume alarme au maximum, sort du silencieux / vibreur, passe le « Ne pas déranger », écran plein écran, jusqu'à acquittement humain |
+| `alarm` | Sonnerie d'alarme en boucle, volume alarme au maximum, sort du silencieux / vibreur, passe le « Ne pas déranger », écran plein écran ; un gros bouton central (à glisser hors du cercle, comme les alarmes Samsung) coupe le son sur le téléphone |
 | `ring` | Un son de notification **même en silencieux ou vibreur** |
 | `notify` | Notification standard, respecte le mode du téléphone |
 
@@ -39,9 +39,20 @@ l'émission.
   réaction, groupe par groupe.
 - L'app ne peut **pas** émettre d'alerte : le serveur n'expose aucune route
   d'émission à une identité d'appareil.
-- L'utilisateur peut **acquitter** une alerte (arrête l'alarme ; visible dans le front).
+- Les alertes sont **à sens unique** (décision du 2026-10-02) : pas d'acquittement,
+  le téléphone ne renvoie rien à l'humain ni à l'émetteur. Seul un accusé de
+  réception technique et automatique part du téléphone une fois l'alerte stockée :
+  sans lui le serveur ne pourrait ni retransmettre ni rattraper un téléphone
+  éteint, et la garantie de livraison tomberait.
+- L'écran d'accueil affiche les dernières alertes reçues : par défaut les 5 plus
+  récentes de moins de 24 h, les deux réglables. Menu burger vers les serveurs
+  et les réglages ; thème clair / sombre du téléphone par défaut.
 - Plusieurs serveurs Inbox peuvent être ajoutés et gérés dans l'app (une
   connexion et des abonnements par serveur).
+- L'utilisateur s'identifie par un **pseudo** (décision du 2026-10-02) : un pseudo
+  par défaut dans les réglages de l'app, modifiable serveur par serveur à tout
+  moment. Le serveur l'enregistre avec l'appareil et dans chaque connexion, ce qui
+  permet de suivre les sessions par identifiant dans le front admin.
 
 ### 3.2 Alerte
 - Groupe obligatoire ; titre et message **facultatifs**.
@@ -55,7 +66,9 @@ l'émission.
   réelle (derrière proxys de confiance), version de l'app, connecté depuis,
   dernier signe de vie, abonnements, alertes en attente.
 - Historique des connexions et des alertes, détail de livraison par appareil
-  (envoyée, reçue, affichée, acquittée, nombre d'envois).
+  (envoyée, reçue, nombre d'envois).
+- Accueil : les dernières alertes (5 de moins de 24 h par défaut, réglable),
+  menu burger, thème du système par défaut, charte graphique de S3-Browser.
 - Révocation d'un appareil, envoi manuel d'une alerte.
 - Aucune configuration modifiable : la configuration est déclarative (HCL).
 - **Pas de mot de passe** (décision du 2026-10-01) : l'accès au front admin est

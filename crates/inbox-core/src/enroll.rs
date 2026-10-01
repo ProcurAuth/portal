@@ -54,16 +54,36 @@ enum ClientState {
 /// Device side of enrollment.
 pub struct EnrollClient {
     device_name: String,
+    user_name: Option<String>,
     state: ClientState,
     rng: Rng,
 }
 
 pub fn validate_device_name(name: &str) -> Result<String> {
-    let name = name.trim();
-    if name.is_empty() || name.len() > MAX_DEVICE_NAME || name.chars().any(char::is_control) {
-        return Err(Error::Malformed("device name"));
+    validate_label(name).ok_or(Error::Malformed("device name"))
+}
+
+/// The pseudonym of the person using the device, shown and tracked by the server.
+pub fn validate_user_name(name: &str) -> Result<String> {
+    validate_label(name).ok_or(Error::Malformed("user name"))
+}
+
+fn validate_label(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > MAX_DEVICE_NAME || text.chars().any(char::is_control) {
+        return None;
     }
-    Ok(name.to_string())
+    Some(text.to_string())
+}
+
+/// MAC input binding the device name, key and (when present) user name.
+fn client_mac_parts<'a>(name: &'a str, pk: &'a [u8], user: Option<&'a str>) -> Vec<&'a [u8]> {
+    let mut parts = vec![name.as_bytes(), pk];
+    if let Some(u) = user {
+        parts.push(b"user");
+        parts.push(u.as_bytes());
+    }
+    parts
 }
 
 fn encode<T: serde::Serialize>(msg: &T) -> String {
@@ -71,20 +91,32 @@ fn encode<T: serde::Serialize>(msg: &T) -> String {
 }
 
 impl EnrollClient {
-    /// Returns the client and the first message to send.
-    pub fn start(
+    /// Returns the client and the first message to send. Enrolls without a user name.
+    pub fn start(password: &[u8], device_name: &str, rng: Rng) -> Result<(EnrollClient, String)> {
+        EnrollClient::start_as(password, device_name, None, rng)
+    }
+
+    /// Like [`EnrollClient::start`], announcing the pseudonym of the user.
+    pub fn start_as(
         password: &[u8],
         device_name: &str,
+        user_name: Option<&str>,
         mut rng: Rng,
     ) -> Result<(EnrollClient, String)> {
         let device_name = validate_device_name(device_name)?;
+        let user_name = user_name.map(validate_user_name).transpose()?;
         let (login, request) = LoginClient::start(Role::Device, password, &mut rng)?;
         let msg = encode(&EnrollClientMsg::Start {
             protocol: PROTOCOL_VERSION,
             credential_request: request,
         });
         Ok((
-            EnrollClient { device_name, state: ClientState::AwaitChallenge(Box::new(login)), rng },
+            EnrollClient {
+                device_name,
+                user_name,
+                state: ClientState::AwaitChallenge(Box::new(login)),
+                rng,
+            },
             msg,
         ))
     }
@@ -106,11 +138,12 @@ impl EnrollClient {
                 let device = noise::generate_keypair()?;
                 let mac = login::mac(
                     &key.derive(CLIENT_MAC),
-                    &[self.device_name.as_bytes(), &device.public],
+                    &client_mac_parts(&self.device_name, &device.public, self.user_name.as_deref()),
                 );
                 let reply = encode(&EnrollClientMsg::Finish {
                     credential_finalization: finalization,
                     device_name: self.device_name.clone(),
+                    user_name: self.user_name.clone(),
                     device_public_key: device.public.clone(),
                     mac: mac.to_vec(),
                 });
@@ -159,6 +192,7 @@ pub struct EnrollServer<'a> {
 /// A device that proved knowledge of the password, waiting for an id.
 pub struct VerifiedDevice {
     pub name: String,
+    pub user_name: Option<String>,
     pub public_key: Vec<u8>,
 }
 
@@ -201,6 +235,7 @@ impl<'a> EnrollServer<'a> {
         let EnrollClientMsg::Finish {
             credential_finalization,
             device_name,
+            user_name,
             device_public_key,
             mac,
         } = msg
@@ -211,16 +246,17 @@ impl<'a> EnrollServer<'a> {
         let key = login.finish(&credential_finalization)?;
         login::verify_mac(
             &key.derive(CLIENT_MAC),
-            &[device_name.as_bytes(), &device_public_key],
+            &client_mac_parts(&device_name, &device_public_key, user_name.as_deref()),
             &mac,
         )?;
         let name = validate_device_name(&device_name)?;
+        let user_name = user_name.as_deref().map(validate_user_name).transpose()?;
         if device_public_key.len() != 32 {
             return Err(Error::Malformed("device key length"));
         }
         self.session = Some(key);
         self.device_public_key = Some(device_public_key.clone());
-        Ok(VerifiedDevice { name, public_key: device_public_key })
+        Ok(VerifiedDevice { name, user_name, public_key: device_public_key })
     }
 
     /// Builds the `Accepted` reply once the device is stored.
@@ -257,7 +293,8 @@ mod tests {
             login::register(&key.opaque, Role::Device, server_pw, &mut Rng::os()).unwrap();
         let record = login::parse_record(&record_bytes).unwrap();
         let mut server = EnrollServer::new(&key, &record);
-        let (mut client, m1) = EnrollClient::start(client_pw, " Pixel de garde ", Rng::os())?;
+        let (mut client, m1) =
+            EnrollClient::start_as(client_pw, " Pixel de garde ", Some(" alice "), Rng::os())?;
         let m2 = server.on_start(EnrollServer::parse(&m1)?, &mut Rng::os())?;
         let ClientStep::Send(m3) = client.on_message(&m2)? else { panic!("expected send") };
         let verified = server.on_finish(EnrollServer::parse(&m3)?)?;
@@ -273,6 +310,7 @@ mod tests {
         assert_eq!(device.server_public_key, server_pk);
         assert_eq!(verified.public_key, device.device_public_key);
         assert_eq!(verified.name, "Pixel de garde");
+        assert_eq!(verified.user_name.as_deref(), Some("alice"));
     }
 
     #[test]

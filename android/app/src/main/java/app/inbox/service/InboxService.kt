@@ -22,7 +22,7 @@ import app.inbox.alert.AlarmPlayer
 import app.inbox.alert.Alerter
 import app.inbox.data.Store
 import app.inbox.ui.MainActivity
-import app.inbox.ui.formatAgo
+import app.inbox.ui.formatSince
 
 /**
  * Foreground service holding one persistent session per enrolled server. It is
@@ -100,16 +100,15 @@ class InboxService : Service() {
         super.onDestroy()
     }
 
-    /** Alerts stored but never shown (process died in between) are shown now; unacknowledged alarms ring again. */
+    /** Alerts stored but never shown (process died in between) are shown now; alarms not stopped ring again. */
     private fun recoverLocalState() {
         val store = Store.get(this)
         for (a in store.unnotified()) {
             Alerter.present(this, a)
             store.markNotified(a.serverId, a.alertId)
-            store.enqueueAck(a.serverId, a.alertId, "displayed")
         }
         val cutoff = System.currentTimeMillis() - UNACKED_ALARM_RESUME_MS
-        for (a in store.unackedAlarms()) {
+        for (a in store.ringingAlarms()) {
             if (a.receivedAtMs >= cutoff && !AlarmPlayer.isRinging()) Alerter.present(this, a)
         }
         store.prune(System.currentTimeMillis() - LOCAL_HISTORY_MS)
@@ -159,7 +158,7 @@ class InboxService : Service() {
             val line = when (st.state) {
                 LinkState.CONNECTED -> { connected++; "${s.serverName} : connecté" }
                 LinkState.CONNECTING -> "${s.serverName} : connexion…"
-                LinkState.DISCONNECTED -> "${s.serverName} : déconnecté ${formatAgo(now - st.sinceMs)}"
+                LinkState.DISCONNECTED -> "${s.serverName} : déconnecté ${formatSince(now - st.sinceMs)}"
                 LinkState.REENROLL -> "${s.serverName} : ré-enrôlement requis"
             }
             lines.add(line)

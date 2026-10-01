@@ -11,8 +11,11 @@ object Native {
         System.loadLibrary("inbox_android")
     }
 
-    /** Returns `{"handle": Long, "send": String}` or `{"error": {"code", "message"}}`. */
-    @JvmStatic external fun enrollStart(password: ByteArray, deviceName: String): String
+    /**
+     * Starts an enrollment announcing `userName` (the pseudo; empty for none).
+     * Returns `{"handle": Long, "send": String}` or `{"error": {"code", "message"}}`.
+     */
+    @JvmStatic external fun enrollStart(password: ByteArray, deviceName: String, userName: String): String
 
     /** Returns `{"send": String}`, `{"done": {...}}` or `{"error": {...}}`. */
     @JvmStatic external fun enrollOnMessage(handle: Long, text: String): String

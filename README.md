@@ -13,7 +13,7 @@ monitoring and makes subscribed Android phones ring, even when they are on silen
   sessions are Noise IK. A network capture yields neither the password nor any
   material for an offline attack.
 - **Receive-only Android app.** For each group, the user chooses *alarm* (loud and
-  full-screen until acknowledged, overriding silent, vibrate and do-not-disturb),
+  full-screen until stopped on the phone, overriding silent, vibrate and do-not-disturb),
   *ring* (one sound, even on silent) or *notify*.
 
 French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
@@ -159,7 +159,7 @@ the `groups` of its `producer` block.
 | Method and path | Purpose |
 |---|---|
 | `POST /api/v1/alerts` | Body: `{"group": "...", "title"?: "...", "message"?: "..."}`. Header `Idempotency-Key` is required. Returns `201 {alert_id, duplicate, targets}`. |
-| `GET /api/v1/alerts/{id}` | Delivery status per device: sent, received, displayed and acknowledged, with attempt counts. Use it to escalate elsewhere. |
+| `GET /api/v1/alerts/{id}` | Delivery status per device: sent and received, with attempt counts. Use it to escalate elsewhere. |
 | `POST /api/v1/webhooks/alertmanager/{group}` | Alertmanager / Grafana webhook payload. One Inbox alert per alert, deduplicated on fingerprint + status + `startsAt`. |
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (checks the database). |
 | `GET /api/version` | Version, git revision, protocol version. |
@@ -239,7 +239,7 @@ page: open it in a private window or with extensions disabled.
 | `inbox_alerts_duplicate_total{source}` | counter | Submissions deduplicated by idempotency key |
 | `inbox_deliveries_created_total` | counter | Per-device delivery rows |
 | `inbox_deliveries_sent_total` | counter | Alert frames sent, including retransmissions |
-| `inbox_acks_total{stage}` | counter | Device acknowledgements |
+| `inbox_delivery_receipts_total` | counter | Delivery receipts sent by devices |
 | `inbox_delivery_latency_seconds` | histogram | Acceptance to first receipt |
 | `inbox_deliveries_pending` | gauge | Deliveries still waiting for a device |
 | `inbox_oldest_pending_delivery_seconds` | gauge | Age of the oldest waiting alert. **Alert on this.** |

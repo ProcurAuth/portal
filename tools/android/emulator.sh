@@ -48,6 +48,7 @@ install_apk() {
   adb shell appops set app.inbox USE_FULL_SCREEN_INTENT allow >/dev/null 2>&1 || true
   adb shell cmd notification allow_dnd app.inbox >/dev/null 2>&1 || true
   adb shell dumpsys deviceidle whitelist +app.inbox >/dev/null 2>&1 || true
+  adb shell appops set app.inbox SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
   adb shell monkey -p app.inbox -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
   echo "installed $(basename "$apk")"
 }

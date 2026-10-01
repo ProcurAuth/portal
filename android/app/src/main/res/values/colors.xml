@@ -1,4 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Palette from the S3-Browser design tokens (light). Dark values in values-night. -->
 <resources>
-    <color name="launcher_background">#B71C1C</color>
+    <color name="launcher_background">#167DF0</color>
+
+    <color name="bg_page">#F5F7FA</color>
+    <color name="bg_panel">#FFFFFF</color>
+    <color name="bg_subtle">#F8FAFC</color>
+    <color name="bg_hover">#F1F5F9</color>
+    <color name="border">#DFE4EA</color>
+    <color name="border_strong">#C7D0DB</color>
+    <color name="text">#172033</color>
+    <color name="text_strong">#101828</color>
+    <color name="text_muted">#667085</color>
+    <color name="text_subtle">#98A2B3</color>
+    <color name="primary">#167DF0</color>
+    <color name="primary_pressed">#0F6ED8</color>
+    <color name="primary_soft">#EEF6FF</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="danger">#B42318</color>
+    <color name="danger_soft">#FFF1F0</color>
+    <color name="warning">#9A6700</color>
+    <color name="warning_soft">#FFF8C5</color>
+    <color name="success">#067647</color>
+    <color name="success_soft">#ECFDF3</color>
+    <color name="scrim">#66101828</color>
 </resources>
