@@ -157,7 +157,6 @@
     for (const g of data.groups) groupNames.set(g.id, g.name);
     $('server-name').textContent = data.server.name;
     $('server-version').textContent = 'v' + data.server.version;
-    document.title = data.server.name + ' · Inbox';
 
     const st = data.stats;
     const pill = $('status-pill');

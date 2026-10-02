@@ -113,8 +113,10 @@ fun applyInsets(view: View) {
     val base = intArrayOf(view.paddingLeft, view.paddingTop, view.paddingRight, view.paddingBottom)
     view.setOnApplyWindowInsetsListener { v, insets ->
         val (l, t, r, b) = if (Build.VERSION.SDK_INT >= 30) {
+            // The keyboard inset too, so fields being edited stay above it.
             val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            listOf(i.left, i.top, i.right, i.bottom)
+            val ime = insets.getInsets(WindowInsets.Type.ime())
+            listOf(i.left, i.top, i.right, maxOf(i.bottom, ime.bottom))
         } else {
             listOf(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
         }

@@ -308,13 +308,9 @@ class MainActivity : BaseActivity() {
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
         if (alerts.isEmpty()) {
-            if (!showRead && store.alertCount(includeRead = true) > 0) {
-                body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_no_unread_title),
-                    getString(R.string.alerts_no_unread_body), null, null))
-            } else {
-                body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_empty_title, windowLabel(window)),
-                    getString(R.string.alerts_empty_body), null, null))
-            }
+            body.addView(label(getString(R.string.alerts_none), 14f, color(R.color.text_muted)).apply {
+                gravity = Gravity.CENTER
+            }, lp().margins(this, t = 32, b = 8))
         } else {
             // One card per alert, the severity bar on its left edge.
             alerts.forEachIndexed { i, a ->
@@ -327,44 +323,44 @@ class MainActivity : BaseActivity() {
                 body.addView(card, lp().margins(this, t = if (i == 0) 4 else 8))
             }
         }
-        body.addView(listFooter(showRead, store.alertCount(showRead) > alerts.size),
+        if (store.alertCount(showRead) > alerts.size) {
+            body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }
+        body.addView(showReadToggle(showRead),
             lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
     }
 
-    /** "Show read" toggle and "See more", plain accent text on one row (48 dp targets). */
-    private fun listFooter(showRead: Boolean, hasMore: Boolean): View = lin(vertical = false).apply {
+    /** "See more": plain accent text with a 48 dp touch target. */
+    private fun seeMore(): View = label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
         gravity = Gravity.CENTER
-        addView(lin(vertical = false).apply {
-            minimumHeight = dp(48)
-            setPadding(dp(12), 0, dp(12), 0)
-            isClickable = true
-            isFocusable = true
-            background = rowRipple()
-            contentDescription = getString(R.string.alerts_show_read)
-            addView(checkMark(showRead), lp(dp(16), dp(16)))
-            addView(label(getString(R.string.alerts_show_read), 13f,
-                color(if (showRead) R.color.primary else R.color.text_muted), MEDIUM),
-                lp(WRAP, WRAP).margins(this@MainActivity, l = 8))
-            setOnClickListener {
-                Prefs.setShowRead(this@MainActivity, !showRead)
-                extra = 0
-                render()
-            }
-        }, lp(WRAP, WRAP))
-        if (hasMore) {
-            addView(label("·", 13f, color(R.color.text_subtle)), lp(WRAP, WRAP).margins(this@MainActivity, l = 4, r = 4))
-            addView(label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
-                gravity = Gravity.CENTER
-                minHeight = dp(48)
-                setPadding(dp(12), 0, dp(12), 0)
-                isClickable = true
-                isFocusable = true
-                background = rowRipple()
-                setOnClickListener {
-                    extra += 10
-                    render()
-                }
-            }, lp(WRAP, WRAP))
+        minHeight = dp(48)
+        setPadding(dp(12), 0, dp(12), 0)
+        isClickable = true
+        isFocusable = true
+        background = rowRipple()
+        setOnClickListener {
+            extra += 10
+            render()
+        }
+    }
+
+    /** "Show read" check box, centered alone on its row, identical with or without alerts. */
+    private fun showReadToggle(showRead: Boolean): View = lin(vertical = false).apply {
+        gravity = Gravity.CENTER
+        minimumHeight = dp(48)
+        setPadding(dp(12), 0, dp(12), 0)
+        isClickable = true
+        isFocusable = true
+        background = rowRipple()
+        contentDescription = getString(R.string.alerts_show_read)
+        addView(checkMark(showRead), lp(dp(16), dp(16)))
+        addView(label(getString(R.string.alerts_show_read), 13f,
+            color(if (showRead) R.color.primary else R.color.text_muted), MEDIUM),
+            lp(WRAP, WRAP).margins(this@MainActivity, l = 8))
+        setOnClickListener {
+            Prefs.setShowRead(this@MainActivity, !showRead)
+            extra = 0
+            render()
         }
     }
 
@@ -552,19 +548,11 @@ class MainActivity : BaseActivity() {
         id.addView(label(getString(R.string.settings_pseudo), 14f, color(R.color.text), MEDIUM))
         id.addView(label(getString(R.string.settings_pseudo_help), 11.5f, color(R.color.text_muted)), lp().margins(this, t = 2))
         val current = Prefs.defaultUserName(this)
-        val input = textField(current ?: "", getString(R.string.pseudo_hint), mono = true)
-        val save = {
-            val v = cleanUserName(input.text.toString())
-            if (v == null) {
-                input.error = getString(R.string.pseudo_invalid)
-            } else {
-                Prefs.setDefaultUserName(this, v)
-                Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
-                render()
-            }
-        }
-        input.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_DONE) { save(); true } else false }
-        id.addView(inlineField(input, getString(R.string.save_short)) { save() }, lp().margins(this, t = 10))
+        id.addView(pseudoEditor(current) { v ->
+            Prefs.setDefaultUserName(this, v)
+            Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
+            render()
+        }, lp().margins(this, t = 10))
         if (current == null) {
             id.addView(label(getString(R.string.settings_pseudo_missing), 11.5f, color(R.color.danger)), lp().margins(this, t = 6))
         }
@@ -663,16 +651,77 @@ fun android.content.Context.textField(value: String, hint: String, password: Boo
     imeOptions = EditorInfo.IME_ACTION_DONE
 }
 
-/** Input with a compact trailing action button on the same line. */
-fun android.content.Context.inlineField(input: EditText, action: String, onAction: () -> Unit): LinearLayout =
-    lin(vertical = false).apply {
+/**
+ * Pseudo shown read-only with an "Edit" action. Editing focuses the field and
+ * shows Cancel / OK; OK is enabled only once the trimmed value is valid and
+ * differs from the current one. Cancel restores the current value.
+ */
+fun android.content.Context.pseudoEditor(current: String?, onSave: (String) -> Unit): LinearLayout {
+    val ctx = this
+    val input = textField(current ?: "", getString(R.string.pseudo_hint), mono = true)
+    val actions = lin(vertical = false)
+    val box = lin(vertical = false).apply {
         addView(input, lp(0, WRAP, 1f))
-        addView(mono(action.uppercase(), 11f, color(R.color.on_primary), bold = true).apply {
+        addView(actions, lp(WRAP, WRAP).margins(ctx, l = 8))
+    }
+    fun small(text: String, primary: Boolean, onClick: () -> Unit) =
+        mono(text.uppercase(), 11f, color(if (primary) R.color.on_primary else R.color.text), bold = true).apply {
             gravity = Gravity.CENTER
             minHeight = dp(34)
-            setPadding(dp(14), 0, dp(14), 0)
-            background = pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
+            setPadding(dp(12), 0, dp(12), 0)
+            background = if (primary) pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
+            else pressable(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke))
             isClickable = true
-            setOnClickListener { onAction() }
-        }, lp(WRAP, WRAP).margins(this@inlineField, l = 8))
+            setOnClickListener { if (isEnabled) onClick() }
+        }
+    val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+    var showReadOnly: () -> Unit = {}
+    lateinit var ok: android.widget.TextView
+    val refreshOk = {
+        val v = cleanUserName(input.text.toString())
+        val enabled = v != null && v != current
+        ok.isEnabled = enabled
+        ok.alpha = if (enabled) 1f else 0.4f
     }
+    val showEditing = {
+        input.isEnabled = true
+        input.isFocusableInTouchMode = true
+        input.requestFocus()
+        input.setSelection(input.text.length)
+        imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+        // Once the keyboard is up, bring the field into view.
+        input.postDelayed({ input.requestRectangleOnScreen(android.graphics.Rect(0, 0, input.width, input.height + dp(64))) }, 350)
+        actions.removeAllViews()
+        actions.addView(small(getString(R.string.cancel), primary = false) {
+            input.setText(current ?: "")
+            input.error = null
+            showReadOnly()
+        })
+        ok = small(getString(R.string.save_short), primary = true) {
+            val v = cleanUserName(input.text.toString())
+            if (v != null && v != current) {
+                imm.hideSoftInputFromWindow(input.windowToken, 0)
+                onSave(v)
+            }
+        }
+        actions.addView(ok, lp(WRAP, WRAP).margins(ctx, l = 6))
+        refreshOk()
+    }
+    showReadOnly = {
+        imm.hideSoftInputFromWindow(input.windowToken, 0)
+        input.clearFocus()
+        input.isEnabled = false
+        actions.removeAllViews()
+        actions.addView(small(getString(R.string.edit), primary = false) { showEditing() })
+    }
+    input.addTextChangedListener(object : android.text.TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        override fun afterTextChanged(s: android.text.Editable?) { if (actions.childCount == 2) refreshOk() }
+    })
+    input.setOnEditorActionListener { _, action, _ ->
+        if (action == EditorInfo.IME_ACTION_DONE && actions.childCount == 2 && ok.isEnabled) { ok.performClick(); true } else false
+    }
+    if (current == null) showEditing() else showReadOnly()
+    return box
+}

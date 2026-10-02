@@ -60,7 +60,6 @@
 
     $('server-name').textContent = data.server.name;
     $('server-version').textContent = 'v' + data.server.version;
-    document.title = 'Integrations · ' + data.server.name;
 
     const out = [];
 

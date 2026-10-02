@@ -133,19 +133,12 @@ class ServerActivity : BaseActivity() {
         body.addView(sectionLabel(getString(R.string.server_pseudo)))
         val p = panel(padH = 14, padV = 12)
         p.addView(label(getString(R.string.server_pseudo_help), 11.5f, color(R.color.text_muted)))
-        val input = textField(server.userName ?: "", getString(R.string.pseudo_hint), mono = true)
-        val save = {
-            val v = cleanUserName(input.text.toString())
-            if (v == null) {
-                input.error = getString(R.string.pseudo_invalid)
-            } else {
-                store.setUserName(serverId, v)
-                Registry.connections[serverId]?.setUserName(v)
-                Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
-            }
-        }
-        input.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_DONE) { save(); true } else false }
-        p.addView(inlineField(input, getString(R.string.save_short)) { save() }, lp().margins(this, t = 10))
+        p.addView(pseudoEditor(server.userName) { v ->
+            store.setUserName(serverId, v)
+            Registry.connections[serverId]?.setUserName(v)
+            Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
+            render()
+        }, lp().margins(this, t = 10))
         body.addView(p)
 
         // Groups
