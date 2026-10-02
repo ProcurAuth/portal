@@ -110,7 +110,7 @@ class AlarmActivity : Activity() {
             gravity = Gravity.CENTER
             includeFontPadding = false
         }, lp(MATCH, WRAP).margins(this, t = 14))
-        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), "RX " + hms(a.receivedAtMs), shortAge(a.createdAtMs).uppercase())
+        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), getString(R.string.alarm_received_at, hms(a.receivedAtMs)), shortAge(a.createdAtMs))
             .joinToString("  ·  "), 11f, faint).apply { gravity = Gravity.CENTER; letterSpacing = 0.06f },
             lp(MATCH, WRAP).margins(this, t = 8))
 
@@ -121,7 +121,7 @@ class AlarmActivity : Activity() {
                 GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x14FFFFFF, 0x00FFFFFF)).apply { cornerRadius = dpf(18f) },
             ))
         }
-        card.addView(mono("ALARM · " + a.groupName.uppercase(), 10.5f, red, bold = true).apply { letterSpacing = 0.08f })
+        card.addView(mono(getString(R.string.action_alarm).uppercase() + " · " + a.groupName.uppercase(), 10.5f, red, bold = true).apply { letterSpacing = 0.08f })
         card.addView(label(a.title ?: a.groupName, 22f, white, BOLD), lp().margins(this, t = 8))
         a.message?.let {
             card.addView(label(it, 15f, dim), lp().margins(this, t = 8))

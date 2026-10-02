@@ -477,14 +477,6 @@ async fn delivery_guarantees_end_to_end() {
         r#"{"group":"infra"}"#,
     );
     assert_eq!(st, 401);
-    let (st, _) = http(
-        port,
-        "POST",
-        "/api/v1/alerts",
-        &[("Authorization", format!("Bearer {}", s.token))],
-        r#"{"group":"infra"}"#,
-    );
-    assert_eq!(st, 400, "missing idempotency key");
     assert_eq!(post_alert(&s, "f", json!({"group": "other"})).0, 403);
     assert_eq!(post_alert(&s, "u", json!({"group": "infra", "bogus": 1})).0, 400);
 
@@ -686,5 +678,120 @@ async fn password_guessing_is_rate_limited() {
         Err(inbox_core::Error::Rejected { code, .. }) => assert_eq!(code, "rate_limited"),
         other => panic!("expected rate_limited, got {:?}", other.err()),
     }
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn integrations_and_reverse_proxy_prefixes() {
+    let mut s = Server::setup();
+    // The test client connects from 127.0.0.1: declare it a trusted reverse proxy.
+    let cfg = std::fs::read_to_string(s.config()).unwrap();
+    std::fs::write(
+        s.config(),
+        cfg.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]"),
+    )
+    .unwrap();
+    s.start();
+    let (port, ap) = (s.port, s.admin_port);
+    let dev = enroll_as(port, DEVICE_PW, "phone", Some("ops")).await.unwrap();
+    let (mut c, _) = Conn::open(port, &dev).await.unwrap();
+    c.subscribe("infra", Action::Notify).await;
+
+    // Generic notify: plain text body, token in the query string, no Idempotency-Key.
+    let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
+    let (st, body) =
+        http(port, "POST", &url, &[("Content-Type", "text/plain".into())], "backup KO\n");
+    assert_eq!(st, 201, "{body}");
+    let got = c.alert().await;
+    assert_eq!(
+        (got.title.as_deref(), got.message.as_deref()),
+        (Some("Sauvegarde"), Some("backup KO"))
+    );
+    c.ack(&got.alert_id, AckStage::Received).await;
+    // The same request retried within the minute is deduplicated.
+    let (st, body) =
+        http(port, "POST", &url, &[("Content-Type", "text/plain".into())], "backup KO\n");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"duplicate\":true"));
+
+    // JSON with title/message, bearer header.
+    let auth = ("Authorization", format!("Bearer {}", s.token));
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/notify/infra",
+        std::slice::from_ref(&auth),
+        r#"{"title":"T","message":"M"}"#,
+    );
+    assert_eq!(st, 201);
+    let got = c.alert().await;
+    assert_eq!((got.title.as_deref(), got.message.as_deref()), (Some("T"), Some("M")));
+    c.ack(&got.alert_id, AckStage::Received).await;
+    // Any other JSON is kept as compact text; X-Title gives the title.
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/notify/infra",
+        &[auth.clone(), ("X-Title", "Uptime".into())],
+        r#"{ "monitor": {"name": "web"}, "status": 0 }"#,
+    );
+    assert_eq!(st, 201);
+    let got = c.alert().await;
+    assert_eq!(got.title.as_deref(), Some("Uptime"));
+    assert_eq!(got.message.as_deref(), Some(r#"{"monitor":{"name":"web"},"status":0}"#));
+    c.ack(&got.alert_id, AckStage::Received).await;
+    // Wrong token in the query string is refused; forbidden group too.
+    let (st, _) = http(port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
+    assert_eq!(st, 401);
+    let (st, _) = http(port, "POST", &format!("/api/v1/notify/other?token={}", s.token), &[], "x");
+    assert_eq!(st, 403);
+
+    // JSON API without Idempotency-Key: created, then deduplicated.
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"nokey"}"#,
+    );
+    assert_eq!(st, 201);
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"nokey"}"#,
+    );
+    assert_eq!(st, 200);
+
+    // Admin behind reverse proxies: any prefix, any Host from a trusted proxy.
+    for prefix in ["", "/inbox", "/a/b"] {
+        let (st, body) = http_host(
+            ap,
+            "public.example",
+            "GET",
+            &format!("{prefix}/api/admin/overview"),
+            &[],
+            "",
+        );
+        assert_eq!(st, 200, "{prefix}: {body}");
+        let (st, body) = http_host(ap, "public.example", "GET", &format!("{prefix}/"), &[], "");
+        assert_eq!(st, 200);
+        assert!(
+            body.contains("<html") || body.contains("<!doctype") || body.contains("<!DOCTYPE"),
+            "{prefix}"
+        );
+        let (st, _) = http_host(ap, "public.example", "GET", &format!("{prefix}/app.js"), &[], "");
+        assert_eq!(st, 200, "{prefix}/app.js");
+        let (st, body) = http_host(ap, "public.example", "GET", &format!("{prefix}/doc"), &[], "");
+        assert_eq!(st, 200);
+        assert!(body.contains("doc"), "{prefix}/doc");
+    }
+    let send = json!({"group": "infra", "title": "via proxy", "idempotency_key": "p1"}).to_string();
+    let hdrs =
+        [("Content-Type", "application/json".to_string()), ("X-Inbox-Request", "1".to_string())];
+    let (st, body) =
+        http_host(ap, "public.example", "POST", "/inbox/api/admin/alerts", &hdrs, &send);
+    assert_eq!(st, 201, "{body}");
     s.stop();
 }

@@ -59,7 +59,15 @@ l'émission.
 - Sources : API HTTP avec token d'émetteur (déclaré en HCL, limité à des groupes),
   formulaire du front admin, webhook compatible Alertmanager (utilisé aussi par le
   contact point « Webhook » de Grafana).
-- Clé d'idempotence obligatoire : un émetteur qui réessaie ne crée pas de doublon.
+- Clé d'idempotence recommandée (en-tête `Idempotency-Key`) ; sans elle, une requête
+  identique reçue dans la même minute est dédupliquée. Un émetteur qui réessaie ne
+  crée donc pas de doublon.
+- Intégration avec n'importe quel outil d'alerting (décision du 2026-10-02) :
+  endpoint générique `/api/v1/notify/<groupe>` (texte ou JSON quelconque), token
+  possible dans l'URL (`?token=`) pour les outils sans en-têtes ; la page `/doc` du
+  front donne les recettes (Grafana, Alertmanager et outils courants).
+- Le front admin fonctionne derrière un ou plusieurs reverse proxys, à la racine
+  ou sous n'importe quel sous-chemin, sans configuration supplémentaire.
 
 ### 3.3 Front admin (supervision)
 - Appareils : nom, statut (en ligne / hors ligne / injoignable / révoqué), IP

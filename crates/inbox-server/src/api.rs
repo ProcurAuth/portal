@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
@@ -148,11 +148,24 @@ pub async fn accept_alert(
     }
 }
 
-fn producer<'a>(app: &'a AppState, headers: &HeaderMap) -> Result<&'a Producer, ApiError> {
+/// Query parameters accepted by producer endpoints, for tools that cannot set
+/// headers. A token in a URL may end up in proxy logs: prefer the header.
+#[derive(Debug, Default, Deserialize)]
+pub struct ProducerQuery {
+    token: Option<String>,
+    title: Option<String>,
+}
+
+fn producer<'a>(
+    app: &'a AppState,
+    headers: &HeaderMap,
+    query: &ProducerQuery,
+) -> Result<&'a Producer, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .or(query.token.as_deref())
         .map(str::trim);
     let unauthorized = || {
         ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid bearer token")
@@ -194,17 +207,20 @@ pub struct AlertRequest {
     pub message: Option<String>,
 }
 
-pub fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
-    let key =
-        headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(str::trim).ok_or_else(
-            || {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "missing_idempotency_key",
-                    "Idempotency-Key header is required",
-                )
-            },
-        )?;
+/// The `Idempotency-Key` header, or, when the client sends none, a key derived
+/// from the content and the current minute: an identical request retried within
+/// the same minute is deduplicated.
+pub fn idempotency_key(headers: &HeaderMap, content: &[&str]) -> Result<String, ApiError> {
+    let Some(key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()).map(str::trim)
+    else {
+        let mut h = Sha256::new();
+        for part in content {
+            h.update((part.len() as u64).to_be_bytes());
+            h.update(part.as_bytes());
+        }
+        h.update((crate::util::now_ms() / 60_000).to_be_bytes());
+        return Ok(format!("auto:{}", hex(&h.finalize())));
+    };
     if key.is_empty() || key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -219,12 +235,16 @@ pub fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
 pub async fn post_alert(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<ProducerQuery>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let p = producer(&app, &headers)?;
-    let key = idempotency_key(&headers)?;
+    let p = producer(&app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
     check_group(p, &req.group)?;
+    let key = idempotency_key(
+        &headers,
+        &[&req.group, req.title.as_deref().unwrap_or(""), req.message.as_deref().unwrap_or("")],
+    )?;
     let accepted = accept_alert(
         &app,
         NewAlert {
@@ -245,9 +265,10 @@ pub async fn post_alert(
 pub async fn get_alert(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<ProducerQuery>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let p = producer(&app, &headers)?;
+    let p = producer(&app, &headers, &query)?;
     let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such alert");
     if !is_hex_id(&id) {
         return Err(not_found());
@@ -276,10 +297,11 @@ pub async fn get_alert(
 pub async fn alertmanager(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(query): Query<ProducerQuery>,
     Path(group): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let p = producer(&app, &headers)?;
+    let p = producer(&app, &headers, &query)?;
     check_group(p, &group)?;
     let payload: Value = parse_json(&body)?;
     let alerts = payload.get("alerts").and_then(Value::as_array).ok_or_else(|| {
@@ -333,4 +355,65 @@ pub async fn alertmanager(
     }
     Ok(Json(json!({ "created": created, "duplicates": duplicates, "skipped": skipped }))
         .into_response())
+}
+
+/// `POST /api/v1/notify/{group}`: generic webhook for any alerting tool.
+///
+/// The body may be JSON with optional `title` / `message` fields, any other JSON
+/// (kept as compact text), or plain text. The title may also come from `?title=`
+/// or `X-Title`. Text longer than the limits is truncated rather than refused:
+/// the sending tool usually cannot adapt.
+pub async fn notify(
+    State(app): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ProducerQuery>,
+    Path(group): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let p = producer(&app, &headers, &query)?;
+    check_group(p, &group)?;
+    let limits = &app.config.limits;
+    let header_title = headers.get("x-title").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let text = String::from_utf8_lossy(&body);
+    let (body_title, message) = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(map))
+            if map.get("title").is_some_and(Value::is_string)
+                || map.get("message").is_some_and(Value::is_string) =>
+        {
+            let field = |k: &str| map.get(k).and_then(Value::as_str).map(str::to_string);
+            (field("title"), field("message"))
+        }
+        Ok(Value::String(s)) => (None, Some(s)),
+        Ok(Value::Null) | Err(_) if text.trim().is_empty() => (None, None),
+        Ok(other) => (None, Some(other.to_string())),
+        Err(_) => (None, Some(text.to_string())),
+    };
+    let clean = |v: Option<String>, max: usize| {
+        v.map(|t| {
+            let t: String =
+                t.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+            truncate(t.trim(), max)
+        })
+        .filter(|t| !t.is_empty())
+    };
+    let title = clean(query.title.clone().or(header_title).or(body_title), limits.max_title_bytes);
+    let message = clean(message, limits.max_message_bytes);
+    let key = idempotency_key(
+        &headers,
+        &[&group, title.as_deref().unwrap_or(""), message.as_deref().unwrap_or("")],
+    )?;
+    let accepted = accept_alert(
+        &app,
+        NewAlert {
+            group,
+            title,
+            message,
+            source: format!("notify:{}", p.name),
+            idempotency_key: key,
+        },
+        "notify",
+    )
+    .await?;
+    let status = if accepted.duplicate { StatusCode::OK } else { StatusCode::CREATED };
+    Ok((status, [(header::CACHE_CONTROL, "no-store")], Json(accepted)).into_response())
 }

@@ -10,11 +10,12 @@
 //!   `X-Inbox-Request: 1`, which a cross-origin page cannot send without a CORS
 //!   preflight that this server never grants.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -32,13 +33,52 @@ mod assets {
     include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 }
 
-pub async fn static_asset(uri: Uri, headers: HeaderMap) -> Response {
-    let path = match uri.path().trim_matches('/') {
-        "" => "index.html",
-        "doc" => "doc.html",
-        other => other,
+fn find_asset(
+    path: &str,
+) -> Option<&'static (&'static str, &'static str, &'static [u8], &'static str)> {
+    assets::ASSETS.iter().find(|(p, ..)| *p == path)
+}
+
+/// Maps a request path to an embedded file, whatever prefix reverse proxies added:
+/// the longest suffix that names an asset wins, `.../doc` is the API documentation
+/// and anything else is the dashboard.
+fn resolve_asset(path: &str) -> &'static str {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    for start in 0..segments.len() {
+        let candidate = segments[start..].join("/");
+        if let Some((name, ..)) = find_asset(&candidate) {
+            return name;
+        }
+    }
+    if segments.last() == Some(&"doc") { "doc.html" } else { "index.html" }
+}
+
+/// Rewrites `/<any prefix>/api/...` to `/api/...` so that the admin front works
+/// behind reverse proxies that keep their path prefix, with no configuration.
+pub async fn rewrite_request(mut req: Request) -> Request {
+    let path = req.uri().path();
+    let rewritten = if let Some(i) = path.rfind("/api/admin/") {
+        (i > 0).then(|| path[i..].to_string())
+    } else if path.ends_with("/api/version") && path != "/api/version" {
+        Some("/api/version".to_string())
+    } else {
+        None
     };
-    let Some((_, mime, body, etag)) = assets::ASSETS.iter().find(|(p, ..)| *p == path) else {
+    if let Some(new_path) = rewritten {
+        let pq = match req.uri().query() {
+            Some(q) => format!("{new_path}?{q}"),
+            None => new_path,
+        };
+        if let Ok(uri) = pq.parse::<Uri>() {
+            *req.uri_mut() = uri;
+        }
+    }
+    req
+}
+
+pub async fn static_asset(uri: Uri, headers: HeaderMap) -> Response {
+    let name = resolve_asset(uri.path());
+    let Some((_, mime, body, etag)) = find_asset(name) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     let quoted = format!("\"{etag}\"");
@@ -59,8 +99,17 @@ pub async fn static_asset(uri: Uri, headers: HeaderMap) -> Response {
 // ---------------------------------------------------------------- request guard
 
 /// Host allow-list, cross-site and CSRF checks, then security headers.
-pub async fn guard(State(app): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    if let Err(e) = check_request(&app, req.method(), req.headers()) {
+pub async fn guard(
+    State(app): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // A trusted reverse proxy already routed on its own host name: any Host is
+    // fine through it. Direct clients must use a listed host.
+    let peer_ip = peer.ip().to_canonical();
+    let via_proxy = app.config.server.trusted_proxies.iter().any(|n| n.contains(&peer_ip));
+    if let Err(e) = check_request(&app, req.method(), req.headers(), via_proxy) {
         if req.uri().path().starts_with("/api/") {
             return with_security_headers(e.into_response());
         }
@@ -76,9 +125,14 @@ pub async fn guard(State(app): State<Arc<AppState>>, req: Request, next: Next) -
     with_security_headers(next.run(req).await)
 }
 
-fn check_request(app: &AppState, method: &Method, headers: &HeaderMap) -> Result<(), ApiError> {
+fn check_request(
+    app: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    via_proxy: bool,
+) -> Result<(), ApiError> {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !app.config.admin.allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+    if !via_proxy && !app.config.admin.allowed_hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
         tracing::warn!(event = "admin_host_refused", host = %host);
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -107,15 +161,22 @@ fn check_request(app: &AppState, method: &Method, headers: &HeaderMap) -> Result
     Ok(())
 }
 
+/// Inline scripts are allowed by hash only (computed at build time).
+fn csp() -> &'static HeaderValue {
+    static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
+    CSP.get_or_init(|| {
+        let policy = format!(
+            "default-src 'none'; script-src 'self' {}; style-src 'self'; img-src 'self' data:; \
+             connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            assets::CSP_SCRIPT_HASHES
+        );
+        HeaderValue::from_str(&policy).expect("CSP is ASCII")
+    })
+}
+
 fn with_security_headers(mut res: Response) -> Response {
     let h = res.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
-             connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-        ),
-    );
+    h.insert(header::CONTENT_SECURITY_POLICY, csp().clone());
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));

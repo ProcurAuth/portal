@@ -112,6 +112,7 @@ async fn run(
         .route("/api/v1/alerts", post(api::post_alert))
         .route("/api/v1/alerts/{id}", get(api::get_alert))
         .route("/api/v1/webhooks/alertmanager/{group}", post(api::alertmanager))
+        .route("/api/v1/notify/{group}", post(api::notify))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/api/version", get(version))
@@ -155,11 +156,17 @@ async fn run(
     let public_srv =
         axum::serve(public, public_router.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(stop());
-    let admin_srv = axum::serve(
-        admin_listener,
-        admin_router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(stop());
+    // Prefix rewriting must happen before routing, so it wraps the router.
+    let admin_app =
+        tower::Layer::layer(&axum::middleware::map_request(admin::rewrite_request), admin_router);
+    let admin_srv =
+        axum::serve(
+            admin_listener,
+            axum::ServiceExt::<axum::extract::Request>::into_make_service_with_connect_info::<
+                SocketAddr,
+            >(admin_app),
+        )
+        .with_graceful_shutdown(stop());
     let servers = async { tokio::try_join!(async { public_srv.await }, async { admin_srv.await }) };
     tokio::pin!(servers);
 

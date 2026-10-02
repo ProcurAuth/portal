@@ -4,7 +4,6 @@
   light base with coloured blobs behind. Dark values (the hero look) in values-night.
 -->
 <resources>
-    <color name="launcher_background">#3B8CF7</color>
 
     <!-- Surfaces -->
     <color name="bg_page">#EEF1F6</color>

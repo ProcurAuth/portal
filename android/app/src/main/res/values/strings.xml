@@ -12,7 +12,19 @@
     <string name="drawer_no_pseudo">aucun pseudo</string>
     <string name="drawer_servers_none">Aucun serveur</string>
     <string name="drawer_servers_all_up">tous connectés</string>
-    <string name="drawer_servers_down">%1$d srv hors ligne</string>
+    <plurals name="drawer_servers_down">
+        <item quantity="one">%d serveur hors ligne</item>
+        <item quantity="other">%d serveurs hors ligne</item>
+    </plurals>
+
+    <!-- Status -->
+    <string name="status_online">En ligne</string>
+    <string name="status_offline">Hors ligne</string>
+    <string name="status_offline_since">Hors ligne %1$s</string>
+    <string name="status_connecting">Connexion…</string>
+    <string name="status_reenroll">À réenrôler</string>
+    <string name="status_no_server">Aucun serveur</string>
+    <string name="chip_ringing">En cours</string>
 
 
     <!-- Alerts (home) -->
@@ -22,8 +34,19 @@
     <string name="alerts_no_server_title">Aucun serveur</string>
     <string name="alerts_no_server_body">Ajoutez un serveur Inbox pour commencer à recevoir des alertes.</string>
     <string name="alerts_add_server">Ajouter un serveur</string>
-    <string name="alerts_footer">%1$d dernière(s) · %2$s ·</string>
+    <plurals name="alerts_footer">
+        <item quantity="one">%1$d dernière · %2$s ·</item>
+        <item quantity="other">%1$d dernières · %2$s ·</item>
+    </plurals>
     <string name="alerts_footer_edit">modifier</string>
+    <string name="alerts_meta">%1$d/%2$d · %3$s · serv. %4$d</string>
+    <plurals name="alerts_unread">
+        <item quantity="one">%d non lue</item>
+        <item quantity="other">%d non lues</item>
+    </plurals>
+    <string name="alerts_mark_all">Tout marquer comme lu</string>
+    <string name="alert_mark_read">Marquer comme lu</string>
+    <string name="marked_read">Marquée comme lue</string>
     <string name="alert_stop">Couper l\'alarme</string>
     <string name="alert_close">Fermer</string>
     <string name="alert_permissions_missing">Autorisations manquantes : une alerte critique pourrait ne pas sonner.</string>
@@ -36,6 +59,10 @@
     <string name="action_notify">Notification</string>
     <string name="action_ring">Sonnerie</string>
     <string name="action_alarm">Alarme</string>
+    <string name="seg_off">Aucune</string>
+    <string name="seg_notify">Notif</string>
+    <string name="seg_ring">Sonnerie</string>
+    <string name="seg_alarm">Alarme</string>
 
     <!-- Servers -->
     <string name="servers_title">Serveurs</string>
@@ -48,12 +75,14 @@
     <string name="action_notify_help">Notification normale, selon le mode du téléphone.</string>
     <string name="action_ring_help">Un son, même en silencieux ou en vibreur.</string>
     <string name="action_alarm_help">Ouvre Inbox en plein écran avec l\'alarme et le message, jusqu\'à ce que vous l\'arrêtiez.</string>
+    <string name="server_groups_subscribed">abonnés %1$d/%2$d</string>
     <string name="server_groups_none">Les groupes apparaîtront après la première connexion.</string>
     <string name="server_offline_change">Hors ligne : réessayez une fois connecté</string>
     <string name="server_remove">Supprimer ce serveur</string>
     <string name="server_remove_title">Supprimer %1$s ?</string>
     <string name="server_remove_body">Ce téléphone ne recevra plus ses alertes. Il faudra le mot de passe pour l\'ajouter à nouveau.</string>
     <string name="server_remove_confirm">Supprimer</string>
+    <string name="server_removed">Serveur supprimé</string>
     <string name="cancel">Annuler</string>
 
     <!-- Add server -->
@@ -66,6 +95,7 @@
     <string name="add_device_name">Nom de cet appareil</string>
     <string name="add_device_name_help">Visible par l\'administrateur dans l\'interface web.</string>
     <string name="add_security_note">Le mot de passe ne quitte jamais le téléphone (protocole OPAQUE), même sur une connexion http non chiffrée.</string>
+    <string name="add_encrypted">Connexion chiffrée</string>
     <string name="add_connect">Connecter</string>
     <string name="add_connecting">Connexion et vérification du mot de passe…</string>
     <string name="add_invalid_address">Adresse invalide</string>
@@ -94,7 +124,6 @@
     <string name="perm_overlay">Afficher par-dessus les autres applications</string>
     <string name="perm_grant">Autoriser</string>
     <string name="settings_about">À propos</string>
-    <string name="settings_about_body">Inbox reçoit uniquement des alertes : ce téléphone ne peut pas en envoyer.</string>
 
     <!-- Metadata keys (dense key / value rows) -->
     <string name="meta_server">Serveur</string>
@@ -102,6 +131,7 @@
     <string name="meta_action">Action</string>
     <string name="meta_sent">Envoyée</string>
     <string name="meta_received">Reçue</string>
+    <string name="meta_read">Lue</string>
     <string name="meta_alert_id">ID alerte</string>
     <string name="meta_state">État</string>
     <string name="meta_address">Adresse</string>
@@ -110,12 +140,11 @@
     <string name="meta_device_id">ID appareil</string>
     <string name="meta_detail">Détail</string>
     <string name="meta_version">Version</string>
-    <string name="meta_mode">Mode</string>
-    <string name="meta_mode_value">Réception seule</string>
     <string name="save_short">OK</string>
 
     <!-- Alarm screen -->
     <string name="alarm_hint">Glissez pour arrêter</string>
+    <string name="alarm_received_at">reçue %1$s</string>
     <string name="alarm_all_stopped">L\'arrêt coupe toutes les alarmes en cours.</string>
     <string name="alarm_stop_description">Arrêter l\'alarme. Glissez hors du cercle ou appuyez longuement.</string>
 </resources>

@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Inbox mark "((•))" (assets/brand/mark.svg), scaled into the 66 dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <group android:translateX="30" android:translateY="30">
-        <path android:fillColor="#FFFFFF"
-            android:pathData="M24,46c2.2,0 4,-1.8 4,-4h-8c0,2.2 1.8,4 4,4zM36,34V22c0,-6.1 -3.3,-11.3 -9,-12.6V8c0,-1.7 -1.3,-3 -3,-3s-3,1.3 -3,3v1.4C15.3,10.7 12,15.9 12,22v12l-4,4v2h32v-2l-4,-4z" />
+    <group android:scaleX="1.35" android:scaleY="1.35" android:translateX="10.8" android:translateY="10.8">
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:pathData="M39.8,24.2A11,11 0,0 1,39.8 39.8" />
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:pathData="M24.2,24.2A11,11 0,0 0,24.2 39.8" />
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:strokeAlpha="0.85" android:pathData="M45.4,18.6A19,19 0,0 1,45.4 45.4" />
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:strokeAlpha="0.85" android:pathData="M18.6,18.6A19,19 0,0 0,18.6 45.4" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M26.5,32a5.5,5.5 0,1 0,11 0a5.5,5.5 0,1 0,-11 0z" />
     </group>
 </vector>

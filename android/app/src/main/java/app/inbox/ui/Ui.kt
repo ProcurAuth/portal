@@ -137,7 +137,7 @@ fun Context.panel(padH: Int = 0, padV: Int = 0): LinearLayout = lin(padH = padH,
     outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
 }
 
-/** Square-ish monospace tag: "ALARM", "RING", "UP"… */
+/** Square-ish monospace tag: "ALARME", "SONNERIE", "EN LIGNE"… */
 fun Context.chip(value: String, fg: Int, bg: Int, dot: Boolean = false): TextView =
     mono(value.uppercase(), 10f, fg, bold = true).apply {
         letterSpacing = 0.06f
@@ -214,9 +214,9 @@ fun LinearLayout.LayoutParams.margins(c: Context, l: Int = 0, t: Int = 0, r: Int
 }
 
 /**
- * Compact glass app bar (48 dp): navigation icon on the left, optional trailing
- * view (status) on the right. No title: the brand lives in the drawer header and
- * the screen context in the content's section label.
+ * Compact app bar (48 dp) drawn directly on the page background: navigation icon
+ * on the left, optional trailing view (status) on the right. No title and no bar
+ * background: the screen context is the content's section label.
  */
 fun Context.topBar(navRes: Int, navDescription: String, onNav: () -> Unit, trailing: View? = null): LinearLayout {
     val bar = lin(vertical = false, padH = 4, padV = 0).apply {
@@ -225,11 +225,7 @@ fun Context.topBar(navRes: Int, navDescription: String, onNav: () -> Unit, trail
         addView(View(this@topBar), lp(0, 1, 1f))
         if (trailing != null) addView(trailing, lp(WRAP, WRAP).margins(this@topBar, r = 10))
     }
-    return lin().apply {
-        background = GradientDrawable().apply { setColor(color(R.color.glass)) }
-        addView(bar, lp(MATCH, dp(48)))
-        addView(divider())
-    }
+    return lin().apply { addView(bar, lp(MATCH, dp(48))) }
 }
 
 // ---------------------------------------------------------------- semantics
@@ -237,10 +233,10 @@ fun Context.topBar(navRes: Int, navDescription: String, onNav: () -> Unit, trail
 data class ActionStyle(val icon: Int, val fg: Int, val bg: Int, val label: String, val code: String)
 
 fun Context.actionStyle(action: String?): ActionStyle = when (action) {
-    "alarm" -> ActionStyle(R.drawable.ic_alarm, color(R.color.danger), color(R.color.danger_soft), getString(R.string.action_alarm), "ALARM")
-    "ring" -> ActionStyle(R.drawable.ic_bell_ring, color(R.color.warning), color(R.color.warning_soft), getString(R.string.action_ring), "RING")
+    "alarm" -> ActionStyle(R.drawable.ic_alarm, color(R.color.danger), color(R.color.danger_soft), getString(R.string.action_alarm), "ALARME")
+    "ring" -> ActionStyle(R.drawable.ic_bell_ring, color(R.color.warning), color(R.color.warning_soft), getString(R.string.action_ring), "SONNERIE")
     "notify" -> ActionStyle(R.drawable.ic_bell, color(R.color.info), color(R.color.info_soft), getString(R.string.action_notify), "NOTIF")
-    else -> ActionStyle(R.drawable.ic_bell_outline, color(R.color.text_muted), color(R.color.bg_hover), getString(R.string.action_off), "NONE")
+    else -> ActionStyle(R.drawable.ic_bell_outline, color(R.color.text_muted), color(R.color.bg_hover), getString(R.string.action_off), "AUCUNE")
 }
 
 /** "à l'instant", "il y a 5 min", "il y a 3 h", "hier", "il y a 4 j". */
@@ -255,14 +251,14 @@ fun relativeTime(thenMs: Long, nowMs: Long = System.currentTimeMillis()): String
     }
 }
 
-/** Compact age for dense rows: "now", "4m", "3h", "2d". */
+/** Compact age for dense rows: "<1 min", "4 min", "3 h", "2 j". */
 fun shortAge(thenMs: Long, nowMs: Long = System.currentTimeMillis()): String {
     val s = ((nowMs - thenMs) / 1000).coerceAtLeast(0)
     return when {
-        s < 45 -> "<1m"
-        s < 3_600 -> "${(s + 30) / 60}m"
-        s < 86_400 -> "${s / 3_600}h"
-        else -> "${s / 86_400}d"
+        s < 45 -> "<1 min"
+        s < 3_600 -> "${(s + 30) / 60} min"
+        s < 86_400 -> "${s / 3_600} h"
+        else -> "${s / 86_400} j"
     }
 }
 

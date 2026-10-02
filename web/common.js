@@ -1,4 +1,5 @@
-// Helpers shared by the dashboard (app.js) and the API documentation (doc.js).
+// Helpers shared by the dashboard (app.js) and the integrations page (doc.js).
+// Every URL is relative so the front works at the root or under any proxy prefix.
 'use strict';
 
 window.Inbox = (() => {
@@ -96,6 +97,35 @@ window.Inbox = (() => {
   } catch (_) {
     // Storage unavailable: nothing to clean.
   }
+
+  // Theme: "system" (default, follows the browser), "light" or "dark". The
+  // choice is applied before first paint by a tiny inline script in <head>.
+  const THEME_KEY = 'inbox.theme';
+  function readTheme() {
+    try {
+      const t = localStorage.getItem(THEME_KEY);
+      return t === 'light' || t === 'dark' ? t : 'system';
+    } catch (_) {
+      return 'system';
+    }
+  }
+  function applyTheme(theme) {
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    else delete document.documentElement.dataset.theme;
+    try {
+      if (theme === 'system') localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, theme);
+    } catch (_) {
+      // Storage unavailable: the choice lasts for this page only.
+    }
+    for (const b of document.querySelectorAll('[data-theme-value]')) {
+      b.setAttribute('aria-pressed', b.dataset.themeValue === theme ? 'true' : 'false');
+    }
+  }
+  for (const b of document.querySelectorAll('[data-theme-value]')) {
+    b.addEventListener('click', () => applyTheme(b.dataset.themeValue));
+  }
+  applyTheme(readTheme());
 
   return { $, el, icon, api, toast, copy };
 })();

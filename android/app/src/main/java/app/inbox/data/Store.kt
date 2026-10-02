@@ -35,7 +35,11 @@ data class Alert(
     val notified: Boolean,
     /** When the alarm sound was stopped on this phone (local only, never sent). */
     val stoppedAtMs: Long?,
-)
+    /** When the user marked it read on this phone (local only, never sent). */
+    val readAtMs: Long?,
+) {
+    val unread: Boolean get() = readAtMs == null
+}
 
 data class OutboxItem(val id: Long, val serverId: Long, val alertId: String, val stage: String)
 
@@ -43,10 +47,11 @@ data class OutboxItem(val id: Long, val serverId: Long, val alertId: String, val
  * Local durable state. Alerts are keyed by (server, alert_id): storing an alert is
  * the deduplication point that guarantees each alert is shown exactly once.
  * Alerts are one-way: the only thing sent back is the automatic transport receipt.
- * The `acked_at_ms` column holds the local "alarm stopped" time.
+ * The `acked_at_ms` column holds the local "alarm stopped" time, `read_at_ms` the
+ * local "marked read" time. Neither is ever sent.
  */
 class Store private constructor(context: Context) :
-    SQLiteOpenHelper(context, "inbox.db", null, 2) {
+    SQLiteOpenHelper(context, "inbox.db", null, 3) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -107,6 +112,7 @@ class Store private constructor(context: Context) :
                 action TEXT NOT NULL,
                 notified INTEGER NOT NULL DEFAULT 0,
                 acked_at_ms INTEGER,
+                read_at_ms INTEGER,
                 UNIQUE (server_id, alert_id))"""
         )
         db.execSQL("CREATE INDEX alerts_recent ON alerts(server_id, received_at_ms)")
@@ -123,6 +129,11 @@ class Store private constructor(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         // v2: pseudo per server. Existing servers keep working without one.
         if (oldVersion < 2) db.execSQL("ALTER TABLE servers ADD COLUMN user_name TEXT")
+        // v3: local read state. Alerts received before the upgrade count as read.
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE alerts ADD COLUMN read_at_ms INTEGER")
+            db.execSQL("UPDATE alerts SET read_at_ms = received_at_ms")
+        }
     }
 
     // ------------------------------------------------------------ servers
@@ -277,6 +288,7 @@ class Store private constructor(context: Context) :
                             if (c.isNull(5)) null else c.getString(5),
                             c.getLong(6), c.getLong(7), c.getString(8), c.getInt(9) != 0,
                             if (c.isNull(10)) null else c.getLong(10),
+                            if (c.isNull(11)) null else c.getLong(11),
                         )
                     )
                 }
@@ -284,7 +296,7 @@ class Store private constructor(context: Context) :
         }
 
     private val alertColumns =
-        "server_id, alert_id, group_id, group_name, title, message, created_at_ms, received_at_ms, action, notified, acked_at_ms"
+        "server_id, alert_id, group_id, group_name, title, message, created_at_ms, received_at_ms, action, notified, acked_at_ms, read_at_ms"
 
     fun alert(serverId: Long, alertId: String): Alert? = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE server_id = ? AND alert_id = ?",
@@ -295,6 +307,25 @@ class Store private constructor(context: Context) :
     fun recentAlerts(sinceMs: Long, limit: Int): List<Alert> = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ? ORDER BY received_at_ms DESC, id DESC LIMIT ?",
         arrayOf(sinceMs.toString(), limit.toString())
+    )
+
+    /** Marks one alert read. Returns false if it already was. */
+    fun markRead(serverId: Long, alertId: String): Boolean =
+        writableDatabase.update(
+            "alerts", ContentValues().apply { put("read_at_ms", System.currentTimeMillis()) },
+            "server_id = ? AND alert_id = ? AND read_at_ms IS NULL", arrayOf(serverId.toString(), alertId)
+        ) > 0
+
+    fun unreadAlerts(): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE read_at_ms IS NULL ORDER BY received_at_ms", emptyArray()
+    )
+
+    fun unreadCount(): Int = readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM alerts WHERE read_at_ms IS NULL", null
+    ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    fun serverAlerts(serverId: Long): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE server_id = ?", arrayOf(serverId.toString())
     )
 
     /** Stored but never shown: the app died between storing and notifying. */

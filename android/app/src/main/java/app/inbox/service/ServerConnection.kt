@@ -393,6 +393,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             action = msg.getString("action"),
             notified = false,
             stoppedAtMs = null,
+            readAtMs = null,
         )
         // 1. Durable before acknowledging: if we die after this, it is shown at restart.
         val isNew = store.insertAlertIfNew(alert)

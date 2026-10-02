@@ -46,7 +46,13 @@
   let serverOffset = 0; // server clock - local clock
   const serverNow = () => Date.now() + serverOffset;
   const dateFmt = new Intl.DateTimeFormat('fr-FR', { dateStyle: 'medium', timeStyle: 'medium' });
+  const clockFmt = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  const dayFmt = new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: '2-digit' });
   const absTime = (ms) => (ms ? dateFmt.format(new Date(ms)) : '–');
+  const clock = (ms) => (ms ? clockFmt.format(new Date(ms)) : '--:--:--');
+  // Short relative age for dense rows: "12 s", "4 min", "3 h", "2 j".
+  const age = (ms) => (ms ? duration(serverNow() - ms) : '–');
+  const sameDay = (ms) => new Date(ms).toDateString() === new Date(serverNow()).toDateString();
 
   function duration(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
@@ -126,12 +132,13 @@
   // ------------------------------------------------------------ overview & status
 
   async function refreshOverview() {
-    const data = await api('GET', '/api/admin/overview');
+    const data = await api('GET', 'api/admin/overview');
     overview = data;
     serverOffset = data.server.time_ms - Date.now();
     groupNames.clear();
     for (const g of data.groups) groupNames.set(g.id, g.name);
     $('server-name').textContent = data.server.name;
+    $('server-version').textContent = 'v' + data.server.version;
     document.title = data.server.name + ' · Inbox';
 
     const st = data.stats;
@@ -139,13 +146,15 @@
     const late = st.pending_deliveries > 0 && st.oldest_pending_ms > 60000;
     pill.classList.toggle('warn', st.unreachable > 0 || late);
     pill.classList.toggle('idle', st.enrolled === 0);
-    let extra = '';
-    if (st.unreachable > 0) extra = ' · ' + plural(st.unreachable, 'injoignable');
-    else if (late) extra = ' · envoi en attente';
-    $('status-text').replaceChildren(st.online + '/' + st.enrolled, el('span', { class: 'pill-extra', text: ' en ligne' + extra }));
-    pill.title = st.pending_deliveries > 0
-      ? st.pending_deliveries + ' livraison(s) en attente, la plus ancienne depuis ' + duration(st.oldest_pending_ms)
-      : 'Aucune livraison en attente';
+    let text;
+    if (st.enrolled === 0) text = 'Aucun appareil';
+    else if (st.unreachable > 0) text = plural(st.unreachable, 'injoignable');
+    else if (late) text = 'Envoi en attente';
+    else text = st.online + '/' + st.enrolled + ' en ligne';
+    $('status-text').textContent = text;
+    pill.title = st.online + ' en ligne sur ' + st.enrolled + ' enrôlé(s). ' + (st.pending_deliveries > 0
+      ? st.pending_deliveries + ' livraison(s) en attente, la plus ancienne depuis ' + duration(st.oldest_pending_ms) + '.'
+      : 'Aucune livraison en attente.');
 
     fillGroupSelect();
     updateTargets();
@@ -157,11 +166,11 @@
 
   async function refreshAlerts() {
     const since = Math.floor(serverNow() - ALERT_WINDOW_MS);
-    const data = await api('GET', '/api/admin/alerts?limit=' + ALERT_LIMIT + '&since_ms=' + since);
+    const data = await api('GET', 'api/admin/alerts?limit=' + ALERT_LIMIT + '&since_ms=' + since);
     const alerts = (data.alerts || []).filter((a) => a.created_at >= since).slice(0, ALERT_LIMIT);
     show('alerts-empty', alerts.length === 0);
     renderIfChanged('alerts-list', JSON.stringify(alerts) + [...expanded].join(), () => alerts.map(alertCard));
-    for (const t of document.querySelectorAll('[data-ago]')) t.textContent = ago(Number(t.dataset.ago));
+    for (const t of document.querySelectorAll('[data-age]')) t.textContent = age(Number(t.dataset.age));
   }
 
   function alertCard(a) {
@@ -173,61 +182,59 @@
     const title = a.title || groupName(a.group);
 
     let state;
-    if (targets === 0) state = el('span', { class: 'badge warning' }, icon('alert-circle-outline'), 'Aucun destinataire');
-    else if (missing > 0) state = el('span', { class: 'badge danger' }, icon('clock-outline'), missing + ' non reçue' + (missing > 1 ? 's' : ''));
-    else if (expired === 0) state = el('span', { class: 'badge success' }, icon('check-circle-outline'), 'Reçue');
-    else state = el('span', { class: 'badge neutral', title: "Non reçue avant l'expiration : n'est plus envoyée" }, icon('clock-outline'), 'Expirée');
+    let sev;
+    if (targets === 0) {
+      state = el('span', { class: 'badge warning', title: "Aucun appareil n'était abonné au groupe" }, 'Aucun destinataire');
+      sev = 'warning';
+    } else if (missing > 0) {
+      state = el('span', { class: 'badge danger' }, missing + ' non reçue' + (missing > 1 ? 's' : ''));
+      sev = 'danger';
+    } else if (expired === 0) {
+      state = el('span', { class: 'badge success' }, 'Reçue');
+      sev = 'ok';
+    } else {
+      state = el('span', { class: 'badge neutral', title: "Non reçue avant l'expiration : n'est plus envoyée" }, 'Expirée');
+      sev = 'neutral';
+    }
 
     const fill = el('span');
     fill.style.width = (targets ? Math.round((100 * received) / targets) : 0) + '%';
     const bar = el('span', { class: 'bar' + (missing > 0 || expired > 0 ? ' partial' : ''), 'aria-hidden': 'true' }, fill);
 
-    let message = null;
-    let more = null;
-    if (a.message) {
-      const open = expanded.has(a.id);
-      message = el('p', { class: 'alert-message' + (open ? ' expanded' : ''), text: a.message });
-      if (a.message.length > 140 || a.message.split('\n').length > 2) {
-        more = el('button', {
-          class: 'more-btn',
-          type: 'button',
-          text: open ? 'Voir moins' : 'Voir plus',
-          onclick: (ev) => {
-            ev.stopPropagation();
-            if (expanded.has(a.id)) expanded.delete(a.id);
-            else expanded.add(a.id);
-            refreshAlerts().catch(showError);
-          },
-        });
-      }
-    }
-
+    const when = sameDay(a.created_at) ? clock(a.created_at) : dayFmt.format(new Date(a.created_at)) + ' ' + clock(a.created_at).slice(0, 5);
     return el(
-      'article',
+      'div',
       {
-        class: 'panel alert-card' + (missing > 0 ? ' undelivered' : expired > 0 ? ' expired' : ''),
+        class: 'row clickable alert-row',
         tabindex: '0',
+        role: 'button',
         'aria-label': title,
         onclick: () => openDetail(a.id),
-        onkeydown: (ev) => { if (ev.key === 'Enter') openDetail(a.id); },
+        onkeydown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail(a.id); } },
       },
-      el('div', { class: 'alert-top' },
-        el('span', { class: 'chip', text: groupName(a.group) }),
+      el('span', { class: 'sev ' + sev }),
+      el('div', { class: 'alert-clock', title: absTime(a.created_at) },
+        el('span', { class: 'hms', text: when }),
+        el('span', { class: 'rel', 'data-age': a.created_at, text: age(a.created_at) })),
+      el('div', { class: 'row-main' },
+        el('div', { class: 'alert-head' },
+          el('span', { class: 'chip', text: groupName(a.group) }),
+          el('span', { class: 'alert-title', text: title })),
+        a.message ? el('p', { class: 'alert-message', text: a.message }) : null,
+        el('div', { class: 'alert-meta' }, el('span', { text: sourceLabel(a.source) }))),
+      el('div', { class: 'alert-side' },
         state,
-        el('span', { class: 'alert-time', title: absTime(a.created_at), 'data-ago': a.created_at, text: ago(a.created_at) })),
-      el('div', { class: 'alert-title', text: title }),
-      message,
-      more,
-      el('div', { class: 'alert-foot' },
-        el('span', { class: 'source' }, icon('information-outline'), sourceLabel(a.source)),
-        targets > 0 ? el('span', { class: 'progress' }, bar, received + '/' + targets + ' reçue' + (received > 1 ? 's' : ''), expired > 0 ? el('span', { class: 'expired-count', text: expired + ' expirée' + (expired > 1 ? 's' : '') }) : null) : null),
+        targets > 0
+          ? el('span', { class: 'receipt', title: received + ' reçue(s) sur ' + targets + (expired ? ', ' + expired + ' expirée(s)' : '') },
+            bar, received + '/' + targets)
+          : null),
     );
   }
 
   async function openDetail(id) {
     let d;
     try {
-      d = await api('GET', '/api/admin/alerts/' + encodeURIComponent(id));
+      d = await api('GET', 'api/admin/alerts/' + encodeURIComponent(id));
     } catch (e) {
       toast(e.message);
       return;
@@ -275,9 +282,10 @@
 
   function updateTargets() {
     const n = subscribersOf($('send-group').value);
-    const t = $('send-targets');
+    const t = $('send-hint');
     t.classList.toggle('warn-text', n === 0);
-    t.textContent = n === null ? '' : n === 0 ? 'Aucun appareil abonné' : plural(n, 'appareil') + ' abonné' + (n > 1 ? 's' : '');
+    t.textContent = n === null ? '' : n === 0 ? 'Aucun appareil abonné à ce groupe' : plural(n, 'appareil') + ' abonné' + (n > 1 ? 's' : '');
+    $('send-targets').textContent = overview ? plural(overview.groups.length, 'groupe') : '';
   }
 
   let pendingSend = null; // { fingerprint, key }: the same content reuses its idempotency key
@@ -302,7 +310,7 @@
     btn.disabled = true;
     const result = $('send-result');
     try {
-      const r = await api('POST', '/api/admin/alerts', { ...body, idempotency_key: pendingSend.key });
+      const r = await api('POST', 'api/admin/alerts', { ...body, idempotency_key: pendingSend.key });
       pendingSend = null;
       result.className = 'banner ' + (r.targets === 0 ? 'warning' : 'success');
       result.replaceChildren(
@@ -337,6 +345,7 @@
     if (userFilter !== null && !users.has(userFilter)) userFilter = null;
     const names = [...users.keys()].filter((k) => k !== NO_USER).sort((a, b) => a.localeCompare(b, 'fr'));
     const key = JSON.stringify([...users]) + '|' + userFilter;
+    $('user-filter').hidden = users.size < 2;
     if (users.size < 2) {
       renderIfChanged('user-filter', key, () => []);
       return;
@@ -365,7 +374,7 @@
 
   function renderDevices() {
     const st = overview.stats;
-    $('devices-summary').textContent = st.enrolled + ' enrôlé' + (st.enrolled > 1 ? 's' : '') + ' · ' + st.online + ' en ligne';
+    $('devices-summary').textContent = st.online + '/' + st.enrolled + ' en ligne' + (st.unreachable ? ' · ' + st.unreachable + ' injoignable' + (st.unreachable > 1 ? 's' : '') : '');
     const list = overview.devices
       .filter((r) => matchesUser(r.device.user_name))
       .sort((a, b) => (a.device.user_name || '￿').localeCompare(b.device.user_name || '￿', 'fr') || a.device.name.localeCompare(b.device.name, 'fr'));
@@ -383,7 +392,7 @@
     const meta = [
       (live && live.ip) || d.last_ip || 'IP inconnue',
       'v' + ((live && live.app_version) || d.app_version || '?'),
-      live ? 'connecté ' + ago(live.connected_at) : 'vu ' + ago(d.last_seen_at),
+      live ? 'connecté depuis ' + age(live.connected_at) : 'vu il y a ' + age(d.last_seen_at),
     ];
     if (d.pending && row.status !== 'revoked') meta.push(plural(d.pending, 'alerte') + ' en attente');
     const subs = d.subscriptions.length
@@ -397,7 +406,7 @@
       onclick: async () => {
         if (!(await confirmDialog("Révoquer l'appareil « " + whoText(d.user_name, d.name) + " » ? Il devra être ré-enrôlé pour recevoir des alertes.", 'Révoquer'))) return;
         try {
-          await api('POST', '/api/admin/devices/' + encodeURIComponent(d.id) + '/revoke', {});
+          await api('POST', 'api/admin/devices/' + encodeURIComponent(d.id) + '/revoke', {});
           toast('Appareil révoqué');
           await refreshOverview();
         } catch (e) {
@@ -418,21 +427,23 @@
 
   async function refreshConnections() {
     const filter = userFilter ? '&user=' + encodeURIComponent(userFilter) : '';
-    const data = await api('GET', '/api/admin/connections?limit=' + CONNECTION_LIMIT + filter);
+    const data = await api('GET', 'api/admin/connections?limit=' + CONNECTION_LIMIT + filter);
     const list = (data.connections || []).filter((c) => matchesUser(c.user_name));
-    $('connections-summary').textContent = CONNECTION_LIMIT + ' dernières' + (userFilter === null ? '' : ' · ' + (userFilter || 'sans pseudo'));
+    $('connections-summary').textContent = list.length + ' dernière' + (list.length > 1 ? 's' : '') + (userFilter === null ? '' : ' · ' + (userFilter || 'sans pseudo'));
     show('connections-empty', list.length === 0);
     show('connections-list', list.length > 0);
     const key = JSON.stringify(list) + Math.floor(serverNow() / 30000);
     renderIfChanged('connections-list', key, () => list.map((c) => {
       const open = !c.disconnected_at;
       const sub = [c.ip, 'v' + c.app_version];
-      if (!open) sub.push(duration(c.disconnected_at - c.connected_at) + (c.close_reason ? ' · ' + (CLOSE_REASONS[c.close_reason] || c.close_reason) : ''));
+      if (open) sub.push('depuis ' + age(c.connected_at));
+      else sub.push(duration(c.disconnected_at - c.connected_at) + (c.close_reason ? ' · ' + (CLOSE_REASONS[c.close_reason] || c.close_reason) : ''));
+      const when = sameDay(c.connected_at) ? clock(c.connected_at) : dayFmt.format(new Date(c.connected_at)) + ' ' + clock(c.connected_at).slice(0, 5);
       return el('div', { class: 'row' },
+        el('span', { class: 'sev ' + (open ? 'ok' : '') }),
+        el('span', { class: 'row-time conn-time', title: absTime(c.connected_at), text: when }),
         el('div', { class: 'row-main' }, el('div', { class: 'row-title' }, who(c.user_name, c.device_name)), el('div', { class: 'row-sub', text: sub.join(' · ') })),
-        el('div', { class: 'row-side' },
-          open ? el('span', { class: 'badge success', text: 'En cours' }) : null,
-          el('span', { class: 'row-time', title: absTime(c.connected_at), text: ago(c.connected_at) })));
+        el('div', { class: 'row-side' }, open ? el('span', { class: 'badge success', text: 'En cours' }) : null));
     }));
   }
 

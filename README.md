@@ -51,7 +51,9 @@ docker compose ps            # wait for "healthy"
 
 1. **Admin front.** It has no password and listens on `127.0.0.1:8081`. Reach it
    with `ssh -L 8081:127.0.0.1:8081 <host>`, or put it behind a reverse proxy that
-   authenticates users (and add the proxy's hostname to `admin.allowed_hosts`).
+   authenticates users (list the proxy in `server.trusted_proxies`; its hostname
+   does not need to be in `admin.allowed_hosts`). It works at the root or under
+   any path prefix, behind several proxies at once, with no extra setting.
    It is a single page with no settings: send an alert, the 5 latest alerts of the
    last 24 h with their receipts, devices and connections (filterable by user
    pseudonym). `/doc` documents the producer API with the server's real URLs,
@@ -134,7 +136,9 @@ Reusing a key with different content returns `409`.
     (for example Traefik forward-auth).
   - **DNS rebinding:** requests whose `Host` header is not listed in
     `admin.allowed_hosts` are refused, so a malicious web page cannot reach a
-    localhost-bound admin front through a hostname it controls.
+    localhost-bound admin front through a hostname it controls. Requests that
+    come from a peer listed in `server.trusted_proxies` are exempt: the proxy
+    already routed on its own hostnames.
   - **CSRF:** every `POST` must carry `Content-Type: application/json` and the
     `X-Inbox-Request: 1` header, which a cross-site page cannot send without a
     CORS preflight that Inbox never grants. Requests marked
@@ -166,9 +170,15 @@ the `groups` of its `producer` block.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/v1/alerts` | Body: `{"group": "...", "title"?: "...", "message"?: "..."}`. Header `Idempotency-Key` is required. Returns `201 {alert_id, duplicate, targets}`. |
+| `POST /api/v1/alerts` | Body: `{"group": "...", "title"?: "...", "message"?: "..."}`. `Idempotency-Key` header recommended; without it an identical request within the same minute is deduplicated. Returns `201 {alert_id, duplicate, targets}`. |
+| `POST /api/v1/notify/{group}` | Generic webhook for any tool: plain text, JSON with `title` / `message`, or any JSON (kept as text). Title from `?title=` or `X-Title`. Too long text is truncated. |
 | `GET /api/v1/alerts/{id}` | Delivery status per device: sent and received, with attempt counts. Use it to escalate elsewhere. |
 | `POST /api/v1/webhooks/alertmanager/{group}` | Alertmanager / Grafana webhook payload. One Inbox alert per alert, deduplicated on fingerprint + status + `startsAt`. |
+
+Every producer endpoint takes `Authorization: Bearer <token>`, or `?token=<token>`
+for tools that cannot set headers (the URL may then appear in proxy logs). The
+admin front's `/doc` page gives ready-to-paste recipes for Grafana, Alertmanager
+and other alerting tools, with this server's real URLs.
 | `GET /healthz`, `GET /readyz` | Liveness, and readiness (checks the database). |
 | `GET /api/version` | Version, git revision, protocol version. |
 

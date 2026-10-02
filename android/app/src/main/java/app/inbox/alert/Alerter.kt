@@ -122,9 +122,10 @@ object Alerter {
         val nm = context.getSystemService(NotificationManager::class.java)
         val title = a.title ?: a.groupName
         val body = a.message ?: "Alerte ${a.groupName}"
+        // Tapping the notification opens the alert in the app, which marks it read.
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),
-            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            MainActivity.openAlert(context, a.serverId, a.alertId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val channel = when (a.action) {
@@ -142,6 +143,18 @@ object Alerter {
             .setContentIntent(open)
             .setAutoCancel(a.action != "alarm")
             .setVisibility(Notification.VISIBILITY_PUBLIC)
+        if (a.action != "alarm") {
+            // Dismissing the notification or tapping "Marquer comme lu" marks it read.
+            val read = PendingIntent.getBroadcast(
+                context, requestCode(a, 4),
+                Intent(context, ReadReceiver::class.java)
+                    .putExtra(ReadReceiver.EXTRA_SERVER, a.serverId)
+                    .putExtra(ReadReceiver.EXTRA_ALERT, a.alertId),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            b.setDeleteIntent(read)
+                .addAction(Notification.Action.Builder(null, context.getString(R.string.alert_mark_read), read).build())
+        }
         if (a.action == "alarm") {
             val full = PendingIntent.getActivity(
                 context, requestCode(a, 3), AlarmActivity.intent(context, a.serverId, a.alertId),
@@ -194,17 +207,51 @@ object Alerter {
     }
 
     /**
-     * Stops an alarm on this phone: sound, vibration and the ongoing notification.
-     * Purely local: alerts are one-way and nothing is sent to the server.
+     * Marks an alert read on this phone: its notification disappears and, for an
+     * alarm still ringing, the sound stops. Local only: nothing is sent.
      */
+    fun markRead(context: Context, serverId: Long, alertId: String) {
+        val store = Store.get(context)
+        store.markRead(serverId, alertId)
+        val a = store.alert(serverId, alertId) ?: return Registry.changed()
+        if (a.action == "alarm" && a.stoppedAtMs == null) {
+            stopAlarm(context, serverId, alertId)
+        } else {
+            context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
+            Registry.changed()
+        }
+    }
+
+    /** "Tout marquer comme lu". */
+    fun markAllRead(context: Context) {
+        for (a in Store.get(context).unreadAlerts()) markRead(context, a.serverId, a.alertId)
+        Registry.changed()
+    }
+
+    /** Before a server is deleted: silences its alarms and removes its notifications. */
+    fun forgetServer(context: Context, serverId: Long) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        for (a in Store.get(context).serverAlerts(serverId)) {
+            if (a.action == "alarm" && a.stoppedAtMs == null) AlarmPlayer.stop(context, serverId, a.alertId)
+            nm.cancel(tag(a), ALERT_NOTIFICATION_ID)
+        }
+        nm.cancel(app.inbox.service.InboxService.WARNING_BASE_ID + serverId.toInt())
+    }
+
     /** Stops every alarm still ringing on this phone (local only). */
     fun stopAllAlarms(context: Context) {
         for (a in Store.get(context).ringingAlarms()) stopAlarm(context, a.serverId, a.alertId)
     }
 
+    /**
+     * Stops an alarm on this phone: sound, vibration and the ongoing notification.
+     * Purely local: alerts are one-way and nothing is sent to the server.
+     */
     fun stopAlarm(context: Context, serverId: Long, alertId: String) {
         val store = Store.get(context)
         store.markStopped(serverId, alertId)
+        // Stopping an alarm is seeing it: it is read too.
+        store.markRead(serverId, alertId)
         val a = store.alert(serverId, alertId)
         if (a != null) {
             context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
@@ -352,6 +399,21 @@ object AlarmPlayer {
 
     @Synchronized
     fun isRinging(): Boolean = active.isNotEmpty()
+}
+
+/** "Marquer comme lu" action, and dismissal, of ring / notify notifications (local only). */
+class ReadReceiver : BroadcastReceiver() {
+    companion object {
+        const val EXTRA_SERVER = "server_id"
+        const val EXTRA_ALERT = "alert_id"
+    }
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val serverId = intent.getLongExtra(EXTRA_SERVER, -1)
+        val alertId = intent.getStringExtra(EXTRA_ALERT) ?: return
+        if (serverId < 0) return
+        Alerter.markRead(context, serverId, alertId)
+    }
 }
 
 /** "Couper l'alarme" action on alarm notifications (local only). */

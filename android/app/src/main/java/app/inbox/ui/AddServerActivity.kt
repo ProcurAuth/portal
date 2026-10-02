@@ -22,7 +22,7 @@ class AddServerActivity : BaseActivity() {
         val body = lin(padH = 10, padV = 4)
         root.addView(scroll(body), lp(MATCH, 0, 1f))
 
-        body.addView(sectionLabel(getString(R.string.add_title), "OPAQUE · NOISE IK"))
+        body.addView(sectionLabel(getString(R.string.add_title), getString(R.string.add_encrypted)))
         val form = panel(padH = 14, padV = 12)
         fun field(title: Int, help: String? = null) {
             form.addView(label(getString(title).uppercase(), 10.5f, color(R.color.text_muted), MEDIUM).apply { letterSpacing = 0.1f },

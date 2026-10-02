@@ -1,10 +1,30 @@
 //! Embeds the admin front (`web/`) into the binary, with a SHA-256 ETag per file,
-//! and records the git revision.
+//! collects the CSP hashes of inline scripts, and records the git revision.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
+
+/// Bodies of `<script>` elements without a `src` attribute.
+fn inline_scripts(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<script") {
+        let after = &rest[start..];
+        let Some(tag_end) = after.find('>') else { break };
+        let tag = &after[..tag_end];
+        let body_start = tag_end + 1;
+        let Some(close) = after[body_start..].find("</script>") else { break };
+        if !tag.contains("src=") {
+            out.push(after[body_start..body_start + close].to_string());
+        }
+        rest = &after[body_start + close + "</script>".len()..];
+    }
+    out
+}
 
 const REQUIRED: &[&str] = &["index.html", "app.js", "style.css"];
 
@@ -69,6 +89,19 @@ fn main() {
         .unwrap();
     }
     code.push_str("];\n");
+    let mut hashes = Vec::new();
+    for (rel, path) in &files {
+        if rel.ends_with(".html") {
+            let html = std::fs::read_to_string(path).expect("read html");
+            for script in inline_scripts(&html) {
+                let digest = Sha256::digest(script.as_bytes());
+                hashes.push(format!("'sha256-{}'", STANDARD.encode(digest)));
+            }
+        }
+    }
+    hashes.sort();
+    hashes.dedup();
+    writeln!(code, "pub static CSP_SCRIPT_HASHES: &str = {:?};", hashes.join(" ")).unwrap();
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("assets.rs");
     std::fs::write(out, code).expect("write assets.rs");
 

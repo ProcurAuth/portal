@@ -1,188 +1,58 @@
 <!doctype html>
 <html lang="fr">
 <head>
+  <script>(function(){try{var t=localStorage.getItem("inbox.theme");if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t;}}catch(e){}})();</script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>API · Inbox</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css">
+  <title>Intégrations · Inbox</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">
-      <img src="/favicon.svg" alt="" class="brand-mark" width="24" height="24">
-      <span id="server-name" class="brand-name">Inbox</span>
-    </a>
-    <span class="topbar-spacer"></span>
-    <a class="btn small" href="/"><span class="mdi mdi-arrow-left"></span>Tableau de bord</a>
-  </header>
-
-  <main class="page doc-page">
-    <div id="host-error" class="banner danger" hidden>
-      <span class="mdi mdi-alert-circle-outline"></span>
-      <div>
-        <strong>Hôte non autorisé.</strong>
-        Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur, puis redémarrez Inbox.
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="./">
+        <img src="logo.svg" alt="" class="brand-mark" width="24" height="24">
+        <span id="server-name" class="brand-name">Inbox</span>
+        <span id="server-version" class="brand-version"></span>
+      </a>
+      <span class="topbar-spacer"></span>
+      <div class="segmented" role="group" aria-label="Thème" data-theme-switch>
+        <button type="button" data-theme-value="system" title="Thème du navigateur" aria-label="Thème du navigateur"><span class="mdi mdi-theme-system"></span></button>
+        <button type="button" data-theme-value="light" title="Thème clair" aria-label="Thème clair"><span class="mdi mdi-theme-light"></span></button>
+        <button type="button" data-theme-value="dark" title="Thème sombre" aria-label="Thème sombre"><span class="mdi mdi-theme-dark"></span></button>
       </div>
+      <a class="btn" href="./"><span class="mdi mdi-arrow-left"></span><span class="label">Tableau de bord</span></a>
+    </header>
+
+    <div id="banners" class="banners">
+      <div id="host-error" class="banner danger" hidden>
+        <span class="mdi mdi-alert-circle-outline"></span>
+        <div>
+          <strong>Hôte non autorisé.</strong>
+          Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur,
+          ou déclarez le reverse proxy dans <code>server.trusted_proxies</code>, puis redémarrez Inbox.
+        </div>
+      </div>
+      <div id="global-error" class="banner danger" hidden></div>
     </div>
-    <div id="global-error" class="banner danger" hidden></div>
 
-    <nav class="doc-nav" aria-label="Sommaire">
-      <a href="#base">Adresse de l'API</a>
-      <a href="#send-alert">Envoyer une alerte</a>
-      <a href="#status">Suivre une alerte</a>
-      <a href="#webhook">Alertmanager / Grafana</a>
-      <a href="#health">Santé</a>
-      <a href="#groups">Groupes</a>
-      <a href="#producers">Producteurs</a>
-      <a href="#devices">Appareils</a>
-    </nav>
-
-    <article class="doc">
-      <header class="doc-intro">
-        <h1>API Inbox</h1>
-        <p class="muted">Les producteurs (scripts, supervision, Grafana, Alertmanager) envoient les alertes à cette API.
-          Les téléphones les reçoivent ; les alertes sont à sens unique.</p>
-      </header>
-
-      <section id="base" class="doc-section">
-        <h2>Adresse de l'API</h2>
-        <p>L'API écoute sur le port <code id="api-port">…</code> (<code>server.listen</code>), différent de celui de cette interface.
-          L'adresse ci-dessous est déduite de celle de cette page ; derrière un reverse proxy, utilisez l'adresse publique du proxy.</p>
-        <div id="base-url"></div>
-        <p>Chaque producteur s'authentifie avec son token (fichier <code>token_file</code> de son bloc
-          <code>producer</code>, généré par <code>inbox token</code>), envoyé en <code>Authorization: Bearer &lt;token&gt;</code>.
-          Les tokens ne sont jamais affichés ici. Dans les exemples, exportez-le d'abord :</p>
-        <div id="token-export"></div>
-      </section>
-
-      <section id="send-alert" class="doc-section">
-        <h2><span class="method post">POST</span> Envoyer une alerte</h2>
-        <div id="send-url"></div>
-        <p>L'alerte est acceptée seulement une fois écrite sur disque, avec une livraison prévue pour chaque appareil
-          abonné au groupe à cet instant, qu'il soit en ligne ou non. Un appareil hors ligne la reçoit à sa
-          reconnexion, tant qu'elle n'a pas expiré : une alerte non reçue dans le délai de livraison du serveur
-          (<code>storage.delivery_ttl</code>) n'est plus envoyée et apparaît comme <em>expirée</em>.</p>
-        <h3>En-têtes</h3>
-        <table class="doc-table">
-          <thead><tr><th>En-tête</th><th>Valeur</th></tr></thead>
-          <tbody>
-            <tr><td><code>Authorization</code></td><td><code>Bearer &lt;token du producteur&gt;</code></td></tr>
-            <tr><td><code>Idempotency-Key</code></td><td><strong>Obligatoire.</strong> 1 à 128 caractères ASCII imprimables. Renvoyer la même clé avec le même contenu ne crée pas de doublon : réessayez sans crainte.</td></tr>
-            <tr><td><code>Content-Type</code></td><td><code>application/json</code></td></tr>
-          </tbody>
-        </table>
-        <h3>Corps</h3>
-        <table class="doc-table">
-          <thead><tr><th>Champ</th><th>Type</th><th>Description</th></tr></thead>
-          <tbody>
-            <tr><td><code>group</code></td><td>texte</td><td><strong>Obligatoire.</strong> Identifiant d'un groupe autorisé pour ce producteur (voir <a href="#groups">Groupes</a>).</td></tr>
-            <tr><td><code>title</code></td><td>texte</td><td>Facultatif. Sans titre, le téléphone affiche le nom du groupe.</td></tr>
-            <tr><td><code>message</code></td><td>texte</td><td>Facultatif. Retours à la ligne acceptés.</td></tr>
-          </tbody>
-        </table>
-        <h3>Exemple</h3>
-        <div id="send-curl"></div>
-        <p>Réponse :</p>
-        <div id="send-response"></div>
-        <h3>Codes de réponse</h3>
-        <table class="doc-table">
-          <thead><tr><th>Code</th><th>Signification</th></tr></thead>
-          <tbody>
-            <tr><td><code>201</code></td><td>Alerte acceptée. <code>targets</code> = nombre d'appareils qui la recevront (0 : personne n'est abonné).</td></tr>
-            <tr><td><code>200</code></td><td>Même <code>Idempotency-Key</code> et même contenu : alerte déjà acceptée, <code>duplicate: true</code>.</td></tr>
-            <tr><td><code>400</code></td><td>JSON invalide, champ inconnu, <code>Idempotency-Key</code> absente ou invalide.</td></tr>
-            <tr><td><code>401</code></td><td>Token absent ou invalide.</td></tr>
-            <tr><td><code>403</code></td><td>Groupe non autorisé pour ce producteur.</td></tr>
-            <tr><td><code>409</code></td><td><code>Idempotency-Key</code> déjà utilisée pour une alerte différente.</td></tr>
-            <tr><td><code>413</code></td><td>Titre ou message trop long (<code>limits.max_title_bytes</code>, <code>limits.max_message_bytes</code>).</td></tr>
-            <tr><td><code>422</code></td><td>Groupe inconnu ou caractères de contrôle dans le texte.</td></tr>
-            <tr><td><code>503</code></td><td>Stockage indisponible : réessayez avec la même clé.</td></tr>
-          </tbody>
-        </table>
-        <p class="muted">Les erreurs ont la forme <code>{"error": {"code": "…", "message": "…"}}</code>.</p>
-      </section>
-
-      <section id="status" class="doc-section">
-        <h2><span class="method get">GET</span> Suivre une alerte</h2>
-        <div id="status-url"></div>
-        <p>État de livraison par appareil : envoyée, nombre d'envois et réception. Il n'y a pas d'acquittement :
-          <code>received_at</code> est le seul retour du téléphone ; <code>expired</code> indique un appareil qui
-          ne l'a pas reçue avant l'expiration. Un producteur ne voit que les alertes de ses groupes.
-          Utilisez-le pour escalader par un autre canal si une alerte reste non reçue.</p>
-        <div id="status-curl"></div>
-        <div id="status-response"></div>
-      </section>
-
-      <section id="webhook" class="doc-section">
-        <h2><span class="method post">POST</span> Alertmanager / Grafana</h2>
-        <div id="webhook-url"></div>
-        <p>Reçoit le format webhook de Prometheus Alertmanager, que le contact point « Webhook » de Grafana émet aussi.
-          Chaque alerte du lot devient une alerte Inbox pour le groupe de l'URL : titre <code>[FIRING] alertname</code>,
-          message tiré des annotations <code>summary</code> et <code>description</code>.
-          Elles sont dédoublonnées sur l'empreinte, le statut et l'heure de début, donc les répétitions d'Alertmanager ne
-          réveillent personne deux fois. Les notifications <code>resolved</code> ne sont envoyées que si
-          <code>webhook_send_resolved</code> est activé pour le producteur (voir <a href="#producers">Producteurs</a>).</p>
-        <h3>URL par groupe</h3>
-        <div id="webhook-groups"></div>
-        <h3>Alertmanager</h3>
-        <div id="webhook-alertmanager"></div>
-        <h3>Grafana</h3>
-        <ol class="doc-steps">
-          <li><em>Alerting → Contact points → Add contact point</em>, intégration <strong>Webhook</strong>.</li>
-          <li>URL : l'adresse du groupe à alerter (ci-dessus), méthode <code>POST</code>.</li>
-          <li><em>Optional Webhook settings</em> : <em>Authorization Header - Scheme</em> <code>Bearer</code>,
-            <em>Credentials</em> = token du producteur.</li>
-          <li>Cochez <em>Disable resolved message</em> si le producteur n'envoie pas les résolutions.</li>
-        </ol>
-        <p>Ou par provisioning (<code>/etc/grafana/provisioning/alerting/</code>) :</p>
-        <div id="webhook-grafana"></div>
-        <p class="muted">Réponse : <code>{"created": n, "duplicates": n, "skipped": n}</code>. En cas d'erreur 5xx,
-          Alertmanager et Grafana réessaient.</p>
-      </section>
-
-      <section id="health" class="doc-section">
-        <h2><span class="method get">GET</span> Santé</h2>
-        <table class="doc-table">
-          <thead><tr><th>URL</th><th>Réponse</th></tr></thead>
-          <tbody id="health-rows"></tbody>
-        </table>
-      </section>
-
-      <section id="groups" class="doc-section">
-        <h2>Groupes</h2>
-        <p>Déclarés dans la configuration (<code>group "id" { … }</code>). Chaque appareil choisit, groupe par groupe,
-          l'action déclenchée : notification, sonnerie ou alarme plein écran.</p>
-        <table class="doc-table">
-          <thead><tr><th>Identifiant</th><th>Nom</th><th>Description</th></tr></thead>
-          <tbody id="groups-rows"></tbody>
-        </table>
-      </section>
-
-      <section id="producers" class="doc-section">
-        <h2>Producteurs</h2>
-        <p>Déclarés dans la configuration (<code>producer "nom" { … }</code>), chacun avec son token et ses groupes.
-          L'interface d'administration peut toujours envoyer à tous les groupes.</p>
-        <table class="doc-table">
-          <thead><tr><th>Nom</th><th>Groupes autorisés</th><th>Résolutions</th></tr></thead>
-          <tbody id="producers-rows"></tbody>
-        </table>
-        <p id="producers-empty" class="muted" hidden>Aucun producteur déclaré : seule cette interface peut envoyer des alertes.</p>
-      </section>
-
-      <section id="devices" class="doc-section">
-        <h2>Appareils</h2>
-        <p><code>/v1/enroll</code> et <code>/v1/session</code> (WebSocket, même port que l'API) sont réservés à
-          l'application Android : enrôlement par mot de passe partagé (OPAQUE), puis session chiffrée (Noise IK).
-          Ils ne permettent pas d'envoyer d'alerte.</p>
-      </section>
-    </article>
-  </main>
+    <div class="doc-layout">
+      <nav id="doc-nav" class="doc-nav" aria-label="Sommaire"></nav>
+      <article id="doc" class="doc">
+        <header class="doc-intro">
+          <h1>Intégrations</h1>
+          <p>Brancher Grafana, Alertmanager ou n'importe quel outil d'alerting sur Inbox.
+            Les alertes partent de l'outil vers Inbox, puis vers les téléphones abonnés : elles sont à sens unique.</p>
+        </header>
+      </article>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" hidden></div>
 
-  <script src="/common.js"></script>
-  <script src="/doc.js"></script>
+  <script src="common.js"></script>
+  <script src="doc.js"></script>
 </body>
 </html>

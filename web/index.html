@@ -1,49 +1,61 @@
 <!doctype html>
 <html lang="fr">
 <head>
+  <script>(function(){var p=location.pathname;if(!/\/$/.test(p)&&!/\/doc$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();</script>
+  <script>(function(){try{var t=localStorage.getItem("inbox.theme");if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t;}}catch(e){}})();</script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>Inbox</title>
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">
-      <img src="/favicon.svg" alt="" class="brand-mark" width="24" height="24">
-      <span id="server-name" class="brand-name">Inbox</span>
-    </a>
-    <span class="topbar-spacer"></span>
-    <a id="status-pill" class="status-pill" href="#devices" title="Appareils">
-      <span class="dot"></span><span id="status-text">…</span>
-    </a>
-    <a class="btn small" href="/doc"><span class="mdi mdi-code-json"></span>API</a>
-  </header>
-
-  <main class="page">
-    <div id="host-error" class="banner danger" hidden>
-      <span class="mdi mdi-alert-circle-outline"></span>
-      <div>
-        <strong>Hôte non autorisé.</strong>
-        Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur, puis redémarrez Inbox.
+  <div class="app fit">
+    <header class="topbar">
+      <a class="brand" href="./">
+        <img src="logo.svg" alt="" class="brand-mark" width="24" height="24">
+        <span id="server-name" class="brand-name">Inbox</span>
+        <span id="server-version" class="brand-version"></span>
+      </a>
+      <span class="topbar-spacer"></span>
+      <span id="status-pill" class="status-pill idle" title="">
+        <span class="dot"></span><span id="status-text">…</span>
+      </span>
+      <div class="segmented" role="group" aria-label="Thème" data-theme-switch>
+        <button type="button" data-theme-value="system" title="Thème du navigateur" aria-label="Thème du navigateur"><span class="mdi mdi-theme-system"></span></button>
+        <button type="button" data-theme-value="light" title="Thème clair" aria-label="Thème clair"><span class="mdi mdi-theme-light"></span></button>
+        <button type="button" data-theme-value="dark" title="Thème sombre" aria-label="Thème sombre"><span class="mdi mdi-theme-dark"></span></button>
       </div>
-    </div>
-    <div id="global-error" class="banner danger" hidden></div>
+      <a class="btn" href="doc" title="Intégrations : Grafana, Alertmanager et autres outils"><span class="mdi mdi-code-json"></span><span class="label">Intégrations</span></a>
+    </header>
 
-    <div class="dashboard">
+    <div id="banners" class="banners">
+      <div id="host-error" class="banner danger" hidden>
+        <span class="mdi mdi-alert-circle-outline"></span>
+        <div>
+          <strong>Hôte non autorisé.</strong>
+          Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur,
+          ou déclarez le reverse proxy dans <code>server.trusted_proxies</code>, puis redémarrez Inbox.
+        </div>
+      </div>
+      <div id="global-error" class="banner danger" hidden></div>
+    </div>
+
+    <main class="dashboard">
       <div class="col">
-        <section id="send" class="section">
-          <div class="section-head">
+        <section id="send" class="panel">
+          <div class="panel-head">
             <h2>Envoyer une alerte</h2>
+            <span id="send-targets" class="meta"></span>
           </div>
-          <form id="send-form" class="panel send-form" novalidate>
+          <form id="send-form" class="send-form" novalidate>
             <div class="send-row">
               <label class="field">
                 <span>Groupe</span>
                 <select id="send-group" required></select>
               </label>
-              <label class="field grow">
+              <label class="field">
                 <span>Titre <em>facultatif</em></span>
                 <input id="send-title" type="text" maxlength="200" autocomplete="off">
               </label>
@@ -53,67 +65,73 @@
               <textarea id="send-message" rows="2" maxlength="4000"></textarea>
             </label>
             <div class="send-foot">
-              <span id="send-targets" class="muted"></span>
+              <span id="send-hint" class="targets"></span>
               <button id="send-btn" class="btn primary" type="submit"><span class="mdi mdi-send"></span>Envoyer</button>
             </div>
             <div id="send-result" class="banner" hidden></div>
           </form>
         </section>
 
-        <section id="alerts" class="section">
-          <div class="section-head">
+        <section id="alerts" class="panel grow">
+          <div class="panel-head">
             <h2>Dernières alertes</h2>
-            <span class="muted">5 plus récentes · 24 h</span>
+            <span class="meta">5 dernières · 24 h</span>
           </div>
-          <div id="alerts-list" class="stack"></div>
-          <div id="alerts-empty" class="empty" hidden>
-            <span class="mdi mdi-bell-outline"></span>
-            <p>Aucune alerte depuis 24 h.</p>
+          <div class="panel-body">
+            <div id="alerts-list" class="rows"></div>
+            <div id="alerts-empty" class="empty" hidden>
+              <span class="mdi mdi-bell-outline"></span>
+              <p>Aucune alerte depuis 24 h.</p>
+            </div>
           </div>
         </section>
       </div>
 
       <div class="col">
-        <section id="devices" class="section">
-          <div class="section-head">
+        <section id="devices" class="panel devices">
+          <div class="panel-head">
             <h2>Appareils</h2>
-            <span id="devices-summary" class="muted"></span>
+            <span id="devices-summary" class="meta"></span>
           </div>
-          <div id="user-filter" class="filter-chips" role="group" aria-label="Filtrer par pseudo"></div>
-          <div id="devices-list" class="panel list"></div>
-          <div id="devices-empty" class="empty" hidden>
-            <span class="mdi mdi-cellphone"></span>
-            <p>Aucun appareil enrôlé. Installez l'application et ajoutez ce serveur.</p>
+          <div id="user-filter" class="filter-chips" role="group" aria-label="Filtrer par pseudo" hidden></div>
+          <div class="panel-body">
+            <div id="devices-list" class="rows"></div>
+            <div id="devices-empty" class="empty" hidden>
+              <span class="mdi mdi-cellphone"></span>
+              <p>Aucun appareil enrôlé. Installez l'application et ajoutez ce serveur.</p>
+            </div>
           </div>
         </section>
 
-        <section id="connections" class="section">
-          <div class="section-head">
+        <section id="connections" class="panel grow connections">
+          <div class="panel-head">
             <h2>Connexions</h2>
-            <span id="connections-summary" class="muted">50 dernières</span>
+            <span id="connections-summary" class="meta"></span>
           </div>
-          <div id="connections-list" class="panel list scroll"></div>
-          <div id="connections-empty" class="empty" hidden>
-            <span class="mdi mdi-swap-horizontal"></span>
-            <p>Aucune connexion enregistrée.</p>
+          <div class="panel-body">
+            <div id="connections-list" class="rows"></div>
+            <div id="connections-empty" class="empty" hidden>
+              <span class="mdi mdi-swap-horizontal"></span>
+              <p>Aucune connexion enregistrée.</p>
+            </div>
           </div>
         </section>
       </div>
-    </div>
-  </main>
+    </main>
+  </div>
 
   <dialog id="detail-dialog" class="sheet">
     <div class="sheet-head">
       <div>
-        <div id="detail-group" class="chip"></div>
+        <span id="detail-group" class="chip"></span>
         <h2 id="detail-title"></h2>
-        <p id="detail-meta" class="muted"></p>
+        <p id="detail-meta"></p>
       </div>
       <button id="detail-close" class="icon-btn" type="button" aria-label="Fermer"><span class="mdi mdi-close"></span></button>
     </div>
     <p id="detail-message" class="detail-message"></p>
     <h3 class="sheet-section">Réception par appareil</h3>
-    <div id="detail-deliveries" class="list"></div>
+    <div id="detail-deliveries" class="rows"></div>
   </dialog>
 
   <dialog id="confirm-dialog" class="confirm">
@@ -128,7 +146,7 @@
 
   <div id="toast" class="toast" role="status" hidden></div>
 
-  <script src="/common.js"></script>
-  <script src="/app.js"></script>
+  <script src="common.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

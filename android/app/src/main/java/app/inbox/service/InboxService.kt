@@ -33,7 +33,7 @@ class InboxService : Service() {
     companion object {
         private const val TAG = "Inbox.Service"
         private const val STATUS_ID = 1
-        private const val WARNING_BASE_ID = 2000
+        const val WARNING_BASE_ID = 2000
         private const val TICK_MS = 15_000L
         private const val UNACKED_ALARM_RESUME_MS = 24 * 3600_000L
         private const val LOCAL_HISTORY_MS = 30L * 24 * 3600_000L

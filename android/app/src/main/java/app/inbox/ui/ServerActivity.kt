@@ -1,6 +1,5 @@
 package app.inbox.ui
 
-import android.app.AlertDialog
 import android.os.Bundle
 import android.view.inputmethod.EditorInfo
 import android.widget.LinearLayout
@@ -56,10 +55,10 @@ class ServerActivity : BaseActivity() {
         val st = Registry.status(serverId)
         val now = System.currentTimeMillis()
         val (code, fg) = when (st.state) {
-            LinkState.CONNECTED -> "UP" to color(R.color.success)
-            LinkState.CONNECTING -> "CONNECTING" to color(R.color.warning)
-            LinkState.DISCONNECTED -> "DOWN ${shortAge(st.sinceMs, now)}" to color(R.color.danger)
-            LinkState.REENROLL -> "REENROLL" to color(R.color.danger)
+            LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.success)
+            LinkState.CONNECTING -> getString(R.string.status_connecting) to color(R.color.warning)
+            LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
+            LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
         }
         val soft = when (st.state) {
             LinkState.CONNECTED -> color(R.color.success_soft)
@@ -67,7 +66,11 @@ class ServerActivity : BaseActivity() {
             else -> color(R.color.danger_soft)
         }
         bar.removeAllViews()
-        bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, chip(code.substringBefore(' '), fg, soft, dot = true)))
+        val short = when (st.state) {
+            LinkState.DISCONNECTED -> getString(R.string.status_offline)
+            else -> code
+        }
+        bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, chip(short, fg, soft, dot = true)))
         // Screen context: which server, where.
         body.addView(sectionLabel(server.serverName, server.address.removePrefix("http://").removePrefix("https://")))
         val head = panel(padV = 4)
@@ -111,12 +114,14 @@ class ServerActivity : BaseActivity() {
         val subs = store.subscriptions(serverId)
         val groups = store.groups(serverId)
         body.addView(sectionLabel(getString(R.string.server_groups), if (groups.isEmpty()) null else
-            "${groups.count { subs[it.id] != null }}/${groups.size} SUB"))
+            getString(R.string.server_groups_subscribed, groups.count { subs[it.id] != null }, groups.size)))
         body.addView(label(getString(R.string.server_groups_hint), 11.5f, color(R.color.text_muted)).apply { setPadding(dp(6), 0, dp(6), dp(8)) })
         if (groups.isEmpty()) {
             body.addView(label(getString(R.string.server_groups_none), 12.5f, color(R.color.text_muted)).apply { setPadding(dp(6), 0, 0, dp(8)) })
         } else {
-            val labels = listOf("NONE", "NOTIF", "RING", "ALARM")
+            val labels = listOf(
+                getString(R.string.seg_off), getString(R.string.seg_notify), getString(R.string.seg_ring), getString(R.string.seg_alarm),
+            )
             val helps = listOf(R.string.action_off_help, R.string.action_notify_help, R.string.action_ring_help, R.string.action_alarm_help)
             val list = panel()
             groups.forEachIndexed { i, g ->
@@ -154,17 +159,30 @@ class ServerActivity : BaseActivity() {
     }
 
     private fun confirmRemove(name: String) {
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.server_remove_title, name))
-            .setMessage(getString(R.string.server_remove_body))
-            .setPositiveButton(getString(R.string.server_remove_confirm)) { _, _ ->
-                Registry.connections.remove(serverId)?.stop()
-                Store.get(this).deleteServer(serverId)
-                Registry.forget(serverId)
-                InboxService.start(this)
-                finish()
-            }
-            .setNegativeButton(getString(R.string.cancel), null)
-            .show()
+        bottomSheet { sheet, dialog ->
+            sheet.addView(chip(getString(R.string.server_remove_confirm), color(R.color.danger), color(R.color.danger_soft), dot = true),
+                lp(WRAP, WRAP))
+            sheet.addView(label(getString(R.string.server_remove_title, name), 19f, color(R.color.text_strong), MEDIUM),
+                lp().margins(this, t = 12))
+            sheet.addView(label(getString(R.string.server_remove_body), 13.5f, color(R.color.text_muted)), lp().margins(this, t = 6))
+            val actions = lin(vertical = false)
+            actions.addView(button(getString(R.string.cancel), ButtonKind.SECONDARY) { dialog.dismiss() }, lp(0, WRAP, 1f))
+            actions.addView(button(getString(R.string.server_remove_confirm), ButtonKind.DANGER) {
+                dialog.dismiss()
+                remove()
+            }, lp(0, WRAP, 1f).margins(this, l = 10))
+            sheet.addView(actions, lp().margins(this, t = 16, b = 10))
+        }
+    }
+
+    /** Closes the connection, silences and clears its notifications, deletes its local data and keys. */
+    private fun remove() {
+        Registry.connections.remove(serverId)?.stop()
+        app.inbox.alert.Alerter.forgetServer(this, serverId)
+        Store.get(this).deleteServer(serverId)
+        Registry.forget(serverId)
+        InboxService.start(this)
+        Toast.makeText(this, getString(R.string.server_removed), Toast.LENGTH_SHORT).show()
+        finish()
     }
 }
