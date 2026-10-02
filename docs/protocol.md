@@ -6,6 +6,8 @@ The same crate runs on the server and in the Android app (JNI), so there is a
 single implementation of the cryptography.
 
 All messages are JSON. Binary fields are standard base64 with padding.
+This document describes protocol version 2 (Inbox 0.6). Version 1 apps are refused
+with close code 4426 and must be updated.
 
 ## Keys
 
@@ -25,7 +27,7 @@ enrollment as a failed attempt until it succeeds (`security.max_auth_failures`).
 
 ```text
 device                                              server
-  {"type":"start","protocol":1,
+  {"type":"start","protocol":2,
    "credential_request":b64}                   ->
                                                <-  {"type":"challenge","credential_response":b64}
   {"type":"finish","credential_finalization":b64,
@@ -54,8 +56,8 @@ own server key, and it cannot register a device.
 binary frame carries exactly one Noise message (at most 65535 bytes).
 
 1. Device to server, Noise message 1, carrying
-   `{"protocol":1,"device_id":hex32,"app_version":s}`.
-2. Server to device, Noise message 2, carrying `{"protocol":1,"server_name":s}`.
+   `{"protocol":2,"device_id":hex32,"app_version":s}`.
+2. Server to device, Noise message 2, carrying `{"protocol":2,"server_name":s}`.
    The device rejects any key other than the pinned server key.
 3. Device to server, first transport frame `{"t":"ready"}`. Only after this does
    the server count the session as established, so a replayed message 1 cannot
@@ -68,7 +70,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 |---|---|---|
 | `ready` | | First transport frame. |
 | `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way: there is no human acknowledgement. Idempotent. Legacy apps (0.1, 0.2) may send `displayed` / `acknowledged`: the server treats them as `received`. |
-| `subscribe` | `group`, `action` (`alarm` / `ring` / `notify`) | Create or replace the subscription. |
+| `subscribe` | `group` | Subscribes this device to the group. How the device reacts (alarm, ring, notification) is a local setting of the device: the server never knows it. |
 | `unsubscribe` | `group` | |
 | `set_user_name` | `user_name` | Changes the pseudonym of this device (per server, any time). The server answers `user_name`, or `error` `invalid_user_name`. |
 | `ping` | `nonce` (u64) | Heartbeat; the server answers `pong`. |
@@ -77,9 +79,9 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 
 | `t` | Fields |
 |---|---|
-| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[] {group,action}`, `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym or null) |
+| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym or null) |
 | `user_name` | `user_name` | Confirms `set_user_name`. |
-| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title?`, `message?`, `created_at_ms`, `action` |
+| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `description?` (at most 128 characters), `details?` (Markdown), `created_at_ms` |
 | `subscriptions` | `subscriptions[]`, sent after each change |
 | `pong` | `nonce` |
 | `error` | `code`, `message` (for example `unknown_group`) |
@@ -87,8 +89,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 ### Delivery rules
 
 - **Fan-out at acceptance.** When an alert is accepted, one delivery row is created
-  for every device subscribed to the group at that instant. The device's chosen
-  `action` is copied into the row.
+  for every device subscribed to the group at that instant.
 - **Retransmission.** The server sends rows whose receipt has not arrived yet,
   oldest first, with at most `max_inflight` outstanding. A row that stays
   without receipt for `resend_after` is sent again, and the whole backlog is resent
@@ -126,5 +127,5 @@ pages opened in the operator's browser:
 
 Endpoints: `GET /api/admin/overview`, `GET /api/admin/alerts?limit=`,
 `GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=&user=<pseudonym>`,
-`POST /api/admin/alerts` (`{group, title?, message?, idempotency_key}`) and
+`POST /api/admin/alerts` (`{group, description?, details?, idempotency_key}`) and
 `POST /api/admin/devices/{id}/revoke` (`{}`).

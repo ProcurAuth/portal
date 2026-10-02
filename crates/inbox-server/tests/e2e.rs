@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use inbox_core::enroll::{ClientStep, EnrollClient, EnrolledDevice};
 use inbox_core::noise::{Initiator, Session};
-use inbox_core::proto::{AckStage, Action, AlertMsg, ClientMsg, ServerMsg, SessionHello};
+use inbox_core::proto::{AckStage, AlertMsg, ClientMsg, ServerMsg, SessionHello};
 use inbox_core::rng::Rng;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -101,8 +101,7 @@ security {{
   auth_failure_window = "1m"
 }}
 limits {{
-  max_title_bytes = 100
-  max_message_bytes = 1000
+  max_details_bytes = 1000
   max_request_bytes = 65536
 }}
 logging {{
@@ -375,13 +374,13 @@ impl Conn {
         self.send(&ClientMsg::Ack { alert_id: id.into(), stage }).await;
     }
 
-    async fn subscribe(&mut self, group: &str, action: Action) {
-        self.send(&ClientMsg::Subscribe { group: group.into(), action }).await;
+    async fn subscribe(&mut self, group: &str) {
+        self.send(&ClientMsg::Subscribe { group: group.into() }).await;
         loop {
             if let Recv::Msg(ServerMsg::Subscriptions { subscriptions }) =
                 self.recv(Duration::from_secs(5)).await
             {
-                assert!(subscriptions.iter().any(|s| s.group == group && s.action == action));
+                assert!(subscriptions.iter().any(|s| s == group));
                 return;
             }
         }
@@ -452,10 +451,10 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(groups.len(), 2);
     assert!(subscriptions.is_empty());
     assert_eq!(heartbeat_interval_ms, 5000);
-    ca.subscribe("infra", Action::Alarm).await;
+    ca.subscribe("infra").await;
     {
         let (mut cb, _) = Conn::open(port, &b).await.unwrap();
-        cb.subscribe("infra", Action::Notify).await;
+        cb.subscribe("infra").await;
         // Enrolled without a pseudonym (older app): it sets one in session.
         cb.send(&ClientMsg::SetUserName { user_name: " bob ".into() }).await;
         loop {
@@ -484,20 +483,20 @@ async fn delivery_guarantees_end_to_end() {
     let (st, v) = post_alert(
         &s,
         "k1",
-        json!({"group": "infra", "title": "Disk full", "message": "db-1 at 99%"}),
+        json!({"group": "infra", "description": "Disk full", "details": "db-1 at **99%**"}),
     );
     assert_eq!(st, 201, "{v}");
     assert_eq!(v["targets"], 2);
     let k1 = v["alert_id"].as_str().unwrap().to_string();
     let got = ca.alert().await;
     assert_eq!(got.alert_id, k1);
-    assert_eq!(got.action, Action::Alarm);
-    assert_eq!(got.title.as_deref(), Some("Disk full"));
+    assert_eq!(got.description.as_deref(), Some("Disk full"));
+    assert_eq!(got.details.as_deref(), Some("db-1 at **99%**"));
     ca.ack(&k1, AckStage::Received).await;
     let (st, v) = post_alert(
         &s,
         "k1",
-        json!({"group": "infra", "title": "Disk full", "message": "db-1 at 99%"}),
+        json!({"group": "infra", "description": "Disk full", "details": "db-1 at **99%**"}),
     );
     assert_eq!((st, v["duplicate"].as_bool()), (200, Some(true)));
     assert_eq!(v["alert_id"], k1.as_str());
@@ -510,7 +509,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(ca.alert().await.alert_id, k2);
     let again = ca.alert().await;
     assert_eq!(again.alert_id, k2, "retransmission keeps the alert id");
-    assert!(again.title.is_none() && again.message.is_none(), "title and message are optional");
+    assert!(again.description.is_none() && again.details.is_none(), "both are optional");
     // A legacy app (0.1 / 0.2) may send this stage: it counts as a receipt.
     ca.ack(&k2, AckStage::Acknowledged).await;
     ca.no_alert(Duration::from_millis(2500)).await;
@@ -520,7 +519,6 @@ async fn delivery_guarantees_end_to_end() {
     let first = cb.alert().await;
     let second = cb.alert().await;
     assert_eq!((first.alert_id.as_str(), second.alert_id.as_str()), (k1.as_str(), k2.as_str()));
-    assert_eq!(first.action, Action::Notify);
     cb.ack(&k1, AckStage::Received).await;
     cb.ack(&k2, AckStage::Received).await;
     cb.no_alert(Duration::from_millis(2500)).await;
@@ -579,8 +577,8 @@ async fn delivery_guarantees_end_to_end() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!((v["created"].as_u64(), v["skipped"].as_u64()), (Some(1), Some(1)));
     let got = ca.alert().await;
-    assert_eq!(got.title.as_deref(), Some("[FIRING] HighLatency"));
-    assert_eq!(got.message.as_deref(), Some("p99 > 2s"));
+    assert_eq!(got.description.as_deref(), Some("[FIRING] HighLatency"));
+    assert_eq!(got.details.as_deref(), Some("p99 > 2s"));
     ca.ack(&got.alert_id, AckStage::Received).await;
     let (_, body) = http(port, "POST", "/api/v1/webhooks/alertmanager/infra", &auth, &payload);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["duplicates"], 1);
@@ -605,7 +603,8 @@ async fn delivery_guarantees_end_to_end() {
     let (st, body) = http_host(ap, "evil.example:8081", "GET", "/", &[], "");
     assert_eq!(st, 403);
     assert!(body.contains("admin.allowed_hosts"), "readable page for humans: {body}");
-    let send = json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string();
+    let send =
+        json!({"group": "other", "description": "manual", "idempotency_key": "m1"}).to_string();
     let json_only = [("Content-Type", "application/json".to_string())];
     let (st, _) = http(ap, "POST", "/api/admin/alerts", &json_only, &send);
     assert_eq!(st, 403, "POST without X-Inbox-Request");
@@ -696,7 +695,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let (port, ap) = (s.port, s.admin_port);
     let dev = enroll_as(port, DEVICE_PW, "phone", Some("ops")).await.unwrap();
     let (mut c, _) = Conn::open(port, &dev).await.unwrap();
-    c.subscribe("infra", Action::Notify).await;
+    c.subscribe("infra").await;
 
     // Generic notify: plain text body, token in the query string, no Idempotency-Key.
     let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
@@ -705,7 +704,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(st, 201, "{body}");
     let got = c.alert().await;
     assert_eq!(
-        (got.title.as_deref(), got.message.as_deref()),
+        (got.description.as_deref(), got.details.as_deref()),
         (Some("Sauvegarde"), Some("backup KO"))
     );
     c.ack(&got.alert_id, AckStage::Received).await;
@@ -726,7 +725,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
-    assert_eq!((got.title.as_deref(), got.message.as_deref()), (Some("T"), Some("M")));
+    assert_eq!((got.description.as_deref(), got.details.as_deref()), (Some("T"), Some("M")));
     c.ack(&got.alert_id, AckStage::Received).await;
     // Any other JSON is kept as compact text; X-Title gives the title.
     let (st, _) = http(
@@ -738,14 +737,33 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
-    assert_eq!(got.title.as_deref(), Some("Uptime"));
-    assert_eq!(got.message.as_deref(), Some(r#"{"monitor":{"name":"web"},"status":0}"#));
+    assert_eq!(got.description.as_deref(), Some("Uptime"));
+    assert_eq!(got.details.as_deref(), Some(r#"{"monitor":{"name":"web"},"status":0}"#));
     c.ack(&got.alert_id, AckStage::Received).await;
     // Wrong token in the query string is refused; forbidden group too.
     let (st, _) = http(port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
     assert_eq!(st, 401);
     let (st, _) = http(port, "POST", &format!("/api/v1/notify/other?token={}", s.token), &[], "x");
     assert_eq!(st, 403);
+
+    // Descriptions are at most 128 characters: refused by the JSON API,
+    // truncated by the generic webhook.
+    let long = "x".repeat(129);
+    let body = json!({"group": "infra", "description": long}).to_string();
+    let (st, _) = http(port, "POST", "/api/v1/alerts", std::slice::from_ref(&auth), &body);
+    assert_eq!(st, 413);
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/notify/infra",
+        std::slice::from_ref(&auth),
+        &json!({"description": long, "details": "| a | b |\n|---|---|\n| 1 | 2 |"}).to_string(),
+    );
+    assert_eq!(st, 201);
+    let got = c.alert().await;
+    assert_eq!(got.description.as_deref().map(|d| d.chars().count()), Some(128));
+    assert!(got.details.as_deref().unwrap().starts_with("| a | b |"), "Markdown kept as is");
+    c.ack(&got.alert_id, AckStage::Received).await;
 
     // JSON API without Idempotency-Key: created, then deduplicated.
     let (st, _) = http(
@@ -786,7 +804,8 @@ async fn integrations_and_reverse_proxy_prefixes() {
         assert_eq!(st, 200);
         assert!(body.contains("doc"), "{prefix}/doc");
     }
-    let send = json!({"group": "infra", "title": "via proxy", "idempotency_key": "p1"}).to_string();
+    let send =
+        json!({"group": "infra", "description": "via proxy", "idempotency_key": "p1"}).to_string();
     let hdrs =
         [("Content-Type", "application/json".to_string()), ("X-Inbox-Request", "1".to_string())];
     let (st, body) = http_host(ap, &host, "POST", "/inbox/api/admin/alerts", &hdrs, &send);

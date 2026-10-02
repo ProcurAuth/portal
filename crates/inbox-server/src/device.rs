@@ -493,7 +493,7 @@ async fn handle(
             }
             Ok(true)
         }
-        ClientMsg::Subscribe { group, action } => {
+        ClientMsg::Subscribe { group } => {
             if !app.group_names.contains_key(&group) {
                 send_msg(
                     socket,
@@ -507,12 +507,12 @@ async fn handle(
             let subs = app
                 .db
                 .call(move |c| {
-                    db::set_subscription(c, &id, &group, action)?;
+                    db::set_subscription(c, &id, &group)?;
                     Ok(db::subscriptions(c, &id)?)
                 })
                 .await
                 .map_err(End::Storage)?;
-            tracing::info!(event = "subscription_changed", action = action.as_str());
+            tracing::info!(event = "subscription_changed");
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
             Ok(false)
         }
@@ -583,10 +583,9 @@ async fn flush_deliveries(
             alert_id: p.alert_id,
             group_name: app.group_name(&p.group),
             group: p.group,
-            title: p.title,
-            message: p.message,
+            description: p.description,
+            details: p.details,
             created_at_ms: p.created_at,
-            action: p.action,
         });
         send_msg(socket, session, &msg).await?;
         inflight.insert(p.seq, now);

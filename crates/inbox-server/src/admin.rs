@@ -329,9 +329,10 @@ pub async fn connections(
 pub struct AdminAlert {
     group: String,
     #[serde(default)]
-    title: Option<String>,
+    description: Option<String>,
+    /// Markdown.
     #[serde(default)]
-    message: Option<String>,
+    details: Option<String>,
     idempotency_key: String,
 }
 
@@ -352,8 +353,8 @@ pub async fn send_alert(
         &app,
         NewAlert {
             group: req.group,
-            title: req.title,
-            message: req.message,
+            description: req.description,
+            details: req.details,
             source: "admin".into(),
             idempotency_key: req.idempotency_key,
         },

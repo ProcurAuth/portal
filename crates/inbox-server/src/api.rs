@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
 use inbox_core::noise::MAX_PLAINTEXT;
-use inbox_core::proto::{Action, AlertMsg, ServerMsg};
+use inbox_core::proto::{AlertMsg, MAX_DESCRIPTION_CHARS, ServerMsg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ use tracing::Instrument;
 
 use crate::db::{self, InsertOutcome, NewAlert};
 use crate::state::{AppState, Producer};
-use crate::util::{hex, is_hex_id, truncate};
+use crate::util::{hex, is_hex_id, truncate, truncate_chars};
 
 pub struct ApiError {
     status: StatusCode,
@@ -77,37 +77,52 @@ pub async fn accept_alert(
         ));
     }
     let limits = &app.config.limits;
-    let clean = |field: &str, v: &Option<String>, max: usize| -> Result<Option<String>, ApiError> {
-        match v.as_deref().map(str::trim) {
-            None | Some("") => Ok(None),
-            Some(t) if t.len() > max => Err(ApiError::new(
+    let description = match alert.description.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(t) if t.chars().count() > MAX_DESCRIPTION_CHARS => {
+            return Err(ApiError::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "too_large",
-                format!("{field} exceeds {max} bytes"),
-            )),
-            Some(t) if t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => {
-                Err(ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid_text",
-                    format!("{field} contains control characters"),
-                ))
-            }
-            Some(t) => Ok(Some(t.to_string())),
+                format!("description exceeds {MAX_DESCRIPTION_CHARS} characters"),
+            ));
         }
+        Some(t) if t.chars().any(char::is_control) => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_text",
+                "description must be a single line without control characters",
+            ));
+        }
+        Some(t) => Some(t.to_string()),
     };
-    let title = clean("title", &alert.title, limits.max_title_bytes)?;
-    let message = clean("message", &alert.message, limits.max_message_bytes)?;
-    let alert = NewAlert { title, message, ..alert };
+    let details = match alert.details.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(t) if t.len() > limits.max_details_bytes => {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "too_large",
+                format!("details exceed {} bytes", limits.max_details_bytes),
+            ));
+        }
+        Some(t) if t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_text",
+                "details contain control characters",
+            ));
+        }
+        Some(t) => Some(t.to_string()),
+    };
+    let alert = NewAlert { description, details, ..alert };
 
     // The encoded alert must fit in one encrypted frame, whatever the escaping.
     let probe = ServerMsg::Alert(AlertMsg {
         alert_id: "0".repeat(32),
         group: alert.group.clone(),
         group_name: app.group_name(&alert.group),
-        title: alert.title.clone(),
-        message: alert.message.clone(),
+        description: alert.description.clone(),
+        details: alert.details.clone(),
         created_at_ms: i64::MAX,
-        action: Action::Notify,
     });
     if serde_json::to_vec(&probe).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_PLAINTEXT {
         return Err(ApiError::new(
@@ -153,7 +168,8 @@ pub async fn accept_alert(
 #[derive(Debug, Default, Deserialize)]
 pub struct ProducerQuery {
     token: Option<String>,
-    title: Option<String>,
+    #[serde(alias = "title")]
+    description: Option<String>,
 }
 
 fn producer<'a>(
@@ -201,10 +217,12 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError>
 #[serde(deny_unknown_fields)]
 pub struct AlertRequest {
     pub group: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub message: Option<String>,
+    /// Short summary, at most 128 characters (`title` accepted as an alias).
+    #[serde(default, alias = "title")]
+    pub description: Option<String>,
+    /// Markdown details (`message` accepted as an alias).
+    #[serde(default, alias = "message")]
+    pub details: Option<String>,
 }
 
 /// The `Idempotency-Key` header, or, when the client sends none, a key derived
@@ -243,14 +261,18 @@ pub async fn post_alert(
     check_group(p, &req.group)?;
     let key = idempotency_key(
         &headers,
-        &[&req.group, req.title.as_deref().unwrap_or(""), req.message.as_deref().unwrap_or("")],
+        &[
+            &req.group,
+            req.description.as_deref().unwrap_or(""),
+            req.details.as_deref().unwrap_or(""),
+        ],
     )?;
     let accepted = accept_alert(
         &app,
         NewAlert {
             group: req.group,
-            title: req.title,
-            message: req.message,
+            description: req.description,
+            details: req.details,
             source: format!("producer:{}", p.name),
             idempotency_key: key,
         },
@@ -320,7 +342,7 @@ pub async fn alertmanager(
         let annotations = a.get("annotations").cloned().unwrap_or(Value::Null);
         let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let name = text(&labels, "alertname").unwrap_or_else(|| "alert".into());
-        let title = format!("[{}] {}", status.to_uppercase(), name);
+        let description = format!("[{}] {}", status.to_uppercase(), name);
         let mut message = String::new();
         for k in ["summary", "description"] {
             if let Some(t) = text(&annotations, k).filter(|t| !t.trim().is_empty()) {
@@ -343,8 +365,9 @@ pub async fn alertmanager(
             &app,
             NewAlert {
                 group: group.clone(),
-                title: Some(truncate(&title, limits.max_title_bytes)),
-                message: Some(truncate(&message, limits.max_message_bytes)),
+                description: Some(truncate_chars(&description, MAX_DESCRIPTION_CHARS)),
+                details: Some(truncate(&message, limits.max_details_bytes))
+                    .filter(|d| !d.is_empty()),
                 source: format!("webhook:{}", p.name),
                 idempotency_key: key,
             },
@@ -359,10 +382,12 @@ pub async fn alertmanager(
 
 /// `POST /api/v1/notify/{group}`: generic webhook for any alerting tool.
 ///
-/// The body may be JSON with optional `title` / `message` fields, any other JSON
-/// (kept as compact text), or plain text. The title may also come from `?title=`
-/// or `X-Title`. Text longer than the limits is truncated rather than refused:
-/// the sending tool usually cannot adapt.
+/// The body may be JSON with optional `description` / `details` fields (`title` /
+/// `message` accepted as aliases), any other JSON (kept as compact text in the
+/// details), or plain text (the details). The description may also come from
+/// `?description=` (`?title=`) or `X-Description` (`X-Title`). Text longer than
+/// the limits is truncated rather than refused: the sending tool usually cannot
+/// adapt.
 pub async fn notify(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -373,41 +398,50 @@ pub async fn notify(
     let p = producer(&app, &headers, &query)?;
     check_group(p, &group)?;
     let limits = &app.config.limits;
-    let header_title = headers.get("x-title").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let header_description = header("x-description").or_else(|| header("x-title"));
     let text = String::from_utf8_lossy(&body);
-    let (body_title, message) = match serde_json::from_slice::<Value>(&body) {
+    let (body_description, details) = match serde_json::from_slice::<Value>(&body) {
         Ok(Value::Object(map))
-            if map.get("title").is_some_and(Value::is_string)
-                || map.get("message").is_some_and(Value::is_string) =>
+            if ["description", "details", "title", "message"]
+                .iter()
+                .any(|k| map.get(*k).is_some_and(Value::is_string)) =>
         {
-            let field = |k: &str| map.get(k).and_then(Value::as_str).map(str::to_string);
-            (field("title"), field("message"))
+            let field = |a: &str, b: &str| {
+                map.get(a).or_else(|| map.get(b)).and_then(Value::as_str).map(str::to_string)
+            };
+            (field("description", "title"), field("details", "message"))
         }
         Ok(Value::String(s)) => (None, Some(s)),
         Ok(Value::Null) | Err(_) if text.trim().is_empty() => (None, None),
         Ok(other) => (None, Some(other.to_string())),
         Err(_) => (None, Some(text.to_string())),
     };
-    let clean = |v: Option<String>, max: usize| {
-        v.map(|t| {
+    let description = query
+        .description
+        .clone()
+        .or(header_description)
+        .or(body_description)
+        .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|d| truncate_chars(&d, MAX_DESCRIPTION_CHARS))
+        .filter(|d| !d.is_empty());
+    let details = details
+        .map(|t| {
             let t: String =
                 t.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
-            truncate(t.trim(), max)
+            truncate(t.trim(), limits.max_details_bytes)
         })
-        .filter(|t| !t.is_empty())
-    };
-    let title = clean(query.title.clone().or(header_title).or(body_title), limits.max_title_bytes);
-    let message = clean(message, limits.max_message_bytes);
+        .filter(|t| !t.is_empty());
     let key = idempotency_key(
         &headers,
-        &[&group, title.as_deref().unwrap_or(""), message.as_deref().unwrap_or("")],
+        &[&group, description.as_deref().unwrap_or(""), details.as_deref().unwrap_or("")],
     )?;
     let accepted = accept_alert(
         &app,
         NewAlert {
             group,
-            title,
-            message,
+            description,
+            details,
             source: format!("notify:{}", p.name),
             idempotency_key: key,
         },

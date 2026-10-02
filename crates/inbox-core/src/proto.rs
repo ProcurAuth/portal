@@ -7,37 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::b64::serde_bytes;
 
-/// What the device does when an alert of a subscribed group arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    /// Loops the alarm sound at full alarm volume, overrides silent / vibrate / do
-    /// not disturb and shows a full-screen alert until stopped on the device.
-    Alarm,
-    /// Plays one notification sound even when the phone is silent or on vibrate.
-    Ring,
-    /// Standard notification following the phone sound mode.
-    Notify,
-}
-
-impl Action {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Action::Alarm => "alarm",
-            Action::Ring => "ring",
-            Action::Notify => "notify",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<Action> {
-        match text {
-            "alarm" => Some(Action::Alarm),
-            "ring" => Some(Action::Ring),
-            "notify" => Some(Action::Notify),
-            _ => None,
-        }
-    }
-}
+/// Maximum length of an alert description, in characters.
+pub const MAX_DESCRIPTION_CHARS: usize = 128;
 
 /// Delivery receipt sent by a device.
 ///
@@ -141,24 +112,17 @@ pub struct GroupInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Subscription {
-    pub group: String,
-    pub action: Action,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AlertMsg {
     /// Globally unique (128 random bits, hex). The device deduplicates on it.
     pub alert_id: String,
     pub group: String,
     pub group_name: String,
-    pub title: Option<String>,
-    pub message: Option<String>,
+    /// Short summary, at most [`MAX_DESCRIPTION_CHARS`] characters.
+    pub description: Option<String>,
+    /// Longer content, in Markdown.
+    pub details: Option<String>,
     /// Unix milliseconds at which the server accepted the alert.
     pub created_at_ms: i64,
-    /// Action chosen by this device's subscription when the alert was accepted.
-    pub action: Action,
 }
 
 /// Device -> server, inside the Noise session.
@@ -171,9 +135,10 @@ pub enum ClientMsg {
         alert_id: String,
         stage: AckStage,
     },
+    /// Subscribes to a group. How the device reacts (alarm, ring, notification) is
+    /// a local setting the server never knows.
     Subscribe {
         group: String,
-        action: Action,
     },
     Unsubscribe {
         group: String,
@@ -194,7 +159,8 @@ pub enum ServerMsg {
     Welcome {
         server_name: String,
         groups: Vec<GroupInfo>,
-        subscriptions: Vec<Subscription>,
+        /// Ids of the groups this device is subscribed to.
+        subscriptions: Vec<String>,
         heartbeat_interval_ms: u64,
         offline_warning_after_ms: u64,
         server_time_ms: i64,
@@ -208,7 +174,7 @@ pub enum ServerMsg {
     },
     Alert(AlertMsg),
     Subscriptions {
-        subscriptions: Vec<Subscription>,
+        subscriptions: Vec<String>,
     },
     Pong {
         nonce: u64,
@@ -248,15 +214,15 @@ mod tests {
             alert_id: "ab".into(),
             group: "g".into(),
             group_name: "G".into(),
-            title: None,
-            message: Some("m".into()),
+            description: None,
+            details: Some("**m**".into()),
             created_at_ms: 1,
-            action: Action::Alarm,
         });
         let s = serde_json::to_string(&a).unwrap();
         assert!(s.starts_with(r#"{"t":"alert","alert_id":"ab""#), "{s}");
         let back: ServerMsg = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, ServerMsg::Alert(ref x) if x.action == Action::Alarm));
+        assert!(matches!(back, ServerMsg::Alert(ref x) if x.details.as_deref() == Some("**m**")));
+        assert!(!s.contains("action"), "the server never knows alert levels");
         assert!(
             serde_json::from_str::<ClientMsg>(
                 r#"{"t":"ack","alert_id":"a","stage":"received","x":1}"#

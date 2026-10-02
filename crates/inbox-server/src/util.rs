@@ -40,6 +40,16 @@ pub fn truncate(text: &str, max: usize) -> String {
     text[..end].to_string()
 }
 
+/// Truncates to at most `max` characters, ending with "…" when cut.
+pub fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

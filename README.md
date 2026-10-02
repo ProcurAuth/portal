@@ -172,8 +172,8 @@ the `groups` of its `producer` block.
 
 | Method and path | Purpose |
 |---|---|
-| `POST /api/v1/alerts` | Body: `{"group": "...", "title"?: "...", "message"?: "..."}`. `Idempotency-Key` header recommended; without it an identical request within the same minute is deduplicated. Returns `201 {alert_id, duplicate, targets}`. |
-| `POST /api/v1/notify/{group}` | Generic webhook for any tool: plain text, JSON with `title` / `message`, or any JSON (kept as text). Title from `?title=` or `X-Title`. Too long text is truncated. |
+| `POST /api/v1/alerts` | Body: `{"group": "...", "description"?: "...", "details"?: "..."}` (description at most 128 characters, details in Markdown; `title` / `message` accepted as aliases). `Idempotency-Key` header recommended; without it an identical request within the same minute is deduplicated. Returns `201 {alert_id, duplicate, targets}`. |
+| `POST /api/v1/notify/{group}` | Generic webhook for any tool: plain text, JSON with `title` / `message`, or any JSON (kept as text). Description from `?description=` or `X-Description` (`?title=` / `X-Title` also accepted). Too long text is truncated. |
 | `GET /api/v1/alerts/{id}` | Delivery status per device: sent and received, with attempt counts. Use it to escalate elsewhere. |
 | `POST /api/v1/webhooks/alertmanager/{group}` | Alertmanager / Grafana webhook payload. One Inbox alert per alert, deduplicated on fingerprint + status + `startsAt`. |
 

@@ -25,7 +25,8 @@ pub mod server_key;
 pub use error::{Error, Result};
 
 /// Version of the device protocol. Bumped on any incompatible wire change.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// 2: alert levels are device-local (no action on the wire), description/details.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Re-exported so dependents name the exact same OPAQUE types.
 pub use opaque_ke;

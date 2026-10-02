@@ -27,7 +27,10 @@ l'émission.
 - L'utilisateur saisit l'adresse du serveur (IP:port, nom de domaine, URL
   `http(s)://`), le **mot de passe serveur partagé** et un **nom d'appareil**.
 - Une fois connecté, l'app affiche les groupes déclarés sur le serveur.
-- Pour chaque groupe, l'utilisateur choisit une **action** (ou ne s'abonne pas) :
+- Pour chaque groupe, l'utilisateur choisit une **action** (ou ne s'abonne pas). Ce
+  choix est **local à chaque appareil** (décision du 2026-10-02, protocole v2) : le
+  serveur sait seulement quels groupes un appareil suit, jamais son niveau ; un même
+  pseudo peut avoir plusieurs appareils réglés différemment :
 
 | Action | Comportement Android |
 |---|---|
@@ -55,7 +58,8 @@ l'émission.
   permet de suivre les sessions par identifiant dans le front admin.
 
 ### 3.2 Alerte
-- Groupe obligatoire ; titre et message **facultatifs**.
+- Groupe obligatoire ; **description** courte (128 caractères max) et **détails**
+  en Markdown (tableaux, code, listes), tous deux facultatifs.
 - Sources : API HTTP avec token d'émetteur (déclaré en HCL, limité à des groupes),
   formulaire du front admin, webhook compatible Alertmanager (utilisé aussi par le
   contact point « Webhook » de Grafana).

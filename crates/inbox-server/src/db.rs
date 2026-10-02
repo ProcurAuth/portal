@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-use inbox_core::proto::{Action, Subscription};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
@@ -128,6 +127,13 @@ ALTER TABLE devices ADD COLUMN user_name TEXT;
 ALTER TABLE connections ADD COLUMN user_name TEXT;
 CREATE INDEX devices_user ON devices(user_name);
 CREATE INDEX connections_user ON connections(user_name, connected_at);
+"#,
+    r#"
+-- Alert levels are device-local; alerts carry a short description and Markdown details.
+ALTER TABLE subscriptions DROP COLUMN action;
+ALTER TABLE deliveries DROP COLUMN action;
+ALTER TABLE alerts RENAME COLUMN title TO description;
+ALTER TABLE alerts RENAME COLUMN message TO details;
 "#,
 ];
 
@@ -340,30 +346,21 @@ pub fn touch_seen(conn: &mut Connection, seen: &[(String, i64)]) -> rusqlite::Re
 
 // ---------------------------------------------------------------- subscriptions
 
-pub fn subscriptions(conn: &Connection, device_id: &str) -> rusqlite::Result<Vec<Subscription>> {
+/// Ids of the groups `device_id` is subscribed to. The server never knows how the
+/// device reacts to them: that is a setting of the device.
+pub fn subscriptions(conn: &Connection, device_id: &str) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT group_id, action FROM subscriptions WHERE device_id = ?1 ORDER BY group_id",
+        "SELECT group_id FROM subscriptions WHERE device_id = ?1 ORDER BY group_id",
     )?;
-    let rows = stmt.query_map(params![device_id], |r| {
-        let action: String = r.get(1)?;
-        Ok(Subscription {
-            group: r.get(0)?,
-            action: Action::parse(&action).unwrap_or(Action::Notify),
-        })
-    })?;
+    let rows = stmt.query_map(params![device_id], |r| r.get(0))?;
     rows.collect()
 }
 
-pub fn set_subscription(
-    conn: &Connection,
-    device_id: &str,
-    group: &str,
-    action: Action,
-) -> rusqlite::Result<()> {
+pub fn set_subscription(conn: &Connection, device_id: &str, group: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO subscriptions (device_id, group_id, action, updated_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (device_id, group_id) DO UPDATE SET action = excluded.action, updated_at = excluded.updated_at",
-        params![device_id, group, action.as_str(), now_ms()],
+        "INSERT INTO subscriptions (device_id, group_id, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (device_id, group_id) DO UPDATE SET updated_at = excluded.updated_at",
+        params![device_id, group, now_ms()],
     )?;
     Ok(())
 }
@@ -393,8 +390,8 @@ pub fn prune_subscriptions(conn: &Connection, groups: &[String]) -> rusqlite::Re
 
 pub struct NewAlert {
     pub group: String,
-    pub title: Option<String>,
-    pub message: Option<String>,
+    pub description: Option<String>,
+    pub details: Option<String>,
     pub source: String,
     pub idempotency_key: String,
 }
@@ -419,7 +416,7 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let existing = tx
         .query_row(
-            "SELECT id, group_id, title, message FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
+            "SELECT id, group_id, description, details FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
             params![alert.source, alert.idempotency_key],
             |r| {
                 Ok((
@@ -431,8 +428,8 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
             },
         )
         .optional()?;
-    if let Some((id, group, title, message)) = existing {
-        if group != alert.group || title != alert.title || message != alert.message {
+    if let Some((id, group, description, details)) = existing {
+        if group != alert.group || description != alert.description || details != alert.details {
             return Ok(InsertOutcome::Conflict);
         }
         let devices = delivery_devices(&tx, &id)?;
@@ -441,21 +438,21 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let id = random_id();
     let now = now_ms();
     tx.execute(
-        "INSERT INTO alerts (id, group_id, title, message, source, idempotency_key, created_at)
+        "INSERT INTO alerts (id, group_id, description, details, source, idempotency_key, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             id,
             alert.group,
-            alert.title,
-            alert.message,
+            alert.description,
+            alert.details,
             alert.source,
             alert.idempotency_key,
             now
         ],
     )?;
     tx.execute(
-        "INSERT INTO deliveries (alert_id, device_id, action)
-         SELECT ?1, s.device_id, s.action FROM subscriptions s
+        "INSERT INTO deliveries (alert_id, device_id)
+         SELECT ?1, s.device_id FROM subscriptions s
          JOIN devices d ON d.id = s.device_id
          WHERE s.group_id = ?2 AND d.revoked_at IS NULL
          ORDER BY s.device_id",
@@ -478,10 +475,9 @@ pub struct PendingDelivery {
     pub seq: i64,
     pub alert_id: String,
     pub group: String,
-    pub title: Option<String>,
-    pub message: Option<String>,
+    pub description: Option<String>,
+    pub details: Option<String>,
     pub created_at: i64,
-    pub action: Action,
 }
 
 /// Oldest deliveries of `device_id` whose receipt the device has not sent yet,
@@ -493,21 +489,19 @@ pub fn pending_deliveries(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT d.seq, a.id, a.group_id, a.title, a.message, a.created_at, d.action
+        "SELECT d.seq, a.id, a.group_id, a.description, a.details, a.created_at
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![device_id, limit, cutoff], |r| {
-        let action: String = r.get(6)?;
         Ok(PendingDelivery {
             seq: r.get(0)?,
             alert_id: r.get(1)?,
             group: r.get(2)?,
-            title: r.get(3)?,
-            message: r.get(4)?,
+            description: r.get(3)?,
+            details: r.get(4)?,
             created_at: r.get(5)?,
-            action: Action::parse(&action).unwrap_or(Action::Alarm),
         })
     })?;
     rows.collect()
@@ -573,7 +567,7 @@ pub struct DeviceView {
     pub last_seen_at: Option<i64>,
     pub last_ip: Option<String>,
     pub revoked_at: Option<i64>,
-    pub subscriptions: Vec<Subscription>,
+    pub subscriptions: Vec<String>,
     pub pending: i64,
 }
 
@@ -615,8 +609,8 @@ pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<Devi
 pub struct AlertSummary {
     pub id: String,
     pub group: String,
-    pub title: Option<String>,
-    pub message: Option<String>,
+    pub description: Option<String>,
+    pub details: Option<String>,
     pub source: String,
     pub created_at: i64,
     pub targets: i64,
@@ -625,7 +619,8 @@ pub struct AlertSummary {
     pub expired: i64,
 }
 
-const ALERT_SUMMARY: &str = "SELECT a.id, a.group_id, a.title, a.message, a.source, a.created_at,
+const ALERT_SUMMARY: &str =
+    "SELECT a.id, a.group_id, a.description, a.details, a.source, a.created_at,
         COUNT(d.seq), COUNT(d.received_at)
      FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id";
 
@@ -633,8 +628,8 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
     Ok(AlertSummary {
         id: r.get(0)?,
         group: r.get(1)?,
-        title: r.get(2)?,
-        message: r.get(3)?,
+        description: r.get(2)?,
+        details: r.get(3)?,
         source: r.get(4)?,
         created_at: r.get(5)?,
         targets: r.get(6)?,
@@ -671,7 +666,6 @@ pub struct DeliveryView {
     pub device_id: String,
     pub device_name: String,
     pub user_name: Option<String>,
-    pub action: String,
     pub attempts: i64,
     pub first_sent_at: Option<i64>,
     pub last_sent_at: Option<i64>,
@@ -700,7 +694,7 @@ pub fn alert_detail(
     let summary = with_expiry(summary, cutoff);
     let is_expired = summary.created_at < cutoff;
     let mut stmt = conn.prepare_cached(
-        "SELECT d.device_id, v.name, d.action, d.attempts, d.first_sent_at, d.last_sent_at,
+        "SELECT d.device_id, v.name, d.attempts, d.first_sent_at, d.last_sent_at,
                 d.received_at, v.revoked_at IS NOT NULL, v.user_name
          FROM deliveries d JOIN devices v ON v.id = d.device_id
          WHERE d.alert_id = ?1 ORDER BY v.user_name IS NULL, v.user_name, v.name",
@@ -710,14 +704,13 @@ pub fn alert_detail(
             Ok(DeliveryView {
                 device_id: r.get(0)?,
                 device_name: r.get(1)?,
-                action: r.get(2)?,
-                attempts: r.get(3)?,
-                first_sent_at: r.get(4)?,
-                last_sent_at: r.get(5)?,
-                received_at: r.get(6)?,
-                expired: is_expired && r.get::<_, Option<i64>>(6)?.is_none(),
-                device_revoked: r.get(7)?,
-                user_name: r.get(8)?,
+                attempts: r.get(2)?,
+                first_sent_at: r.get(3)?,
+                last_sent_at: r.get(4)?,
+                received_at: r.get(5)?,
+                expired: is_expired && r.get::<_, Option<i64>>(5)?.is_none(),
+                device_revoked: r.get(6)?,
+                user_name: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -829,8 +822,8 @@ mod tests {
     fn alert(key: &str) -> NewAlert {
         NewAlert {
             group: "infra".into(),
-            title: Some("t".into()),
-            message: None,
+            description: Some("t".into()),
+            details: None,
             source: "producer:test".into(),
             idempotency_key: key.into(),
         }
@@ -842,9 +835,9 @@ mod tests {
         let a = insert_device(&c, "a", None, &[1; 32], "1.1.1.1").unwrap();
         let b = insert_device(&c, "b", None, &[2; 32], "1.1.1.1").unwrap();
         let r = insert_device(&c, "r", None, &[3; 32], "1.1.1.1").unwrap();
-        set_subscription(&c, &a, "infra", Action::Alarm).unwrap();
-        set_subscription(&c, &b, "other", Action::Ring).unwrap();
-        set_subscription(&c, &r, "infra", Action::Ring).unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
+        set_subscription(&c, &b, "other").unwrap();
+        set_subscription(&c, &r, "infra").unwrap();
         revoke_device(&mut c, &r).unwrap();
         let InsertOutcome::Created { devices, .. } = insert_alert(&mut c, &alert("k1")).unwrap()
         else {
@@ -853,7 +846,6 @@ mod tests {
         assert_eq!(devices, vec![a.clone()]);
         let p = pending_deliveries(&c, &a, 10, 0).unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p[0].action, Action::Alarm);
         assert!(pending_deliveries(&c, &b, 10, 0).unwrap().is_empty());
     }
 
@@ -861,7 +853,7 @@ mod tests {
     fn idempotency_key_deduplicates_and_detects_conflicts() {
         let mut c = mem();
         let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
-        set_subscription(&c, &a, "infra", Action::Notify).unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
             panic!()
@@ -873,7 +865,7 @@ mod tests {
         };
         assert_eq!(alert_id, again);
         let mut other = alert("k");
-        other.title = Some("different".into());
+        other.description = Some("different".into());
         assert!(matches!(insert_alert(&mut c, &other).unwrap(), InsertOutcome::Conflict));
         assert_eq!(pending_deliveries(&c, &a, 10, 0).unwrap().len(), 1);
     }
@@ -882,7 +874,7 @@ mod tests {
     fn acks_stop_redelivery_and_are_idempotent() {
         let mut c = mem();
         let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
-        set_subscription(&c, &a, "infra", Action::Notify).unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
             panic!()
@@ -901,7 +893,7 @@ mod tests {
     fn undelivered_alerts_expire_after_the_delivery_ttl() {
         let mut c = mem();
         let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
-        set_subscription(&c, &a, "infra", Action::Notify).unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
             panic!()
@@ -923,7 +915,7 @@ mod tests {
     fn purge_removes_history_past_retention() {
         let mut c = mem();
         let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
-        set_subscription(&c, &a, "infra", Action::Notify).unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
         insert_alert(&mut c, &alert("k")).unwrap();
         let past = now_ms() - 1_000_000;
         assert_eq!(purge(&mut c, past, past).unwrap().0, 0);
