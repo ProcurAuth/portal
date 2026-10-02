@@ -328,19 +328,27 @@ class Store private constructor(context: Context, private val defaultUserName: S
         arrayOf(serverId.toString(), alertId)
     ).firstOrNull()
 
-    /** The `limit` most recent alerts of every server received since `sinceMs`, newest first. */
-    fun recentAlerts(sinceMs: Long, limit: Int): List<Alert> = readAlerts(
-        "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ? ORDER BY received_at_ms DESC, id DESC LIMIT ?",
+    private fun readFilter(includeRead: Boolean) = if (includeRead) "" else " AND read_at_ms IS NULL"
+
+    /**
+     * The `limit` most recent alerts of every server received since `sinceMs`, newest
+     * first; unread ones only unless `includeRead`.
+     */
+    fun recentAlerts(sinceMs: Long, limit: Int, includeRead: Boolean): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE received_at_ms >= ?${readFilter(includeRead)} " +
+            "ORDER BY received_at_ms DESC, id DESC LIMIT ?",
         arrayOf(sinceMs.toString(), limit.toString())
     )
 
     /** The `limit` most recent alerts of every server, whatever their age, newest first. */
-    fun latestAlerts(limit: Int): List<Alert> = readAlerts(
-        "SELECT $alertColumns FROM alerts ORDER BY received_at_ms DESC, id DESC LIMIT ?",
+    fun latestAlerts(limit: Int, includeRead: Boolean): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts WHERE 1 = 1${readFilter(includeRead)} " +
+            "ORDER BY received_at_ms DESC, id DESC LIMIT ?",
         arrayOf(limit.toString())
     )
 
-    fun alertCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM alerts", null)
+    fun alertCount(includeRead: Boolean): Int = readableDatabase
+        .rawQuery("SELECT COUNT(*) FROM alerts WHERE 1 = 1${readFilter(includeRead)}", null)
         .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
 
     /** Marks one alert read. Returns false if it already was. */

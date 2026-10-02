@@ -80,7 +80,7 @@
   }
 
   const STATUS = {
-    online: ['Online', 'success'],
+    online: ['Online', 'ok'],
     offline: ['Offline', 'neutral'],
     unreachable: ['Unreachable', 'danger'],
     revoked: ['Revoked', 'neutral'],
@@ -208,7 +208,7 @@
       state = el('span', { class: 'badge danger' }, missing + ' not received');
       sev = 'danger';
     } else if (expired === 0) {
-      state = el('span', { class: 'badge success' }, 'Received');
+      state = el('span', { class: 'badge ok' }, 'Received');
       sev = 'ok';
     } else {
       state = el('span', { class: 'badge neutral', title: 'Not received before expiry: no longer sent' }, 'Expired');
@@ -268,7 +268,7 @@
       if (x.attempts > 1) sub.push(x.attempts + ' attempts');
       if (x.device_revoked) sub.push('device revoked');
       let side;
-      if (x.received_at) side = el('span', { class: 'badge success', title: absTime(x.received_at) }, icon('check-circle-outline'), 'Received in ' + duration(x.received_at - d.created_at));
+      if (x.received_at) side = el('span', { class: 'badge ok', title: absTime(x.received_at) }, icon('check-circle-outline'), 'Received in ' + duration(x.received_at - d.created_at));
       else if (x.expired) side = el('span', { class: 'badge neutral', title: 'Not received before the alert expired: no longer sent' }, icon('clock-outline'), 'Expired (not received)');
       else side = el('span', { class: 'badge danger' }, icon('clock-outline'), x.first_sent_at ? 'Pending' : 'Not sent yet');
       return el('div', { class: 'row' },
@@ -350,7 +350,7 @@
     try {
       const r = await api('POST', 'api/admin/alerts', { ...body, idempotency_key: pendingSend.key });
       pendingSend = null;
-      result.className = 'banner ' + (r.targets === 0 ? 'warning' : 'success');
+      result.className = 'banner ' + (r.targets === 0 ? 'warning' : 'ok');
       result.replaceChildren(
         icon(r.targets === 0 ? 'alert-circle-outline' : 'check-circle-outline'),
         el('span', {
@@ -500,7 +500,7 @@
           el('div', { class: 'row-title' }, who(c.user_name, c.device_name)),
           el('div', { class: 'row-sub' }, sub.join(' · '),
             open ? el('span', { 'data-since': c.connected_at, 'data-prefix': ' · since ', text: ' · since ' + ago(c.connected_at) }) : null)),
-        el('div', { class: 'row-side' }, open ? el('span', { class: 'badge success', text: 'Live' }) : null));
+        el('div', { class: 'row-side' }, open ? el('span', { class: 'badge ok', text: 'Live' }) : null));
     }));
   }
 

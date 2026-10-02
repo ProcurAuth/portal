@@ -8,13 +8,15 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.TextClock
+import android.widget.TextView
 import app.inbox.R
 import app.inbox.alert.Alerter
 import app.inbox.data.Store
@@ -34,6 +36,16 @@ class AlarmActivity : Activity() {
                 .putExtra(EXTRA_SERVER, serverId)
                 .putExtra(EXTRA_ALERT, alertId)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+    }
+
+    private val ticker = Handler(Looper.getMainLooper())
+    private var elapsed: TextView? = null
+    private var emittedAtMs = 0L
+    private val tick = object : Runnable {
+        override fun run() {
+            elapsed?.text = elapsedText(System.currentTimeMillis() - emittedAtMs)
+            ticker.postDelayed(this, 1000 - System.currentTimeMillis() % 1000)
+        }
     }
 
     private val white = 0xFFFFFFFF.toInt()
@@ -57,8 +69,24 @@ class AlarmActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        ticker.removeCallbacks(tick)
+        ticker.post(tick)
         // The page is visible: the notification must not cover it with a heads-up.
         Alerter.quietAlarmNotifications(this, Store.get(this).ringingAlarms())
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ticker.removeCallbacks(tick)
+    }
+
+    /** Time since the alert was emitted: M:SS under an hour, then H:MM:SS. */
+    private fun elapsedText(ms: Long): String {
+        val total = (ms.coerceAtLeast(0) / 1000)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val s = total % 60
+        return if (h > 0) "+%d:%02d:%02d".format(h, m, s) else "+%02d:%02d".format(m, s)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -93,26 +121,28 @@ class AlarmActivity : Activity() {
         }
         val col = lin(padH = 16, padV = 16).apply { gravity = Gravity.CENTER_HORIZONTAL }
 
+        // Elapsed time since the alert was emitted, live, above everything else.
+        emittedAtMs = a.createdAtMs
+        col.addView(mono(getString(R.string.alarm_since_alert).uppercase(), 11f, faint, bold = true).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = 0.14f
+        }, lp(MATCH, WRAP).margins(this, t = 12))
+        elapsed = mono(elapsedText(System.currentTimeMillis() - a.createdAtMs), 46f, white).apply {
+            gravity = Gravity.CENTER
+        }
+        col.addView(elapsed, lp(MATCH, WRAP).margins(this, t = 6))
+
         // Header: group and how many others ring.
         val head = lin(vertical = false).apply { gravity = Gravity.CENTER }
         head.addView(chip(a.groupName, red, 0x29F04438, dot = true))
         if (others.isNotEmpty()) {
             head.addView(chip("+" + others.size, dim, 0x14FFFFFF), lp(WRAP, WRAP).margins(this, l = 6))
         }
-        col.addView(head, lp(MATCH, WRAP).margins(this, t = 16))
-
-        col.addView(TextClock(this).apply {
-            format12Hour = "HH:mm:ss"
-            format24Hour = "HH:mm:ss"
-            textSize = 46f
-            typeface = MONO
-            setTextColor(white)
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-        }, lp(MATCH, WRAP).margins(this, t = 14))
-        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), getString(R.string.alarm_received_at, hms(a.receivedAtMs)), shortAge(a.createdAtMs))
-            .joinToString("  ·  "), 11f, faint).apply { gravity = Gravity.CENTER; letterSpacing = 0.06f },
-            lp(MATCH, WRAP).margins(this, t = 8))
+        col.addView(head, lp(MATCH, WRAP).margins(this, t = 14))
+        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), getString(R.string.alarm_sent_at, hms(a.createdAtMs)),
+            getString(R.string.alarm_received_at, hms(a.receivedAtMs)))
+            .joinToString(" · "), 10.5f, faint, lines = 2).apply { gravity = Gravity.CENTER; letterSpacing = 0.02f },
+            lp(MATCH, WRAP).margins(this, t = 10))
 
         // Alert text on a glass card, scrollable when long.
         val card = lin(padH = 16, padV = 14).apply {

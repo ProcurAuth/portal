@@ -34,6 +34,9 @@
     <string name="alerts_no_server_body">Add a Inbox server to start receiving alerts.</string>
     <string name="alerts_add_server">Add a server</string>
     <string name="alerts_see_more">See more</string>
+    <string name="alerts_show_read">Show read</string>
+    <string name="alerts_no_unread_title">No unread alerts</string>
+    <string name="alerts_no_unread_body">Alerts you have read are hidden. Tick Show read to see them.</string>
     <string name="alerts_mark_all">Mark all as read</string>
     <string name="alert_mark_read">Mark as read</string>
     <string name="marked_read">Marked as read</string>
@@ -148,6 +151,8 @@
     <!-- Alarm screen -->
     <string name="alarm_hint">Slide to stop</string>
     <string name="alarm_received_at">received %1$s</string>
+    <string name="alarm_since_alert">Since alert</string>
+    <string name="alarm_sent_at">sent %1$s</string>
     <string name="alarm_all_stopped">Stopping silences every ringing alarm.</string>
     <string name="alarm_stop_description">Stop the alarm. Slide out of the circle or long press.</string>
 

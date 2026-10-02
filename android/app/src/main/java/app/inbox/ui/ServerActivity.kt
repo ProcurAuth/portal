@@ -82,7 +82,7 @@ class ServerActivity : BaseActivity() {
         val st = Registry.status(serverId)
         val now = System.currentTimeMillis()
         val (code, fg) = when (st.state) {
-            LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.success)
+            LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.primary)
             LinkState.CONNECTING -> getString(R.string.status_connecting) to color(R.color.warning)
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)

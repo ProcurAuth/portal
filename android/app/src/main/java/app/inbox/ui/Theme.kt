@@ -21,16 +21,15 @@ object Prefs {
 
     private fun prefs(c: Context) = c.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    /** Settings migration: the alert count moved to a new key with a new default (10). */
-    fun migrate(c: Context) {
-        if (prefs(c).contains("display_limit")) prefs(c).edit().remove("display_limit").apply()
-    }
-
     fun limit(c: Context): Int =
         prefs(c).getInt("alerts_shown", DEFAULT_LIMIT).coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)
 
     fun setLimit(c: Context, v: Int) =
         prefs(c).edit().putInt("alerts_shown", v.coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)).apply()
+
+    /** Whether the home list also shows alerts already read. Off by default. */
+    fun showRead(c: Context): Boolean = prefs(c).getBoolean("show_read", false)
+    fun setShowRead(c: Context, v: Boolean) = prefs(c).edit().putBoolean("show_read", v).apply()
 
     fun windowMs(c: Context): Long = prefs(c).getLong("display_window_ms", DEFAULT_WINDOW_MS)
     fun setWindowMs(c: Context, v: Long) = prefs(c).edit().putLong("display_window_ms", v).apply()

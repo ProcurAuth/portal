@@ -301,16 +301,22 @@ class MainActivity : BaseActivity() {
 
         val limit = Prefs.limit(this)
         val window = Prefs.windowMs(this)
+        val showRead = Prefs.showRead(this)
         val now = System.currentTimeMillis()
         // The configured count within the window, then older ones 10 at a time.
-        val base = store.recentAlerts(now - window, limit)
-        val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra)
+        val base = store.recentAlerts(now - window, limit, showRead)
+        val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
         if (alerts.isEmpty()) {
-            body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_empty_title, windowLabel(window)),
-                getString(R.string.alerts_empty_body), null, null))
+            if (!showRead && store.alertCount(includeRead = true) > 0) {
+                body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_no_unread_title),
+                    getString(R.string.alerts_no_unread_body), null, null))
+            } else {
+                body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_empty_title, windowLabel(window)),
+                    getString(R.string.alerts_empty_body), null, null))
+            }
         } else {
-            // One glass card per alert, the severity bar on its rounded left edge.
+            // One card per alert, the severity bar on its left edge.
             alerts.forEachIndexed { i, a ->
                 val card = lin().apply {
                     background = solidCard()
@@ -321,12 +327,36 @@ class MainActivity : BaseActivity() {
                 body.addView(card, lp().margins(this, t = if (i == 0) 4 else 8))
             }
         }
-        if (store.alertCount() > alerts.size) {
-            // Plain accent text, not a button; the row keeps a 48 dp touch target.
-            body.addView(label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
+        body.addView(listFooter(showRead, store.alertCount(showRead) > alerts.size),
+            lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
+    }
+
+    /** "Show read" toggle and "See more", plain accent text on one row (48 dp targets). */
+    private fun listFooter(showRead: Boolean, hasMore: Boolean): View = lin(vertical = false).apply {
+        gravity = Gravity.CENTER
+        addView(lin(vertical = false).apply {
+            minimumHeight = dp(48)
+            setPadding(dp(12), 0, dp(12), 0)
+            isClickable = true
+            isFocusable = true
+            background = rowRipple()
+            contentDescription = getString(R.string.alerts_show_read)
+            addView(checkMark(showRead), lp(dp(16), dp(16)))
+            addView(label(getString(R.string.alerts_show_read), 13f,
+                color(if (showRead) R.color.primary else R.color.text_muted), MEDIUM),
+                lp(WRAP, WRAP).margins(this@MainActivity, l = 8))
+            setOnClickListener {
+                Prefs.setShowRead(this@MainActivity, !showRead)
+                extra = 0
+                render()
+            }
+        }, lp(WRAP, WRAP))
+        if (hasMore) {
+            addView(label("·", 13f, color(R.color.text_subtle)), lp(WRAP, WRAP).margins(this@MainActivity, l = 4, r = 4))
+            addView(label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
                 gravity = Gravity.CENTER
                 minHeight = dp(48)
-                setPadding(dp(24), 0, dp(24), 0)
+                setPadding(dp(12), 0, dp(12), 0)
                 isClickable = true
                 isFocusable = true
                 background = rowRipple()
@@ -334,10 +364,19 @@ class MainActivity : BaseActivity() {
                     extra += 10
                     render()
                 }
-            }, lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
-        } else {
-            body.addView(View(this), lp(MATCH, dp(16)))
+            }, lp(WRAP, WRAP))
         }
+    }
+
+    /** Small square check box drawn in the accent color. */
+    private fun checkMark(checked: Boolean): View = FrameLayout(this).apply {
+        background = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = dpf(3f)
+            if (checked) setColor(color(R.color.primary)) else setColor(0)
+            setStroke(dp(1).coerceAtLeast(2), color(if (checked) R.color.primary else R.color.text_muted))
+        }
+        if (checked) addView(icon(R.drawable.ic_check, color(R.color.on_primary), 12),
+            FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER))
     }
 
     private fun isRinging(a: Alert) = a.action == "alarm" && a.stoppedAtMs == null
@@ -497,7 +536,7 @@ class MainActivity : BaseActivity() {
     private fun linkCode(serverId: Long, now: Long): Pair<String, Int> {
         val st = Registry.status(serverId)
         return when (st.state) {
-            LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.success)
+            LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.primary)
             LinkState.CONNECTING -> getString(R.string.status_connecting) to color(R.color.warning)
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
@@ -584,7 +623,7 @@ class MainActivity : BaseActivity() {
         val p = panel()
         perms.forEachIndexed { i, perm ->
             if (i > 0) p.addView(divider())
-            val trailing = if (perm.granted) chip("OK", color(R.color.success), color(R.color.success_soft), dot = true)
+            val trailing = if (perm.granted) chip("OK", color(R.color.primary), color(R.color.primary_soft), dot = true)
             else mono(getString(R.string.perm_grant).uppercase(), 11f, color(R.color.on_primary), bold = true).apply {
                 background = pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
                 setPadding(dp(10), dp(7), dp(10), dp(7))
