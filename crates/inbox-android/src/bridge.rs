@@ -41,8 +41,7 @@ pub fn enroll_start(
     device_name: &str,
     user_name: &str,
 ) -> Result<(Box<Enroll>, String), Error> {
-    let user = Some(user_name.trim()).filter(|u| !u.is_empty());
-    let (client, msg) = EnrollClient::start_as(password, device_name, user, Rng::os())?;
+    let (client, msg) = EnrollClient::start(password, device_name, user_name, Rng::os())?;
     Ok((Box::new(Enroll { client: Mutex::new(Some(client)) }), msg))
 }
 
@@ -160,7 +159,7 @@ mod tests {
         let out = enroll_on_message(&h, &m2);
         let m3 = out["send"].as_str().unwrap().to_string();
         let verified = server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
-        assert_eq!(verified.user_name.as_deref(), Some("alice"), "pseudo reaches the server");
+        assert_eq!(verified.user_name, "alice", "pseudo reaches the server");
         let m4 = server.accepted("0123456789abcdef0123456789abcdef", "Prod").unwrap();
         let done = enroll_on_message(&h, &m4);
         let done = &done["done"];
@@ -185,16 +184,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_pseudo_enrolls_without_user_name() {
-        let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let rec = login::register(&key.opaque, Role::Device, b"secret-pw", &mut Rng::os()).unwrap();
-        let rec = login::parse_record(&rec).unwrap();
-        let mut server = EnrollServer::new(&key, &rec);
-        let (h, m1) = enroll_start(b"secret-pw", "Pixel", "  ").unwrap();
-        let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
-        let m3 = enroll_on_message(&h, &m2)["send"].as_str().unwrap().to_string();
-        let verified = server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
-        assert!(verified.user_name.is_none());
+    fn pseudo_is_required_and_validated() {
+        let err = enroll_start(b"pw", "Pixel", "  ").err().expect("empty pseudo refused");
+        assert_eq!(error_json(&err)["error"]["code"], "malformed");
         let err =
             enroll_start(b"pw", "Pixel", "bad\u{7}name").err().expect("control characters refused");
         assert_eq!(error_json(&err)["error"]["code"], "malformed");

@@ -135,6 +135,13 @@ ALTER TABLE deliveries DROP COLUMN action;
 ALTER TABLE alerts RENAME COLUMN title TO description;
 ALTER TABLE alerts RENAME COLUMN message TO details;
 "#,
+    r#"
+-- Every device has a pseudonym: devices enrolled before pseudonyms take their name.
+UPDATE devices SET user_name = name WHERE user_name IS NULL;
+UPDATE connections SET user_name =
+    (SELECT d.user_name FROM devices d WHERE d.id = connections.device_id)
+    WHERE user_name IS NULL;
+"#,
 ];
 
 impl Db {
@@ -235,7 +242,7 @@ pub struct DeviceKey {
     pub public_key: Vec<u8>,
     pub revoked: bool,
     pub name: String,
-    pub user_name: Option<String>,
+    pub user_name: String,
 }
 
 pub fn count_active_devices(conn: &Connection) -> rusqlite::Result<u32> {
@@ -245,7 +252,7 @@ pub fn count_active_devices(conn: &Connection) -> rusqlite::Result<u32> {
 pub fn insert_device(
     conn: &Connection,
     name: &str,
-    user_name: Option<&str>,
+    user_name: &str,
     public_key: &[u8],
     ip: &str,
 ) -> rusqlite::Result<String> {
@@ -559,7 +566,7 @@ pub fn ack(
 pub struct DeviceView {
     pub id: String,
     pub name: String,
-    pub user_name: Option<String>,
+    pub user_name: String,
     pub enrolled_at: i64,
     pub enrolled_ip: String,
     pub app_version: Option<String>,
@@ -579,7 +586,7 @@ pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<Devi
                 (SELECT COUNT(*) FROM deliveries x JOIN alerts y ON y.id = x.alert_id
                  WHERE x.device_id = d.id AND x.received_at IS NULL AND y.created_at >= ?1),
                 d.user_name
-         FROM devices d ORDER BY d.revoked_at IS NOT NULL, d.user_name IS NULL, d.user_name, d.name",
+         FROM devices d ORDER BY d.revoked_at IS NOT NULL, d.user_name, d.name",
     )?;
     let mut devices: Vec<DeviceView> = stmt
         .query_map(params![cutoff], |r| {
@@ -665,7 +672,7 @@ fn with_expiry(mut a: AlertSummary, cutoff: i64) -> AlertSummary {
 pub struct DeliveryView {
     pub device_id: String,
     pub device_name: String,
-    pub user_name: Option<String>,
+    pub user_name: String,
     pub attempts: i64,
     pub first_sent_at: Option<i64>,
     pub last_sent_at: Option<i64>,
@@ -697,7 +704,7 @@ pub fn alert_detail(
         "SELECT d.device_id, v.name, d.attempts, d.first_sent_at, d.last_sent_at,
                 d.received_at, v.revoked_at IS NOT NULL, v.user_name
          FROM deliveries d JOIN devices v ON v.id = d.device_id
-         WHERE d.alert_id = ?1 ORDER BY v.user_name IS NULL, v.user_name, v.name",
+         WHERE d.alert_id = ?1 ORDER BY v.user_name, v.name",
     )?;
     let deliveries = stmt
         .query_map(params![id], |r| {
@@ -722,7 +729,7 @@ pub struct ConnectionView {
     pub device_id: String,
     pub device_name: String,
     /// Pseudonym the device had during this connection.
-    pub user_name: Option<String>,
+    pub user_name: String,
     pub ip: String,
     pub app_version: String,
     pub connected_at: i64,
@@ -832,9 +839,9 @@ mod tests {
     #[test]
     fn fan_out_targets_subscribed_devices_only() {
         let mut c = mem();
-        let a = insert_device(&c, "a", None, &[1; 32], "1.1.1.1").unwrap();
-        let b = insert_device(&c, "b", None, &[2; 32], "1.1.1.1").unwrap();
-        let r = insert_device(&c, "r", None, &[3; 32], "1.1.1.1").unwrap();
+        let a = insert_device(&c, "a", "a", &[1; 32], "1.1.1.1").unwrap();
+        let b = insert_device(&c, "b", "b", &[2; 32], "1.1.1.1").unwrap();
+        let r = insert_device(&c, "r", "r", &[3; 32], "1.1.1.1").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         set_subscription(&c, &b, "other").unwrap();
         set_subscription(&c, &r, "infra").unwrap();
@@ -852,7 +859,7 @@ mod tests {
     #[test]
     fn idempotency_key_deduplicates_and_detects_conflicts() {
         let mut c = mem();
-        let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
@@ -873,7 +880,7 @@ mod tests {
     #[test]
     fn acks_stop_redelivery_and_are_idempotent() {
         let mut c = mem();
-        let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
@@ -892,7 +899,7 @@ mod tests {
     #[test]
     fn undelivered_alerts_expire_after_the_delivery_ttl() {
         let mut c = mem();
-        let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
         else {
@@ -914,7 +921,7 @@ mod tests {
     #[test]
     fn purge_removes_history_past_retention() {
         let mut c = mem();
-        let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         insert_alert(&mut c, &alert("k")).unwrap();
         let past = now_ms() - 1_000_000;

@@ -263,18 +263,18 @@ async fn enroll(
     password: &str,
     name: &str,
 ) -> Result<EnrolledDevice, inbox_core::Error> {
-    enroll_as(port, password, name, None).await
+    enroll_as(port, password, name, "tester").await
 }
 
 async fn enroll_as(
     port: u16,
     password: &str,
     name: &str,
-    user: Option<&str>,
+    user: &str,
 ) -> Result<EnrolledDevice, inbox_core::Error> {
     let (mut ws, _) =
         tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/enroll")).await.unwrap();
-    let (mut client, first) = EnrollClient::start_as(password.as_bytes(), name, user, Rng::os())?;
+    let (mut client, first) = EnrollClient::start(password.as_bytes(), name, user, Rng::os())?;
     ws.send(Message::Text(first.into())).await.unwrap();
     loop {
         let msg = ws.next().await.expect("enroll stream").unwrap();
@@ -440,8 +440,8 @@ async fn delivery_guarantees_end_to_end() {
         enroll(port, "not-the-password", "intruder").await.err(),
         Some(inbox_core::Error::AuthenticationFailed)
     );
-    let a = enroll_as(port, DEVICE_PW, "phone-a", Some("alice")).await.unwrap();
-    let b = enroll(port, DEVICE_PW, "phone-b").await.unwrap();
+    let a = enroll_as(port, DEVICE_PW, "phone-a", "alice").await.unwrap();
+    let b = enroll_as(port, DEVICE_PW, "phone-b", "bob-old").await.unwrap();
     assert_eq!(a.server_name, "E2E");
 
     let (mut ca, welcome) = Conn::open(port, &a).await.unwrap();
@@ -455,7 +455,7 @@ async fn delivery_guarantees_end_to_end() {
     {
         let (mut cb, _) = Conn::open(port, &b).await.unwrap();
         cb.subscribe("infra").await;
-        // Enrolled without a pseudonym (older app): it sets one in session.
+        // The pseudonym can be changed per server at any time.
         cb.send(&ClientMsg::SetUserName { user_name: " bob ".into() }).await;
         loop {
             if let Recv::Msg(ServerMsg::UserName { user_name }) =
@@ -501,7 +501,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!((st, v["duplicate"].as_bool()), (200, Some(true)));
     assert_eq!(v["alert_id"], k1.as_str());
     ca.no_alert(Duration::from_millis(2500)).await;
-    assert_eq!(post_alert(&s, "k1", json!({"group": "infra", "title": "changed"})).0, 409);
+    assert_eq!(post_alert(&s, "k1", json!({"group": "infra", "description": "changed"})).0, 409);
 
     // No receipt: retransmitted with the same id until the device confirms.
     let (_, v) = post_alert(&s, "k2", json!({"group": "infra"}));
@@ -510,8 +510,7 @@ async fn delivery_guarantees_end_to_end() {
     let again = ca.alert().await;
     assert_eq!(again.alert_id, k2, "retransmission keeps the alert id");
     assert!(again.description.is_none() && again.details.is_none(), "both are optional");
-    // A legacy app (0.1 / 0.2) may send this stage: it counts as a receipt.
-    ca.ack(&k2, AckStage::Acknowledged).await;
+    ca.ack(&k2, AckStage::Received).await;
     ca.no_alert(Duration::from_millis(2500)).await;
 
     // Offline device receives its whole backlog on reconnect, in order.
@@ -530,7 +529,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Pending deliveries survive a server restart.
     drop(ca);
-    let (_, v) = post_alert(&s, "k3", json!({"group": "infra", "message": "while you were away"}));
+    let (_, v) = post_alert(&s, "k3", json!({"group": "infra", "details": "while you were away"}));
     let k3 = v["alert_id"].as_str().unwrap().to_string();
     s.stop();
     s.start();
@@ -693,12 +692,12 @@ async fn integrations_and_reverse_proxy_prefixes() {
     .unwrap();
     s.start();
     let (port, ap) = (s.port, s.admin_port);
-    let dev = enroll_as(port, DEVICE_PW, "phone", Some("ops")).await.unwrap();
+    let dev = enroll_as(port, DEVICE_PW, "phone", "ops").await.unwrap();
     let (mut c, _) = Conn::open(port, &dev).await.unwrap();
     c.subscribe("infra").await;
 
     // Generic notify: plain text body, token in the query string, no Idempotency-Key.
-    let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
+    let url = format!("/api/v1/notify/infra?token={}&description=Sauvegarde", s.token);
     let (st, body) =
         http(port, "POST", &url, &[("Content-Type", "text/plain".into())], "backup KO\n");
     assert_eq!(st, 201, "{body}");
@@ -721,18 +720,18 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
-        r#"{"title":"T","message":"M"}"#,
+        r#"{"description":"T","details":"M"}"#,
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
     assert_eq!((got.description.as_deref(), got.details.as_deref()), (Some("T"), Some("M")));
     c.ack(&got.alert_id, AckStage::Received).await;
-    // Any other JSON is kept as compact text; X-Title gives the title.
+    // Any other JSON is kept as compact text; X-Description gives the description.
     let (st, _) = http(
         port,
         "POST",
         "/api/v1/notify/infra",
-        &[auth.clone(), ("X-Title", "Uptime".into())],
+        &[auth.clone(), ("X-Description", "Uptime".into())],
         r#"{ "monitor": {"name": "web"}, "status": 0 }"#,
     );
     assert_eq!(st, 201);
@@ -765,13 +764,23 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert!(got.details.as_deref().unwrap().starts_with("| a | b |"), "Markdown kept as is");
     c.ack(&got.alert_id, AckStage::Received).await;
 
+    // Only the current field names are accepted.
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"old name"}"#,
+    );
+    assert_eq!(st, 400);
+
     // JSON API without Idempotency-Key: created, then deduplicated.
     let (st, _) = http(
         port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
-        r#"{"group":"infra","title":"nokey"}"#,
+        r#"{"group":"infra","description":"nokey"}"#,
     );
     assert_eq!(st, 201);
     let (st, _) = http(
@@ -779,7 +788,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
-        r#"{"group":"infra","title":"nokey"}"#,
+        r#"{"group":"infra","description":"nokey"}"#,
     );
     assert_eq!(st, 200);
 

@@ -31,7 +31,7 @@ device                                              server
    "credential_request":b64}                   ->
                                                <-  {"type":"challenge","credential_response":b64}
   {"type":"finish","credential_finalization":b64,
-   "device_name":s,"user_name":s?,"device_public_key":b64,
+   "device_name":s,"user_name":s,"device_public_key":b64,
    "mac":b64}                                  ->   verifies OPAQUE, then mac
                                                <-  {"type":"accepted","device_id":hex32,
                                                     "server_name":s,"server_public_key":b64,"mac":b64}
@@ -40,7 +40,7 @@ device                                              server
 - `K = HKDF-SHA256(salt="inbox/v1", ikm=OPAQUE session key, info=label)`.
 - Client MAC: `HMAC-SHA256(K("enroll/client-mac"), device_name ‖ device_public_key [‖ "user" ‖ user_name])`.
   `user_name` is the pseudonym of the person using the device (1..64 bytes, no
-  control characters). It is optional for apps 0.1 / 0.2, which omit it.
+  control characters), required.
 - Server MAC: `HMAC-SHA256(K("enroll/server-mac"), device_id ‖ server_name ‖ server_public_key ‖ device_public_key)`.
 - Every MAC input part is prefixed by its length as a big-endian u64.
 - On failure the server sends `{"type":"rejected","code":c,"message":m}`. Codes are
@@ -69,7 +69,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 | `t` | Fields | Meaning |
 |---|---|---|
 | `ready` | | First transport frame. |
-| `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way: there is no human acknowledgement. Idempotent. Legacy apps (0.1, 0.2) may send `displayed` / `acknowledged`: the server treats them as `received`. |
+| `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way: there is no human acknowledgement. Idempotent. |
 | `subscribe` | `group` | Subscribes this device to the group. How the device reacts (alarm, ring, notification) is a local setting of the device: the server never knows it. |
 | `unsubscribe` | `group` | |
 | `set_user_name` | `user_name` | Changes the pseudonym of this device (per server, any time). The server answers `user_name`, or `error` `invalid_user_name`. |
@@ -79,7 +79,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 
 | `t` | Fields |
 |---|---|
-| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym or null) |
+| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym) |
 | `user_name` | `user_name` | Confirms `set_user_name`. |
 | `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `description?` (at most 128 characters), `details?` (Markdown), `created_at_ms` |
 | `subscriptions` | `subscriptions[]`, sent after each change |

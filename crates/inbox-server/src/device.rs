@@ -20,7 +20,9 @@ use axum::response::Response;
 use opentelemetry::KeyValue;
 use inbox_core::enroll::EnrollServer;
 use inbox_core::noise::{self, Responder, Session};
-use inbox_core::proto::{AlertMsg, ClientMsg, ServerMsg, SessionAccept, SessionHello, close};
+use inbox_core::proto::{
+    AckStage, AlertMsg, ClientMsg, ServerMsg, SessionAccept, SessionHello, close,
+};
 use inbox_core::rng::Rng;
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
 use tokio::sync::{Notify, watch};
@@ -142,7 +144,7 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     let max_devices = app.config.devices.max_devices;
     let ip_text = ip.to_string();
     let name = verified.name.clone();
-    let user = verified.user_name.clone().unwrap_or_default();
+    let user = verified.user_name.clone();
     let stored = app
         .db
         .call(move |c| {
@@ -152,7 +154,7 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
             Ok(Some(db::insert_device(
                 c,
                 &verified.name,
-                verified.user_name.as_deref(),
+                &verified.user_name,
                 &verified.public_key,
                 &ip_text,
             )?))
@@ -303,7 +305,7 @@ async fn run_session(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
         "device.session",
         device.id = %device_id,
         device.name = %device.name,
-        user.name = %device.user_name.as_deref().unwrap_or(""),
+        user.name = %device.user_name,
         client.address = %ip,
         app.version = %hello.app_version
     );
@@ -389,7 +391,7 @@ async fn deliver(
     let cfg = &app.config.devices;
     let id = device_id.to_string();
     let profile = app.db.call(move |c| {
-        let user_name = db::find_device(c, &id)?.and_then(|d| d.user_name);
+        let user_name = db::find_device(c, &id)?.map(|d| d.user_name).unwrap_or_default();
         Ok((db::subscriptions(c, &id)?, user_name))
     });
     let (subscriptions, user_name) = match profile.await {
@@ -472,9 +474,7 @@ async fn handle(
             send_msg(socket, session, &ServerMsg::Pong { nonce }).await?;
             Ok(false)
         }
-        // Every stage is a delivery receipt: legacy apps also send displayed and
-        // acknowledged, which only ever follow a receipt.
-        ClientMsg::Ack { alert_id, stage: _ } => {
+        ClientMsg::Ack { alert_id, stage: AckStage::Received } => {
             if !is_hex_id(&alert_id) {
                 return Err(End::Protocol("malformed alert id"));
             }

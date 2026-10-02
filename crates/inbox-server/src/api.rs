@@ -168,7 +168,6 @@ pub async fn accept_alert(
 #[derive(Debug, Default, Deserialize)]
 pub struct ProducerQuery {
     token: Option<String>,
-    #[serde(alias = "title")]
     description: Option<String>,
 }
 
@@ -217,11 +216,11 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError>
 #[serde(deny_unknown_fields)]
 pub struct AlertRequest {
     pub group: String,
-    /// Short summary, at most 128 characters (`title` accepted as an alias).
-    #[serde(default, alias = "title")]
+    /// Short summary, at most 128 characters.
+    #[serde(default)]
     pub description: Option<String>,
-    /// Markdown details (`message` accepted as an alias).
-    #[serde(default, alias = "message")]
+    /// Markdown details.
+    #[serde(default)]
     pub details: Option<String>,
 }
 
@@ -382,12 +381,11 @@ pub async fn alertmanager(
 
 /// `POST /api/v1/notify/{group}`: generic webhook for any alerting tool.
 ///
-/// The body may be JSON with optional `description` / `details` fields (`title` /
-/// `message` accepted as aliases), any other JSON (kept as compact text in the
-/// details), or plain text (the details). The description may also come from
-/// `?description=` (`?title=`) or `X-Description` (`X-Title`). Text longer than
-/// the limits is truncated rather than refused: the sending tool usually cannot
-/// adapt.
+/// The body may be JSON with optional `description` / `details` fields, any other
+/// JSON (kept as compact text in the details), or plain text (the details). The
+/// description may also come from `?description=` or `X-Description`. Text longer
+/// than the limits is truncated rather than refused: the sending tool usually
+/// cannot adapt.
 pub async fn notify(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -399,18 +397,16 @@ pub async fn notify(
     check_group(p, &group)?;
     let limits = &app.config.limits;
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-    let header_description = header("x-description").or_else(|| header("x-title"));
+    let header_description = header("x-description");
     let text = String::from_utf8_lossy(&body);
     let (body_description, details) = match serde_json::from_slice::<Value>(&body) {
         Ok(Value::Object(map))
-            if ["description", "details", "title", "message"]
+            if ["description", "details"]
                 .iter()
                 .any(|k| map.get(*k).is_some_and(Value::is_string)) =>
         {
-            let field = |a: &str, b: &str| {
-                map.get(a).or_else(|| map.get(b)).and_then(Value::as_str).map(str::to_string)
-            };
-            (field("description", "title"), field("details", "message"))
+            let field = |k: &str| map.get(k).and_then(Value::as_str).map(str::to_string);
+            (field("description"), field("details"))
         }
         Ok(Value::String(s)) => (None, Some(s)),
         Ok(Value::Null) | Err(_) if text.trim().is_empty() => (None, None),

@@ -20,18 +20,12 @@ pub const MAX_DESCRIPTION_CHARS: usize = 128;
 pub enum AckStage {
     /// Stored durably on the device. Stops server retransmission.
     Received,
-    /// Legacy (app 0.1 / 0.2). Treated as `Received`.
-    Displayed,
-    /// Legacy (app 0.1 / 0.2). Treated as `Received`.
-    Acknowledged,
 }
 
 impl AckStage {
     pub fn as_str(self) -> &'static str {
         match self {
             AckStage::Received => "received",
-            AckStage::Displayed => "displayed",
-            AckStage::Acknowledged => "acknowledged",
         }
     }
 }
@@ -50,9 +44,8 @@ pub enum EnrollClientMsg {
         #[serde(with = "serde_bytes")]
         credential_finalization: Vec<u8>,
         device_name: String,
-        /// Pseudonym of the person using the device. Absent for apps 0.1 / 0.2.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        user_name: Option<String>,
+        /// Pseudonym of the person using the device.
+        user_name: String,
         #[serde(with = "serde_bytes")]
         device_public_key: Vec<u8>,
         /// Binds the device key and name to the OPAQUE session.
@@ -164,9 +157,8 @@ pub enum ServerMsg {
         heartbeat_interval_ms: u64,
         offline_warning_after_ms: u64,
         server_time_ms: i64,
-        /// Pseudonym recorded for this device, if any.
-        #[serde(default)]
-        user_name: Option<String>,
+        /// Pseudonym recorded for this device.
+        user_name: String,
     },
     /// Confirms a `SetUserName`.
     UserName {
