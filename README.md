@@ -137,8 +137,10 @@ Reusing a key with different content returns `409`.
   - **DNS rebinding:** requests whose `Host` header is not listed in
     `admin.allowed_hosts` are refused, so a malicious web page cannot reach a
     localhost-bound admin front through a hostname it controls. Requests that
-    come from a peer listed in `server.trusted_proxies` are exempt: the proxy
-    already routed on its own hostnames.
+    come from a peer listed in `server.trusted_proxies` are exempt (the proxy
+    already routed on its own hostnames), except loopback peers: SSH tunnels and
+    local browsers arrive from loopback. List only real proxy addresses, never the
+    Docker gateway or a whole bridge range (host and tunnel traffic come from it).
   - **CSRF:** every `POST` must carry `Content-Type: application/json` and the
     `X-Inbox-Request: 1` header, which a cross-site page cannot send without a
     CORS preflight that Inbox never grants. Requests marked

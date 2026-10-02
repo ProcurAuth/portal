@@ -106,9 +106,9 @@ pub async fn guard(
     next: Next,
 ) -> Response {
     // A trusted reverse proxy already routed on its own host name: any Host is
-    // fine through it. Direct clients must use a listed host.
-    let peer_ip = peer.ip().to_canonical();
-    let via_proxy = app.config.server.trusted_proxies.iter().any(|n| n.contains(&peer_ip));
+    // fine through it. Direct clients must use a listed host. Loopback peers are
+    // never exempt: SSH tunnels and local browsers arrive from loopback.
+    let via_proxy = exempt_from_host_check(peer.ip(), &app.config.server.trusted_proxies);
     if let Err(e) = check_request(&app, req.method(), req.headers(), via_proxy) {
         if req.uri().path().starts_with("/api/") {
             return with_security_headers(e.into_response());
@@ -123,6 +123,14 @@ pub async fn guard(
         return with_security_headers(res.into_response());
     }
     with_security_headers(next.run(req).await)
+}
+
+/// Whether a request may use any `Host` because it comes from a trusted reverse
+/// proxy. Loopback is never exempt: SSH tunnels and local browsers use it, and a
+/// DNS-rebinding page would reach the admin front through them.
+pub(crate) fn exempt_from_host_check(peer: std::net::IpAddr, trusted: &[ipnet::IpNet]) -> bool {
+    let ip = peer.to_canonical();
+    !ip.is_loopback() && trusted.iter().any(|n| n.contains(&ip))
 }
 
 fn check_request(
@@ -374,4 +382,28 @@ pub async fn revoke(
         tracing::info!(event = "device_revoked", device.id = %id);
     }
     Ok(no_store(json!({ "revoked": revoked })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_non_loopback_trusted_proxies_skip_the_host_check() {
+        let trusted: Vec<ipnet::IpNet> =
+            vec!["127.0.0.0/8".parse().unwrap(), "172.30.0.0/24".parse().unwrap()];
+        assert!(exempt_from_host_check("172.30.0.10".parse().unwrap(), &trusted));
+        assert!(!exempt_from_host_check("127.0.0.1".parse().unwrap(), &trusted), "loopback");
+        assert!(!exempt_from_host_check("::ffff:127.0.0.1".parse().unwrap(), &trusted));
+        assert!(!exempt_from_host_check("10.0.0.1".parse().unwrap(), &trusted), "not trusted");
+    }
+
+    #[test]
+    fn assets_resolve_under_any_prefix() {
+        assert_eq!(resolve_asset("/"), "index.html");
+        assert_eq!(resolve_asset("/inbox"), "index.html");
+        assert_eq!(resolve_asset("/a/b/app.js"), "app.js");
+        assert_eq!(resolve_asset("/a/doc"), "doc.html");
+        assert_eq!(resolve_asset("/a/doc/style.css"), "style.css");
+    }
 }

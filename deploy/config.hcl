@@ -5,9 +5,12 @@ server {
   name            = "Inbox"
   listen          = "0.0.0.0:8080"
   admin_listen    = "0.0.0.0:8081"
-  # Docker bridge networks, so a reverse proxy container (Traefik, nginx) can pass
-  # the client address. Remove entries you do not use.
-  trusted_proxies = ["172.16.0.0/12", "192.168.0.0/16"]
+  # Reverse proxies allowed to pass the client address (X-Forwarded-For) and to
+  # reach the admin front under any Host name. List your proxy containers' IPs
+  # or a dedicated proxy network, e.g. ["172.30.0.10/32"]. Never list the Docker
+  # gateway (x.x.x.1) nor a whole bridge range: SSH-tunnel and host traffic
+  # arrive from the gateway and would bypass the admin Host check.
+  trusted_proxies = []
   shutdown_grace  = "10s"
   server_key_file = "/run/secrets/inbox_server_key"
 }

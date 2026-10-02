@@ -16,7 +16,7 @@ not in public issues. Include affected version, impact and reproduction steps.
   `server.admin_listen` can send alerts and revoke devices. Network placement (or
   an authenticating reverse proxy) is the access control. The server refuses
   direct requests whose `Host` is not in `admin.allowed_hosts` (DNS rebinding;
-  requests from `server.trusted_proxies` are exempt), `POST`s
+  requests from non-loopback `server.trusted_proxies` are exempt), `POST`s
   without `Content-Type: application/json` and `X-Inbox-Request: 1` (CSRF), and
   requests marked `Sec-Fetch-Site: cross-site`.
 - Secrets live in files referenced by the configuration (`*_file`); they are never
@@ -28,6 +28,7 @@ not in public issues. Include affected version, impact and reproduction steps.
   reverse proxy that authenticates users, ideally over TLS.
 - Keep `admin.allowed_hosts` to the exact hostnames used without a proxy.
 - Prefer `Authorization: Bearer` over `?token=`: query strings are often logged.
-- Restrict `server.trusted_proxies` to your reverse proxies.
+- Restrict `server.trusted_proxies` to your reverse proxies' addresses: never the
+  Docker gateway or a whole bridge range (host and SSH-tunnel traffic come from it).
 - Back up the server key and the database; protect both (they are secrets).
 - Alert on `inbox_devices_unreachable` and `inbox_oldest_pending_delivery_seconds`.

@@ -684,7 +684,8 @@ async fn password_guessing_is_rate_limited() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrations_and_reverse_proxy_prefixes() {
     let mut s = Server::setup();
-    // The test client connects from 127.0.0.1: declare it a trusted reverse proxy.
+    // Even when loopback is declared a trusted proxy, loopback peers keep the Host
+    // check (SSH tunnels); the exemption itself is unit-tested in admin.rs.
     let cfg = std::fs::read_to_string(s.config()).unwrap();
     std::fs::write(
         s.config(),
@@ -764,34 +765,31 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 200);
 
-    // Admin behind reverse proxies: any prefix, any Host from a trusted proxy.
+    let (st, _) = http_host(ap, "evil.example", "GET", "/api/admin/overview", &[], "");
+    assert_eq!(st, 403, "loopback is never exempt from the Host check");
+
+    // Admin behind reverse proxies: any path prefix.
+    let host = format!("localhost:{ap}");
     for prefix in ["", "/inbox", "/a/b"] {
-        let (st, body) = http_host(
-            ap,
-            "public.example",
-            "GET",
-            &format!("{prefix}/api/admin/overview"),
-            &[],
-            "",
-        );
+        let (st, body) =
+            http_host(ap, &host, "GET", &format!("{prefix}/api/admin/overview"), &[], "");
         assert_eq!(st, 200, "{prefix}: {body}");
-        let (st, body) = http_host(ap, "public.example", "GET", &format!("{prefix}/"), &[], "");
+        let (st, body) = http_host(ap, &host, "GET", &format!("{prefix}/"), &[], "");
         assert_eq!(st, 200);
         assert!(
             body.contains("<html") || body.contains("<!doctype") || body.contains("<!DOCTYPE"),
             "{prefix}"
         );
-        let (st, _) = http_host(ap, "public.example", "GET", &format!("{prefix}/app.js"), &[], "");
+        let (st, _) = http_host(ap, &host, "GET", &format!("{prefix}/app.js"), &[], "");
         assert_eq!(st, 200, "{prefix}/app.js");
-        let (st, body) = http_host(ap, "public.example", "GET", &format!("{prefix}/doc"), &[], "");
+        let (st, body) = http_host(ap, &host, "GET", &format!("{prefix}/doc"), &[], "");
         assert_eq!(st, 200);
         assert!(body.contains("doc"), "{prefix}/doc");
     }
     let send = json!({"group": "infra", "title": "via proxy", "idempotency_key": "p1"}).to_string();
     let hdrs =
         [("Content-Type", "application/json".to_string()), ("X-Inbox-Request", "1".to_string())];
-    let (st, body) =
-        http_host(ap, "public.example", "POST", "/inbox/api/admin/alerts", &hdrs, &send);
+    let (st, body) = http_host(ap, &host, "POST", "/inbox/api/admin/alerts", &hdrs, &send);
     assert_eq!(st, 201, "{body}");
     s.stop();
 }

@@ -67,9 +67,13 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 The admin front has **no password**: anyone who can reach `server.admin_listen`
 can send alerts and revoke devices. Bind it to localhost or a private network, or
 put a reverse proxy that authenticates users in front of it. Requests coming from
-a peer in `server.trusted_proxies` skip the `allowed_hosts` check (the proxy routed
-on its own hostnames), so several proxies, at the root or under any path prefix,
-need no extra setting. Every admin `POST` must also carry
+a non-loopback peer in `server.trusted_proxies` skip the `allowed_hosts` check (the
+proxy routed on its own hostnames), so several proxies, at the root or under any
+path prefix, need no per-hostname setting. Loopback peers always keep the check
+(SSH tunnels, local browsers); a proxy on the same host must therefore have its
+hostnames in `allowed_hosts`. Never put the Docker gateway (x.x.x.1) or a whole
+bridge range in `trusted_proxies`: traffic from the host and from SSH tunnels
+arrives from the gateway. Every admin `POST` must also carry
 `Content-Type: application/json` and `X-Inbox-Request: 1` (CSRF protection), and
 requests marked `Sec-Fetch-Site: cross-site` are refused.
 
