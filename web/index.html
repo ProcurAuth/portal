@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <script>(function(){var p=location.pathname;if(!/\/$/.test(p)&&!/\/doc$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();</script>
   <script>(function(){try{var t=localStorage.getItem("inbox.theme");if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t;}}catch(e){}})();</script>
@@ -19,24 +19,25 @@
         <span id="server-version" class="brand-version"></span>
       </a>
       <span class="topbar-spacer"></span>
+      <span id="freshness" class="freshness" title="Time since the dashboard data was last refreshed"></span>
       <span id="status-pill" class="status-pill idle" title="">
         <span class="dot"></span><span id="status-text">…</span>
       </span>
-      <div class="segmented" role="group" aria-label="Thème" data-theme-switch>
-        <button type="button" data-theme-value="system" title="Thème du navigateur" aria-label="Thème du navigateur"><span class="mdi mdi-theme-system"></span></button>
-        <button type="button" data-theme-value="light" title="Thème clair" aria-label="Thème clair"><span class="mdi mdi-theme-light"></span></button>
-        <button type="button" data-theme-value="dark" title="Thème sombre" aria-label="Thème sombre"><span class="mdi mdi-theme-dark"></span></button>
+      <div class="segmented" role="group" aria-label="Theme" data-theme-switch>
+        <button type="button" data-theme-value="system" title="Browser theme" aria-label="Browser theme"><span class="mdi mdi-theme-system"></span></button>
+        <button type="button" data-theme-value="light" title="Light theme" aria-label="Light theme"><span class="mdi mdi-theme-light"></span></button>
+        <button type="button" data-theme-value="dark" title="Dark theme" aria-label="Dark theme"><span class="mdi mdi-theme-dark"></span></button>
       </div>
-      <a class="btn" href="doc" title="Intégrations : Grafana, Alertmanager et autres outils"><span class="mdi mdi-code-json"></span><span class="label">Intégrations</span></a>
+      <a class="btn" href="doc" title="Integrations: Grafana, Alertmanager and other tools"><span class="mdi mdi-code-json"></span><span class="label">Integrations</span></a>
     </header>
 
     <div id="banners" class="banners">
       <div id="host-error" class="banner danger" hidden>
         <span class="mdi mdi-alert-circle-outline"></span>
         <div>
-          <strong>Hôte non autorisé.</strong>
-          Ajoutez <code id="host-error-host"></code> à <code>admin.allowed_hosts</code> dans la configuration du serveur,
-          ou déclarez le reverse proxy dans <code>server.trusted_proxies</code>, puis redémarrez Inbox.
+          <strong>Host not allowed.</strong>
+          Add <code id="host-error-host"></code> to <code>admin.allowed_hosts</code> in the server configuration,
+          or declare the reverse proxy in <code>server.trusted_proxies</code>, then restart Inbox.
         </div>
       </div>
       <div id="global-error" class="banner danger" hidden></div>
@@ -44,29 +45,36 @@
 
     <main class="dashboard">
       <div class="col">
-        <section id="send" class="panel">
+        <section id="send" class="panel send-panel">
           <div class="panel-head">
-            <h2>Envoyer une alerte</h2>
+            <h2>Send an alert</h2>
             <span id="send-targets" class="meta"></span>
           </div>
           <form id="send-form" class="send-form" novalidate>
             <div class="send-row">
               <label class="field">
-                <span>Groupe</span>
+                <span>Group</span>
                 <select id="send-group" required></select>
               </label>
               <label class="field">
-                <span>Titre <em>facultatif</em></span>
-                <input id="send-title" type="text" maxlength="200" autocomplete="off">
+                <span>Description <em>optional</em> <b id="desc-count" class="counter">0/128</b></span>
+                <input id="send-description" type="text" maxlength="128" autocomplete="off" placeholder="Short summary shown in the notification">
               </label>
             </div>
-            <label class="field">
-              <span>Message <em>facultatif</em></span>
-              <textarea id="send-message" rows="2" maxlength="4000"></textarea>
-            </label>
+            <div class="field details-field">
+              <div class="details-head">
+                <span class="field-label">Details <em>optional, Markdown</em></span>
+                <div class="tabs" role="tablist" aria-label="Details editor">
+                  <button id="tab-write" type="button" role="tab" aria-selected="true" aria-controls="send-details">Write</button>
+                  <button id="tab-preview" type="button" role="tab" aria-selected="false" aria-controls="details-preview">Preview</button>
+                </div>
+              </div>
+              <textarea id="send-details" rows="3" placeholder="Markdown: **bold**, `code`, lists, tables, ```code blocks```…" aria-label="Details"></textarea>
+              <div id="details-preview" class="details-preview" role="tabpanel" hidden></div>
+            </div>
             <div class="send-foot">
               <span id="send-hint" class="targets"></span>
-              <button id="send-btn" class="btn primary" type="submit"><span class="mdi mdi-send"></span>Envoyer</button>
+              <button id="send-btn" class="btn primary" type="submit"><span class="mdi mdi-send"></span>Send</button>
             </div>
             <div id="send-result" class="banner" hidden></div>
           </form>
@@ -74,14 +82,14 @@
 
         <section id="alerts" class="panel grow">
           <div class="panel-head">
-            <h2>Dernières alertes</h2>
-            <span class="meta">5 dernières · 24 h</span>
+            <h2>Latest alerts</h2>
+            <span class="meta">last 5 · 24 h</span>
           </div>
           <div class="panel-body">
             <div id="alerts-list" class="rows"></div>
             <div id="alerts-empty" class="empty" hidden>
               <span class="mdi mdi-bell-outline"></span>
-              <p>Aucune alerte depuis 24 h.</p>
+              <p>No alert in the last 24 hours.</p>
             </div>
           </div>
         </section>
@@ -90,29 +98,29 @@
       <div class="col">
         <section id="devices" class="panel devices">
           <div class="panel-head">
-            <h2>Appareils</h2>
+            <h2>Devices</h2>
             <span id="devices-summary" class="meta"></span>
           </div>
-          <div id="user-filter" class="filter-chips" role="group" aria-label="Filtrer par pseudo" hidden></div>
+          <div id="user-filter" class="filter-chips" role="group" aria-label="Filter by user" hidden></div>
           <div class="panel-body">
             <div id="devices-list" class="rows"></div>
             <div id="devices-empty" class="empty" hidden>
               <span class="mdi mdi-cellphone"></span>
-              <p>Aucun appareil enrôlé. Installez l'application et ajoutez ce serveur.</p>
+              <p>No enrolled device. Install the app and add this server.</p>
             </div>
           </div>
         </section>
 
         <section id="connections" class="panel grow connections">
           <div class="panel-head">
-            <h2>Connexions</h2>
+            <h2>Connections</h2>
             <span id="connections-summary" class="meta"></span>
           </div>
           <div class="panel-body">
             <div id="connections-list" class="rows"></div>
             <div id="connections-empty" class="empty" hidden>
               <span class="mdi mdi-swap-horizontal"></span>
-              <p>Aucune connexion enregistrée.</p>
+              <p>No connection recorded.</p>
             </div>
           </div>
         </section>
@@ -127,19 +135,21 @@
         <h2 id="detail-title"></h2>
         <p id="detail-meta"></p>
       </div>
-      <button id="detail-close" class="icon-btn" type="button" aria-label="Fermer"><span class="mdi mdi-close"></span></button>
+      <button id="detail-close" class="icon-btn" type="button" aria-label="Close"><span class="mdi mdi-close"></span></button>
     </div>
-    <p id="detail-message" class="detail-message"></p>
-    <h3 class="sheet-section">Réception par appareil</h3>
-    <div id="detail-deliveries" class="rows"></div>
+    <div class="sheet-body">
+      <div id="detail-details" class="detail-details"></div>
+      <h3 class="sheet-section">Delivery per device</h3>
+      <div id="detail-deliveries" class="rows"></div>
+    </div>
   </dialog>
 
   <dialog id="confirm-dialog" class="confirm">
     <form method="dialog">
       <p id="confirm-text"></p>
       <div class="form-actions">
-        <button value="cancel" class="btn" type="submit">Annuler</button>
-        <button id="confirm-ok" value="ok" class="btn primary" type="submit">Confirmer</button>
+        <button value="cancel" class="btn" type="submit">Cancel</button>
+        <button id="confirm-ok" value="ok" class="btn primary" type="submit">Confirm</button>
       </div>
     </form>
   </dialog>
@@ -147,6 +157,7 @@
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="common.js"></script>
+  <script src="markdown.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

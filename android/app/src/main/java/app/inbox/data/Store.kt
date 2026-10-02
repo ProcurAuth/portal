@@ -27,10 +27,13 @@ data class Alert(
     val alertId: String,
     val group: String,
     val groupName: String,
-    val title: String?,
-    val message: String?,
+    /** Short summary (at most 128 characters on the server). */
+    val description: String?,
+    /** Long Markdown text. */
+    val details: String?,
     val createdAtMs: Long,
     val receivedAtMs: Long,
+    /** What this phone did with it: the local level of its group when it arrived. */
     val action: String,
     val notified: Boolean,
     /** When the alarm sound was stopped on this phone (local only, never sent). */
@@ -41,26 +44,35 @@ data class Alert(
     val unread: Boolean get() = readAtMs == null
 }
 
-data class OutboxItem(val id: Long, val serverId: Long, val alertId: String, val stage: String)
-
 /**
  * Local durable state. Alerts are keyed by (server, alert_id): storing an alert is
  * the deduplication point that guarantees each alert is shown exactly once.
  * Alerts are one-way: the only thing sent back is the automatic transport receipt.
  * The `acked_at_ms` column holds the local "alarm stopped" time, `read_at_ms` the
  * local "marked read" time. Neither is ever sent.
+ *
+ * Column names predate protocol v2: `alerts.title` holds the description and
+ * `alerts.message` the Markdown details; `subscriptions` holds this phone's own
+ * level per group (alarm / ring / notify, or off). The server only knows which
+ * groups this phone subscribes to, never the level.
  */
-class Store private constructor(context: Context) :
-    SQLiteOpenHelper(context, "inbox.db", null, 3) {
+class Store private constructor(context: Context, private val defaultUserName: String?) :
+    SQLiteOpenHelper(context, "inbox.db", null, 4) {
 
     companion object {
         @Volatile private var instance: Store? = null
 
         fun get(context: Context): Store =
             instance ?: synchronized(this) {
-                instance ?: Store(context.applicationContext).also { instance = it }
+                instance ?: Store(
+                    context.applicationContext,
+                    // Only needed by the v4 migration (servers enrolled without a username).
+                    context.getSharedPreferences("inbox_ui", Context.MODE_PRIVATE).getString("default_user_name", null),
+                ).also { instance = it }
             }
 
+        const val LEVEL_OFF = "off"
+        const val LEVEL_NOTIFY = "notify"
         const val DEFAULT_HEARTBEAT_MS = 20_000L
         const val DEFAULT_OFFLINE_WARNING_MS = 180_000L
     }
@@ -116,14 +128,6 @@ class Store private constructor(context: Context) :
                 UNIQUE (server_id, alert_id))"""
         )
         db.execSQL("CREATE INDEX alerts_recent ON alerts(server_id, received_at_ms)")
-        db.execSQL(
-            """CREATE TABLE outbox (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-                alert_id TEXT NOT NULL,
-                stage TEXT NOT NULL,
-                UNIQUE (server_id, alert_id, stage))"""
-        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -133,6 +137,14 @@ class Store private constructor(context: Context) :
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE alerts ADD COLUMN read_at_ms INTEGER")
             db.execSQL("UPDATE alerts SET read_at_ms = received_at_ms")
+        }
+        // v4: the receipt is sent right after storing (the server retransmits until
+        // it gets one), so the ack outbox is gone; servers enrolled without a
+        // username take the default one.
+        if (oldVersion < 4) {
+            db.execSQL("DROP TABLE IF EXISTS outbox")
+            defaultUserName?.takeIf { it.isNotBlank() }
+                ?.let { db.execSQL("UPDATE servers SET user_name = ? WHERE user_name IS NULL", arrayOf(it)) }
         }
     }
 
@@ -190,10 +202,19 @@ class Store private constructor(context: Context) :
         writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
     }
 
+    /** What the session must send so the server's subscriptions match the local levels. */
+    data class Reconcile(val subscribe: List<String>, val unsubscribe: List<String>)
+
+    /**
+     * Stores the server's groups and reconciles the local levels with the groups the
+     * server says this phone subscribes to: a subscribed group without a local level
+     * gets NOTIF; a local level the server does not know is subscribed again; a group
+     * turned off while offline is unsubscribed.
+     */
     fun saveWelcome(
-        id: Long, serverName: String, groups: List<Group>, subscriptions: Map<String, String>,
+        id: Long, serverName: String, groups: List<Group>, serverSubscriptions: Set<String>,
         heartbeatMs: Long, offlineWarningMs: Long,
-    ) {
+    ): Reconcile {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -208,31 +229,31 @@ class Store private constructor(context: Context) :
                     put("server_id", id); put("group_id", g.id); put("name", g.name); put("description", g.description)
                 })
             }
-            replaceSubscriptions(db, id, subscriptions)
+            val known = groups.map { it.id }.toSet()
+            val levels = levels(id).filterKeys { it in known }
+            db.delete("subscriptions", "server_id = ?", arrayOf(id.toString()))
+            val merged = levels.toMutableMap()
+            for (g in serverSubscriptions) if (g in known && g !in merged) merged[g] = LEVEL_NOTIFY
+            for ((g, a) in merged) insertLevel(db, id, g, a)
             db.setTransactionSuccessful()
+            return Reconcile(
+                subscribe = merged.filter { it.value != LEVEL_OFF && it.key !in serverSubscriptions }.keys.sorted(),
+                unsubscribe = merged.filter { it.value == LEVEL_OFF && it.key in serverSubscriptions }.keys.sorted(),
+            )
         } finally {
             db.endTransaction()
         }
     }
 
-    fun saveSubscriptions(id: Long, subscriptions: Map<String, String>) {
-        val db = writableDatabase
-        db.beginTransaction()
-        try {
-            replaceSubscriptions(db, id, subscriptions)
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
+    private fun insertLevel(db: SQLiteDatabase, id: Long, group: String, action: String) {
+        db.insertWithOnConflict("subscriptions", null, ContentValues().apply {
+            put("server_id", id); put("group_id", group); put("action", action)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    private fun replaceSubscriptions(db: SQLiteDatabase, id: Long, subscriptions: Map<String, String>) {
-        db.delete("subscriptions", "server_id = ?", arrayOf(id.toString()))
-        for ((g, a) in subscriptions) {
-            db.insertOrThrow("subscriptions", null, ContentValues().apply {
-                put("server_id", id); put("group_id", g); put("action", a)
-            })
-        }
+    /** Sets this phone's level for a group; null turns the group off. */
+    fun setLevel(id: Long, group: String, action: String?) {
+        insertLevel(writableDatabase, id, group, action ?: LEVEL_OFF)
     }
 
     fun groups(serverId: Long): List<Group> = readableDatabase.rawQuery(
@@ -240,9 +261,13 @@ class Store private constructor(context: Context) :
         arrayOf(serverId.toString())
     ).use { c -> buildList { while (c.moveToNext()) add(Group(c.getString(0), c.getString(1), c.getString(2))) } }
 
-    fun subscriptions(serverId: Long): Map<String, String> = readableDatabase.rawQuery(
+    /** Local level of every group with one, including explicit "off". */
+    fun levels(serverId: Long): Map<String, String> = readableDatabase.rawQuery(
         "SELECT group_id, action FROM subscriptions WHERE server_id = ?", arrayOf(serverId.toString())
     ).use { c -> buildMap { while (c.moveToNext()) put(c.getString(0), c.getString(1)) } }
+
+    /** Groups this phone is subscribed to, with their level (off groups excluded). */
+    fun subscriptions(serverId: Long): Map<String, String> = levels(serverId).filterValues { it != LEVEL_OFF }
 
     // ------------------------------------------------------------ alerts
 
@@ -253,8 +278,8 @@ class Store private constructor(context: Context) :
             put("alert_id", a.alertId)
             put("group_id", a.group)
             put("group_name", a.groupName)
-            put("title", a.title)
-            put("message", a.message)
+            put("title", a.description)
+            put("message", a.details)
             put("created_at_ms", a.createdAtMs)
             put("received_at_ms", a.receivedAtMs)
             put("action", a.action)
@@ -309,6 +334,15 @@ class Store private constructor(context: Context) :
         arrayOf(sinceMs.toString(), limit.toString())
     )
 
+    /** The `limit` most recent alerts of every server, whatever their age, newest first. */
+    fun latestAlerts(limit: Int): List<Alert> = readAlerts(
+        "SELECT $alertColumns FROM alerts ORDER BY received_at_ms DESC, id DESC LIMIT ?",
+        arrayOf(limit.toString())
+    )
+
+    fun alertCount(): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM alerts", null)
+        .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
     /** Marks one alert read. Returns false if it already was. */
     fun markRead(serverId: Long, alertId: String): Boolean =
         writableDatabase.update(
@@ -338,23 +372,6 @@ class Store private constructor(context: Context) :
         "SELECT $alertColumns FROM alerts WHERE action = 'alarm' AND acked_at_ms IS NULL ORDER BY received_at_ms",
         emptyArray()
     )
-
-    // ------------------------------------------------------------ outbox
-
-    fun enqueueAck(serverId: Long, alertId: String, stage: String) {
-        writableDatabase.insertWithOnConflict("outbox", null, ContentValues().apply {
-            put("server_id", serverId); put("alert_id", alertId); put("stage", stage)
-        }, SQLiteDatabase.CONFLICT_IGNORE)
-    }
-
-    fun outbox(serverId: Long): List<OutboxItem> = readableDatabase.rawQuery(
-        "SELECT id, server_id, alert_id, stage FROM outbox WHERE server_id = ? ORDER BY id LIMIT 256",
-        arrayOf(serverId.toString())
-    ).use { c -> buildList { while (c.moveToNext()) add(OutboxItem(c.getLong(0), c.getLong(1), c.getString(2), c.getString(3))) } }
-
-    fun removeOutbox(id: Long) {
-        writableDatabase.delete("outbox", "id = ?", arrayOf(id.toString()))
-    }
 
     /** Keeps the local history bounded. Alarms still ringing are never removed. */
     fun prune(olderThanMs: Long) {

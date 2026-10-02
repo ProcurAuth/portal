@@ -73,7 +73,7 @@ class AddServerActivity : BaseActivity() {
             status.text = getString(R.string.add_connecting)
             Thread {
                 val result = try {
-                    val e = Enroller.enroll(addr, pw, deviceName, user)
+                    val e = Enroller.enroll(this, addr, pw, deviceName, user)
                     val sealed = KeyVault.seal(e.devicePrivateKey)
                     e.devicePrivateKey.fill(0)
                     Store.get(this).addServer(addr.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, user)
@@ -81,7 +81,7 @@ class AddServerActivity : BaseActivity() {
                 } catch (e: EnrollmentError) {
                     e.message
                 } catch (e: Exception) {
-                    "Erreur : ${e.message ?: e.javaClass.simpleName}"
+                    getString(R.string.add_error, e.message ?: e.javaClass.simpleName)
                 }
                 runOnUiThread {
                     if (result == null) {

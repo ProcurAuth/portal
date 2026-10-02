@@ -122,14 +122,12 @@ class AlarmActivity : Activity() {
             ))
         }
         card.addView(mono(getString(R.string.action_alarm).uppercase() + " · " + a.groupName.uppercase(), 10.5f, red, bold = true).apply { letterSpacing = 0.08f })
-        card.addView(label(a.title ?: a.groupName, 22f, white, BOLD), lp().margins(this, t = 8))
-        a.message?.let {
-            card.addView(label(it, 15f, dim), lp().margins(this, t = 8))
-        }
+        card.addView(label(a.description ?: a.groupName, 22f, white, BOLD), lp().margins(this, t = 8))
+        a.details?.let { card.addView(markdown(it, MdPalette.ALARM, 15f), lp().margins(this, t = 10)) }
         if (others.isNotEmpty()) {
             card.addView(View(this).apply { setBackgroundColor(0x1AFFFFFF) }, lp(MATCH, 1).margins(this, t = 12, b = 8))
             for (o in others.take(3)) {
-                card.addView(mono(hms(o.createdAtMs) + "  " + (o.title ?: o.groupName), 11.5f, faint), lp().margins(this, t = 3))
+                card.addView(mono(hms(o.createdAtMs) + "  " + (o.description ?: o.groupName), 11.5f, faint), lp().margins(this, t = 3))
             }
             card.addView(label(getString(R.string.alarm_all_stopped), 11f, faint), lp().margins(this, t = 6))
         }

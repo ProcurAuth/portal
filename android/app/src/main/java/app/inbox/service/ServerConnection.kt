@@ -40,7 +40,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         class Closed(val code: Int, val reason: String) : Event
         class Failure(val error: Throwable) : Event
         class Command(val json: JSONObject) : Event
-        object Flush : Event
         object Wake : Event
         object Stop : Event
     }
@@ -66,11 +65,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private var session = 0L
     private var failures = 0
     private var nonce = 0L
-    /** Outbox rows sent on this session, deleted once a later pong proves the server processed them. */
-    private val outboxInFlight = mutableSetOf<Long>()
-    /** Servers older than the pseudo feature reject `set_user_name`: only send it when Welcome has the field. */
-    @Volatile private var supportsUserName = false
-    private val confirmOnPong = sortedMapOf<Long, List<Long>>()
+    private val pingSentAt = sortedMapOf<Long, Long>()
     private val thread = Thread({ loop() }, "inbox-server-$serverId")
 
     fun start() = thread.start()
@@ -85,27 +80,23 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         events.offer(Event.Wake)
     }
 
-    fun flushOutbox() {
-        events.offer(Event.Flush)
-    }
-
     fun isConnected() = connected
 
-    /** Returns false when offline: subscriptions can only change on a live session. */
     /** Asks the server to track this phone under `userName`; sent again after each Welcome if needed. */
     fun setUserName(userName: String) {
-        if (connected && supportsUserName) events.offer(Event.Command(JSONObject().put("t", "set_user_name").put("user_name", userName)))
+        if (connected) events.offer(Event.Command(JSONObject().put("t", "set_user_name").put("user_name", userName)))
     }
 
-    fun subscribe(group: String, action: String?): Boolean {
-        if (!connected) return false
-        val msg = if (action == null) {
-            JSONObject().put("t", "unsubscribe").put("group", group)
-        } else {
-            JSONObject().put("t", "subscribe").put("group", group).put("action", action)
-        }
-        events.offer(Event.Command(msg))
-        return true
+    /**
+     * Sets this phone's level for a group (null = off). The level stays on the phone:
+     * the server only learns whether the group is subscribed. Offline changes are
+     * applied by the next Welcome reconciliation.
+     */
+    fun setLevel(group: String, action: String?) {
+        store.setLevel(serverId, group, action)
+        val t = if (action == null) "unsubscribe" else "subscribe"
+        if (connected) events.offer(Event.Command(JSONObject().put("t", t).put("group", group)))
+        Registry.changed()
     }
 
     // ------------------------------------------------------------ main loop
@@ -192,10 +183,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     /** Runs one session. Returns how long to wait before reconnecting. */
     private fun runSession(server: app.inbox.data.Server): Long {
         events.clear()
-        outboxInFlight.clear()
-        confirmOnPong.clear()
+        pingSentAt.clear()
         val address = ServerAddress.parse(server.address) ?: run {
-            store.setReenroll(serverId, "Adresse invalide")
+            store.setReenroll(serverId, "Invalid address")
             return 0
         }
         val ws = Http.client.newWebSocket(Request.Builder().url(address.ws("/v1/session")).build(), Listener())
@@ -228,9 +218,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             var welcomed = false
             while (running) {
                 val now = System.currentTimeMillis()
-                if (now - lastFrame > heartbeat * 5 / 2) throw SessionEnd(1_000, "Pas de réponse du serveur")
+                if (now - lastFrame > heartbeat * 5 / 2) throw SessionEnd(1_000, "No answer from the server")
                 if (welcomed && now - lastPing >= heartbeat) {
-                    send(JSONObject().put("t", "ping").put("nonce", ++nonce))
+                    ping()
                     lastPing = now
                 }
                 val wait = maxOf(100L, minOf(heartbeat - (now - lastPing), heartbeat * 5 / 2 - (now - lastFrame)))
@@ -238,26 +228,23 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                     null -> {}
                     is Event.Binary -> {
                         lastFrame = System.currentTimeMillis()
+                        Registry.frame(serverId, lastFrame)
                         val msg = JSONObject(String(Native.sessionDecrypt(session, e.bytes)))
                         when (msg.getString("t")) {
                             "welcome" -> {
                                 heartbeat = msg.getLong("heartbeat_interval_ms").coerceAtLeast(5_000L)
-                                onWelcome(msg)
+                                val reconcile = onWelcome(msg)
                                 welcomed = true
                                 connected = true
                                 failures = 0
                                 Registry.setStatus(serverId, LinkState.CONNECTED, msg.optString("server_name"))
-                                supportsUserName = msg.has("user_name")
-                                if (supportsUserName) {
-                                    syncUserName(if (msg.isNull("user_name")) null else msg.optString("user_name", "").ifEmpty { null })
-                                }
-                                flushPendingAcks()
+                                syncUserName(msg.optNullableString("user_name"))
+                                for (g in reconcile.subscribe) send(JSONObject().put("t", "subscribe").put("group", g))
+                                for (g in reconcile.unsubscribe) send(JSONObject().put("t", "unsubscribe").put("group", g))
+                                ping()
                             }
                             "alert" -> onAlert(msg)
-                            "subscriptions" -> {
-                                store.saveSubscriptions(serverId, parseSubscriptions(msg.getJSONArray("subscriptions")))
-                                Registry.changed()
-                            }
+                            "subscriptions" -> Registry.changed()
                             "pong" -> onPong(msg.getLong("nonce"))
                             "user_name" -> Registry.changed()
                             "error" -> Log.w(TAG, "server error ${msg.optString("code")}: ${msg.optString("message")}")
@@ -265,12 +252,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                         }
                     }
                     is Event.Command -> if (connected) send(e.json)
-                    Event.Flush -> if (connected) flushPendingAcks()
                     is Event.Closed -> return onClosed(e.code, e.reason)
-                    is Event.Failure -> throw SessionEnd(backoff(), e.error.message ?: "Connexion perdue")
+                    is Event.Failure -> throw SessionEnd(backoff(), e.error.message ?: "Connection lost")
                     Event.Stop -> return 0
                     Event.Wake, Event.Open -> {}
-                    is Event.Text -> throw SessionEnd(backoff(), "Réponse inattendue du serveur")
+                    is Event.Text -> throw SessionEnd(backoff(), "Unexpected answer from the server")
                 }
             }
             return 0
@@ -287,9 +273,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         while (true) {
             when (val e = events.poll(maxOf(1, deadline - System.currentTimeMillis()), TimeUnit.MILLISECONDS)) {
                 Event.Open -> return
-                null -> throw SessionEnd(backoff(), "Serveur injoignable")
-                is Event.Failure -> throw SessionEnd(backoff(), "Serveur injoignable : ${e.error.message}")
-                is Event.Closed -> throw SessionEnd(onClosed(e.code, e.reason), "Connexion refusée")
+                null -> throw SessionEnd(backoff(), "Server unreachable")
+                is Event.Failure -> throw SessionEnd(backoff(), "Server unreachable: ${e.error.message}")
+                is Event.Closed -> throw SessionEnd(onClosed(e.code, e.reason), "Connection refused")
                 Event.Stop -> throw InterruptedException()
                 else -> {}
             }
@@ -301,9 +287,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         while (true) {
             when (val e = events.poll(maxOf(1, deadline - System.currentTimeMillis()), TimeUnit.MILLISECONDS)) {
                 is Event.Binary -> return e.bytes
-                null -> throw SessionEnd(backoff(), "Le serveur ne répond pas")
-                is Event.Failure -> throw SessionEnd(backoff(), "Connexion perdue : ${e.error.message}")
-                is Event.Closed -> throw SessionEnd(onClosed(e.code, e.reason), "Connexion refusée")
+                null -> throw SessionEnd(backoff(), "The server does not answer")
+                is Event.Failure -> throw SessionEnd(backoff(), "Connection lost: ${e.error.message}")
+                is Event.Closed -> throw SessionEnd(onClosed(e.code, e.reason), "Connection refused")
                 Event.Stop -> throw InterruptedException()
                 else -> {}
             }
@@ -315,62 +301,68 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         connected = false
         return when (code) {
             CLOSE_UNKNOWN_DEVICE, CLOSE_REVOKED -> {
-                val why = if (code == CLOSE_REVOKED) "Appareil révoqué par l'administrateur" else "Appareil inconnu du serveur"
-                store.setReenroll(serverId, "$why : supprimez puis ajoutez à nouveau ce serveur")
+                val why = if (code == CLOSE_REVOKED) "Device revoked by the administrator" else "Device unknown to the server"
+                store.setReenroll(serverId, "$why: delete this server and add it again")
                 Registry.setStatus(serverId, LinkState.REENROLL, why)
                 0
             }
             CLOSE_PROTOCOL -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Version incompatible : mettez l'application à jour")
+                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Incompatible version: update the app")
                 MAX_BACKOFF_MS * 10
             }
             CLOSE_RATE_LIMITED -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Trop de tentatives, nouvel essai dans une minute")
+                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Too many attempts, retrying in a minute")
                 60_000L
             }
             CLOSE_REPLACED -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Session remplacée")
+                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Session replaced")
                 5_000L
             }
             CLOSE_RESTART -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Redémarrage du serveur")
+                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Server restarting")
                 1_000L + Random.nextLong(2_000L)
             }
             else -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Déconnecté ($code${if (reason.isNotEmpty()) " $reason" else ""})")
+                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Disconnected ($code${if (reason.isNotEmpty()) " $reason" else ""})")
                 backoff()
             }
         }
     }
 
     private fun send(msg: JSONObject) {
-        val ws = socket ?: throw SessionEnd(backoff(), "Connexion perdue")
+        val ws = socket ?: throw SessionEnd(backoff(), "Connection lost")
         val frame = Native.sessionEncrypt(session, msg.toString().toByteArray())
-        if (!ws.send(frame.toByteString())) throw SessionEnd(backoff(), "Connexion perdue")
+        if (!ws.send(frame.toByteString())) throw SessionEnd(backoff(), "Connection lost")
+    }
+
+    /** Heartbeat; its pong gives the round trip shown on the server screen. */
+    private fun ping() {
+        val n = ++nonce
+        pingSentAt[n] = System.currentTimeMillis()
+        if (pingSentAt.size > 64) pingSentAt.remove(pingSentAt.firstKey())
+        send(JSONObject().put("t", "ping").put("nonce", n))
     }
 
     // ------------------------------------------------------------ messages
 
-    private fun parseSubscriptions(arr: JSONArray): Map<String, String> = buildMap {
-        for (i in 0 until arr.length()) {
-            val s = arr.getJSONObject(i)
-            put(s.getString("group"), s.getString("action"))
-        }
+    /** Protocol v2: the server's subscriptions are group ids only. */
+    private fun parseSubscriptions(arr: JSONArray): Set<String> = buildSet {
+        for (i in 0 until arr.length()) add(arr.getString(i))
     }
 
-    /** The local pseudo for this server wins: older enrollments have none on the server. */
+    /** The username set on this phone for this server wins over what the server recorded. */
     private fun syncUserName(recorded: String?) {
         val local = store.server(serverId)?.userName ?: return
         if (local != recorded) send(JSONObject().put("t", "set_user_name").put("user_name", local))
     }
 
-    private fun onWelcome(msg: JSONObject) {
+    private fun onWelcome(msg: JSONObject): Store.Reconcile {
         val groups = msg.getJSONArray("groups")
         val list = (0 until groups.length()).map {
             val g = groups.getJSONObject(it)
             Group(g.getString("id"), g.getString("name"), g.getString("description"))
         }
-        store.saveWelcome(
+        return store.saveWelcome(
             serverId,
             msg.getString("server_name"),
             list,
@@ -386,11 +378,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             alertId = msg.getString("alert_id"),
             group = msg.getString("group"),
             groupName = msg.getString("group_name"),
-            title = if (msg.isNull("title")) null else msg.getString("title"),
-            message = if (msg.isNull("message")) null else msg.getString("message"),
+            description = msg.optNullableString("description"),
+            details = msg.optNullableString("details"),
             createdAtMs = msg.getLong("created_at_ms"),
             receivedAtMs = System.currentTimeMillis(),
-            action = msg.getString("action"),
+            action = localAction(msg.getString("group")),
             notified = false,
             stoppedAtMs = null,
             readAtMs = null,
@@ -406,34 +398,18 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         Registry.changed()
     }
 
-    private fun flushPendingAcks() {
-        val sent = mutableListOf<Long>()
-        for (item in store.outbox(serverId)) {
-            if (item.id in outboxInFlight) continue
-            // Older versions queued "displayed"/"acknowledged": alerts are one-way now.
-            if (item.stage != "received") {
-                store.removeOutbox(item.id)
-                continue
-            }
-            send(JSONObject().put("t", "ack").put("alert_id", item.alertId).put("stage", item.stage))
-            outboxInFlight.add(item.id)
-            sent.add(item.id)
-        }
-        if (sent.isEmpty()) return
-        // The server handles frames in order: its pong proves the acks before it were stored.
-        val n = ++nonce
-        confirmOnPong[n] = sent
-        send(JSONObject().put("t", "ping").put("nonce", n))
-    }
+    /**
+     * The level is this phone's choice. An alert of a group just turned off was
+     * already targeted by the server: it is still shown, as a plain notification.
+     */
+    private fun localAction(group: String): String =
+        store.levels(serverId)[group]?.takeIf { it == "alarm" || it == "ring" || it == "notify" } ?: Store.LEVEL_NOTIFY
+
+    private fun JSONObject.optNullableString(key: String): String? =
+        if (!has(key) || isNull(key)) null else getString(key).ifEmpty { null }
 
     private fun onPong(n: Long) {
-        val done = confirmOnPong.headMap(n + 1)
-        for (ids in done.values) {
-            for (id in ids) {
-                store.removeOutbox(id)
-                outboxInFlight.remove(id)
-            }
-        }
-        done.clear()
+        val now = System.currentTimeMillis()
+        Registry.pong(serverId, now, pingSentAt.remove(n)?.let { now - it })
     }
 }

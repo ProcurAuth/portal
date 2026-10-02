@@ -21,6 +21,17 @@ class ServerActivity : BaseActivity() {
     private lateinit var bar: android.widget.FrameLayout
     private lateinit var body: LinearLayout
     private val onChange: () -> Unit = { render() }
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** Live rows, refreshed every second without rebuilding the screen. */
+    private var pingValue: android.widget.TextView? = null
+    private var updateValue: android.widget.TextView? = null
+    private var sinceValue: android.widget.TextView? = null
+    private val tick = object : Runnable {
+        override fun run() {
+            refreshLive()
+            handler.postDelayed(this, 1_000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,11 +50,27 @@ class ServerActivity : BaseActivity() {
         super.onResume()
         Registry.addListener(onChange)
         render()
+        handler.post(tick)
     }
 
     override fun onPause() {
         super.onPause()
         Registry.removeListener(onChange)
+        handler.removeCallbacks(tick)
+    }
+
+    private fun refreshLive() {
+        val now = System.currentTimeMillis()
+        val live = Registry.liveness(serverId)
+        val st = Registry.status(serverId)
+        val connected = st.state == LinkState.CONNECTED
+        pingValue?.text = live.lastPongMs?.let { at ->
+            getString(R.string.server_ago, liveAge(at, now)) + (live.rttMs?.let { "  ·  $it ms" } ?: "")
+        } ?: getString(R.string.server_never)
+        pingValue?.setTextColor(color(if (connected) R.color.text else R.color.text_muted))
+        updateValue?.text = live.lastFrameMs?.let { "${hms(it)}  ·  " + getString(R.string.server_ago, liveAge(it, now)) }
+            ?: getString(R.string.server_never)
+        sinceValue?.text = if (connected) "${hms(st.sinceMs)}  ·  ${liveAge(st.sinceMs, now)}" else "—"
     }
 
     private fun render() {
@@ -60,17 +87,28 @@ class ServerActivity : BaseActivity() {
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
         }
-        val soft = when (st.state) {
-            LinkState.CONNECTED -> color(R.color.success_soft)
-            LinkState.CONNECTING -> color(R.color.warning_soft)
-            else -> color(R.color.danger_soft)
-        }
         bar.removeAllViews()
         val short = when (st.state) {
             LinkState.DISCONNECTED -> getString(R.string.status_offline)
             else -> code
         }
-        bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, chip(short, fg, soft, dot = true)))
+        // Same status light as the home: words stay in the State row below.
+        val light = PulseDot(this, if (st.state == LinkState.CONNECTED) color(R.color.primary) else fg, st.state == LinkState.CONNECTED)
+            .apply { contentDescription = short }
+        bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, light))
+        // Live: heartbeat round trip and last frame, ticking every second.
+        body.addView(sectionLabel(getString(R.string.server_live)))
+        val live = panel(padV = 4)
+        live.addView(kv(getString(R.string.server_last_ping), "—"))
+        pingValue = (live.getChildAt(live.childCount - 1) as LinearLayout).let { it.getChildAt(it.childCount - 1) as android.widget.TextView }
+        live.addView(divider())
+        live.addView(kv(getString(R.string.server_last_update), "—"))
+        updateValue = (live.getChildAt(live.childCount - 1) as LinearLayout).let { it.getChildAt(it.childCount - 1) as android.widget.TextView }
+        live.addView(divider())
+        live.addView(kv(getString(R.string.server_connected_since), "—"))
+        sinceValue = (live.getChildAt(live.childCount - 1) as LinearLayout).let { it.getChildAt(it.childCount - 1) as android.widget.TextView }
+        body.addView(live)
+        refreshLive()
         // Screen context: which server, where.
         body.addView(sectionLabel(server.serverName, server.address.removePrefix("http://").removePrefix("https://")))
         val head = panel(padV = 4)
@@ -111,7 +149,7 @@ class ServerActivity : BaseActivity() {
         body.addView(p)
 
         // Groups
-        val subs = store.subscriptions(serverId)
+        val subs = store.subscriptions(serverId) // local levels; the server only knows the group ids
         val groups = store.groups(serverId)
         body.addView(sectionLabel(getString(R.string.server_groups), if (groups.isEmpty()) null else
             getString(R.string.server_groups_subscribed, groups.count { subs[it.id] != null }, groups.size)))
@@ -143,8 +181,11 @@ class ServerActivity : BaseActivity() {
                     val s = actionStyle(ACTIONS[k])
                     s.fg to s.bg
                 }) { k ->
-                    if (Registry.connections[serverId]?.subscribe(g.id, ACTIONS[k]) != true) {
-                        Toast.makeText(this, getString(R.string.server_offline_change), Toast.LENGTH_LONG).show()
+                    // Saved on the phone right away; the server learns the subscription when connected.
+                    val conn = Registry.connections[serverId]
+                    if (conn != null) conn.setLevel(g.id, ACTIONS[k]) else {
+                        store.setLevel(serverId, g.id, ACTIONS[k])
+                        render()
                     }
                 }, lp().margins(this, t = 8))
                 col.addView(label(getString(helps[current]), 11f, color(R.color.text_muted)), lp().margins(this, t = 6))

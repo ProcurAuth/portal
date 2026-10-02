@@ -66,7 +66,7 @@ window.Inbox = (() => {
     if (navigator.clipboard && window.isSecureContext) {
       try {
         await navigator.clipboard.writeText(text);
-        toast('Copié');
+        toast('Copied');
         return true;
       } catch (_) {
         // Fall through to the selection fallback.
@@ -84,10 +84,10 @@ window.Inbox = (() => {
       } catch (_) {
         ok = false;
       }
-      toast(ok ? 'Copié' : 'Texte sélectionné : Ctrl+C pour copier');
+      toast(ok ? 'Copied' : 'Text selected: press Ctrl+C to copy');
       return ok;
     }
-    toast('Copie indisponible');
+    toast('Copy unavailable');
     return false;
   }
 

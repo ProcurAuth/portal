@@ -79,9 +79,9 @@ for pair in aarch64-linux-android:arm64-v8a armv7-linux-androideabi:armeabi-v7a 
   cp "$CARGO_TARGET_DIR/$triple/release/libinbox_android.so" "$libs/$abi/libinbox_android.so"
 done
 
-echo "==> gradle assembleRelease ($version)"
+echo "==> gradle testReleaseUnitTest assembleRelease ($version)"
 cd /src/android
-gradle --no-daemon --console=plain -PinboxVersion="$version" assembleRelease
+gradle --no-daemon --console=plain -PinboxVersion="$version" testReleaseUnitTest assembleRelease
 
 mkdir -p /src/dist
 out="/src/dist/inbox-$version.apk"

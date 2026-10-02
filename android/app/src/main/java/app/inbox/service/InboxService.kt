@@ -65,7 +65,7 @@ class InboxService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val n = statusNotification("Démarrage…")
+        val n = statusNotification(getString(R.string.svc_starting))
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(STATUS_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
@@ -156,10 +156,10 @@ class InboxService : Service() {
         for (s in servers) {
             val st = Registry.status(s.id)
             val line = when (st.state) {
-                LinkState.CONNECTED -> { connected++; "${s.serverName} : connecté" }
-                LinkState.CONNECTING -> "${s.serverName} : connexion…"
-                LinkState.DISCONNECTED -> "${s.serverName} : déconnecté ${formatSince(now - st.sinceMs)}"
-                LinkState.REENROLL -> "${s.serverName} : ré-enrôlement requis"
+                LinkState.CONNECTED -> { connected++; getString(R.string.svc_connected, s.serverName) }
+                LinkState.CONNECTING -> getString(R.string.svc_connecting, s.serverName)
+                LinkState.DISCONNECTED -> getString(R.string.svc_disconnected, s.serverName, formatSince(now - st.sinceMs))
+                LinkState.REENROLL -> getString(R.string.svc_reenroll, s.serverName)
             }
             lines.add(line)
             val offline = st.state != LinkState.CONNECTED &&
@@ -169,11 +169,9 @@ class InboxService : Service() {
                 warned.add(s.id)
                 val w = Notification.Builder(this, Alerter.CH_WARNING)
                     .setSmallIcon(R.drawable.ic_notification)
-                    .setContentTitle("Alertes non reçues : ${s.serverName}")
-                    .setContentText(st.detail ?: "Inbox n'est plus connecté à ce serveur")
-                    .setStyle(Notification.BigTextStyle().bigText(
-                        "Inbox ne peut plus recevoir les alertes de ${s.serverName}. " + (st.detail ?: "")
-                    ))
+                    .setContentTitle(getString(R.string.svc_warning_title, s.serverName))
+                    .setContentText(st.detail ?: getString(R.string.svc_warning_text))
+                    .setStyle(Notification.BigTextStyle().bigText(getString(R.string.svc_warning_big, s.serverName, st.detail ?: "")))
                     .setContentIntent(PendingIntent.getActivity(this, id, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
                     .build()
                 try {
@@ -187,8 +185,8 @@ class InboxService : Service() {
             }
         }
         val summary = when {
-            servers.isEmpty() -> "Aucun serveur configuré"
-            connected == servers.size -> if (servers.size == 1) lines[0] else "$connected/${servers.size} serveurs connectés"
+            servers.isEmpty() -> getString(R.string.svc_no_server)
+            connected == servers.size -> if (servers.size == 1) lines[0] else getString(R.string.svc_all_connected, connected, servers.size)
             else -> lines.joinToString("\n")
         }
         try {

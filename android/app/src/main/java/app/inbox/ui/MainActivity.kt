@@ -45,6 +45,8 @@ class MainActivity : BaseActivity() {
     private enum class Screen { ALERTS, SERVERS, SETTINGS }
 
     private var screen = Screen.ALERTS
+    /** Older alerts loaded with "See more", beyond the configured count and window. */
+    private var extra = 0
     private lateinit var main: LinearLayout
     private lateinit var bar: FrameLayout
     private lateinit var scroller: ScrollView
@@ -136,6 +138,7 @@ class MainActivity : BaseActivity() {
 
     private fun go(s: Screen) {
         screen = s
+        extra = 0
         if (drawer.isOpen) drawer.close()
         scroller.scrollTo(0, 0)
         render()
@@ -149,14 +152,25 @@ class MainActivity : BaseActivity() {
         Overall(servers.count { Registry.status(it.id).state == LinkState.CONNECTED }, servers.size)
 
     /**
-     * Compact mono status. The n/x count only shows when a server is down:
-     * all up = green "EN LIGNE", degraded = amber "1/2", all down = red "0/2".
+     * Status light, no words: all connected = a small blue dot that breathes;
+     * degraded = amber dot + "1/2"; all down = red dot + "0/2".
      */
-    private fun statusChip(o: Overall): View = when {
-        o.total == 0 -> chip(getString(R.string.status_no_server), color(R.color.text_muted), color(R.color.bg_hover), dot = true)
-        o.connected == o.total -> chip(getString(R.string.status_online), color(R.color.success), color(R.color.success_soft), dot = true)
-        o.connected > 0 -> chip("${o.connected}/${o.total}", color(R.color.warning), color(R.color.warning_soft), dot = true)
-        else -> chip("${o.connected}/${o.total}", color(R.color.danger), color(R.color.danger_soft), dot = true)
+    private fun statusIndicator(o: Overall): View {
+        val row = lin(vertical = false).apply { gravity = Gravity.CENTER_VERTICAL }
+        val (tint, pulse) = when {
+            o.total == 0 -> color(R.color.text_subtle) to false
+            o.connected == o.total -> color(R.color.primary) to true
+            o.connected > 0 -> color(R.color.warning) to false
+            else -> color(R.color.danger) to false
+        }
+        row.addView(PulseDot(this, tint, pulse), lp(dp(22), dp(22)))
+        downCount(o)?.let { row.addView(mono(it, 12f, tint, bold = true), lp(WRAP, WRAP).margins(this, l = 2)) }
+        row.contentDescription = when {
+            o.total == 0 -> getString(R.string.status_no_server)
+            o.connected == o.total -> getString(R.string.status_all_online)
+            else -> resources.getQuantityString(R.plurals.drawer_servers_down, o.total - o.connected, o.total - o.connected)
+        }
+        return row
     }
 
     /** "1/2" when some server is down, null when all are up. */
@@ -171,7 +185,7 @@ class MainActivity : BaseActivity() {
             Screen.SETTINGS -> getString(R.string.settings_title)
         }
         bar.removeAllViews()
-        bar.addView(topBar(R.drawable.ic_menu, getString(R.string.nav_open), { drawer.open() }, statusChip(o)))
+        bar.addView(topBar(R.drawable.ic_menu, getString(R.string.nav_open), { drawer.open() }, statusIndicator(o)))
         renderDrawer(servers, o)
 
         val y = scroller.scrollY
@@ -192,7 +206,7 @@ class MainActivity : BaseActivity() {
         head.addView(mono(if (who != null) "@$who" else getString(R.string.drawer_no_pseudo), 16f,
             if (who != null) color(R.color.text_strong) else color(R.color.warning), bold = true), lp().margins(this, t = 4))
         val st = lin(vertical = false)
-        st.addView(statusChip(o))
+        st.addView(statusIndicator(o))
         val stText = when {
             o.total == 0 -> getString(R.string.drawer_servers_none)
             o.connected == o.total -> getString(R.string.drawer_servers_all_up)
@@ -237,6 +251,24 @@ class MainActivity : BaseActivity() {
         item(Screen.ALERTS, R.drawable.ic_bell, R.string.nav_alerts)
         item(Screen.SERVERS, R.drawable.ic_server, R.string.nav_servers)
         item(Screen.SETTINGS, R.drawable.ic_settings, R.string.nav_settings)
+        if (unread > 0) {
+            items.addView(divider(), lp(MATCH, 1).margins(this, t = 6, b = 6))
+            val markAll = lin(vertical = false, padH = 12, padV = 0).apply {
+                minimumHeight = dp(44)
+                background = pressable(0x00000000, dpf(CONTROL_RADIUS))
+                isClickable = true
+                contentDescription = getString(R.string.alerts_mark_all)
+                setOnClickListener {
+                    Alerter.markAllRead(this@MainActivity)
+                    Toast.makeText(this@MainActivity, getString(R.string.all_marked_read), Toast.LENGTH_SHORT).show()
+                    drawer.close()
+                    render()
+                }
+                addView(icon(R.drawable.ic_check_circle, color(R.color.primary), 18), lp(dp(18), dp(18)).margins(this@MainActivity, r = 14))
+                addView(label(getString(R.string.alerts_mark_all), 14f, color(R.color.primary), MEDIUM), lp(0, WRAP, 1f))
+            }
+            items.addView(markAll)
+        }
         drawerContent.addView(items, lp(MATCH, 0, 1f))
         drawerContent.addView(divider())
         drawerContent.addView(mono("v${BuildConfig.VERSION_NAME}", 10f, color(R.color.text_subtle)).apply {
@@ -270,45 +302,42 @@ class MainActivity : BaseActivity() {
         val limit = Prefs.limit(this)
         val window = Prefs.windowMs(this)
         val now = System.currentTimeMillis()
-        val alerts = store.recentAlerts(now - window, limit)
+        // The configured count within the window, then older ones 10 at a time.
+        val base = store.recentAlerts(now - window, limit)
+        val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra)
         val names = servers.associate { it.id to it.serverName }
-        body.addView(sectionLabel(getString(R.string.alerts_title),
-            getString(R.string.alerts_meta, alerts.size, limit, windowLabel(window), servers.size)))
-        val unread = store.unreadCount()
-        if (unread > 0) {
-            val r = lin(vertical = false).apply { setPadding(dp(6), 0, dp(2), dp(6)) }
-            r.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
-            r.addView(mono(resources.getQuantityString(R.plurals.alerts_unread, unread, unread), 11f, color(R.color.primary), bold = true),
-                lp(0, WRAP, 1f))
-            r.addView(mono(getString(R.string.alerts_mark_all).uppercase(), 10.5f, color(R.color.primary), bold = true).apply {
-                setPadding(dp(8), dp(6), dp(8), dp(6))
-                background = pressable(color(R.color.primary_soft), dpf(CHIP_RADIUS))
-                isClickable = true
-                contentDescription = getString(R.string.alerts_mark_all)
-                setOnClickListener { Alerter.markAllRead(this@MainActivity); render() }
-            })
-            body.addView(r)
-        }
         if (alerts.isEmpty()) {
             body.addView(emptyState(R.drawable.ic_check_circle, getString(R.string.alerts_empty_title, windowLabel(window)),
                 getString(R.string.alerts_empty_body), null, null))
         } else {
-            val p = panel()
+            // One glass card per alert, the severity bar on its rounded left edge.
             alerts.forEachIndexed { i, a ->
-                if (i > 0) p.addView(divider())
-                p.addView(alertRow(a, names[a.serverId] ?: "", now))
+                val card = lin().apply {
+                    background = solidCard()
+                    clipToOutline = true
+                    outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                    addView(alertRow(a, names[a.serverId] ?: "", now))
+                }
+                body.addView(card, lp().margins(this, t = if (i == 0) 4 else 8))
             }
-            body.addView(p)
         }
-
-        val footer = lin(vertical = false).apply { gravity = Gravity.CENTER }
-        footer.addView(mono(resources.getQuantityString(R.plurals.alerts_footer, limit, limit, windowLabel(window)), 10.5f, color(R.color.text_subtle)))
-        footer.addView(mono(getString(R.string.alerts_footer_edit).uppercase(), 10.5f, color(R.color.primary), bold = true).apply {
-            setPadding(dp(6), dp(10), dp(6), dp(10))
-            isClickable = true
-            setOnClickListener { go(Screen.SETTINGS) }
-        })
-        body.addView(footer, lp().margins(this, t = 4, b = 12))
+        if (store.alertCount() > alerts.size) {
+            // Plain accent text, not a button; the row keeps a 48 dp touch target.
+            body.addView(label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
+                gravity = Gravity.CENTER
+                minHeight = dp(48)
+                setPadding(dp(24), 0, dp(24), 0)
+                isClickable = true
+                isFocusable = true
+                background = rowRipple()
+                setOnClickListener {
+                    extra += 10
+                    render()
+                }
+            }, lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        } else {
+            body.addView(View(this), lp(MATCH, dp(16)))
+        }
     }
 
     private fun isRinging(a: Alert) = a.action == "alarm" && a.stoppedAtMs == null
@@ -343,14 +372,14 @@ class MainActivity : BaseActivity() {
         val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
         val titleRow = lin(vertical = false)
         if (a.unread) titleRow.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
-        titleRow.addView(label(a.title ?: a.groupName, 14f,
+        titleRow.addView(label(a.description ?: a.groupName, 14f,
             if (a.unread) color(R.color.text_strong) else color(R.color.text),
             if (a.unread) BOLD else REGULAR, lines = 1), lp(0, WRAP, 1f))
         content.addView(titleRow)
         val meta = SpannableStringBuilder()
         meta.append("${a.groupName} · $serverName")
         meta.setSpan(ForegroundColorSpan(color(R.color.text_subtle)), 0, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        a.message?.let { meta.append("  ").append(it.replace('\n', ' ')) }
+        a.details?.let { d -> app.inbox.md.Markdown.firstLine(d)?.let { meta.append("  ").append(it) } }
         content.addView(label(meta, 12f, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
         row.addView(content, lp(0, WRAP, 1f))
 
@@ -387,10 +416,9 @@ class MainActivity : BaseActivity() {
                 lp(0, WRAP, 1f).margins(this, l = 8))
             head.addView(mono(shortAge(a.createdAtMs), 11f, color(R.color.text_subtle)))
             sheet.addView(head)
-            sheet.addView(label(a.title ?: a.groupName, 19f, color(R.color.text_strong), MEDIUM), lp().margins(this, t = 12))
-            a.message?.let {
-                sheet.addView(label(it, 14f, color(R.color.text)).apply { setTextIsSelectable(true) }, lp().margins(this, t = 8))
-            }
+            sheet.addView(label(a.description ?: a.groupName, 19f, color(R.color.text_strong), MEDIUM).apply { setTextIsSelectable(true) },
+                lp().margins(this, t = 12))
+            a.details?.let { sheet.addView(markdown(it), lp().margins(this, t = 10)) }
             val meta = panel(padV = 4)
             val late = a.receivedAtMs - a.createdAtMs
             listOf(
@@ -433,7 +461,7 @@ class MainActivity : BaseActivity() {
     private fun renderServers(servers: List<Server>) {
         val o = overall(servers)
         body.addView(sectionLabel(getString(R.string.servers_title),
-            if (servers.isEmpty()) null else downCount(o) ?: getString(R.string.status_online)))
+            if (servers.isEmpty()) null else downCount(o) ?: getString(R.string.drawer_servers_all_up)))
         if (servers.isEmpty()) {
             body.addView(emptyState(R.drawable.ic_server, getString(R.string.alerts_no_server_title),
                 getString(R.string.alerts_no_server_body), null, null))
@@ -480,7 +508,7 @@ class MainActivity : BaseActivity() {
 
     private fun renderSettings() {
         // Identity
-        body.addView(sectionLabel(getString(R.string.settings_title) + " · " + getString(R.string.settings_identity)))
+        body.addView(sectionLabel(getString(R.string.settings_identity)))
         val id = panel(padH = 14, padV = 12)
         id.addView(label(getString(R.string.settings_pseudo), 14f, color(R.color.text), MEDIUM))
         id.addView(label(getString(R.string.settings_pseudo_help), 11.5f, color(R.color.text_muted)), lp().margins(this, t = 2))
@@ -492,12 +520,6 @@ class MainActivity : BaseActivity() {
                 input.error = getString(R.string.pseudo_invalid)
             } else {
                 Prefs.setDefaultUserName(this, v)
-                // Servers enrolled before pseudos existed adopt the default.
-                val store = Store.get(this)
-                for (s in store.servers().filter { it.userName == null }) {
-                    store.setUserName(s.id, v)
-                    Registry.connections[s.id]?.setUserName(v)
-                }
                 Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
                 render()
             }
@@ -569,7 +591,7 @@ class MainActivity : BaseActivity() {
                 isClickable = true
                 setOnClickListener { perm.request(this@MainActivity) }
             }
-            p.addView(row(getString(perm.title), perm.why, trailing))
+            p.addView(row(getString(perm.title), getString(perm.why), trailing))
         }
         body.addView(p)
 

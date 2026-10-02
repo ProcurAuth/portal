@@ -15,7 +15,7 @@ import app.inbox.R
 data class Permission(
     val key: String,
     val title: Int,
-    val why: String,
+    val why: Int,
     val granted: Boolean,
     val request: (Activity) -> Unit,
 )
@@ -29,30 +29,30 @@ object Permissions {
         if (Build.VERSION.SDK_INT >= 33) {
             list += Permission(
                 "notifications", R.string.perm_notifications,
-                "Indispensable pour afficher les alertes.",
+                R.string.perm_notifications_why,
                 a.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
             ) { it.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
         }
         list += Permission(
             "overlay", R.string.perm_overlay,
-            "Pour qu'une Alarme ouvre Inbox en plein écran même quand le téléphone est utilisé.",
+            R.string.perm_overlay_why,
             Settings.canDrawOverlays(a),
         ) { it.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg)) }
         if (Build.VERSION.SDK_INT >= 34) {
             list += Permission(
                 "full_screen", R.string.perm_full_screen,
-                "Pour afficher l'alarme sur l'écran verrouillé.",
+                R.string.perm_full_screen_why,
                 nm.canUseFullScreenIntent(),
             ) { it.startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, pkg)) }
         }
         list += Permission(
             "battery", R.string.perm_battery,
-            "Sinon Android peut couper Inbox en arrière-plan.",
+            R.string.perm_battery_why,
             pm.isIgnoringBatteryOptimizations(a.packageName),
         ) { it.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkg)) }
         list += Permission(
             "dnd", R.string.perm_dnd,
-            "Pour sortir du mode silencieux ou vibreur lors d'une alarme.",
+            R.string.perm_dnd_why,
             nm.isNotificationPolicyAccessGranted,
         ) { it.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
         return list

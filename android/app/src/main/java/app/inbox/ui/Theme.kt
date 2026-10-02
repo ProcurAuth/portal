@@ -12,7 +12,7 @@ import android.view.WindowInsetsController
 /** User display preferences. */
 object Prefs {
     private const val FILE = "inbox_ui"
-    const val DEFAULT_LIMIT = 5
+    const val DEFAULT_LIMIT = 10
     const val DEFAULT_WINDOW_MS = 24L * 3_600_000
     val LIMIT_RANGE = 1..50
     val WINDOWS_MS = listOf(1L, 6L, 12L, 24L, 48L, 168L).map { it * 3_600_000 }
@@ -21,11 +21,16 @@ object Prefs {
 
     private fun prefs(c: Context) = c.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
+    /** Settings migration: the alert count moved to a new key with a new default (10). */
+    fun migrate(c: Context) {
+        if (prefs(c).contains("display_limit")) prefs(c).edit().remove("display_limit").apply()
+    }
+
     fun limit(c: Context): Int =
-        prefs(c).getInt("display_limit", DEFAULT_LIMIT).coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)
+        prefs(c).getInt("alerts_shown", DEFAULT_LIMIT).coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)
 
     fun setLimit(c: Context, v: Int) =
-        prefs(c).edit().putInt("display_limit", v.coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)).apply()
+        prefs(c).edit().putInt("alerts_shown", v.coerceIn(LIMIT_RANGE.first, LIMIT_RANGE.last)).apply()
 
     fun windowMs(c: Context): Long = prefs(c).getLong("display_window_ms", DEFAULT_WINDOW_MS)
     fun setWindowMs(c: Context, v: Long) = prefs(c).edit().putLong("display_window_ms", v).apply()

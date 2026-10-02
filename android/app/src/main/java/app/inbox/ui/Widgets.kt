@@ -275,3 +275,53 @@ fun TextView.asLink(): TextView = apply {
 }
 
 fun ViewGroup.addAll(vararg views: View) = views.forEach { addView(it) }
+
+/**
+ * Status light: a small dot whose halo breathes every two seconds (all servers
+ * connected). Static when [pulse] is false.
+ */
+class PulseDot(context: Context, private val tint: Int, private val pulse: Boolean = true) : View(context) {
+    private val core = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = tint }
+    private val halo = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = tint }
+    private var phase = 0f
+    private val animator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+        duration = 2000
+        repeatCount = android.animation.ValueAnimator.INFINITE
+        interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+        addUpdateListener {
+            phase = it.animatedValue as Float
+            invalidate()
+        }
+    }
+
+    /** 22 dp unless the parent imposes a size. */
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val size = context.dp(22)
+        setMeasuredDimension(resolveSize(size, widthMeasureSpec), resolveSize(size, heightMeasureSpec))
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (pulse) animator.start()
+    }
+
+    override fun onDetachedFromWindow() {
+        animator.cancel()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        val cx = width / 2f
+        val cy = height / 2f
+        val r = minOf(width, height) * 0.18f
+        if (pulse) {
+            // Halo grows from the core to the bounds while fading out, then repeats.
+            val max = minOf(width, height) / 2f
+            halo.alpha = ((1f - phase) * 110).toInt()
+            canvas.drawCircle(cx, cy, r + (max - r) * phase, halo)
+            // The core itself glows a little with the breath.
+            core.alpha = (200 + 55 * kotlin.math.sin(phase * Math.PI).toFloat()).toInt()
+        }
+        canvas.drawCircle(cx, cy, r, core)
+    }
+}

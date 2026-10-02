@@ -51,35 +51,35 @@ object Alerter {
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val alarm = NotificationChannel(CH_ALARM, "Alarmes", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Alertes critiques : sonnent jusqu'à ce que vous coupiez l'alarme, même en silencieux"
+        val alarm = NotificationChannel(CH_ALARM, "Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "Critical alerts: ring until you stop them, even in silent mode"
             setSound(null, null) // played by AlarmPlayer on the alarm stream
             enableVibration(false) // vibration handled by AlarmPlayer
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val active = NotificationChannel(CH_ALARM_ACTIVE, "Alarme affichée", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "Alarme en cours déjà ouverte en plein écran"
+        val active = NotificationChannel(CH_ALARM_ACTIVE, "Alarm on screen", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Ringing alarm already open full screen"
             setSound(null, null)
             enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val ring = NotificationChannel(CH_RING, "Sonneries", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Un son, même en silencieux ou en vibreur"
+        val ring = NotificationChannel(CH_RING, "Rings", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "One sound, even in silent or vibrate mode"
             setSound(null, null)
             enableVibration(false)
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
         val notify = NotificationChannel(CH_NOTIFY, "Notifications", NotificationManager.IMPORTANCE_DEFAULT).apply {
-            description = "Notifications standard, selon le mode du téléphone"
+            description = "Standard notifications, following the phone sound mode"
         }
-        val status = NotificationChannel(CH_STATUS, "État de la connexion", NotificationManager.IMPORTANCE_MIN).apply {
-            description = "Notification permanente du service Inbox"
+        val status = NotificationChannel(CH_STATUS, "Connection status", NotificationManager.IMPORTANCE_MIN).apply {
+            description = "Permanent notification of the Inbox service"
             setShowBadge(false)
         }
-        val warning = NotificationChannel(CH_WARNING, "Perte de connexion", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Prévient quand Inbox ne peut plus recevoir d'alertes"
+        val warning = NotificationChannel(CH_WARNING, "Connection lost", NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "Warns when Inbox can no longer receive alerts"
         }
         nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning))
     }
@@ -120,8 +120,9 @@ object Alerter {
 
     private fun post(context: Context, a: Alert, direct: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val title = a.title ?: a.groupName
-        val body = a.message ?: "Alerte ${a.groupName}"
+        val title = a.description ?: a.groupName
+        // The details are Markdown: the notification shows their first plain line.
+        val body = a.details?.let { app.inbox.md.Markdown.firstLine(it) } ?: context.getString(R.string.alert_in_group, a.groupName)
         // Tapping the notification opens the alert in the app, which marks it read.
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),
@@ -137,14 +138,16 @@ object Alerter {
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(body)
-            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setStyle(Notification.BigTextStyle().bigText(
+                a.details?.let { app.inbox.md.Markdown.plainText(it).take(800) }?.ifEmpty { null } ?: body
+            ))
             .setWhen(a.createdAtMs)
             .setShowWhen(true)
             .setContentIntent(open)
             .setAutoCancel(a.action != "alarm")
             .setVisibility(Notification.VISIBILITY_PUBLIC)
         if (a.action != "alarm") {
-            // Dismissing the notification or tapping "Marquer comme lu" marks it read.
+            // Dismissing the notification or tapping "Mark as read" marks it read.
             val read = PendingIntent.getBroadcast(
                 context, requestCode(a, 4),
                 Intent(context, ReadReceiver::class.java)
@@ -222,7 +225,7 @@ object Alerter {
         }
     }
 
-    /** "Tout marquer comme lu". */
+    /** "Mark all as read". */
     fun markAllRead(context: Context) {
         for (a in Store.get(context).unreadAlerts()) markRead(context, a.serverId, a.alertId)
         Registry.changed()
@@ -339,7 +342,7 @@ object AlarmPlayer {
         if (player != null) return
         val app = context.applicationContext
         val audio = app.getSystemService(AudioManager::class.java)
-        // "Sortir du vibreur": restore normal ringer mode when allowed to.
+        // Leave silent / vibrate: restore the normal ringer mode when allowed to.
         val nm = app.getSystemService(NotificationManager::class.java)
         if (audio.ringerMode != AudioManager.RINGER_MODE_NORMAL && nm.isNotificationPolicyAccessGranted) {
             try {
@@ -401,7 +404,7 @@ object AlarmPlayer {
     fun isRinging(): Boolean = active.isNotEmpty()
 }
 
-/** "Marquer comme lu" action, and dismissal, of ring / notify notifications (local only). */
+/** "Mark as read" action, and dismissal, of ring / notify notifications (local only). */
 class ReadReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_SERVER = "server_id"
@@ -416,7 +419,7 @@ class ReadReceiver : BroadcastReceiver() {
     }
 }
 
-/** "Couper l'alarme" action on alarm notifications (local only). */
+/** "Stop alarm" action on alarm notifications (local only). */
 class StopReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_SERVER = "server_id"

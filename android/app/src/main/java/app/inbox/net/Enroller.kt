@@ -1,5 +1,7 @@
 package app.inbox.net
 
+import android.content.Context
+import app.inbox.R
 import app.inbox.core.Native
 import okhttp3.Request
 import okhttp3.Response
@@ -31,7 +33,8 @@ object Enroller {
         class Failure(val t: Throwable) : Ev
     }
 
-    fun enroll(address: ServerAddress, password: ByteArray, deviceName: String, userName: String): Enrollment {
+    fun enroll(context: Context, address: ServerAddress, password: ByteArray, deviceName: String, userName: String): Enrollment {
+        val str = { id: Int -> context.getString(id) }
         val q = LinkedBlockingQueue<Ev>()
         val ws = Http.client.newWebSocket(
             Request.Builder().url(address.ws("/v1/enroll")).build(),
@@ -46,22 +49,22 @@ object Enroller {
         try {
             when (val e = q.poll(20, TimeUnit.SECONDS)) {
                 Ev.Open -> {}
-                is Ev.Failure -> throw EnrollmentError("Serveur injoignable : ${e.t.message ?: e.t.javaClass.simpleName}")
-                else -> throw EnrollmentError("Serveur injoignable")
+                is Ev.Failure -> throw EnrollmentError(context.getString(R.string.err_unreachable_detail, e.t.message ?: e.t.javaClass.simpleName))
+                else -> throw EnrollmentError(str(R.string.err_unreachable))
             }
             val start = JSONObject(Native.enrollStart(password, deviceName, userName))
-            start.optJSONObject("error")?.let { throw EnrollmentError(describe(it)) }
+            start.optJSONObject("error")?.let { throw EnrollmentError(describe(context, it)) }
             handle = start.getLong("handle")
             ws.send(start.getString("send"))
             while (true) {
                 val text = when (val e = q.poll(90, TimeUnit.SECONDS)) {
                     is Ev.Text -> e.text
-                    is Ev.Closed -> throw EnrollmentError("Le serveur a fermé la connexion (${e.code})")
-                    is Ev.Failure -> throw EnrollmentError("Connexion perdue : ${e.t.message}")
-                    else -> throw EnrollmentError("Le serveur ne répond pas")
+                    is Ev.Closed -> throw EnrollmentError(context.getString(R.string.err_closed, e.code))
+                    is Ev.Failure -> throw EnrollmentError(context.getString(R.string.err_lost, e.t.message ?: ""))
+                    else -> throw EnrollmentError(str(R.string.err_no_answer))
                 }
                 val out = JSONObject(Native.enrollOnMessage(handle, text))
-                out.optJSONObject("error")?.let { throw EnrollmentError(describe(it)) }
+                out.optJSONObject("error")?.let { throw EnrollmentError(describe(context, it)) }
                 out.optString("send", "").takeIf { it.isNotEmpty() }?.let { ws.send(it) }
                 out.optJSONObject("done")?.let { d ->
                     return Enrollment(
@@ -79,14 +82,14 @@ object Enroller {
         }
     }
 
-    private fun describe(err: JSONObject): String = when (err.optString("code")) {
+    private fun describe(c: Context, err: JSONObject): String = when (err.optString("code")) {
         // A wrong password is detected locally by OPAQUE (the server cannot tell).
-        "auth_failed", "bad_password" -> "Mot de passe incorrect"
-        "rate_limited" -> "Trop de tentatives, réessayez plus tard"
-        "too_many_devices" -> "Nombre maximal d'appareils atteint sur ce serveur"
-        "protocol" -> "Version incompatible avec ce serveur : ${err.optString("message")}"
-        "internal" -> "Erreur interne du serveur"
-        "malformed" -> "Pseudo ou nom d'appareil invalide"
-        else -> err.optString("message", "Erreur inconnue")
+        "auth_failed", "bad_password" -> c.getString(R.string.err_bad_password)
+        "rate_limited" -> c.getString(R.string.err_rate_limited)
+        "too_many_devices" -> c.getString(R.string.err_too_many_devices)
+        "protocol" -> c.getString(R.string.err_protocol, err.optString("message"))
+        "internal" -> c.getString(R.string.err_internal)
+        "malformed" -> c.getString(R.string.err_malformed)
+        else -> err.optString("message").ifEmpty { c.getString(R.string.err_unknown) }
     }
 }

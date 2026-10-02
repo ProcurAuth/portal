@@ -63,4 +63,6 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // JVM unit tests only (Markdown parser); not shipped in the APK.
+    testImplementation("junit:junit:4.13.2")
 }
