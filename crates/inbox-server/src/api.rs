@@ -252,8 +252,14 @@ pub async fn get_alert(
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail =
-        app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
+    let detail = app
+        .db
+        .call({
+            let cutoff = app.delivery_cutoff();
+            move |c| Ok(db::alert_detail(c, &id, cutoff)?)
+        })
+        .await
+        .map_err(ApiError::storage)?;
     let detail = detail.ok_or_else(not_found)?;
     if !p.groups.contains(&detail.summary.group) {
         return Err(not_found());

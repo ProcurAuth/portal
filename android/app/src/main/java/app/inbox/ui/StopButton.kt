@@ -5,6 +5,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.RectF
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
@@ -23,11 +25,12 @@ import kotlin.math.min
  * A simple tap does nothing, so a phone in a pocket cannot silence an alarm.
  */
 class StopButton(context: Context, private val onStop: () -> Unit) : View(context) {
-    private val red = 0xFFE5484D.toInt()
+    private val red = 0xFFF04438.toInt()
     private val white = 0xFFFFFFFF.toInt()
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = red }
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = white }
-    private val pulse = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = red }
+    private val pulse = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = red }
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG)
     private val cross = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; color = white; strokeCap = Paint.Cap.ROUND
     }
@@ -69,6 +72,15 @@ class StopButton(context: Context, private val onStop: () -> Unit) : View(contex
         setMeasuredDimension(size, size)
     }
 
+    private val arcBounds = RectF()
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val maxR = min(outer, min(w / 2f, h / 2f))
+        glow.shader = RadialGradient(w / 2f, h / 2f, maxR, intArrayOf(0x66F04438, 0x1FF04438, 0x00F04438),
+            floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP)
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         pulseAnim.start()
@@ -87,25 +99,37 @@ class StopButton(context: Context, private val onStop: () -> Unit) : View(contex
         val r = inner
         val maxR = min(outer, min(cx, cy))
 
-        // Pulsing halos, staggered.
+        // Soft red glow under the button.
+        canvas.drawCircle(cx, cy, maxR, glow)
+        // Thin pulsing rings, staggered.
         if (!dragging) {
-            for (k in 0..1) {
-                val p = (phase + k * 0.5f) % 1f
-                pulse.alpha = ((1f - p) * 90).toInt()
+            pulse.strokeWidth = resources.displayMetrics.density * 1.5f
+            for (k in 0..2) {
+                val p = (phase + k / 3f) % 1f
+                pulse.alpha = ((1f - p) * 170).toInt()
                 canvas.drawCircle(cx, cy, r + (maxR - r) * p, pulse)
             }
         }
-        // Threshold ring.
-        ring.strokeWidth = resources.displayMetrics.density * 2f
-        ring.alpha = if (dragging && outside) 230 else 70
-        canvas.drawCircle(cx, cy, maxR - ring.strokeWidth, ring)
+        // Threshold ring, with tick marks like an instrument dial.
+        ring.strokeWidth = resources.displayMetrics.density * 1f
+        ring.alpha = if (dragging && outside) 230 else 60
+        val rr = maxR - ring.strokeWidth
+        canvas.drawCircle(cx, cy, rr, ring)
+        for (i in 0 until 48) {
+            val ang = Math.toRadians(i * 7.5)
+            val len = if (i % 4 == 0) resources.displayMetrics.density * 7f else resources.displayMetrics.density * 3.5f
+            val c0 = Math.cos(ang).toFloat()
+            val s0 = Math.sin(ang).toFloat()
+            canvas.drawLine(cx + c0 * rr, cy + s0 * rr, cx + c0 * (rr - len), cy + s0 * (rr - len), ring)
+        }
 
         // Long-press progress.
         if (pressStart > 0 && !dragging) {
             val p = ((SystemClock.uptimeMillis() - pressStart) / LONG_PRESS_MS.toFloat()).coerceIn(0f, 1f)
             arc.strokeWidth = resources.displayMetrics.density * 5f
             val pad = r + arc.strokeWidth * 2
-            canvas.drawArc(RectF(cx - pad, cy - pad, cx + pad, cy + pad), -90f, 360f * p, false, arc)
+            arcBounds.set(cx - pad, cy - pad, cx + pad, cy + pad)
+            canvas.drawArc(arcBounds, -90f, 360f * p, false, arc)
             if (p < 1f) postInvalidateOnAnimation()
         }
 
@@ -114,8 +138,8 @@ class StopButton(context: Context, private val onStop: () -> Unit) : View(contex
         val by = cy + dy
         fill.alpha = if (dragging && outside) 200 else 255
         canvas.drawCircle(bx, by, r, fill)
-        cross.strokeWidth = resources.displayMetrics.density * 6f
-        val c = r * 0.32f
+        cross.strokeWidth = resources.displayMetrics.density * 4f
+        val c = r * 0.26f
         canvas.drawLine(bx - c, by - c, bx + c, by + c, cross)
         canvas.drawLine(bx + c, by - c, bx - c, by + c, cross)
     }

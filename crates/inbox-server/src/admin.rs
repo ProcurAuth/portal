@@ -33,8 +33,11 @@ mod assets {
 }
 
 pub async fn static_asset(uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
+    let path = match uri.path().trim_matches('/') {
+        "" => "index.html",
+        "doc" => "doc.html",
+        other => other,
+    };
     let Some((_, mime, body, etag)) = assets::ASSETS.iter().find(|(p, ..)| *p == path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
@@ -130,7 +133,10 @@ fn no_store(v: serde_json::Value) -> Response {
 pub async fn overview(State(app): State<Arc<AppState>>) -> Result<Response, ApiError> {
     let (devices, (pending, oldest)) = app
         .db
-        .call(|c| Ok((db::list_devices(c)?, db::pending_stats(c)?)))
+        .call({
+            let cutoff = app.delivery_cutoff();
+            move |c| Ok((db::list_devices(c, cutoff)?, db::pending_stats(c, cutoff)?))
+        })
         .await
         .map_err(ApiError::storage)?;
     let live = app.hub.snapshot();
@@ -169,7 +175,15 @@ pub async fn overview(State(app): State<Arc<AppState>>) -> Result<Response, ApiE
             "version": env!("CARGO_PKG_VERSION"),
             "time_ms": now,
             "unreachable_after_ms": unreachable_after,
+            // Port of the device / producer API listener, for the API documentation.
+            "api_port": app.config.server.listen.port(),
         },
+        // Producers and their groups; tokens are never exposed.
+        "producers": app.secrets.producers.iter().map(|p| json!({
+            "name": p.name,
+            "groups": p.groups,
+            "webhook_send_resolved": p.webhook_send_resolved,
+        })).collect::<Vec<_>>(),
         "groups": app.groups,
         "devices": devices,
         "stats": {
@@ -199,7 +213,10 @@ pub async fn alerts(
     let since = q.since_ms.unwrap_or(0).max(0);
     let list = app
         .db
-        .call(move |c| Ok(db::recent_alerts(c, limit, since)?))
+        .call({
+            let cutoff = app.delivery_cutoff();
+            move |c| Ok(db::recent_alerts(c, limit, since, cutoff)?)
+        })
         .await
         .map_err(ApiError::storage)?;
     Ok(no_store(json!({ "alerts": list })))
@@ -213,8 +230,14 @@ pub async fn alert(
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail =
-        app.db.call(move |c| Ok(db::alert_detail(c, &id)?)).await.map_err(ApiError::storage)?;
+    let detail = app
+        .db
+        .call({
+            let cutoff = app.delivery_cutoff();
+            move |c| Ok(db::alert_detail(c, &id, cutoff)?)
+        })
+        .await
+        .map_err(ApiError::storage)?;
     Ok(no_store(serde_json::to_value(detail.ok_or_else(not_found)?).expect("serializes")))
 }
 

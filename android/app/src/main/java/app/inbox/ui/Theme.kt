@@ -48,9 +48,9 @@ fun cleanUserName(text: String): String? {
 }
 
 /**
- * Base for the app screens: applies the chosen theme (system by default), matches
- * the system bars to the page colour and pads the content by the system insets
- * (required for edge-to-edge on Android 15).
+ * Base for the app screens: applies the chosen theme (system by default), draws
+ * edge to edge over the coloured backdrop and pads the content by the system
+ * insets.
  */
 abstract class BaseActivity : Activity() {
     override fun attachBaseContext(newBase: Context) {
@@ -73,32 +73,32 @@ abstract class BaseActivity : Activity() {
     val isNight: Boolean
         get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
+    /** Transparent system bars over the coloured backdrop (edge to edge on every version). */
     @Suppress("DEPRECATION")
     private fun styleSystemBars() {
-        val bg = color(app.inbox.R.color.bg_page)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
+        window.statusBarColor = 0x00000000
+        window.navigationBarColor = 0x00000000
+        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
         val light = !isNight
+        var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        if (Build.VERSION.SDK_INT < 30) {
+            if (light) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+            if (light && Build.VERSION.SDK_INT >= 27) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
+        window.decorView.systemUiVisibility = flags
         if (Build.VERSION.SDK_INT >= 30) {
             val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
                 WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
             window.decorView.post {
                 window.insetsController?.setSystemBarsAppearance(if (light) mask else 0, mask)
             }
-        } else {
-            var flags = window.decorView.systemUiVisibility
-            flags = if (light) flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR else flags and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
-            if (Build.VERSION.SDK_INT >= 27) {
-                flags = if (light) flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-                else flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
-            }
-            window.decorView.systemUiVisibility = flags
         }
     }
 
-    /** Sets the content and keeps it clear of the status and navigation bars. */
+    /** Sets the content over the backdrop and keeps it clear of the system bars. */
     fun setScreen(root: View) {
-        setContentView(root)
+        setContentView(withBackdrop(root))
         applyInsets(root)
     }
 }

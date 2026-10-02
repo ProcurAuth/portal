@@ -96,8 +96,8 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 - **Order on the device.** The app stores the alert durably *before* sending
   `ack received`, and deduplicates on `alert_id`. Notifications use an identifier
   derived from `alert_id`, so a retransmission never shows twice.
-- **No expiry.** Undelivered rows are never purged. A revoked device's rows are
-  abandoned.
+- **Expiry.** A delivery not received within `storage.delivery_ttl` is no longer
+  sent and is reported as expired. A revoked device's rows are abandoned.
 
 ### Close codes
 

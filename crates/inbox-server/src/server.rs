@@ -225,10 +225,11 @@ fn spawn_background(app: Arc<AppState>) {
             if n.is_multiple_of(4) {
                 flush_last_seen(&a).await;
             }
+            let cutoff = a.delivery_cutoff();
             let stats =
-                a.db.call(|c| {
+                a.db.call(move |c| {
                     Ok((
-                        db::pending_stats(c)?,
+                        db::pending_stats(c, cutoff)?,
                         db::subscribed_devices(c)?,
                         db::count_active_devices(c)?,
                     ))

@@ -8,18 +8,12 @@
     <string name="nav_alerts">Alertes</string>
     <string name="nav_servers">Serveurs</string>
     <string name="nav_settings">Réglages</string>
-    <string name="drawer_tagline">Réception d\'alertes</string>
+    <string name="drawer_identity">Pseudo</string>
+    <string name="drawer_no_pseudo">aucun pseudo</string>
     <string name="drawer_servers_none">Aucun serveur</string>
-    <string name="drawer_servers_status">%1$d/%2$d serveur(s) connecté(s)</string>
+    <string name="drawer_servers_all_up">tous connectés</string>
+    <string name="drawer_servers_down">%1$d srv hors ligne</string>
 
-    <!-- Connection status -->
-    <string name="status_connected">Connecté</string>
-    <string name="status_partial">Partiel</string>
-    <string name="status_offline">Hors ligne</string>
-    <string name="status_none">Aucun serveur</string>
-    <string name="status_connecting">Connexion…</string>
-    <string name="status_disconnected_since">Déconnecté %1$s</string>
-    <string name="status_reenroll">Ré-enrôlement requis</string>
 
     <!-- Alerts (home) -->
     <string name="alerts_title">Dernières alertes</string>
@@ -30,12 +24,8 @@
     <string name="alerts_add_server">Ajouter un serveur</string>
     <string name="alerts_footer">%1$d dernière(s) · %2$s ·</string>
     <string name="alerts_footer_edit">modifier</string>
-    <string name="alert_late">reçue %1$s après l\'envoi</string>
-    <string name="alert_ringing">Sonne</string>
     <string name="alert_stop">Couper l\'alarme</string>
     <string name="alert_close">Fermer</string>
-    <string name="alert_sent_at">Envoyée le %1$s</string>
-    <string name="alert_received_at">Reçue le %1$s</string>
     <string name="alert_permissions_missing">Autorisations manquantes : une alerte critique pourrait ne pas sonner.</string>
     <string name="alert_permissions_fix">Corriger</string>
     <string name="alert_overlay_missing">Un groupe est réglé sur Alarme, mais Inbox ne peut pas s\'afficher par-dessus les autres applications : l\'alarme ne s\'ouvrira pas en plein écran si le téléphone est utilisé.</string>
@@ -46,16 +36,10 @@
     <string name="action_notify">Notification</string>
     <string name="action_ring">Sonnerie</string>
     <string name="action_alarm">Alarme</string>
-    <string name="action_off_short">Aucune</string>
-    <string name="action_notify_short">Notif.</string>
 
     <!-- Servers -->
     <string name="servers_title">Serveurs</string>
-    <string name="servers_empty">Aucun serveur pour l\'instant.</string>
     <string name="servers_add">Ajouter un serveur</string>
-    <string name="server_device">Appareil « %1$s »</string>
-    <string name="server_identity">%1$s · %2$s</string>
-    <string name="server_no_pseudo">sans pseudo</string>
     <string name="server_pseudo">Pseudo sur ce serveur</string>
     <string name="server_pseudo_help">Envoyé au serveur dès la connexion ; l\'administrateur voit vos sessions sous ce nom.</string>
     <string name="server_groups">Groupes</string>
@@ -79,7 +63,6 @@
     <string name="add_password">Mot de passe des appareils</string>
     <string name="add_pseudo">Pseudo</string>
     <string name="add_pseudo_required">Choisissez d\'abord votre pseudo par défaut dans les Réglages.</string>
-    <string name="add_pseudo_settings">Ouvrir les réglages</string>
     <string name="add_device_name">Nom de cet appareil</string>
     <string name="add_device_name_help">Visible par l\'administrateur dans l\'interface web.</string>
     <string name="add_security_note">Le mot de passe ne quitte jamais le téléphone (protocole OPAQUE), même sur une connexion http non chiffrée.</string>
@@ -99,27 +82,40 @@
     <string name="settings_pseudo_missing">Aucun pseudo : obligatoire avant d\'ajouter un serveur.</string>
     <string name="pseudo_hint">ex. alice</string>
     <string name="pseudo_invalid">Pseudo invalide (1 à 64 caractères, sans caractère de contrôle)</string>
-    <string name="save">Enregistrer</string>
     <string name="saved">Enregistré</string>
     <string name="theme_system">Système</string>
     <string name="theme_light">Clair</string>
     <string name="theme_dark">Sombre</string>
     <string name="settings_permissions">Autorisations</string>
-    <string name="settings_permissions_hint">Sans elles, une alerte critique pourrait ne pas sonner.</string>
     <string name="perm_notifications">Notifications</string>
     <string name="perm_full_screen">Alarmes plein écran</string>
     <string name="perm_battery">Ignorer l\'optimisation de batterie</string>
     <string name="perm_dnd">Accès « Ne pas déranger »</string>
     <string name="perm_overlay">Afficher par-dessus les autres applications</string>
-    <string name="perm_granted">Autorisé</string>
     <string name="perm_grant">Autoriser</string>
     <string name="settings_about">À propos</string>
-    <string name="settings_version">Version %1$s</string>
     <string name="settings_about_body">Inbox reçoit uniquement des alertes : ce téléphone ne peut pas en envoyer.</string>
+
+    <!-- Metadata keys (dense key / value rows) -->
+    <string name="meta_server">Serveur</string>
+    <string name="meta_group">Groupe</string>
+    <string name="meta_action">Action</string>
+    <string name="meta_sent">Envoyée</string>
+    <string name="meta_received">Reçue</string>
+    <string name="meta_alert_id">ID alerte</string>
+    <string name="meta_state">État</string>
+    <string name="meta_address">Adresse</string>
+    <string name="meta_device">Appareil</string>
+    <string name="meta_pseudo">Pseudo</string>
+    <string name="meta_device_id">ID appareil</string>
+    <string name="meta_detail">Détail</string>
+    <string name="meta_version">Version</string>
+    <string name="meta_mode">Mode</string>
+    <string name="meta_mode_value">Réception seule</string>
+    <string name="save_short">OK</string>
 
     <!-- Alarm screen -->
     <string name="alarm_hint">Glissez pour arrêter</string>
-    <string name="alarm_more">+ %1$d autre(s) alarme(s)</string>
     <string name="alarm_all_stopped">L\'arrêt coupe toutes les alarmes en cours.</string>
     <string name="alarm_stop_description">Arrêter l\'alarme. Glissez hors du cercle ou appuyez longuement.</string>
 </resources>

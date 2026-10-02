@@ -3,7 +3,9 @@ package app.inbox.ui
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -53,6 +55,12 @@ class AlarmActivity : Activity() {
         render()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // The page is visible: the notification must not cover it with a heads-up.
+        Alerter.quietAlarmNotifications(this, Store.get(this).ringingAlarms())
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -73,65 +81,72 @@ class AlarmActivity : Activity() {
         val others = ringing.dropLast(1).reversed()
         val server = store.server(a.serverId)
 
-        val root = FrameLayout(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0xFF0F141B.toInt(), 0xFF1A1218.toInt(), 0xFF3B0D10.toInt()),
-            )
+        val red = 0xFFF04438.toInt()
+        val glow = GradientDrawable().apply {
+            gradientType = GradientDrawable.RADIAL_GRADIENT
+            colors = intArrayOf(0x66F04438, 0x26F04438, 0x00F04438)
+            gradientRadius = resources.displayMetrics.widthPixels * 0.95f
+            setGradientCenter(0.5f, 0.76f)
         }
-        val col = lin(padH = 28, padV = 24).apply { gravity = Gravity.CENTER_HORIZONTAL }
+        val root = FrameLayout(this).apply {
+            background = LayerDrawable(arrayOf(ColorDrawable(0xFF0B0E13.toInt()), glow))
+        }
+        val col = lin(padH = 16, padV = 16).apply { gravity = Gravity.CENTER_HORIZONTAL }
 
         // Header: group and how many others ring.
         val head = lin(vertical = false).apply { gravity = Gravity.CENTER }
-        head.addView(pill(a.groupName, white, 0x33E5484D, dot = true))
+        head.addView(chip(a.groupName, red, 0x29F04438, dot = true))
         if (others.isNotEmpty()) {
-            head.addView(
-                pill(getString(R.string.alarm_more, others.size), dim, 0x1FFFFFFF),
-                lp(WRAP, WRAP).margins(this, l = 8),
-            )
+            head.addView(chip("+" + others.size, dim, 0x14FFFFFF), lp(WRAP, WRAP).margins(this, l = 6))
         }
-        col.addView(head, lp(MATCH, WRAP).margins(this, t = 24))
+        col.addView(head, lp(MATCH, WRAP).margins(this, t = 16))
 
         col.addView(TextClock(this).apply {
-            format12Hour = "HH:mm"
-            format24Hour = "HH:mm"
-            textSize = 64f
-            typeface = LIGHT
+            format12Hour = "HH:mm:ss"
+            format24Hour = "HH:mm:ss"
+            textSize = 46f
+            typeface = MONO
             setTextColor(white)
             gravity = Gravity.CENTER
             includeFontPadding = false
-        }, lp(MATCH, WRAP).margins(this, t = 16))
-        col.addView(label(relativeTime(a.createdAtMs).replaceFirstChar { it.uppercase() } +
-            " · " + (server?.serverName ?: ""), 14f, faint).apply { gravity = Gravity.CENTER },
-            lp(MATCH, WRAP).margins(this, t = 6))
+        }, lp(MATCH, WRAP).margins(this, t = 14))
+        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), "RX " + hms(a.receivedAtMs), shortAge(a.createdAtMs).uppercase())
+            .joinToString("  ·  "), 11f, faint).apply { gravity = Gravity.CENTER; letterSpacing = 0.06f },
+            lp(MATCH, WRAP).margins(this, t = 8))
 
-        // Alert text, scrollable when long.
-        val text = lin().apply { gravity = Gravity.CENTER_HORIZONTAL }
-        text.addView(label(a.title ?: a.groupName, 28f, white, BOLD).apply { gravity = Gravity.CENTER })
-        a.message?.let {
-            text.addView(label(it, 17f, dim).apply { gravity = Gravity.CENTER }, lp(MATCH, WRAP).margins(this, t = 12))
+        // Alert text on a glass card, scrollable when long.
+        val card = lin(padH = 16, padV = 14).apply {
+            background = LayerDrawable(arrayOf(
+                rounded(0x17FFFFFF, dpf(18f), 0x24FFFFFF, dp(1)),
+                GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x14FFFFFF, 0x00FFFFFF)).apply { cornerRadius = dpf(18f) },
+            ))
         }
-        for (o in others.take(3)) {
-            text.addView(label("• " + (o.title ?: o.groupName), 14f, faint, lines = 1).apply {
-                gravity = Gravity.CENTER
-            }, lp(MATCH, WRAP).margins(this, t = 8))
+        card.addView(mono("ALARM · " + a.groupName.uppercase(), 10.5f, red, bold = true).apply { letterSpacing = 0.08f })
+        card.addView(label(a.title ?: a.groupName, 22f, white, BOLD), lp().margins(this, t = 8))
+        a.message?.let {
+            card.addView(label(it, 15f, dim), lp().margins(this, t = 8))
         }
         if (others.isNotEmpty()) {
-            text.addView(label(getString(R.string.alarm_all_stopped), 12f, faint).apply { gravity = Gravity.CENTER },
-                lp(MATCH, WRAP).margins(this, t = 8))
+            card.addView(View(this).apply { setBackgroundColor(0x1AFFFFFF) }, lp(MATCH, 1).margins(this, t = 12, b = 8))
+            for (o in others.take(3)) {
+                card.addView(mono(hms(o.createdAtMs) + "  " + (o.title ?: o.groupName), 11.5f, faint), lp().margins(this, t = 3))
+            }
+            card.addView(label(getString(R.string.alarm_all_stopped), 11f, faint), lp().margins(this, t = 6))
         }
         val textScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
-            addView(text)
+            addView(card)
         }
-        col.addView(textScroll, lp(MATCH, 0, 1f).margins(this, t = 20))
+        col.addView(textScroll, lp(MATCH, 0, 1f).margins(this, t = 18))
 
         col.addView(StopButton(this) {
             Alerter.stopAllAlarms(this)
             finish()
-        }, lp(WRAP, WRAP).margins(this, t = 12))
-        col.addView(label(getString(R.string.alarm_hint), 15f, dim, MEDIUM).apply { gravity = Gravity.CENTER },
-            lp(MATCH, WRAP).margins(this, t = 4, b = 12))
+        }, lp(WRAP, WRAP).margins(this, t = 8))
+        col.addView(mono(getString(R.string.alarm_hint).uppercase(), 11f, dim, bold = true).apply {
+            gravity = Gravity.CENTER
+            letterSpacing = 0.14f
+        }, lp(MATCH, WRAP).margins(this, t = 2, b = 10))
 
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)

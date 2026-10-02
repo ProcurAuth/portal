@@ -90,8 +90,10 @@ donc **affichage exactement une fois**.
 4. Le téléphone enregistre l'alerte durablement **avant** de confirmer la
    réception, déduplique sur l'identifiant d'alerte (128 bits aléatoires), et
    réaffiche au redémarrage ce qui a été reçu mais pas affiché.
-5. Une alerte en attente **n'expire jamais** ; la rétention ne purge que
-   l'historique déjà livré.
+5. Une alerte non reçue par un téléphone reste en mémoire et est renvoyée pendant
+   `storage.delivery_ttl` (7 jours, décision du 2026-10-02), puis expire pour ce
+   téléphone et apparaît « expirée » dans le front admin. L'historique est purgé
+   après `storage.alert_retention`, qui doit être ≥ `delivery_ttl`.
 6. Visibilité des trous de couverture : appareil abonné injoignable signalé dans
    le front et par la métrique `inbox_devices_unreachable` ; côté téléphone,
    notification permanente de connexion et avertissement après

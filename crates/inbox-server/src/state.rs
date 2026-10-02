@@ -92,6 +92,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Alerts created before this Unix time (ms) have expired for delivery.
+    pub fn delivery_cutoff(&self) -> i64 {
+        crate::util::now_ms() - self.config.storage.delivery_ttl.as_millis() as i64
+    }
+
     pub fn group_name(&self, id: &str) -> String {
         self.group_names.get(id).cloned().unwrap_or_else(|| id.to_string())
     }

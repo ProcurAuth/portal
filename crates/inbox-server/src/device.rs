@@ -563,7 +563,10 @@ async fn flush_deliveries(
     let limit = app.config.devices.max_inflight;
     let pending = app
         .db
-        .call(move |c| Ok(db::pending_deliveries(c, &id, limit)?))
+        .call({
+            let cutoff = app.delivery_cutoff();
+            move |c| Ok(db::pending_deliveries(c, &id, limit, cutoff)?)
+        })
         .await
         .map_err(End::Storage)?;
     let still_pending: HashSet<i64> = pending.iter().map(|p| p.seq).collect();

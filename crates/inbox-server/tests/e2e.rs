@@ -79,6 +79,7 @@ server {{
 }}
 storage {{
   path = "{db}"
+  delivery_ttl = "1h"
   alert_retention = "1h"
   connection_log_retention = "1h"
 }}

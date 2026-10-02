@@ -41,7 +41,8 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
 | `path` | path | parent directory must exist | SQLite database (WAL, `synchronous = FULL`). |
-| `alert_retention` | duration | ≥ 1h | Alerts received by every non-revoked target device are purged after this. **Alerts still waiting for a device are never purged.** |
+| `delivery_ttl` | duration | ≥ 1m | An alert a device has not received within this delay is no longer sent to it and shows as expired (7d in the examples). |
+| `alert_retention` | duration | ≥ 1h, ≥ `delivery_ttl` | History (delivered and expired alerts) is purged after this. |
 | `connection_log_retention` | duration | ≥ 1h | Closed entries of the connection log are purged after this. |
 
 ## `devices`

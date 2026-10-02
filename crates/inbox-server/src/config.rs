@@ -50,7 +50,10 @@ pub struct Server {
 #[serde(deny_unknown_fields)]
 pub struct Storage {
     pub path: PathBuf,
-    /// Delivered alerts older than this are purged. Undelivered alerts never are.
+    /// An alert a device has not received within this delay is no longer sent to it.
+    #[serde(deserialize_with = "duration")]
+    pub delivery_ttl: Duration,
+    /// Alerts (delivered or expired) older than this are purged. Must be >= delivery_ttl.
     #[serde(deserialize_with = "duration")]
     pub alert_retention: Duration,
     #[serde(deserialize_with = "duration")]
@@ -223,6 +226,11 @@ impl Config {
         check(
             st.alert_retention >= Duration::from_secs(3600),
             "storage.alert_retention must be >= 1h",
+        );
+        check(st.delivery_ttl >= Duration::from_secs(60), "storage.delivery_ttl must be >= 1m");
+        check(
+            st.alert_retention >= st.delivery_ttl,
+            "storage.alert_retention must be >= storage.delivery_ttl",
         );
         check(
             st.connection_log_retention >= Duration::from_secs(3600),

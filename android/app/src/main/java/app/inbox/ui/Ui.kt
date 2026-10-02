@@ -5,6 +5,7 @@ import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.text.TextUtils
 import android.view.Gravity
@@ -16,14 +17,15 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import app.inbox.R
-import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /*
  * Programmatic view toolkit (the app ships without AndroidX nor XML layouts).
- * Visual language from S3-Browser: neutral panels with a 1 dp border, 12 dp
- * cards, 9 dp controls, system font, one blue accent and soft status colours.
+ * Visual language, "industrial glass": dense rows like an observability event
+ * viewer (monospace data, uppercase micro-labels, hairlines, severity bars) laid
+ * on frosted translucent panels over a softly coloured backdrop.
  */
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -37,6 +39,13 @@ val MEDIUM: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 val BOLD: Typeface = Typeface.create("sans-serif", Typeface.BOLD)
 val REGULAR: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
 val LIGHT: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+val MONO: Typeface = Typeface.MONOSPACE
+val MONO_BOLD: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+
+/** Panel radius (continuous-looking large corners) and compact control radius. */
+const val PANEL_RADIUS = 18f
+const val CONTROL_RADIUS = 8f
+const val CHIP_RADIUS = 4f
 
 fun rounded(fill: Int, radius: Float, stroke: Int? = null, strokeWidth: Int = 0): GradientDrawable =
     GradientDrawable().apply {
@@ -45,12 +54,33 @@ fun rounded(fill: Int, radius: Float, stroke: Int? = null, strokeWidth: Int = 0)
         if (stroke != null) setStroke(strokeWidth, stroke)
     }
 
+/**
+ * Frosted glass: translucent fill, 1 px edge, and a faint highlight on the upper
+ * part like light caught by the top of a pane.
+ */
+fun Context.glass(radius: Float = dpf(PANEL_RADIUS), fill: Int = color(R.color.glass)): Drawable {
+    val base = rounded(fill, radius, color(R.color.glass_stroke), dp(1))
+    val sheen = GradientDrawable(
+        GradientDrawable.Orientation.TOP_BOTTOM,
+        intArrayOf(color(R.color.glass_highlight) and 0x55FFFFFF, 0x00FFFFFF),
+    ).apply { cornerRadius = radius }
+    return LayerDrawable(arrayOf(base, sheen)).apply {
+        setLayerInset(1, dp(1), dp(1), dp(1), 0)
+        setLayerGravity(1, Gravity.TOP or Gravity.FILL_HORIZONTAL)
+        setLayerHeight(1, dp(28))
+    }
+}
+
 /** Background with a pressed ripple clipped to the same shape. */
 fun Context.pressable(fill: Int, radius: Float, stroke: Int? = null): Drawable {
     val shape = rounded(fill, radius, stroke, if (stroke != null) dp(1) else 0)
     val mask = rounded(0xFFFFFFFF.toInt(), radius)
     return RippleDrawable(ColorStateList.valueOf(color(R.color.bg_hover)), shape, mask)
 }
+
+/** Transparent, rectangular ripple for rows inside a panel. */
+fun Context.rowRipple(): Drawable =
+    RippleDrawable(ColorStateList.valueOf(color(R.color.bg_hover)), null, rounded(0xFFFFFFFF.toInt(), 0f))
 
 fun Context.lin(vertical: Boolean = true, padH: Int = 0, padV: Int = 0): LinearLayout = LinearLayout(this).apply {
     orientation = if (vertical) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
@@ -70,12 +100,18 @@ fun Context.label(
     typeface = face
     setTextColor(color)
     includeFontPadding = false
-    setLineSpacing(dpf(2f), 1f)
+    setLineSpacing(dpf(1.5f), 1f)
     if (lines > 0) {
         maxLines = lines
         ellipsize = TextUtils.TruncateAt.END
     }
 }
+
+/** Monospace data text with tabular figures. */
+fun Context.mono(value: CharSequence, size: Float = 12f, color: Int = color(R.color.text), bold: Boolean = false, lines: Int = 1): TextView =
+    label(value, size, color, if (bold) MONO_BOLD else MONO, lines).apply {
+        fontFeatureSettings = "tnum"
+    }
 
 fun Context.icon(res: Int, tint: Int, size: Int = 20): ImageView = ImageView(this).apply {
     setImageResource(res)
@@ -83,74 +119,89 @@ fun Context.icon(res: Int, tint: Int, size: Int = 20): ImageView = ImageView(thi
     layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
 }
 
-/** A 40 dp round touch target holding an icon. */
-fun Context.iconButton(res: Int, description: String, tint: Int = color(R.color.text), onClick: () -> Unit): FrameLayout =
+/** A 40 dp touch target holding an icon. */
+fun Context.iconButton(res: Int, description: String, tint: Int = color(R.color.text), size: Int = 20, onClick: () -> Unit): FrameLayout =
     FrameLayout(this).apply {
         contentDescription = description
         background = RippleDrawable(ColorStateList.valueOf(color(R.color.bg_hover)), null, null)
         isClickable = true
         setOnClickListener { onClick() }
-        addView(icon(res, tint, 24), FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
-        layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+        addView(icon(res, tint, size), FrameLayout.LayoutParams(dp(size), dp(size), Gravity.CENTER))
+        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
     }
 
-fun Context.card(padding: Int = 16): LinearLayout = lin(padH = padding, padV = padding).apply {
-    background = rounded(color(R.color.bg_panel), dpf(12f), color(R.color.border), dp(1))
-    elevation = dpf(1f)
+/** Glass panel holding compact rows. */
+fun Context.panel(padH: Int = 0, padV: Int = 0): LinearLayout = lin(padH = padH, padV = padV).apply {
+    background = glass()
+    clipToOutline = true
     outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
 }
 
-fun Context.pill(value: String, fg: Int, bg: Int, dot: Boolean = false): TextView = label(value, 12f, fg, MEDIUM).apply {
-    background = rounded(bg, dpf(999f))
-    setPadding(dp(10), dp(5), dp(10), dp(5))
-    gravity = Gravity.CENTER_VERTICAL
-    if (dot) {
-        val d = rounded(fg, dpf(4f)).apply { setSize(dp(7), dp(7)) }
-        setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null)
-        compoundDrawablePadding = dp(6)
+/** Square-ish monospace tag: "ALARM", "RING", "UP"… */
+fun Context.chip(value: String, fg: Int, bg: Int, dot: Boolean = false): TextView =
+    mono(value.uppercase(), 10f, fg, bold = true).apply {
+        letterSpacing = 0.06f
+        background = rounded(bg, dpf(CHIP_RADIUS), fg and 0x40FFFFFF, dp(1))
+        setPadding(dp(6), dp(3), dp(6), dp(3))
+        gravity = Gravity.CENTER_VERTICAL
+        if (dot) {
+            val d = rounded(fg, dpf(3f)).apply { setSize(dp(6), dp(6)) }
+            setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null)
+            compoundDrawablePadding = dp(5)
+        }
     }
+
+/** Kept for compatibility with older call sites: a chip without uppercase forcing. */
+fun Context.pill(value: String, fg: Int, bg: Int, dot: Boolean = false): TextView = chip(value, fg, bg, dot)
+
+fun Context.statusDot(fg: Int, size: Int = 7): View = View(this).apply {
+    background = rounded(fg, dpf(size / 2f))
+    layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
 }
 
 enum class ButtonKind { PRIMARY, SECONDARY, DANGER }
 
 fun Context.button(value: String, kind: ButtonKind = ButtonKind.PRIMARY, onClick: () -> Unit): TextView =
-    label(value, 15f, face = MEDIUM).apply {
+    label(value, 14f, face = MEDIUM).apply {
         gravity = Gravity.CENTER
-        minHeight = dp(46)
-        setPadding(dp(16), 0, dp(16), 0)
+        minHeight = dp(40)
+        setPadding(dp(14), 0, dp(14), 0)
         isClickable = true
         isFocusable = true
         when (kind) {
             ButtonKind.PRIMARY -> {
                 setTextColor(color(R.color.on_primary))
-                background = pressable(color(R.color.primary), dpf(9f))
+                background = pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
             }
             ButtonKind.SECONDARY -> {
                 setTextColor(color(R.color.text))
-                background = pressable(color(R.color.bg_panel), dpf(9f), color(R.color.border))
+                background = pressable(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke))
             }
             ButtonKind.DANGER -> {
                 setTextColor(color(R.color.danger))
-                background = pressable(color(R.color.bg_panel), dpf(9f), color(R.color.border))
+                background = pressable(color(R.color.danger_soft), dpf(CONTROL_RADIUS), color(R.color.danger) and 0x40FFFFFF)
             }
         }
         setOnClickListener { onClick() }
     }
 
-fun Context.sectionLabel(value: String): TextView =
-    label(value.uppercase(), 12f, color(R.color.text_muted), MEDIUM).apply {
-        letterSpacing = 0.06f
-        setPadding(dp(4), dp(20), dp(4), dp(8))
-    }
+/** Uppercase micro-label above a panel, with an optional right-aligned mono value. */
+fun Context.sectionLabel(value: String, trailing: String? = null): View {
+    val row = lin(vertical = false, padH = 6, padV = 0).apply { setPadding(dp(6), dp(14), dp(6), dp(6)) }
+    row.addView(label(value.uppercase(), 11f, color(R.color.text_muted), MEDIUM).apply { letterSpacing = 0.12f }, lp(0, WRAP, 1f))
+    trailing?.let { row.addView(mono(it, 11f, color(R.color.text_muted))) }
+    return row
+}
 
-fun Context.divider(): View = View(this).apply {
-    setBackgroundColor(color(R.color.border))
-    layoutParams = LinearLayout.LayoutParams(MATCH, dp(1))
+fun Context.divider(insetStart: Int = 0): View = View(this).apply {
+    setBackgroundColor(color(R.color.hairline))
+    layoutParams = LinearLayout.LayoutParams(MATCH, 1).apply { marginStart = dp(insetStart) }
 }
 
 fun Context.scroll(content: View): ScrollView = ScrollView(this).apply {
     isFillViewport = true
     clipToPadding = false
+    isVerticalScrollBarEnabled = false
     overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
     addView(content, ViewGroup.LayoutParams(MATCH, WRAP))
 }
@@ -162,29 +213,34 @@ fun LinearLayout.LayoutParams.margins(c: Context, l: Int = 0, t: Int = 0, r: Int
     setMargins(c.dp(l), c.dp(t), c.dp(r), c.dp(b))
 }
 
-/** App bar: navigation icon, title and an optional trailing view. */
-fun Context.topBar(title: String, navRes: Int, navDescription: String, onNav: () -> Unit, trailing: View? = null): LinearLayout =
-    lin(vertical = false, padH = 4, padV = 0).apply {
-        minimumHeight = dp(56)
-        setBackgroundColor(color(R.color.bg_page))
-        addView(iconButton(navRes, navDescription, onClick = onNav))
-        addView(label(title, 20f, color(R.color.text_strong), MEDIUM).apply {
-            setPadding(dp(8), 0, 0, 0)
-        }, lp(0, WRAP, 1f))
-        if (trailing != null) {
-            addView(trailing, lp(WRAP, WRAP).margins(this@topBar, r = 12))
-        }
+/**
+ * Compact glass app bar (48 dp): navigation icon on the left, optional trailing
+ * view (status) on the right. No title: the brand lives in the drawer header and
+ * the screen context in the content's section label.
+ */
+fun Context.topBar(navRes: Int, navDescription: String, onNav: () -> Unit, trailing: View? = null): LinearLayout {
+    val bar = lin(vertical = false, padH = 4, padV = 0).apply {
+        minimumHeight = dp(48)
+        addView(iconButton(navRes, navDescription, color(R.color.text_strong), 20, onNav))
+        addView(View(this@topBar), lp(0, 1, 1f))
+        if (trailing != null) addView(trailing, lp(WRAP, WRAP).margins(this@topBar, r = 10))
     }
+    return lin().apply {
+        background = GradientDrawable().apply { setColor(color(R.color.glass)) }
+        addView(bar, lp(MATCH, dp(48)))
+        addView(divider())
+    }
+}
 
 // ---------------------------------------------------------------- semantics
 
-data class ActionStyle(val icon: Int, val fg: Int, val bg: Int, val label: String)
+data class ActionStyle(val icon: Int, val fg: Int, val bg: Int, val label: String, val code: String)
 
 fun Context.actionStyle(action: String?): ActionStyle = when (action) {
-    "alarm" -> ActionStyle(R.drawable.ic_alarm, color(R.color.danger), color(R.color.danger_soft), getString(R.string.action_alarm))
-    "ring" -> ActionStyle(R.drawable.ic_bell_ring, color(R.color.warning), color(R.color.warning_soft), getString(R.string.action_ring))
-    "notify" -> ActionStyle(R.drawable.ic_bell, color(R.color.primary), color(R.color.primary_soft), getString(R.string.action_notify))
-    else -> ActionStyle(R.drawable.ic_bell_outline, color(R.color.text_muted), color(R.color.bg_hover), getString(R.string.action_off))
+    "alarm" -> ActionStyle(R.drawable.ic_alarm, color(R.color.danger), color(R.color.danger_soft), getString(R.string.action_alarm), "ALARM")
+    "ring" -> ActionStyle(R.drawable.ic_bell_ring, color(R.color.warning), color(R.color.warning_soft), getString(R.string.action_ring), "RING")
+    "notify" -> ActionStyle(R.drawable.ic_bell, color(R.color.info), color(R.color.info_soft), getString(R.string.action_notify), "NOTIF")
+    else -> ActionStyle(R.drawable.ic_bell_outline, color(R.color.text_muted), color(R.color.bg_hover), getString(R.string.action_off), "NONE")
 }
 
 /** "à l'instant", "il y a 5 min", "il y a 3 h", "hier", "il y a 4 j". */
@@ -196,6 +252,17 @@ fun relativeTime(thenMs: Long, nowMs: Long = System.currentTimeMillis()): String
         s < 86_400 -> "il y a ${s / 3_600} h"
         s < 172_800 -> "hier"
         else -> "il y a ${s / 86_400} j"
+    }
+}
+
+/** Compact age for dense rows: "now", "4m", "3h", "2d". */
+fun shortAge(thenMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    val s = ((nowMs - thenMs) / 1000).coerceAtLeast(0)
+    return when {
+        s < 45 -> "<1m"
+        s < 3_600 -> "${(s + 30) / 60}m"
+        s < 86_400 -> "${s / 3_600}h"
+        else -> "${s / 86_400}d"
     }
 }
 
@@ -227,5 +294,13 @@ fun windowLabel(ms: Long): String {
 }
 
 /** The app is French-only: dates follow, whatever the phone locale. */
-fun formatTime(ms: Long): String =
-    DateFormat.getDateTimeInstance(DateFormat.LONG, DateFormat.SHORT, Locale.FRANCE).format(Date(ms))
+fun formatTime(ms: Long): String = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.FRANCE).format(Date(ms))
+
+/** "14:02:31". */
+fun hms(ms: Long): String = SimpleDateFormat("HH:mm:ss", Locale.FRANCE).format(Date(ms))
+
+/** "14:02:31" for today, "12/09 14:02" for older entries. */
+fun clockTime(ms: Long, nowMs: Long = System.currentTimeMillis()): String {
+    val sameDay = SimpleDateFormat("yyyyMMdd", Locale.FRANCE).let { it.format(Date(ms)) == it.format(Date(nowMs)) }
+    return SimpleDateFormat(if (sameDay) "HH:mm:ss" else "dd/MM HH:mm", Locale.FRANCE).format(Date(ms))
+}

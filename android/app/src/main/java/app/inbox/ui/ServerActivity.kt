@@ -19,6 +19,7 @@ class ServerActivity : BaseActivity() {
     }
 
     private var serverId = -1L
+    private lateinit var bar: android.widget.FrameLayout
     private lateinit var body: LinearLayout
     private val onChange: () -> Unit = { render() }
 
@@ -27,8 +28,10 @@ class ServerActivity : BaseActivity() {
         serverId = intent.getLongExtra(EXTRA_SERVER, -1)
         val root = lin()
         val server = Store.get(this).server(serverId) ?: return finish()
-        root.addView(topBar(server.serverName, R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }))
-        body = lin(padH = 16, padV = 8)
+        title = server.serverName
+        bar = android.widget.FrameLayout(this)
+        root.addView(bar, lp())
+        body = lin(padH = 10, padV = 4)
         root.addView(scroll(body), lp(MATCH, 0, 1f))
         setScreen(root)
     }
@@ -51,34 +54,45 @@ class ServerActivity : BaseActivity() {
 
         // Status
         val st = Registry.status(serverId)
-        val (text, fg, bg) = when (st.state) {
-            LinkState.CONNECTED -> Triple(getString(R.string.status_connected), color(R.color.success), color(R.color.success_soft))
-            LinkState.CONNECTING -> Triple(getString(R.string.status_connecting), color(R.color.warning), color(R.color.warning_soft))
-            LinkState.DISCONNECTED -> Triple(
-                getString(R.string.status_disconnected_since, formatSince(System.currentTimeMillis() - st.sinceMs)),
-                color(R.color.danger), color(R.color.danger_soft),
-            )
-            LinkState.REENROLL -> Triple(getString(R.string.status_reenroll), color(R.color.danger), color(R.color.danger_soft))
+        val now = System.currentTimeMillis()
+        val (code, fg) = when (st.state) {
+            LinkState.CONNECTED -> "UP" to color(R.color.success)
+            LinkState.CONNECTING -> "CONNECTING" to color(R.color.warning)
+            LinkState.DISCONNECTED -> "DOWN ${shortAge(st.sinceMs, now)}" to color(R.color.danger)
+            LinkState.REENROLL -> "REENROLL" to color(R.color.danger)
         }
-        val head = card(16).apply { orientation = LinearLayout.HORIZONTAL }
-        head.addView(iconBadge(R.drawable.ic_server, color(R.color.primary), color(R.color.primary_soft), 44), lp(dp(44), dp(44)).margins(this, r = 14))
-        val col = lin()
-        col.addView(label(server.serverName, 17f, color(R.color.text_strong), MEDIUM))
-        col.addView(label(server.address, 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
-        col.addView(label(getString(R.string.server_device, server.deviceName), 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
-        col.addView(pill(text, fg, bg, dot = true), lp(WRAP, WRAP).margins(this, t = 10))
+        val soft = when (st.state) {
+            LinkState.CONNECTED -> color(R.color.success_soft)
+            LinkState.CONNECTING -> color(R.color.warning_soft)
+            else -> color(R.color.danger_soft)
+        }
+        bar.removeAllViews()
+        bar.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }, chip(code.substringBefore(' '), fg, soft, dot = true)))
+        // Screen context: which server, where.
+        body.addView(sectionLabel(server.serverName, server.address.removePrefix("http://").removePrefix("https://")))
+        val head = panel(padV = 4)
+        head.addView(kv(getString(R.string.meta_state), code, fg))
+        head.addView(divider())
+        head.addView(kv(getString(R.string.meta_server), server.serverName))
+        head.addView(divider())
+        head.addView(kv(getString(R.string.meta_address), server.address))
+        head.addView(divider())
+        head.addView(kv(getString(R.string.meta_device), server.deviceName))
+        head.addView(divider())
+        head.addView(kv(getString(R.string.meta_pseudo), server.userName ?: "—"))
+        head.addView(divider())
+        head.addView(kv(getString(R.string.meta_device_id), server.deviceId.take(16) + "…"))
         if (st.state != LinkState.CONNECTED && st.detail != null) {
-            col.addView(label(st.detail, 12f, color(R.color.text_muted)), lp().margins(this, t = 6))
+            head.addView(divider())
+            head.addView(kv(getString(R.string.meta_detail), st.detail, color(R.color.text_muted), lines = 3))
         }
-        head.addView(col, lp(0, WRAP, 1f))
-        body.addView(head, lp().margins(this, t = 8))
+        body.addView(head)
 
         // Pseudo on this server
         body.addView(sectionLabel(getString(R.string.server_pseudo)))
-        val p = card(16)
-        p.addView(label(getString(R.string.server_pseudo_help), 13f, color(R.color.text_muted)))
-        val input = textField(server.userName ?: "", getString(R.string.pseudo_hint))
-        p.addView(input, lp().margins(this, t = 12))
+        val p = panel(padH = 14, padV = 12)
+        p.addView(label(getString(R.string.server_pseudo_help), 11.5f, color(R.color.text_muted)))
+        val input = textField(server.userName ?: "", getString(R.string.pseudo_hint), mono = true)
         val save = {
             val v = cleanUserName(input.text.toString())
             if (v == null) {
@@ -90,47 +104,53 @@ class ServerActivity : BaseActivity() {
             }
         }
         input.setOnEditorActionListener { _, action, _ -> if (action == EditorInfo.IME_ACTION_DONE) { save(); true } else false }
-        p.addView(button(getString(R.string.save), ButtonKind.SECONDARY) { save() }, lp().margins(this, t = 12))
+        p.addView(inlineField(input, getString(R.string.save_short)) { save() }, lp().margins(this, t = 10))
         body.addView(p)
 
         // Groups
-        body.addView(sectionLabel(getString(R.string.server_groups)))
-        body.addView(label(getString(R.string.server_groups_hint), 13f, color(R.color.text_muted)).apply { setPadding(dp(4), 0, dp(4), dp(10)) })
         val subs = store.subscriptions(serverId)
         val groups = store.groups(serverId)
+        body.addView(sectionLabel(getString(R.string.server_groups), if (groups.isEmpty()) null else
+            "${groups.count { subs[it.id] != null }}/${groups.size} SUB"))
+        body.addView(label(getString(R.string.server_groups_hint), 11.5f, color(R.color.text_muted)).apply { setPadding(dp(6), 0, dp(6), dp(8)) })
         if (groups.isEmpty()) {
-            body.addView(label(getString(R.string.server_groups_none), 14f, color(R.color.text_muted)).apply { setPadding(dp(4), 0, 0, dp(8)) })
-        }
-        val labels = listOf(
-            getString(R.string.action_off_short), getString(R.string.action_notify_short),
-            getString(R.string.action_ring), getString(R.string.action_alarm),
-        )
-        val helps = listOf(R.string.action_off_help, R.string.action_notify_help, R.string.action_ring_help, R.string.action_alarm_help)
-        for (g in groups) {
-            val current = ACTIONS.indexOf(subs[g.id]).coerceAtLeast(0)
-            val c = card(16)
-            val top = lin(vertical = false)
-            val style = actionStyle(ACTIONS[current])
-            top.addView(iconBadge(style.icon, style.fg, style.bg, 36), lp(dp(36), dp(36)).margins(this, r = 12))
-            val t = lin()
-            t.addView(label(g.name, 15f, color(R.color.text_strong), MEDIUM))
-            if (g.description.isNotEmpty()) t.addView(label(g.description, 13f, color(R.color.text_muted)), lp().margins(this, t = 2))
-            top.addView(t, lp(0, WRAP, 1f))
-            c.addView(top)
-            c.addView(segmented(labels, current, accent = { i ->
-                val s = actionStyle(ACTIONS[i])
-                s.fg to s.bg
-            }) { i ->
-                if (Registry.connections[serverId]?.subscribe(g.id, ACTIONS[i]) != true) {
-                    Toast.makeText(this, getString(R.string.server_offline_change), Toast.LENGTH_LONG).show()
-                }
-            }, lp().margins(this, t = 12))
-            c.addView(label(getString(helps[current]), 12f, color(R.color.text_muted)), lp().margins(this, t = 8))
-            body.addView(c, lp().margins(this, b = 10))
+            body.addView(label(getString(R.string.server_groups_none), 12.5f, color(R.color.text_muted)).apply { setPadding(dp(6), 0, 0, dp(8)) })
+        } else {
+            val labels = listOf("NONE", "NOTIF", "RING", "ALARM")
+            val helps = listOf(R.string.action_off_help, R.string.action_notify_help, R.string.action_ring_help, R.string.action_alarm_help)
+            val list = panel()
+            groups.forEachIndexed { i, g ->
+                if (i > 0) list.addView(divider())
+                val current = ACTIONS.indexOf(subs[g.id]).coerceAtLeast(0)
+                val style = actionStyle(ACTIONS[current])
+                val c = lin(vertical = false)
+                c.addView(android.view.View(this).apply { setBackgroundColor(if (current == 0) 0x00000000 else style.fg) }, lp(dp(3), MATCH))
+                val col = lin(padH = 12, padV = 10)
+                val top = lin(vertical = false)
+                val t = lin()
+                t.addView(label(g.name, 14f, color(R.color.text_strong), MEDIUM, lines = 1))
+                val desc = if (g.description.isNotEmpty()) "${g.id} · ${g.description}" else g.id
+                t.addView(mono(desc, 10.5f, color(R.color.text_subtle)), lp().margins(this, t = 2))
+                top.addView(t, lp(0, WRAP, 1f))
+                top.addView(chip(style.code, style.fg, style.bg))
+                col.addView(top)
+                col.addView(segmented(labels, current, accent = { k ->
+                    val s = actionStyle(ACTIONS[k])
+                    s.fg to s.bg
+                }) { k ->
+                    if (Registry.connections[serverId]?.subscribe(g.id, ACTIONS[k]) != true) {
+                        Toast.makeText(this, getString(R.string.server_offline_change), Toast.LENGTH_LONG).show()
+                    }
+                }, lp().margins(this, t = 8))
+                col.addView(label(getString(helps[current]), 11f, color(R.color.text_muted)), lp().margins(this, t = 6))
+                c.addView(col, lp(0, WRAP, 1f))
+                list.addView(c)
+            }
+            body.addView(list)
         }
 
         body.addView(button(getString(R.string.server_remove), ButtonKind.DANGER) { confirmRemove(server.serverName) },
-            lp().margins(this, t = 16, b = 24))
+            lp().margins(this, t = 16, b = 20))
     }
 
     private fun confirmRemove(name: String) {

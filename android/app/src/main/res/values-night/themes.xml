@@ -6,8 +6,9 @@
         <item name="android:colorAccent">@color/primary</item>
         <item name="android:colorControlActivated">@color/primary</item>
         <item name="android:windowBackground">@color/bg_page</item>
-        <item name="android:statusBarColor">@color/bg_page</item>
-        <item name="android:navigationBarColor">@color/bg_page</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:textColorPrimary">@color/text</item>
         <item name="android:textColorSecondary">@color/text_muted</item>

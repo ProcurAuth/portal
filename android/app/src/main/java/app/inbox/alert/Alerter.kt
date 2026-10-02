@@ -91,6 +91,34 @@ object Alerter {
     private fun requestCode(a: Alert, salt: Int) = (tag(a).hashCode() * 31) + salt
 
     fun present(context: Context, a: Alert) {
+        // Phone in use and allowed to draw over apps: the alarm page is opened directly,
+        // so the notification must not add a heads-up on top of it. Otherwise the
+        // full-screen intent (locked / screen off) or its heads-up fallback is used.
+        val direct = a.action == "alarm" && phoneInUse(context) && Settings.canDrawOverlays(context)
+        post(context, a, direct)
+        when (a.action) {
+            "alarm" -> {
+                AlarmPlayer.start(context, a)
+                openAlarmScreen(context, a)
+            }
+            "ring" -> playOnce(context)
+            else -> {}
+        }
+    }
+
+    /**
+     * Once the alarm page is on screen, replaces each ringing alarm's heads-up with
+     * the same notification on the discreet channel, so it does not cover the page.
+     */
+    fun quietAlarmNotifications(context: Context, alerts: List<Alert>) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        for (a in alerts) {
+            nm.cancel(tag(a), ALERT_NOTIFICATION_ID)
+            post(context, a, direct = true)
+        }
+    }
+
+    private fun post(context: Context, a: Alert, direct: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java)
         val title = a.title ?: a.groupName
         val body = a.message ?: "Alerte ${a.groupName}"
@@ -99,10 +127,6 @@ object Alerter {
             Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        // Phone in use and allowed to draw over apps: the alarm page is opened directly,
-        // so the notification must not add a heads-up on top of it. Otherwise the
-        // full-screen intent (locked / screen off) or its heads-up fallback is used.
-        val direct = a.action == "alarm" && phoneInUse(context) && Settings.canDrawOverlays(context)
         val channel = when (a.action) {
             "alarm" -> if (direct) CH_ALARM_ACTIVE else CH_ALARM
             "ring" -> CH_RING
@@ -143,14 +167,6 @@ object Alerter {
             nm.notify(tag(a), ALERT_NOTIFICATION_ID, b.build())
         } catch (e: SecurityException) {
             Log.w(TAG, "notification permission missing", e)
-        }
-        when (a.action) {
-            "alarm" -> {
-                AlarmPlayer.start(context, a)
-                openAlarmScreen(context, a)
-            }
-            "ring" -> playOnce(context)
-            else -> {}
         }
     }
 

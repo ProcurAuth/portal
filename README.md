@@ -52,6 +52,10 @@ docker compose ps            # wait for "healthy"
 1. **Admin front.** It has no password and listens on `127.0.0.1:8081`. Reach it
    with `ssh -L 8081:127.0.0.1:8081 <host>`, or put it behind a reverse proxy that
    authenticates users (and add the proxy's hostname to `admin.allowed_hosts`).
+   It is a single page with no settings: send an alert, the 5 latest alerts of the
+   last 24 h with their receipts, devices and connections (filterable by user
+   pseudonym). `/doc` documents the producer API with the server's real URLs,
+   groups and producers, ready to copy.
 2. **Phone.** Install the APK from the GitHub release (`inbox-<version>.apk`). Add
    a server with its address (`host:8080`, a domain, or an `https://` URL behind a
    proxy), the device password and a device name. Grant the permissions the app
@@ -73,7 +77,9 @@ curl -fsS -X POST http://localhost:8080/api/v1/alerts \
    appareils et le token d'émetteur.
 2. Adapter `config.hcl` (nom, groupes, émetteurs), puis lancer `docker compose up -d --build`.
 3. Ouvrir le front admin (port 8081, sans mot de passe, accessible en local
-   uniquement : tunnel SSH ou reverse proxy authentifiant). Installer l'APK,
+   uniquement : tunnel SSH ou reverse proxy authentifiant). C'est une seule page
+   sans réglages (envoi d'alerte, 5 dernières alertes sur 24 h, appareils,
+   connexions) ; `/doc` documente l'API avec les vraies URL. Installer l'APK,
    ajouter le serveur (adresse, mot de passe appareils, nom), puis choisir
    l'action de chaque groupe. L'app gère plusieurs serveurs Inbox.
 
@@ -95,8 +101,10 @@ inbox serve --config /etc/inbox/config.hcl
    It resends during the session (`resend_after`) and on every reconnection.
 3. The phone stores the alert before confirming it. It deduplicates on the
    128-bit alert id, and on restart it re-posts alerts it stored but never showed.
-4. Undelivered alerts never expire. Retention only purges history that has
-   already been delivered.
+4. An alert a phone has not received yet is kept and retried for
+   `storage.delivery_ttl` (7 days in the examples), then expires for that phone
+   and shows as expired in the admin front. History is purged after
+   `storage.alert_retention` (which must be >= `delivery_ttl`).
 5. Gaps in coverage are visible:
    - A subscribed device that stops reporting becomes *unreachable* in the front and in `inbox_devices_unreachable`.
    - The phone shows its connection state permanently and warns after `offline_warning_after`.

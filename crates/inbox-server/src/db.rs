@@ -484,19 +484,21 @@ pub struct PendingDelivery {
     pub action: Action,
 }
 
-/// Oldest deliveries of `device_id` whose receipt the device has not sent yet.
+/// Oldest deliveries of `device_id` whose receipt the device has not sent yet,
+/// among alerts created at or after `cutoff` (older ones have expired).
 pub fn pending_deliveries(
     conn: &Connection,
     device_id: &str,
     limit: u32,
+    cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
         "SELECT d.seq, a.id, a.group_id, a.title, a.message, a.created_at, d.action
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
-         WHERE d.device_id = ?1 AND d.received_at IS NULL
+         WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![device_id, limit], |r| {
+    let rows = stmt.query_map(params![device_id, limit, cutoff], |r| {
         let action: String = r.get(6)?;
         Ok(PendingDelivery {
             seq: r.get(0)?,
@@ -575,16 +577,18 @@ pub struct DeviceView {
     pub pending: i64,
 }
 
-pub fn list_devices(conn: &Connection) -> rusqlite::Result<Vec<DeviceView>> {
+/// `cutoff`: alerts created before it have expired and no longer count as pending.
+pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<DeviceView>> {
     let mut stmt = conn.prepare_cached(
         "SELECT d.id, d.name, d.enrolled_at, d.enrolled_ip, d.app_version, d.last_connected_at,
                 d.last_seen_at, d.last_ip, d.revoked_at,
-                (SELECT COUNT(*) FROM deliveries x WHERE x.device_id = d.id AND x.received_at IS NULL),
+                (SELECT COUNT(*) FROM deliveries x JOIN alerts y ON y.id = x.alert_id
+                 WHERE x.device_id = d.id AND x.received_at IS NULL AND y.created_at >= ?1),
                 d.user_name
          FROM devices d ORDER BY d.revoked_at IS NOT NULL, d.user_name IS NULL, d.user_name, d.name",
     )?;
     let mut devices: Vec<DeviceView> = stmt
-        .query_map([], |r| {
+        .query_map(params![cutoff], |r| {
             Ok(DeviceView {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -617,6 +621,8 @@ pub struct AlertSummary {
     pub created_at: i64,
     pub targets: i64,
     pub received: i64,
+    /// Targets that never received the alert before it expired.
+    pub expired: i64,
 }
 
 const ALERT_SUMMARY: &str = "SELECT a.id, a.group_id, a.title, a.message, a.source, a.created_at,
@@ -633,6 +639,7 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
         created_at: r.get(5)?,
         targets: r.get(6)?,
         received: r.get(7)?,
+        expired: 0,
     })
 }
 
@@ -641,13 +648,22 @@ pub fn recent_alerts(
     conn: &Connection,
     limit: u32,
     since_ms: i64,
+    cutoff: i64,
 ) -> rusqlite::Result<Vec<AlertSummary>> {
     let sql = format!(
         "{ALERT_SUMMARY} WHERE a.created_at >= ?2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?1"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![limit, since_ms], alert_summary)?;
-    rows.collect()
+    rows.map(|r| r.map(|a| with_expiry(a, cutoff))).collect()
+}
+
+/// Fills `expired`: an alert created before `cutoff` is no longer delivered.
+fn with_expiry(mut a: AlertSummary, cutoff: i64) -> AlertSummary {
+    if a.created_at < cutoff {
+        a.expired = a.targets - a.received;
+    }
+    a
 }
 
 #[derive(Debug, Serialize)]
@@ -660,6 +676,8 @@ pub struct DeliveryView {
     pub first_sent_at: Option<i64>,
     pub last_sent_at: Option<i64>,
     pub received_at: Option<i64>,
+    /// Not received before the alert expired: it will not be sent any more.
+    pub expired: bool,
     pub device_revoked: bool,
 }
 
@@ -670,11 +688,17 @@ pub struct AlertDetail {
     pub deliveries: Vec<DeliveryView>,
 }
 
-pub fn alert_detail(conn: &Connection, id: &str) -> rusqlite::Result<Option<AlertDetail>> {
+pub fn alert_detail(
+    conn: &Connection,
+    id: &str,
+    cutoff: i64,
+) -> rusqlite::Result<Option<AlertDetail>> {
     let sql = format!("{ALERT_SUMMARY} WHERE a.id = ?1 GROUP BY a.id");
     let Some(summary) = conn.query_row(&sql, params![id], alert_summary).optional()? else {
         return Ok(None);
     };
+    let summary = with_expiry(summary, cutoff);
+    let is_expired = summary.created_at < cutoff;
     let mut stmt = conn.prepare_cached(
         "SELECT d.device_id, v.name, d.action, d.attempts, d.first_sent_at, d.last_sent_at,
                 d.received_at, v.revoked_at IS NOT NULL, v.user_name
@@ -691,6 +715,7 @@ pub fn alert_detail(conn: &Connection, id: &str) -> rusqlite::Result<Option<Aler
                 first_sent_at: r.get(4)?,
                 last_sent_at: r.get(5)?,
                 received_at: r.get(6)?,
+                expired: is_expired && r.get::<_, Option<i64>>(6)?.is_none(),
                 device_revoked: r.get(7)?,
                 user_name: r.get(8)?,
             })
@@ -741,13 +766,14 @@ pub fn recent_connections(
 }
 
 /// Gauges for telemetry: (pending deliveries, oldest pending alert age in ms).
-pub fn pending_stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
+/// Expired deliveries (alerts created before `cutoff`) are not pending.
+pub fn pending_stats(conn: &Connection, cutoff: i64) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
         "SELECT COUNT(*), COALESCE(?1 - MIN(a.created_at), 0)
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          JOIN devices v ON v.id = d.device_id
-         WHERE d.received_at IS NULL AND v.revoked_at IS NULL",
-        params![now_ms()],
+         WHERE d.received_at IS NULL AND v.revoked_at IS NULL AND a.created_at >= ?2",
+        params![now_ms(), cutoff],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
 }
@@ -764,8 +790,8 @@ pub fn subscribed_devices(conn: &Connection) -> rusqlite::Result<Vec<(String, Op
 
 // ---------------------------------------------------------------- retention
 
-/// Deletes delivered history past retention. An alert is only removed once no
-/// delivery to a non-revoked device is still waiting for it.
+/// Deletes history past retention. Configuration guarantees that
+/// `alert_retention >= delivery_ttl`, so nothing deliverable is ever removed.
 pub fn purge(
     conn: &mut Connection,
     alert_cutoff: i64,
@@ -776,9 +802,7 @@ pub fn purge(
         "CREATE TEMP TABLE IF NOT EXISTS purge_ids (id TEXT PRIMARY KEY); DELETE FROM purge_ids;",
     )?;
     tx.execute(
-        "INSERT INTO purge_ids SELECT a.id FROM alerts a WHERE a.created_at < ?1 AND NOT EXISTS (
-             SELECT 1 FROM deliveries d JOIN devices v ON v.id = d.device_id
-             WHERE d.alert_id = a.id AND d.received_at IS NULL AND v.revoked_at IS NULL)",
+        "INSERT INTO purge_ids SELECT a.id FROM alerts a WHERE a.created_at < ?1",
         params![alert_cutoff],
     )?;
     tx.execute("DELETE FROM deliveries WHERE alert_id IN (SELECT id FROM purge_ids)", [])?;
@@ -827,10 +851,10 @@ mod tests {
             panic!()
         };
         assert_eq!(devices, vec![a.clone()]);
-        let p = pending_deliveries(&c, &a, 10).unwrap();
+        let p = pending_deliveries(&c, &a, 10, 0).unwrap();
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].action, Action::Alarm);
-        assert!(pending_deliveries(&c, &b, 10).unwrap().is_empty());
+        assert!(pending_deliveries(&c, &b, 10, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -851,7 +875,7 @@ mod tests {
         let mut other = alert("k");
         other.title = Some("different".into());
         assert!(matches!(insert_alert(&mut c, &other).unwrap(), InsertOutcome::Conflict));
-        assert_eq!(pending_deliveries(&c, &a, 10).unwrap().len(), 1);
+        assert_eq!(pending_deliveries(&c, &a, 10, 0).unwrap().len(), 1);
     }
 
     #[test]
@@ -867,14 +891,14 @@ mod tests {
         assert!(first.first_receipt_latency_ms.is_some());
         let second = ack(&c, &a, &alert_id).unwrap().unwrap();
         assert!(second.first_receipt_latency_ms.is_none());
-        assert!(pending_deliveries(&c, &a, 10).unwrap().is_empty());
+        assert!(pending_deliveries(&c, &a, 10, 0).unwrap().is_empty());
         assert!(ack(&c, &a, "nope").unwrap().is_none());
-        let d = alert_detail(&c, &alert_id).unwrap().unwrap();
+        let d = alert_detail(&c, &alert_id, 0).unwrap().unwrap();
         assert_eq!((d.summary.targets, d.summary.received), (1, 1));
     }
 
     #[test]
-    fn purge_never_removes_undelivered_alerts() {
+    fn undelivered_alerts_expire_after_the_delivery_ttl() {
         let mut c = mem();
         let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra", Action::Notify).unwrap();
@@ -882,9 +906,28 @@ mod tests {
         else {
             panic!()
         };
+        let before = now_ms() - 1_000;
+        assert_eq!(pending_deliveries(&c, &a, 10, before).unwrap().len(), 1, "still deliverable");
+        assert_eq!(pending_stats(&c, before).unwrap().0, 1);
+        let after = now_ms() + 1_000;
+        assert!(pending_deliveries(&c, &a, 10, after).unwrap().is_empty(), "expired: not sent");
+        assert_eq!(pending_stats(&c, after).unwrap().0, 0);
+        let d = alert_detail(&c, &alert_id, after).unwrap().unwrap();
+        assert_eq!(d.summary.expired, 1);
+        assert!(d.deliveries[0].expired);
+        let d = alert_detail(&c, &alert_id, before).unwrap().unwrap();
+        assert_eq!(d.summary.expired, 0);
+    }
+
+    #[test]
+    fn purge_removes_history_past_retention() {
+        let mut c = mem();
+        let a = insert_device(&c, "a", None, &[1; 32], "ip").unwrap();
+        set_subscription(&c, &a, "infra", Action::Notify).unwrap();
+        insert_alert(&mut c, &alert("k")).unwrap();
+        let past = now_ms() - 1_000_000;
+        assert_eq!(purge(&mut c, past, past).unwrap().0, 0);
         let future = now_ms() + 1_000_000;
-        assert_eq!(purge(&mut c, future, future).unwrap().0, 0);
-        ack(&c, &a, &alert_id).unwrap();
         assert_eq!(purge(&mut c, future, future).unwrap().0, 1);
     }
 }

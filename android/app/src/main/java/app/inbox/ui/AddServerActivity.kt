@@ -17,37 +17,40 @@ class AddServerActivity : BaseActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = lin()
-        root.addView(topBar(getString(R.string.add_title), R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }))
-        val body = lin(padH = 16, padV = 8)
+        title = getString(R.string.add_title)
+        root.addView(topBar(R.drawable.ic_arrow_left, getString(R.string.nav_back), { finish() }))
+        val body = lin(padH = 10, padV = 4)
         root.addView(scroll(body), lp(MATCH, 0, 1f))
 
-        val form = card(16)
+        body.addView(sectionLabel(getString(R.string.add_title), "OPAQUE · NOISE IK"))
+        val form = panel(padH = 14, padV = 12)
         fun field(title: Int, help: String? = null) {
-            form.addView(label(getString(title), 14f, color(R.color.text), MEDIUM), lp().margins(this, t = if (form.childCount == 0) 0 else 16))
-            help?.let { form.addView(label(it, 12f, color(R.color.text_muted)), lp().margins(this, t = 2)) }
+            form.addView(label(getString(title).uppercase(), 10.5f, color(R.color.text_muted), MEDIUM).apply { letterSpacing = 0.1f },
+                lp().margins(this, t = if (form.childCount == 0) 0 else 12))
+            help?.let { form.addView(label(it, 11f, color(R.color.text_subtle)), lp().margins(this, t = 2)) }
         }
         field(R.string.add_address)
-        val address = textField("", getString(R.string.add_address_hint)).apply {
+        val address = textField("", getString(R.string.add_address_hint), mono = true).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
-        form.addView(address, lp().margins(this, t = 8))
+        form.addView(address, lp().margins(this, t = 6))
         field(R.string.add_password)
         val password = textField("", "", password = true)
-        form.addView(password, lp().margins(this, t = 8))
+        form.addView(password, lp().margins(this, t = 6))
         field(R.string.add_pseudo)
-        val pseudo = textField(Prefs.defaultUserName(this) ?: "", getString(R.string.pseudo_hint))
-        form.addView(pseudo, lp().margins(this, t = 8))
+        val pseudo = textField(Prefs.defaultUserName(this) ?: "", getString(R.string.pseudo_hint), mono = true)
+        form.addView(pseudo, lp().margins(this, t = 6))
         field(R.string.add_device_name, getString(R.string.add_device_name_help))
-        val name = textField(Build.MODEL, "")
-        form.addView(name, lp().margins(this, t = 8))
-        body.addView(form, lp().margins(this, t = 8))
+        val name = textField(Build.MODEL, "", mono = true)
+        form.addView(name, lp().margins(this, t = 6))
+        body.addView(form)
 
-        body.addView(lin(vertical = false, padH = 4, padV = 12).apply {
-            addView(icon(R.drawable.ic_info, color(R.color.text_muted), 18), lp(dp(18), dp(18)).margins(this@AddServerActivity, r = 10))
-            addView(label(getString(R.string.add_security_note), 12f, color(R.color.text_muted)), lp(0, WRAP, 1f))
+        body.addView(lin(vertical = false, padH = 6, padV = 10).apply {
+            addView(icon(R.drawable.ic_info, color(R.color.text_subtle), 14), lp(dp(14), dp(14)).margins(this@AddServerActivity, r = 8))
+            addView(label(getString(R.string.add_security_note), 11f, color(R.color.text_muted)), lp(0, WRAP, 1f))
         })
 
-        val status = label("", 14f, color(R.color.text_muted)).apply { setPadding(dp(4), dp(10), dp(4), dp(10)) }
+        val status = mono("", 11.5f, color(R.color.text_muted), lines = 4).apply { setPadding(dp(6), dp(10), dp(6), dp(10)) }
         lateinit var connect: TextView
         connect = button(getString(R.string.add_connect)) {
             val addr = ServerAddress.parse(address.text.toString())

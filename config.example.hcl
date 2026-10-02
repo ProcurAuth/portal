@@ -21,8 +21,9 @@ server {
 
 storage {
   path = "/var/lib/inbox/inbox.db"
-  # Alerts delivered to every target device are purged after this.
-  # Alerts still waiting for a device are never purged.
+  # An alert a phone has not received within this delay is no longer sent to it.
+  delivery_ttl             = "7d"
+  # History (delivered and expired alerts) is purged after this; >= delivery_ttl.
   alert_retention          = "30d"
   connection_log_retention = "90d"
 }

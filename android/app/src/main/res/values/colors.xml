@@ -1,27 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Palette from the S3-Browser design tokens (light). Dark values in values-night. -->
+<!--
+  "Industrial glass" palette, light variant: frosted white panels over a soft
+  light base with coloured blobs behind. Dark values (the hero look) in values-night.
+-->
 <resources>
-    <color name="launcher_background">#167DF0</color>
+    <color name="launcher_background">#3B8CF7</color>
 
-    <color name="bg_page">#F5F7FA</color>
-    <color name="bg_panel">#FFFFFF</color>
-    <color name="bg_subtle">#F8FAFC</color>
-    <color name="bg_hover">#F1F5F9</color>
-    <color name="border">#DFE4EA</color>
-    <color name="border_strong">#C7D0DB</color>
-    <color name="text">#172033</color>
-    <color name="text_strong">#101828</color>
-    <color name="text_muted">#667085</color>
-    <color name="text_subtle">#98A2B3</color>
-    <color name="primary">#167DF0</color>
-    <color name="primary_pressed">#0F6ED8</color>
-    <color name="primary_soft">#EEF6FF</color>
+    <!-- Surfaces -->
+    <color name="bg_page">#EEF1F6</color>
+    <color name="glass">#B8FFFFFF</color>
+    <color name="glass_strong">#D9F7F9FC</color>
+    <color name="glass_stroke">#14101828</color>
+    <color name="glass_highlight">#CCFFFFFF</color>
+    <color name="hairline">#120F172A</color>
+    <color name="field">#80FFFFFF</color>
+    <color name="bg_hover">#140F172A</color>
+    <color name="scrim">#330F172A</color>
+
+    <!-- Text -->
+    <color name="text">#0F172A</color>
+    <color name="text_strong">#020617</color>
+    <color name="text_muted">#5B6474</color>
+    <color name="text_subtle">#8C95A4</color>
+
+    <!-- Accent and severities -->
+    <color name="primary">#2F7FEA</color>
+    <color name="primary_soft">#1F3B8CF7</color>
     <color name="on_primary">#FFFFFF</color>
-    <color name="danger">#B42318</color>
-    <color name="danger_soft">#FFF1F0</color>
-    <color name="warning">#9A6700</color>
-    <color name="warning_soft">#FFF8C5</color>
-    <color name="success">#067647</color>
-    <color name="success_soft">#ECFDF3</color>
-    <color name="scrim">#66101828</color>
+    <color name="danger">#D92D20</color>
+    <color name="danger_soft">#1FF04438</color>
+    <color name="warning">#B54708</color>
+    <color name="warning_soft">#24F5A524</color>
+    <color name="success">#079455</color>
+    <color name="success_soft">#1F32D583</color>
+    <color name="info">#0E7490</color>
+    <color name="info_soft">#1F22B8CF</color>
+
+    <!-- Backdrop blobs (alpha applied when painted) -->
+    <color name="blob_1">#7FB2FF</color>
+    <color name="blob_2">#C3B1FF</color>
+    <color name="blob_3">#8CE8DA</color>
 </resources>
