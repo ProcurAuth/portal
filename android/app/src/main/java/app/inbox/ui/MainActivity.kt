@@ -312,7 +312,7 @@ class MainActivity : BaseActivity() {
                 gravity = Gravity.CENTER
             }, lp().margins(this, t = 32, b = 8))
         } else {
-            // One card per alert, the severity bar on its left edge.
+            // One card per alert, the severity bar on its left edge. Swipe right: read.
             alerts.forEachIndexed { i, a ->
                 val card = lin().apply {
                     background = solidCard()
@@ -320,7 +320,11 @@ class MainActivity : BaseActivity() {
                     outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
                     addView(alertRow(a, names[a.serverId] ?: "", now))
                 }
-                body.addView(card, lp().margins(this, t = if (i == 0) 4 else 8))
+                val swipe = SwipeToRead(this, card, enabled = a.unread, removeOnCommit = !showRead) {
+                    Alerter.markRead(this, a.serverId, a.alertId)
+                    render()
+                }
+                body.addView(swipe, lp().margins(this, t = if (i == 0) 4 else 8))
             }
         }
         if (store.alertCount(showRead) > alerts.size) {
