@@ -11,7 +11,7 @@
     <string name="drawer_identity">Username</string>
     <string name="drawer_no_pseudo">no username</string>
     <string name="drawer_servers_none">No server</string>
-    <string name="drawer_servers_all_up">all connected</string>
+    <string name="drawer_servers_all_up">All connected</string>
     <plurals name="drawer_servers_down">
         <item quantity="one">%d server offline</item>
         <item quantity="other">%d servers offline</item>
@@ -20,7 +20,6 @@
     <!-- Status -->
     <string name="status_online">Online</string>
     <string name="status_all_online">All servers connected</string>
-    <string name="status_offline">Offline</string>
     <string name="status_offline_since">Offline %1$s</string>
     <string name="status_connecting">Connecting…</string>
     <string name="status_reenroll">Re-enroll</string>
@@ -38,7 +37,6 @@
     <string name="alert_mark_read">Mark as read</string>
     <string name="marked_read">Marked as read</string>
     <string name="swipe_read">Read</string>
-    <string name="all_marked_read">All alerts marked as read</string>
     <string name="alert_in_group">Alert in %1$s</string>
     <string name="alert_stop">Stop alarm</string>
     <string name="alert_close">Close</string>
@@ -60,7 +58,6 @@
     <!-- Servers -->
     <string name="servers_title">Servers</string>
     <string name="servers_add">Add a server</string>
-    <string name="server_live">Live</string>
     <string name="server_last_ping">Last ping</string>
     <string name="server_last_update">Last update</string>
     <string name="server_connected_since">Connected since</string>
@@ -69,12 +66,8 @@
     <string name="server_pseudo">Username on this server</string>
     <string name="server_pseudo_help">Sent to the server when connecting; the administrator sees your sessions under this name.</string>
     <string name="server_groups">Groups</string>
-    <string name="server_groups_hint">Choose what this phone does when an alert of the group arrives. The level stays on this phone: the server only knows which groups you follow.</string>
-    <string name="action_off_help">No alert from this group.</string>
-    <string name="action_notify_help">Standard notification, following the phone sound mode.</string>
-    <string name="action_ring_help">One sound, even in silent or vibrate mode.</string>
-    <string name="action_alarm_help">Opens Inbox full screen with the alarm and the message, until you stop it.</string>
-    <string name="server_groups_subscribed">followed %1$d/%2$d</string>
+    <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the phone\'s sound mode, Ring sounds even in silent mode, Alarm opens full screen until you stop it.</string>
+    <string name="server_groups_subscribed">Followed: %1$d/%2$d</string>
     <string name="server_groups_none">Groups appear after the first connection.</string>
     <string name="server_remove">Delete server</string>
     <string name="server_remove_title">Delete %1$s?</string>
@@ -90,33 +83,27 @@
     <string name="add_address_hint">192.168.1.10:8080 or https://inbox.example.com</string>
     <string name="add_password">Device password</string>
     <string name="add_pseudo">Username</string>
-    <string name="add_pseudo_required">Choose your default username in Settings first.</string>
     <string name="add_device_name">Name of this device</string>
     <string name="add_device_name_help">Visible to the administrator in the web interface.</string>
     <string name="add_security_note">The password never leaves the phone (OPAQUE protocol), even over unencrypted http.</string>
-    <string name="add_encrypted">Encrypted connection</string>
     <string name="add_connect">Connect</string>
-    <string name="add_connecting">Connecting and checking the password…</string>
+    <string name="add_connecting">Connecting…</string>
     <string name="add_invalid_address">Invalid address</string>
     <string name="add_error">Error: %1$s</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
-    <string name="settings_display">Alert list</string>
     <string name="settings_limit">Alerts shown</string>
     <string name="settings_window">Maximum age</string>
     <string name="settings_theme">Theme</string>
-    <string name="settings_identity">Identity</string>
     <string name="settings_pseudo">Default username</string>
     <string name="settings_pseudo_help">Identifies you to servers. Used for every new server, then editable server by server.</string>
-    <string name="settings_pseudo_missing">No username: required before adding a server.</string>
     <string name="pseudo_hint">e.g. alice</string>
     <string name="pseudo_invalid">Invalid username (1 to 64 characters, no control characters)</string>
     <string name="saved">Saved</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>
     <string name="theme_dark">Dark</string>
-    <string name="settings_permissions">Permissions</string>
     <string name="perm_notifications">Notifications</string>
     <string name="perm_notifications_why">Required to show alerts.</string>
     <string name="perm_full_screen">Full-screen alarms</string>
@@ -128,7 +115,6 @@
     <string name="perm_overlay">Display over other apps</string>
     <string name="perm_overlay_why">Lets an Alarm open Inbox full screen even while the phone is in use.</string>
     <string name="perm_grant">Allow</string>
-    <string name="settings_about">About</string>
 
     <!-- Metadata keys (dense key / value rows) -->
     <string name="meta_server">Server</string>
@@ -141,7 +127,6 @@
     <string name="meta_state">State</string>
     <string name="meta_address">Address</string>
     <string name="meta_device">Device</string>
-    <string name="meta_pseudo">Username</string>
     <string name="meta_device_id">Device ID</string>
     <string name="meta_detail">Detail</string>
     <string name="meta_version">Version</string>
@@ -149,9 +134,7 @@
 
     <!-- Alarm screen -->
     <string name="alarm_hint">Slide to stop</string>
-    <string name="alarm_received_at">received %1$s</string>
-    <string name="alarm_since_alert">Since alert</string>
-    <string name="alarm_sent_at">sent %1$s</string>
+    <string name="alarm_since_alert">since alert</string>
     <string name="alarm_all_stopped">Stopping silences every ringing alarm.</string>
     <string name="alarm_stop_description">Stop the alarm. Slide out of the circle or long press.</string>
 
@@ -168,8 +151,7 @@
     <string name="svc_warning_big">Inbox can no longer receive alerts from %1$s. %2$s</string>
 
     <!-- Enrollment errors -->
-    <string name="err_unreachable">Server unreachable</string>
-    <string name="err_unreachable_detail">Server unreachable: %1$s</string>
+    <string name="err_unreachable">Server not reachable (check address / network)</string>
     <string name="err_closed">The server closed the connection (%1$d)</string>
     <string name="err_lost">Connection lost: %1$s</string>
     <string name="err_no_answer">The server does not answer</string>
@@ -180,4 +162,34 @@
     <string name="err_internal">Internal server error</string>
     <string name="err_malformed">Invalid username or device name</string>
     <string name="err_unknown">Unknown error</string>
+
+    <!-- 0.9.0 -->
+    <string name="undo">Undo</string>
+    <plurals name="marked_read_n">
+        <item quantity="one">%d alert marked as read</item>
+        <item quantity="other">%d alerts marked as read</item>
+    </plurals>
+    <string name="alerts_no_group">%1$s: no group followed</string>
+    <string name="alerts_choose_groups">Choose groups</string>
+    <string name="a11y_selected">Selected</string>
+    <string name="a11y_not_selected">Not selected</string>
+    <string name="a11y_expanded">Expanded</string>
+    <string name="a11y_collapsed">Collapsed</string>
+    <string name="server_details">Connection details</string>
+    <string name="settings_limit_less">Show fewer alerts</string>
+    <string name="settings_limit_more">Show more alerts</string>
+    <string name="status_reconnecting">Reconnecting…</string>
+    <string name="add_pseudo_first">Also becomes your default username.</string>
+    <string name="add_link_invalid">This link has no valid http or https address.</string>
+    <string name="add_password_missing">Enter the device password.</string>
+    <string name="add_device_name_missing">Enter a name for this device.</string>
+    <string name="add_password_show">Show password</string>
+    <string name="add_password_hide">Hide password</string>
+    <string name="alarm_sent">sent</string>
+    <string name="alarm_received">received</string>
+    <string name="alarm_more">More ↓</string>
+    <plurals name="alarm_others">
+        <item quantity="one">%d other alarm ringing</item>
+        <item quantity="other">%d other alarms ringing</item>
+    </plurals>
 </resources>

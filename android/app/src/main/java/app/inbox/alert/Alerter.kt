@@ -213,21 +213,36 @@ object Alerter {
      * Marks an alert read on this phone: its notification disappears and, for an
      * alarm still ringing, the sound stops. Local only: nothing is sent.
      */
-    fun markRead(context: Context, serverId: Long, alertId: String) {
+    /** Returns true when the alert was unread until now (so an undo has something to restore). */
+    fun markRead(context: Context, serverId: Long, alertId: String): Boolean {
         val store = Store.get(context)
-        store.markRead(serverId, alertId)
-        val a = store.alert(serverId, alertId) ?: return Registry.changed()
+        val changed = store.markRead(serverId, alertId)
+        val a = store.alert(serverId, alertId) ?: return changed.also { Registry.changed() }
         if (a.action == "alarm" && a.stoppedAtMs == null) {
             stopAlarm(context, serverId, alertId)
         } else {
             context.getSystemService(NotificationManager::class.java).cancel(tag(a), ALERT_NOTIFICATION_ID)
             Registry.changed()
         }
+        return changed
     }
 
-    /** "Mark all as read". */
-    fun markAllRead(context: Context) {
-        for (a in Store.get(context).unreadAlerts()) markRead(context, a.serverId, a.alertId)
+    /** "Mark all as read". Returns the (server id, alert id) of the alerts it marked. */
+    fun markAllRead(context: Context): List<Pair<Long, String>> {
+        val marked = Store.get(context).unreadAlerts()
+            .filter { markRead(context, it.serverId, it.alertId) }
+            .map { it.serverId to it.alertId }
+        Registry.changed()
+        return marked
+    }
+
+    /**
+     * Undo of a mark-read: the alerts count as unread again. Their notifications
+     * are not posted again and a stopped alarm stays stopped.
+     */
+    fun markUnread(context: Context, alerts: List<Pair<Long, String>>) {
+        val store = Store.get(context)
+        for ((serverId, alertId) in alerts) store.markUnread(serverId, alertId)
         Registry.changed()
     }
 

@@ -244,6 +244,9 @@ pub async fn overview(State(app): State<Arc<AppState>>) -> Result<Response, ApiE
             "version": env!("CARGO_PKG_VERSION"),
             "time_ms": now,
             "unreachable_after_ms": unreachable_after,
+            // A delivery younger than this is still in flight, not failed.
+            "resend_after_ms": app.config.devices.resend_after.as_millis() as u64,
+            "heartbeat_interval_ms": app.config.devices.heartbeat_interval.as_millis() as u64,
             // Port of the device / producer API listener, for the API documentation.
             "api_port": app.config.server.listen.port(),
         },

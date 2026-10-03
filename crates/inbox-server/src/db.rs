@@ -624,6 +624,8 @@ pub struct AlertSummary {
     pub received: i64,
     /// Targets that never received the alert before it expired.
     pub expired: i64,
+    /// Pseudonyms of non-revoked targets that have not received the alert yet.
+    pub missing: Vec<String>,
 }
 
 const ALERT_SUMMARY: &str =
@@ -642,6 +644,7 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
         targets: r.get(6)?,
         received: r.get(7)?,
         expired: 0,
+        missing: Vec::new(),
     })
 }
 
@@ -657,7 +660,23 @@ pub fn recent_alerts(
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![limit, since_ms], alert_summary)?;
-    rows.map(|r| r.map(|a| with_expiry(a, cutoff))).collect()
+    let mut alerts: Vec<AlertSummary> =
+        rows.map(|r| r.map(|a| with_expiry(a, cutoff))).collect::<rusqlite::Result<_>>()?;
+    for a in &mut alerts {
+        a.missing = missing_users(conn, &a.id)?;
+    }
+    Ok(alerts)
+}
+
+/// Pseudonyms of the non-revoked devices that have not received `alert_id` yet.
+fn missing_users(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT v.user_name FROM deliveries d JOIN devices v ON v.id = d.device_id
+         WHERE d.alert_id = ?1 AND d.received_at IS NULL AND v.revoked_at IS NULL
+         ORDER BY v.user_name",
+    )?;
+    let rows = stmt.query_map(params![alert_id], |r| r.get(0))?;
+    rows.collect()
 }
 
 /// Fills `expired`: an alert created before `cutoff` is no longer delivered.
@@ -698,7 +717,8 @@ pub fn alert_detail(
     let Some(summary) = conn.query_row(&sql, params![id], alert_summary).optional()? else {
         return Ok(None);
     };
-    let summary = with_expiry(summary, cutoff);
+    let mut summary = with_expiry(summary, cutoff);
+    summary.missing = missing_users(conn, id)?;
     let is_expired = summary.created_at < cutoff;
     let mut stmt = conn.prepare_cached(
         "SELECT d.device_id, v.name, d.attempts, d.first_sent_at, d.last_sent_at,

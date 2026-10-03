@@ -49,7 +49,7 @@ data class MdPalette(
 }
 
 /** Renders alert details (Markdown) to plain views: no WebView, nothing executed. */
-fun Context.markdown(source: String, palette: MdPalette = MdPalette.themed(this), size: Float = 14f): View {
+fun Context.markdown(source: String, palette: MdPalette = MdPalette.themed(this), size: Float = SP_M): View {
     val root = lin()
     render(Markdown.parse(source), root, palette, size, first = true)
     return root
@@ -60,7 +60,7 @@ private fun Context.render(blocks: List<Block>, into: LinearLayout, p: MdPalette
         val top = if (i == 0 && first) 0 else 8
         when (b) {
             is Block.Heading -> into.addView(
-                richText(b.inlines, p, when (b.level) { 1 -> size + 4f; 2 -> size + 2f; else -> size + 0.5f }, p.strong, BOLD),
+                richText(b.inlines, p, if (b.level == 1) scaleStep(size, 1) else size, p.strong, BOLD),
                 lp().margins(this, t = if (i == 0) 0 else 12),
             )
             is Block.Paragraph -> into.addView(richText(b.inlines, p, size, p.text, REGULAR), lp().margins(this, t = top))
@@ -143,12 +143,12 @@ private fun openUrl(context: Context, url: String) {
 private fun Context.codeBlock(b: Block.CodeBlock, p: MdPalette, size: Float): View {
     val box = lin().apply { background = rounded(p.codeBg, dpf(CONTROL_RADIUS), p.border, dp(1)) }
     b.language?.let {
-        box.addView(mono(it.uppercase(), 9.5f, p.muted, bold = true).apply {
+        box.addView(mono(it.uppercase(), SP_XS, p.muted, bold = true).apply {
             letterSpacing = 0.1f
             setPadding(dp(10), dp(7), dp(10), 0)
         })
     }
-    val code = mono(b.code, size - 1.5f, p.strong, lines = 0).apply {
+    val code = mono(b.code, scaleStep(size, -1), p.strong, lines = 0).apply {
         setLineSpacing(dpf(2f), 1f)
         setHorizontallyScrolling(true)
         setTextIsSelectable(true)
@@ -166,7 +166,7 @@ private fun Context.listBlock(b: Block.ListBlock, p: MdPalette, size: Float): Vi
     b.items.forEachIndexed { k, item ->
         val row = lin(vertical = false).apply { gravity = Gravity.NO_GRAVITY }
         val marker = if (b.ordered) "${b.start + k}." else "•"
-        row.addView(mono(marker, size - 1f, p.muted).apply { gravity = Gravity.END; setPadding(0, 0, dp(8), 0) },
+        row.addView(mono(marker, size, p.muted).apply { gravity = Gravity.END; setPadding(0, 0, dp(8), 0) },
             lp(dp(if (b.ordered) 26 else 16), WRAP))
         val content = lin()
         render(item, content, p, size, first = true)
@@ -183,7 +183,7 @@ private fun Context.table(b: Block.Table, p: MdPalette, size: Float): View {
         isStretchAllColumns = false
     }
     fun cell(inlines: List<Inline>, align: Align, header: Boolean, shaded: Boolean): TextView =
-        richText(inlines, p, size - 1f, if (header) p.strong else p.text, if (header) BOLD else REGULAR).apply {
+        richText(inlines, p, scaleStep(size, -1), if (header) p.strong else p.text, if (header) BOLD else REGULAR).apply {
             setTextIsSelectable(false)
             gravity = when (align) {
                 Align.LEFT -> Gravity.START

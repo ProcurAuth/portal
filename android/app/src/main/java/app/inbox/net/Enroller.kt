@@ -19,7 +19,10 @@ class Enrollment(
     val serverPublicKey: ByteArray,
 )
 
-class EnrollmentError(message: String) : Exception(message)
+/** Which form field an enrollment error is about (the screen shows it under that field). */
+enum class EnrollField { ADDRESS, PASSWORD, USERNAME, NONE }
+
+class EnrollmentError(message: String, val field: EnrollField = EnrollField.NONE) : Exception(message)
 
 /**
  * Enrolls this phone with the shared device password (OPAQUE: the password never
@@ -49,11 +52,11 @@ object Enroller {
         try {
             when (val e = q.poll(20, TimeUnit.SECONDS)) {
                 Ev.Open -> {}
-                is Ev.Failure -> throw EnrollmentError(context.getString(R.string.err_unreachable_detail, e.t.message ?: e.t.javaClass.simpleName))
-                else -> throw EnrollmentError(str(R.string.err_unreachable))
+                // No WebSocket at all: wrong address, server down or no network.
+                else -> throw EnrollmentError(str(R.string.err_unreachable), EnrollField.ADDRESS)
             }
             val start = JSONObject(Native.enrollStart(password, deviceName, userName))
-            start.optJSONObject("error")?.let { throw EnrollmentError(describe(context, it)) }
+            start.optJSONObject("error")?.let { throw describe(context, it) }
             handle = start.getLong("handle")
             ws.send(start.getString("send"))
             while (true) {
@@ -64,7 +67,7 @@ object Enroller {
                     else -> throw EnrollmentError(str(R.string.err_no_answer))
                 }
                 val out = JSONObject(Native.enrollOnMessage(handle, text))
-                out.optJSONObject("error")?.let { throw EnrollmentError(describe(context, it)) }
+                out.optJSONObject("error")?.let { throw describe(context, it) }
                 out.optString("send", "").takeIf { it.isNotEmpty() }?.let { ws.send(it) }
                 out.optJSONObject("done")?.let { d ->
                     return Enrollment(
@@ -82,14 +85,14 @@ object Enroller {
         }
     }
 
-    private fun describe(c: Context, err: JSONObject): String = when (err.optString("code")) {
+    private fun describe(c: Context, err: JSONObject): EnrollmentError = when (err.optString("code")) {
         // A wrong password is detected locally by OPAQUE (the server cannot tell).
-        "auth_failed", "bad_password" -> c.getString(R.string.err_bad_password)
-        "rate_limited" -> c.getString(R.string.err_rate_limited)
-        "too_many_devices" -> c.getString(R.string.err_too_many_devices)
-        "protocol" -> c.getString(R.string.err_protocol, err.optString("message"))
-        "internal" -> c.getString(R.string.err_internal)
-        "malformed" -> c.getString(R.string.err_malformed)
-        else -> err.optString("message").ifEmpty { c.getString(R.string.err_unknown) }
+        "auth_failed", "bad_password" -> EnrollmentError(c.getString(R.string.err_bad_password), EnrollField.PASSWORD)
+        "rate_limited" -> EnrollmentError(c.getString(R.string.err_rate_limited))
+        "too_many_devices" -> EnrollmentError(c.getString(R.string.err_too_many_devices))
+        "protocol" -> EnrollmentError(c.getString(R.string.err_protocol, err.optString("message")))
+        "internal" -> EnrollmentError(c.getString(R.string.err_internal))
+        "malformed" -> EnrollmentError(c.getString(R.string.err_malformed), EnrollField.USERNAME)
+        else -> EnrollmentError(err.optString("message").ifEmpty { c.getString(R.string.err_unknown) })
     }
 }

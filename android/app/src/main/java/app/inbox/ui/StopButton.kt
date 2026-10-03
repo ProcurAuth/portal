@@ -61,9 +61,21 @@ class StopButton(context: Context, private val onStop: () -> Unit) : View(contex
         isHapticFeedbackEnabled = true
     }
 
-    /** Inner button radius: the button is about 45 % of the screen width. */
-    private val inner: Float get() = resources.displayMetrics.widthPixels * 0.225f
-    private val outer: Float get() = inner * 1.75f
+    /**
+     * Smaller dial (about 38 % of the screen width instead of 45 %) so long
+     * messages and large fonts keep room above it.
+     */
+    var compact = false
+        set(value) {
+            if (field == value) return
+            field = value
+            requestLayout()
+            invalidate()
+        }
+
+    /** Inner button radius. */
+    private val inner: Float get() = resources.displayMetrics.widthPixels * (if (compact) 0.19f else 0.225f)
+    private val outer: Float get() = inner * (if (compact) 1.55f else 1.75f)
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val wanted = (outer * 2 + inner * 0.3f).toInt()

@@ -1,6 +1,8 @@
 package app.inbox.ui
 
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,11 +14,13 @@ import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Toast
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import app.inbox.BuildConfig
 import app.inbox.R
 import app.inbox.alert.Alerter
@@ -32,6 +36,7 @@ class MainActivity : BaseActivity() {
     companion object {
         private const val EXTRA_SERVER = "open_server"
         private const val EXTRA_ALERT = "open_alert"
+        private const val EXTRA_NOTICE = "notice"
 
         /** Opens the home screen on one alert (from its notification); opening marks it read. */
         fun openAlert(context: android.content.Context, serverId: Long, alertId: String): Intent =
@@ -40,6 +45,12 @@ class MainActivity : BaseActivity() {
                 .putExtra(EXTRA_SERVER, serverId)
                 .putExtra(EXTRA_ALERT, alertId)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+
+        /** Back to the home screen with a snackbar, e.g. "Server deleted". */
+        fun notice(context: android.content.Context, text: String): Intent =
+            Intent(context, MainActivity::class.java)
+                .putExtra(EXTRA_NOTICE, text)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     }
 
     private enum class Screen { ALERTS, SERVERS, SETTINGS }
@@ -47,6 +58,7 @@ class MainActivity : BaseActivity() {
     private var screen = Screen.ALERTS
     /** Older alerts loaded with "See more", beyond the configured count and window. */
     private var extra = 0
+    private lateinit var root: FrameLayout
     private lateinit var main: LinearLayout
     private lateinit var bar: FrameLayout
     private lateinit var scroller: ScrollView
@@ -66,7 +78,7 @@ class MainActivity : BaseActivity() {
         super.onCreate(savedInstanceState)
         screen = savedInstanceState?.getString("screen")?.let { runCatching { Screen.valueOf(it) }.getOrNull() } ?: Screen.ALERTS
 
-        val root = FrameLayout(this)
+        root = FrameLayout(this)
         val behind = FrameLayout(this)
         behind.addView(Backdrop(this), FrameLayout.LayoutParams(MATCH, MATCH))
         main = lin()
@@ -81,6 +93,7 @@ class MainActivity : BaseActivity() {
         val scrim = View(this)
         root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
         drawer = Drawer(this, scrim, behind)
+        drawer.onToggle = { syncBack() }
         drawerContent = lin()
         drawer.addView(drawerContent, lp(MATCH, MATCH))
         root.addView(drawer, FrameLayout.LayoutParams(drawerWidth(), MATCH))
@@ -100,6 +113,10 @@ class MainActivity : BaseActivity() {
 
     /** A notification was tapped: show that alert (which marks it read). */
     private fun handleOpen(intent: Intent?) {
+        intent?.getStringExtra(EXTRA_NOTICE)?.let { text ->
+            intent.removeExtra(EXTRA_NOTICE)
+            root.post { root.snackbar(text) }
+        }
         val serverId = intent?.getLongExtra(EXTRA_SERVER, -1) ?: -1
         val alertId = intent?.getStringExtra(EXTRA_ALERT) ?: return
         intent.removeExtra(EXTRA_ALERT)
@@ -127,12 +144,48 @@ class MainActivity : BaseActivity() {
         handler.removeCallbacks(tick)
     }
 
-    @Deprecated("Platform back handling; the app has no AndroidX")
-    override fun onBackPressed() {
+    /*
+     * Back closes the drawer, then returns to the alerts. On Android 13+ the
+     * callback is registered only while there is something to close, so Back on
+     * the home screen keeps the system's predictive "back to home" animation.
+     */
+    private val backCallback: Any? = if (Build.VERSION.SDK_INT >= 33) OnBackInvokedCallback { handleBack() } else null
+    private var backRegistered = false
+
+    private fun handleBack(): Boolean {
         when {
             drawer.isOpen -> drawer.close()
             screen != Screen.ALERTS -> go(Screen.ALERTS)
-            else -> @Suppress("DEPRECATION") super.onBackPressed()
+            else -> return false
+        }
+        return true
+    }
+
+    private fun syncBack() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val wanted = drawer.isOpen || screen != Screen.ALERTS
+        if (wanted == backRegistered) return
+        val cb = backCallback as OnBackInvokedCallback
+        if (wanted) onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, cb)
+        else onBackInvokedDispatcher.unregisterOnBackInvokedCallback(cb)
+        backRegistered = wanted
+    }
+
+    /** Android 8 to 12 only: 13+ uses [backCallback]. */
+    @Deprecated("Replaced by OnBackInvokedCallback on Android 13+")
+    override fun onBackPressed() {
+        @Suppress("DEPRECATION")
+        if (!handleBack()) super.onBackPressed()
+    }
+
+    /** "Marked as read · Undo" for 5 s; Undo makes [alerts] unread again. */
+    private fun offerUndo(alerts: List<Pair<Long, String>>) {
+        if (alerts.isEmpty()) return
+        val text = if (alerts.size == 1) getString(R.string.marked_read)
+        else resources.getQuantityString(R.plurals.marked_read_n, alerts.size, alerts.size)
+        root.snackbar(text, getString(R.string.undo)) {
+            Alerter.markUnread(this, alerts)
+            render()
         }
     }
 
@@ -164,7 +217,7 @@ class MainActivity : BaseActivity() {
             else -> color(R.color.danger) to false
         }
         row.addView(PulseDot(this, tint, pulse), lp(dp(22), dp(22)))
-        downCount(o)?.let { row.addView(mono(it, 12f, tint, bold = true), lp(WRAP, WRAP).margins(this, l = 2)) }
+        downCount(o)?.let { row.addView(mono(it, SP_S, tint, bold = true), lp(WRAP, WRAP).margins(this, l = 2)) }
         row.contentDescription = when {
             o.total == 0 -> getString(R.string.status_no_server)
             o.connected == o.total -> getString(R.string.status_all_online)
@@ -196,15 +249,16 @@ class MainActivity : BaseActivity() {
             Screen.SETTINGS -> renderSettings()
         }
         scroller.post { scroller.scrollTo(0, y) }
+        syncBack()
     }
 
     private fun renderDrawer(servers: List<Server>, o: Overall) {
         drawerContent.removeAllViews()
         val head = lin(padH = 16, padV = 16)
         val who = Prefs.defaultUserName(this)
-        head.addView(label(getString(R.string.drawer_identity).uppercase(), 10f, color(R.color.text_subtle), MEDIUM).apply { letterSpacing = 0.12f })
-        head.addView(mono(if (who != null) "@$who" else getString(R.string.drawer_no_pseudo), 16f,
-            if (who != null) color(R.color.text_strong) else color(R.color.warning), bold = true), lp().margins(this, t = 4))
+        head.addView(label(getString(R.string.drawer_identity), SP_S, color(R.color.text_muted)))
+        head.addView(if (who != null) mono("@$who", SP_L, color(R.color.text_strong), bold = true)
+            else label(getString(R.string.drawer_no_pseudo), SP_L, color(R.color.text_muted), MEDIUM), lp().margins(this, t = 4))
         val st = lin(vertical = false)
         st.addView(statusIndicator(o))
         val stText = when {
@@ -212,7 +266,7 @@ class MainActivity : BaseActivity() {
             o.connected == o.total -> getString(R.string.drawer_servers_all_up)
             else -> resources.getQuantityString(R.plurals.drawer_servers_down, o.total - o.connected, o.total - o.connected)
         }
-        st.addView(mono(stText.uppercase(), 10.5f, color(R.color.text_subtle)), lp(WRAP, WRAP).margins(this, l = 8))
+        st.addView(label(stText, SP_S, color(R.color.text_muted)), lp(WRAP, WRAP).margins(this, l = 8))
         head.addView(st, lp().margins(this, t = 12))
         drawerContent.addView(head)
         drawerContent.addView(divider())
@@ -229,17 +283,17 @@ class MainActivity : BaseActivity() {
             val on = s == screen
             val fg = if (on) color(R.color.primary) else color(R.color.text)
             val row = lin(vertical = false, padH = 12, padV = 0).apply {
-                minimumHeight = dp(44)
+                minimumHeight = dp(48)
                 background = pressable(if (on) color(R.color.primary_soft) else 0x00000000, dpf(CONTROL_RADIUS))
                 isClickable = true
                 setOnClickListener { go(s) }
                 addView(icon(icon, fg, 18), lp(dp(18), dp(18)).margins(this@MainActivity, r = 14))
-                addView(label(getString(text), 14f, fg, MEDIUM), lp(0, WRAP, 1f))
+                addView(label(getString(text), SP_M, fg, MEDIUM), lp(0, WRAP, 1f))
                 val count = counts[s].orEmpty()
                 if (count.isNotEmpty()) {
                     val warn = count == "!"
                     val unreadBadge = s == Screen.ALERTS
-                    addView(mono(count, 11f, when {
+                    addView(mono(count, SP_S, when {
                         warn -> color(R.color.warning)
                         unreadBadge -> color(R.color.primary)
                         else -> color(R.color.text_muted)
@@ -254,25 +308,24 @@ class MainActivity : BaseActivity() {
         if (unread > 0) {
             items.addView(divider(), lp(MATCH, 1).margins(this, t = 6, b = 6))
             val markAll = lin(vertical = false, padH = 12, padV = 0).apply {
-                minimumHeight = dp(44)
+                minimumHeight = dp(48)
                 background = pressable(0x00000000, dpf(CONTROL_RADIUS))
                 isClickable = true
                 contentDescription = getString(R.string.alerts_mark_all)
                 setOnClickListener {
-                    Alerter.markAllRead(this@MainActivity)
-                    Toast.makeText(this@MainActivity, getString(R.string.all_marked_read), Toast.LENGTH_SHORT).show()
+                    val marked = Alerter.markAllRead(this@MainActivity)
                     drawer.close()
                     render()
+                    offerUndo(marked)
                 }
                 addView(icon(R.drawable.ic_check_circle, color(R.color.primary), 18), lp(dp(18), dp(18)).margins(this@MainActivity, r = 14))
-                addView(label(getString(R.string.alerts_mark_all), 14f, color(R.color.primary), MEDIUM), lp(0, WRAP, 1f))
+                addView(label(getString(R.string.alerts_mark_all), SP_M, color(R.color.primary), MEDIUM), lp(0, WRAP, 1f))
             }
             items.addView(markAll)
         }
         drawerContent.addView(items, lp(MATCH, 0, 1f))
         drawerContent.addView(divider())
-        drawerContent.addView(mono("v${BuildConfig.VERSION_NAME}", 10f, color(R.color.text_subtle)).apply {
-            letterSpacing = 0.06f
+        drawerContent.addView(mono("v${BuildConfig.VERSION_NAME}", SP_XS, color(R.color.text_subtle)).apply {
             setPadding(dp(16), dp(12), dp(16), dp(14))
         })
     }
@@ -298,6 +351,13 @@ class MainActivity : BaseActivity() {
                 getString(R.string.alerts_no_server_body), getString(R.string.alerts_add_server)) { addServer() })
             return
         }
+        // A server whose groups are known but none followed sends this phone nothing.
+        for (s in servers) {
+            if (store.subscriptions(s.id).isNotEmpty() || store.groups(s.id).isEmpty()) continue
+            body.addView(banner(getString(R.string.alerts_no_group, s.serverName), getString(R.string.alerts_choose_groups),
+                color(R.color.primary), color(R.color.primary_soft), R.drawable.ic_bell_outline) { openServer(s.id) },
+                lp().margins(this, t = 8))
+        }
 
         val limit = Prefs.limit(this)
         val window = Prefs.windowMs(this)
@@ -308,7 +368,7 @@ class MainActivity : BaseActivity() {
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
         if (alerts.isEmpty()) {
-            body.addView(label(getString(R.string.alerts_none), 14f, color(R.color.text_muted)).apply {
+            body.addView(label(getString(R.string.alerts_none), SP_M, color(R.color.text_muted)).apply {
                 gravity = Gravity.CENTER
             }, lp().margins(this, t = 32, b = 8))
         } else {
@@ -321,8 +381,9 @@ class MainActivity : BaseActivity() {
                     addView(alertRow(a, names[a.serverId] ?: "", now))
                 }
                 val swipe = SwipeToRead(this, card, enabled = a.unread, removeOnCommit = !showRead) {
-                    Alerter.markRead(this, a.serverId, a.alertId)
+                    val marked = Alerter.markRead(this, a.serverId, a.alertId)
                     render()
+                    if (marked) offerUndo(listOf(a.serverId to a.alertId))
                 }
                 body.addView(swipe, lp().margins(this, t = if (i == 0) 4 else 8))
             }
@@ -335,7 +396,7 @@ class MainActivity : BaseActivity() {
     }
 
     /** "See more": plain accent text with a 48 dp touch target. */
-    private fun seeMore(): View = label(getString(R.string.alerts_see_more), 13f, color(R.color.primary), MEDIUM).apply {
+    private fun seeMore(): View = label(getString(R.string.alerts_see_more), SP_M, color(R.color.primary), MEDIUM).apply {
         gravity = Gravity.CENTER
         minHeight = dp(48)
         setPadding(dp(12), 0, dp(12), 0)
@@ -348,35 +409,24 @@ class MainActivity : BaseActivity() {
         }
     }
 
-    /** "Show read" check box, centered alone on its row, identical with or without alerts. */
-    private fun showReadToggle(showRead: Boolean): View = lin(vertical = false).apply {
-        gravity = Gravity.CENTER
-        minimumHeight = dp(48)
-        setPadding(dp(12), 0, dp(12), 0)
-        isClickable = true
-        isFocusable = true
-        background = rowRipple()
-        contentDescription = getString(R.string.alerts_show_read)
-        addView(checkMark(showRead), lp(dp(16), dp(16)))
-        addView(label(getString(R.string.alerts_show_read), 13f,
-            color(if (showRead) R.color.primary else R.color.text_muted), MEDIUM),
-            lp(WRAP, WRAP).margins(this@MainActivity, l = 8))
-        setOnClickListener {
-            Prefs.setShowRead(this@MainActivity, !showRead)
+    /** "Show read" native check box, centered alone on its row, identical with or without alerts. */
+    private fun showReadToggle(showRead: Boolean): View = CheckBox(this).apply {
+        text = getString(R.string.alerts_show_read)
+        textSize = SP_M
+        typeface = MEDIUM
+        isChecked = showRead
+        minHeight = dp(48)
+        setPadding(dp(6), 0, dp(12), 0)
+        setTextColor(color(if (showRead) R.color.primary else R.color.text_muted))
+        buttonTintList = ColorStateList(
+            arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()),
+            intArrayOf(color(R.color.primary), color(R.color.text_muted)),
+        )
+        setOnCheckedChangeListener { _, checked ->
+            Prefs.setShowRead(this@MainActivity, checked)
             extra = 0
             render()
         }
-    }
-
-    /** Small square check box drawn in the accent color. */
-    private fun checkMark(checked: Boolean): View = FrameLayout(this).apply {
-        background = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dpf(3f)
-            if (checked) setColor(color(R.color.primary)) else setColor(0)
-            setStroke(dp(1).coerceAtLeast(2), color(if (checked) R.color.primary else R.color.text_muted))
-        }
-        if (checked) addView(icon(R.drawable.ic_check, color(R.color.on_primary), 12),
-            FrameLayout.LayoutParams(dp(12), dp(12), Gravity.CENTER))
     }
 
     private fun isRinging(a: Alert) = a.action == "alarm" && a.stoppedAtMs == null
@@ -393,10 +443,10 @@ class MainActivity : BaseActivity() {
             // Long press: mark read without opening.
             isLongClickable = true
             setOnLongClickListener {
-                if (a.unread) {
-                    Alerter.markRead(this@MainActivity, a.serverId, a.alertId)
-                    Toast.makeText(this@MainActivity, getString(R.string.marked_read), Toast.LENGTH_SHORT).show()
+                if (a.unread && Alerter.markRead(this@MainActivity, a.serverId, a.alertId)) {
+                    performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
                     render()
+                    offerUndo(listOf(a.serverId to a.alertId))
                 }
                 true
             }
@@ -404,14 +454,14 @@ class MainActivity : BaseActivity() {
         row.addView(View(this).apply { setBackgroundColor(style.fg) }, lp(dp(3), MATCH))
 
         val time = lin().apply { setPadding(dp(10), dp(9), 0, dp(9)) }
-        time.addView(mono(hms(a.createdAtMs), 11.5f, color(R.color.text)))
-        time.addView(mono(shortAge(a.createdAtMs, now), 10.5f, color(R.color.text_subtle)), lp().margins(this, t = 3))
+        time.addView(mono(hms(a.createdAtMs), SP_S, color(R.color.text)))
+        time.addView(mono(shortAge(a.createdAtMs, now), SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 3))
         row.addView(time, lp(dp(74), WRAP))
 
         val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
         val titleRow = lin(vertical = false)
         if (a.unread) titleRow.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
-        titleRow.addView(label(a.description ?: a.groupName, 14f,
+        titleRow.addView(label(a.description ?: a.groupName, SP_M,
             if (a.unread) color(R.color.text_strong) else color(R.color.text),
             if (a.unread) BOLD else REGULAR, lines = 1), lp(0, WRAP, 1f))
         content.addView(titleRow)
@@ -419,7 +469,7 @@ class MainActivity : BaseActivity() {
         meta.append("${a.groupName} · $serverName")
         meta.setSpan(ForegroundColorSpan(color(R.color.text_subtle)), 0, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         a.details?.let { d -> app.inbox.md.Markdown.firstLine(d)?.let { meta.append("  ").append(it) } }
-        content.addView(label(meta, 12f, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
+        content.addView(label(meta, SP_S, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
         row.addView(content, lp(0, WRAP, 1f))
 
         val tags = lin().apply {
@@ -451,11 +501,11 @@ class MainActivity : BaseActivity() {
         bottomSheet { sheet, dialog ->
             val head = lin(vertical = false)
             head.addView(chip(style.code, style.fg, style.bg))
-            head.addView(mono(a.groupName.uppercase(), 11f, color(R.color.text_muted)).apply { letterSpacing = 0.08f },
+            head.addView(label("${a.groupName} · $serverName", SP_S, color(R.color.text_muted), lines = 1),
                 lp(0, WRAP, 1f).margins(this, l = 8))
-            head.addView(mono(shortAge(a.createdAtMs), 11f, color(R.color.text_subtle)))
+            head.addView(mono(shortAge(a.createdAtMs), SP_S, color(R.color.text_subtle)))
             sheet.addView(head)
-            sheet.addView(label(a.description ?: a.groupName, 19f, color(R.color.text_strong), MEDIUM).apply { setTextIsSelectable(true) },
+            sheet.addView(label(a.description ?: a.groupName, SP_L, color(R.color.text_strong), BOLD).apply { setTextIsSelectable(true) },
                 lp().margins(this, t = 12))
             a.details?.let { sheet.addView(markdown(it), lp().margins(this, t = 10)) }
             val meta = panel(padV = 4)
@@ -480,26 +530,22 @@ class MainActivity : BaseActivity() {
     private fun emptyState(iconRes: Int, title: String, text: String, action: String?, onAction: (() -> Unit)?): View {
         val c = panel(padH = 18, padV = 20).apply { gravity = Gravity.CENTER_HORIZONTAL }
         c.addView(iconBadge(iconRes, color(R.color.primary), color(R.color.primary_soft), 40), lp(dp(40), dp(40)))
-        c.addView(label(title, 15f, color(R.color.text_strong), MEDIUM).apply { gravity = Gravity.CENTER }, lp().margins(this, t = 12))
-        c.addView(label(text, 12.5f, color(R.color.text_muted)).apply { gravity = Gravity.CENTER }, lp().margins(this, t = 4))
+        c.addView(label(title, SP_L, color(R.color.text_strong), MEDIUM).apply { gravity = Gravity.CENTER }, lp().margins(this, t = 12))
+        c.addView(label(text, SP_M, color(R.color.text_muted)).apply { gravity = Gravity.CENTER }, lp().margins(this, t = 4))
         if (action != null && onAction != null) c.addView(button(action) { onAction() }, lp().margins(this, t = 14))
         return lin().apply { addView(c, lp().margins(this@MainActivity, t = 6)) }
     }
 
     // ------------------------------------------------------------ servers
 
-    private fun addServer() {
-        if (Prefs.defaultUserName(this) == null) {
-            Toast.makeText(this, getString(R.string.add_pseudo_required), Toast.LENGTH_LONG).show()
-            go(Screen.SETTINGS)
-            return
-        }
-        startActivity(Intent(this, AddServerActivity::class.java))
-    }
+    private fun addServer() = startActivity(Intent(this, AddServerActivity::class.java))
+
+    private fun openServer(id: Long) =
+        startActivity(Intent(this, ServerActivity::class.java).putExtra(ServerActivity.EXTRA_SERVER, id))
 
     private fun renderServers(servers: List<Server>) {
         val o = overall(servers)
-        body.addView(sectionLabel(getString(R.string.servers_title),
+        body.addView(sectionTitle(getString(R.string.servers_title),
             if (servers.isEmpty()) null else downCount(o) ?: getString(R.string.drawer_servers_all_up)))
         if (servers.isEmpty()) {
             body.addView(emptyState(R.drawable.ic_server, getString(R.string.alerts_no_server_title),
@@ -514,30 +560,29 @@ class MainActivity : BaseActivity() {
                     minimumHeight = dp(56)
                     background = rowRipple()
                     isClickable = true
-                    setOnClickListener {
-                        startActivity(Intent(this@MainActivity, ServerActivity::class.java).putExtra(ServerActivity.EXTRA_SERVER, s.id))
-                    }
+                    setOnClickListener { openServer(s.id) }
                 }
                 row.addView(statusDot(fg, 8), lp(dp(8), dp(8)).margins(this, r = 10))
                 val col = lin()
-                col.addView(label(s.serverName, 14f, color(R.color.text_strong), MEDIUM, lines = 1))
-                col.addView(mono("${s.userName ?: "—"} · ${s.deviceName}", 11f, color(R.color.text_muted)), lp().margins(this, t = 2))
-                col.addView(mono(s.address.removePrefix("http://").removePrefix("https://"), 10.5f, color(R.color.text_subtle)), lp().margins(this, t = 1))
+                col.addView(label(s.serverName, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
+                col.addView(label("${s.userName?.let { "@$it" } ?: "—"} · ${s.deviceName}", SP_S, color(R.color.text_muted), lines = 1),
+                    lp().margins(this, t = 2))
+                col.addView(mono(s.address.removePrefix("http://").removePrefix("https://"), SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 2))
                 row.addView(col, lp(0, WRAP, 1f))
-                row.addView(mono(code, 11f, fg, bold = true), lp(WRAP, WRAP).margins(this, l = 8, r = 4))
+                row.addView(label(code, SP_S, fg, MEDIUM, lines = 1), lp(WRAP, WRAP).margins(this, l = 8, r = 4))
                 row.addView(icon(R.drawable.ic_chevron_right, color(R.color.text_subtle), 16), lp(dp(16), dp(16)))
                 p.addView(row)
             }
             body.addView(p)
         }
-        body.addView(button("+  " + getString(R.string.servers_add), ButtonKind.SECONDARY) { addServer() }, lp().margins(this, t = 10, b = 16))
+        body.addView(button(getString(R.string.servers_add), ButtonKind.SECONDARY) { addServer() }, lp().margins(this, t = 10, b = 16))
     }
 
     private fun linkCode(serverId: Long, now: Long): Pair<String, Int> {
         val st = Registry.status(serverId)
         return when (st.state) {
             LinkState.CONNECTED -> getString(R.string.status_online) to color(R.color.primary)
-            LinkState.CONNECTING -> getString(R.string.status_connecting) to color(R.color.warning)
+            LinkState.CONNECTING -> (st.detail ?: getString(R.string.status_connecting)) to color(R.color.warning)
             LinkState.DISCONNECTED -> getString(R.string.status_offline_since, shortAge(st.sinceMs, now)) to color(R.color.danger)
             LinkState.REENROLL -> getString(R.string.status_reenroll) to color(R.color.danger)
         }
@@ -546,39 +591,40 @@ class MainActivity : BaseActivity() {
     // ------------------------------------------------------------ settings
 
     private fun renderSettings() {
-        // Identity
-        body.addView(sectionLabel(getString(R.string.settings_identity)))
+        body.addView(sectionTitle(getString(R.string.settings_title)))
+
+        // Default username
         val id = panel(padH = 14, padV = 12)
-        id.addView(label(getString(R.string.settings_pseudo), 14f, color(R.color.text), MEDIUM))
-        id.addView(label(getString(R.string.settings_pseudo_help), 11.5f, color(R.color.text_muted)), lp().margins(this, t = 2))
+        id.addView(label(getString(R.string.settings_pseudo), SP_M, color(R.color.text), MEDIUM))
+        id.addView(label(getString(R.string.settings_pseudo_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 2))
         val current = Prefs.defaultUserName(this)
         id.addView(pseudoEditor(current) { v ->
             Prefs.setDefaultUserName(this, v)
-            Toast.makeText(this, getString(R.string.saved), Toast.LENGTH_SHORT).show()
             render()
+            root.snackbar(getString(R.string.saved))
         }, lp().margins(this, t = 10))
-        if (current == null) {
-            id.addView(label(getString(R.string.settings_pseudo_missing), 11.5f, color(R.color.danger)), lp().margins(this, t = 6))
-        }
         body.addView(id)
 
-        // Display
-        body.addView(sectionLabel(getString(R.string.settings_display)))
+        // Alert list
         val d = panel()
         val limit = Prefs.limit(this)
         val stepper = lin(vertical = false).apply {
             background = rounded(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke), dp(1))
-            addView(iconButton(R.drawable.ic_minus, "-", color(R.color.text), 16) { Prefs.setLimit(this@MainActivity, limit - 1); render() }.apply {
-                layoutParams = LinearLayout.LayoutParams(dp(34), dp(30))
+            addView(iconButton(R.drawable.ic_minus, getString(R.string.settings_limit_less), color(R.color.text), 16) {
+                Prefs.setLimit(this@MainActivity, limit - 1); render()
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(40))
                 isEnabled = limit > Prefs.LIMIT_RANGE.first
                 alpha = if (isEnabled) 1f else 0.35f
             })
-            addView(mono(limit.toString(), 13f, color(R.color.text_strong), bold = true).apply {
+            addView(mono(limit.toString(), SP_M, color(R.color.text_strong), bold = true).apply {
                 gravity = Gravity.CENTER
-                minWidth = dp(30)
+                minWidth = dp(28)
             })
-            addView(iconButton(R.drawable.ic_plus, "+", color(R.color.text), 16) { Prefs.setLimit(this@MainActivity, limit + 1); render() }.apply {
-                layoutParams = LinearLayout.LayoutParams(dp(34), dp(30))
+            addView(iconButton(R.drawable.ic_plus, getString(R.string.settings_limit_more), color(R.color.text), 16) {
+                Prefs.setLimit(this@MainActivity, limit + 1); render()
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(40))
                 isEnabled = limit < Prefs.LIMIT_RANGE.last
                 alpha = if (isEnabled) 1f else 0.35f
             })
@@ -586,51 +632,44 @@ class MainActivity : BaseActivity() {
         d.addView(row(getString(R.string.settings_limit), null, stepper))
         d.addView(divider())
         val w = lin(padH = 14, padV = 10)
-        w.addView(label(getString(R.string.settings_window), 14f, color(R.color.text), MEDIUM))
+        w.addView(label(getString(R.string.settings_window), SP_M, color(R.color.text), MEDIUM))
         val window = Prefs.windowMs(this)
         val options = Prefs.WINDOWS_MS
-        w.addView(segmented(options.map { windowLabel(it).replace(" ", "") }, options.indexOf(window).coerceAtLeast(0)) { i ->
+        w.addView(segmented(options.map { windowLabel(it) }, options.indexOf(window).coerceAtLeast(0),
+            describe = { i -> getString(R.string.settings_window) + ": " + windowLabel(options[i]) }) { i ->
             Prefs.setWindowMs(this, options[i])
             render()
         }, lp().margins(this, t = 8))
         d.addView(w)
-        body.addView(d)
+        body.addView(d, lp().margins(this, t = 10))
 
         // Theme
-        body.addView(sectionLabel(getString(R.string.settings_theme)))
-        val t = panel(padH = 10, padV = 10)
+        val t = lin(padH = 14, padV = 10).apply { background = solidCard() }
+        t.addView(label(getString(R.string.settings_theme), SP_M, color(R.color.text), MEDIUM))
         val modes = Prefs.ThemeMode.entries
-        t.addView(segmented(
-            listOf(getString(R.string.theme_system), getString(R.string.theme_light), getString(R.string.theme_dark)),
-            modes.indexOf(Prefs.theme(this)),
-        ) { i ->
+        val modeNames = listOf(getString(R.string.theme_system), getString(R.string.theme_light), getString(R.string.theme_dark))
+        t.addView(segmented(modeNames, modes.indexOf(Prefs.theme(this)),
+            describe = { i -> getString(R.string.settings_theme) + ": " + modeNames[i] }) { i ->
             Prefs.setTheme(this, modes[i])
             recreate()
-        })
-        body.addView(t)
+        }, lp().margins(this, t = 8))
+        body.addView(t, lp().margins(this, t = 10))
 
         // Permissions
         val perms = Permissions.all(this)
-        body.addView(sectionLabel(getString(R.string.settings_permissions), "${perms.count { it.granted }}/${perms.size} OK"))
         val p = panel()
         perms.forEachIndexed { i, perm ->
             if (i > 0) p.addView(divider())
             val trailing = if (perm.granted) chip("OK", color(R.color.primary), color(R.color.primary_soft), dot = true)
-            else mono(getString(R.string.perm_grant).uppercase(), 11f, color(R.color.on_primary), bold = true).apply {
-                background = pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
-                setPadding(dp(10), dp(7), dp(10), dp(7))
-                isClickable = true
-                setOnClickListener { perm.request(this@MainActivity) }
-            }
+            else button(getString(R.string.perm_grant)) { perm.request(this@MainActivity) }
             p.addView(row(getString(perm.title), getString(perm.why), trailing))
         }
-        body.addView(p)
+        body.addView(p, lp().margins(this, t = 10))
 
         // About
-        body.addView(sectionLabel(getString(R.string.settings_about)))
         val about = panel(padV = 4)
         about.addView(kv(getString(R.string.meta_version), BuildConfig.VERSION_NAME))
-        body.addView(about, lp().margins(this, b = 20))
+        body.addView(about, lp().margins(this, t = 10, b = 20))
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -639,17 +678,18 @@ class MainActivity : BaseActivity() {
     }
 }
 
-/** Compact single-line input on a translucent field. */
+/** Compact single-line input on a field background (monospace for data such as addresses). */
 fun android.content.Context.textField(value: String, hint: String, password: Boolean = false, mono: Boolean = false): EditText = EditText(this).apply {
     setText(value)
     this.hint = hint
     isSingleLine = true
-    textSize = 13.5f
+    textSize = SP_M
+    minHeight = dp(48)
     if (mono) typeface = MONO
     setTextColor(color(R.color.text))
     setHintTextColor(color(R.color.text_subtle))
     background = rounded(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke), dp(1))
-    setPadding(dp(10), dp(7), dp(10), dp(7))
+    setPadding(dp(12), dp(8), dp(12), dp(8))
     inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
     else InputType.TYPE_CLASS_TEXT
     imeOptions = EditorInfo.IME_ACTION_DONE
@@ -669,10 +709,12 @@ fun android.content.Context.pseudoEditor(current: String?, onSave: (String) -> U
         addView(actions, lp(WRAP, WRAP).margins(ctx, l = 8))
     }
     fun small(text: String, primary: Boolean, onClick: () -> Unit) =
-        mono(text.uppercase(), 11f, color(if (primary) R.color.on_primary else R.color.text), bold = true).apply {
+        label(text, SP_M, color(if (primary) R.color.on_primary else R.color.text), MEDIUM).apply {
             gravity = Gravity.CENTER
-            minHeight = dp(34)
-            setPadding(dp(12), 0, dp(12), 0)
+            minHeight = dp(48)
+            minWidth = dp(48)
+            setPadding(dp(14), 0, dp(14), 0)
+            isFocusable = true
             background = if (primary) pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
             else pressable(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke))
             isClickable = true

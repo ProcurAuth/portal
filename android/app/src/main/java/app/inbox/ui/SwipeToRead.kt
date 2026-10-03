@@ -4,8 +4,10 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
@@ -43,6 +45,8 @@ class SwipeToRead(
     private var downX = 0f
     private var downY = 0f
     private var dragging = false
+    /** Past the commit threshold: releasing now marks read (a haptic tick says so). */
+    private var armed = false
     private var done = false
     private var velocity: VelocityTracker? = null
 
@@ -53,7 +57,7 @@ class SwipeToRead(
             setPadding(context.dp(16), 0, context.dp(16), 0)
             background = rounded(context.color(R.color.primary), radius)
             addView(context.icon(R.drawable.ic_check, context.color(R.color.on_primary), 18), lp(context.dp(18), context.dp(18)))
-            addView(context.label(context.getString(R.string.swipe_read), 13f, context.color(R.color.on_primary), MEDIUM),
+            addView(context.label(context.getString(R.string.swipe_read), SP_M, context.color(R.color.on_primary), MEDIUM),
                 lp(WRAP, WRAP).margins(context, l = 8))
             visibility = INVISIBLE
         }
@@ -115,7 +119,14 @@ class SwipeToRead(
             MotionEvent.ACTION_DOWN -> return true
             MotionEvent.ACTION_MOVE -> {
                 if (!dragging) return true
-                card.translationX = (ev.x - downX).coerceAtLeast(0f)
+                val dx = (ev.x - downX).coerceAtLeast(0f)
+                card.translationX = dx
+                val past = dx > width * THRESHOLD
+                if (past != armed) {
+                    armed = past
+                    if (past) performHapticFeedback(
+                        if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.CLOCK_TICK)
+                }
             }
             MotionEvent.ACTION_UP -> {
                 if (dragging) {
@@ -136,6 +147,7 @@ class SwipeToRead(
 
     private fun recycle() {
         dragging = false
+        armed = false
         velocity?.recycle()
         velocity = null
     }

@@ -551,6 +551,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(detail["targets"], 2);
     assert_eq!(detail["received"], 2);
     assert!(detail.get("acknowledged").is_none(), "alerts are one-way");
+    assert_eq!(detail["missing"], json!([]), "everyone received k1");
     let users: Vec<&str> = detail["deliveries"]
         .as_array()
         .unwrap()

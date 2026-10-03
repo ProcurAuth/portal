@@ -358,6 +358,14 @@ class Store private constructor(context: Context, private val defaultUserName: S
             "server_id = ? AND alert_id = ? AND read_at_ms IS NULL", arrayOf(serverId.toString(), alertId)
         ) > 0
 
+    /** Undo of a "mark read": the alert counts as unread again (local state only). */
+    fun markUnread(serverId: Long, alertId: String) {
+        writableDatabase.update(
+            "alerts", ContentValues().apply { putNull("read_at_ms") },
+            "server_id = ? AND alert_id = ?", arrayOf(serverId.toString(), alertId)
+        )
+    }
+
     fun unreadAlerts(): List<Alert> = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE read_at_ms IS NULL ORDER BY received_at_ms", emptyArray()
     )

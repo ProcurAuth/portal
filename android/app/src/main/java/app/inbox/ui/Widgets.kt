@@ -23,17 +23,15 @@ import app.inbox.R
 import kotlin.math.abs
 
 /**
- * Softly coloured backdrop behind the glass: a few large radial blobs on the page
- * colour, blurred on Android 12+ so translucent panels read as frosted glass.
+ * Page backdrop: graphite (or pale grey) with a single soft blue light in the top
+ * corner, blurred on Android 12+ so the drawer and sheets read as frosted.
  */
 class Backdrop(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
         android.content.res.Configuration.UI_MODE_NIGHT_YES
     private val blobs = listOf(
-        Triple(R.color.blob_1, floatArrayOf(0.12f, 0.08f), 0.75f),
-        Triple(R.color.blob_2, floatArrayOf(1.0f, 0.42f), 0.7f),
-        Triple(R.color.blob_3, floatArrayOf(0.15f, 0.95f), 0.8f),
+        Triple(R.color.backdrop_glow, floatArrayOf(0.1f, 0.04f), 0.95f),
     )
 
     init {
@@ -48,7 +46,7 @@ class Backdrop(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        val alpha = if (night) 0x55 else 0x66
+        val alpha = if (night) 0x44 else 0x55
         circles = blobs.map { (_, at, size) -> Triple(at[0] * w, at[1] * h, size * w) }
         shaders = blobs.mapIndexed { i, (res, _, _) ->
             val c = context.color(res) and 0x00FFFFFF
@@ -79,11 +77,15 @@ fun View.frost(on: Boolean) {
     setRenderEffect(if (on) RenderEffect.createBlurEffect(context.dpf(9f), context.dpf(9f), Shader.TileMode.CLAMP) else null)
 }
 
-/** Compact segmented control with monospace uppercase options. */
+/**
+ * Compact segmented control (sentence case, UI font). Each option is a radio for
+ * TalkBack; [describe] gives its spoken label, e.g. "Ops: Ring".
+ */
 fun Context.segmented(
     options: List<String>,
     selected: Int,
     accent: (Int) -> Pair<Int, Int> = { color(R.color.primary) to color(R.color.primary_soft) },
+    describe: ((Int) -> String)? = null,
     onSelect: (Int) -> Unit,
 ): LinearLayout = lin(vertical = false).apply {
     background = rounded(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke), dp(1))
@@ -91,15 +93,29 @@ fun Context.segmented(
     options.forEachIndexed { i, text ->
         val on = i == selected
         val (fg, bg) = accent(i)
-        addView(mono(text.uppercase(), 11f, if (on) fg else color(R.color.text_muted), bold = on).apply {
-            letterSpacing = 0.04f
+        addView(label(text, SP_S, if (on) fg else color(R.color.text_muted), if (on) BOLD else MEDIUM, lines = 1).apply {
             gravity = Gravity.CENTER
-            minHeight = dp(28)
-            setPadding(dp(2), 0, dp(2), 0)
+            minHeight = dp(44)
+            setPadding(dp(4), 0, dp(4), 0)
             background = if (on) rounded(bg, dpf(CONTROL_RADIUS - 2), fg and 0x59FFFFFF, dp(1)) else pressable(0x00000000, dpf(CONTROL_RADIUS - 2))
             isClickable = true
+            isFocusable = true
+            contentDescription = describe?.invoke(i) ?: text
+            if (Build.VERSION.SDK_INT >= 30) stateDescription = getString(if (on) R.string.a11y_selected else R.string.a11y_not_selected)
+            accessibilityDelegate = radioDelegate(on)
             setOnClickListener { if (i != selected) onSelect(i) }
         }, lp(0, WRAP, 1f))
+    }
+}
+
+/** Announces a view as a radio button, checked or not. */
+private fun radioDelegate(checked: Boolean) = object : View.AccessibilityDelegate() {
+    override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(host, info)
+        info.className = android.widget.RadioButton::class.java.name
+        info.isCheckable = true
+        @Suppress("DEPRECATION")
+        info.isChecked = checked
     }
 }
 
@@ -108,8 +124,8 @@ fun Context.row(title: String, subtitle: String? = null, trailing: View? = null,
     lin(vertical = false, padH = 14, padV = 10).apply {
         minimumHeight = dp(44)
         val texts = lin()
-        texts.addView(label(title, 14f, color(R.color.text), MEDIUM))
-        subtitle?.let { texts.addView(label(it, 11.5f, color(R.color.text_muted)), lp().margins(this@row, t = 2)) }
+        texts.addView(label(title, SP_M, color(R.color.text), MEDIUM))
+        subtitle?.let { texts.addView(label(it, SP_S, color(R.color.text_muted)), lp().margins(this@row, t = 2)) }
         addView(texts, lp(0, WRAP, 1f))
         trailing?.let { addView(it, lp(WRAP, WRAP).margins(this@row, l = 10)) }
         if (onClick != null) {
@@ -119,13 +135,14 @@ fun Context.row(title: String, subtitle: String? = null, trailing: View? = null,
         }
     }
 
-/** Key / value row: uppercase muted key, right-aligned monospace value. */
-fun Context.kv(key: String, value: String, valueColor: Int = color(R.color.text), lines: Int = 1): LinearLayout =
+/** Key / value row: muted key, right-aligned monospace value. */
+fun Context.kv(key: String, value: String, valueColor: Int = color(R.color.text), lines: Int = 1, valueMono: Boolean = true): LinearLayout =
     lin(vertical = false, padH = 14, padV = 0).apply {
-        minimumHeight = dp(30)
-        setPadding(dp(14), dp(6), dp(14), dp(6))
-        addView(label(key.uppercase(), 10f, color(R.color.text_muted), MEDIUM).apply { letterSpacing = 0.1f }, lp(WRAP, WRAP))
-        addView(mono(value, 11.5f, valueColor, lines = lines).apply { gravity = Gravity.END }, lp(0, WRAP, 1f).margins(this@kv, l = 12))
+        minimumHeight = dp(32)
+        setPadding(dp(14), dp(7), dp(14), dp(7))
+        addView(label(key, SP_S, color(R.color.text_muted)), lp(WRAP, WRAP))
+        val v = if (valueMono) mono(value, SP_S, valueColor, lines = lines) else label(value, SP_S, valueColor, MEDIUM, lines = lines)
+        addView(v.apply { gravity = Gravity.END }, lp(0, WRAP, 1f).margins(this@kv, l = 12))
     }
 
 /** Round tinted container with an icon in the middle. */
@@ -135,22 +152,88 @@ fun Context.iconBadge(res: Int, fg: Int, bg: Int, size: Int = 32): FrameLayout =
     layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
 }
 
-/** Thin warning strip with a coloured edge and a trailing action. */
-fun Context.banner(text: String, action: String, fg: Int, bg: Int, onAction: () -> Unit): LinearLayout =
+/** Thin strip with a coloured edge and a trailing action (sentence case). */
+fun Context.banner(
+    text: CharSequence,
+    action: String,
+    fg: Int,
+    bg: Int,
+    iconRes: Int = R.drawable.ic_warning,
+    onAction: () -> Unit,
+): LinearLayout =
     lin(vertical = false, padH = 0, padV = 0).apply {
-        background = rounded(bg, dpf(12f), fg and 0x4DFFFFFF, dp(1))
+        background = rounded(bg, dpf(CARD_RADIUS), fg and 0x4DFFFFFF, dp(1))
         clipToOutline = true
         outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
         addView(View(this@banner).apply { setBackgroundColor(fg) }, lp(dp(3), MATCH))
-        addView(icon(R.drawable.ic_warning, fg, 16), lp(dp(16), dp(16)).margins(this@banner, l = 10, r = 8))
-        addView(label(text, 12f, color(R.color.text), lines = 3).apply { setPadding(0, dp(9), 0, dp(9)) }, lp(0, WRAP, 1f))
-        addView(mono(action.uppercase(), 11f, fg, bold = true).apply {
-            setPadding(dp(12), dp(12), dp(12), dp(12))
+        addView(icon(iconRes, fg, 16), lp(dp(16), dp(16)).margins(this@banner, l = 10, r = 8))
+        addView(label(text, SP_S, color(R.color.text), lines = 3).apply { setPadding(0, dp(9), 0, dp(9)) }, lp(0, WRAP, 1f))
+        addView(label(action, SP_M, fg, MEDIUM).apply {
+            gravity = Gravity.CENTER
+            minHeight = dp(48)
+            setPadding(dp(12), 0, dp(12), 0)
             isClickable = true
+            isFocusable = true
             background = rowRipple()
             setOnClickListener { onAction() }
         })
     }
+
+/**
+ * Bottom snackbar inside [host] (a FrameLayout covering the screen): one line of
+ * text and an action, gone after [durationMs] or once the action is used. Showing
+ * a new one replaces the previous one.
+ */
+fun FrameLayout.snackbar(text: String, action: String? = null, durationMs: Long = 5_000, onAction: () -> Unit = {}) {
+    val c = context
+    findViewWithTag<View>(SNACKBAR_TAG)?.let { removeView(it) }
+    val bar = c.lin(vertical = false).apply {
+        tag = SNACKBAR_TAG
+        background = rounded(c.color(R.color.snackbar), c.dpf(CARD_RADIUS))
+        elevation = c.dpf(6f)
+        minimumHeight = c.dp(48)
+        setPadding(c.dp(16), 0, c.dp(if (action != null) 4 else 16), 0)
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+    }
+    val dismiss = Runnable {
+        bar.animate().alpha(0f).translationY(c.dpf(16f)).setDuration(150).withEndAction { removeView(bar) }.start()
+    }
+    bar.addView(c.label(text, SP_M, c.color(R.color.on_snackbar), lines = 2), lp(0, WRAP, 1f))
+    if (action != null) bar.addView(c.label(action, SP_M, c.color(R.color.snackbar_action), BOLD).apply {
+        gravity = Gravity.CENTER
+        minHeight = c.dp(48)
+        setPadding(c.dp(14), 0, c.dp(14), 0)
+        isClickable = true
+        isFocusable = true
+        background = c.pressable(0x00000000, c.dpf(CONTROL_RADIUS))
+        setOnClickListener {
+            bar.removeCallbacks(dismiss)
+            removeView(bar)
+            onAction()
+        }
+    })
+    val bottom = bottomInset() + c.dp(12)
+    addView(bar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM).apply {
+        setMargins(c.dp(10), 0, c.dp(10), bottom)
+    })
+    bar.alpha = 0f
+    bar.translationY = c.dpf(16f)
+    bar.animate().alpha(1f).translationY(0f).setDuration(180).start()
+    bar.postDelayed(dismiss, durationMs)
+}
+
+private const val SNACKBAR_TAG = "inbox.snackbar"
+
+/** Bottom system bar (or keyboard) inset currently applied to this view's window. */
+@Suppress("DEPRECATION")
+private fun View.bottomInset(): Int {
+    val insets = rootWindowInsets ?: return 0
+    return if (Build.VERSION.SDK_INT >= 30) {
+        insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.ime()).bottom
+    } else {
+        insets.systemWindowInsetBottom
+    }
+}
 
 /** Bottom sheet on a plain Dialog: frosted glass, blurred backdrop on Android 12+. */
 fun Activity.bottomSheet(build: (LinearLayout, Dialog) -> Unit): Dialog {
@@ -198,6 +281,8 @@ fun Activity.bottomSheet(build: (LinearLayout, Dialog) -> Unit): Dialog {
 class Drawer(context: Context, private val scrim: View, private val behind: View) : LinearLayout(context) {
     var isOpen = false
         private set
+    /** Called after each open / close, e.g. to (un)register the Back callback. */
+    var onToggle: (() -> Unit)? = null
     private var startX = 0f
     private var dragging = false
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
@@ -226,6 +311,7 @@ class Drawer(context: Context, private val scrim: View, private val behind: View
         behind.frost(true)
         scrim.animate().alpha(1f).setDuration(200).start()
         animate().translationX(0f).setDuration(220).start()
+        onToggle?.invoke()
     }
 
     fun close() {
@@ -235,6 +321,7 @@ class Drawer(context: Context, private val scrim: View, private val behind: View
         animate().translationX(-width.toFloat()).setDuration(200).withEndAction {
             if (!isOpen) visibility = INVISIBLE
         }.start()
+        onToggle?.invoke()
     }
 
     override fun onInterceptTouchEvent(e: MotionEvent): Boolean {

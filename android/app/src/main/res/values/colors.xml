@@ -38,8 +38,11 @@
     <color name="info">#0E7490</color>
     <color name="info_soft">#1F22B8CF</color>
 
-    <!-- Backdrop blobs (alpha applied when painted) -->
-    <color name="blob_1">#7FB2FF</color>
-    <color name="blob_2">#C3B1FF</color>
-    <color name="blob_3">#8CE8DA</color>
+    <!-- Snackbar: inverse surface -->
+    <color name="snackbar">#1E2430</color>
+    <color name="on_snackbar">#F5F7FA</color>
+    <color name="snackbar_action">#7CB6FF</color>
+
+    <!-- The one soft blue light on the page (alpha applied when painted) -->
+    <color name="backdrop_glow">#7FB2FF</color>
 </resources>

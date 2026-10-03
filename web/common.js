@@ -33,13 +33,23 @@ window.Inbox = (() => {
       opts.headers['x-inbox-request'] = '1';
       opts.body = JSON.stringify(body === undefined ? {} : body);
     }
-    const res = await fetch(path, opts);
+    let res;
+    try {
+      res = await fetch(path, opts);
+    } catch (_) {
+      // No HTTP answer at all: server down, network cut or proxy gone.
+      const err = new Error("Can't reach the Inbox server");
+      err.offline = true;
+      throw err;
+    }
     const data = await res.json().catch(() => ({}));
     const hostError = $('host-error');
     if (!res.ok) {
       const err = new Error((data.error && data.error.message) || 'HTTP ' + res.status);
       err.status = res.status;
       err.code = data.error && data.error.code;
+      // A proxy answering for a stopped server (502/503/504) is the same outage.
+      err.offline = res.status >= 502 && res.status <= 504;
       if (err.code === 'host_not_allowed' && hostError) {
         $('host-error-host').textContent = location.host;
         hostError.hidden = false;
@@ -89,13 +99,6 @@ window.Inbox = (() => {
     }
     toast('Copy unavailable');
     return false;
-  }
-
-  // Older versions stored display settings here; the dashboard has none now.
-  try {
-    localStorage.removeItem('inbox.settings');
-  } catch (_) {
-    // Storage unavailable: nothing to clean.
   }
 
   // Theme: "system" (default, follows the browser), "light" or "dark". The

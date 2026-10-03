@@ -100,6 +100,10 @@ abstract class BaseActivity : Activity() {
         }
     }
 
+    /** Bottom snackbar over this screen (see [android.widget.FrameLayout.snackbar]). */
+    fun snackbar(text: String, action: String? = null, onAction: () -> Unit = {}) =
+        findViewById<android.widget.FrameLayout>(android.R.id.content).snackbar(text, action, onAction = onAction)
+
     /** Sets the content over the backdrop and keeps it clear of the system bars. */
     fun setScreen(root: View) {
         setContentView(withBackdrop(root))

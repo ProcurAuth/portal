@@ -3,6 +3,7 @@ package app.inbox.service
 import android.content.Context
 import android.util.Log
 import app.inbox.BuildConfig
+import app.inbox.R
 import app.inbox.alert.Alerter
 import app.inbox.core.Native
 import app.inbox.data.Alert
@@ -109,7 +110,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                 waitFor(Long.MAX_VALUE)
                 continue
             }
-            Registry.setStatus(serverId, LinkState.CONNECTING, null)
+            // While offline, retries keep the red "Offline" until one succeeds (no flicker).
+            val st = Registry.status(serverId)
+            if (failures == 0 || st.state != LinkState.DISCONNECTED) {
+                Registry.setStatus(serverId, LinkState.CONNECTING, st.detail.takeIf { st.state == LinkState.CONNECTING })
+            }
             val delay = try {
                 runSession(server)
             } catch (e: InterruptedException) {
@@ -190,6 +195,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         }
         val ws = Http.client.newWebSocket(Request.Builder().url(address.ws("/v1/session")).build(), Listener())
         socket = ws
+        // Set once the server welcomed us: losing such a session first shows
+        // "Reconnecting…"; "Offline" waits for a reconnect attempt to fail.
+        var welcomed = false
 
         try {
             // Handshake.
@@ -215,15 +223,15 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             var heartbeat = server.heartbeatMs
             var lastFrame = System.currentTimeMillis()
             var lastPing = lastFrame
-            var welcomed = false
             while (running) {
                 val now = System.currentTimeMillis()
-                if (now - lastFrame > heartbeat * 5 / 2) throw SessionEnd(1_000, "No answer from the server")
+                val silence = noAnswerTimeout(heartbeat)
+                if (now - lastFrame > silence) throw SessionEnd(1_000, "No answer from the server")
                 if (welcomed && now - lastPing >= heartbeat) {
                     ping()
                     lastPing = now
                 }
-                val wait = maxOf(100L, minOf(heartbeat - (now - lastPing), heartbeat * 5 / 2 - (now - lastFrame)))
+                val wait = maxOf(100L, minOf(heartbeat - (now - lastPing), silence - (now - lastFrame)))
                 when (val e = events.poll(wait, TimeUnit.MILLISECONDS)) {
                     null -> {}
                     is Event.Binary -> {
@@ -252,7 +260,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                         }
                     }
                     is Event.Command -> if (connected) send(e.json)
-                    is Event.Closed -> return onClosed(e.code, e.reason)
+                    is Event.Closed -> return onClosed(e.code, e.reason, welcomed)
                     is Event.Failure -> throw SessionEnd(backoff(), e.error.message ?: "Connection lost")
                     Event.Stop -> return 0
                     Event.Wake, Event.Open -> {}
@@ -261,7 +269,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             }
             return 0
         } catch (e: SessionEnd) {
-            Registry.setStatus(serverId, LinkState.DISCONNECTED, e.message)
+            if (welcomed) Registry.setStatus(serverId, LinkState.CONNECTING, context.getString(R.string.status_reconnecting))
+            else Registry.setStatus(serverId, LinkState.DISCONNECTED, e.message)
             return e.retryAfterMs
         } finally {
             ws.close(1000, null)
@@ -296,8 +305,21 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         }
     }
 
-    /** Maps a close code to the reconnect policy. Returns the delay before reconnecting. */
-    private fun onClosed(code: Int, reason: String): Long {
+    /**
+     * Silence after which the session is considered dead: 2.5 heartbeats, but at
+     * least 4 measured round trips and 10 s, so a slow link is not cut needlessly.
+     */
+    private fun noAnswerTimeout(heartbeat: Long): Long {
+        val rtt = Registry.liveness(serverId).rttMs ?: 0L
+        return maxOf(heartbeat * 5 / 2, rtt * 4, 10_000L)
+    }
+
+    /**
+     * Maps a close code to the reconnect policy. Returns the delay before reconnecting.
+     * [wasConnected]: the session had been welcomed, so an ordinary close shows
+     * "Reconnecting…" until the next attempt says otherwise.
+     */
+    private fun onClosed(code: Int, reason: String, wasConnected: Boolean = false): Long {
         connected = false
         return when (code) {
             CLOSE_UNKNOWN_DEVICE, CLOSE_REVOKED -> {
@@ -319,11 +341,13 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                 5_000L
             }
             CLOSE_RESTART -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Server restarting")
+                if (wasConnected) Registry.setStatus(serverId, LinkState.CONNECTING, context.getString(R.string.status_reconnecting))
+                else Registry.setStatus(serverId, LinkState.DISCONNECTED, "Server restarting")
                 1_000L + Random.nextLong(2_000L)
             }
             else -> {
-                Registry.setStatus(serverId, LinkState.DISCONNECTED, "Disconnected ($code${if (reason.isNotEmpty()) " $reason" else ""})")
+                if (wasConnected) Registry.setStatus(serverId, LinkState.CONNECTING, context.getString(R.string.status_reconnecting))
+                else Registry.setStatus(serverId, LinkState.DISCONNECTED, "Disconnected ($code${if (reason.isNotEmpty()) " $reason" else ""})")
                 backoff()
             }
         }

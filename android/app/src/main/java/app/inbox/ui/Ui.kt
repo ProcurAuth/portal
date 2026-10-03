@@ -23,9 +23,9 @@ import java.util.Locale
 
 /*
  * Programmatic view toolkit (the app ships without AndroidX nor XML layouts).
- * Visual language, "industrial glass": dense rows like an observability event
- * viewer (monospace data, uppercase micro-labels, hairlines, severity bars) laid
- * on frosted translucent panels over a softly coloured backdrop.
+ * Visual language, compact industrial: dense rows like an observability event
+ * viewer (monospace for data only, hairlines, severity bars) on solid cards over
+ * a graphite page with one soft blue light.
  */
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
@@ -41,6 +41,24 @@ val REGULAR: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
 val LIGHT: Typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
 val MONO: Typeface = Typeface.MONOSPACE
 val MONO_BOLD: Typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+
+/*
+ * The whole type scale, in sp: five sizes. Only the alarm page adds display sizes.
+ * Nothing that carries meaning goes below SP_XS.
+ */
+const val SP_XS = 11f
+const val SP_S = 12f
+const val SP_M = 14f
+const val SP_L = 16f
+const val SP_XL = 22f
+
+private val SCALE = floatArrayOf(SP_XS, SP_S, SP_M, SP_L, SP_XL)
+
+/** The scale size [steps] away from [size] (clamped to the scale). */
+fun scaleStep(size: Float, steps: Int): Float {
+    val i = SCALE.indexOfFirst { it >= size }.let { if (it < 0) SCALE.size - 1 else it }
+    return SCALE[(i + steps).coerceIn(0, SCALE.size - 1)]
+}
 
 /** Panel radius (continuous-looking large corners) and compact control radius. */
 const val PANEL_RADIUS = 18f
@@ -99,7 +117,7 @@ fun Context.lin(vertical: Boolean = true, padH: Int = 0, padV: Int = 0): LinearL
 
 fun Context.label(
     value: CharSequence,
-    size: Float = 14f,
+    size: Float = SP_M,
     color: Int = color(R.color.text),
     face: Typeface = REGULAR,
     lines: Int = 0,
@@ -117,7 +135,7 @@ fun Context.label(
 }
 
 /** Monospace data text with tabular figures. */
-fun Context.mono(value: CharSequence, size: Float = 12f, color: Int = color(R.color.text), bold: Boolean = false, lines: Int = 1): TextView =
+fun Context.mono(value: CharSequence, size: Float = SP_S, color: Int = color(R.color.text), bold: Boolean = false, lines: Int = 1): TextView =
     label(value, size, color, if (bold) MONO_BOLD else MONO, lines).apply {
         fontFeatureSettings = "tnum"
     }
@@ -128,7 +146,7 @@ fun Context.icon(res: Int, tint: Int, size: Int = 20): ImageView = ImageView(thi
     layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
 }
 
-/** A 40 dp touch target holding an icon. */
+/** A 48 dp touch target holding an icon. */
 fun Context.iconButton(res: Int, description: String, tint: Int = color(R.color.text), size: Int = 20, onClick: () -> Unit): FrameLayout =
     FrameLayout(this).apply {
         contentDescription = description
@@ -136,7 +154,7 @@ fun Context.iconButton(res: Int, description: String, tint: Int = color(R.color.
         isClickable = true
         setOnClickListener { onClick() }
         addView(icon(res, tint, size), FrameLayout.LayoutParams(dp(size), dp(size), Gravity.CENTER))
-        layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
     }
 
 /** Solid card holding compact rows. */
@@ -148,7 +166,7 @@ fun Context.panel(padH: Int = 0, padV: Int = 0): LinearLayout = lin(padH = padH,
 
 /** Square-ish monospace tag: "ALARM", "RING", "NOTIF"… */
 fun Context.chip(value: String, fg: Int, bg: Int, dot: Boolean = false): TextView =
-    mono(value.uppercase(), 10f, fg, bold = true).apply {
+    mono(value.uppercase(), SP_XS, fg, bold = true).apply {
         letterSpacing = 0.06f
         background = rounded(bg, dpf(CHIP_RADIUS), fg and 0x40FFFFFF, dp(1))
         setPadding(dp(6), dp(3), dp(6), dp(3))
@@ -168,9 +186,9 @@ fun Context.statusDot(fg: Int, size: Int = 7): View = View(this).apply {
 enum class ButtonKind { PRIMARY, SECONDARY, DANGER }
 
 fun Context.button(value: String, kind: ButtonKind = ButtonKind.PRIMARY, onClick: () -> Unit): TextView =
-    label(value, 14f, face = MEDIUM).apply {
+    label(value, SP_M, face = MEDIUM).apply {
         gravity = Gravity.CENTER
-        minHeight = dp(40)
+        minHeight = dp(48)
         setPadding(dp(14), 0, dp(14), 0)
         isClickable = true
         isFocusable = true
@@ -191,11 +209,16 @@ fun Context.button(value: String, kind: ButtonKind = ButtonKind.PRIMARY, onClick
         setOnClickListener { onClick() }
     }
 
-/** Uppercase micro-label above a panel, with an optional right-aligned mono value. */
-fun Context.sectionLabel(value: String, trailing: String? = null): View {
-    val row = lin(vertical = false, padH = 6, padV = 0).apply { setPadding(dp(6), dp(14), dp(6), dp(6)) }
-    row.addView(label(value.uppercase(), 11f, color(R.color.text_muted), MEDIUM).apply { letterSpacing = 0.12f }, lp(0, WRAP, 1f))
-    trailing?.let { row.addView(mono(it, 11f, color(R.color.text_muted))) }
+/**
+ * Section title (sentence case): the heading of the panel below it, never an
+ * eyebrow over another title. Optional right-aligned data value.
+ */
+fun Context.sectionTitle(value: String, trailing: String? = null): View {
+    val row = lin(vertical = false).apply { setPadding(dp(4), dp(18), dp(4), dp(8)) }
+    row.addView(label(value, SP_L, color(R.color.text_strong), MEDIUM).apply {
+        if (android.os.Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
+    }, lp(0, WRAP, 1f))
+    trailing?.let { row.addView(label(it, SP_S, color(R.color.text_muted)).apply { fontFeatureSettings = "tnum" }) }
     return row
 }
 
@@ -222,7 +245,7 @@ fun LinearLayout.LayoutParams.margins(c: Context, l: Int = 0, t: Int = 0, r: Int
 /**
  * Compact app bar (48 dp) drawn directly on the page background: navigation icon
  * on the left, optional trailing view (status) on the right. No title and no bar
- * background: the screen context is the content's section label.
+ * background: the screen context is the content's section title.
  */
 fun Context.topBar(navRes: Int, navDescription: String, onNav: () -> Unit, trailing: View? = null): LinearLayout {
     val bar = lin(vertical = false, padH = 4, padV = 0).apply {

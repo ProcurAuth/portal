@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app fit">
+  <div id="app" class="app fit loading">
     <header class="topbar">
       <a class="brand" href="./">
         <img src="logo.svg" alt="" class="brand-mark" width="24" height="24">
@@ -20,8 +20,8 @@
       </a>
       <span class="topbar-spacer"></span>
       <span id="freshness" class="freshness" title="Time since the dashboard data was last refreshed"></span>
-      <span id="status-pill" class="status-pill idle" title="">
-        <span class="dot"></span><span id="status-text">…</span>
+      <span id="status-pill" class="status-pill idle">
+        <span class="dot"></span><span id="status-text">Connecting…</span>
       </span>
       <div class="segmented" role="group" aria-label="Theme" data-theme-switch>
         <button type="button" data-theme-value="system" title="Browser theme" aria-label="Browser theme"><span class="mdi mdi-theme-system"></span></button>
@@ -40,21 +40,47 @@
           or declare the reverse proxy in <code>server.trusted_proxies</code>, then restart Inbox.
         </div>
       </div>
-      <div id="global-error" class="banner danger" hidden></div>
+      <div id="offline-banner" class="banner danger" hidden>
+        <span class="mdi mdi-alert-circle-outline"></span>
+        <span id="offline-text"></span>
+      </div>
     </div>
+
+    <section id="coverage" class="coverage" aria-label="Coverage per group">
+      <div id="coverage-list" class="coverage-list"></div>
+    </section>
 
     <main class="dashboard">
       <div class="col">
-        <section id="send" class="panel send-panel">
-          <div class="panel-head">
-            <h2>Send an alert</h2>
-            <span id="send-targets" class="meta"></span>
+        <section id="alerts" class="feed grow">
+          <div class="feed-head">
+            <h2>Latest alerts</h2>
+            <span id="alerts-summary" class="meta">last 24 h</span>
+            <span class="stale-tag">stale data</span>
           </div>
-          <form id="send-form" class="send-form" novalidate>
+          <div id="alerts-body" class="feed-body">
+            <div id="alerts-list" class="cards"></div>
+            <div id="alerts-empty" class="empty" hidden>
+              <span class="mdi mdi-bell-outline"></span>
+              <p>No alert in the last 24 hours.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="send" class="panel send-panel">
+          <button id="send-toggle" class="send-toggle" type="button" aria-expanded="false" aria-controls="send-form">
+            <span class="mdi mdi-send"></span>
+            <span class="send-toggle-label">Send an alert</span>
+            <span id="send-targets" class="meta"></span>
+            <span class="mdi mdi-chevron-down send-chevron"></span>
+          </button>
+          <form id="send-form" class="send-form" novalidate hidden>
             <div class="send-row">
               <label class="field">
                 <span>Group</span>
-                <select id="send-group" required></select>
+                <select id="send-group" required disabled>
+                  <option value="">Loading groups…</option>
+                </select>
               </label>
               <label class="field">
                 <span>Description <em>optional</em> <b id="desc-count" class="counter">0/128</b></span>
@@ -63,35 +89,22 @@
             </div>
             <div class="field details-field">
               <div class="details-head">
-                <span class="field-label">Details <em>optional, Markdown</em></span>
+                <span class="field-label" id="details-label">Details <em>optional, Markdown</em></span>
                 <div class="tabs" role="tablist" aria-label="Details editor">
                   <button id="tab-write" type="button" role="tab" aria-selected="true" aria-controls="send-details">Write</button>
                   <button id="tab-preview" type="button" role="tab" aria-selected="false" aria-controls="details-preview">Preview</button>
                 </div>
               </div>
-              <textarea id="send-details" rows="3" placeholder="Markdown: **bold**, `code`, lists, tables, ```code blocks```…" aria-label="Details"></textarea>
+              <textarea id="send-details" rows="3" placeholder="Markdown: **bold**, `code`, lists, tables, ```code blocks```…" aria-labelledby="details-label"></textarea>
               <div id="details-preview" class="details-preview" role="tabpanel" hidden></div>
             </div>
             <div class="send-foot">
               <span id="send-hint" class="targets"></span>
-              <button id="send-btn" class="btn primary" type="submit"><span class="mdi mdi-send"></span>Send</button>
+              <button id="send-cancel" class="btn" type="button">Close</button>
+              <button id="send-btn" class="btn primary" type="submit" disabled><span class="mdi mdi-send"></span>Send</button>
             </div>
             <div id="send-result" class="banner" hidden></div>
           </form>
-        </section>
-
-        <section id="alerts" class="panel grow">
-          <div class="panel-head">
-            <h2>Latest alerts</h2>
-            <span class="meta">last 5 · 24 h</span>
-          </div>
-          <div class="panel-body">
-            <div id="alerts-list" class="rows"></div>
-            <div id="alerts-empty" class="empty" hidden>
-              <span class="mdi mdi-bell-outline"></span>
-              <p>No alert in the last 24 hours.</p>
-            </div>
-          </div>
         </section>
       </div>
 
@@ -100,13 +113,29 @@
           <div class="panel-head">
             <h2>Devices</h2>
             <span id="devices-summary" class="meta"></span>
+            <span class="stale-tag">stale data</span>
+            <button id="phone-link-btn" class="btn ghost" type="button" title="Copy the link that adds this server in the Inbox app" hidden>
+              <span class="mdi mdi-cellphone"></span><span class="label">Phone link</span>
+            </button>
           </div>
           <div id="user-filter" class="filter-chips" role="group" aria-label="Filter by user" hidden></div>
           <div class="panel-body">
             <div id="devices-list" class="rows"></div>
-            <div id="devices-empty" class="empty" hidden>
+            <div id="devices-empty" class="onboard" hidden>
               <span class="mdi mdi-cellphone"></span>
-              <p>No enrolled device. Install the app and add this server.</p>
+              <p class="onboard-title">No phone enrolled yet</p>
+              <p>Install the Inbox APK, then add this server in the app.</p>
+              <div class="addr">
+                <span class="addr-label">Server address</span>
+                <code id="api-address" class="addr-value"></code>
+                <button id="api-address-copy" class="btn" type="button"><span class="mdi mdi-content-copy"></span>Copy</button>
+              </div>
+              <div class="addr">
+                <span class="addr-label">Phone link</span>
+                <a id="phone-link" class="addr-value mono" href="#"></a>
+                <button id="phone-link-copy" class="btn" type="button"><span class="mdi mdi-content-copy"></span>Copy</button>
+              </div>
+              <p class="hint">Open the phone link on the phone (send it by message or mail): the app opens on the add-server form, already filled in.</p>
             </div>
           </div>
         </section>
@@ -115,6 +144,7 @@
           <div class="panel-head">
             <h2>Connections</h2>
             <span id="connections-summary" class="meta"></span>
+            <span class="stale-tag">stale data</span>
           </div>
           <div class="panel-body">
             <div id="connections-list" class="rows"></div>
@@ -128,10 +158,9 @@
     </main>
   </div>
 
-  <dialog id="detail-dialog" class="sheet">
+  <dialog id="detail-dialog" class="sheet" aria-labelledby="detail-title">
     <div class="sheet-head">
       <div>
-        <span id="detail-group" class="chip"></span>
         <h2 id="detail-title"></h2>
         <p id="detail-meta"></p>
       </div>
@@ -154,6 +183,7 @@
     </form>
   </dialog>
 
+  <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="false"></div>
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="common.js"></script>

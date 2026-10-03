@@ -10,13 +10,17 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableStringBuilder
+import android.text.StaticLayout
+import android.text.Spanned
+import android.text.style.TypefaceSpan
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.window.OnBackInvokedDispatcher
 import app.inbox.R
 import app.inbox.alert.Alerter
 import app.inbox.data.Store
@@ -64,6 +68,7 @@ class AlarmActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        blockBack()
         render()
     }
 
@@ -95,9 +100,17 @@ class AlarmActivity : Activity() {
         render()
     }
 
+    /** Android 8 to 12: Back is ignored on purpose (13+ uses the callback registered in onCreate). */
     @Deprecated("Back must not dismiss an alarm silently")
     override fun onBackPressed() {
         // Ignored on purpose: the alarm is stopped with the big button only.
+    }
+
+    /** Swallows Back on Android 13+: the alarm is stopped with the big button only. */
+    private fun blockBack() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY) {}
+        }
     }
 
     private fun render() {
@@ -108,6 +121,7 @@ class AlarmActivity : Activity() {
         val a = ringing.last()
         val others = ringing.dropLast(1).reversed()
         val server = store.server(a.serverId)
+        val largeFont = resources.configuration.fontScale >= 1.2f
 
         val red = 0xFFF04438.toInt()
         val glow = GradientDrawable().apply {
@@ -121,63 +135,117 @@ class AlarmActivity : Activity() {
         }
         val col = lin(padH = 16, padV = 16).apply { gravity = Gravity.CENTER_HORIZONTAL }
 
-        // Elapsed time since the alert was emitted, live, above everything else.
+        // Elapsed time since the alert was emitted, live: "+03:12 since alert".
         emittedAtMs = a.createdAtMs
-        col.addView(mono(getString(R.string.alarm_since_alert).uppercase(), 11f, faint, bold = true).apply {
+        val timer = lin(vertical = false).apply {
             gravity = Gravity.CENTER
-            letterSpacing = 0.14f
-        }, lp(MATCH, WRAP).margins(this, t = 12))
-        elapsed = mono(elapsedText(System.currentTimeMillis() - a.createdAtMs), 46f, white).apply {
-            gravity = Gravity.CENTER
+            isBaselineAligned = true
         }
-        col.addView(elapsed, lp(MATCH, WRAP).margins(this, t = 6))
+        elapsed = mono(elapsedText(System.currentTimeMillis() - a.createdAtMs), if (largeFont) 40f else 46f, white)
+        timer.addView(elapsed)
+        timer.addView(label(getString(R.string.alarm_since_alert), SP_L, dim), lp(WRAP, WRAP).margins(this, l = 10))
+        col.addView(timer, lp(MATCH, WRAP).margins(this, t = 8))
 
-        // Header: group and how many others ring.
+        // Group (the one place it is named) and how many others ring.
         val head = lin(vertical = false).apply { gravity = Gravity.CENTER }
-        head.addView(chip(a.groupName, red, 0x29F04438, dot = true))
+        head.addView(label(a.groupName, SP_M, red, MEDIUM, lines = 1).apply {
+            background = rounded(0x29F04438, dpf(CHIP_RADIUS), 0x40F04438, dp(1))
+            setPadding(dp(8), dp(4), dp(10), dp(4))
+            val d = rounded(red, dpf(3f)).apply { setSize(dp(6), dp(6)) }
+            setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null)
+            compoundDrawablePadding = dp(6)
+        })
         if (others.isNotEmpty()) {
-            head.addView(chip("+" + others.size, dim, 0x14FFFFFF), lp(WRAP, WRAP).margins(this, l = 6))
+            head.addView(mono("+" + others.size, SP_M, dim, bold = true).apply {
+                background = rounded(0x14FFFFFF, dpf(CHIP_RADIUS))
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                contentDescription = resources.getQuantityString(R.plurals.alarm_others, others.size, others.size)
+            }, lp(WRAP, WRAP).margins(this, l = 6))
         }
-        col.addView(head, lp(MATCH, WRAP).margins(this, t = 14))
-        col.addView(mono(listOfNotNull(server?.serverName?.uppercase(), getString(R.string.alarm_sent_at, hms(a.createdAtMs)),
-            getString(R.string.alarm_received_at, hms(a.receivedAtMs)))
-            .joinToString(" · "), 10.5f, faint, lines = 2).apply { gravity = Gravity.CENTER; letterSpacing = 0.02f },
+        col.addView(head, lp(MATCH, WRAP).margins(this, t = 12))
+        val meta = SpannableStringBuilder()
+        server?.serverName?.let { meta.append(it).append("  ·  ") }
+        meta.append(getString(R.string.alarm_sent)).append(' ')
+        monoSpan(meta, hms(a.createdAtMs))
+        meta.append("  ·  ").append(getString(R.string.alarm_received)).append(' ')
+        monoSpan(meta, hms(a.receivedAtMs))
+        col.addView(label(meta, SP_S, faint, lines = 2).apply { gravity = Gravity.CENTER },
             lp(MATCH, WRAP).margins(this, t = 10))
 
-        // Alert text on a glass card, scrollable when long.
+        // Alert text on a card; scrolls when long, with a fade and a "More" hint.
         val card = lin(padH = 16, padV = 14).apply {
             background = LayerDrawable(arrayOf(
                 rounded(0x17FFFFFF, dpf(18f), 0x24FFFFFF, dp(1)),
                 GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x14FFFFFF, 0x00FFFFFF)).apply { cornerRadius = dpf(18f) },
             ))
         }
-        card.addView(mono(getString(R.string.action_alarm).uppercase() + " · " + a.groupName.uppercase(), 10.5f, red, bold = true).apply { letterSpacing = 0.08f })
-        card.addView(label(a.description ?: a.groupName, 22f, white, BOLD), lp().margins(this, t = 8))
-        a.details?.let { card.addView(markdown(it, MdPalette.ALARM, 15f), lp().margins(this, t = 10)) }
+        val text = a.description ?: a.groupName
+        val description = label(text, 24f, white, BOLD)
+        // Beyond two lines at 24 sp, the description steps down to 18 sp.
+        val textWidth = resources.displayMetrics.widthPixels - dp(64)
+        val lines = StaticLayout.Builder.obtain(text, 0, text.length, description.paint, textWidth)
+            .setLineSpacing(description.lineSpacingExtra, description.lineSpacingMultiplier)
+            .build().lineCount
+        if (lines > 2) description.textSize = 18f
+        card.addView(description)
+        a.details?.let { card.addView(markdown(it, MdPalette.ALARM, SP_L), lp().margins(this, t = 10)) }
         if (others.isNotEmpty()) {
             card.addView(View(this).apply { setBackgroundColor(0x1AFFFFFF) }, lp(MATCH, 1).margins(this, t = 12, b = 8))
             for (o in others.take(3)) {
-                card.addView(mono(hms(o.createdAtMs) + "  " + (o.description ?: o.groupName), 11.5f, faint), lp().margins(this, t = 3))
+                val line = SpannableStringBuilder()
+                monoSpan(line, hms(o.createdAtMs))
+                line.append("  ").append(o.description ?: o.groupName)
+                card.addView(label(line, SP_S, faint, lines = 1), lp().margins(this, t = 4))
             }
-            card.addView(label(getString(R.string.alarm_all_stopped), 11f, faint), lp().margins(this, t = 6))
+            card.addView(label(getString(R.string.alarm_all_stopped), SP_S, faint), lp().margins(this, t = 6))
         }
         val textScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(dp(40))
             addView(card)
         }
-        col.addView(textScroll, lp(MATCH, 0, 1f).margins(this, t = 18))
+        val more = label(getString(R.string.alarm_more), SP_S, white, MEDIUM).apply {
+            background = rounded(0xCC1A1F29.toInt(), dpf(12f), 0x33FFFFFF, dp(1))
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            visibility = View.GONE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            isClickable = true
+            setOnClickListener { textScroll.smoothScrollBy(0, textScroll.height * 2 / 3) }
+        }
+        val textBox = FrameLayout(this)
+        textBox.addView(textScroll, FrameLayout.LayoutParams(MATCH, MATCH))
+        textBox.addView(more, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(6)
+        })
+        col.addView(textBox, lp(MATCH, 0, 1f).margins(this, t = 16))
 
-        col.addView(StopButton(this) {
+        val stop = StopButton(this) {
             Alerter.stopAllAlarms(this)
             finish()
-        }, lp(WRAP, WRAP).margins(this, t = 8))
-        col.addView(mono(getString(R.string.alarm_hint).uppercase(), 11f, dim, bold = true).apply {
+        }.apply { compact = largeFont }
+        // Overflowing text: show the hint and give the text more room with a smaller dial.
+        val refreshMore = {
+            val overflow = card.height > textScroll.height
+            if (overflow) stop.compact = true
+            more.visibility = if (textScroll.canScrollVertically(1)) View.VISIBLE else View.GONE
+        }
+        textScroll.setOnScrollChangeListener { _, _, _, _, _ -> refreshMore() }
+        textScroll.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> textScroll.post { refreshMore() } }
+        col.addView(stop, lp(WRAP, WRAP).margins(this, t = 8))
+        col.addView(label(getString(R.string.alarm_hint), SP_M, dim, MEDIUM).apply {
             gravity = Gravity.CENTER
-            letterSpacing = 0.14f
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }, lp(MATCH, WRAP).margins(this, t = 2, b = 10))
 
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
         applyInsets(col)
+    }
+
+    private fun monoSpan(sb: SpannableStringBuilder, text: String) {
+        val start = sb.length
+        sb.append(text)
+        sb.setSpan(TypefaceSpan("monospace"), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 }
