@@ -12,6 +12,10 @@
     <string name="drawer_no_pseudo">no username</string>
     <string name="drawer_servers_none">No server</string>
     <string name="drawer_servers_all_up">All connected</string>
+    <plurals name="servers_connected">
+        <item quantity="one">%1$d/%2$d server connected</item>
+        <item quantity="other">%1$d/%2$d servers connected</item>
+    </plurals>
     <plurals name="drawer_servers_down">
         <item quantity="one">%d server offline</item>
         <item quantity="other">%d servers offline</item>
@@ -141,11 +145,9 @@
     <!-- Service notifications -->
     <string name="svc_starting">Starting…</string>
     <string name="svc_no_server">No server configured</string>
-    <string name="svc_connected">%1$s: connected</string>
     <string name="svc_connecting">%1$s: connecting…</string>
     <string name="svc_disconnected">%1$s: disconnected %2$s</string>
     <string name="svc_reenroll">%1$s: re-enrollment required</string>
-    <string name="svc_all_connected">Servers connected: %1$d/%2$d</string>
     <string name="svc_warning_title">Alerts not received: %1$s</string>
     <string name="svc_warning_text">Inbox is no longer connected to this server</string>
     <string name="svc_warning_big">Inbox can no longer receive alerts from %1$s. %2$s</string>

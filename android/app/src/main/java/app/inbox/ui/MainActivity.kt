@@ -368,31 +368,51 @@ class MainActivity : BaseActivity() {
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
         if (alerts.isEmpty()) {
-            body.addView(label(getString(R.string.alerts_none), SP_M, color(R.color.text_muted)).apply {
-                gravity = Gravity.CENTER
-            }, lp().margins(this, t = 32, b = 8))
-        } else {
-            // One card per alert, the severity bar on its left edge. Swipe right: read.
-            alerts.forEachIndexed { i, a ->
-                val card = lin().apply {
-                    background = solidCard()
-                    clipToOutline = true
-                    outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
-                    addView(alertRow(a, names[a.serverId] ?: "", now))
-                }
-                val swipe = SwipeToRead(this, card, enabled = a.unread, removeOnCommit = !showRead) {
-                    val marked = Alerter.markRead(this, a.serverId, a.alertId)
-                    render()
-                    if (marked) offerUndo(listOf(a.serverId to a.alertId))
-                }
-                body.addView(swipe, lp().margins(this, t = if (i == 0) 4 else 8))
+            // The all-clear fills the free space; "Show read" stays pinned at the bottom.
+            body.addView(allClear(overall(servers)), lp(MATCH, 0, 1f))
+            body.addView(showReadToggle(showRead),
+                lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            return
+        }
+        // One card per alert, the severity bar on its left edge. Swipe right: read.
+        alerts.forEachIndexed { i, a ->
+            val card = lin().apply {
+                background = solidCard()
+                clipToOutline = true
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+                addView(alertRow(a, names[a.serverId] ?: "", now))
             }
+            val swipe = SwipeToRead(this, card, enabled = a.unread, removeOnCommit = !showRead) {
+                val marked = Alerter.markRead(this, a.serverId, a.alertId)
+                render()
+                if (marked) offerUndo(listOf(a.serverId to a.alertId))
+            }
+            body.addView(swipe, lp().margins(this, t = if (i == 0) 4 else 8))
         }
         if (store.alertCount(showRead) > alerts.size) {
             body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
         }
         body.addView(showReadToggle(showRead),
             lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
+    }
+
+    /** "No alerts" with a check, and how many servers are connected (amber when one is down, red when all are). */
+    private fun allClear(o: Overall): View = lin().apply {
+        gravity = Gravity.CENTER
+        val title = lin(vertical = false).apply { gravity = Gravity.CENTER }
+        title.addView(icon(R.drawable.ic_check_circle, color(R.color.primary), 24))
+        title.addView(label(getString(R.string.alerts_none), SP_L, color(R.color.text_strong), MEDIUM),
+            lp(WRAP, WRAP).margins(this@MainActivity, l = 8))
+        addView(title, lp(WRAP, WRAP))
+        val up = o.connected == o.total
+        val tint = when {
+            up -> R.color.text_muted
+            o.connected > 0 -> R.color.warning
+            else -> R.color.danger
+        }
+        addView(label(resources.getQuantityString(R.plurals.servers_connected, o.total, o.connected, o.total),
+            SP_S, color(tint), if (up) REGULAR else MEDIUM),
+            lp(WRAP, WRAP).margins(this@MainActivity, t = 6))
     }
 
     /** "See more": plain accent text with a 48 dp touch target. */

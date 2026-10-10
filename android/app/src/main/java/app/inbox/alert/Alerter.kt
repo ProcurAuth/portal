@@ -30,7 +30,8 @@ import app.inbox.ui.MainActivity
 /**
  * Turns a stored alert into what the subscriber asked for:
  * - `alarm`: full-screen alert, looping alarm sound at full alarm volume through
- *   silent / vibrate / do-not-disturb, vibration, until stopped on the phone;
+ *   silent / vibrate / do-not-disturb, vibration, until stopped on the phone, which
+ *   then gets its silent / vibrate mode and alarm volume back;
  * - `ring`: one sound on the alarm stream (audible in silent / vibrate) + vibration;
  * - `notify`: a standard notification that follows the phone sound mode.
  */
@@ -347,6 +348,8 @@ object AlarmPlayer {
     private val active = linkedSetOf<String>()
     private var player: MediaPlayer? = null
     private var savedVolume: Int? = null
+    /** Ringer mode (silent / vibrate) the phone was in before the alarm forced it to normal. */
+    private var savedRinger: Int? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private fun key(serverId: Long, alertId: String) = "$serverId:$alertId"
@@ -357,17 +360,19 @@ object AlarmPlayer {
         if (player != null) return
         val app = context.applicationContext
         val audio = app.getSystemService(AudioManager::class.java)
-        // Leave silent / vibrate: restore the normal ringer mode when allowed to.
+        // Leave silent / vibrate while it rings (when allowed to); stop() puts the mode back.
         val nm = app.getSystemService(NotificationManager::class.java)
-        if (audio.ringerMode != AudioManager.RINGER_MODE_NORMAL && nm.isNotificationPolicyAccessGranted) {
+        val ringer = audio.ringerMode
+        if (ringer != AudioManager.RINGER_MODE_NORMAL && nm.isNotificationPolicyAccessGranted) {
             try {
                 audio.ringerMode = AudioManager.RINGER_MODE_NORMAL
+                if (savedRinger == null) savedRinger = ringer
             } catch (e: SecurityException) {
                 Log.w(TAG, "cannot change ringer mode", e)
             }
         }
         try {
-            savedVolume = audio.getStreamVolume(AudioManager.STREAM_ALARM)
+            if (savedVolume == null) savedVolume = audio.getStreamVolume(AudioManager.STREAM_ALARM)
             audio.setStreamVolume(AudioManager.STREAM_ALARM, audio.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
         } catch (e: SecurityException) {
             Log.w(TAG, "cannot raise alarm volume", e)
@@ -404,13 +409,26 @@ object AlarmPlayer {
         }
         player = null
         Alerter.vibrator(app).cancel()
+        val audio = app.getSystemService(AudioManager::class.java)
         savedVolume?.let {
             try {
-                app.getSystemService(AudioManager::class.java).setStreamVolume(AudioManager.STREAM_ALARM, it, 0)
+                audio.setStreamVolume(AudioManager.STREAM_ALARM, it, 0)
             } catch (_: SecurityException) {
             }
         }
         savedVolume = null
+        // Back to silent / vibrate, unless the user changed the mode while it was ringing.
+        savedRinger?.let {
+            val nm = app.getSystemService(NotificationManager::class.java)
+            if (audio.ringerMode == AudioManager.RINGER_MODE_NORMAL && nm.isNotificationPolicyAccessGranted) {
+                try {
+                    audio.ringerMode = it
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "cannot restore ringer mode", e)
+                }
+            }
+        }
+        savedRinger = null
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
     }

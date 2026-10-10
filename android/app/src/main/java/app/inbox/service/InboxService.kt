@@ -151,17 +151,17 @@ class InboxService : Service() {
         val servers = store.servers()
         val nm = getSystemService(NotificationManager::class.java)
         val now = System.currentTimeMillis()
-        val lines = mutableListOf<String>()
+        val lines = mutableListOf<String>() // servers that are not connected
         var connected = 0
         for (s in servers) {
             val st = Registry.status(s.id)
             val line = when (st.state) {
-                LinkState.CONNECTED -> { connected++; getString(R.string.svc_connected, s.serverName) }
+                LinkState.CONNECTED -> { connected++; null }
                 LinkState.CONNECTING -> getString(R.string.svc_connecting, s.serverName)
                 LinkState.DISCONNECTED -> getString(R.string.svc_disconnected, s.serverName, formatSince(now - st.sinceMs))
                 LinkState.REENROLL -> getString(R.string.svc_reenroll, s.serverName)
             }
-            lines.add(line)
+            if (line != null) lines.add(line)
             val offline = st.state != LinkState.CONNECTED &&
                 (st.state == LinkState.REENROLL || now - st.sinceMs >= s.offlineWarningMs)
             val id = WARNING_BASE_ID + s.id.toInt()
@@ -184,10 +184,12 @@ class InboxService : Service() {
                 nm.cancel(id)
             }
         }
-        val summary = when {
-            servers.isEmpty() -> getString(R.string.svc_no_server)
-            connected == servers.size -> if (servers.size == 1) lines[0] else getString(R.string.svc_all_connected, connected, servers.size)
-            else -> lines.joinToString("\n")
+        // "1/2 servers connected", then one line per server that is not.
+        val summary = if (servers.isEmpty()) {
+            getString(R.string.svc_no_server)
+        } else {
+            val count = resources.getQuantityString(R.plurals.servers_connected, servers.size, connected, servers.size)
+            (listOf(count) + lines).joinToString("\n")
         }
         try {
             nm.notify(STATUS_ID, statusNotification(summary))

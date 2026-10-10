@@ -47,6 +47,13 @@
   --shadow-pop: 0 10px 24px -6px rgba(16, 24, 40, .22), 0 2px 6px rgba(16, 24, 40, .08);
   --scrim: rgba(16, 24, 40, .38);
   --skeleton: #e9edf2;
+  /* Code highlighting (>= 4.5:1 on --subtle). */
+  --tk-comment: var(--text-3);
+  --tk-string: #1a7f37;
+  --tk-keyword: #8250df;
+  --tk-key: #0550ae;
+  --tk-value: #953800;
+  --tk-url: #0a6b7a;
 
   --r-sm: 4px;
   --r-md: 6px;
@@ -91,6 +98,12 @@
     --shadow-pop: 0 12px 28px -6px rgba(0, 0, 0, .7), 0 2px 6px rgba(0, 0, 0, .4);
     --scrim: rgba(0, 0, 0, .55);
     --skeleton: #1b212b;
+    --tk-comment: var(--text-3);
+    --tk-string: #7fd68f;
+    --tk-keyword: #d2a8ff;
+    --tk-key: #79c0ff;
+    --tk-value: #ffa657;
+    --tk-url: #56d4dd;
   }
 }
 
@@ -128,6 +141,12 @@
   --shadow-pop: 0 12px 28px -6px rgba(0, 0, 0, .7), 0 2px 6px rgba(0, 0, 0, .4);
   --scrim: rgba(0, 0, 0, .55);
   --skeleton: #1b212b;
+  --tk-comment: var(--text-3);
+  --tk-string: #7fd68f;
+  --tk-keyword: #d2a8ff;
+  --tk-key: #79c0ff;
+  --tk-value: #ffa657;
+  --tk-url: #56d4dd;
 }
 
 /* ------------------------------------------------------------ base */
@@ -833,6 +852,15 @@ dialog::backdrop { background: var(--scrim); }
   white-space: pre;
 }
 .code.inline pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Syntax highlighting of the integration snippets (classes set by doc.js). */
+.tk-comment { color: var(--tk-comment); font-style: italic; }
+.tk-string { color: var(--tk-string); }
+.tk-keyword { color: var(--tk-keyword); }
+.tk-key { color: var(--tk-key); }
+.tk-value { color: var(--tk-value); }
+.tk-url { color: var(--tk-url); }
+/* The placeholder to replace (<TOKEN>): visible in every snippet. */
+.tk-ph { color: var(--warning); background: var(--warning-soft); border-radius: 3px; font-weight: 700; }
 .code .copy { position: absolute; top: 5px; right: 5px; background: var(--panel); border-color: var(--border); }
 .code-wrap { display: flex; flex-direction: column; gap: 5px; }
 .code-label { font-size: var(--fs-1); font-weight: 600; color: var(--muted); }
