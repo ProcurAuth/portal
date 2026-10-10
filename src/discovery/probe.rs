@@ -1,0 +1,84 @@
+//! Liveness probes: one GET per service that declares a health URL.
+
+use std::time::Duration;
+
+use crate::catalog::Health;
+
+/// Client for probes. It follows no redirect and does not verify certificates: a probe asks
+/// "does something answer?", sends nothing secret, and an in-cluster service often has a private CA.
+pub fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .tls_certs_only(super::embedded_roots())
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .user_agent(concat!("portal-probe/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("cannot build the probe client: {e}"))
+}
+
+/// Up when the service answers with anything below 500 (a 401 or a redirect means it is running);
+/// down on a 5xx, a refused or timed-out connection.
+pub async fn http(client: &reqwest::Client, url: &str) -> Health {
+    match client.get(url).send().await {
+        Ok(response) if response.status().as_u16() < 500 => Health::Up,
+        _ => Health::Down,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serves one canned response per connection on a loopback port.
+    fn serve(status_line: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { return };
+                let mut buffer = [0u8; 512];
+                let _ = stream.read(&mut buffer);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn statuses_below_500_are_up_and_5xx_or_no_answer_is_down() {
+        let client = build_client(Duration::from_secs(2)).unwrap();
+        let runtime = runtime();
+        for (status, expected) in [
+            ("200 OK", Health::Up),
+            ("401 Unauthorized", Health::Up),
+            ("302 Found", Health::Up),
+            ("503 Service Unavailable", Health::Down),
+        ] {
+            let url = serve(status);
+            assert_eq!(runtime.block_on(http(&client, &url)), expected, "{status}");
+        }
+        // A port nothing listens on.
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            format!(
+                "http://127.0.0.1:{}/",
+                listener.local_addr().unwrap().port()
+            )
+        };
+        assert_eq!(runtime.block_on(http(&client, &closed)), Health::Down);
+    }
+}

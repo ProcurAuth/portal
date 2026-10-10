@@ -1,0 +1,32 @@
+http:
+  routers:
+    # This router must win over application catch-all routers for /auth/*.
+    # The global entryPoint middleware still runs first; portal /auth/verify
+    # explicitly allows the public login/logout/style paths to avoid a loop.
+    portal:
+      entryPoints:
+        - websecure
+      rule: "PathPrefix(`/auth/`)"
+      priority: 50000
+      service: portal
+      tls: {}
+
+  services:
+    portal:
+      loadBalancer:
+        servers:
+          - url: "http://portal:4181"
+
+  middlewares:
+    portal:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify"
+        # Safe default when Traefik is directly exposed to clients.
+        # If Traefik itself is behind a trusted reverse proxy/LB, configure
+        # entryPoints.websecure.forwardedHeaders.trustedIPs and switch this to true.
+        trustForwardHeader: false
+        preserveLocationHeader: true
+        forwardBody: false
+        maxResponseBodySize: 4096
+        authRequestHeaders:
+          - Cookie

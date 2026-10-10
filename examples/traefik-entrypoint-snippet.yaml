@@ -1,0 +1,25 @@
+# Static Traefik configuration. The middleware is prepended to every HTTP
+# router attached to websecure.
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+
+  websecure:
+    address: ":443"
+    http:
+      middlewares:
+        - portal@file
+      tls:
+        options: default
+
+    # If another trusted proxy/load-balancer sits in front of Traefik, list only
+    # its addresses here and set forwardAuth.trustForwardHeader=true.
+    # forwardedHeaders:
+    #   trustedIPs:
+    #     - "10.0.0.0/8"

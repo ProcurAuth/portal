@@ -1,0 +1,9 @@
+.git
+.github
+.env
+target
+dist
+*.zip
+*.tgz
+*.sha256
+.DS_Store
