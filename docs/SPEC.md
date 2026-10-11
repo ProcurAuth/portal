@@ -58,8 +58,8 @@ l'émission.
   permet de suivre les sessions par identifiant dans le front admin.
 
 ### 3.2 Alerte
-- Groupe obligatoire ; **description** courte (128 caractères max) et **détails**
-  en Markdown (tableaux, code, listes), tous deux facultatifs.
+- Une alerte se compose d'un **groupe** et d'un **titre** (une ligne, 128 caractères
+  max), tous deux obligatoires : ni description ni détails.
 - Sources : API HTTP avec token d'émetteur (déclaré en HCL, limité à des groupes),
   formulaire du front admin, webhook compatible Alertmanager (utilisé aussi par le
   contact point « Webhook » de Grafana).

@@ -62,6 +62,8 @@ class MainActivity : BaseActivity() {
     private lateinit var main: LinearLayout
     private lateinit var bar: FrameLayout
     private lateinit var scroller: ScrollView
+    /** Fixed row under the list: always on screen, whatever the list length. */
+    private lateinit var footer: FrameLayout
     private lateinit var body: LinearLayout
     private lateinit var drawer: Drawer
     private lateinit var drawerContent: LinearLayout
@@ -87,6 +89,8 @@ class MainActivity : BaseActivity() {
         body = lin(padH = 10, padV = 4)
         scroller = scroll(body)
         main.addView(scroller, lp(MATCH, 0, 1f))
+        footer = FrameLayout(this)
+        main.addView(footer, lp())
         behind.addView(main, FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(behind, FrameLayout.LayoutParams(MATCH, MATCH))
 
@@ -249,6 +253,12 @@ class MainActivity : BaseActivity() {
             Screen.SETTINGS -> renderSettings()
         }
         scroller.post { scroller.scrollTo(0, y) }
+        // "Show read" stays pinned under the alerts list, never inside it.
+        footer.removeAllViews()
+        if (screen == Screen.ALERTS && servers.isNotEmpty()) {
+            footer.addView(showReadToggle(Prefs.showRead(this)),
+                FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(8) })
+        }
         syncBack()
     }
 
@@ -368,10 +378,7 @@ class MainActivity : BaseActivity() {
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
         if (alerts.isEmpty()) {
-            // The all-clear fills the free space; "Show read" stays pinned at the bottom.
             body.addView(allClear(overall(servers)), lp(MATCH, 0, 1f))
-            body.addView(showReadToggle(showRead),
-                lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
             return
         }
         // One card per alert, the severity bar on its left edge. Swipe right: read.
@@ -392,8 +399,6 @@ class MainActivity : BaseActivity() {
         if (store.alertCount(showRead) > alerts.size) {
             body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
         }
-        body.addView(showReadToggle(showRead),
-            lp(WRAP, WRAP).margins(this, t = 2, b = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
     }
 
     /** "No alerts" with a check, and how many servers are connected (amber when one is down, red when all are). */
@@ -429,7 +434,7 @@ class MainActivity : BaseActivity() {
         }
     }
 
-    /** "Show read" native check box, centered alone on its row, identical with or without alerts. */
+    /** "Show read" native check box, in the fixed footer of the alerts screen. */
     private fun showReadToggle(showRead: Boolean): View = CheckBox(this).apply {
         text = getString(R.string.alerts_show_read)
         textSize = SP_M
@@ -481,14 +486,13 @@ class MainActivity : BaseActivity() {
         val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
         val titleRow = lin(vertical = false)
         if (a.unread) titleRow.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
-        titleRow.addView(label(a.description ?: a.groupName, SP_M,
+        titleRow.addView(label(a.title, SP_M,
             if (a.unread) color(R.color.text_strong) else color(R.color.text),
             if (a.unread) BOLD else REGULAR, lines = 1), lp(0, WRAP, 1f))
         content.addView(titleRow)
         val meta = SpannableStringBuilder()
         meta.append("${a.groupName} · $serverName")
         meta.setSpan(ForegroundColorSpan(color(R.color.text_subtle)), 0, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        a.details?.let { d -> app.inbox.md.Markdown.firstLine(d)?.let { meta.append("  ").append(it) } }
         content.addView(label(meta, SP_S, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
         row.addView(content, lp(0, WRAP, 1f))
 
@@ -525,9 +529,8 @@ class MainActivity : BaseActivity() {
                 lp(0, WRAP, 1f).margins(this, l = 8))
             head.addView(mono(shortAge(a.createdAtMs), SP_S, color(R.color.text_subtle)))
             sheet.addView(head)
-            sheet.addView(label(a.description ?: a.groupName, SP_L, color(R.color.text_strong), BOLD).apply { setTextIsSelectable(true) },
+            sheet.addView(label(a.title, SP_L, color(R.color.text_strong), BOLD).apply { setTextIsSelectable(true) },
                 lp().margins(this, t = 12))
-            a.details?.let { sheet.addView(markdown(it), lp().margins(this, t = 10)) }
             val meta = panel(padV = 4)
             val late = a.receivedAtMs - a.createdAtMs
             listOf(

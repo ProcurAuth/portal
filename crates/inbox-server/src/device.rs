@@ -583,8 +583,7 @@ async fn flush_deliveries(
             alert_id: p.alert_id,
             group_name: app.group_name(&p.group),
             group: p.group,
-            description: p.description,
-            details: p.details,
+            title: p.title,
             created_at_ms: p.created_at,
         });
         send_msg(socket, session, &msg).await?;

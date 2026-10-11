@@ -9,17 +9,16 @@
 
 (() => {
   const { $, el, icon, api, toast, copy } = window.Inbox;
-  const md = window.InboxMarkdown;
 
   const ALERT_WINDOW_MS = 24 * 3600 * 1000;
   const ALERT_MIN = 3;
   const ALERT_MAX = 50;
   const ALERT_PHONE = 10;
   const CARD_GAP = 8;
-  const CARD_MIN = 58; // a card without details nor missing line
+  const CARD_MIN = 58; // a card without a missing line
   const CONNECTION_LIMIT = 50;
   const REFRESH_MS = 3000;
-  const DESCRIPTION_MAX = 128;
+  const TITLE_MAX = 128;
 
   // ------------------------------------------------------------ helpers
 
@@ -305,7 +304,7 @@
   function announceAlerts() {
     if (seenAlerts) {
       for (const a of alerts.slice().reverse()) {
-        if (!seenAlerts.has(a.id)) announce('New alert in ' + groupName(a.group) + ': ' + (a.description || md.plain(a.details) || 'no description') + '.');
+        if (!seenAlerts.has(a.id)) announce('New alert in ' + groupName(a.group) + ': ' + a.title + '.');
       }
     }
     seenAlerts = new Set([...(seenAlerts || []), ...alerts.map((a) => a.id)]);
@@ -336,8 +335,6 @@
 
   function alertCard(a) {
     const s = deliveryState(a);
-    const description = a.description || groupName(a.group);
-    const preview = md.plain(a.details);
     const titles = {
       norecipient: 'No device followed this group',
       expired: 'Not received by every device before expiry: no longer sent',
@@ -365,7 +362,7 @@
         class: 'alert-card',
         tabindex: '0',
         role: 'button',
-        'aria-label': description + ', ' + groupName(a.group) + ', ' + s.label,
+        'aria-label': a.title + ', ' + groupName(a.group) + ', ' + s.label,
         onclick: () => openDetail(a.id),
         onkeydown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openDetail(a.id); } },
       },
@@ -376,8 +373,7 @@
       el('div', { class: 'alert-main' },
         el('div', { class: 'alert-head' },
           el('span', { class: 'chip', text: groupName(a.group) }),
-          el('span', { class: 'alert-title', text: description })),
-        preview ? el('p', { class: 'alert-message', text: preview }) : null,
+          el('span', { class: 'alert-title', text: a.title })),
         el('div', { class: 'alert-meta' }, el('span', { text: sourceLabel(a.source) }), missingLine)),
       el('div', { class: 'alert-side' },
         el('span', { class: 'badge ' + s.badge, title: titles[s.kind] }, s.label),
@@ -426,14 +422,13 @@
       toast(e.message);
       return;
     }
-    $('detail-title').textContent = d.description || groupName(d.group);
+    $('detail-title').textContent = d.title;
     $('detail-meta').replaceChildren(
       el('span', { class: 'chip', text: groupName(d.group) }),
       el('span', { class: 'mono', text: absTime(d.created_at) }),
       el('span', { text: sourceLabel(d.source) }),
       el('span', { class: 'mono', text: (d.received || 0) + '/' + (d.targets || 0) + ' received' + (d.expired ? ' · ' + d.expired + ' expired' : '') }),
     );
-    $('detail-details').replaceChildren(d.details ? md.render(d.details) : el('p', { class: 'muted', text: 'No details.' }));
     const rows = (d.deliveries || []).map((x) => {
       let side;
       let why;
@@ -494,23 +489,10 @@
   }
 
   function updateCounter() {
-    const n = [...$('send-description').value].length;
-    const c = $('desc-count');
-    c.textContent = n + '/' + DESCRIPTION_MAX;
-    c.classList.toggle('near', n >= DESCRIPTION_MAX - 8);
-  }
-
-  function selectTab(preview) {
-    $('tab-write').setAttribute('aria-selected', preview ? 'false' : 'true');
-    $('tab-preview').setAttribute('aria-selected', preview ? 'true' : 'false');
-    $('send-details').hidden = preview;
-    $('details-preview').hidden = !preview;
-    if (preview) {
-      const src = $('send-details').value;
-      $('details-preview').replaceChildren(src.trim() ? md.render(src) : el('p', { class: 'muted', text: 'Nothing to preview.' }));
-    } else {
-      $('send-details').focus();
-    }
+    const n = [...$('send-title').value].length;
+    const c = $('title-count');
+    c.textContent = n + '/' + TITLE_MAX;
+    c.classList.toggle('near', n >= TITLE_MAX - 8);
   }
 
   function toggleSend(open) {
@@ -526,14 +508,16 @@
 
   async function sendAlert(ev) {
     ev.preventDefault();
-    const description = [...$('send-description').value.trim()].slice(0, DESCRIPTION_MAX).join('');
     const body = {
       group: $('send-group').value,
-      description: description || undefined,
-      details: $('send-details').value.trim() || undefined,
+      title: [...$('send-title').value.trim()].slice(0, TITLE_MAX).join(''),
     };
     if (!body.group) {
       $('send-group').focus();
+      return;
+    }
+    if (!body.title) {
+      $('send-title').focus();
       return;
     }
     const fingerprint = JSON.stringify(body);
@@ -560,10 +544,8 @@
         }),
       );
       result.hidden = false;
-      $('send-description').value = '';
-      $('send-details').value = '';
+      $('send-title').value = '';
       updateCounter();
-      selectTab(false);
       refreshAlerts().catch(() => {});
     } catch (e) {
       result.className = 'banner danger';
@@ -761,9 +743,7 @@
   $('send-cancel').addEventListener('click', () => { toggleSend(false); $('send-toggle').focus(); });
   $('send-form').addEventListener('submit', sendAlert);
   $('send-group').addEventListener('change', updateTargets);
-  $('send-description').addEventListener('input', updateCounter);
-  $('tab-write').addEventListener('click', () => selectTab(false));
-  $('tab-preview').addEventListener('click', () => selectTab(true));
+  $('send-title').addEventListener('input', updateCounter);
   $('api-address-copy').addEventListener('click', () => copy(apiBase(), $('api-address')));
   $('phone-link-copy').addEventListener('click', () => copy(phoneLink(), $('phone-link')));
   $('phone-link-btn').addEventListener('click', () => copy(phoneLink()));

@@ -88,7 +88,6 @@ requests marked `Sec-Fetch-Site: cross-site` are refused.
 
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
-| `max_details_bytes` | integer | 1..32768 | Limit of an alert's Markdown details (UTF-8 bytes). An alert must also fit in one encrypted frame once encoded. The description is always at most 128 characters. |
 | `max_request_bytes` | integer | 4096..1048576 | HTTP request body limit on both listeners. |
 
 ## `logging`

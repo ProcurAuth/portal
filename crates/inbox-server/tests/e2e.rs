@@ -101,7 +101,6 @@ security {{
   auth_failure_window = "1m"
 }}
 limits {{
-  max_details_bytes = 1000
   max_request_bytes = 65536
 }}
 logging {{
@@ -476,40 +475,33 @@ async fn delivery_guarantees_end_to_end() {
         r#"{"group":"infra"}"#,
     );
     assert_eq!(st, 401);
-    assert_eq!(post_alert(&s, "f", json!({"group": "other"})).0, 403);
-    assert_eq!(post_alert(&s, "u", json!({"group": "infra", "bogus": 1})).0, 400);
+    assert_eq!(post_alert(&s, "f", json!({"group": "other", "title": "t"})).0, 403);
+    assert_eq!(post_alert(&s, "u", json!({"group": "infra", "title": "t", "bogus": 1})).0, 400);
+    assert_eq!(post_alert(&s, "n", json!({"group": "infra"})).0, 400, "the title is required");
+    assert_eq!(post_alert(&s, "b", json!({"group": "infra", "title": "  "})).0, 422);
 
     // Accepted once, delivered once, deduplicated on retry.
-    let (st, v) = post_alert(
-        &s,
-        "k1",
-        json!({"group": "infra", "description": "Disk full", "details": "db-1 at **99%**"}),
-    );
+    let (st, v) = post_alert(&s, "k1", json!({"group": "infra", "title": "Disk full"}));
     assert_eq!(st, 201, "{v}");
     assert_eq!(v["targets"], 2);
     let k1 = v["alert_id"].as_str().unwrap().to_string();
     let got = ca.alert().await;
     assert_eq!(got.alert_id, k1);
-    assert_eq!(got.description.as_deref(), Some("Disk full"));
-    assert_eq!(got.details.as_deref(), Some("db-1 at **99%**"));
+    assert_eq!((got.title.as_str(), got.group.as_str()), ("Disk full", "infra"));
     ca.ack(&k1, AckStage::Received).await;
-    let (st, v) = post_alert(
-        &s,
-        "k1",
-        json!({"group": "infra", "description": "Disk full", "details": "db-1 at **99%**"}),
-    );
+    let (st, v) = post_alert(&s, "k1", json!({"group": "infra", "title": "Disk full"}));
     assert_eq!((st, v["duplicate"].as_bool()), (200, Some(true)));
     assert_eq!(v["alert_id"], k1.as_str());
     ca.no_alert(Duration::from_millis(2500)).await;
-    assert_eq!(post_alert(&s, "k1", json!({"group": "infra", "description": "changed"})).0, 409);
+    assert_eq!(post_alert(&s, "k1", json!({"group": "infra", "title": "changed"})).0, 409);
 
     // No receipt: retransmitted with the same id until the device confirms.
-    let (_, v) = post_alert(&s, "k2", json!({"group": "infra"}));
+    let (_, v) = post_alert(&s, "k2", json!({"group": "infra", "title": "Second"}));
     let k2 = v["alert_id"].as_str().unwrap().to_string();
     assert_eq!(ca.alert().await.alert_id, k2);
     let again = ca.alert().await;
     assert_eq!(again.alert_id, k2, "retransmission keeps the alert id");
-    assert!(again.description.is_none() && again.details.is_none(), "both are optional");
+    assert_eq!(again.title, "Second");
     ca.ack(&k2, AckStage::Received).await;
     ca.no_alert(Duration::from_millis(2500)).await;
 
@@ -529,7 +521,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Pending deliveries survive a server restart.
     drop(ca);
-    let (_, v) = post_alert(&s, "k3", json!({"group": "infra", "details": "while you were away"}));
+    let (_, v) = post_alert(&s, "k3", json!({"group": "infra", "title": "while you were away"}));
     let k3 = v["alert_id"].as_str().unwrap().to_string();
     s.stop();
     s.start();
@@ -577,8 +569,7 @@ async fn delivery_guarantees_end_to_end() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!((v["created"].as_u64(), v["skipped"].as_u64()), (Some(1), Some(1)));
     let got = ca.alert().await;
-    assert_eq!(got.description.as_deref(), Some("[FIRING] HighLatency"));
-    assert_eq!(got.details.as_deref(), Some("p99 > 2s"));
+    assert_eq!(got.title, "[FIRING] HighLatency: p99 > 2s");
     ca.ack(&got.alert_id, AckStage::Received).await;
     let (_, body) = http(port, "POST", "/api/v1/webhooks/alertmanager/infra", &auth, &payload);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["duplicates"], 1);
@@ -603,8 +594,7 @@ async fn delivery_guarantees_end_to_end() {
     let (st, body) = http_host(ap, "evil.example:8081", "GET", "/", &[], "");
     assert_eq!(st, 403);
     assert!(body.contains("admin.allowed_hosts"), "readable page for humans: {body}");
-    let send =
-        json!({"group": "other", "description": "manual", "idempotency_key": "m1"}).to_string();
+    let send = json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string();
     let json_only = [("Content-Type", "application/json".to_string())];
     let (st, _) = http(ap, "POST", "/api/admin/alerts", &json_only, &send);
     assert_eq!(st, 403, "POST without X-Inbox-Request");
@@ -698,15 +688,12 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.subscribe("infra").await;
 
     // Generic notify: plain text body, token in the query string, no Idempotency-Key.
-    let url = format!("/api/v1/notify/infra?token={}&description=Sauvegarde", s.token);
+    let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
     let (st, body) =
         http(port, "POST", &url, &[("Content-Type", "text/plain".into())], "backup KO\n");
     assert_eq!(st, 201, "{body}");
     let got = c.alert().await;
-    assert_eq!(
-        (got.description.as_deref(), got.details.as_deref()),
-        (Some("Sauvegarde"), Some("backup KO"))
-    );
+    assert_eq!(got.title, "Sauvegarde");
     c.ack(&got.alert_id, AckStage::Received).await;
     // The same request retried within the minute is deduplicated.
     let (st, body) =
@@ -714,31 +701,57 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("\"duplicate\":true"));
 
-    // JSON with title/message, bearer header.
+    // Without a title anywhere, the plain text body is the title, on one line.
     let auth = ("Authorization", format!("Bearer {}", s.token));
     let (st, _) = http(
         port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
-        r#"{"description":"T","details":"M"}"#,
+        "backup\n  failed\n",
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
-    assert_eq!((got.description.as_deref(), got.details.as_deref()), (Some("T"), Some("M")));
+    assert_eq!(got.title, "backup failed");
     c.ack(&got.alert_id, AckStage::Received).await;
-    // Any other JSON is kept as compact text; X-Description gives the description.
+    // An empty request has no title: refused.
+    let (st, _) = http(port, "POST", "/api/v1/notify/infra", std::slice::from_ref(&auth), "");
+    assert_eq!(st, 422);
+
+    // JSON with a title, bearer header.
     let (st, _) = http(
         port,
         "POST",
         "/api/v1/notify/infra",
-        &[auth.clone(), ("X-Description", "Uptime".into())],
+        std::slice::from_ref(&auth),
+        r#"{"title":"T","other":"ignored"}"#,
+    );
+    assert_eq!(st, 201);
+    let got = c.alert().await;
+    assert_eq!(got.title, "T");
+    c.ack(&got.alert_id, AckStage::Received).await;
+    // Any other JSON is the title as compact text; X-Title overrides it.
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/notify/infra",
+        &[auth.clone(), ("X-Title", "Uptime".into())],
         r#"{ "monitor": {"name": "web"}, "status": 0 }"#,
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
-    assert_eq!(got.description.as_deref(), Some("Uptime"));
-    assert_eq!(got.details.as_deref(), Some(r#"{"monitor":{"name":"web"},"status":0}"#));
+    assert_eq!(got.title, "Uptime");
+    c.ack(&got.alert_id, AckStage::Received).await;
+    let (st, _) = http(
+        port,
+        "POST",
+        "/api/v1/notify/infra",
+        std::slice::from_ref(&auth),
+        r#"{ "monitor": {"name": "web"}, "status": 0 }"#,
+    );
+    assert_eq!(st, 201);
+    let got = c.alert().await;
+    assert_eq!(got.title, r#"{"monitor":{"name":"web"},"status":0}"#);
     c.ack(&got.alert_id, AckStage::Received).await;
     // Wrong token in the query string is refused; forbidden group too.
     let (st, _) = http(port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
@@ -746,10 +759,10 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let (st, _) = http(port, "POST", &format!("/api/v1/notify/other?token={}", s.token), &[], "x");
     assert_eq!(st, 403);
 
-    // Descriptions are at most 128 characters: refused by the JSON API,
+    // Titles are at most 128 characters: refused by the JSON API,
     // truncated by the generic webhook.
     let long = "x".repeat(129);
-    let body = json!({"group": "infra", "description": long}).to_string();
+    let body = json!({"group": "infra", "title": long}).to_string();
     let (st, _) = http(port, "POST", "/api/v1/alerts", std::slice::from_ref(&auth), &body);
     assert_eq!(st, 413);
     let (st, _) = http(
@@ -757,12 +770,11 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
-        &json!({"description": long, "details": "| a | b |\n|---|---|\n| 1 | 2 |"}).to_string(),
+        &json!({"title": long}).to_string(),
     );
     assert_eq!(st, 201);
     let got = c.alert().await;
-    assert_eq!(got.description.as_deref().map(|d| d.chars().count()), Some(128));
-    assert!(got.details.as_deref().unwrap().starts_with("| a | b |"), "Markdown kept as is");
+    assert_eq!(got.title.chars().count(), 128);
     c.ack(&got.alert_id, AckStage::Received).await;
 
     // Only the current field names are accepted.
@@ -771,7 +783,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
-        r#"{"group":"infra","title":"old name"}"#,
+        r#"{"group":"infra","description":"old name"}"#,
     );
     assert_eq!(st, 400);
 
@@ -781,7 +793,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
-        r#"{"group":"infra","description":"nokey"}"#,
+        r#"{"group":"infra","title":"nokey"}"#,
     );
     assert_eq!(st, 201);
     let (st, _) = http(
@@ -789,7 +801,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
-        r#"{"group":"infra","description":"nokey"}"#,
+        r#"{"group":"infra","title":"nokey"}"#,
     );
     assert_eq!(st, 200);
 
@@ -814,8 +826,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
         assert_eq!(st, 200);
         assert!(body.contains("doc"), "{prefix}/doc");
     }
-    let send =
-        json!({"group": "infra", "description": "via proxy", "idempotency_key": "p1"}).to_string();
+    let send = json!({"group": "infra", "title": "via proxy", "idempotency_key": "p1"}).to_string();
     let hdrs =
         [("Content-Type", "application/json".to_string()), ("X-Inbox-Request", "1".to_string())];
     let (st, body) = http_host(ap, &host, "POST", "/inbox/api/admin/alerts", &hdrs, &send);

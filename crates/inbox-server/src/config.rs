@@ -108,8 +108,6 @@ pub struct Security {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    /// Markdown details of an alert. Descriptions are always at most 128 characters.
-    pub max_details_bytes: usize,
     pub max_request_bytes: usize,
 }
 
@@ -278,10 +276,6 @@ impl Config {
         );
 
         let l = &self.limits;
-        check(
-            (1..=32 * 1024).contains(&l.max_details_bytes),
-            "limits.max_details_bytes must be in 1..32768 (one encrypted frame)",
-        );
         check(
             (4096..=1024 * 1024).contains(&l.max_request_bytes),
             "limits.max_request_bytes must be in 4096..1048576",

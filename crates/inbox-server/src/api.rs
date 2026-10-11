@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opentelemetry::KeyValue;
 use inbox_core::noise::MAX_PLAINTEXT;
-use inbox_core::proto::{AlertMsg, MAX_DESCRIPTION_CHARS, ServerMsg};
+use inbox_core::proto::{AlertMsg, MAX_TITLE_CHARS, ServerMsg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ use tracing::Instrument;
 
 use crate::db::{self, InsertOutcome, NewAlert};
 use crate::state::{AppState, Producer};
-use crate::util::{hex, is_hex_id, truncate, truncate_chars};
+use crate::util::{hex, is_hex_id, truncate_chars};
 
 pub struct ApiError {
     status: StatusCode,
@@ -76,52 +76,36 @@ pub async fn accept_alert(
             format!("unknown group {:?}", alert.group),
         ));
     }
-    let limits = &app.config.limits;
-    let description = match alert.description.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(t) if t.chars().count() > MAX_DESCRIPTION_CHARS => {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "too_large",
-                format!("description exceeds {MAX_DESCRIPTION_CHARS} characters"),
-            ));
-        }
-        Some(t) if t.chars().any(char::is_control) => {
-            return Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_text",
-                "description must be a single line without control characters",
-            ));
-        }
-        Some(t) => Some(t.to_string()),
-    };
-    let details = match alert.details.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(t) if t.len() > limits.max_details_bytes => {
-            return Err(ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "too_large",
-                format!("details exceed {} bytes", limits.max_details_bytes),
-            ));
-        }
-        Some(t) if t.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => {
-            return Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_text",
-                "details contain control characters",
-            ));
-        }
-        Some(t) => Some(t.to_string()),
-    };
-    let alert = NewAlert { description, details, ..alert };
+    let title = alert.title.trim();
+    if title.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "missing_title",
+            "an alert needs a title",
+        ));
+    }
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            format!("title exceeds {MAX_TITLE_CHARS} characters"),
+        ));
+    }
+    if title.chars().any(char::is_control) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_text",
+            "title must be a single line without control characters",
+        ));
+    }
+    let alert = NewAlert { title: title.to_string(), ..alert };
 
     // The encoded alert must fit in one encrypted frame, whatever the escaping.
     let probe = ServerMsg::Alert(AlertMsg {
         alert_id: "0".repeat(32),
         group: alert.group.clone(),
         group_name: app.group_name(&alert.group),
-        description: alert.description.clone(),
-        details: alert.details.clone(),
+        title: alert.title.clone(),
         created_at_ms: i64::MAX,
     });
     if serde_json::to_vec(&probe).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_PLAINTEXT {
@@ -163,12 +147,18 @@ pub async fn accept_alert(
     }
 }
 
+/// Control characters and runs of whitespace become single spaces.
+fn one_line(text: &str) -> String {
+    let spaced: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Query parameters accepted by producer endpoints, for tools that cannot set
 /// headers. A token in a URL may end up in proxy logs: prefer the header.
 #[derive(Debug, Default, Deserialize)]
 pub struct ProducerQuery {
     token: Option<String>,
-    description: Option<String>,
+    title: Option<String>,
 }
 
 fn producer<'a>(
@@ -216,12 +206,8 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError>
 #[serde(deny_unknown_fields)]
 pub struct AlertRequest {
     pub group: String,
-    /// Short summary, at most 128 characters.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Markdown details.
-    #[serde(default)]
-    pub details: Option<String>,
+    /// One line, at most 128 characters.
+    pub title: String,
 }
 
 /// The `Idempotency-Key` header, or, when the client sends none, a key derived
@@ -258,20 +244,12 @@ pub async fn post_alert(
     let p = producer(&app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
     check_group(p, &req.group)?;
-    let key = idempotency_key(
-        &headers,
-        &[
-            &req.group,
-            req.description.as_deref().unwrap_or(""),
-            req.details.as_deref().unwrap_or(""),
-        ],
-    )?;
+    let key = idempotency_key(&headers, &[&req.group, &req.title])?;
     let accepted = accept_alert(
         &app,
         NewAlert {
             group: req.group,
-            description: req.description,
-            details: req.details,
+            title: req.title,
             source: format!("producer:{}", p.name),
             idempotency_key: key,
         },
@@ -329,7 +307,6 @@ pub async fn alertmanager(
         ApiError::new(StatusCode::BAD_REQUEST, "invalid_payload", "missing alerts array")
     })?;
 
-    let limits = &app.config.limits;
     let (mut created, mut duplicates, mut skipped) = (0usize, 0usize, 0usize);
     for a in alerts {
         let status = a.get("status").and_then(Value::as_str).unwrap_or("firing");
@@ -341,15 +318,13 @@ pub async fn alertmanager(
         let annotations = a.get("annotations").cloned().unwrap_or(Value::Null);
         let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let name = text(&labels, "alertname").unwrap_or_else(|| "alert".into());
-        let description = format!("[{}] {}", status.to_uppercase(), name);
-        let mut message = String::new();
-        for k in ["summary", "description"] {
-            if let Some(t) = text(&annotations, k).filter(|t| !t.trim().is_empty()) {
-                if !message.is_empty() {
-                    message.push('\n');
-                }
-                message.push_str(t.trim());
-            }
+        // "[FIRING] alertname: summary", on one line.
+        let mut title = format!("[{}] {}", status.to_uppercase(), name);
+        if let Some(summary) =
+            text(&annotations, "summary").map(|t| one_line(&t)).filter(|t| !t.is_empty())
+        {
+            title.push_str(": ");
+            title.push_str(&summary);
         }
         let fingerprint = text(a, "fingerprint").unwrap_or_else(|| {
             // serde_json maps are ordered, so this hash is stable for equal label sets.
@@ -358,15 +333,11 @@ pub async fn alertmanager(
         let starts_at = text(a, "startsAt").unwrap_or_default();
         let key = format!("{}:{}:{}", fingerprint, status, starts_at);
         let key = if key.len() > 128 { hex(&Sha256::digest(key.as_bytes())) } else { key };
-        let message: String =
-            message.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
         let accepted = accept_alert(
             &app,
             NewAlert {
                 group: group.clone(),
-                description: Some(truncate_chars(&description, MAX_DESCRIPTION_CHARS)),
-                details: Some(truncate(&message, limits.max_details_bytes))
-                    .filter(|d| !d.is_empty()),
+                title: truncate_chars(&title, MAX_TITLE_CHARS),
                 source: format!("webhook:{}", p.name),
                 idempotency_key: key,
             },
@@ -381,11 +352,10 @@ pub async fn alertmanager(
 
 /// `POST /api/v1/notify/{group}`: generic webhook for any alerting tool.
 ///
-/// The body may be JSON with optional `description` / `details` fields, any other
-/// JSON (kept as compact text in the details), or plain text (the details). The
-/// description may also come from `?description=` or `X-Description`. Text longer
-/// than the limits is truncated rather than refused: the sending tool usually
-/// cannot adapt.
+/// The title comes from `?title=`, the `X-Title` header or the `title` field of a
+/// JSON body; otherwise the body itself (plain text, or any other JSON as compact
+/// text) is the title. It is put on one line and truncated to the limit rather
+/// than refused: the sending tool usually cannot adapt.
 pub async fn notify(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -395,52 +365,28 @@ pub async fn notify(
 ) -> Result<Response, ApiError> {
     let p = producer(&app, &headers, &query)?;
     check_group(p, &group)?;
-    let limits = &app.config.limits;
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-    let header_description = header("x-description");
+    let header_title = headers.get("x-title").and_then(|v| v.to_str().ok()).map(str::to_string);
     let text = String::from_utf8_lossy(&body);
-    let (body_description, details) = match serde_json::from_slice::<Value>(&body) {
-        Ok(Value::Object(map))
-            if ["description", "details"]
-                .iter()
-                .any(|k| map.get(*k).is_some_and(Value::is_string)) =>
-        {
-            let field = |k: &str| map.get(k).and_then(Value::as_str).map(str::to_string);
-            (field("description"), field("details"))
+    let body_title = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Object(map)) if map.get("title").is_some_and(Value::is_string) => {
+            map.get("title").and_then(Value::as_str).map(str::to_string)
         }
-        Ok(Value::String(s)) => (None, Some(s)),
-        Ok(Value::Null) | Err(_) if text.trim().is_empty() => (None, None),
-        Ok(other) => (None, Some(other.to_string())),
-        Err(_) => (None, Some(text.to_string())),
+        Ok(Value::String(s)) => Some(s),
+        Ok(Value::Null) | Err(_) if text.trim().is_empty() => None,
+        Ok(other) => Some(other.to_string()),
+        Err(_) => Some(text.to_string()),
     };
-    let description = query
-        .description
+    let title = query
+        .title
         .clone()
-        .or(header_description)
-        .or(body_description)
-        .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
-        .map(|d| truncate_chars(&d, MAX_DESCRIPTION_CHARS))
-        .filter(|d| !d.is_empty());
-    let details = details
-        .map(|t| {
-            let t: String =
-                t.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
-            truncate(t.trim(), limits.max_details_bytes)
-        })
-        .filter(|t| !t.is_empty());
-    let key = idempotency_key(
-        &headers,
-        &[&group, description.as_deref().unwrap_or(""), details.as_deref().unwrap_or("")],
-    )?;
+        .or(header_title)
+        .or(body_title)
+        .map(|t| one_line(&truncate_chars(&one_line(&t), MAX_TITLE_CHARS)))
+        .unwrap_or_default();
+    let key = idempotency_key(&headers, &[&group, &title])?;
     let accepted = accept_alert(
         &app,
-        NewAlert {
-            group,
-            description,
-            details,
-            source: format!("notify:{}", p.name),
-            idempotency_key: key,
-        },
+        NewAlert { group, title, source: format!("notify:{}", p.name), idempotency_key: key },
         "notify",
     )
     .await?;

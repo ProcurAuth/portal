@@ -83,20 +83,9 @@
                 </select>
               </label>
               <label class="field">
-                <span>Description <em>optional</em> <b id="desc-count" class="counter">0/128</b></span>
-                <input id="send-description" type="text" maxlength="128" autocomplete="off" placeholder="Short summary shown in the notification">
+                <span>Title <b id="title-count" class="counter">0/128</b></span>
+                <input id="send-title" type="text" maxlength="128" required autocomplete="off" placeholder="Shown in the notification">
               </label>
-            </div>
-            <div class="field details-field">
-              <div class="details-head">
-                <span class="field-label" id="details-label">Details <em>optional, Markdown</em></span>
-                <div class="tabs" role="tablist" aria-label="Details editor">
-                  <button id="tab-write" type="button" role="tab" aria-selected="true" aria-controls="send-details">Write</button>
-                  <button id="tab-preview" type="button" role="tab" aria-selected="false" aria-controls="details-preview">Preview</button>
-                </div>
-              </div>
-              <textarea id="send-details" rows="3" placeholder="Markdown: **bold**, `code`, lists, tables, ```code blocks```…" aria-labelledby="details-label"></textarea>
-              <div id="details-preview" class="details-preview" role="tabpanel" hidden></div>
             </div>
             <div class="send-foot">
               <span id="send-hint" class="targets"></span>
@@ -167,7 +156,6 @@
       <button id="detail-close" class="icon-btn" type="button" aria-label="Close"><span class="mdi mdi-close"></span></button>
     </div>
     <div class="sheet-body">
-      <div id="detail-details" class="detail-details"></div>
       <h3 class="sheet-section">Delivery per device</h3>
       <div id="detail-deliveries" class="rows"></div>
     </div>
@@ -187,7 +175,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
 
   <script src="common.js"></script>
-  <script src="markdown.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

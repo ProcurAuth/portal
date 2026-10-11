@@ -179,22 +179,20 @@ class AlarmActivity : Activity() {
                 GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x14FFFFFF, 0x00FFFFFF)).apply { cornerRadius = dpf(18f) },
             ))
         }
-        val text = a.description ?: a.groupName
-        val description = label(text, 24f, white, BOLD)
-        // Beyond two lines at 24 sp, the description steps down to 18 sp.
+        val title = label(a.title, 24f, white, BOLD)
+        // Beyond two lines at 24 sp, the title steps down to 18 sp.
         val textWidth = resources.displayMetrics.widthPixels - dp(64)
-        val lines = StaticLayout.Builder.obtain(text, 0, text.length, description.paint, textWidth)
-            .setLineSpacing(description.lineSpacingExtra, description.lineSpacingMultiplier)
+        val lines = StaticLayout.Builder.obtain(a.title, 0, a.title.length, title.paint, textWidth)
+            .setLineSpacing(title.lineSpacingExtra, title.lineSpacingMultiplier)
             .build().lineCount
-        if (lines > 2) description.textSize = 18f
-        card.addView(description)
-        a.details?.let { card.addView(markdown(it, MdPalette.ALARM, SP_L), lp().margins(this, t = 10)) }
+        if (lines > 2) title.textSize = 18f
+        card.addView(title)
         if (others.isNotEmpty()) {
             card.addView(View(this).apply { setBackgroundColor(0x1AFFFFFF) }, lp(MATCH, 1).margins(this, t = 12, b = 8))
             for (o in others.take(3)) {
                 val line = SpannableStringBuilder()
                 monoSpan(line, hms(o.createdAtMs))
-                line.append("  ").append(o.description ?: o.groupName)
+                line.append("  ").append(o.title)
                 card.addView(label(line, SP_S, faint, lines = 1), lp().margins(this, t = 4))
             }
             card.addView(label(getString(R.string.alarm_all_stopped), SP_S, faint), lp().margins(this, t = 6))

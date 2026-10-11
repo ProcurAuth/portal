@@ -331,11 +331,7 @@ pub async fn connections(
 #[serde(deny_unknown_fields)]
 pub struct AdminAlert {
     group: String,
-    #[serde(default)]
-    description: Option<String>,
-    /// Markdown.
-    #[serde(default)]
-    details: Option<String>,
+    title: String,
     idempotency_key: String,
 }
 
@@ -356,8 +352,7 @@ pub async fn send_alert(
         &app,
         NewAlert {
             group: req.group,
-            description: req.description,
-            details: req.details,
+            title: req.title,
             source: "admin".into(),
             idempotency_key: req.idempotency_key,
         },

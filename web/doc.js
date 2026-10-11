@@ -163,9 +163,8 @@
         ' Send it in the ', c('Authorization: Bearer <TOKEN>'), ' header or, for tools that cannot add headers, in the URL: ', c('?token=<TOKEN>'), '.',
         current ? [' Below, ', c(TOKEN), ' is the token of ', b(current.producer), '.'] : null),
       warn('A token in a URL may end up in proxy logs: prefer the header when the tool supports it.'),
-      p('An alert has a ', b('description'), ' (short, shown in the notification, truncated to 128 characters) and optional ', b('details'),
-        ' in ', b('Markdown'), ' (lists, tables, code blocks…), rendered on the phone and in this console.'),
-      p('An alert targets a ', b('group'), '; only the groups allowed for the producer are accepted. Phones choose themselves how they react to each group.'),
+      p('An alert has a ', b('group'), ' and a ', b('title'), ': one line of at most 128 characters, shown in the notification and in this console.'),
+      p('Only the groups allowed for the producer are accepted. Phones choose themselves how they react to each group.'),
       groups.length
         ? table(['Id', 'Name', 'Description'], groups.map((x) => [x.id, x.name, x.description || '—']))
         : note('No group declared.'),
@@ -176,19 +175,18 @@
     out.push(section('generic', 'Universal webhook', 'POST /api/v1/notify/{group}',
       p('Works with any tool that can call a URL. The body can be:'),
       el('ul', {},
-        el('li', {}, 'JSON with the optional fields ', c('description'), ' and ', c('details'), ';'),
-        el('li', {}, 'any other JSON: it becomes the details, as is;'),
-        el('li', {}, 'plain text: it becomes the details.')),
-      p('The description can also come from ', c('?description=…'), ' or the ', c('X-Description'), ' header. Answers ', c('201'), ' (created) or ', c('200'), ' (duplicate already received).'),
+        el('li', {}, 'JSON with a ', c('title'), ' field;'),
+        el('li', {}, 'plain text, or any other JSON: it becomes the title (on one line, truncated to 128 characters).')),
+      p('The title can also come from ', c('?title=…'), ' or the ', c('X-Title'), ' header, which win over the body. A request without any title is refused (', c('422'), '). Answers ', c('201'), ' (created) or ', c('200'), ' (duplicate already received).'),
       code(notifyTok, { inline: true, lang: 'url', label: 'URL to paste into the tool' }),
       code([
         'curl -fsS -X POST ' + shellQuote(notify) + ' \\',
         '  -H "Authorization: Bearer $INBOX_TOKEN" \\',
         "  -H 'Content-Type: application/json' \\",
-        '  -d ' + shellQuote(JSON.stringify({ description: 'Disk full on db-1', details: '**/var** is at `97 %`\n\n| mount | used |\n|---|---:|\n| /var | 97 % |' })),
+        '  -d ' + shellQuote(JSON.stringify({ title: 'Disk full on db-1: /var at 97 %' })),
       ].join('\n'), { lang: 'sh', label: 'curl, JSON' }),
       code([
-        'curl -fsS -X POST ' + shellQuote(notify + '?description=Backup') + ' \\',
+        'curl -fsS -X POST ' + shellQuote(notify) + ' \\',
         '  -H "Authorization: Bearer $INBOX_TOKEN" \\',
         "  --data-binary 'The nightly backup failed'",
       ].join('\n'), { lang: 'sh', label: 'curl, plain text' }),
@@ -202,7 +200,7 @@
         ['HTTP Method: ', c('POST'), '.'],
         ['Optional Webhook settings → Authorization Header: Scheme ', c('Bearer'), ', Credentials: the token.'],
         ['Save, check with ', b('Test'), ', then use this contact point in a notification policy.']),
-      note('Grafana sends the Alertmanager format: one Inbox alert per Grafana alert, deduplicated on its fingerprint. The description is ', c('[FIRING] <alertname>'), ', the details are the ', c('summary'), ' and ', c('description'), ' annotations (Markdown allowed). Resolved alerts are only sent if the producer has ', c('webhook_send_resolved = true'), '.'),
+      note('Grafana sends the Alertmanager format: one Inbox alert per Grafana alert, deduplicated on its fingerprint. The title is ', c('[FIRING] <alertname>'), ' followed by the ', c('summary'), ' annotation when there is one. Resolved alerts are only sent if the producer has ', c('webhook_send_resolved = true'), '.'),
       code([
         'apiVersion: 1',
         'contactPoints:',
@@ -233,7 +231,7 @@
         'route:',
         '  receiver: inbox',
       ].join('\n'), { lang: 'yaml', label: 'alertmanager.yml' }),
-      note('One Inbox alert per alert of the Alertmanager group; repeats and retries do not page twice. Description: ', c('[FIRING] <alertname>'), '; details: the ', c('summary'), ' and ', c('description'), ' annotations.')));
+      note('One Inbox alert per alert of the Alertmanager group; repeats and retries do not page twice. Title: ', c('[FIRING] <alertname>'), ' followed by the ', c('summary'), ' annotation when there is one.')));
 
     out.push(section('uptime-kuma', 'Uptime Kuma', 'Webhook notification',
       code(notifyTok, { inline: true, lang: 'url', label: 'Post URL' }),
@@ -242,13 +240,13 @@
         ['Post URL: the one above.'],
         ['Request Body: ', b('Custom Body'), ', with the body below.'],
         ['Additional Headers (optional, instead of ', c('?token='), '): the header JSON below.']),
-      code('{ "description": "Uptime Kuma: {{ monitorJSON.name }}", "details": "{{ msg }}" }', { lang: 'json', label: 'Custom Body' }),
+      code('{ "title": "Uptime Kuma: {{ msg }}" }', { lang: 'json', label: 'Custom Body' }),
       code('{ "Authorization": "Bearer ' + TOKEN + '" }', { lang: 'json', label: 'Additional Headers' })));
 
     out.push(section('zabbix', 'Zabbix', 'Webhook media type',
       steps(
         ['Alerts → Media types → ', b('Create media type'), ', type ', b('Webhook'), '.'],
-        ['Parameters: ', c('url'), ' = the URL below, ', c('token'), ' = the token, ', c('subject'), ' = ', c('{ALERT.SUBJECT}'), ', ', c('message'), ' = ', c('{ALERT.MESSAGE}'), '.'],
+        ['Parameters: ', c('url'), ' = the URL below, ', c('token'), ' = the token, ', c('subject'), ' = ', c('{ALERT.SUBJECT}'), '.'],
         ['Script: the code below.'],
         ['Assign the media to a user and to a trigger action.']),
       code(notify, { inline: true, lang: 'url' }),
@@ -257,7 +255,7 @@
         'var req = new HttpRequest();',
         "req.addHeader('Content-Type: application/json');",
         "req.addHeader('Authorization: Bearer ' + p.token);",
-        'var resp = req.post(p.url, JSON.stringify({ description: p.subject, details: p.message }));',
+        'var resp = req.post(p.url, JSON.stringify({ title: p.subject }));',
         'if (req.getStatus() >= 300) {',
         "  throw 'Inbox: HTTP ' + req.getStatus() + ' ' + resp;",
         '}',
@@ -274,8 +272,7 @@
         '      Authorization: "Bearer ' + TOKEN + '"',
         '      Content-Type: "application/json"',
         '    body: |',
-        '      { "description": "[ALERT_TRIGGERED_OR_RESOLVED] [ENDPOINT_NAME]",',
-        '        "details": "[ALERT_DESCRIPTION]" }',
+        '      { "title": "[ALERT_TRIGGERED_OR_RESOLVED] [ENDPOINT_NAME]: [ALERT_DESCRIPTION]" }',
         '',
         'endpoints:',
         '  - name: api',
@@ -289,17 +286,17 @@
         ['Integrations → ', b('Webhook'), '.'],
         ['For the "down" event: method ', c('POST'), ', the URL below, body: ', c('$NAME is down ($STATUS)'), '.'],
         ['Leave the "up" event empty, unless you also want to be told when it recovers.']),
-      code(notify + '?description=Healthchecks&token=' + TOKEN, { inline: true, lang: 'url' })));
+      code(notify + '?token=' + TOKEN, { inline: true, lang: 'url' })));
 
     out.push(section('shell', 'Nagios, Icinga, Checkmk, Netdata', 'Notification command',
-      p('These tools run a command for each notification: call ', c('curl'), ' with the text as plain-text details.'),
+      p('These tools run a command for each notification: call ', c('curl'), ' with a short text as the plain-text body: it becomes the title.'),
       code([
         'define command {',
         '  command_name  notify-inbox',
         '  command_line  /usr/bin/curl -fsS -m 10 -X POST \\',
         '    -H "Authorization: Bearer ' + TOKEN + '" \\',
         '    --data-binary "$NOTIFICATIONTYPE$ $HOSTNAME$ $SERVICEDESC$: $SERVICEOUTPUT$" \\',
-        '    "' + notify + '?description=Nagios"',
+        '    "' + notify + '"',
         '}',
       ].join('\n'), { lang: 'sh', label: 'Nagios / Icinga 1 (commands.cfg)' }),
       code([
@@ -308,7 +305,7 @@
         'curl -fsS -m 10 -X POST \\',
         '  -H "Authorization: Bearer ' + TOKEN + '" \\',
         '  --data-binary "$NOTIFY_HOSTNAME $NOTIFY_SERVICEDESC: $NOTIFY_SERVICEOUTPUT$NOTIFY_HOSTOUTPUT" \\',
-        '  "' + notify + '?description=Checkmk"',
+        '  "' + notify + '"',
       ].join('\n'), { lang: 'sh', label: 'Checkmk (notification script)' }),
       note('Netdata, Icinga 2 and the other script-based tools work the same way: a ', c('curl'), ' to the universal URL.')));
 
@@ -321,15 +318,15 @@
         '    headers:',
         '      Authorization: "Bearer ' + TOKEN + '"',
         '    content_type: "application/json"',
-        "    payload: '{\"description\": \"{{ description }}\", \"details\": \"{{ details }}\"}'",
+        "    payload: '{\"title\": \"{{ title }}\"}'",
       ].join('\n'), { lang: 'yaml', label: 'configuration.yaml' }),
-      note('Call it from an automation: service ', c('rest_command.inbox'), ' with ', c('description'), ' and ', c('details'), '.')));
+      note('Call it from an automation: service ', c('rest_command.inbox'), ' with ', c('title'), '.')));
 
     out.push(section('workflow', 'n8n, Node-RED, Make, Zapier', 'HTTP request',
       steps(
         [b('HTTP Request'), ' node, method ', c('POST'), ', URL below.'],
         ['Header ', c('Authorization'), ' = ', c('Bearer <TOKEN>'), ' (or ', c('?token='), ' in the URL).'],
-        ['JSON body: ', c('{"description": "…", "details": "…"}'), '.']),
+        ['JSON body: ', c('{"title": "…"}'), '.']),
       code(notify, { inline: true, lang: 'url' })));
 
     out.push(section('scripts', 'Scripts and cron', null,
@@ -337,7 +334,7 @@
         '#!/bin/sh',
         '# Page when a backup fails',
         'if ! /usr/local/bin/backup.sh; then',
-        '  curl -fsS -m 10 -X POST ' + shellQuote(notify + '?description=Backup') + ' \\',
+        '  curl -fsS -m 10 -X POST ' + shellQuote(notify) + ' \\',
         '    -H "Authorization: Bearer $INBOX_TOKEN" \\',
         '    --data-binary "The backup of $(hostname) failed"',
         'fi',
@@ -346,19 +343,19 @@
         'Invoke-RestMethod -Method Post -Uri "' + notify + '" `',
         '  -Headers @{ Authorization = "Bearer $env:INBOX_TOKEN" } `',
         '  -ContentType "application/json" `',
-        "  -Body '{\"description\":\"Windows\",\"details\":\"Service stopped\"}'",
+        "  -Body '{\"title\":\"Windows: service stopped\"}'",
       ].join('\n'), { lang: 'sh', label: 'PowerShell' })));
 
     out.push(section('reference', 'Reference', null,
       table(['Endpoint', 'Use'], [
-        ['POST /api/v1/notify/{group}', 'Universal webhook: JSON {description, details}, other JSON or plain text.'],
+        ['POST /api/v1/notify/{group}', 'Universal webhook: JSON {title}, ?title=, X-Title, or plain text as the title.'],
         ['POST /api/v1/webhooks/alertmanager/{group}', 'Prometheus Alertmanager format, also used by Grafana.'],
-        ['POST ' + alerts.replace(base, ''), 'JSON API: {"group", "description"?, "details"?}.'],
+        ['POST ' + alerts.replace(base, ''), 'JSON API: {"group", "title"}.'],
         ['GET /api/v1/alerts/{id}', 'Delivery per device for one alert.'],
       ]),
       table(['Field', 'Content'], [
-        ['description', 'Short text shown in the notification. Truncated to 128 characters.'],
-        ['details', 'Optional Markdown: headings, lists, tables, code blocks, links. Long text is truncated to the server limit.'],
+        ['group', 'Id of the group to page (see above).'],
+        ['title', 'One line shown in the notification, at most 128 characters. Required.'],
       ]),
       table(['Code', 'Meaning'], [
         ['201', 'Alert written to disk and scheduled for every device following the group.'],
@@ -367,7 +364,7 @@
         ['401', 'Missing or invalid token.'],
         ['403', 'Group not allowed for this producer.'],
         ['409', 'Same idempotency key, different content.'],
-        ['413 / 422', 'Alert too long, unknown group or control characters.'],
+        ['413 / 422', 'Title too long, missing or with control characters; unknown group.'],
         ['503', 'Storage unavailable: retry.'],
       ]),
       note('An offline phone gets the alert when it reconnects. An alert a phone has not received within the server\'s ', c('storage.delivery_ttl'), ' expires for that phone and is no longer sent.')));

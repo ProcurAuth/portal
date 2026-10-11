@@ -1,4 +1,4 @@
-# Device protocol (version 1)
+# Device protocol (version 3)
 
 The code is the reference: [`crates/inbox-core/src/proto.rs`](../crates/inbox-core/src/proto.rs),
 [`enroll.rs`](../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../crates/inbox-core/src/noise.rs).
@@ -6,8 +6,8 @@ The same crate runs on the server and in the Android app (JNI), so there is a
 single implementation of the cryptography.
 
 All messages are JSON. Binary fields are standard base64 with padding.
-This document describes protocol version 2 (Inbox 0.6). Version 1 apps are refused
-with close code 4426 and must be updated.
+This document describes protocol version 3 (Inbox 0.10). Apps speaking another
+version are refused with close code 4426 and must be updated.
 
 ## Keys
 
@@ -27,7 +27,7 @@ enrollment as a failed attempt until it succeeds (`security.max_auth_failures`).
 
 ```text
 device                                              server
-  {"type":"start","protocol":2,
+  {"type":"start","protocol":3,
    "credential_request":b64}                   ->
                                                <-  {"type":"challenge","credential_response":b64}
   {"type":"finish","credential_finalization":b64,
@@ -56,8 +56,8 @@ own server key, and it cannot register a device.
 binary frame carries exactly one Noise message (at most 65535 bytes).
 
 1. Device to server, Noise message 1, carrying
-   `{"protocol":2,"device_id":hex32,"app_version":s}`.
-2. Server to device, Noise message 2, carrying `{"protocol":2,"server_name":s}`.
+   `{"protocol":3,"device_id":hex32,"app_version":s}`.
+2. Server to device, Noise message 2, carrying `{"protocol":3,"server_name":s}`.
    The device rejects any key other than the pinned server key.
 3. Device to server, first transport frame `{"t":"ready"}`. Only after this does
    the server count the session as established, so a replayed message 1 cannot
@@ -81,7 +81,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 |---|---|
 | `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (recorded pseudonym) |
 | `user_name` | `user_name` | Confirms `set_user_name`. |
-| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `description?` (at most 128 characters), `details?` (Markdown), `created_at_ms` |
+| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title` (one line, at most 128 characters), `created_at_ms` |
 | `subscriptions` | `subscriptions[]`, sent after each change |
 | `pong` | `nonce` |
 | `error` | `code`, `message` (for example `unknown_group`) |
@@ -127,5 +127,5 @@ pages opened in the operator's browser:
 
 Endpoints: `GET /api/admin/overview`, `GET /api/admin/alerts?limit=`,
 `GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=&user=<pseudonym>`,
-`POST /api/admin/alerts` (`{group, description?, details?, idempotency_key}`) and
+`POST /api/admin/alerts` (`{group, title, idempotency_key}`) and
 `POST /api/admin/devices/{id}/revoke` (`{}`).

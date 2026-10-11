@@ -28,18 +28,6 @@ pub fn is_hex_id(text: &str) -> bool {
     text.len() == 32 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Truncates to at most `max` bytes on a character boundary.
-pub fn truncate(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
-}
-
 /// Truncates to at most `max` characters, ending with "…" when cut.
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -59,7 +47,7 @@ mod tests {
         let id = random_id();
         assert!(is_hex_id(&id));
         assert_ne!(id, random_id());
-        assert_eq!(truncate("héllo", 2), "h");
-        assert_eq!(truncate("abc", 10), "abc");
+        assert_eq!(truncate_chars("héllo", 3), "hé…");
+        assert_eq!(truncate_chars("abc", 10), "abc");
     }
 }

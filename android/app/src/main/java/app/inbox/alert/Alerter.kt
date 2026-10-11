@@ -121,9 +121,7 @@ object Alerter {
 
     private fun post(context: Context, a: Alert, direct: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val title = a.description ?: a.groupName
-        // The details are Markdown: the notification shows their first plain line.
-        val body = a.details?.let { app.inbox.md.Markdown.firstLine(it) } ?: context.getString(R.string.alert_in_group, a.groupName)
+        val body = context.getString(R.string.alert_in_group, a.groupName)
         // Tapping the notification opens the alert in the app, which marks it read.
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),
@@ -137,11 +135,8 @@ object Alerter {
         }
         val b = Notification.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
+            .setContentTitle(a.title)
             .setContentText(body)
-            .setStyle(Notification.BigTextStyle().bigText(
-                a.details?.let { app.inbox.md.Markdown.plainText(it).take(800) }?.ifEmpty { null } ?: body
-            ))
             .setWhen(a.createdAtMs)
             .setShowWhen(true)
             .setContentIntent(open)

@@ -142,6 +142,12 @@ UPDATE connections SET user_name =
     (SELECT d.user_name FROM devices d WHERE d.id = connections.device_id)
     WHERE user_name IS NULL;
 "#,
+    r#"
+-- An alert is a group and a title: no more details; the title is never empty.
+UPDATE alerts SET description = group_id WHERE description IS NULL OR description = '';
+ALTER TABLE alerts DROP COLUMN details;
+ALTER TABLE alerts RENAME COLUMN description TO title;
+"#,
 ];
 
 impl Db {
@@ -397,8 +403,7 @@ pub fn prune_subscriptions(conn: &Connection, groups: &[String]) -> rusqlite::Re
 
 pub struct NewAlert {
     pub group: String,
-    pub description: Option<String>,
-    pub details: Option<String>,
+    pub title: String,
     pub source: String,
     pub idempotency_key: String,
 }
@@ -423,20 +428,13 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let existing = tx
         .query_row(
-            "SELECT id, group_id, description, details FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
+            "SELECT id, group_id, title FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
             params![alert.source, alert.idempotency_key],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            },
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
         )
         .optional()?;
-    if let Some((id, group, description, details)) = existing {
-        if group != alert.group || description != alert.description || details != alert.details {
+    if let Some((id, group, title)) = existing {
+        if group != alert.group || title != alert.title {
             return Ok(InsertOutcome::Conflict);
         }
         let devices = delivery_devices(&tx, &id)?;
@@ -445,17 +443,9 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let id = random_id();
     let now = now_ms();
     tx.execute(
-        "INSERT INTO alerts (id, group_id, description, details, source, idempotency_key, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            id,
-            alert.group,
-            alert.description,
-            alert.details,
-            alert.source,
-            alert.idempotency_key,
-            now
-        ],
+        "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, alert.group, alert.title, alert.source, alert.idempotency_key, now],
     )?;
     tx.execute(
         "INSERT INTO deliveries (alert_id, device_id)
@@ -482,8 +472,7 @@ pub struct PendingDelivery {
     pub seq: i64,
     pub alert_id: String,
     pub group: String,
-    pub description: Option<String>,
-    pub details: Option<String>,
+    pub title: String,
     pub created_at: i64,
 }
 
@@ -496,7 +485,7 @@ pub fn pending_deliveries(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT d.seq, a.id, a.group_id, a.description, a.details, a.created_at
+        "SELECT d.seq, a.id, a.group_id, a.title, a.created_at
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
@@ -506,9 +495,8 @@ pub fn pending_deliveries(
             seq: r.get(0)?,
             alert_id: r.get(1)?,
             group: r.get(2)?,
-            description: r.get(3)?,
-            details: r.get(4)?,
-            created_at: r.get(5)?,
+            title: r.get(3)?,
+            created_at: r.get(4)?,
         })
     })?;
     rows.collect()
@@ -616,8 +604,7 @@ pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<Devi
 pub struct AlertSummary {
     pub id: String,
     pub group: String,
-    pub description: Option<String>,
-    pub details: Option<String>,
+    pub title: String,
     pub source: String,
     pub created_at: i64,
     pub targets: i64,
@@ -628,8 +615,7 @@ pub struct AlertSummary {
     pub missing: Vec<String>,
 }
 
-const ALERT_SUMMARY: &str =
-    "SELECT a.id, a.group_id, a.description, a.details, a.source, a.created_at,
+const ALERT_SUMMARY: &str = "SELECT a.id, a.group_id, a.title, a.source, a.created_at,
         COUNT(d.seq), COUNT(d.received_at)
      FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id";
 
@@ -637,12 +623,11 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
     Ok(AlertSummary {
         id: r.get(0)?,
         group: r.get(1)?,
-        description: r.get(2)?,
-        details: r.get(3)?,
-        source: r.get(4)?,
-        created_at: r.get(5)?,
-        targets: r.get(6)?,
-        received: r.get(7)?,
+        title: r.get(2)?,
+        source: r.get(3)?,
+        created_at: r.get(4)?,
+        targets: r.get(5)?,
+        received: r.get(6)?,
         expired: 0,
         missing: Vec::new(),
     })
@@ -849,8 +834,7 @@ mod tests {
     fn alert(key: &str) -> NewAlert {
         NewAlert {
             group: "infra".into(),
-            description: Some("t".into()),
-            details: None,
+            title: "t".into(),
             source: "producer:test".into(),
             idempotency_key: key.into(),
         }
@@ -892,7 +876,7 @@ mod tests {
         };
         assert_eq!(alert_id, again);
         let mut other = alert("k");
-        other.description = Some("different".into());
+        other.title = "different".into();
         assert!(matches!(insert_alert(&mut c, &other).unwrap(), InsertOutcome::Conflict));
         assert_eq!(pending_deliveries(&c, &a, 10, 0).unwrap().len(), 1);
     }

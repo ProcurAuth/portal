@@ -54,7 +54,6 @@ security {
 }
 
 limits {
-  max_details_bytes = 16384
   max_request_bytes = 65536
 }
 

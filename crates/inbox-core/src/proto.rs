@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::b64::serde_bytes;
 
-/// Maximum length of an alert description, in characters.
-pub const MAX_DESCRIPTION_CHARS: usize = 128;
+/// Maximum length of an alert title, in characters.
+pub const MAX_TITLE_CHARS: usize = 128;
 
 /// Delivery receipt sent by a device.
 ///
@@ -110,10 +110,8 @@ pub struct AlertMsg {
     pub alert_id: String,
     pub group: String,
     pub group_name: String,
-    /// Short summary, at most [`MAX_DESCRIPTION_CHARS`] characters.
-    pub description: Option<String>,
-    /// Longer content, in Markdown.
-    pub details: Option<String>,
+    /// One line, at most [`MAX_TITLE_CHARS`] characters.
+    pub title: String,
     /// Unix milliseconds at which the server accepted the alert.
     pub created_at_ms: i64,
 }
@@ -206,14 +204,13 @@ mod tests {
             alert_id: "ab".into(),
             group: "g".into(),
             group_name: "G".into(),
-            description: None,
-            details: Some("**m**".into()),
+            title: "disk full".into(),
             created_at_ms: 1,
         });
         let s = serde_json::to_string(&a).unwrap();
         assert!(s.starts_with(r#"{"t":"alert","alert_id":"ab""#), "{s}");
         let back: ServerMsg = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, ServerMsg::Alert(ref x) if x.details.as_deref() == Some("**m**")));
+        assert!(matches!(back, ServerMsg::Alert(ref x) if x.title == "disk full"));
         assert!(!s.contains("action"), "the server never knows alert levels");
         assert!(
             serde_json::from_str::<ClientMsg>(

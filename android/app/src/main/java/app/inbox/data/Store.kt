@@ -27,10 +27,8 @@ data class Alert(
     val alertId: String,
     val group: String,
     val groupName: String,
-    /** Short summary (at most 128 characters on the server). */
-    val description: String?,
-    /** Long Markdown text. */
-    val details: String?,
+    /** Single line, at most 128 characters on the server. */
+    val title: String,
     val createdAtMs: Long,
     val receivedAtMs: Long,
     /** What this phone did with it: the local level of its group when it arrived. */
@@ -51,13 +49,12 @@ data class Alert(
  * The `acked_at_ms` column holds the local "alarm stopped" time, `read_at_ms` the
  * local "marked read" time. Neither is ever sent.
  *
- * Column names predate protocol v2: `alerts.title` holds the description and
- * `alerts.message` the Markdown details; `subscriptions` holds this phone's own
- * level per group (alarm / ring / notify, or off). The server only knows which
- * groups this phone subscribes to, never the level.
+ * `subscriptions` holds this phone's own level per group (alarm / ring / notify,
+ * or off). The server only knows which groups this phone subscribes to, never the
+ * level.
  */
 class Store private constructor(context: Context, private val defaultUserName: String?) :
-    SQLiteOpenHelper(context, "inbox.db", null, 4) {
+    SQLiteOpenHelper(context, "inbox.db", null, 5) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -110,6 +107,10 @@ class Store private constructor(context: Context, private val defaultUserName: S
                 group_id TEXT NOT NULL, action TEXT NOT NULL,
                 PRIMARY KEY (server_id, group_id))"""
         )
+        createAlerts(db)
+    }
+
+    private fun createAlerts(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE alerts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,8 +118,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
                 alert_id TEXT NOT NULL,
                 group_id TEXT NOT NULL,
                 group_name TEXT NOT NULL,
-                title TEXT,
-                message TEXT,
+                title TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
                 received_at_ms INTEGER NOT NULL,
                 action TEXT NOT NULL,
@@ -145,6 +145,11 @@ class Store private constructor(context: Context, private val defaultUserName: S
             db.execSQL("DROP TABLE IF EXISTS outbox")
             defaultUserName?.takeIf { it.isNotBlank() }
                 ?.let { db.execSQL("UPDATE servers SET user_name = ? WHERE user_name IS NULL", arrayOf(it)) }
+        }
+        // v5: an alert is a group and a title; the earlier alert history is dropped.
+        if (oldVersion < 5) {
+            db.execSQL("DROP TABLE IF EXISTS alerts")
+            createAlerts(db)
         }
     }
 
@@ -278,8 +283,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
             put("alert_id", a.alertId)
             put("group_id", a.group)
             put("group_name", a.groupName)
-            put("title", a.description)
-            put("message", a.details)
+            put("title", a.title)
             put("created_at_ms", a.createdAtMs)
             put("received_at_ms", a.receivedAtMs)
             put("action", a.action)
@@ -308,12 +312,10 @@ class Store private constructor(context: Context, private val defaultUserName: S
                 while (c.moveToNext()) {
                     add(
                         Alert(
-                            c.getLong(0), c.getString(1), c.getString(2), c.getString(3),
-                            if (c.isNull(4)) null else c.getString(4),
-                            if (c.isNull(5)) null else c.getString(5),
-                            c.getLong(6), c.getLong(7), c.getString(8), c.getInt(9) != 0,
+                            c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4),
+                            c.getLong(5), c.getLong(6), c.getString(7), c.getInt(8) != 0,
+                            if (c.isNull(9)) null else c.getLong(9),
                             if (c.isNull(10)) null else c.getLong(10),
-                            if (c.isNull(11)) null else c.getLong(11),
                         )
                     )
                 }
@@ -321,7 +323,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
         }
 
     private val alertColumns =
-        "server_id, alert_id, group_id, group_name, title, message, created_at_ms, received_at_ms, action, notified, acked_at_ms, read_at_ms"
+        "server_id, alert_id, group_id, group_name, title, created_at_ms, received_at_ms, action, notified, acked_at_ms, read_at_ms"
 
     fun alert(serverId: Long, alertId: String): Alert? = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE server_id = ? AND alert_id = ?",

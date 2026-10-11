@@ -17,8 +17,6 @@
     <!-- Cards and list panels: near-opaque surface, crisp border. -->
     <color name="card">#F7FFFFFF</color>
     <color name="card_stroke">#1F0F172A</color>
-    <!-- Markdown code spans, code blocks and table headers. -->
-    <color name="code_bg">#0F0F172A</color>
     <color name="scrim">#330F172A</color>
 
     <!-- Text -->
