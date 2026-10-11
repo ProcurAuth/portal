@@ -1,8 +1,8 @@
 # portal
 
-Authentication service for Traefik `ForwardAuth`, and the launcher page of the lab, written in Rust: a superadmin defined by the environment, users with roles added from a settings popup, a role gate on every service, and a history of who signed in and what they used. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or annotation (Kubernetes IngressRoute), grouped in full-width rows, with their health and an offline icon library; see the repository README for the labels.
+Authentication service for Traefik `ForwardAuth`, and the launcher page of the lab, written in Rust: a superadmin defined by the environment, users with roles added from the settings pages, a role gate on every service, and a history of who signed in and what they used. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or annotation (Kubernetes IngressRoute), grouped in full-width rows, with their health and an offline icon library; see the repository README for the labels.
 
-The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio; discovery uses `reqwest` (rustls) for the Kubernetes API and health probes. Pages are rendered in Rust; the only script is the theme selector (and Escape closing the settings popup). Accounts and history live in one SQLite file (bundled in the static binary). There is no Redis, JavaScript framework, CDN, or runtime shell, and nothing is fetched from the internet at runtime.
+The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio; discovery uses `reqwest` (rustls) for the Kubernetes API and health probes. Pages are rendered in Rust; the only script is the theme selector (the settings page of the users adds one small script for its password generator). Accounts and history live in one SQLite file (bundled in the static binary). There is no Redis, JavaScript framework, CDN, or runtime shell, and nothing is fetched from the internet at runtime.
 
 ## Authentication model
 
@@ -19,7 +19,7 @@ authentication {
 
 At startup the plaintext password is read with a strict size bound, hashed once with Argon2id, and the plaintext buffer is zeroized. The superadmin sees and may open everything, and is the only account that can manage the others.
 
-**Users** are added and deleted by the superadmin from the gear popup of the launcher. Their Argon2id hashes are stored in the SQLite file (`storage.database`); the request path reads an in-memory copy and never waits on the disk. A user holds any number of roles. Exactly one Argon2 check runs per login attempt whoever the login names (the superadmin's hash, the account's, or a dummy one), and the failure message is the same, so neither time nor wording tells whether a login exists.
+**Users** are added and deleted by the superadmin from the settings pages (the gear of the launcher). Their Argon2id hashes are stored in the SQLite file (`storage.database`); the request path reads an in-memory copy and never waits on the disk. A user holds any number of roles. Exactly one Argon2 check runs per login attempt whoever the login names (the superadmin's hash, the account's, or a dummy one), and the failure message is the same, so neither time nor wording tells whether a login exists.
 
 A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. The server keeps the active-session set in bounded RAM with an expiration time; logout deletes the session immediately. Restarting the process clears all sessions.
 
@@ -37,23 +37,30 @@ A service binds to roles with its `portal.roles` label (an annotation in K3s): `
 
 - no `portal.roles`: open to the superadmin only. Access is granted by naming a role, never by omission, so a new service is closed to every user until it is bound to a role;
 - some roles: open to the superadmin and to users holding at least one of them;
-- a role that is not in `roles.names` exists nowhere: it opens the service to nobody but the superadmin, and the settings popup flags the service with a warning (without naming the role).
+- a role that is not in `roles.names` exists nowhere: it opens the service to nobody but the superadmin, and the Services settings page flags the service with a warning (without naming the role).
 
 `/auth/verify` enforces this. It matches the path asked for (`X-Forwarded-Uri`) to the service that owns the longest path prefix of its `href`, on whole segments. Traefik routes on the cleaned path but forwards the raw URI, so the portal reads the path every way a proxy or a backend might (`%2e%2e`, `//`, `%2f` as a character and as a separator, `\`) and allows the request only if every reading is allowed: `/grafana/../clickhouse/` is judged as a ClickHouse request. A refused browser navigation is redirected to `/auth/denied` (the answer to ForwardAuth cannot carry a page: Traefik caps its body); anything else gets a plain 403. `/auth/*` is never subject to roles, and a path that no service owns (an absolute asset path) stays open to every signed-in user. The launcher shows only the services a user may open.
 
-## Settings popup and history
+## Settings pages and history
 
-The superadmin gets a gear on the launcher. It opens a window of one fixed size (its header and tabs never move, only the body scrolls) on the `#settings` anchor. It works without script; script adds the **Generate** button and the dialog behaviour (focus moves into the window, the page behind is inert, **Escape**, the cross and the backdrop close it, focus returns to the gear, no history entry is left behind). Three tabs:
+The superadmin gets a gear on the launcher. It opens the settings, which are **one HTML page per tab**, as the pages of clickhouse-dash are: a header with **Back to panel**, a row of underlined tab links (no fill, only a line under the current one), then the page. They live under `/auth/settings` (Traefik already routes `/auth/` to the portal), work without script, and answer 404 to anyone who is not the superadmin in its own right (a user, or the superadmin browsing as a user). A page carries only what its tab shows, and the launcher carries none of it, so the browser builds a small DOM wherever it goes (a twelve-service launcher is about 150 elements; the settings used to add 700 more to it). Four tabs:
 
-1. **Users**: the accounts first, with the number of failed sign-ins of the last 30 days as a red counter; **Add a user** is one button that opens the form in place (it also opens after a refused attempt). One card per account: last sign-in, a graph of its connections, its latest sessions (time, address, browser, duration, how each ended), the services it used, the services it may open, **Log in as**, **Edit** and a two-step **Delete**. **Edit** changes the roles and, when a new password is typed, the password (leave it empty to keep it); a new password ends that account's sessions at once, a change of roles applies from the next request. The **Generate** button of both forms fills the password field with a random 20-character password drawn in the browser, never sent anywhere before the form is submitted. Below the accounts: connections per day over 30 days (neutral bars, today's in the accent, with the peak day written out) and the recent events.
-2. **Roles**: each role of the configuration, with its users and the services it opens.
-3. **Services**: each service with the roles it accepts (`Superadmin only` when it names no existing role, or the existing roles) and a warning when a role it names does not exist.
+1. **Users** (`/auth/settings`): the accounts first, with the number of failed sign-ins of the last 30 days as a red counter; **Add a user** is one button that opens the form in place (it also opens after a refused attempt). One card per account: last sign-in, a graph of its connections, its latest sessions (time, address, browser, duration, how each ended), the services it used, the services it may open, **Log in as**, **Edit** and a two-step **Delete**. **Edit** changes the roles and, when a new password is typed, the password (leave it empty to keep it); a new password ends that account's sessions at once, a change of roles applies from the next request. The **Generate** button of both forms fills the password field with a random 20-character password drawn in the browser, never sent anywhere before the form is submitted. Below the accounts: connections per day over 30 days (neutral bars, today's in the accent, with the peak day written out; a graph is one SVG of three paths) and the recent events. The password generator is the only script of these pages and loads on this page only.
+2. **Roles** (`/auth/settings/roles`): each role of the configuration, with its users and the services it opens.
+3. **Services** (`/auth/settings/services`): each service with the roles it accepts (`Superadmin only` when it names no existing role, or the existing roles) and a warning when a role it names does not exist.
+4. **Logins** (`/auth/settings/logins`): the sign-in log, below.
+
+### Sign-in log
+
+Every sign-in attempt that reaches the password check is recorded: when (UTC, to the second), whether it succeeded, the **login as typed**, whether that login names an account, the client address and the browser. The page shows the figures of the last 24 hours (attempts, refused, distinct addresses refused), the log newest first, 50 rows a page, with a *Refused* filter (`?r=failed`, `?p=N`).
+
+The password is never recorded, in the database, on the page or in the logs. What a visitor types is hostile data, so it never travels raw: control characters (newline, NUL, escape sequences) and characters that hide or reorder text (zero-width characters, right-to-left overrides, line separators) are kept as a visible `\u{..}` escape, the text is cut at 64 characters with an ellipsis, it is only ever a bound SQL parameter, it is HTML-escaped where the page prints it (and the CSP forbids inline script and style anyway), and in the JSON logs (`login_failed`, `login_success` carry `login`) it stays inside one escaped string, so it cannot forge a line. An attempt blocked by the rate limiter is counted in the metrics but not listed one by one, and the log keeps at most 20,000 attempts (newest first), so a siege cannot fill the volume.
 
 A browser refused by the role gate lands on a 403 page that names the service (only a service of the catalogue is ever named, from its id), says to ask the administrator for a role, and offers **Back to panel** and **Sign out**.
 
 **Log in as** gives the superadmin a session as the user (flagged *impersonated*: it is not counted as a connection of that user, and is tagged *via superadmin* in the history). A banner offers **Back to superadmin**, which needs no password because the impersonated session itself proves it was opened by the superadmin. Account management is refused while impersonating.
 
-History goes to SQLite (`storage.database`) and is kept `storage.retention_days` days (90 by default): sessions (login, address, user agent, start, last seen, end and why), the services each session used (counts per service, never a path or query) and administrative events (users added or deleted, impersonation, failed sign-ins). A failed sign-in on a login that does not exist is counted without storing what was typed, since a password is sometimes typed there. Requests only touch memory; one writer thread flushes every 15 seconds in a single transaction, and an event is dropped (and counted in `portal_tracking_dropped_total`) rather than slowing a request down. Sessions a previous run left open end with the reason *restart*. Times are UTC.
+History goes to SQLite (`storage.database`) and is kept `storage.retention_days` days (90 by default): sessions (login, address, user agent, start, last seen, end and why), the services each session used (counts per service, never a path or query) and administrative events (users added or deleted, impersonation, failed sign-ins) and the sign-in attempts above. The per-account failed counters count only logins that name an account; a login that does not exist is counted apart and appears, as typed, in the sign-in log (a person sometimes types a password in the login field: that is the one thing this log can hold that it should not, which is why it is short-lived and visible only to the superadmin). Requests only touch memory; one writer thread flushes every 15 seconds in a single transaction, and an event is dropped (and counted in `portal_tracking_dropped_total`) rather than slowing a request down. Sessions a previous run left open end with the reason *restart*. Times are UTC.
 
 ```hcl
 users {
@@ -107,7 +114,7 @@ Open:
 http://localhost:4181/auth/login
 ```
 
-Sign in as `admin` / `test1234`; the gear opens the settings popup.
+Sign in as `admin` / `test1234`; the gear opens the settings pages.
 
 Stop with:
 

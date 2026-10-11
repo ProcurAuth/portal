@@ -1,4 +1,5 @@
-/* portal: one stylesheet for the launcher and the authentication pages.
+/* portal: the stylesheet of every page (launcher, authentication, settings header). The settings pages
+   add settings.css; the launcher and the login page never load those rules.
    Components name tokens; only the token blocks below hold colour literals.
    Surfaces, state colours and the accent follow the graphite system of circular-fi/clickhouse-dash. */
 
@@ -16,6 +17,7 @@
   --danger-bg: rgba(239, 68, 68, 0.12);
   --warning: #fbbf24;
   --warning-bg: rgba(245, 158, 11, 0.12);
+  --success-bg: rgba(34, 197, 94, 0.12);
   --success: #34d399;
   --accent-fill: #356fe6;
   --accent-fill-hover: #2c62d4;
@@ -23,10 +25,7 @@
   --accent-text: #93b4ff;
   --on-fill: #ffffff;
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.28);
-  --shadow-modal: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 18px 50px rgba(0, 0, 0, 0.45);
-  --sheen: rgba(26, 52, 152, 0.07);
   --input-border: #6b7280;
-  --scrim: rgba(0, 0, 0, 0.55);
   /* Monochrome icon sets draw in black inside an <img>; dark surfaces flip them to light. */
   --mono-filter: invert(0.92);
 }
@@ -50,10 +49,7 @@
     --accent-tint: rgba(37, 88, 217, 0.1);
     --accent-text: #1d4ed8;
     --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(15, 18, 25, 0.08);
-    --shadow-modal: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 18px 50px rgba(15, 18, 25, 0.18);
-    --sheen: rgba(37, 88, 217, 0.05);
     --input-border: #767e8a;
-    --scrim: rgba(15, 18, 25, 0.38);
     --mono-filter: none;
   }
 }
@@ -81,10 +77,7 @@
   --accent-tint: rgba(37, 88, 217, 0.1);
   --accent-text: #1d4ed8;
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(15, 18, 25, 0.08);
-  --shadow-modal: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 18px 50px rgba(15, 18, 25, 0.18);
-  --sheen: rgba(37, 88, 217, 0.05);
   --input-border: #767e8a;
-  --scrim: rgba(15, 18, 25, 0.38);
   --mono-filter: none;
 }
 
@@ -165,7 +158,7 @@ a {
 .appHeader {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 16px;
   height: 56px;
   max-width: var(--page-width);
@@ -173,10 +166,36 @@ a {
   padding: 0 24px;
 }
 
+.appHeader__left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .appHeader__right {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
+}
+
+/* Settings pages: the way back to the launcher, in the place the brand takes in clickhouse-dash. */
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  margin-left: -6px;
+  padding: 0 8px 0 4px;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.15s var(--ease);
+}
+
+.backLink:hover {
+  color: var(--text);
 }
 
 .button {
@@ -268,6 +287,9 @@ a {
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   background: var(--panel);
+  /* A row below the fold is not laid out or painted until it is near the screen. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 150px;
 }
 
 .group__head {
@@ -394,9 +416,50 @@ a {
   font-weight: 600;
 }
 
+/* "up" is green and its dot pulses. The dot is the label's own ::before and the ring its ::after, so
+   there is no node to add; the ring animates transform and opacity only, which the browser runs
+   on the compositor without touching layout or paint, and the animation stops for anyone who asked
+   for less motion. */
 .tile__state--up {
-  color: var(--muted);
-  font-weight: 400;
+  position: relative;
+  padding-left: 14px;
+  color: var(--success);
+}
+
+.tile__state--up::before,
+.tile__state--up::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.tile__state--up::after {
+  animation: pulse-up 2.4s ease-out infinite;
+}
+
+@keyframes pulse-up {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile__state--up::after {
+    animation: none;
+    opacity: 0;
+  }
 }
 
 .tile--down {
@@ -573,21 +636,16 @@ a {
   font-weight: 600;
 }
 
-/* Settings popup (superadmin): opens on #settings, tabs are radio buttons, no script ---- */
+
+.hint {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
 
 .button--icon {
   width: 34px;
   padding: 0;
-}
-
-.button--danger {
-  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-  color: var(--danger);
-}
-
-.button--danger:hover {
-  border-color: var(--danger);
-  background: var(--danger-bg);
 }
 
 .viewAs {
@@ -609,654 +667,6 @@ a {
   color: var(--text);
 }
 
-html:has(.modal:target:not(.is-closed)) {
-  overflow: hidden;
-}
-
-.modal {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-
-.modal:target {
-  display: flex;
-}
-
-/* Set by the script when it closes the popup without leaving the page (see theme.js). */
-.modal.is-closed {
-  display: none;
-}
-
-.modal__panel:focus-visible {
-  outline: 0;
-}
-
-.modal__backdrop {
-  position: absolute;
-  inset: 0;
-  background: var(--scrim);
-}
-
-/* The window has one fixed size, whatever the tab or the amount of content: the header and the tabs
-   stay where they are and only the area below them scrolls. */
-.modal__panel {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  width: min(100%, 980px);
-  height: min(780px, calc(100dvh - 48px));
-  padding: 16px 20px 0;
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-panel);
-  background: linear-gradient(180deg, var(--sheen), transparent 2rem), var(--panel);
-  box-shadow: var(--shadow-modal);
-}
-
-.modal__head {
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: space-between;
-  height: 32px;
-  margin: 0 0 12px;
-}
-
-.modal__head h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-/* A bare cross: no frame, no fill; it only brightens when pointed at. */
-.modal__close {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  margin-right: -8px;
-  border-radius: var(--radius-control);
-  color: var(--muted);
-  text-decoration: none;
-  transition: color 0.15s var(--ease);
-}
-
-.modal__close:hover {
-  color: var(--text);
-}
-
-.tabInput {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.tabs {
-  display: flex;
-  flex: none;
-  gap: 8px;
-  padding: 0 0 14px;
-  border-bottom: 1px solid var(--border);
-}
-
-.tabs label {
-  display: inline-flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 14px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--raised);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: border-color 0.15s var(--ease), background-color 0.15s var(--ease), color 0.15s var(--ease);
-}
-
-.tabs label:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.panels {
-  flex: 1 1 auto;
-  min-height: 0;
-  margin: 0 -4px;
-  padding: 16px 4px 22px;
-  overflow: auto;
-  scrollbar-gutter: stable;
-}
-
-.panel {
-  display: none;
-}
-
-#tab-users:checked ~ .tabs label[for="tab-users"] {
-  border-color: var(--accent-fill);
-  background: var(--accent-tint);
-  color: var(--accent-text);
-  text-decoration: underline;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 5px;
-}
-
-#tab-users:checked ~ .panels .panel--users {
-  display: block;
-}
-
-#tab-users:focus-visible ~ .tabs label[for="tab-users"] {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 2px;
-}
-
-#tab-roles:checked ~ .tabs label[for="tab-roles"] {
-  border-color: var(--accent-fill);
-  background: var(--accent-tint);
-  color: var(--accent-text);
-  text-decoration: underline;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 5px;
-}
-
-#tab-roles:checked ~ .panels .panel--roles {
-  display: block;
-}
-
-#tab-roles:focus-visible ~ .tabs label[for="tab-roles"] {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 2px;
-}
-
-#tab-services:checked ~ .tabs label[for="tab-services"] {
-  border-color: var(--accent-fill);
-  background: var(--accent-tint);
-  color: var(--accent-text);
-  text-decoration: underline;
-  text-decoration-thickness: 2px;
-  text-underline-offset: 5px;
-}
-
-#tab-services:checked ~ .panels .panel--services {
-  display: block;
-}
-
-#tab-services:focus-visible ~ .tabs label[for="tab-services"] {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 2px;
-}
-
-.panel h3 {
-  margin: 0 0 6px;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.panel h4 {
-  margin: 16px 0 6px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.panel .sectionTitle {
-  margin: 22px 0 10px;
-}
-
-.panel code {
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.hint {
-  margin: 4px 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.sectionTitle .hint {
-  margin-left: 6px;
-  font-weight: 500;
-}
-
-.modal .notice {
-  width: auto;
-  margin: 0 0 14px;
-}
-
-.modal .notice:focus-visible {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 2px;
-}
-
-.notice--ok {
-  background: var(--accent-tint);
-  color: var(--accent-text);
-}
-
-.notice--error {
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
-.overview {
-  display: grid;
-  grid-template-columns: minmax(160px, 240px) 1fr;
-  gap: 16px;
-  align-items: center;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--raised);
-}
-
-.spark {
-  display: block;
-  width: 100%;
-  max-width: 420px;
-  height: 40px;
-}
-
-.spark--wide {
-  max-width: none;
-  height: 64px;
-}
-
-.spark__bar {
-  fill: var(--muted);
-  opacity: 0.6;
-}
-
-.spark__bar--today {
-  fill: var(--accent-fill);
-  opacity: 1;
-}
-
-.spark__zero {
-  fill: var(--muted);
-  opacity: 0.35;
-}
-
-.accountsHead {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
-  margin: 0 0 8px;
-}
-
-.panel .accountsHead .sectionTitle {
-  margin: 0;
-}
-
-.accountsHead + .hint {
-  margin: 0 0 10px;
-}
-
-/* Adding is the rare task: a button that opens the form in place. */
-.addUser {
-  margin: 0 0 12px;
-}
-
-.addUser > summary {
-  width: fit-content;
-  list-style: none;
-  cursor: pointer;
-}
-
-.addUser > summary::-webkit-details-marker {
-  display: none;
-}
-
-.addUser > form {
-  display: grid;
-  gap: 12px;
-  margin-top: 10px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--raised);
-}
-
-.addUser__fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  align-items: start;
-  gap: 12px;
-}
-
-.field {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.panel input[type="text"],
-.panel input[type="password"] {
-  width: 100%;
-  height: 35px;
-  padding: 0 12px;
-  border: 1px solid var(--input-border);
-  border-radius: var(--radius-field);
-  background: var(--inset);
-  color: var(--text);
-  font: inherit;
-  font-weight: 400;
-}
-
-.panel input[type="text"]:focus-visible,
-.panel input[type="password"]:focus-visible {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 1px;
-}
-
-.roleBoxes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.roleBoxes legend {
-  margin-bottom: 6px;
-  padding: 0;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.modal .button {
-  height: 35px;
-  padding: 0 14px;
-  border-radius: var(--radius-field);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.addUser .button {
-  justify-self: start;
-}
-
-.passwordRow {
-  display: flex;
-  gap: 8px;
-}
-
-.passwordRow input {
-  flex: 1;
-  min-width: 0;
-}
-
-/* Generating needs script; without it the button would do nothing, so it is not shown. */
-.passwordRow .generate {
-  display: none;
-  flex: none;
-}
-
-.js .passwordRow .generate {
-  display: inline-flex;
-}
-
-.field .hint {
-  margin: 0;
-  font-weight: 400;
-}
-
-/* An empty live region stays in the page (so it is announced when it fills) but takes no room. */
-.field .hint:empty {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-}
-
-.userList {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-}
-
-.user {
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--raised);
-}
-
-.user__summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  list-style: none;
-  cursor: pointer;
-}
-
-.user__summary::-webkit-details-marker {
-  display: none;
-}
-
-/* A drawn chevron, not a text glyph: nothing for a screen reader to read out. */
-.user__summary::before {
-  content: "";
-  flex: none;
-  width: 6px;
-  height: 6px;
-  margin: 0 2px 2px 1px;
-  border-right: 2px solid var(--muted);
-  border-bottom: 2px solid var(--muted);
-  transform: rotate(-45deg);
-}
-
-.user[open] > .user__summary::before {
-  margin-bottom: 4px;
-  transform: rotate(45deg);
-}
-
-.user__name {
-  font-weight: 700;
-}
-
-.user__meta {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.user__body {
-  padding: 4px 14px 14px;
-  border-top: 1px solid var(--border);
-}
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: var(--accent-tint);
-  color: var(--accent-text);
-  font-size: 11.5px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.pill--danger {
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
-.pill--accent {
-  background: var(--accent-fill);
-  color: var(--on-fill);
-}
-
-.pill--muted {
-  border: 1px solid var(--border);
-  background: var(--raised);
-  color: var(--muted);
-}
-
-.pill--plain {
-  border: 1px solid var(--border);
-  background: var(--inset);
-  color: var(--text);
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-}
-
-.tableScroll {
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-field);
-  background: var(--inset);
-}
-
-.table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 12.5px;
-}
-
-.table th {
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--raised);
-  color: var(--text);
-  font-weight: 700;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.table td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  overflow-wrap: break-word;
-  vertical-align: top;
-}
-
-.table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.table .pill + .pill {
-  margin-left: 6px;
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 10px;
-  margin-top: 16px;
-}
-
-.confirm > summary {
-  list-style: none;
-  cursor: pointer;
-}
-
-.confirm > summary::-webkit-details-marker {
-  display: none;
-}
-
-.confirm--edit[open] {
-  flex-basis: 100%;
-}
-
-.confirm--edit[open] > form {
-  display: grid;
-  gap: 12px;
-  max-width: 560px;
-}
-
-.confirm[open] > form {
-  margin-top: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-}
-
-.roleGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.roleCard {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--raised);
-}
-
-.svcName {
-  font-weight: 600;
-}
-
-.warn {
-  display: inline-grid;
-  place-items: center;
-  margin-left: 6px;
-  color: var(--warning);
-  vertical-align: -3px;
-}
-
-.warn .icon {
-  width: 16px;
-  height: 16px;
-}
-
-@media (max-width: 640px) {
-  .modal {
-    padding: 0;
-  }
-
-  .modal__panel {
-    height: 100dvh;
-    border-radius: 0;
-  }
-
-  .overview {
-    grid-template-columns: 1fr;
-  }
-
-  .viewAs {
-    width: calc(100% - 28px);
-  }
-}
-
 @media (max-width: 640px) {
   .appHeader,
   .rows {
@@ -1268,6 +678,10 @@ html:has(.modal:target:not(.is-closed)) {
     width: calc(100% - 28px);
   }
 
+  .viewAs {
+    width: calc(100% - 28px);
+  }
+
   .tiles {
     grid-template-columns: 1fr;
   }
@@ -1276,8 +690,7 @@ html:has(.modal:target:not(.is-closed)) {
 /* Touch: every control reaches 44px. */
 @media (pointer: coarse) {
   .button,
-  .card .button,
-  .modal .button {
+  .card .button {
     height: 44px;
   }
 
@@ -1285,37 +698,17 @@ html:has(.modal:target:not(.is-closed)) {
     width: 44px;
   }
 
+  .backLink {
+    height: 44px;
+  }
+
   .themeSwitch button {
     width: 40px;
     height: 40px;
   }
 
-  .modal__close {
-    width: 44px;
-    height: 44px;
-  }
-
-  .tabs label {
-    height: 44px;
-  }
-
-  .panel input[type="text"],
-  .panel input[type="password"],
   .card input[type="text"],
   .card input[type="password"] {
     height: 44px;
-  }
-
-  .check {
-    min-height: 44px;
-  }
-
-  .check input {
-    width: 20px;
-    height: 20px;
-  }
-
-  .user__summary {
-    min-height: 48px;
   }
 }

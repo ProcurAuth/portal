@@ -1,4 +1,4 @@
-//! The SQLite file: accounts, and the history the popup shows.
+//! The SQLite file: accounts, and the history the settings pages show.
 //!
 //! One connection behind a mutex. Callers run these methods on blocking threads (the writer thread
 //! of [`crate::tracking`], or `spawn_blocking` from a handler); the request path reads the in-memory
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
-use crate::tracking::{AuditEvent, Batch, Event};
+use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
 /// Days drawn by the connection graphs, today included.
 pub const GRAPH_DAYS: usize = 30;
@@ -17,7 +17,12 @@ const RECENT_SESSIONS: i64 = 8;
 const RECENT_EVENTS: i64 = 12;
 const TOP_SERVICES: i64 = 12;
 const DAY: i64 = 86_400;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+/// Rows per page of the sign-in log.
+pub const LOGIN_PAGE_SIZE: i64 = 50;
+/// The sign-in log keeps at most this many rows, newest first: failures are bounded per minute by the
+/// rate limiter, and this bounds what a long siege can leave on the volume.
+const MAX_LOGIN_ROWS: i64 = 20_000;
 
 const SCHEMA: &str = "
 CREATE TABLE users (
@@ -64,6 +69,20 @@ CREATE TABLE audit_events (
   user_agent TEXT NOT NULL
 );
 CREATE INDEX audit_events_ts ON audit_events (ts);
+";
+
+/// Added by schema version 2 (a database at version 1 gets it when opened).
+const LOGIN_SCHEMA: &str = "
+CREATE TABLE login_attempts (
+  id INTEGER PRIMARY KEY,
+  ts INTEGER NOT NULL,
+  ip TEXT,
+  login TEXT NOT NULL,
+  known INTEGER NOT NULL,
+  success INTEGER NOT NULL,
+  user_agent TEXT NOT NULL
+);
+CREATE INDEX login_attempts_ts ON login_attempts (ts);
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,7 +134,40 @@ pub struct AuditRow {
     pub ip: Option<String>,
 }
 
-/// What the popup shows about one account.
+/// One line of the sign-in log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginRow {
+    pub ts: i64,
+    /// What was typed, already made safe when it was recorded.
+    pub login: String,
+    /// The typed login named an account.
+    pub known: bool,
+    pub success: bool,
+    pub ip: Option<String>,
+    pub user_agent: String,
+}
+
+/// One page of the sign-in log and the figures above it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoginPage {
+    pub rows: Vec<LoginRow>,
+    /// Rows that match the filter, over every page.
+    pub matching: u32,
+    /// Zero-based, already brought back into range.
+    pub page: u32,
+    pub attempts_24h: u32,
+    pub failed_24h: u32,
+    /// Distinct addresses behind the failed attempts of the last 24 hours.
+    pub addresses_24h: u32,
+}
+
+impl LoginPage {
+    pub fn pages(&self) -> u32 {
+        self.matching.div_ceil(LOGIN_PAGE_SIZE as u32).max(1)
+    }
+}
+
+/// What the Users page shows about one account.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountActivity {
     pub login: String,
@@ -134,14 +186,14 @@ pub struct Snapshot {
     /// Every real connection, all accounts.
     pub days: Vec<DayStat>,
     pub recent_events: Vec<AuditRow>,
-    /// Failed logins on a name that does not exist (the typed name is never stored).
+    /// Failed logins on a name that does not exist (the typed names are in the sign-in log).
     pub unknown_failures_30d: u32,
     /// Unix time of the first day drawn.
     pub first_day: i64,
 }
 
 impl Snapshot {
-    /// What the popup shows when the history cannot be read: the accounts, with nothing recorded.
+    /// What the Users page shows when the history cannot be read: the accounts, with nothing recorded.
     pub fn blank(accounts: &[(String, bool)], now: i64) -> Self {
         Self {
             accounts: accounts
@@ -199,7 +251,12 @@ impl Store {
         match version {
             0 => conn
                 .execute_batch(&format!(
-                    "BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                    "BEGIN; {SCHEMA} {LOGIN_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                ))
+                .map_err(db)?,
+            1 => conn
+                .execute_batch(&format!(
+                    "BEGIN; {LOGIN_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
                 ))
                 .map_err(db)?,
             SCHEMA_VERSION => {}
@@ -334,6 +391,7 @@ impl Store {
         }
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(db)?;
+        let mut logged_attempts = false;
         for event in &batch.events {
             match event {
                 Event::SessionStarted(start) => {
@@ -363,7 +421,18 @@ impl Store {
                     .map_err(db)?;
                 }
                 Event::Audit(audit) => insert_audit(&tx, audit)?,
+                Event::Login(attempt) => {
+                    insert_login(&tx, attempt)?;
+                    logged_attempts = true;
+                }
             }
+        }
+        if logged_attempts {
+            tx.execute(
+                "DELETE FROM login_attempts WHERE id <= (SELECT MAX(id) FROM login_attempts) - ?1",
+                [MAX_LOGIN_ROWS],
+            )
+            .map_err(db)?;
         }
         for ((sid, service), hit) in &batch.hits {
             tx.execute(
@@ -419,12 +488,73 @@ impl Store {
         .map_err(db)?;
         tx.execute("DELETE FROM audit_events WHERE ts < ?1", [cutoff])
             .map_err(db)?;
+        tx.execute("DELETE FROM login_attempts WHERE ts < ?1", [cutoff])
+            .map_err(db)?;
         tx.commit().map_err(db)
     }
 
     // History: reads --------------------------------------------------------------------------
 
-    /// Everything the popup shows. `accounts` is `(login, is_superadmin)`.
+    /// One page of the sign-in log, newest first; `only_failed` keeps the refused attempts. A page
+    /// past the end is brought back to the last one.
+    pub fn login_attempts(
+        &self,
+        now: i64,
+        page: u32,
+        only_failed: bool,
+    ) -> Result<LoginPage, String> {
+        let conn = self.conn();
+        let matching: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM login_attempts WHERE (?1 = 0 OR success = 0)",
+                [only_failed],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        let mut result = LoginPage {
+            matching: matching as u32,
+            ..LoginPage::default()
+        };
+        result.page = page.min(result.pages() - 1);
+        result.rows = conn
+            .prepare(
+                "SELECT ts, login, known, success, ip, user_agent FROM login_attempts
+                  WHERE (?1 = 0 OR success = 0)
+                  ORDER BY id DESC LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(db)?
+            .query_map(
+                params![only_failed, LOGIN_PAGE_SIZE, i64::from(result.page) * LOGIN_PAGE_SIZE],
+                |row| {
+                    Ok(LoginRow {
+                        ts: row.get(0)?,
+                        login: row.get(1)?,
+                        known: row.get(2)?,
+                        success: row.get(3)?,
+                        ip: row.get(4)?,
+                        user_agent: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        let (attempts, failed, addresses): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(success = 0), 0),
+                        COUNT(DISTINCT CASE WHEN success = 0 THEN ip END)
+                   FROM login_attempts WHERE ts >= ?1",
+                [now - DAY],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(db)?;
+        result.attempts_24h = attempts as u32;
+        result.failed_24h = failed as u32;
+        result.addresses_24h = addresses as u32;
+        Ok(result)
+    }
+
+    /// Everything the Users page shows. `accounts` is `(login, is_superadmin)`.
     pub fn snapshot(&self, accounts: &[(String, bool)], now: i64) -> Result<Snapshot, String> {
         let conn = self.conn();
         let first_day = now - now.rem_euclid(DAY) - (GRAPH_DAYS as i64 - 1) * DAY;
@@ -540,6 +670,22 @@ fn insert_audit(conn: &Connection, audit: &AuditEvent) -> Result<(), String> {
             audit.actor,
             audit.ip,
             audit.user_agent
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+fn insert_login(conn: &Connection, attempt: &LoginAttempt) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO login_attempts (ts, ip, login, known, success, user_agent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            attempt.at,
+            attempt.ip,
+            attempt.login,
+            attempt.known,
+            attempt.success,
+            attempt.user_agent
         ],
     )
     .map_err(db)?;
@@ -834,6 +980,140 @@ mod tests {
             Some(300),
             "ends when it was last seen"
         );
+    }
+
+    fn attempt(login: &str, success: bool, ip: &str, at: i64) -> Event {
+        Event::Login(LoginAttempt {
+            login: login.into(),
+            known: login == "alice",
+            success,
+            ip: Some(ip.into()),
+            user_agent: "Browser/1.0".into(),
+            at,
+        })
+    }
+
+    #[test]
+    fn sign_in_attempts_are_listed_newest_first_with_the_figures_of_the_last_day() {
+        let store = Store::open_in_memory();
+        store
+            .apply(&Batch {
+                events: vec![
+                    attempt("alice", true, "10.0.0.2", NOW - 3 * DAY),
+                    attempt("alice", false, "10.0.0.2", NOW - 600),
+                    attempt("admin", false, "203.0.113.7", NOW - 500),
+                    attempt("root", false, "203.0.113.7", NOW - 400),
+                    attempt("alice", true, "10.0.0.2", NOW - 300),
+                ],
+                ..Batch::default()
+            })
+            .unwrap();
+        let all = store.login_attempts(NOW, 0, false).unwrap();
+        assert_eq!(all.matching, 5);
+        assert_eq!(all.rows[0].ts, NOW - 300, "newest first");
+        assert!(all.rows[0].success && all.rows[0].known);
+        assert_eq!(all.rows[2].login, "admin");
+        assert!(!all.rows[2].known);
+        assert_eq!(all.rows[2].ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(
+            (all.attempts_24h, all.failed_24h, all.addresses_24h),
+            (4, 3, 2),
+            "the attempt of three days ago is out of the figures, two addresses failed"
+        );
+        let failed = store.login_attempts(NOW, 0, true).unwrap();
+        assert_eq!(failed.matching, 3);
+        assert!(failed.rows.iter().all(|row| !row.success));
+        assert_eq!(failed.attempts_24h, 4, "the figures do not depend on the filter");
+    }
+
+    #[test]
+    fn a_hostile_login_is_stored_and_read_back_as_the_text_it_is() {
+        let store = Store::open_in_memory();
+        let nasty = "x'); DROP TABLE users; DELETE FROM login_attempts; --";
+        store
+            .apply(&Batch {
+                events: vec![attempt(nasty, false, "10.0.0.9", NOW)],
+                ..Batch::default()
+            })
+            .unwrap();
+        store.insert_user(&user("alice", &[])).unwrap();
+        let page = store.login_attempts(NOW, 0, false).unwrap();
+        assert_eq!(page.rows[0].login, nasty);
+        assert_eq!(store.load_users().unwrap().len(), 1, "the tables are intact");
+    }
+
+    #[test]
+    fn the_sign_in_log_pages_and_a_page_past_the_end_comes_back_to_the_last_one() {
+        let store = Store::open_in_memory();
+        let events = (0..(LOGIN_PAGE_SIZE + 5))
+            .map(|i| attempt("alice", false, "10.0.0.2", NOW - 1_000 + i))
+            .collect();
+        store
+            .apply(&Batch {
+                events,
+                ..Batch::default()
+            })
+            .unwrap();
+        let first = store.login_attempts(NOW, 0, false).unwrap();
+        assert_eq!((first.rows.len() as i64, first.pages()), (LOGIN_PAGE_SIZE, 2));
+        let second = store.login_attempts(NOW, 1, false).unwrap();
+        assert_eq!(second.rows.len(), 5);
+        assert_eq!(second.rows[0].ts, NOW - 1_000 + 4, "continues where the first page stopped");
+        let beyond = store.login_attempts(NOW, 99, false).unwrap();
+        assert_eq!(beyond.page, 1);
+        assert_eq!(beyond.rows.len(), 5);
+        let empty = Store::open_in_memory().login_attempts(NOW, 7, false).unwrap();
+        assert_eq!((empty.page, empty.pages(), empty.rows.len()), (0, 1, 0));
+    }
+
+    #[test]
+    fn the_sign_in_log_is_pruned_by_age_and_capped_in_size() {
+        let store = Store::open_in_memory();
+        store
+            .apply(&Batch {
+                events: vec![
+                    attempt("old", false, "10.0.0.2", 10),
+                    attempt("new", false, "10.0.0.2", 900),
+                ],
+                ..Batch::default()
+            })
+            .unwrap();
+        store.prune(500).unwrap();
+        let page = store.login_attempts(1_000, 0, false).unwrap();
+        assert_eq!(page.matching, 1);
+        assert_eq!(page.rows[0].login, "new");
+
+        let store = Store::open_in_memory();
+        let flood = |from: i64, count: i64| Batch {
+            events: (from..from + count)
+                .map(|i| attempt("bot", false, "198.51.100.1", i))
+                .collect(),
+            ..Batch::default()
+        };
+        store.apply(&flood(0, MAX_LOGIN_ROWS - 10)).unwrap();
+        store.apply(&flood(MAX_LOGIN_ROWS, 30)).unwrap();
+        let page = store.login_attempts(NOW, 0, false).unwrap();
+        assert_eq!(i64::from(page.matching), MAX_LOGIN_ROWS, "the oldest rows made room");
+        assert_eq!(page.rows[0].ts, MAX_LOGIN_ROWS + 29, "the newest are the ones kept");
+    }
+
+    #[test]
+    fn a_database_at_version_one_gains_the_sign_in_log_when_opened() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("{SCHEMA} PRAGMA user_version = 1;")).unwrap();
+        conn.execute(
+            "INSERT INTO users (login, password_hash, created_at) VALUES ('alice', 'h', 1)",
+            [],
+        )
+        .unwrap();
+        let store = Store::init(conn).unwrap();
+        assert_eq!(store.load_users().unwrap().len(), 1, "what was there stays");
+        assert_eq!(store.login_attempts(NOW, 0, false).unwrap().matching, 0);
+        let version: i64 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

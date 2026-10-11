@@ -32,14 +32,14 @@ use crate::rate_limit::RateLimiter;
 use crate::session::{
     Binding, NewSession, Principal, Session, SessionIssueError, SessionStore,
 };
-use crate::store::{InsertError, Snapshot, Store, UserRow};
-use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, Tracker};
+use crate::store::{InsertError, LoginPage, Snapshot, Store, UserRow};
+use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
 use crate::ui;
 use crate::users::{check_new_password, normalize_login, Directory, UserRecord};
 use crate::util::{
     constant_time_eq, html_escape, json_escape, parse_form, path_only,
-    percent_decode_form, percent_encode_query_component, validate_return_uri,
+    percent_decode_form, percent_encode_query_component, typed_login, validate_return_uri,
 };
 
 const HOME_PATH: &str = "/";
@@ -59,7 +59,9 @@ const USERS_TOKEN: &str = "users";
 const LOGOUT_TOKEN: &str = "logout";
 
 const STYLE_PATH: &str = "/auth/style.css";
+const SETTINGS_STYLE_PATH: &str = "/auth/settings.css";
 const THEME_JS_PATH: &str = "/auth/assets/theme.js";
+const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
 
@@ -302,13 +304,19 @@ async fn handle_request(
         } else if method == Method::GET && path == HEALTH_PATH {
             text_response(StatusCode::OK, "ok\n")
         } else if method == Method::GET && path == HOME_PATH {
-            handle_home(&state, &uri, request.headers(), &client).await
+            handle_home(&state, request.headers(), &client).await
         } else if method == Method::GET && path == STYLE_PATH {
             static_response("text/css; charset=utf-8", ui::CSS)
         } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
             handle_icon(&state, &path)
+        } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
+            static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
         } else if method == Method::GET && path == THEME_JS_PATH {
             static_response("text/javascript; charset=utf-8", ui::THEME_JS)
+        } else if method == Method::GET && path == SETTINGS_JS_PATH {
+            static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
+        } else if method == Method::GET && is_settings_path(&path) {
+            handle_settings(&state, &path, &uri, request.headers(), &client).await
         } else if method == Method::GET && path == SUCCESS_PATH {
             handle_success(&state, request.headers(), &client)
         } else if method == Method::GET && path == DENIED_PATH {
@@ -552,7 +560,6 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
 /// The launcher. The portal checks the session itself (the route does not go through ForwardAuth).
 async fn handle_home(
     state: &Arc<AppState>,
-    uri: &str,
     headers: &HeaderMap,
     client: &Client,
 ) -> HttpResponse {
@@ -576,16 +583,6 @@ async fn handle_home(
         None => Arc::clone(&catalog),
     };
 
-    let is_admin = viewer.session.principal == Principal::Superadmin && !viewer.session.impersonated;
-    let admin_data = if is_admin {
-        Some(load_admin_data(state).await)
-    } else {
-        None
-    };
-    let admin = admin_data.map(|(users, snapshot)| {
-        admin_view(state, &catalog, uri, &users_token, users, snapshot)
-    });
-
     let page = ui::home_page(
         &shown,
         &state.icons,
@@ -595,13 +592,122 @@ async fn handle_home(
             logout_token: &logout_token,
             users_token: &users_token,
             hidden_services: catalog.service_count() - shown.service_count(),
-            admin: admin.as_ref(),
+            settings: is_superadmin(&viewer),
         },
     );
     html_response(StatusCode::OK, page)
 }
 
-/// The accounts and their history, for the settings popup.
+/// The superadmin in its own right: not while browsing as a user.
+fn is_superadmin(viewer: &Viewer) -> bool {
+    viewer.session.principal == Principal::Superadmin && !viewer.session.impersonated
+}
+
+fn is_settings_path(path: &str) -> bool {
+    matches!(
+        path,
+        ui::settings::USERS_PATH
+            | ui::settings::ROLES_PATH
+            | ui::settings::SERVICES_PATH
+            | ui::settings::LOGINS_PATH
+    )
+}
+
+/// One page of the settings, whose route is its tab. The portal checks the session itself (the route
+/// does not go through ForwardAuth); to anyone but the superadmin the page does not exist.
+async fn handle_settings(
+    state: &Arc<AppState>,
+    path: &str,
+    uri: &str,
+    headers: &HeaderMap,
+    client: &Client,
+) -> HttpResponse {
+    let Some(viewer) = current_viewer(state, headers, client) else {
+        return match login_location(state, uri) {
+            Ok(location) => redirect_response(StatusCode::FOUND, &location),
+            Err(()) => text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n"),
+        };
+    };
+    if !is_superadmin(&viewer) {
+        state.metrics.user_admin("settings", "forbidden");
+        return handle_not_found(state, &Method::GET, uri, headers, client);
+    }
+    let (Ok(logout_token), Ok(users_token)) = (
+        sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token),
+        sign_action_token(&state.signing_secret, USERS_TOKEN, &viewer.token),
+    ) else {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    };
+    let frame = ui::Frame {
+        logout_token: &logout_token,
+    };
+    let catalog = current_catalog(state);
+    let registry = &state.config.roles.names;
+    let page = match path {
+        ui::settings::ROLES_PATH => {
+            let holders: Vec<(String, Vec<String>)> = state
+                .users
+                .list()
+                .into_iter()
+                .map(|(login, record)| (login, record.roles))
+                .collect();
+            ui::roles_page(
+                &frame,
+                &ui::RolesView {
+                    registry,
+                    catalog: &catalog,
+                    holders: &holders,
+                },
+            )
+        }
+        ui::settings::SERVICES_PATH => ui::services_page(
+            &frame,
+            &ui::ServicesView {
+                registry,
+                catalog: &catalog,
+            },
+        ),
+        ui::settings::LOGINS_PATH => {
+            let only_failed = query_value(uri, "r").as_deref() == Some("failed");
+            let asked = query_value(uri, "p")
+                .and_then(|p| p.parse::<u32>().ok())
+                .unwrap_or(1)
+                .max(1)
+                - 1;
+            let data = load_login_page(state, asked, only_failed).await;
+            ui::logins_page(
+                &frame,
+                &ui::LoginsView {
+                    page: &data,
+                    only_failed,
+                    retention_days: state.config.storage.retention_days,
+                },
+            )
+        }
+        _ => {
+            let (users, snapshot) = load_admin_data(state).await;
+            let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
+            ui::users_page(&frame, &view)
+        }
+    };
+    html_response(StatusCode::OK, page)
+}
+
+/// One page of the sign-in log; an unreadable database gives an empty page and a line in the logs.
+async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) -> LoginPage {
+    let store = Arc::clone(&state.store);
+    let now = unix_now();
+    match tokio::task::spawn_blocking(move || store.login_attempts(now, page, only_failed)).await {
+        Ok(Ok(data)) => data,
+        Ok(Err(error)) => {
+            log(state, LogLevel::Error, "history_unreadable", &[("error", error)]);
+            LoginPage::default()
+        }
+        Err(_) => LoginPage::default(),
+    }
+}
+
+/// The accounts and their history, for the Users page.
 async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, Snapshot) {
     let users = state.users.list();
     let mut accounts: Vec<(String, bool)> = users.iter().map(|(login, _)| (login.clone(), false)).collect();
@@ -620,14 +726,14 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
     (users, snapshot)
 }
 
-fn admin_view<'a>(
+fn users_view<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
     uri: &str,
     users_token: &'a str,
     users: Vec<(String, UserRecord)>,
     snapshot: Snapshot,
-) -> ui::AdminView<'a> {
+) -> ui::UsersView<'a> {
     let mut activities = snapshot.accounts.into_iter();
     let cards = users
         .into_iter()
@@ -639,8 +745,7 @@ fn admin_view<'a>(
             superadmin: false,
         })
         .collect();
-    ui::AdminView {
-        tab: ui::Tab::parse(&query_value(uri, "t").unwrap_or_default()),
+    ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
         registry: &state.config.roles.names,
         catalog,
@@ -770,16 +875,41 @@ fn handle_login_get(
         return redirect_response(StatusCode::SEE_OTHER, &rd);
     }
 
-    let csrf = match new_csrf_token() {
-        Ok(v) => v,
-        Err(_) => {
-            return text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authentication error\n",
-            )
-        }
+    // A browser that already holds a token keeps it: another request for the login page (a second tab,
+    // a favicon fetch that Traefik sends through ForwardAuth, whose redirect lands here) must not
+    // replace the cookie under the form that is open, or its submit fails the CSRF check.
+    let csrf = match existing_csrf_token(state, headers, client) {
+        Some(v) => v,
+        None => match new_csrf_token() {
+            Ok(v) => v,
+            Err(_) => {
+                return text_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "authentication error\n",
+                )
+            }
+        },
     };
     login_page(state, client.https, &rd, &sig, &csrf, None, StatusCode::OK)
+}
+
+/// The anti-CSRF token the browser already holds, when it is one this portal issued (the shape of
+/// [`new_csrf_token`]: 32 URL-safe base64 characters).
+fn existing_csrf_token(state: &AppState, headers: &HeaderMap, client: &Client) -> Option<String> {
+    cookie_value(
+        headers,
+        transport::csrf_cookie_name(client.https),
+        state.config.security.max_cookie_header_bytes,
+    )
+    .and_then(csrf_shape)
+}
+
+fn csrf_shape(value: &str) -> Option<String> {
+    (value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then(|| value.to_string())
 }
 
 fn handle_success(state: &AppState, headers: &HeaderMap, client: &Client) -> HttpResponse {
@@ -930,6 +1060,10 @@ async fn handle_login_post(
     // Exactly one Argon2 check whoever the login names: the superadmin's hash, the account's, or a
     // dummy one when the login does not exist. Time and budget tell nothing about the login.
     let who = identify(state, &login_input);
+    // What is kept of the attempt: the login as typed, made safe, and whether it names an account.
+    // The password is not part of it.
+    let typed = typed_login(&login_input);
+    let known = !matches!(who, Who::Unknown);
     let target_hash = match &who {
         Who::Superadmin => state.superadmin_hash.clone(),
         Who::User(_, record) => record.password_hash.clone(),
@@ -972,10 +1106,22 @@ async fn handle_login_post(
             state,
             LogLevel::Warn,
             "login_failed",
-            &[("client_ip", client_ip_text)],
+            &[
+                ("client_ip", client_ip_text),
+                ("login", typed.clone()),
+                ("known", known.to_string()),
+            ],
         );
-        // What was typed is recorded only when it names an account: on an unknown login it is
-        // sometimes a password.
+        state.tracker.emit(Event::Login(LoginAttempt {
+            login: typed,
+            known,
+            success: false,
+            ip: ip_text(client),
+            user_agent: user_agent_text(&headers),
+            at: unix_now(),
+        }));
+        // The audit event names an account only when the typed login is one, so the per-account
+        // counters never count a typo or a probe.
         state.tracker.emit(Event::Audit(AuditEvent {
             kind: AuditKind::LoginFailed,
             login: who.login(state),
@@ -1062,11 +1208,19 @@ async fn handle_login_post(
 
     state.metrics.login_success();
     state.metrics.session_issued();
+    state.tracker.emit(Event::Login(LoginAttempt {
+        login: typed.clone(),
+        known,
+        success: true,
+        ip: ip_text(client),
+        user_agent: user_agent_text(&headers),
+        at: unix_now(),
+    }));
     log(
         state,
         LogLevel::Info,
         "login_success",
-        &[("client_ip", client_ip_text)],
+        &[("client_ip", client_ip_text), ("login", typed)],
     );
     response
 }
@@ -1372,7 +1526,7 @@ fn require_superadmin(
     viewer: &Viewer,
     action: &'static str,
 ) -> Result<(), HttpResponse> {
-    if viewer.session.principal == Principal::Superadmin && !viewer.session.impersonated {
+    if is_superadmin(viewer) {
         Ok(())
     } else {
         state.metrics.user_admin(action, "forbidden");
@@ -1380,11 +1534,11 @@ fn require_superadmin(
     }
 }
 
-/// Back to the settings popup with the outcome of the action (a code from a fixed list).
-fn settings_redirect(code: &str, tab: &str) -> HttpResponse {
+/// Back to the Users page with the outcome of the action (a code from a fixed list).
+fn settings_redirect(code: &str) -> HttpResponse {
     redirect_response(
         StatusCode::SEE_OTHER,
-        &format!("{HOME_PATH}?s={code}&t={tab}#settings"),
+        &format!("{}?s={code}", ui::settings::USERS_PATH),
     )
 }
 
@@ -1436,7 +1590,7 @@ async fn handle_users_add(
     let registry = &state.config.roles.names;
     let rejected = |code: &str| {
         state.metrics.user_admin("add", "rejected");
-        settings_redirect(code, "users")
+        settings_redirect(code)
     };
     let login = match normalize_login(&login) {
         Ok(login) => login,
@@ -1507,7 +1661,7 @@ async fn handle_users_add(
         &headers,
     );
     state.metrics.user_admin("add", "ok");
-    settings_redirect("user-added", "users")
+    settings_redirect("user-added")
 }
 
 async fn handle_users_delete(
@@ -1531,7 +1685,7 @@ async fn handle_users_delete(
         Ok(login) if state.users.get(&login).is_some() => login,
         _ => {
             state.metrics.user_admin("delete", "rejected");
-            return settings_redirect("no-user", "users");
+            return settings_redirect("no-user");
         }
     };
 
@@ -1542,9 +1696,9 @@ async fn handle_users_delete(
         Ok(Err(error)) => {
             log(state, LogLevel::Error, "user_delete_failed", &[("error", error)]);
             state.metrics.user_admin("delete", "rejected");
-            return settings_redirect("error", "users");
+            return settings_redirect("error");
         }
-        Err(_) => return settings_redirect("error", "users"),
+        Err(_) => return settings_redirect("error"),
     }
     state.users.remove(&login);
     state.sessions.revoke_user(&login, EndReason::UserDeleted);
@@ -1557,7 +1711,7 @@ async fn handle_users_delete(
         &headers,
     );
     state.metrics.user_admin("delete", "ok");
-    settings_redirect("user-deleted", "users")
+    settings_redirect("user-deleted")
 }
 
 /// Changes an account: its roles, and its password when a new one is given. The session of an
@@ -1591,7 +1745,7 @@ async fn handle_users_update(
 
     let rejected = |code: &str| {
         state.metrics.user_admin("update", "rejected");
-        settings_redirect(code, "users")
+        settings_redirect(code)
     };
     let login = match normalize_login(&login) {
         Ok(login) => login,
@@ -1615,7 +1769,7 @@ async fn handle_users_update(
     let roles_changed = held != roles;
     if !change_password && !roles_changed {
         state.metrics.user_admin("update", "ok");
-        return settings_redirect("unchanged", "users");
+        return settings_redirect("unchanged");
     }
 
     let new_hash = if change_password {
@@ -1675,7 +1829,7 @@ async fn handle_users_update(
         );
     }
     state.metrics.user_admin("update", "ok");
-    settings_redirect(if change_password { "password-reset" } else { "user-updated" }, "users")
+    settings_redirect(if change_password { "password-reset" } else { "user-updated" })
 }
 
 /// "Log in as": the superadmin's session becomes a session of the user, flagged as impersonated.
@@ -1700,7 +1854,7 @@ async fn handle_impersonate(
         Ok(login) if state.users.get(&login).is_some() => login,
         _ => {
             state.metrics.user_admin("impersonate", "rejected");
-            return settings_redirect("no-user", "users");
+            return settings_redirect("no-user");
         }
     };
     let response = switch_session(
@@ -1755,7 +1909,7 @@ async fn handle_impersonate_end(
         Principal::Superadmin,
         state.superadmin_login.clone(),
         false,
-        redirect_response(StatusCode::SEE_OTHER, &format!("{HOME_PATH}#settings")),
+        redirect_response(StatusCode::SEE_OTHER, ui::settings::USERS_PATH),
     );
     if response.status() == StatusCode::SEE_OTHER {
         audit(
@@ -2255,7 +2409,8 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         HOME_PATH => "home",
         VERIFY_PATH => "verify",
         HEALTH_PATH => "health",
-        STYLE_PATH | THEME_JS_PATH => "assets",
+        STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
+        _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",
         LOGIN_PATH => "login",
@@ -2318,6 +2473,17 @@ mod tests {
             );
         }
         out
+    }
+
+    #[test]
+    fn a_csrf_cookie_is_reused_only_when_it_has_the_shape_of_ours() {
+        let ok = "A".repeat(32);
+        assert_eq!(csrf_shape(&ok), Some(ok.clone()));
+        assert_eq!(csrf_shape("short"), None);
+        assert_eq!(csrf_shape(&"A".repeat(33)), None);
+        assert_eq!(csrf_shape(&format!("{}\"", "A".repeat(31))), None);
+        let issued = new_csrf_token().unwrap();
+        assert_eq!(csrf_shape(&issued), Some(issued), "what new_csrf_token issues is accepted");
     }
 
     #[test]

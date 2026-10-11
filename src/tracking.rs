@@ -107,6 +107,20 @@ pub struct AuditEvent {
     pub at: i64,
 }
 
+/// One sign-in attempt that reached the password check, kept to see who knocks and from where.
+/// The password never reaches this type.
+#[derive(Clone, Debug)]
+pub struct LoginAttempt {
+    /// What was typed in the login field, already made safe by [`crate::util::typed_login`].
+    pub login: String,
+    /// The typed login names an account (the superadmin included).
+    pub known: bool,
+    pub success: bool,
+    pub ip: Option<String>,
+    pub user_agent: String,
+    pub at: i64,
+}
+
 #[derive(Clone, Debug)]
 pub enum Event {
     SessionStarted(SessionStart),
@@ -116,6 +130,7 @@ pub enum Event {
         at: i64,
     },
     Audit(AuditEvent),
+    Login(LoginAttempt),
 }
 
 /// What one session did on one service since the last flush.

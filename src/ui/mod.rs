@@ -1,23 +1,34 @@
-//! Server-rendered pages: the launcher and the authentication cards.
+//! Server-rendered pages: the launcher, the authentication cards and the settings pages.
 //!
-//! The browser receives finished HTML. The only script is the theme selector; everything else
-//! works without JavaScript. No page references anything outside this binary (the CSS and the
-//! script are served from `/auth/`, the icon sprite is inlined).
+//! The browser receives finished HTML. The only script of every page is the theme selector (the
+//! Users settings page adds the password generator); everything else works without JavaScript. No
+//! page references anything outside this binary (the CSS and the scripts are served from `/auth/`,
+//! the icon sprite is inlined, reduced to the symbols the page draws).
 //!
-//! Interface: [`home_page`], [`auth_document`], [`message_page`], the embedded [`CSS`] and
-//! [`THEME_JS`], and [`demo_catalog`] / [`demo_admin`] (synthetic data for `portal render-demo`).
+//! What a page costs the browser is a design input: a page carries only what it shows (the settings
+//! are pages of their own, not a hidden block of the launcher), its stylesheet only the rules it
+//! uses, and the login and error pages draw no icon at all.
+//!
+//! Interface: [`home_page`], [`auth_document`], [`message_page`], [`denied_page`], the settings pages
+//! of [`settings`], the embedded assets ([`CSS`], [`SETTINGS_CSS`], [`THEME_JS`], [`SETTINGS_JS`]),
+//! and [`demo_page`] (synthetic data for `portal render-demo`).
 
-pub mod admin;
+pub mod settings;
 
 use std::fmt::Write as _;
 
 use crate::catalog::{parse_labels, Catalog, Group, Health, Service};
 use crate::icons::Icons;
 use crate::util::html_escape;
-pub use admin::{notice_for, AdminView, Tab, UserCard};
+pub use settings::{
+    logins_page, notice_for, roles_page, services_page, users_page, Frame, LoginsView, RolesView,
+    ServicesView, UserCard, UsersView,
+};
 
 pub const CSS: &str = include_str!("../../web/portal.css");
+pub const SETTINGS_CSS: &str = include_str!("../../web/settings.css");
 pub const THEME_JS: &str = include_str!("../../web/theme.js");
+pub const SETTINGS_JS: &str = include_str!("../../web/settings.js");
 const SPRITE: &str = include_str!("../../web/sprite.svg");
 
 const MAX_LISTED_PROBLEMS: usize = 3;
@@ -33,8 +44,8 @@ pub struct HomeContext<'a> {
     pub users_token: &'a str,
     /// Services the roles of the viewer hide from the page.
     pub hidden_services: usize,
-    /// The settings popup: only for the superadmin.
-    pub admin: Option<&'a AdminView<'a>>,
+    /// The gear that opens the settings: only for the superadmin.
+    pub settings: bool,
 }
 
 /// The launcher: one full-width row per group, a tile per service.
@@ -61,16 +72,17 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         }
         body.push_str("</main>");
     }
-    if let Some(view) = ctx.admin {
-        body.push_str(&admin::render(view));
+    let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
+    if ctx.settings {
+        icons.push("i-settings");
     }
-    document("Portal", &body)
+    document("Portal", "", &icons, &body)
 }
 
 /// Wraps an authentication card (`<h1>`, text, form) in the shared shell.
 pub fn auth_document(title: &str, card_html: &str) -> String {
     let body = format!(r#"<main class="authShell"><div class="card">{card_html}</div></main>"#);
-    document(title, &body)
+    document(title, "", &[], &body)
 }
 
 /// A card with a title, a sentence and one button back to the launcher: the 404 and the 403.
@@ -100,22 +112,43 @@ pub fn denied_page(text: &str, viewer: &str, logout_token: &str) -> String {
     )
 }
 
-fn document(title: &str, body: &str) -> String {
+/// A whole page. `head` holds the extra stylesheet of a page that has one; `icons` names the sprite
+/// symbols the page draws.
+fn document(title: &str, head: &str, icons: &[&str], body: &str) -> String {
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css"><script src="/auth/assets/theme.js"></script></head><body>{SPRITE}{body}</body></html>"#,
-        html_escape(title)
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css">{head}<script src="/auth/assets/theme.js"></script></head><body>{}{body}</body></html>"#,
+        html_escape(title),
+        sprite(icons),
     )
 }
 
-fn header(ctx: &HomeContext) -> String {
-    let mut out = String::new();
-    out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
-    if ctx.admin.is_some() {
-        out.push_str(
-            r##"<a class="button button--icon" href="#settings" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></a>"##,
-        );
+/// The inline sprite reduced to `ids` (the file holds one `<symbol>` per line); nothing at all when
+/// the page draws no icon.
+fn sprite(ids: &[&str]) -> String {
+    if ids.is_empty() {
+        return String::new();
     }
-    out.push_str(r#"<div class="themeSwitch" data-theme-switch role="group" aria-label="Theme">"#);
+    let mut out = String::from(
+        r#"<svg class="sprite" xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" focusable="false">"#,
+    );
+    for line in SPRITE.lines() {
+        let id = line
+            .strip_prefix(r#"<symbol id=""#)
+            .and_then(|rest| rest.split('"').next());
+        if id.is_some_and(|id| ids.contains(&id)) {
+            out.push_str(line);
+        }
+    }
+    out.push_str("</svg>");
+    out
+}
+
+/// The System / Dark / Light selector; the script fills in the pressed state and shows it (without
+/// script it stays hidden, since it would do nothing).
+fn theme_switch() -> String {
+    let mut out = String::from(
+        r#"<div class="themeSwitch" data-theme-switch role="group" aria-label="Theme">"#,
+    );
     for (value, label, icon) in [
         ("system", "System theme", "i-device-desktop"),
         ("dark", "Dark theme", "i-moon"),
@@ -126,12 +159,29 @@ fn header(ctx: &HomeContext) -> String {
             r##"<button type="button" data-theme-value="{value}" aria-pressed="false" aria-label="{label}" title="{label}"><svg class="icon" aria-hidden="true"><use href="#{icon}"/></svg></button>"##
         );
     }
-    // A form, not a link: signing out is a POST that ends the session at once, with no page in between.
-    let _ = write!(
-        out,
-        r##"</div><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>Sign out</button></form></div></header>"##,
-        html_escape(ctx.logout_token)
-    );
+    out.push_str("</div>");
+    out
+}
+
+/// A form, not a link: signing out is a POST that ends the session at once, with no page in between.
+fn sign_out_form(token: &str) -> String {
+    format!(
+        r##"<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>Sign out</button></form>"##,
+        html_escape(token)
+    )
+}
+
+fn header(ctx: &HomeContext) -> String {
+    let mut out = String::new();
+    out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
+    if ctx.settings {
+        out.push_str(
+            r##"<a class="button button--icon" href="/auth/settings" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></a>"##,
+        );
+    }
+    out.push_str(&theme_switch());
+    out.push_str(&sign_out_form(ctx.logout_token));
+    out.push_str("</div></header>");
     if ctx.impersonating {
         let _ = write!(
             out,
@@ -401,8 +451,8 @@ pub fn demo_catalog() -> Catalog {
     Catalog::build(services, Vec::new())
 }
 
-/// The roles of the demo: `data`, asked by one demo service, is deliberately missing so the popup
-/// shows the warning.
+/// The roles of the demo: `data`, asked by one demo service, is deliberately missing so the
+/// Services page shows the warning.
 pub fn demo_registry() -> Vec<String> {
     ["ops", "dev", "viewer"]
         .iter()
@@ -411,7 +461,7 @@ pub fn demo_registry() -> Vec<String> {
 }
 
 /// Synthetic accounts and history for `portal render-demo`.
-pub fn demo_admin<'a>(catalog: &'a Catalog, registry: &'a [String]) -> AdminView<'a> {
+fn demo_users<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a> {
     use crate::store::{AccountActivity, AuditRow, DayStat, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
     let first_day = now - now.rem_euclid(86_400) - 29 * 86_400;
@@ -465,8 +515,7 @@ pub fn demo_admin<'a>(catalog: &'a Catalog, registry: &'a [String]) -> AdminView
         },
     }
     };
-    AdminView {
-        tab: Tab::Users,
+    UsersView {
         notice: None,
         registry,
         catalog,
@@ -499,6 +548,93 @@ pub fn demo_admin<'a>(catalog: &'a Catalog, registry: &'a [String]) -> AdminView
     }
 }
 
+/// Synthetic sign-in attempts for `portal render-demo`.
+fn demo_logins() -> crate::store::LoginPage {
+    use crate::store::{LoginPage, LoginRow};
+    let now = 1_791_623_502_i64;
+    let firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0";
+    let row = |ago: i64, login: &str, known: bool, success: bool, ip: &str, agent: &str| LoginRow {
+        ts: now - ago,
+        login: login.into(),
+        known,
+        success,
+        ip: Some(ip.into()),
+        user_agent: agent.into(),
+    };
+    LoginPage {
+        rows: vec![
+            row(120, "root", true, true, "192.168.1.20", firefox),
+            row(2_000, "admin", false, false, "203.0.113.7", "curl/8.5.0"),
+            row(2_010, "root", true, false, "203.0.113.7", "curl/8.5.0"),
+            row(2_030, "'; DROP TABLE users; --", false, false, "198.51.100.23", "python-requests/2.31"),
+            row(2_040, "<script>alert(1)</script>", false, false, "198.51.100.23", "python-requests/2.31"),
+            row(9_000, "alice", true, true, "192.168.1.31", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"),
+        ],
+        matching: 6,
+        attempts_24h: 6,
+        failed_24h: 4,
+        addresses_24h: 2,
+        ..LoginPage::default()
+    }
+}
+
+/// A page of `portal render-demo`: the launcher or one settings page, on synthetic data. `None` for a
+/// name that is not a page.
+pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
+    let catalog = demo_catalog();
+    let registry = demo_registry();
+    let frame = Frame {
+        logout_token: "demo",
+    };
+    Some(match name {
+        "launcher" => home_page(
+            &catalog,
+            icons,
+            &HomeContext {
+                viewer: "root",
+                impersonating: false,
+                logout_token: "demo",
+                users_token: "demo",
+                hidden_services: 0,
+                settings: true,
+            },
+        ),
+        "users" => users_page(&frame, &demo_users(&catalog, &registry)),
+        "roles" => {
+            let users = demo_users(&catalog, &registry);
+            let holders: Vec<(String, Vec<String>)> = users
+                .users
+                .iter()
+                .map(|u| (u.login.clone(), u.roles.clone()))
+                .collect();
+            roles_page(
+                &frame,
+                &RolesView {
+                    registry: &registry,
+                    catalog: &catalog,
+                    holders: &holders,
+                },
+            )
+        }
+        "services" => services_page(
+            &frame,
+            &ServicesView {
+                registry: &registry,
+                catalog: &catalog,
+            },
+        ),
+        "logins" => logins_page(
+            &frame,
+            &LoginsView {
+                page: &demo_logins(),
+                only_failed: false,
+                retention_days: 90,
+            },
+        ),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,7 +647,7 @@ mod tests {
             logout_token: "t",
             users_token: "u",
             hidden_services: 0,
-            admin: None,
+            settings: false,
         }
     }
 
@@ -559,30 +695,74 @@ mod tests {
     }
 
     #[test]
-    fn only_the_superadmin_gets_the_gear_and_the_popup() {
+    fn only_the_superadmin_gets_the_gear_and_it_opens_a_page_not_a_popup() {
         let plain = home_page(&demo_catalog(), &Icons::empty(), &ctx());
-        assert!(!plain.contains("#settings") && !plain.contains(r#"id="settings""#));
-        let catalog = demo_catalog();
-        let registry = demo_registry();
-        let admin = demo_admin(&catalog, &registry);
+        assert!(!plain.contains("/auth/settings") && !plain.contains("#i-settings"));
         let page = home_page(
-            &catalog,
+            &demo_catalog(),
             &Icons::empty(),
             &HomeContext {
-                admin: Some(&admin),
+                settings: true,
                 ..ctx()
             },
         );
-        assert!(page.contains(r##"href="#settings""##) && page.contains(r#"id="settings""#));
-        assert!(
-            page.contains(r#"name="r_ops""#),
-            "roles come from the registry"
+        assert!(page.contains(
+            r##"<a class="button button--icon" href="/auth/settings" aria-label="Settings""##
+        ));
+        assert!(page.contains(r#"<symbol id="i-settings""#));
+    }
+
+    #[test]
+    fn the_launcher_carries_none_of_the_settings_whoever_looks_at_it() {
+        let page = home_page(
+            &demo_catalog(),
+            &Icons::empty(),
+            &HomeContext {
+                settings: true,
+                ..ctx()
+            },
         );
+        for gone in ["id=\"settings\"", "modal", "r_ops", "userList", "tabInput", "class=\"warn\""] {
+            assert!(!page.contains(gone), "{gone}");
+        }
         assert!(
-            page.contains(r#"class="warn""#),
-            "a demo service asks for a role that does not exist"
+            page.matches('<').count() < 700,
+            "a launcher of twelve services stays a small DOM"
         );
-        assert!(!page.contains(">data<"), "the missing role is never named");
+        assert!(!page.contains("settings.css") && !page.contains("settings.js"));
+    }
+
+    #[test]
+    fn a_page_inlines_only_the_icons_it_draws() {
+        let launcher = home_page(&demo_catalog(), &Icons::empty(), &ctx());
+        assert_eq!(launcher.matches("<symbol ").count(), 4, "no gear for a user");
+        assert!(!launcher.contains("i-alert-triangle") && !launcher.contains("i-chevron-left"));
+        for page in [
+            auth_document("Authentication", "<p>x</p>"),
+            message_page("Page not found", "x", "Back"),
+            denied_page("x", "alice", "t"),
+        ] {
+            assert!(!page.contains("<symbol") && !page.contains("class=\"sprite\""));
+        }
+        let settings = demo_page("users", &Icons::empty()).unwrap();
+        assert_eq!(settings.matches("<symbol ").count(), 6);
+        assert!(settings.contains(r#"<symbol id="i-chevron-left""#));
+    }
+
+    #[test]
+    fn every_demo_page_renders_and_an_unknown_one_does_not() {
+        for name in ["launcher", "users", "roles", "services", "logins"] {
+            let page = demo_page(name, &Icons::empty()).unwrap();
+            assert!(page.starts_with("<!doctype html>"), "{name}");
+        }
+        assert!(demo_page("nope", &Icons::empty()).is_none());
+        let roles = demo_page("roles", &Icons::empty()).unwrap();
+        assert!(roles.contains("alice") && roles.contains("viewer"));
+        let services = demo_page("services", &Icons::empty()).unwrap();
+        assert!(services.contains(r#"class="warn""#), "a demo service asks for a missing role");
+        assert!(!services.contains(">data<"), "the missing role is never named");
+        let logins = demo_page("logins", &Icons::empty()).unwrap();
+        assert!(logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert"));
     }
 
     #[test]

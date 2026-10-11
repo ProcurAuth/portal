@@ -1,0 +1,666 @@
+/* portal: the rules only the settings pages use (header tabs, panels, forms, tables, graphs). The page
+   loads portal.css first: tokens, header, buttons and the notice come from there.
+   The look follows clickhouse-dash: a row of underlined tab links under the header, then panels. */
+
+.navRow {
+  border-bottom: 1px solid var(--border);
+}
+
+.contentTabs {
+  display: flex;
+  gap: 2px;
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 0 24px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.contentTabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* A tab is a link to a page of its own: no fill, no frame, only the line under the current one. */
+.contentTabs__tab {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.contentTabs__tab:hover {
+  color: var(--text);
+}
+
+.contentTabs__tab.is-active {
+  border-bottom-color: var(--accent-fill);
+  color: var(--text);
+}
+
+.settings {
+  display: grid;
+  gap: 16px;
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 20px 24px 56px;
+}
+
+.settings .notice {
+  width: auto;
+  margin: 0;
+}
+
+.notice--ok {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.notice--error {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.panel {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+}
+
+.panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0 0 12px;
+  padding: 0 2px;
+}
+
+.panel__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.panel__head .hint {
+  margin: 0;
+}
+
+.panel > .hint {
+  margin: 0 0 10px;
+}
+
+.settings h3 {
+  margin: 16px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.settings a {
+  color: var(--accent-text);
+}
+
+.settings .button {
+  height: 35px;
+  padding: 0 14px;
+  border-radius: var(--radius-field);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings .button--primary,
+.settings .button--danger,
+.settings .inbox .button {
+  text-decoration: none;
+}
+
+.button--danger {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
+.button--danger:hover {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+/* Figures -------------------------------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.stat {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+}
+
+.stat__label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stat__value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat__value--danger {
+  color: var(--danger);
+}
+
+.overview {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--raised);
+}
+
+.overview .hint {
+  margin: 0;
+}
+
+.spark {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  height: 40px;
+}
+
+.spark--wide {
+  max-width: none;
+  height: 64px;
+}
+
+.spark__bar {
+  fill: var(--muted);
+  opacity: 0.6;
+}
+
+.spark__bar--today {
+  fill: var(--accent-fill);
+  opacity: 1;
+}
+
+.spark__zero {
+  fill: var(--muted);
+  opacity: 0.35;
+}
+
+/* Forms ---------------------------------------------------------------------------------- */
+
+/* Adding is the rare task: a button that opens the form in place. */
+.addUser {
+  margin: 0 0 12px;
+}
+
+.addUser > summary {
+  width: fit-content;
+  list-style: none;
+  cursor: pointer;
+}
+
+.addUser > summary::-webkit-details-marker {
+  display: none;
+}
+
+.addUser > form {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--raised);
+}
+
+.addUser__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+
+.addUser .button {
+  justify-self: start;
+}
+
+.field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings input[type="text"],
+.settings input[type="password"] {
+  width: 100%;
+  height: 35px;
+  padding: 0 12px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-field);
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+  font-weight: 400;
+}
+
+.settings input[type="text"]:focus-visible,
+.settings input[type="password"]:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
+}
+
+.roleBoxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.roleBoxes legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.passwordRow {
+  display: flex;
+  gap: 8px;
+}
+
+.passwordRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Generating needs script; without it the button would do nothing, so it is not shown. */
+.passwordRow .generate {
+  display: none;
+  flex: none;
+}
+
+.js .passwordRow .generate {
+  display: inline-flex;
+}
+
+.field .hint {
+  margin: 0;
+  font-weight: 400;
+}
+
+/* An empty live region stays in the page (so it is announced when it fills) but takes no room. */
+.field .hint:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* Accounts ------------------------------------------------------------------------------- */
+
+.userList {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.user {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--raised);
+}
+
+.user__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.user__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A drawn chevron, not a text glyph: nothing for a screen reader to read out. */
+.user__summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 2px 1px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+}
+
+.user[open] > .user__summary::before {
+  margin-bottom: 4px;
+  transform: rotate(45deg);
+}
+
+.user__name {
+  font-weight: 700;
+}
+
+.user__meta {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.user__body {
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--accent-tint);
+  color: var(--accent-text);
+  font-size: 11.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pill--danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.pill--ok {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.pill--accent {
+  background: var(--accent-fill);
+  color: var(--on-fill);
+}
+
+.pill--muted {
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--muted);
+}
+
+.pill--plain {
+  border: 1px solid var(--border);
+  background: var(--inset);
+  color: var(--text);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.confirm > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.confirm > summary::-webkit-details-marker {
+  display: none;
+}
+
+.confirm--edit[open] {
+  flex-basis: 100%;
+}
+
+.confirm--edit[open] > form {
+  display: grid;
+  gap: 12px;
+  max-width: 560px;
+}
+
+.confirm[open] > form {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+}
+
+/* Tables --------------------------------------------------------------------------------- */
+
+.tableScroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-field);
+  background: var(--inset);
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+}
+
+.table th {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--text);
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: break-word;
+  vertical-align: top;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table .pill + .pill {
+  margin-left: 6px;
+}
+
+/* What a visitor typed is shown as the data it is: monospace, wrapped, never reordered. */
+.typed {
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
+.svcName {
+  font-weight: 600;
+}
+
+.warn {
+  display: inline-grid;
+  place-items: center;
+  margin-left: 6px;
+  color: var(--warning);
+  vertical-align: -3px;
+}
+
+.warn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Roles ---------------------------------------------------------------------------------- */
+
+.roleGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.roleCard {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--raised);
+}
+
+.roleCard h3 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Logins --------------------------------------------------------------------------------- */
+
+/* Two links that behave as one control, as the theme selector does: the current one carries the
+   accent tint and the line under it. */
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+}
+
+.segmented a {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.segmented a:hover {
+  color: var(--text);
+}
+
+.segmented a.is-active {
+  background: var(--accent-tint);
+  box-shadow: inset 0 -2px 0 var(--accent-fill);
+  color: var(--accent-text);
+}
+
+.inbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.inbox .hint {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .contentTabs,
+  .settings {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .overview {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Touch: every control reaches 44px. */
+@media (pointer: coarse) {
+  .settings .button {
+    height: 44px;
+  }
+
+  .contentTabs__tab {
+    height: 44px;
+  }
+
+  .segmented a {
+    height: 36px;
+  }
+
+  .settings input[type="text"],
+  .settings input[type="password"] {
+    height: 44px;
+  }
+
+  .check {
+    min-height: 44px;
+  }
+
+  .check input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .user__summary {
+    min-height: 48px;
+  }
+}

@@ -42,6 +42,45 @@ pub fn json_escape(input: &str) -> String {
     out
 }
 
+/// Characters that draw nothing or reorder the text around them: soft hyphen, bidirectional
+/// controls and isolates, zero-width characters, line and paragraph separators, the byte order mark.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD | 0x061C | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF
+            | 0xFFF9..=0xFFFB
+    )
+}
+
+/// Longest login kept from a sign-in attempt, in characters (an escape counts for what it prints).
+pub const TYPED_LOGIN_MAX: usize = 64;
+
+/// What a visitor typed in the login field, made safe to keep and to show back. The text is data from
+/// anyone on the network, so it never travels raw: control characters and characters that hide or
+/// reorder text become a visible `\u{..}` escape (a newline cannot forge a log line, an escape
+/// sequence cannot drive a terminal, a right-to-left mark cannot disguise a row), the length is
+/// bounded, and the surrounding blanks go. Quotes and angle brackets stay as typed: they are
+/// harmless in the database (always a bound parameter) and are escaped where the page prints them.
+pub fn typed_login(input: &str) -> String {
+    let mut out = String::new();
+    let mut printed = 0usize;
+    for c in input.trim().chars() {
+        let piece = if c.is_control() || is_invisible_format(c) {
+            format!("\\u{{{:x}}}", c as u32)
+        } else {
+            c.to_string()
+        };
+        let width = piece.chars().count();
+        if printed + width > TYPED_LOGIN_MAX {
+            out.push('\u{2026}');
+            break;
+        }
+        out.push_str(&piece);
+        printed += width;
+    }
+    out
+}
+
 pub fn percent_encode_query_component(input: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(input.len());
@@ -193,6 +232,11 @@ pub fn format_utc(unix: i64) -> String {
     )
 }
 
+/// `2026-10-10 14:03:27` (UTC): the sign-in log, where seconds tell attempts apart.
+pub fn format_utc_secs(unix: i64) -> String {
+    format!("{}:{:02}", format_utc(unix), unix.rem_euclid(60))
+}
+
 /// `45 s`, `12 min`, `2 h 5 min`, `3 d 4 h`.
 pub fn format_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
@@ -279,12 +323,54 @@ mod tests {
         assert_eq!(format_utc(1_791_623_502), "2026-10-10 09:11");
         assert_eq!(format_utc(951_782_400), "2000-02-29 00:00");
         assert_eq!(format_utc(-86_400), "1969-12-31 00:00");
+        assert_eq!(format_utc_secs(1_791_623_502), "2026-10-10 09:11:42");
         assert_eq!(format_duration(-5), "0 s");
         assert_eq!(format_duration(45), "45 s");
         assert_eq!(format_duration(720), "12 min");
         assert_eq!(format_duration(7_500), "2 h 5 min");
         assert_eq!(format_duration(7_200), "2 h");
         assert_eq!(format_duration(100_000), "1 d 3 h");
+    }
+
+    #[test]
+    fn a_typed_login_cannot_carry_control_characters_or_hidden_text() {
+        assert_eq!(typed_login("  Alice "), "Alice");
+        assert_eq!(typed_login("a\nb\r\nc"), "a\\u{a}b\\u{d}\\u{a}c", "no forged line");
+        assert_eq!(typed_login("\u{1b}[31mred"), "\\u{1b}[31mred", "no terminal escape");
+        assert_eq!(typed_login("x\0y"), "x\\u{0}y", "no NUL in the database text");
+        assert_eq!(
+            typed_login("admin\u{202e}gnp.exe"),
+            "admin\\u{202e}gnp.exe",
+            "a right-to-left override is shown, not obeyed"
+        );
+        assert_eq!(typed_login("a\u{200b}b\u{feff}"), "a\\u{200b}b\\u{feff}");
+        assert_eq!(typed_login("é-日本"), "é-日本", "ordinary text is kept");
+        assert_eq!(typed_login(""), "");
+        assert_eq!(typed_login(" \t "), "");
+    }
+
+    #[test]
+    fn a_typed_login_is_bounded_without_cutting_an_escape_in_half() {
+        let long = "x".repeat(500);
+        let kept = typed_login(&long);
+        assert_eq!(kept.chars().count(), TYPED_LOGIN_MAX + 1, "the limit plus an ellipsis");
+        assert!(kept.ends_with('\u{2026}'));
+        let escapes = "\u{7}".repeat(100);
+        let kept = typed_login(&escapes);
+        assert!(kept.chars().count() <= TYPED_LOGIN_MAX + 1);
+        assert!(kept.trim_end_matches('\u{2026}').ends_with("\\u{7}"), "whole escapes only");
+        assert_eq!(typed_login(&"y".repeat(TYPED_LOGIN_MAX)), "y".repeat(TYPED_LOGIN_MAX));
+    }
+
+    #[test]
+    fn sql_and_markup_in_a_typed_login_stay_inert_text() {
+        let nasty = "'; DROP TABLE users; --";
+        assert_eq!(typed_login(nasty), nasty, "kept as typed: only a bound parameter ever carries it");
+        assert_eq!(html_escape(&typed_login("<img src=x onerror=1>")), "&lt;img src=x onerror=1&gt;");
+        assert_eq!(
+            json_escape(&typed_login("a\"},{\"event\":\"forged")),
+            "a\\\"},{\\\"event\\\":\\\"forged"
+        );
     }
 
     #[test]

@@ -78,30 +78,17 @@ fn real_main() -> Result<(), String> {
             healthcheck(&config_path)
         }
         "hash-password" => hash_password_command(),
-        // Synthetic launcher page on stdout: to look at the design without a runtime or a login.
+        // A synthetic page on stdout: to look at the design without a runtime or a login.
         "render-demo" => {
             let icons = match args.next() {
-                Some(dir) => icons::Icons::load(Path::new(&dir)),
-                None => icons::Icons::empty(),
+                Some(dir) if dir != "-" => icons::Icons::load(Path::new(&dir)),
+                _ => icons::Icons::empty(),
             };
-            let catalog = ui::demo_catalog();
-            let registry = ui::demo_registry();
-            let admin = ui::demo_admin(&catalog, &registry);
-            print!(
-                "{}",
-                ui::home_page(
-                    &catalog,
-                    &icons,
-                    &ui::HomeContext {
-                        viewer: "root",
-                        impersonating: false,
-                        logout_token: "demo",
-                        users_token: "demo",
-                        hidden_services: 0,
-                        admin: Some(&admin),
-                    },
-                )
-            );
+            let name = args.next().unwrap_or_else(|| "launcher".into());
+            let page = ui::demo_page(&name, &icons).ok_or_else(|| {
+                format!("unknown page {name}: launcher, users, roles, services or logins")
+            })?;
+            print!("{page}");
             Ok(())
         }
         "version" | "--version" | "-V" => {
@@ -249,7 +236,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal healthcheck --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal healthcheck --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|roles|services|logins] > page.html\n  portal version",
         release_version()
     );
 }

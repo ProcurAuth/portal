@@ -17,7 +17,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_SVG_BYTES: u64 = 256 * 1024;
+/// An icon larger than this is not offered. A service icon is drawn at 24 pixels, and the browser
+/// parses and rasterises the whole document to do it: the library has logos of 250 KiB (embedded
+/// bitmaps) that cost a launcher more than the rest of the page. The ones a lab uses weigh 1 to 5 KiB.
+const MAX_SVG_BYTES: u64 = 32 * 1024;
 const EXTENSIONS: [&str; 6] = [".png", ".svg", ".webp", ".jpg", ".jpeg", ".ico"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +85,8 @@ impl Icons {
         }
     }
 
-    /// Indexes `root/{di,si,tb}/*.svg`. A missing directory gives an empty library.
+    /// Indexes `root/{di,si,tb}/*.svg` within the size budget. A missing directory gives an empty
+    /// library.
     pub fn load(root: &Path) -> Self {
         let mut icons = Self {
             root: root.to_path_buf(),
@@ -95,7 +99,10 @@ impl Icons {
             for entry in entries.flatten() {
                 let file = entry.file_name();
                 if let Some(name) = file.to_str().and_then(|f| f.strip_suffix(".svg")) {
-                    if is_safe_name(name) {
+                    let light = entry
+                        .metadata()
+                        .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_SVG_BYTES);
+                    if light && is_safe_name(name) {
                         icons.names[set.index()].insert(name.to_string());
                     }
                 }
@@ -275,6 +282,22 @@ mod tests {
         );
         assert_eq!(icons.svg(Set::Dashboard, "grafana"), None);
         assert_eq!(icons.svg(Set::Dashboard, "../si/grafana"), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_heavy_icon_is_not_offered_and_a_bare_name_falls_through_to_a_lighter_set() {
+        let heavy = format!("<svg>{}</svg>", "x".repeat(MAX_SVG_BYTES as usize));
+        let (icons, root) = library(&[
+            ("di/memos.svg", heavy.as_str()),
+            ("si/memos.svg", "<svg id=\"s\"/>"),
+            ("di/bulky.svg", heavy.as_str()),
+        ]);
+        let memos = icons.resolve("memos").unwrap();
+        assert_eq!(memos.set, Set::Simple, "the heavy colour logo is skipped");
+        assert_eq!(icons.resolve("di:memos"), None, "an explicit set does not fall back");
+        assert_eq!(icons.resolve("bulky"), None, "no lighter one: the tile shows the initial");
+        assert!(icons.svg(Set::Dashboard, "memos").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
