@@ -43,8 +43,21 @@ jobs:
         run: tools/dev/cargo.sh fmt --all -- --check
       - name: Clippy (core, server, JNI bridge)
         run: tools/dev/cargo.sh clippy --locked -p inbox-core -p inbox-server -p inbox-android --all-targets -- -D warnings
-      - name: Tests
+      - name: PostgreSQL for the multi-instance tests
+        run: |
+          docker run -d --name inbox-pg -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:18-alpine -c max_connections=300
+          for i in $(seq 1 30); do docker exec inbox-pg pg_isready -U postgres && break; sleep 1; done
+      - name: Tests (SQLite, and the two-instance tests on PostgreSQL)
+        env:
+          INBOX_DEV_NETWORK: host
+          INBOX_TEST_PG: 127.0.0.1:5432:postgres:pw
         run: tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server -p inbox-android
+      - name: End-to-end suite on PostgreSQL
+        env:
+          INBOX_DEV_NETWORK: host
+          INBOX_TEST_PG: 127.0.0.1:5432:postgres:pw
+          INBOX_E2E_BACKEND: postgres
+        run: tools/dev/cargo.sh test --locked -p inbox-server --test e2e
 
   image:
     name: Image and compose smoke test

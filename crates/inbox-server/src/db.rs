@@ -35,6 +35,8 @@ impl Closed {
 #[derive(Debug)]
 pub enum DbError {
     Sqlite(rusqlite::Error),
+    /// PostgreSQL (see `pg.rs`): the message of the driver or of the pool.
+    Pg(String),
     Closed,
 }
 
@@ -42,6 +44,7 @@ impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DbError::Sqlite(e) => write!(f, "sqlite: {e}"),
+            DbError::Pg(e) => write!(f, "postgres: {e}"),
             DbError::Closed => f.write_str("database thread stopped"),
         }
     }
@@ -665,7 +668,7 @@ fn missing_users(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<Stri
 }
 
 /// Fills `expired`: an alert created before `cutoff` is no longer delivered.
-fn with_expiry(mut a: AlertSummary, cutoff: i64) -> AlertSummary {
+pub(crate) fn with_expiry(mut a: AlertSummary, cutoff: i64) -> AlertSummary {
     if a.created_at < cutoff {
         a.expired = a.targets - a.received;
     }

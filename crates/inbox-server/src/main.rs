@@ -8,12 +8,14 @@ mod db;
 mod device;
 mod hub;
 mod net;
+mod pg;
 mod ratelimit;
 mod replica;
 mod secrets;
 mod server;
 mod shutdown;
 mod state;
+mod store;
 mod telemetry;
 mod util;
 

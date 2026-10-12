@@ -12,12 +12,12 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
-use crate::db::Db;
 use crate::hub::Hub;
 use crate::ratelimit::AuthLimiter;
 use crate::replica::Replica;
 use crate::secrets::read_secret;
 use crate::shutdown::Shutdown;
+use crate::store::Store;
 use crate::telemetry::{Gauges, Metrics};
 
 pub struct Producer {
@@ -81,7 +81,7 @@ fn load_record(path: &std::path::Path, label: &str) -> Result<ServerRegistration
 pub struct AppState {
     pub config: Config,
     pub secrets: Secrets,
-    pub db: Db,
+    pub db: Store,
     pub replica: Replica,
     pub hub: Hub,
     pub limiter: AuthLimiter,
@@ -101,6 +101,13 @@ impl AppState {
 
     pub fn group_name(&self, id: &str) -> String {
         self.group_names.get(id).cloned().unwrap_or_else(|| id.to_string())
+    }
+
+    /// Sessions open on this instance and, with a shared database, on the others (a local one is the freshest).
+    pub async fn live_sessions(&self) -> std::collections::HashMap<String, crate::hub::LiveInfo> {
+        let mut live = self.db.remote_sessions().await.unwrap_or_default();
+        live.extend(self.hub.snapshot());
+        live
     }
 
     /// Finds the producer owning `token`, comparing hashes in constant time.

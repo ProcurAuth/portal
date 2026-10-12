@@ -69,7 +69,18 @@ telemetry {
   export_interval = "15s"
 }
 
-# Optional: standby replication to a directory shared with the instances that may take over
+# Optional, instead of storage.path: PostgreSQL, shared by any number of active instances (plain TCP, no TLS).
+# postgres {
+#   host            = "postgres.internal"
+#   port            = 5432
+#   database        = "inbox"
+#   user            = "inbox"
+#   password_file   = "/run/secrets/inbox_db_password"
+#   pool_size       = 8
+#   connect_timeout = "5s"
+# }
+
+# Optional (SQLite only): standby replication to a directory shared with the instances that may take over
 # (a ReadWriteMany volume). All attributes are mandatory when the block is present.
 # replica {
 #   dir               = "/replica"

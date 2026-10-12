@@ -6,8 +6,8 @@ and strict:
 - **Every attribute is mandatory.** There are no implicit defaults. The only
   optional elements are the `producer` blocks (zero producers is valid: the admin
   front can always send alerts), the endpoint settings of a disabled
-  `telemetry` block and the `replica` block (absent: no replication; present: all
-  its attributes are mandatory).
+  `telemetry` block, the `replica` block (SQLite standby replication) and the `postgres`
+  block (PostgreSQL storage). When present, all their attributes are mandatory.
 - **Unknown attributes and blocks are rejected**, so a typo stops startup instead
   of being ignored.
 - **Semantic checks** (ranges, cross-field rules, references) run before anything
@@ -41,7 +41,7 @@ the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
 
 | Attribute | Type | Constraint | Meaning |
 |---|---|---|---|
-| `path` | path | parent directory must exist | SQLite database (WAL, `synchronous = FULL`). |
+| `path` | path | parent directory must exist | SQLite database (WAL, `synchronous = FULL`). Required unless a `postgres` block is present, then it must be absent. |
 | `delivery_ttl` | duration | ≥ 1m | An alert a device has not received within this delay is no longer sent to it and shows as expired (7d in the examples). |
 | `alert_retention` | duration | ≥ 1h, ≥ `delivery_ttl` | History (delivered and expired alerts) is purged after this. |
 | `connection_log_retention` | duration | ≥ 1h | Closed entries of the connection log are purged after this. |
@@ -109,6 +109,32 @@ requests marked `Sec-Fetch-Site: cross-site` are refused.
 
 Telemetry never gates the service: if the collector is down, exports fail in the
 background and alerts keep flowing.
+
+## `postgres` (optional)
+
+PostgreSQL instead of SQLite: any number of instances share the database and are all active (see "Several active
+instances" in the README). When present, `storage.path` must be absent; the other `storage` attributes still apply. Without
+it, `storage.path` is required. Not compatible with `replica`.
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `host`, `port` | string, port | The database server, plain TCP (no TLS). |
+| `database`, `user` | string ≤ 63 bytes | Created beforehand; the user owns the database (Inbox creates its tables). |
+| `password_file` | path | File holding the password (a secret, never inline). |
+| `pool_size` | 2..64 | Connections for requests and sessions; one more is kept for notifications. |
+| `connect_timeout` | duration 1s..60s | Connection and pool timeout. |
+
+```hcl
+postgres {
+  host            = "postgresql-rw.data.svc.cluster.local"
+  port            = 5432
+  database        = "inbox"
+  user            = "inbox"
+  password_file   = "/run/secrets/inbox_db_password"
+  pool_size       = 8
+  connect_timeout = "5s"
+}
+```
 
 ## `replica` (optional)
 

@@ -126,6 +126,14 @@ l'instance active ; une instance perdue qui revient ne peut pas écraser son suc
 Une alerte acquittée n'est donc jamais perdue par la perte du nœud, et la relance d'un producteur resté sans réponse est
 dédupliquée. Un accusé de réception perdu peut provoquer un renvoi : l'application déduplique sur `alert_id`.
 
+### 4.2 Plusieurs instances actives (optionnel)
+
+Avec un bloc `postgres`, l'état est dans PostgreSQL et plusieurs instances servent en même temps. Une alerte et ses
+lignes de livraison forment une transaction ; la clé d'idempotence est un index unique, donc une relance par une autre
+instance est dédupliquée. Les instances se préviennent par `LISTEN`/`NOTIFY` (réveil d'un téléphone connecté ailleurs,
+révocation, session remplacée) et par un battement dans la table `instances` : les sessions d'une instance silencieuse
+depuis 30 s sont fermées par les autres.
+
 ## 5. Sécurité
 
 Objectif : sur HTTP en clair, le mot de passe ne transite jamais et une capture

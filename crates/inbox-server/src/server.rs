@@ -17,13 +17,15 @@ use tokio::net::TcpListener;
 use crate::admin;
 use crate::api;
 use crate::config::Config;
-use crate::db::{self, Db};
+use crate::db::Db;
 use crate::device;
 use crate::hub::Hub;
+use crate::pg::{Event, PgStore};
 use crate::ratelimit::AuthLimiter;
 use crate::replica::{self, Replica};
 use crate::shutdown::Shutdown;
 use crate::state::{AppState, Secrets};
+use crate::store::{Stats, Store};
 use crate::telemetry::{self, Gauges, Metrics};
 use crate::util::now_ms;
 use crate::{GIT_SHA, VERSION};
@@ -32,32 +34,41 @@ pub fn serve(config: Config) -> Result<(), String> {
     // Everything that can be checked is checked before anything starts.
     let secrets = Secrets::load(&config)?;
     let (guard, meter) = telemetry::init(&config)?;
-    // A standby waits here, before the database is opened and before any port is bound: it serves nothing.
-    let boot = match &config.replica {
-        Some(r) => match replica::boot(r, &config.storage.path)? {
+    // SQLite: a standby waits here, before the database is opened and before any port is bound: it serves nothing.
+    let boot = match (&config.replica, &config.storage.path) {
+        (Some(r), Some(path)) => match replica::boot(r, path)? {
             Some(boot) => Some(boot),
             None => {
                 guard.shutdown();
                 return Ok(());
             }
         },
-        None => None,
+        _ => None,
     };
-    let (db, db_closed) = Db::open(&config.storage.path)?;
+    let sqlite = config.storage.path.as_deref().map(Db::open).transpose()?;
     let shutdown = Shutdown::new();
     let stats = Arc::new(replica::Stats::default());
-    let running =
-        boot.map(|b| b.start(&config.storage.path, shutdown.clone(), stats.clone())).transpose()?;
+    let running = match (boot, &config.storage.path) {
+        (Some(b), Some(path)) => Some(b.start(path, shutdown.clone(), stats.clone())?),
+        _ => None,
+    };
     let replica = running.as_ref().map_or_else(Replica::disabled, |r| r.replica());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("inbox")
         .build()
         .map_err(|e| format!("cannot start runtime: {e}"))?;
-    let result = runtime.block_on(run(config, secrets, db, meter, shutdown, replica, stats));
+    let (store, db_closed) = match (sqlite, &config.postgres) {
+        (Some((db, closed)), _) => (Store::Sqlite(db), Some(closed)),
+        (None, Some(pg)) => (Store::Pg(Arc::new(runtime.block_on(PgStore::connect(pg))?)), None),
+        (None, None) => return Err("storage.path or a postgres block is required".into()),
+    };
+    let result = runtime.block_on(run(config, secrets, store, meter, shutdown, replica, stats));
     // Dropping the runtime drops every task, hence every database handle.
     runtime.shutdown_timeout(Duration::from_secs(5));
-    if !db_closed.wait(Duration::from_secs(10)) {
+    if let Some(closed) = db_closed
+        && !closed.wait(Duration::from_secs(10))
+    {
         tracing::warn!(event = "database_close_timeout");
     }
     // The database is closed: the last snapshot is complete, then the next instance can take over at once.
@@ -75,17 +86,14 @@ pub fn serve(config: Config) -> Result<(), String> {
 async fn run(
     config: Config,
     secrets: Secrets,
-    db: Db,
+    db: Store,
     meter: opentelemetry::metrics::Meter,
     shutdown: Shutdown,
     replica: Replica,
     replica_stats: Arc<replica::Stats>,
 ) -> Result<(), String> {
     let group_ids: Vec<String> = config.group.keys().cloned().collect();
-    let pruned = db
-        .call(move |c| Ok(db::prune_subscriptions(c, &group_ids)?))
-        .await
-        .map_err(|e| format!("storage: {e}"))?;
+    let pruned = db.prune_subscriptions(group_ids).await.map_err(|e| format!("storage: {e}"))?;
     if pruned > 0 {
         tracing::warn!(
             event = "subscriptions_pruned",
@@ -171,6 +179,7 @@ async fn run(
         producers = app.secrets.producers.len(),
         telemetry = app.config.telemetry.enabled,
         replica = app.config.replica.is_some(),
+        storage = if app.db.is_shared() { "postgres" } else { "sqlite" },
     );
 
     let grace = app.config.server.shutdown_grace;
@@ -216,6 +225,11 @@ async fn run(
     };
     shutdown.trigger();
     flush_last_seen(&app).await;
+    if let Store::Pg(pg) = &app.db
+        && let Err(e) = pg.shutdown().await
+    {
+        tracing::warn!(event = "instance_shutdown_failed", error = %e);
+    }
     tracing::info!(event = "stopped");
     result
 }
@@ -224,9 +238,8 @@ async fn readyz(State(app): State<Arc<AppState>>) -> impl IntoResponse {
     if app.shutdown.is_triggered() {
         return (StatusCode::SERVICE_UNAVAILABLE, "draining");
     }
-    let probe = app.db.call(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?));
-    match tokio::time::timeout(Duration::from_secs(2), probe).await {
-        Ok(Ok(1)) => (StatusCode::OK, "ready"),
+    match tokio::time::timeout(Duration::from_secs(2), app.db.ping()).await {
+        Ok(Ok(())) => (StatusCode::OK, "ready"),
         _ => (StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"),
     }
 }
@@ -243,12 +256,60 @@ async fn flush_last_seen(app: &AppState) {
     if seen.is_empty() {
         return;
     }
-    if let Err(e) = app.db.call(move |c| Ok(db::touch_seen(c, &seen)?)).await {
+    if let Err(e) = app.db.touch_seen(seen).await {
         tracing::warn!(event = "last_seen_flush_failed", error = %e);
     }
 }
 
+/// With a shared database: the heartbeat of this instance, and the notifications of the other instances.
+fn spawn_cluster(app: Arc<AppState>) {
+    let Store::Pg(pg) = &app.db else { return };
+    let pg = pg.clone();
+
+    let (beat_pg, a) = (pg.clone(), app.clone());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = a.shutdown.wait() => return,
+            }
+            match beat_pg.heartbeat().await {
+                Ok(0) => {}
+                Ok(closed) => {
+                    tracing::warn!(event = "lost_instance_sessions_closed", count = closed)
+                }
+                Err(e) => tracing::warn!(event = "heartbeat_failed", error = %e),
+            }
+        }
+    });
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (listen_pg, a) = (pg.clone(), app.clone());
+    tokio::spawn(async move {
+        let stop = a.shutdown.clone();
+        listen_pg.listen(tx, async move { stop.wait().await }).await;
+    });
+    tokio::spawn(async move {
+        use inbox_core::proto::close;
+        while let Some(event) = rx.recv().await {
+            match event {
+                Event::Wake(devices) => app.hub.wake(&devices),
+                Event::Revoked(device) => app.hub.kick(&device, close::REVOKED),
+                Event::Replaced { device, instance, connected_at } => {
+                    if instance != pg.instance() {
+                        app.hub.kick_older(&device, connected_at, close::REPLACED);
+                    }
+                }
+                Event::Resync => app.hub.wake_all(),
+            }
+        }
+    });
+}
+
 fn spawn_background(app: Arc<AppState>) {
+    spawn_cluster(app.clone());
     // Gauges and last-seen persistence.
     let a = app.clone();
     tokio::spawn(async move {
@@ -264,19 +325,9 @@ fn spawn_background(app: Arc<AppState>) {
             if n.is_multiple_of(4) {
                 flush_last_seen(&a).await;
             }
-            let cutoff = a.delivery_cutoff();
-            let stats =
-                a.db.call(move |c| {
-                    Ok((
-                        db::pending_stats(c, cutoff)?,
-                        db::subscribed_devices(c)?,
-                        db::count_active_devices(c)?,
-                    ))
-                })
-                .await;
-            match stats {
-                Ok(((pending, oldest), subscribed, enrolled)) => {
-                    let live = a.hub.snapshot();
+            match a.db.stats(a.delivery_cutoff()).await {
+                Ok(Stats { pending: (pending, oldest), subscribed, enrolled }) => {
+                    let live = a.live_sessions().await;
                     let cutoff = now_ms() - a.config.devices.unreachable_after.as_millis() as i64;
                     let unreachable = subscribed
                         .iter()
@@ -307,7 +358,7 @@ fn spawn_background(app: Arc<AppState>) {
             let now = now_ms();
             let alert_cutoff = now - a.config.storage.alert_retention.as_millis() as i64;
             let conn_cutoff = now - a.config.storage.connection_log_retention.as_millis() as i64;
-            match a.db.call(move |c| Ok(db::purge(c, alert_cutoff, conn_cutoff)?)).await {
+            match a.db.purge(alert_cutoff, conn_cutoff).await {
                 Ok((alerts, connections)) if alerts + connections > 0 => {
                     tracing::info!(event = "retention_purged", alerts, connections)
                 }

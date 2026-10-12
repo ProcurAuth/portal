@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::{ApiError, accept_alert};
-use crate::db::{self, NewAlert};
+use crate::db::NewAlert;
 use crate::state::AppState;
 use crate::util::{is_hex_id, now_ms};
 
@@ -200,15 +200,9 @@ fn no_store(v: serde_json::Value) -> Response {
 }
 
 pub async fn overview(State(app): State<Arc<AppState>>) -> Result<Response, ApiError> {
-    let (devices, (pending, oldest)) = app
-        .db
-        .call({
-            let cutoff = app.delivery_cutoff();
-            move |c| Ok((db::list_devices(c, cutoff)?, db::pending_stats(c, cutoff)?))
-        })
-        .await
-        .map_err(ApiError::storage)?;
-    let live = app.hub.snapshot();
+    let (devices, (pending, oldest)) =
+        app.db.overview(app.delivery_cutoff()).await.map_err(ApiError::storage)?;
+    let live = app.live_sessions().await;
     let now = now_ms();
     let unreachable_after = app.config.devices.unreachable_after.as_millis() as i64;
     let (mut online, mut unreachable, mut enrolled) = (0, 0, 0);
@@ -285,10 +279,7 @@ pub async fn alerts(
     let since = q.since_ms.unwrap_or(0).max(0);
     let list = app
         .db
-        .call({
-            let cutoff = app.delivery_cutoff();
-            move |c| Ok(db::recent_alerts(c, limit, since, cutoff)?)
-        })
+        .recent_alerts(limit, since, app.delivery_cutoff())
         .await
         .map_err(ApiError::storage)?;
     Ok(no_store(json!({ "alerts": list })))
@@ -302,14 +293,8 @@ pub async fn alert(
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail = app
-        .db
-        .call({
-            let cutoff = app.delivery_cutoff();
-            move |c| Ok(db::alert_detail(c, &id, cutoff)?)
-        })
-        .await
-        .map_err(ApiError::storage)?;
+    let detail =
+        app.db.alert_detail(&id, app.delivery_cutoff()).await.map_err(ApiError::storage)?;
     Ok(no_store(serde_json::to_value(detail.ok_or_else(not_found)?).expect("serializes")))
 }
 
@@ -319,11 +304,7 @@ pub async fn connections(
 ) -> Result<Response, ApiError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let user = q.user.filter(|u| !u.trim().is_empty());
-    let list = app
-        .db
-        .call(move |c| Ok(db::recent_connections(c, limit, user.as_deref())?))
-        .await
-        .map_err(ApiError::storage)?;
+    let list = app.db.recent_connections(limit, user).await.map_err(ApiError::storage)?;
     Ok(no_store(json!({ "connections": list })))
 }
 
@@ -370,12 +351,7 @@ pub async fn revoke(
     if !is_hex_id(&id) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such device"));
     }
-    let device = id.clone();
-    let revoked = app
-        .db
-        .call(move |c| Ok(db::revoke_device(c, &device)?))
-        .await
-        .map_err(ApiError::storage)?;
+    let revoked = app.db.revoke_device(&id).await.map_err(ApiError::storage)?;
     if revoked {
         if let Err(e) = app.replica.sync().await {
             app.metrics.replica_sync_failures.add(1, &[]);

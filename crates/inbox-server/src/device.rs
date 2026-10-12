@@ -29,7 +29,7 @@ use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, timeout};
 use tracing::Instrument;
 
-use crate::db::{self, DbError};
+use crate::db::DbError;
 use crate::hub::Live;
 use crate::net::client_ip;
 use crate::state::AppState;
@@ -142,23 +142,17 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     };
 
     let max_devices = app.config.devices.max_devices;
-    let ip_text = ip.to_string();
     let name = verified.name.clone();
     let user = verified.user_name.clone();
     let stored = app
         .db
-        .call(move |c| {
-            if db::count_active_devices(c)? >= max_devices {
-                return Ok(None);
-            }
-            Ok(Some(db::insert_device(
-                c,
-                &verified.name,
-                &verified.user_name,
-                &verified.public_key,
-                &ip_text,
-            )?))
-        })
+        .enroll_device(
+            max_devices,
+            verified.name,
+            verified.user_name,
+            verified.public_key,
+            ip.to_string(),
+        )
         .await;
     let device_id = match stored {
         Ok(Some(id)) => id,
@@ -265,7 +259,7 @@ async fn run_session(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
     }
     let device_id = hello.device_id.clone();
     let id = device_id.clone();
-    let device = match app.db.call(move |c| Ok(db::find_device(c, &id)?)).await {
+    let device = match app.db.find_device(&id).await {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(event = "session_lookup_failed", error = %e);
@@ -343,17 +337,16 @@ async fn established(
         },
         close::REPLACED,
     );
-    let (id, ip_text, ver) = (device_id.clone(), ip.to_string(), app_version.clone());
-    let connection_id =
-        match app.db.call(move |c| Ok(db::record_connect(c, &id, &ip_text, &ver)?)).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(event = "session_record_failed", error = %e);
-                app.hub.unregister(&device_id, session_id);
-                close_with(&mut socket, 1011, "storage error").await;
-                return;
-            }
-        };
+    let connection_id = match app.db.record_connect(&device_id, &ip.to_string(), &app_version).await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(event = "session_record_failed", error = %e);
+            app.hub.unregister(&device_id, session_id);
+            close_with(&mut socket, 1011, "storage error").await;
+            return;
+        }
+    };
     app.metrics.sessions_active.add(1, &[]);
     tracing::info!(event = "device_connected");
 
@@ -364,10 +357,7 @@ async fn established(
     app.metrics.sessions_active.add(-1, &[]);
     app.metrics.session_closes.add(1, &[KeyValue::new("reason", end.reason())]);
     let reason = end.reason();
-    let id = device_id.clone();
-    if let Err(e) =
-        app.db.call(move |c| Ok(db::record_disconnect(c, connection_id, &id, reason)?)).await
-    {
+    if let Err(e) = app.db.record_disconnect(connection_id, &device_id, reason).await {
         tracing::error!(event = "session_disconnect_record_failed", error = %e);
     }
     match &end {
@@ -393,12 +383,7 @@ async fn deliver(
     last_seen: &AtomicI64,
 ) -> End {
     let cfg = &app.config.devices;
-    let id = device_id.to_string();
-    let profile = app.db.call(move |c| {
-        let user_name = db::find_device(c, &id)?.map(|d| d.user_name).unwrap_or_default();
-        Ok((db::subscriptions(c, &id)?, user_name))
-    });
-    let (subscriptions, user_name) = match profile.await {
+    let (subscriptions, user_name) = match app.db.profile(device_id).await {
         Ok(p) => p,
         Err(e) => return End::Storage(e),
     };
@@ -482,12 +467,7 @@ async fn handle(
             if !is_hex_id(&alert_id) {
                 return Err(End::Protocol("malformed alert id"));
             }
-            let id = device_id.to_string();
-            let outcome = app
-                .db
-                .call(move |c| Ok(db::ack(c, &id, &alert_id)?))
-                .await
-                .map_err(End::Storage)?;
+            let outcome = app.db.ack(device_id, &alert_id).await.map_err(End::Storage)?;
             app.metrics.acks.add(1, &[]);
             if let Some(o) = outcome {
                 if let Some(ms) = o.first_receipt_latency_ms {
@@ -507,15 +487,7 @@ async fn handle(
                 .await?;
                 return Ok(false);
             }
-            let id = device_id.to_string();
-            let subs = app
-                .db
-                .call(move |c| {
-                    db::set_subscription(c, &id, &group)?;
-                    Ok(db::subscriptions(c, &id)?)
-                })
-                .await
-                .map_err(End::Storage)?;
+            let subs = app.db.subscribe(device_id, &group).await.map_err(End::Storage)?;
             tracing::info!(event = "subscription_changed");
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
             Ok(false)
@@ -529,25 +501,13 @@ async fn handle(
                 send_msg(socket, session, &error).await?;
                 return Ok(false);
             };
-            let (id, name) = (device_id.to_string(), user_name.clone());
-            app.db
-                .call(move |c| Ok(db::set_user_name(c, &id, &name)?))
-                .await
-                .map_err(End::Storage)?;
+            app.db.set_user_name(device_id, &user_name).await.map_err(End::Storage)?;
             tracing::info!(event = "user_name_changed", user.name = %user_name);
             send_msg(socket, session, &ServerMsg::UserName { user_name }).await?;
             Ok(false)
         }
         ClientMsg::Unsubscribe { group } => {
-            let id = device_id.to_string();
-            let subs = app
-                .db
-                .call(move |c| {
-                    db::delete_subscription(c, &id, &group)?;
-                    Ok(db::subscriptions(c, &id)?)
-                })
-                .await
-                .map_err(End::Storage)?;
+            let subs = app.db.unsubscribe(device_id, &group).await.map_err(End::Storage)?;
             tracing::info!(event = "subscription_removed");
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
             Ok(false)
@@ -563,14 +523,10 @@ async fn flush_deliveries(
     device_id: &str,
     inflight: &mut HashMap<i64, Instant>,
 ) -> Result<(), End> {
-    let id = device_id.to_string();
     let limit = app.config.devices.max_inflight;
     let pending = app
         .db
-        .call({
-            let cutoff = app.delivery_cutoff();
-            move |c| Ok(db::pending_deliveries(c, &id, limit, cutoff)?)
-        })
+        .pending_deliveries(device_id, limit, app.delivery_cutoff())
         .await
         .map_err(End::Storage)?;
     let still_pending: HashSet<i64> = pending.iter().map(|p| p.seq).collect();
@@ -596,7 +552,7 @@ async fn flush_deliveries(
     }
     if !sent.is_empty() {
         app.metrics.deliveries_sent.add(sent.len() as u64, &[]);
-        app.db.call(move |c| Ok(db::mark_sent(c, &sent)?)).await.map_err(End::Storage)?;
+        app.db.mark_sent(sent).await.map_err(End::Storage)?;
     }
     Ok(())
 }

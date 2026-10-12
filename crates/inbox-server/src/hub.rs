@@ -59,6 +59,22 @@ impl Hub {
         }
     }
 
+    /// Wakes every session: used after the notifications of the other instances may have been missed.
+    pub fn wake_all(&self) {
+        for l in self.sessions.lock().expect("hub lock").values() {
+            l.wake.notify_one();
+        }
+    }
+
+    /// Closes the session of `device_id` unless it is newer than `before_ms` (the device opened another one elsewhere).
+    pub fn kick_older(&self, device_id: &str, before_ms: i64, code: u16) {
+        if let Some(l) = self.sessions.lock().expect("hub lock").get(device_id)
+            && l.connected_at < before_ms
+        {
+            l.kick.send_replace(Some(code));
+        }
+    }
+
     pub fn kick(&self, device_id: &str, code: u16) {
         if let Some(l) = self.sessions.lock().expect("hub lock").get(device_id) {
             l.kick.send_replace(Some(code));

@@ -39,16 +39,85 @@ fn inbox(args: &[&str], stdin: Option<&str>) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
+/// An administrative PostgreSQL connection, from `INBOX_TEST_PG=host:port:user:password`. The tests that need it are
+/// skipped when it is absent; `INBOX_E2E_BACKEND=postgres` runs the whole suite against it instead of SQLite.
+#[derive(Clone)]
+struct PgAdmin {
+    host: String,
+    port: u16,
+    user: String,
+    password: String,
+}
+
+fn pg_admin() -> Option<PgAdmin> {
+    let raw = std::env::var("INBOX_TEST_PG").ok()?;
+    let mut parts = raw.splitn(4, ':');
+    Some(PgAdmin {
+        host: parts.next()?.to_string(),
+        port: parts.next()?.parse().ok()?,
+        user: parts.next()?.to_string(),
+        password: parts.next()?.to_string(),
+    })
+}
+
+fn postgres_backend() -> bool {
+    std::env::var("INBOX_E2E_BACKEND").is_ok_and(|v| v == "postgres")
+}
+
+impl PgAdmin {
+    /// Runs SQL on a fresh thread: the callers are asynchronous tests, where a runtime cannot be started.
+    fn exec(&self, database: &str, sql: String) {
+        let (host, port, user, password, database) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+            database.to_string(),
+        );
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                let mut config = tokio_postgres::Config::new();
+                config.host(&host).port(port).user(&user).password(&password).dbname(&database);
+                let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client.batch_execute(&sql).await.unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+    }
+
+    fn create_database(&self, name: &str) {
+        self.exec("postgres", format!("CREATE DATABASE {name}"));
+    }
+
+    fn drop_database(&self, name: &str) {
+        self.exec("postgres", format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"));
+    }
+}
+
 struct Server {
     dir: PathBuf,
+    /// Name of this instance: its configuration and log files.
+    name: String,
     port: u16,
     admin_port: u16,
     child: Option<Child>,
     token: String,
+    /// The database to drop with the server that created it.
+    pg: Option<(PgAdmin, String)>,
 }
 
 impl Server {
     fn setup() -> Server {
+        match pg_admin().filter(|_| postgres_backend()) {
+            Some(admin) => Server::setup_with(Some(admin)),
+            None => Server::setup_with(None),
+        }
+    }
+
+    fn setup_with(pg: Option<PgAdmin>) -> Server {
         let dir =
             std::env::temp_dir().join(format!("inbox-e2e-{}-{}", std::process::id(), free_port()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -67,6 +136,34 @@ impl Server {
 
         let port = free_port();
         let admin_port = free_port();
+        let database = format!("inbox_e2e_{}", free_port());
+        let (storage_path, postgres_block) = match &pg {
+            None => (format!("path = \"{}\"", p("inbox.db")), String::new()),
+            Some(admin) => {
+                admin.create_database(&database);
+                std::fs::write(dir.join("db_password"), &admin.password).unwrap();
+                (
+                    String::new(),
+                    format!(
+                        r#"
+postgres {{
+  host = "{}"
+  port = {}
+  database = "{database}"
+  user = "{}"
+  password_file = "{}"
+  pool_size = 6
+  connect_timeout = "5s"
+}}
+"#,
+                        admin.host,
+                        admin.port,
+                        admin.user,
+                        p("db_password")
+                    ),
+                )
+            }
+        };
         let config = format!(
             r#"
 server {{
@@ -78,7 +175,7 @@ server {{
   server_key_file = "{key}"
 }}
 storage {{
-  path = "{db}"
+  {storage_path}
   delivery_ttl = "1h"
   alert_retention = "1h"
   connection_log_retention = "1h"
@@ -123,21 +220,45 @@ producer "ci" {{
   groups = ["infra"]
   webhook_send_resolved = false
 }}
-"#,
-            db = p("inbox.db"),
+{postgres_block}"#,
             dc = p("device_cred"),
             tok = p("token"),
         );
         std::fs::write(dir.join("config.hcl"), config).unwrap();
-        Server { dir, port, admin_port, child: None, token }
+        let pg = pg.map(|admin| (admin, database));
+        Server { dir, name: "server".into(), port, admin_port, child: None, token, pg }
+    }
+
+    /// Another instance of the same service: same database, same secrets, its own ports, configuration and log.
+    fn sibling(&self, name: &str) -> Server {
+        let (port, admin_port) = (free_port(), free_port());
+        let text = std::fs::read_to_string(self.config())
+            .unwrap()
+            .replace(&self.port.to_string(), &port.to_string())
+            .replace(&self.admin_port.to_string(), &admin_port.to_string());
+        std::fs::write(self.dir.join(format!("{name}.hcl")), text).unwrap();
+        Server {
+            dir: self.dir.clone(),
+            name: name.into(),
+            port,
+            admin_port,
+            child: None,
+            token: self.token.clone(),
+            pg: None,
+        }
     }
 
     fn config(&self) -> String {
-        self.dir.join("config.hcl").to_string_lossy().to_string()
+        let file = if self.name == "server" {
+            "config.hcl".to_string()
+        } else {
+            format!("{}.hcl", self.name)
+        };
+        self.dir.join(file).to_string_lossy().to_string()
     }
 
     fn start(&mut self) {
-        let log = std::fs::File::create(self.dir.join("server.log")).unwrap();
+        let log = std::fs::File::create(self.dir.join(format!("{}.log", self.name))).unwrap();
         let child = Command::new(BIN)
             .args(["serve", "--config", &self.config()])
             .stdout(Stdio::null())
@@ -167,7 +288,7 @@ producer "ci" {{
     }
 
     fn log(&self) -> String {
-        std::fs::read_to_string(self.dir.join("server.log")).unwrap_or_default()
+        std::fs::read_to_string(self.dir.join(format!("{}.log", self.name))).unwrap_or_default()
     }
 }
 
@@ -182,7 +303,12 @@ impl Drop for Server {
             let _ = c.kill();
             let _ = c.wait();
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some((admin, database)) = self.pg.take() {
+            admin.drop_database(&database);
+        }
+        if self.name == "server" {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -645,11 +771,9 @@ async fn delivery_guarantees_end_to_end() {
 
     s.stop();
     assert!(!s.log().contains("panicked"), "{}", s.log());
-    assert!(
-        s.log().contains("database_closed"),
-        "graceful shutdown closes the database: {}",
-        s.log()
-    );
+    // SQLite is checkpointed and closed; with PostgreSQL the instance forgets itself and closes its sessions.
+    let closed = if s.pg.is_some() { "event=\"stopped\"" } else { "database_closed" };
+    assert!(s.log().contains(closed), "graceful shutdown: {}", s.log());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -838,7 +962,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 /// over from the shared directory and knows every device and alert that was acknowledged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_instance_takes_over_a_lost_node() {
-    let mut s = Server::setup();
+    let mut s = Server::setup_with(None);
     let shared = s.dir.join("shared");
     let first_db = s.dir.join("inbox.db");
     let text = std::fs::read_to_string(s.config()).unwrap();
@@ -937,4 +1061,161 @@ fn check_config_reports_the_replica_block() {
     let out = inbox(&["check-config", "--config", broken.to_str().unwrap()], None);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("lease_ttl"));
+}
+
+/// Two active instances on one PostgreSQL database: they share phones, alerts, receipts and sessions. Needs
+/// `INBOX_TEST_PG=host:port:user:password` (a role that can create databases); skipped without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_active_instances_share_phones_alerts_and_sessions() {
+    use inbox_core::proto::close;
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    // Polling alone would only notice a new alert every 5 s: a fast delivery across instances proves the notifications.
+    let text = std::fs::read_to_string(a.config())
+        .unwrap()
+        .replace("resend_after = \"1s\"", "resend_after = \"30s\"")
+        .replace("session_timeout = \"10s\"", "session_timeout = \"120s\"")
+        .replace("unreachable_after = \"10s\"", "unreachable_after = \"120s\"");
+    std::fs::write(a.config(), text).unwrap();
+    let mut b = a.sibling("instance-b");
+    a.start();
+    b.start();
+
+    // A phone enrolled through A opens its session on B.
+    let phone = enroll_as(a.port, DEVICE_PW, "phone-a", "alice").await.unwrap();
+    let (mut on_b, _) = Conn::open(b.port, &phone).await.unwrap();
+    on_b.subscribe("infra").await;
+
+    // An alert accepted by A reaches the session held by B at once.
+    let began = Instant::now();
+    let body = json!({"group": "infra", "title": "from a"});
+    let (st, first) = post_alert(&a, "shared-1", body.clone());
+    assert_eq!(st, 201, "{first}");
+    let alert = on_b.alert().await;
+    assert_eq!(alert.title, "from a");
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "woken by polling, not by the notification: {:?}",
+        began.elapsed()
+    );
+    on_b.ack(&alert.alert_id, AckStage::Received).await;
+
+    // The idempotency key holds across instances.
+    let (st, again) = post_alert(&b, "shared-1", body);
+    assert_eq!(st, 200, "{again}");
+    assert_eq!(again["alert_id"], first["alert_id"]);
+
+    // Both admin fronts see the phone online, although its session lives on B, and the receipt B recorded.
+    for s in [&a, &b] {
+        let (st, overview) = admin(s.admin_port, "GET", "/api/admin/overview", "");
+        assert_eq!(st, 200, "{overview}");
+        assert_eq!(overview["stats"]["online"], 1, "{overview}");
+        assert_eq!(overview["stats"]["enrolled"], 1);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, alerts) = admin(a.admin_port, "GET", "/api/admin/alerts", "");
+        if alerts["alerts"][0]["received"] == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the receipt recorded on B never showed on A: {alerts}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // A device has one session: opening another one through A closes the one held by B.
+    let (mut on_a, _) = Conn::open(a.port, &phone).await.unwrap();
+    assert_eq!(on_b.closed_code().await, Some(close::REPLACED));
+
+    // Revoking through B closes the session held by A.
+    let (st, _) = admin(
+        b.admin_port,
+        "POST",
+        &format!("/api/admin/devices/{}/revoke", phone.device_id),
+        "{}",
+    );
+    assert_eq!(st, 200);
+    assert_eq!(on_a.closed_code().await, Some(close::REVOKED));
+    assert_eq!(Conn::open(b.port, &phone).await.err(), Some(close::REVOKED));
+
+    // The same alert sent at the same time to both instances is stored once, whichever wins.
+    let results: Vec<(u16, Value)> = std::thread::scope(|scope| {
+        let tasks: Vec<_> = (0..8)
+            .map(|i| {
+                let target = if i % 2 == 0 { &a } else { &b };
+                scope.spawn(move || {
+                    post_alert(target, "race-1", json!({"group": "infra", "title": "same alert"}))
+                })
+            })
+            .collect();
+        tasks.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|(st, _)| *st == 201).count(), 1, "{results:?}");
+    assert!(results.iter().all(|(st, _)| *st == 201 || *st == 200), "{results:?}");
+    let ids: std::collections::HashSet<_> =
+        results.iter().map(|(_, v)| v["alert_id"].to_string()).collect();
+    assert_eq!(ids.len(), 1, "one alert id for one idempotency key: {results:?}");
+
+    // The node of A is lost: B keeps accepting everything.
+    let mut lost = a.child.take().unwrap();
+    lost.kill().unwrap();
+    lost.wait().unwrap();
+    let other = enroll_as(b.port, DEVICE_PW, "phone-b", "bob").await.unwrap();
+    let (mut other_conn, _) = Conn::open(b.port, &other).await.unwrap();
+    other_conn.subscribe("infra").await;
+    let (st, second) =
+        post_alert(&b, "shared-2", json!({"group": "infra", "title": "after the loss"}));
+    assert_eq!(st, 201, "{second}");
+    assert_eq!(other_conn.alert().await.title, "after the loss");
+}
+
+/// The sessions of an instance that disappeared are closed by the survivors once its heartbeat stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sessions_of_a_lost_instance_are_closed_by_the_others() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    let text = std::fs::read_to_string(a.config())
+        .unwrap()
+        .replace("session_timeout = \"10s\"", "session_timeout = \"120s\"")
+        .replace("unreachable_after = \"10s\"", "unreachable_after = \"120s\"");
+    std::fs::write(a.config(), text).unwrap();
+    let mut b = a.sibling("instance-b");
+    a.start();
+    b.start();
+    let phone = enroll_as(a.port, DEVICE_PW, "phone-a", "alice").await.unwrap();
+    let (_conn, _) = Conn::open(a.port, &phone).await.unwrap();
+    let (_, overview) = admin(b.admin_port, "GET", "/api/admin/overview", "");
+    assert_eq!(overview["stats"]["online"], 1, "{overview}");
+
+    let mut lost = a.child.take().unwrap();
+    lost.kill().unwrap();
+    lost.wait().unwrap();
+    // Nobody tells B: the heartbeat stops, then the janitor closes the sessions (30 s of silence).
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, overview) = admin(b.admin_port, "GET", "/api/admin/overview", "");
+        if overview["stats"]["online"] == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the dead instance still holds a session: {overview}");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    // The sessions stop counting as live after 30 s, the janitor of B then writes their end within one heartbeat.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (_, connections) = admin(b.admin_port, "GET", "/api/admin/connections", "");
+        if connections.to_string().contains("instance_lost") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the janitor never closed the connection: {connections}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }

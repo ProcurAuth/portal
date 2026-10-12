@@ -22,6 +22,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hcl-rs = "0.19.8"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+# PostgreSQL storage (several active instances share one database). Plain TCP: no TLS stack, so no C dependency.
+tokio-postgres = { version = "0.7", default-features = false }
+deadpool-postgres = { version = "0.14", default-features = false, features = ["rt_tokio_1"] }
 ipnet = { version = "2.12.2", features = ["serde"] }
 sha2 = { workspace = true }
 hmac = { workspace = true }

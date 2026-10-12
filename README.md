@@ -331,10 +331,35 @@ database on an `emptyDir`, a short `tolerationSeconds` on `node.kubernetes.io/un
 5 minutes), and a startup probe that tolerates the wait of a standby (`lease_ttl` plus the restore). Expect the
 service to be back about `node-monitor-grace-period + tolerationSeconds + lease_ttl` after the loss of the node.
 
+## Several active instances (PostgreSQL)
+
+By default Inbox keeps its state in a SQLite file and exactly one instance runs. With a `postgres` block in the
+configuration (and no `storage.path`) the state lives in PostgreSQL instead, and **any number of instances can be active
+at the same time**, behind a load balancer (a Kubernetes Service). Phones can connect to any of them, and any of them
+accepts alerts: the loss of an instance is only a reconnection for the phones it held.
+
+- **Delivery state is the database.** An alert and its delivery rows are one transaction; the idempotency key is a unique
+  index, so a producer that retries through another instance is deduplicated (`200`). The database decides, not the
+  instances: for the same guarantees as SQLite, use a PostgreSQL that is itself replicated (synchronous commit).
+- **Instances tell each other with `LISTEN`/`NOTIFY`:** a new alert wakes the phone connected to another instance within a
+  few milliseconds, a revoked device and a device that reconnected elsewhere lose their old session. Notifications are a
+  speed-up, not a dependency: a session also looks at the database every `min(devices.resend_after, 5s)`, and after a
+  lost notification connection every session is flushed at once.
+- **Instances heartbeat in the `instances` table** (every 5 s, with the database clock). The sessions of an instance
+  silent for 30 s are closed by the survivors (`close_reason = instance_lost`), and the admin front shows the phones
+  connected to any instance as online.
+- **Plain TCP, no TLS stack:** use the private network (the connection is password authenticated, SCRAM). One role and one
+  database are enough; the schema is created and migrated at start under an advisory lock, and refused if it is newer
+  than the binary.
+- **Rate limits are per instance** (`security.max_auth_failures`): N instances allow N times as many attempts.
+- The `replica` block is for SQLite only. Switching an existing installation from SQLite to PostgreSQL does not copy the
+  data: phones must enroll again.
+
 ## Limitations
 
-- **One active instance.** State lives in one SQLite file, so never run two replicas at once. To survive the loss of
-  the node, run one instance with [standby replication](#standby-replication): a second one waits and takes over.
+- **SQLite mode: one active instance.** State lives in one SQLite file, so never run two replicas at once. To survive
+  the loss of the node, use [standby replication](#standby-replication), or run
+  [several active instances on PostgreSQL](#several-active-instances-postgresql).
 - **Android only.** iOS cannot keep a connection in the background without Apple's push service.
 - **TLS** is the reverse proxy's job.
 - **Telemetry export** is OTLP/HTTP over `http://` only.

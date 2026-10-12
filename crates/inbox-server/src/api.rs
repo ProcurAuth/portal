@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
-use crate::db::{self, InsertOutcome, NewAlert};
+use crate::db::{InsertOutcome, NewAlert};
 use crate::state::{AppState, Producer};
 use crate::util::{hex, is_hex_id, truncate_chars};
 
@@ -117,12 +117,7 @@ pub async fn accept_alert(
     }
 
     let span = tracing::info_span!("alert.accept", alert.group = %alert.group, alert.source = %alert.source);
-    let outcome = app
-        .db
-        .call(move |c| Ok(db::insert_alert(c, &alert)?))
-        .instrument(span)
-        .await
-        .map_err(ApiError::storage)?;
+    let outcome = app.db.insert_alert(alert).instrument(span).await.map_err(ApiError::storage)?;
     match outcome {
         InsertOutcome::Created { alert_id, devices, .. } => {
             app.metrics.alerts_accepted.add(1, &[KeyValue::new("source", source_kind)]);
@@ -293,14 +288,8 @@ pub async fn get_alert(
     if !is_hex_id(&id) {
         return Err(not_found());
     }
-    let detail = app
-        .db
-        .call({
-            let cutoff = app.delivery_cutoff();
-            move |c| Ok(db::alert_detail(c, &id, cutoff)?)
-        })
-        .await
-        .map_err(ApiError::storage)?;
+    let detail =
+        app.db.alert_detail(&id, app.delivery_cutoff()).await.map_err(ApiError::storage)?;
     let detail = detail.ok_or_else(not_found)?;
     if !p.groups.contains(&detail.summary.group) {
         return Err(not_found());

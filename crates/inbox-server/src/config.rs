@@ -31,6 +31,9 @@ pub struct Config {
     /// Optional `replica { ... }` block: standby replication to a shared directory (see `replica.rs`).
     #[serde(default)]
     pub replica: Option<Replica>,
+    /// Optional `postgres { ... }` block: PostgreSQL instead of SQLite, so that several instances can be active at once.
+    #[serde(default)]
+    pub postgres: Option<Postgres>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,7 +55,9 @@ pub struct Server {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Storage {
-    pub path: PathBuf,
+    /// SQLite database file. Required, unless a `postgres` block selects PostgreSQL (then it must be absent).
+    #[serde(default)]
+    pub path: Option<PathBuf>,
     /// An alert a device has not received within this delay is no longer sent to it.
     #[serde(deserialize_with = "duration")]
     pub delivery_ttl: Duration,
@@ -147,6 +152,23 @@ pub struct Telemetry {
     pub service_name: Option<String>,
     #[serde(default, deserialize_with = "opt_duration")]
     pub export_interval: Option<Duration>,
+}
+
+/// Present: Inbox keeps its state in PostgreSQL, shared by every instance, and any number of instances can run (and
+/// serve phones) at the same time. Absent: the state is a SQLite file owned by one instance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Postgres {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub user: String,
+    /// File holding the password of `user` (a secret: never inline).
+    pub password_file: PathBuf,
+    /// Connections used by requests and sessions (one more is kept for notifications).
+    pub pool_size: u32,
+    #[serde(deserialize_with = "duration")]
+    pub connect_timeout: Duration,
 }
 
 /// Present: the database is copied to a directory shared with the other instances that may take over.
@@ -305,6 +327,34 @@ impl Config {
             "limits.max_request_bytes must be in 4096..1048576",
         );
 
+        check(
+            !(self.postgres.is_some() && st.path.is_some()),
+            "storage.path must be absent when the postgres block is present",
+        );
+        check(
+            self.postgres.is_some() || st.path.is_some(),
+            "storage.path is required (or a postgres block to use PostgreSQL)",
+        );
+        if let Some(p) = &self.postgres {
+            check(
+                !p.host.trim().is_empty() && p.host.len() <= 253,
+                "postgres.host must be 1..253 bytes",
+            );
+            check(p.port != 0, "postgres.port must not be 0");
+            check(
+                [&p.database, &p.user].iter().all(|n| !n.is_empty() && n.len() <= 63),
+                "postgres.database and postgres.user must be 1..63 bytes",
+            );
+            check((2..=64).contains(&p.pool_size), "postgres.pool_size must be in 2..64");
+            check(
+                (Duration::from_secs(1)..=Duration::from_secs(60)).contains(&p.connect_timeout),
+                "postgres.connect_timeout must be in 1s..60s",
+            );
+            check(
+                self.replica.is_none(),
+                "the replica block is for SQLite: remove it when using postgres",
+            );
+        }
         if let Some(r) = &self.replica {
             check(r.dir.is_absolute(), "replica.dir must be an absolute path");
             check(
@@ -317,7 +367,7 @@ impl Config {
                 "replica.sync_timeout must be in 1s..60s",
             );
             check(
-                self.storage.path.parent().is_none_or(|p| p != r.dir),
+                self.storage.path.as_ref().and_then(|p| p.parent()).is_none_or(|p| p != r.dir),
                 "replica.dir must not be the directory of storage.path",
             );
         }
@@ -481,6 +531,45 @@ replica {
                 .unwrap_err()
                 .contains("directory of storage.path")
         );
+    }
+
+    const POSTGRES: &str = r#"
+postgres {
+  host            = "postgresql-rw.data.svc.cluster.local"
+  port            = 5432
+  database        = "inbox"
+  user            = "inbox"
+  password_file   = "/run/secrets/inbox_db_password"
+  pool_size       = 8
+  connect_timeout = "5s"
+}
+"#;
+
+    /// The example selects SQLite; with PostgreSQL the file path goes away.
+    fn with_postgres() -> String {
+        EXAMPLE.replace("  path = \"/var/lib/inbox/inbox.db\"\n", "") + POSTGRES
+    }
+
+    #[test]
+    fn postgres_replaces_the_sqlite_path_and_is_strict() {
+        let c = Config::parse(&with_postgres()).unwrap();
+        assert!(c.storage.path.is_none());
+        assert_eq!(c.postgres.unwrap().pool_size, 8);
+        // Both, or neither: refused.
+        let both = format!("{EXAMPLE}{POSTGRES}");
+        assert!(Config::parse(&both).unwrap_err().contains("storage.path must be absent"));
+        let neither = EXAMPLE.replace("  path = \"/var/lib/inbox/inbox.db\"\n", "");
+        assert!(Config::parse(&neither).unwrap_err().contains("storage.path is required"));
+        // Every attribute of the block is mandatory.
+        for line in POSTGRES.lines().filter(|l| l.contains(" = ")) {
+            let broken = with_postgres().replace(&format!("{line}\n"), "");
+            assert!(Config::parse(&broken).is_err(), "accepted without: {line}");
+        }
+        let bad = with_postgres().replace("pool_size       = 8", "pool_size       = 1");
+        assert!(Config::parse(&bad).unwrap_err().contains("pool_size"));
+        // The standby replication is for SQLite.
+        let replica = format!("{}{REPLICA}", with_postgres());
+        assert!(Config::parse(&replica).unwrap_err().contains("replica block is for SQLite"));
     }
 
     #[test]
