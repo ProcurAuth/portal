@@ -646,9 +646,14 @@ impl Worker {
     fn snapshot(&self) -> Result<(), String> {
         match take_snapshot(&self.source, &self.dir, self.epoch, &self.owner) {
             Ok(bytes) => {
-                self.stats.snapshots.fetch_add(1, SeqCst);
+                let first = self.stats.snapshots.fetch_add(1, SeqCst) == 0;
                 self.stats.last_snapshot_ms.store(now_ms(), SeqCst);
-                tracing::debug!(event = "replica_snapshot", epoch = self.epoch, bytes);
+                if first {
+                    // One line per process proves the shared directory works; the following ones are routine.
+                    tracing::info!(event = "replica_first_snapshot", epoch = self.epoch, bytes, dir = %self.dir.display());
+                } else {
+                    tracing::debug!(event = "replica_snapshot", epoch = self.epoch, bytes);
+                }
                 prune(&self.dir, self.epoch);
                 Ok(())
             }
