@@ -414,6 +414,15 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
         return empty_response(StatusCode::NO_CONTENT);
     }
 
+    // A path a service declared with `portal.exclude` goes through without a session (a webhook, a
+    // health probe): its caller cannot sign in. Everything else needs one.
+    let catalog = current_catalog(state);
+    let method = unique_header_str(headers, "x-forwarded-method").ok().flatten();
+    if access::excluded(&catalog, method, original_uri).is_some() {
+        state.metrics.verify_excluded();
+        return empty_response(StatusCode::NO_CONTENT);
+    }
+
     let Some(viewer) = current_viewer(state, headers, client) else {
         return match login_location(state, original_uri) {
             Ok(location) => {
@@ -427,7 +436,6 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
         };
     };
 
-    let catalog = current_catalog(state);
     match access::decide(
         &catalog,
         &state.config.roles.names,

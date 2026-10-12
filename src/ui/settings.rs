@@ -696,7 +696,7 @@ pub struct ServicesView<'a> {
 
 pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let mut out = String::from(
-        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who may open each service. A service is opened to the roles it names with <code>portal.roles</code>; a service with no role is open to the superadmin only, who may open all of them.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Roles allowed</th></tr></thead><tbody>"#,
+        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who may open each service. A service is opened to the roles it names with <code>portal.roles</code>; a service with no role is open to the superadmin only, who may open all of them. <code>portal.exclude</code> opens paths of a service to anyone, signed in or not: it is listed here so that it can be audited.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Roles allowed</th><th>Open without sign-in</th></tr></thead><tbody>"#,
     );
     for group in view.catalog.groups() {
         for service in &group.services {
@@ -723,6 +723,14 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
             } else {
                 for role in known {
                     let _ = write!(out, r#"<span class="pill">{}</span>"#, html_escape(role));
+                }
+            }
+            out.push_str("</td><td>");
+            if service.exclude.is_empty() {
+                out.push_str(r#"<span class="pill pill--muted">None</span>"#);
+            } else {
+                for rule in &service.exclude {
+                    let _ = write!(out, r#"<code>{}</code> "#, html_escape(rule.text()));
                 }
             }
             out.push_str("</td></tr>");

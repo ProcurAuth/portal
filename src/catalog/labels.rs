@@ -8,9 +8,11 @@
 use std::collections::BTreeMap;
 
 use super::{Health, Service};
+use crate::access::{href_prefix, ExcludeRule};
 
 const MAX_TEXT_CHARS: usize = 160;
 const MAX_ROLES: usize = 16;
+const MAX_EXCLUDES: usize = 8;
 const DEFAULT_GROUP: &str = "Other";
 
 /// Parses the labels of one workload. `origin` names it in errors and is the fallback display
@@ -49,6 +51,8 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     };
     let roles = parse_roles(labels.get("portal.roles").map(String::as_str).unwrap_or(""))
         .map_err(|e| fail(format!("roles {e}")))?;
+    let exclude = parse_exclude(labels.get("portal.exclude").map(String::as_str).unwrap_or(""), href)
+        .map_err(|e| fail(format!("exclude {e}")))?;
     let id = match labels
         .get("portal.id")
         .map(|v| v.trim())
@@ -72,6 +76,7 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
         weight,
         health_url,
         roles,
+        exclude,
         health: Health::Unknown,
     }))
 }
@@ -169,6 +174,35 @@ pub fn parse_roles(raw: &str) -> Result<Vec<String>, String> {
         return Err(format!("more than {MAX_ROLES} roles"));
     }
     Ok(out)
+}
+
+/// The `portal.exclude` label: one rule per line (blank lines and `#` comments ignored), each a path
+/// under the service's own `href`, so a service can only open what it owns. Any unusable rule
+/// makes the whole label unusable: nothing is excluded then, and the problem is reported.
+fn parse_exclude(raw: &str, href: &str) -> Result<Vec<ExcludeRule>, String> {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    if lines.len() > MAX_EXCLUDES {
+        return Err(format!("more than {MAX_EXCLUDES} rules"));
+    }
+    let prefix = href_prefix(href).ok_or_else(|| "needs a local href other than /".to_string())?;
+    let mut rules: Vec<ExcludeRule> = Vec::new();
+    for line in lines {
+        let rule = ExcludeRule::parse(line).map_err(|e| format!("{line:?}: {e}"))?;
+        if !rule.starts_with(&prefix) {
+            return Err(format!("{line:?}: must stay under {href}"));
+        }
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+    Ok(rules)
 }
 
 /// Lower-case, runs of anything but letters and digits become one `-`.
@@ -412,5 +446,62 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(service.id, "my-app-1");
+    }
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::*;
+
+    fn labels(href: &str, exclude: &str) -> BTreeMap<String, String> {
+        [("portal.name", "Dagu"), ("portal.href", href), ("portal.exclude", exclude)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_label_holds_one_rule_per_line_and_ignores_comments_and_repeats() {
+        let service = parse(
+            "dagu",
+            &labels(
+                "/dagu",
+                "# webhooks\n  POST /dagu/api/v1/webhooks/*  \n\nPOST /dagu/api/v1/webhooks/*\nGET /dagu/api/v1/health\r\n",
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let texts: Vec<&str> = service.exclude.iter().map(ExcludeRule::text).collect();
+        assert_eq!(texts, ["POST /dagu/api/v1/webhooks/*", "GET /dagu/api/v1/health"]);
+    }
+
+    #[test]
+    fn no_label_means_nothing_is_excluded() {
+        assert!(parse("x", &labels("/dagu", "")).unwrap().unwrap().exclude.is_empty());
+        assert!(parse("x", &labels("https://example.org/", "")).unwrap().unwrap().exclude.is_empty());
+    }
+
+    #[test]
+    fn a_service_can_only_open_paths_under_its_own_href() {
+        for rule in ["POST /grafana/api/x", "POST /dagu", "POST /*/api", "/", "POST /dagux/api"] {
+            let err = parse("dagu", &labels("/dagu/api", rule)).unwrap_err();
+            assert!(err.contains("exclude"), "{rule}: {err}");
+        }
+        assert!(parse("dagu", &labels("/dagu", "POST /dagu/*")).is_ok());
+        assert!(parse("dagu", &labels("/dagu/api", "POST /dagu/api/x")).is_ok());
+    }
+
+    #[test]
+    fn a_service_without_a_local_prefix_cannot_open_anything() {
+        assert!(parse("x", &labels("/", "GET /a")).is_err());
+        assert!(parse("x", &labels("https://example.org/", "GET /a")).is_err());
+    }
+
+    #[test]
+    fn a_bad_rule_makes_the_whole_label_unusable_and_is_reported_with_its_origin() {
+        let err = parse("apps/dagu", &labels("/dagu", "GET /dagu/ok\nGET /dagu/[a-z]+")).unwrap_err();
+        assert!(err.starts_with("apps/dagu: exclude "), "{err}");
+        let many = (0..9).map(|i| format!("GET /dagu/p{i}")).collect::<Vec<_>>().join("\n");
+        assert!(parse("x", &labels("/dagu", &many)).unwrap_err().contains("more than 8 rules"));
     }
 }

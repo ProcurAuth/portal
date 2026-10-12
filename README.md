@@ -41,6 +41,29 @@ A service binds to roles with its `portal.roles` label (an annotation in K3s): `
 
 `/auth/verify` enforces this. It matches the path asked for (`X-Forwarded-Uri`) to the service that owns the longest path prefix of its `href`, on whole segments. Traefik routes on the cleaned path but forwards the raw URI, so the portal reads the path every way a proxy or a backend might (`%2e%2e`, `//`, `%2f` as a character and as a separator, `\`) and allows the request only if every reading is allowed: `/grafana/../clickhouse/` is judged as a ClickHouse request. A refused browser navigation is redirected to `/auth/denied` (the answer to ForwardAuth cannot carry a page: Traefik caps its body); anything else gets a plain 403. `/auth/*` is never subject to roles, and a path that no service owns (an absolute asset path) stays open to every signed-in user. The launcher shows only the services a user may open.
 
+### Paths open without a session (`portal.exclude`)
+
+A caller that cannot sign in (a webhook, a probe) needs a path the portal does not authenticate. The service declares it with `portal.exclude` (an annotation in K3s), **one rule per line** (blank lines and `#` comments are ignored):
+
+```yaml
+portal.exclude: |
+  POST /dagu/api/v1/webhooks/*
+  GET  /dagu/api/v1/health
+  PUT,POST /dagu/hooks/**
+```
+
+A rule is `[METHOD[,METHOD]] /path`. A segment is written out (`[A-Za-z0-9._~-]`, up to 64 characters), `*` stands for exactly one segment, and `**`, last only, for one or more. There is no regular expression and no partial wildcard (`fo*`): a rule that skips authentication has to be readable at a glance, and a pattern engine is one more thing to get wrong. Without a method the rule matches any; with methods, only those (a request with no method header matches none of them).
+
+The rules are strict on purpose:
+
+- a service can only open paths under **its own `href`**, and only while it is the service that owns the path (the longest prefix wins, as for roles): `/dagu/admin` declared by another service stays closed to Dagu's rules;
+- the path is read every way a proxy or a backend might read it (`%2e%2e`, `//`, `%2f` as a character and as a separator, `\`), and the request is let through only if **every** reading belongs to the same service and matches one of its rules: `/dagu/api/v1/webhooks/..%2f..%2fadmin` is not a webhook;
+- a wildcard never stands for a segment that hides a separator, and `/auth/*` is never open;
+- a rule that cannot be read (a regular expression, a bad method, a path outside the `href`, more than 8 rules) makes the **whole label** unusable: nothing is opened, the service is reported in the catalogue problems, and it is not listed until it is fixed;
+- the query string is ignored, and nothing is recorded in a session (there is none): the request is counted in `portal_forward_auth_requests_total{result="excluded"}`.
+
+The Services settings page lists the rules of every service, so the whole exposure can be audited in one place. What a rule opens is protected only by what the service does itself (a webhook token): the portal no longer asks anything.
+
 ## Settings pages and history
 
 The superadmin gets a gear on the launcher. It opens the settings, which are **one HTML page per tab**, as the pages of clickhouse-dash are: a header with **Back to panel**, a row of underlined tab links (no fill, only a line under the current one), then the page. They live under `/auth/settings` (Traefik already routes `/auth/` to the portal), work without script, and answer 404 to anyone who is not the superadmin in its own right (a user, or the superadmin browsing as a user). A page carries only what its tab shows, and the launcher carries none of it, so the browser builds a small DOM wherever it goes (a twelve-service launcher is about 150 elements; the settings used to add 700 more to it). Four tabs:

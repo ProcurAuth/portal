@@ -67,6 +67,7 @@ pub struct Metrics {
 
     verify_allowed: AtomicU64,
     verify_denied: AtomicU64,
+    verify_excluded: AtomicU64,
     verify_redirected: AtomicU64,
     verify_bad_request: AtomicU64,
     verify_internal_error: AtomicU64,
@@ -107,6 +108,7 @@ impl Metrics {
             user_admin: Mutex::new(HashMap::new()),
             verify_allowed: AtomicU64::new(0),
             verify_denied: AtomicU64::new(0),
+            verify_excluded: AtomicU64::new(0),
             verify_redirected: AtomicU64::new(0),
             verify_bad_request: AtomicU64::new(0),
             verify_internal_error: AtomicU64::new(0),
@@ -191,6 +193,10 @@ impl Metrics {
 
     pub fn verify_allowed(&self) {
         self.verify_allowed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn verify_excluded(&self) {
+        self.verify_excluded.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn verify_redirected(&self) {
@@ -346,6 +352,7 @@ impl Metrics {
         out.push_str("# TYPE portal_forward_auth_requests_total counter\n");
         write_counter(&mut out, "portal_forward_auth_requests_total", "result", "allowed", &self.verify_allowed);
         write_counter(&mut out, "portal_forward_auth_requests_total", "result", "denied", &self.verify_denied);
+        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "excluded", &self.verify_excluded);
         write_counter(&mut out, "portal_forward_auth_requests_total", "result", "redirected", &self.verify_redirected);
         write_counter(&mut out, "portal_forward_auth_requests_total", "result", "bad_request", &self.verify_bad_request);
         write_counter(&mut out, "portal_forward_auth_requests_total", "result", "internal_error", &self.verify_internal_error);

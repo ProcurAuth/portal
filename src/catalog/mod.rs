@@ -13,6 +13,8 @@ use std::collections::{HashMap, HashSet};
 
 pub use labels::{parse as parse_labels, parse_roles};
 
+use crate::access::ExcludeRule;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Health {
     /// No probe configured, or none answered yet.
@@ -38,6 +40,8 @@ pub struct Service {
     pub health_url: Option<String>,
     /// Roles allowed to see and open the service. Empty means the default policy.
     pub roles: Vec<String>,
+    /// Paths of the service reachable without signing in (`portal.exclude`); empty for almost every service.
+    pub exclude: Vec<ExcludeRule>,
     pub health: Health,
 }
 
@@ -61,6 +65,7 @@ impl Group {
 pub struct GateService {
     pub id: String,
     pub roles: Vec<String>,
+    pub exclude: Vec<ExcludeRule>,
 }
 
 /// The services that own one path prefix (usually one).
@@ -182,6 +187,7 @@ fn build_gate(groups: &[Group]) -> Vec<GateEntry> {
         let gate_service = GateService {
             id: service.id.clone(),
             roles: service.roles.clone(),
+            exclude: service.exclude.clone(),
         };
         match entries.iter_mut().find(|e| e.prefix == prefix) {
             Some(entry) => entry.services.push(gate_service),
@@ -216,6 +222,7 @@ mod tests {
             weight,
             health_url: None,
             roles: Vec::new(),
+            exclude: Vec::new(),
             health: Health::Unknown,
         }
     }
