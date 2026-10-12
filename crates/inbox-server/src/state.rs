@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::hub::Hub;
 use crate::ratelimit::AuthLimiter;
+use crate::replica::Replica;
 use crate::secrets::read_secret;
 use crate::shutdown::Shutdown;
 use crate::telemetry::{Gauges, Metrics};
@@ -81,6 +82,7 @@ pub struct AppState {
     pub config: Config,
     pub secrets: Secrets,
     pub db: Db,
+    pub replica: Replica,
     pub hub: Hub,
     pub limiter: AuthLimiter,
     pub metrics: Metrics,

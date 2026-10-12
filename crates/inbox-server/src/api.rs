@@ -131,11 +131,14 @@ pub async fn accept_alert(
             if devices.is_empty() {
                 tracing::warn!(event = "alert_without_targets", alert.id = %alert_id);
             }
+            replicate(app).await?;
             app.hub.wake(&devices);
             Ok(Accepted { alert_id, duplicate: false, targets: devices.len() })
         }
         InsertOutcome::Duplicate { alert_id, devices } => {
             app.metrics.alerts_duplicate.add(1, &[KeyValue::new("source", source_kind)]);
+            // A retry after a failed copy must not be acknowledged before the copy exists.
+            replicate(app).await?;
             app.hub.wake(&devices);
             Ok(Accepted { alert_id, duplicate: true, targets: devices.len() })
         }
@@ -145,6 +148,24 @@ pub async fn accept_alert(
             "idempotency key already used for a different alert",
         )),
     }
+}
+
+/// Waits for the shared copy that contains the alert just committed, before it is acknowledged or delivered: an
+/// instance that takes over from a lost node then knows every alert that was acknowledged, and a device never
+/// receives an alert that a producer retry would create a second time. With `sync_alerts = false` a failed copy
+/// is only logged.
+async fn replicate(app: &AppState) -> Result<(), ApiError> {
+    let Err(error) = app.replica.sync().await else { return Ok(()) };
+    app.metrics.replica_sync_failures.add(1, &[]);
+    tracing::warn!(event = "replica_sync_failed", error = %error);
+    if app.replica.strict_alerts() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "replication_unavailable",
+            "the alert could not be replicated, retry",
+        ));
+    }
+    Ok(())
 }
 
 /// Control characters and runs of whitespace become single spaces.

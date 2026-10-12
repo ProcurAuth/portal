@@ -9,6 +9,7 @@ mod device;
 mod hub;
 mod net;
 mod ratelimit;
+mod replica;
 mod secrets;
 mod server;
 mod shutdown;

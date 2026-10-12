@@ -69,6 +69,16 @@ telemetry {
   export_interval = "15s"
 }
 
+# Optional: standby replication to a directory shared with the instances that may take over
+# (a ReadWriteMany volume). All attributes are mandatory when the block is present.
+# replica {
+#   dir               = "/replica"
+#   snapshot_interval = "10s"
+#   lease_ttl         = "30s"
+#   sync_timeout      = "5s"
+#   sync_alerts       = true
+# }
+
 group "infra" {
   name        = "Infra prod"
   description = "Production outages"

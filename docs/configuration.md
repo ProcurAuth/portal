@@ -5,8 +5,9 @@ and strict:
 
 - **Every attribute is mandatory.** There are no implicit defaults. The only
   optional elements are the `producer` blocks (zero producers is valid: the admin
-  front can always send alerts) and the endpoint settings of a disabled
-  `telemetry` block.
+  front can always send alerts), the endpoint settings of a disabled
+  `telemetry` block and the `replica` block (absent: no replication; present: all
+  its attributes are mandatory).
 - **Unknown attributes and blocks are rejected**, so a typo stops startup instead
   of being ignored.
 - **Semantic checks** (ranges, cross-field rules, references) run before anything
@@ -108,6 +109,29 @@ requests marked `Sec-Fetch-Site: cross-site` are refused.
 
 Telemetry never gates the service: if the collector is down, exports fail in the
 background and alerts keep flowing.
+
+## `replica` (optional)
+
+Standby replication to a directory shared with the other instances that may take over
+(see "Standby replication" in the README). Absent: Inbox runs alone.
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `dir` | absolute path | Shared directory (ReadWriteMany volume). Must not be the directory of `storage.path`. |
+| `snapshot_interval` | duration ≥ 1s | A changed database is copied at most this often. Accepted alerts, enrollments and revocations do not wait for it. |
+| `lease_ttl` | duration ≥ 5s | An instance whose lease has not changed for this long is considered lost; a standby then takes over. Also the time after which an instance that cannot renew its lease stops. |
+| `sync_timeout` | duration 1s..60s | How long a write waits for the copy that contains it. |
+| `sync_alerts` | bool | `true`: an alert is acknowledged and delivered only once copied (`503 replication_unavailable` otherwise). `false`: acknowledged after the local commit. |
+
+```hcl
+replica {
+  dir               = "/replica"
+  snapshot_interval = "10s"
+  lease_ttl         = "30s"
+  sync_timeout      = "5s"
+  sync_alerts       = true
+}
+```
 
 ## `group "<id>"`
 

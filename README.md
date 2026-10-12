@@ -269,6 +269,11 @@ page: open it in a private window or with extensions disabled.
 | `inbox_device_session_closes_total{reason}` | counter | Session ends |
 | `inbox_auth_failures_total{kind}` | counter | Failed authentications |
 | `inbox_enrollments_total` | counter | Devices enrolled |
+| `inbox_replica_epoch` | gauge | Epoch of the replica lease this instance owns (replication only) |
+| `inbox_replica_last_snapshot_age_seconds` | gauge | Age of the newest snapshot in the shared directory. **Alert on this.** |
+| `inbox_replica_snapshots_total` | counter | Snapshots published |
+| `inbox_replica_snapshot_failures_total` | counter | Snapshots that failed |
+| `inbox_replica_sync_failures_total` | counter | Writes that could not be copied before the answer |
 
 ## Building
 
@@ -291,9 +296,45 @@ matches the workspace version. They contain:
 No container image is ever published to a registry (GHCR or other): build it
 locally with `tools/build.sh image` or `docker compose up --build`.
 
+## Standby replication
+
+SQLite needs a real local filesystem (WAL uses shared memory), so the database cannot live on a network volume. To
+survive the loss of the node, give Inbox a `replica` block pointing at a directory **shared by every instance that may
+run it** (a ReadWriteMany plain-file volume). The database stays local; the shared directory holds:
+
+- `snapshot-<epoch>.db`: a consistent copy (SQLite online backup) rewritten when the database changed, at most every
+  `snapshot_interval`, and **before an alert, an enrollment or a revocation is acknowledged**;
+- `lease.json`: who is the active instance. It is renewed every `lease_ttl / 3`;
+- `claim-<epoch>`: created exclusively, so two standbys cannot take the same epoch.
+
+A starting instance waits until the lease is released (clean stop: at once) or has not changed for `lease_ttl` (lost
+node), takes the next epoch, **restores the newest snapshot that passes `PRAGMA quick_check`** (the local database is
+only a cache) and then serves. It writes `snapshot-<its epoch>.db` only, so a lost instance that comes back can never
+overwrite its successor; it also notices the new epoch at its next renewal, or fails to renew for `lease_ttl`, and
+stops by itself (fencing: exit status 1, the orchestrator restarts it as a standby).
+
+Delivery guarantees across a takeover:
+
+- With `sync_alerts = true` an alert is acknowledged (`201`/`200`) and delivered to devices only after the snapshot that
+  contains it is published, so a producer that never got an answer retries and is deduplicated, and every acknowledged
+  alert survives the loss of the node. If the shared directory is unavailable the producer gets
+  `503 replication_unavailable` and retries; with `false` the alert is accepted after the local commit and a failed copy
+  is only logged (`inbox_replica_sync_failures_total`).
+- Device receipts and last-seen times are copied with the next snapshot. After a takeover an alert may be sent again to a
+  phone whose receipt was lost: the app deduplicates on `alert_id`, so it is never shown twice.
+- First start with a `replica` block on an existing database: the shared directory is empty, so the local database is
+  kept and becomes snapshot 1.
+
+Run it as a Deployment with one replica and the `Recreate` strategy (not a StatefulSet: a StatefulSet pod on an
+unreachable node is never rescheduled by Kubernetes), the shared directory on a ReadWriteMany volume, the local
+database on an `emptyDir`, a short `tolerationSeconds` on `node.kubernetes.io/unreachable` and `not-ready` (the default is
+5 minutes), and a startup probe that tolerates the wait of a standby (`lease_ttl` plus the restore). Expect the
+service to be back about `node-monitor-grace-period + tolerationSeconds + lease_ttl` after the loss of the node.
+
 ## Limitations
 
-- **Single node.** State lives in one SQLite file, so do not run two replicas.
+- **One active instance.** State lives in one SQLite file, so never run two replicas at once. To survive the loss of
+  the node, run one instance with [standby replication](#standby-replication): a second one waits and takes over.
 - **Android only.** iOS cannot keep a connection in the background without Apple's push service.
 - **TLS** is the reverse proxy's job.
 - **Telemetry export** is OTLP/HTTP over `http://` only.

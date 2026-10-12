@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "inbox-android"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "jni",
  "inbox-core",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "inbox-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.22.1",
  "hkdf",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "inbox-server"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "axum",
  "base64 0.22.1",

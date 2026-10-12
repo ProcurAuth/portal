@@ -833,3 +833,108 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(st, 201, "{body}");
     s.stop();
 }
+
+/// The node running Inbox is lost (SIGKILL, local disk gone): a second instance with an empty local disk takes
+/// over from the shared directory and knows every device and alert that was acknowledged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_instance_takes_over_a_lost_node() {
+    let mut s = Server::setup();
+    let shared = s.dir.join("shared");
+    let first_db = s.dir.join("inbox.db");
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let replica = format!(
+        r#"
+replica {{
+  dir               = "{}"
+  snapshot_interval = "1s"
+  lease_ttl         = "5s"
+  sync_timeout      = "5s"
+  sync_alerts       = true
+}}
+"#,
+        shared.display()
+    );
+    std::fs::write(s.config(), format!("{text}{replica}")).unwrap();
+    s.start();
+    let port = s.port;
+
+    // Everything below is acknowledged, hence already in the shared directory.
+    let phone = enroll_as(port, DEVICE_PW, "phone-a", "alice").await.unwrap();
+    let (st, accepted) =
+        post_alert(&s, "failover-1", json!({"group": "infra", "title": "before the loss"}));
+    assert_eq!(st, 201, "{accepted}");
+    let alert_id = accepted["alert_id"].as_str().unwrap().to_string();
+    assert!(shared.join("lease.json").exists() && shared.join("snapshot-1.db").exists());
+
+    // The node is lost: no signal handler runs, and its disk is gone with it.
+    let mut child = s.child.take().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", first_db.display()));
+    }
+
+    // The standby has an empty local disk and waits for the dead owner's lease to expire.
+    let second_db = s.dir.join("standby.db");
+    let config = std::fs::read_to_string(s.config()).unwrap();
+    std::fs::write(
+        s.config(),
+        config.replace(&first_db.display().to_string(), &second_db.display().to_string()),
+    )
+    .unwrap();
+    let began = Instant::now();
+    s.start();
+    assert!(
+        began.elapsed() >= Duration::from_secs(3),
+        "took over before the lease expired: {:?}",
+        began.elapsed()
+    );
+    assert!(s.log().contains("replica_ready") || s.log().contains("restored_epoch"), "{}", s.log());
+
+    let (st, overview) = admin(s.admin_port, "GET", "/api/admin/overview", "");
+    assert_eq!(st, 200, "{overview}");
+    assert_eq!(overview["stats"]["enrolled"], 1, "the enrolled phone survived: {overview}");
+    let (_, alerts) = admin(s.admin_port, "GET", "/api/admin/alerts", "");
+    assert!(alerts.to_string().contains(&alert_id), "the acknowledged alert survived: {alerts}");
+    // The producer retries the alert it never got an answer for: deduplicated, not created twice.
+    let (st, again) =
+        post_alert(&s, "failover-1", json!({"group": "infra", "title": "before the loss"}));
+    assert_eq!(st, 200, "{again}");
+    assert_eq!(again["alert_id"], alert_id.as_str());
+    // The phone still enrolled on the first instance opens a session on the second one.
+    let (_conn, welcome) = Conn::open(port, &phone).await.unwrap();
+    assert!(matches!(welcome, ServerMsg::Welcome { .. }));
+    assert!(shared.join("snapshot-2.db").exists(), "the new epoch publishes its own snapshot");
+
+    // A clean stop hands the lease over at once: no waiting for the ttl.
+    s.stop();
+    let began = Instant::now();
+    s.start();
+    assert!(
+        began.elapsed() < Duration::from_secs(4),
+        "a released lease was not taken at once: {:?}",
+        began.elapsed()
+    );
+    let (_, overview) = admin(s.admin_port, "GET", "/api/admin/overview", "");
+    assert_eq!(overview["stats"]["enrolled"], 1);
+}
+
+/// Without a `replica` block nothing changes: no shared directory is needed or touched.
+#[test]
+fn check_config_reports_the_replica_block() {
+    let s = Server::setup();
+    let out = inbox(&["check-config", "--config", &s.config()], None);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("replica off"));
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let broken = s.dir.join("replica.hcl");
+    std::fs::write(
+        &broken,
+        format!(
+            "{text}\nreplica {{\n dir = \"/x\"\n snapshot_interval = \"1s\"\n lease_ttl = \"1s\"\n sync_timeout = \"1s\"\n sync_alerts = true\n}}\n"
+        ),
+    )
+    .unwrap();
+    let out = inbox(&["check-config", "--config", broken.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("lease_ttl"));
+}

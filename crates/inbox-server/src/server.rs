@@ -21,6 +21,7 @@ use crate::db::{self, Db};
 use crate::device;
 use crate::hub::Hub;
 use crate::ratelimit::AuthLimiter;
+use crate::replica::{self, Replica};
 use crate::shutdown::Shutdown;
 use crate::state::{AppState, Secrets};
 use crate::telemetry::{self, Gauges, Metrics};
@@ -31,19 +32,43 @@ pub fn serve(config: Config) -> Result<(), String> {
     // Everything that can be checked is checked before anything starts.
     let secrets = Secrets::load(&config)?;
     let (guard, meter) = telemetry::init(&config)?;
+    // A standby waits here, before the database is opened and before any port is bound: it serves nothing.
+    let boot = match &config.replica {
+        Some(r) => match replica::boot(r, &config.storage.path)? {
+            Some(boot) => Some(boot),
+            None => {
+                guard.shutdown();
+                return Ok(());
+            }
+        },
+        None => None,
+    };
     let (db, db_closed) = Db::open(&config.storage.path)?;
+    let shutdown = Shutdown::new();
+    let stats = Arc::new(replica::Stats::default());
+    let running =
+        boot.map(|b| b.start(&config.storage.path, shutdown.clone(), stats.clone())).transpose()?;
+    let replica = running.as_ref().map_or_else(Replica::disabled, |r| r.replica());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("inbox")
         .build()
         .map_err(|e| format!("cannot start runtime: {e}"))?;
-    let result = runtime.block_on(run(config, secrets, db, meter));
+    let result = runtime.block_on(run(config, secrets, db, meter, shutdown, replica, stats));
     // Dropping the runtime drops every task, hence every database handle.
     runtime.shutdown_timeout(Duration::from_secs(5));
     if !db_closed.wait(Duration::from_secs(10)) {
         tracing::warn!(event = "database_close_timeout");
     }
+    // The database is closed: the last snapshot is complete, then the next instance can take over at once.
+    let fenced = running.as_ref().is_some_and(|r| r.fenced());
+    if let Some(running) = running {
+        running.finish();
+    }
     guard.shutdown();
+    if fenced {
+        return Err("replica: another instance owns the lease, stopped".into());
+    }
     result
 }
 
@@ -52,6 +77,9 @@ async fn run(
     secrets: Secrets,
     db: Db,
     meter: opentelemetry::metrics::Meter,
+    shutdown: Shutdown,
+    replica: Replica,
+    replica_stats: Arc<replica::Stats>,
 ) -> Result<(), String> {
     let group_ids: Vec<String> = config.group.keys().cloned().collect();
     let pruned = db
@@ -85,7 +113,9 @@ async fn run(
     let group_names = config.group.iter().map(|(id, g)| (id.clone(), g.name.clone())).collect();
     let gauges = Arc::new(Gauges::default());
     telemetry::register_gauges(&meter, gauges.clone());
-    let shutdown = Shutdown::new();
+    if config.replica.is_some() {
+        telemetry::register_replica_gauges(&meter, replica_stats);
+    }
     let app = Arc::new(AppState {
         limiter: AuthLimiter::new(
             config.security.max_auth_failures,
@@ -93,6 +123,7 @@ async fn run(
         ),
         secrets,
         db,
+        replica,
         hub: Hub::default(),
         metrics: Metrics::new(&meter),
         gauges,
@@ -139,6 +170,7 @@ async fn run(
         groups = app.groups.len(),
         producers = app.secrets.producers.len(),
         telemetry = app.config.telemetry.enabled,
+        replica = app.config.replica.is_some(),
     );
 
     let grace = app.config.server.shutdown_grace;

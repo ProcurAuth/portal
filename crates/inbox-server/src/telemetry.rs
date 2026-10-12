@@ -148,6 +148,7 @@ pub struct Metrics {
     pub enrollments: Counter<u64>,
     pub sessions_active: UpDownCounter<i64>,
     pub session_closes: Counter<u64>,
+    pub replica_sync_failures: Counter<u64>,
 }
 
 impl Metrics {
@@ -197,6 +198,12 @@ impl Metrics {
                 .u64_counter("inbox_device_session_closes_total")
                 .with_description("Device sessions closed, by reason")
                 .build(),
+            replica_sync_failures: meter
+                .u64_counter("inbox_replica_sync_failures_total")
+                .with_description(
+                    "Writes that could not be copied to the replica before the answer",
+                )
+                .build(),
         }
     }
 }
@@ -236,5 +243,40 @@ pub fn register_gauges(meter: &Meter, gauges: std::sync::Arc<Gauges>) {
         .i64_observable_gauge("inbox_devices_enrolled")
         .with_description("Non-revoked enrolled devices")
         .with_callback(move |o| o.observe(g.enrolled_devices.load(Relaxed), &[]))
+        .build();
+}
+
+/// Replication state: which epoch this instance owns and how fresh the shared copy is.
+pub fn register_replica_gauges(meter: &Meter, stats: std::sync::Arc<crate::replica::Stats>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let s = stats.clone();
+    meter
+        .u64_observable_gauge("inbox_replica_epoch")
+        .with_description("Epoch of the replica lease owned by this instance")
+        .with_callback(move |o| o.observe(s.epoch.load(Relaxed), &[]))
+        .build();
+    let s = stats.clone();
+    meter
+        .f64_observable_gauge("inbox_replica_last_snapshot_age_seconds")
+        .with_description("Age of the newest snapshot in the shared directory")
+        .with_unit("s")
+        .with_callback(move |o| {
+            let at = s.last_snapshot_ms.load(Relaxed);
+            if at > 0 {
+                o.observe((crate::util::now_ms() - at) as f64 / 1000.0, &[]);
+            }
+        })
+        .build();
+    let s = stats.clone();
+    meter
+        .u64_observable_counter("inbox_replica_snapshots_total")
+        .with_description("Snapshots published to the shared directory")
+        .with_callback(move |o| o.observe(s.snapshots.load(Relaxed), &[]))
+        .build();
+    let s = stats;
+    meter
+        .u64_observable_counter("inbox_replica_snapshot_failures_total")
+        .with_description("Snapshots that failed")
+        .with_callback(move |o| o.observe(s.failures.load(Relaxed), &[]))
         .build();
 }

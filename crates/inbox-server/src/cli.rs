@@ -89,11 +89,12 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
             let config = Config::load(&PathBuf::from(f.required("--config")?))?;
             Secrets::load(&config)?;
             println!(
-                "config ok: {} groups, {} producers, devices on {}, admin on {}",
+                "config ok: {} groups, {} producers, devices on {}, admin on {}, replica {}",
                 config.group.len(),
                 config.producer.len(),
                 config.server.listen,
-                config.server.admin_listen
+                config.server.admin_listen,
+                config.replica.as_ref().map_or("off".to_string(), |r| r.dir.display().to_string())
             );
             Ok(())
         }

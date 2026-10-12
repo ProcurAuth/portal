@@ -377,6 +377,10 @@ pub async fn revoke(
         .await
         .map_err(ApiError::storage)?;
     if revoked {
+        if let Err(e) = app.replica.sync().await {
+            app.metrics.replica_sync_failures.add(1, &[]);
+            tracing::warn!(event = "replica_sync_failed", error = %e);
+        }
         app.hub.kick(&id, inbox_core::proto::close::REVOKED);
         tracing::info!(event = "device_revoked", device.id = %id);
     }

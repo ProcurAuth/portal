@@ -174,6 +174,10 @@ async fn run_enroll(app: Arc<AppState>, mut socket: WebSocket, ip: IpAddr) {
             return;
         }
     };
+    if let Err(e) = app.replica.sync().await {
+        app.metrics.replica_sync_failures.add(1, &[]);
+        tracing::warn!(event = "replica_sync_failed", error = %e);
+    }
     let accepted = match server.accepted(&device_id, &app.config.server.name) {
         Ok(a) => a,
         Err(e) => {

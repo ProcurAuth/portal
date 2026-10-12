@@ -118,6 +118,14 @@ n'est livré tant qu'il ne redémarre pas) ; « Forcer l'arrêt » et certains
 gestionnaires de batterie constructeurs coupent l'app (l'app guide vers
 l'exemption batterie, le serveur signale l'appareil injoignable).
 
+### 4.1 Reprise sur perte de nœud (optionnel)
+
+Avec un bloc `replica`, une copie cohérente de la base est publiée dans un répertoire partagé avant qu'une alerte, un
+enrôlement ou une révocation soit acquitté (`sync_alerts = true`). Un verrou (`lease`) à époque croissante désigne
+l'instance active ; une instance perdue qui revient ne peut pas écraser son successeur (elle s'arrête d'elle-même).
+Une alerte acquittée n'est donc jamais perdue par la perte du nœud, et la relance d'un producteur resté sans réponse est
+dédupliquée. Un accusé de réception perdu peut provoquer un renvoi : l'application déduplique sur `alert_id`.
+
 ## 5. Sécurité
 
 Objectif : sur HTTP en clair, le mot de passe ne transite jamais et une capture

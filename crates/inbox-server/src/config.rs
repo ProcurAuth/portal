@@ -28,6 +28,9 @@ pub struct Config {
     /// `producer "<name>" { ... }`, optional: the admin front can always send alerts.
     #[serde(default)]
     pub producer: BTreeMap<String, Producer>,
+    /// Optional `replica { ... }` block: standby replication to a shared directory (see `replica.rs`).
+    #[serde(default)]
+    pub replica: Option<Replica>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,6 +147,27 @@ pub struct Telemetry {
     pub service_name: Option<String>,
     #[serde(default, deserialize_with = "opt_duration")]
     pub export_interval: Option<Duration>,
+}
+
+/// Present: the database is copied to a directory shared with the other instances that may take over.
+/// Absent: Inbox runs alone, with the database on its local disk only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replica {
+    /// Directory shared by every instance that may run Inbox (a ReadWriteMany plain-file volume).
+    pub dir: PathBuf,
+    /// A changed database is copied at most this often. Accepted alerts, enrollments and revocations do not wait.
+    #[serde(deserialize_with = "duration")]
+    pub snapshot_interval: Duration,
+    /// An instance whose lease has not changed for this long is considered lost by the others, which then take over.
+    #[serde(deserialize_with = "duration")]
+    pub lease_ttl: Duration,
+    /// How long an accepted alert waits for the copy that contains it.
+    #[serde(deserialize_with = "duration")]
+    pub sync_timeout: Duration,
+    /// true: an alert is acknowledged only once copied (503 `replication_unavailable` otherwise, the producer
+    /// retries); false: acknowledged after the local commit, copied as soon as possible.
+    pub sync_alerts: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -281,6 +305,23 @@ impl Config {
             "limits.max_request_bytes must be in 4096..1048576",
         );
 
+        if let Some(r) = &self.replica {
+            check(r.dir.is_absolute(), "replica.dir must be an absolute path");
+            check(
+                r.snapshot_interval >= Duration::from_secs(1),
+                "replica.snapshot_interval must be >= 1s",
+            );
+            check(r.lease_ttl >= Duration::from_secs(5), "replica.lease_ttl must be >= 5s");
+            check(
+                (Duration::from_secs(1)..=Duration::from_secs(60)).contains(&r.sync_timeout),
+                "replica.sync_timeout must be in 1s..60s",
+            );
+            check(
+                self.storage.path.parent().is_none_or(|p| p != r.dir),
+                "replica.dir must not be the directory of storage.path",
+            );
+        }
+
         let t = &self.telemetry;
         if t.enabled {
             match &t.otlp_endpoint {
@@ -403,6 +444,43 @@ pub(crate) mod tests {
             .replace("groups                = [\"infra\"]", "groups                = [\"nope\"]");
         let err = Config::parse(&text).unwrap_err();
         assert!(err.contains("unknown group"), "{err}");
+    }
+
+    const REPLICA: &str = r#"
+replica {
+  dir               = "/replica"
+  snapshot_interval = "10s"
+  lease_ttl         = "30s"
+  sync_timeout      = "5s"
+  sync_alerts       = true
+}
+"#;
+
+    #[test]
+    fn replica_block_is_optional_and_strict() {
+        assert!(Config::parse(EXAMPLE).unwrap().replica.is_none());
+        let c = Config::parse(&format!("{EXAMPLE}{REPLICA}")).unwrap();
+        let r = c.replica.unwrap();
+        assert_eq!(r.lease_ttl, Duration::from_secs(30));
+        assert!(r.sync_alerts);
+        // Every attribute of the block is mandatory, like everywhere else.
+        for line in REPLICA.lines().filter(|l| l.contains(" = ")) {
+            let broken = REPLICA.replace(&format!("{line}\n"), "");
+            assert!(
+                Config::parse(&format!("{EXAMPLE}{broken}")).is_err(),
+                "accepted without: {line}"
+            );
+        }
+        let bad = REPLICA.replace("\"30s\"", "\"2s\"");
+        assert!(Config::parse(&format!("{EXAMPLE}{bad}")).unwrap_err().contains("lease_ttl"));
+        let bad = REPLICA.replace("/replica", "replica");
+        assert!(Config::parse(&format!("{EXAMPLE}{bad}")).unwrap_err().contains("absolute"));
+        let bad = REPLICA.replace("/replica", "/var/lib/inbox");
+        assert!(
+            Config::parse(&format!("{EXAMPLE}{bad}"))
+                .unwrap_err()
+                .contains("directory of storage.path")
+        );
     }
 
     #[test]
