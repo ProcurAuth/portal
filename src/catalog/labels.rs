@@ -237,35 +237,35 @@ mod tests {
     #[test]
     fn native_labels_cover_every_field() {
         let service = parse(
-            "windmill",
+            "notes",
             &labels(&[
                 ("portal.group", "Infra"),
-                ("portal.name", "Windmill"),
+                ("portal.name", "Notes"),
                 ("portal.description", "Workflow automation"),
-                ("portal.icon", "windmill"),
-                ("portal.href", "/windmill/"),
+                ("portal.icon", "notes"),
+                ("portal.href", "/notes/"),
                 ("portal.target", "_blank"),
                 ("portal.weight", "40"),
                 (
                     "portal.health",
-                    "http://windmill-server:8000/api/health/status",
+                    "http://notes-server:8000/api/health/status",
                 ),
                 ("portal.roles", "Admin, ops,admin"),
             ]),
         )
         .unwrap()
         .unwrap();
-        assert_eq!(service.id, "infra-windmill");
+        assert_eq!(service.id, "infra-notes");
         assert_eq!(service.group, "Infra");
-        assert_eq!(service.href, "/windmill/");
+        assert_eq!(service.href, "/notes/");
         assert!(service.new_tab);
         assert_eq!(service.weight, 40);
         assert_eq!(service.roles, ["admin", "ops"]);
         assert_eq!(
             service.health_url.as_deref(),
-            Some("http://windmill-server:8000/api/health/status")
+            Some("http://notes-server:8000/api/health/status")
         );
-        assert_eq!(service.icon.as_deref(), Some("windmill"));
+        assert_eq!(service.icon.as_deref(), Some("notes"));
     }
 
     #[test]

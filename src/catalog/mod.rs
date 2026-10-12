@@ -31,7 +31,7 @@ pub struct Service {
     pub group: String,
     pub name: String,
     pub description: String,
-    /// Icon reference as declared (`windmill`, `docker.png`, ...); resolved by the icon library.
+    /// Icon reference as declared (`notes`, `docker.png`, ...); resolved by the icon library.
     pub icon: Option<String>,
     /// A path on this host (`/grafana/`) or an absolute http(s) URL; validated at parse time.
     pub href: String,
@@ -245,7 +245,7 @@ mod tests {
         let catalog = Catalog::build(
             vec![
                 service("Monitoring", "Prometheus", 10),
-                service("Infra", "Windmill", 40),
+                service("Infra", "Notes", 40),
                 service("Infra", "Registry", 20),
                 service("Infra", "DDNS", 20),
                 service("Monitoring", "Grafana", 5),
@@ -264,7 +264,7 @@ mod tests {
                     vec![
                         "DDNS".to_string(),
                         "Registry".to_string(),
-                        "Windmill".to_string()
+                        "Notes".to_string()
                     ]
                 ),
             ]

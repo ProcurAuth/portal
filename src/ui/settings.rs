@@ -932,7 +932,7 @@ mod tests {
         Catalog::build(
             vec![
                 service("Grafana", "/grafana/", "ops"),
-                service("Windmill", "/windmill/", ""),
+                service("Notes", "/notes/", ""),
                 service("Typo", "/typo/", "opz"),
                 service("Mixed", "/mixed/", "dev, opz"),
             ],

@@ -298,12 +298,12 @@ pub fn demo_catalog() -> Catalog {
     type Row<'a> = (&'a str, &'a [(&'a str, &'a str)], Health);
     let rows: [Row; 12] = [
         (
-            "windmill",
+            "notes",
             &[
                 ("portal.group", "Infra"),
-                ("portal.name", "Windmill"),
+                ("portal.name", "Notes"),
                 ("portal.description", "Workflow automation and scripts"),
-                ("portal.href", "/windmill/"),
+                ("portal.href", "/notes/"),
                 ("portal.weight", "40"),
                 ("portal.roles", "ops, dev"),
             ],
@@ -506,7 +506,7 @@ fn demo_users<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a>
                 },
             ],
             services: vec![
-                ServiceUse { service_id: "infra-windmill".into(), hits: 412, last_at: now - 120 },
+                ServiceUse { service_id: "infra-notes".into(), hits: 412, last_at: now - 120 },
                 ServiceUse { service_id: "monitoring-grafana".into(), hits: 96, last_at: now - 5_000 },
             ],
             sessions_30d: 18,
@@ -919,13 +919,13 @@ mod tests {
     #[test]
     fn tiles_use_the_declared_icon_then_one_named_like_the_service_then_the_initial() {
         let root = std::env::temp_dir().join(format!("portal-ui-icons-{}", std::process::id()));
-        for file in ["di/windmill.svg", "si/grafana.svg"] {
+        for file in ["di/notes.svg", "si/grafana.svg"] {
             std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
             std::fs::write(root.join(file), "<svg/>").unwrap();
         }
         let icons = Icons::load(&root);
         let mut declared = service("Workflows", "", "/w/");
-        declared.icon = Some("windmill.png".into());
+        declared.icon = Some("notes.png".into());
         let catalog = Catalog::build(
             vec![
                 declared,
@@ -935,7 +935,7 @@ mod tests {
             Vec::new(),
         );
         let page = home_page(&catalog, &icons, &ctx());
-        assert!(page.contains(r#"<img class="tile__img" src="/auth/icons/di/windmill.svg""#));
+        assert!(page.contains(r#"<img class="tile__img" src="/auth/icons/di/notes.svg""#));
         assert!(page.contains(
             r#"<img class="tile__img tile__img--mono" src="/auth/icons/si/grafana.svg""#
         ));

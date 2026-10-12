@@ -7,8 +7,8 @@
 //! | `tb` | tabler icons (outline) | generic interface icons, monochrome |
 //!
 //! Nothing is fetched at runtime. A service names its icon in any of the forms people already
-//! use in Homepage labels (`windmill`, `docker.png`, `si-grafana`) or with an explicit set
-//! (`di:windmill`, `tb:server`); a bare name is looked up in `di`, then `si`, then `tb`.
+//! use in Homepage labels (`notes`, `docker.png`, `si-grafana`) or with an explicit set
+//! (`di:notes`, `tb:server`); a bare name is looked up in `di`, then `si`, then `tb`.
 //!
 //! Interface: [`Icons::load`], [`Icons::resolve`] (spec to [`Icon`]) and [`Icons::svg`] (bytes for
 //! the route). The directory is scanned once; the files are read on demand.
@@ -205,7 +205,7 @@ mod tests {
     fn sample() -> (Icons, PathBuf) {
         library(&[
             ("di/docker.svg", "<svg id=\"d\"/>"),
-            ("di/windmill.svg", "<svg/>"),
+            ("di/notes.svg", "<svg/>"),
             ("si/grafana.svg", "<svg id=\"s\"/>"),
             ("si/docker.svg", "<svg/>"),
             ("tb/server.svg", "<svg id=\"t\"/>"),
@@ -236,7 +236,7 @@ mod tests {
             icons.resolve("docker.png").unwrap().url(),
             "/auth/icons/di/docker.svg"
         );
-        assert_eq!(icons.resolve("Windmill.SVG").unwrap().name, "windmill");
+        assert_eq!(icons.resolve("Notes.SVG").unwrap().name, "notes");
         assert_eq!(icons.resolve("si-grafana").unwrap().set, Set::Simple);
         assert_eq!(
             icons.resolve("si-docker").unwrap().set,
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(icons.resolve("tb:docker").unwrap().set, Set::Tabler);
         assert_eq!(icons.resolve("tabler:server").unwrap().set, Set::Tabler);
         assert_eq!(icons.resolve("di:grafana"), None);
-        assert_eq!(icons.resolve("tb:windmill"), None);
+        assert_eq!(icons.resolve("tb:notes"), None);
         fs::remove_dir_all(root).unwrap();
     }
 

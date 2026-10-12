@@ -951,7 +951,7 @@ mod tests {
         for last_at in [200, 300] {
             let mut hits = HashMap::new();
             hits.insert(
-                (5u64, "windmill".to_string()),
+                (5u64, "notes".to_string()),
                 Hit {
                     first_at: last_at,
                     last_at,

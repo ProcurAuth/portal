@@ -341,7 +341,7 @@ mod tests {
             vec![
                 svc("Grafana", "/grafana/", "ops"),
                 svc("ClickHouse", "/clickhouse/", "data"),
-                svc("Windmill", "/windmill/", ""),
+                svc("Notes", "/notes/", ""),
                 svc("Nested", "/grafana/admin/", "root-only"),
                 svc("Typo", "/typo/", "opz"),
                 svc("External", "https://example.org/", "ops"),
@@ -410,10 +410,10 @@ mod tests {
 
     #[test]
     fn a_service_without_roles_is_open_to_the_superadmin_only() {
-        assert!(!allowed(&[], "/windmill/api/x"));
-        assert!(!allowed(&["ops", "data", "root-only"], "/windmill"));
+        assert!(!allowed(&[], "/notes/api/x"));
+        assert!(!allowed(&["ops", "data", "root-only"], "/notes"));
         assert!(matches!(
-            decide(&catalog(), &registry(), None, "/windmill/api/x"),
+            decide(&catalog(), &registry(), None, "/notes/api/x"),
             Decision::Allow { .. }
         ));
     }
@@ -459,15 +459,15 @@ mod tests {
     #[test]
     fn path_tricks_cannot_reach_a_service_the_user_may_not_open() {
         for uri in [
-            "/windmill/../clickhouse/",
-            "/windmill/%2e%2e/clickhouse/",
-            "/windmill/%2E%2E/clickhouse/",
+            "/notes/../clickhouse/",
+            "/notes/%2e%2e/clickhouse/",
+            "/notes/%2E%2E/clickhouse/",
             "//clickhouse/",
             "/./clickhouse/",
-            "/windmill%2F..%2Fclickhouse/",
-            "/windmill%5C..%5Cclickhouse/",
+            "/notes%2F..%2Fclickhouse/",
+            "/notes%5C..%5Cclickhouse/",
             "/clickhouse/./x",
-            "/grafana/../clickhouse?x=/windmill/",
+            "/grafana/../clickhouse?x=/notes/",
             "/clickhouse%00/",
             "/clickhouse%zz/",
         ] {

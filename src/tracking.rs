@@ -319,7 +319,7 @@ mod tests {
         let tracker = Tracker::new(Some(tx));
         tracker.service_hit(7, "grafana", Some("10.0.0.2".into()), 100);
         tracker.service_hit(7, "grafana", Some("10.0.0.2".into()), 130);
-        tracker.service_hit(7, "windmill", None, 140);
+        tracker.service_hit(7, "notes", None, 140);
         tracker.service_hit(8, "grafana", None, 150);
         let hits = tracker.hits.lock().unwrap();
         let grafana = &hits[&(7, "grafana".to_string())];
