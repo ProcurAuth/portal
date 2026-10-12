@@ -102,18 +102,28 @@ fn write_lease(dir: &Path, record: &LeaseRecord) -> Result<(), String> {
     replace_file(&tmp, &dir.join(LEASE_FILE)).map_err(|e| format!("cannot write {LEASE_FILE}: {e}"))
 }
 
-/// Renames `from` over `to`. The rename is atomic on a POSIX filesystem; one that refuses to replace an existing
-/// file gets a remove then a rename instead.
+/// Renames `from` over `to`. The rename is atomic on a POSIX filesystem. A FUSE volume may not know a file that was
+/// just written (`NotFound`): the rename is tried again a few times. One that refuses to replace an existing file
+/// gets a remove then a rename instead.
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    match fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(first) => {
-            if fs::remove_file(to).is_err() {
-                return Err(first);
+    let mut last = None;
+    for attempt in 0..6 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound && from.exists() => last = Some(e),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(e),
+            Err(first) => {
+                if fs::remove_file(to).is_err() {
+                    return Err(first);
+                }
+                return fs::rename(from, to);
             }
-            fs::rename(from, to)
         }
     }
+    Err(last.expect("six failed attempts"))
 }
 
 fn sync_dir(dir: &Path) {
