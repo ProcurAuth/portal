@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::Path;
 use std::time::Duration;
 
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Runtime};
@@ -1049,6 +1050,192 @@ impl PgStore {
             .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok((alerts as usize, connections as usize))
+    }
+}
+
+/// The optional columns of a device row: app version, last connected, last seen, last ip, revoked.
+type DeviceTail = (Option<String>, Option<i64>, Option<i64>, Option<String>, Option<i64>);
+
+/// What `import_sqlite` copied.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Imported {
+    pub devices: usize,
+    pub subscriptions: usize,
+    pub alerts: usize,
+    pub deliveries: usize,
+    pub connections: usize,
+}
+
+impl PgStore {
+    /// Copies a SQLite database (a Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
+    /// transaction: devices, subscriptions, alerts, deliveries and the connection log. Refuses a database that is not empty.
+    pub async fn import_sqlite(&self, path: &Path) -> Result<Imported, String> {
+        use rusqlite::{Connection, OpenFlags};
+        let lite = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        let version: i64 =
+            lite.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if version != crate::db::SCHEMA_VERSION {
+            return Err(format!(
+                "{} has schema version {version}, this binary imports version {}: start the SQLite instance once with this binary to migrate it",
+                path.display(),
+                crate::db::SCHEMA_VERSION
+            ));
+        }
+        let mut c = self.client().await.map_err(|e| e.to_string())?;
+        let tx = c.transaction().await.map_err(|e| e.to_string())?;
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_ENROLL])
+            .await
+            .map_err(|e| e.to_string())?;
+        for table in ["devices", "alerts"] {
+            let n: i64 = tx
+                .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
+                .await
+                .map_err(|e| e.to_string())?
+                .get(0);
+            if n > 0 {
+                return Err(format!(
+                    "the PostgreSQL database already holds {n} rows in {table}: refusing to import over it"
+                ));
+            }
+        }
+        let mut out = Imported::default();
+
+        let mut stmt = lite
+            .prepare(
+                "SELECT id, name, COALESCE(user_name, name), public_key, enrolled_at, enrolled_ip, app_version,
+                        last_connected_at, last_seen_at, last_ip, revoked_at FROM devices",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (id, name, user, key, at, ip): (String, String, String, Vec<u8>, i64, String) = (
+                r.get(0).unwrap(),
+                r.get(1).unwrap(),
+                r.get(2).unwrap(),
+                r.get(3).unwrap(),
+                r.get(4).unwrap(),
+                r.get(5).unwrap(),
+            );
+            let (ver, connected, seen, last_ip, revoked): DeviceTail = (
+                r.get(6).unwrap(),
+                r.get(7).unwrap(),
+                r.get(8).unwrap(),
+                r.get(9).unwrap(),
+                r.get(10).unwrap(),
+            );
+            tx.execute(
+                "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip, app_version, last_connected_at,
+                                      last_seen_at, last_ip, revoked_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &[&id, &name, &user, &key, &at, &ip, &ver, &connected, &seen, &last_ip, &revoked],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.devices += 1;
+        }
+
+        let mut stmt = lite
+            .prepare("SELECT device_id, group_id, updated_at FROM subscriptions")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (device, group, at): (String, String, i64) =
+                (r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap());
+            tx.execute(
+                "INSERT INTO subscriptions (device_id, group_id, updated_at) VALUES ($1, $2, $3)",
+                &[&device, &group, &at],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.subscriptions += 1;
+        }
+
+        let mut stmt = lite
+            .prepare("SELECT id, group_id, title, source, idempotency_key, created_at FROM alerts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (id, group, title, source, key, at): (String, String, String, String, String, i64) = (
+                r.get(0).unwrap(),
+                r.get(1).unwrap(),
+                r.get(2).unwrap(),
+                r.get(3).unwrap(),
+                r.get(4).unwrap(),
+                r.get(5).unwrap(),
+            );
+            tx.execute(
+                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+                &[&id, &group, &title, &source, &key, &at],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.alerts += 1;
+        }
+
+        let mut stmt = lite
+            .prepare("SELECT seq, alert_id, device_id, attempts, first_sent_at, last_sent_at, received_at FROM deliveries")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (seq, alert, device, attempts): (i64, String, String, i64) =
+                (r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap(), r.get(3).unwrap());
+            let (first, last, received): (Option<i64>, Option<i64>, Option<i64>) =
+                (r.get(4).unwrap(), r.get(5).unwrap(), r.get(6).unwrap());
+            tx.execute(
+                "INSERT INTO deliveries (seq, alert_id, device_id, attempts, first_sent_at, last_sent_at, received_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[&seq, &alert, &device, &attempts, &first, &last, &received],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.deliveries += 1;
+        }
+
+        let mut stmt = lite
+            .prepare(
+                "SELECT id, device_id, COALESCE(user_name, ''), ip, app_version, connected_at, disconnected_at, close_reason
+                 FROM connections",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (id, device, user, ip, ver, connected): (i64, String, String, String, String, i64) = (
+                r.get(0).unwrap(),
+                r.get(1).unwrap(),
+                r.get(2).unwrap(),
+                r.get(3).unwrap(),
+                r.get(4).unwrap(),
+                r.get(5).unwrap(),
+            );
+            let (disconnected, reason): (Option<i64>, Option<String>) =
+                (r.get(6).unwrap(), r.get(7).unwrap());
+            // A session still open in the file belongs to the instance that wrote it: it is over.
+            let disconnected = disconnected.or(Some(connected));
+            let reason = reason.or_else(|| Some("imported".to_string()));
+            tx.execute(
+                "INSERT INTO connections (id, device_id, user_name, ip, app_version, connected_at, disconnected_at, close_reason, instance)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'imported')",
+                &[&id, &device, &user, &ip, &ver, &connected, &disconnected, &reason],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.connections += 1;
+        }
+
+        // The sequences continue after the imported rows.
+        for (table, column) in [("deliveries", "seq"), ("connections", "id")] {
+            tx.execute(
+                &format!(
+                    "SELECT setval(pg_get_serial_sequence('{table}', '{column}'), GREATEST(COALESCE((SELECT MAX({column}) FROM {table}), 0), 1))"
+                ),
+                &[],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(out)
     }
 }
 

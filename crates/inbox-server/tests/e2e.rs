@@ -1219,3 +1219,85 @@ async fn the_sessions_of_a_lost_instance_are_closed_by_the_others() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
+
+/// An existing SQLite installation moves to PostgreSQL without enrolling the phones again and without losing the alerts
+/// that are still waiting for a phone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sqlite_installation_moves_to_postgres() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut s = Server::setup_with(None);
+    s.start();
+    let phone = enroll_as(s.port, DEVICE_PW, "phone-a", "alice").await.unwrap();
+    {
+        let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+        conn.subscribe("infra").await;
+        let (st, _) =
+            post_alert(&s, "mig-1", json!({"group": "infra", "title": "received before"}));
+        assert_eq!(st, 201);
+        let alert = conn.alert().await;
+        conn.ack(&alert.alert_id, AckStage::Received).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    } // the phone goes offline
+    let (st, _) =
+        post_alert(&s, "mig-2", json!({"group": "infra", "title": "waiting for the phone"}));
+    assert_eq!(st, 201);
+    s.stop();
+
+    // The same configuration, on PostgreSQL.
+    let database = format!("inbox_e2e_{}", free_port());
+    admin_pg.create_database(&database);
+    std::fs::write(s.dir.join("db_password"), &admin_pg.password).unwrap();
+    let sqlite_file = s.dir.join("inbox.db");
+    let text = std::fs::read_to_string(s.config())
+        .unwrap()
+        .replace(&format!("path = \"{}\"", sqlite_file.display()), "");
+    let pg_config = s.dir.join("postgres.hcl");
+    std::fs::write(
+        &pg_config,
+        format!(
+            "{text}\npostgres {{\n host = \"{}\"\n port = {}\n database = \"{database}\"\n user = \"{}\"\n password_file = \"{}\"\n pool_size = 4\n connect_timeout = \"5s\"\n}}\n",
+            admin_pg.host,
+            admin_pg.port,
+            admin_pg.user,
+            s.dir.join("db_password").display()
+        ),
+    )
+    .unwrap();
+    let (cfg, from) =
+        (pg_config.to_str().unwrap().to_string(), sqlite_file.to_str().unwrap().to_string());
+    let out = inbox(&["import-sqlite", "--config", &cfg, "--from", &from], None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let report = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(report.contains("1 devices") && report.contains("2 alerts"), "{report}");
+    // Importing twice would duplicate everything: refused.
+    let again = inbox(&["import-sqlite", "--config", &cfg, "--from", &from], None);
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("refusing to import"));
+
+    let mut moved = Server {
+        dir: s.dir.clone(),
+        name: "postgres".into(),
+        port: s.port,
+        admin_port: s.admin_port,
+        child: None,
+        token: s.token.clone(),
+        pg: Some((admin_pg, database)),
+    };
+    moved.start();
+    let (_, overview) = admin(moved.admin_port, "GET", "/api/admin/overview", "");
+    assert_eq!(overview["stats"]["enrolled"], 1, "{overview}");
+    assert_eq!(overview["devices"][0]["device"]["subscriptions"][0], "infra");
+    let (_, alerts) = admin(moved.admin_port, "GET", "/api/admin/alerts", "");
+    assert_eq!(alerts["alerts"].as_array().unwrap().len(), 2, "{alerts}");
+    // The phone did not enroll again: the same keys open a session, and the alert it never received arrives.
+    let (mut conn, _) = Conn::open(moved.port, &phone).await.unwrap();
+    let waiting = conn.alert().await;
+    assert_eq!(waiting.title, "waiting for the phone");
+    // New alerts keep working after the imported sequences.
+    let (st, _) = post_alert(&moved, "mig-3", json!({"group": "infra", "title": "after the move"}));
+    assert_eq!(st, 201);
+    assert_eq!(conn.alert().await.title, "after the move");
+}

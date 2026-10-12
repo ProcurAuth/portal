@@ -352,8 +352,11 @@ accepts alerts: the loss of an instance is only a reconnection for the phones it
   database are enough; the schema is created and migrated at start under an advisory lock, and refused if it is newer
   than the binary.
 - **Rate limits are per instance** (`security.max_auth_failures`): N instances allow N times as many attempts.
-- The `replica` block is for SQLite only. Switching an existing installation from SQLite to PostgreSQL does not copy the
-  data: phones must enroll again.
+- The `replica` block is for SQLite only.
+- **Moving an existing SQLite installation to PostgreSQL** keeps the enrolled phones and the history:
+  `inbox import-sqlite --config <config with a postgres block> --from <inbox.db or a snapshot>` copies devices,
+  subscriptions, alerts, deliveries and the connection log in one transaction, into an empty database (it refuses
+  otherwise). Stop the SQLite instance (or use its last snapshot) first, import, then start the PostgreSQL instances.
 
 ## Limitations
 

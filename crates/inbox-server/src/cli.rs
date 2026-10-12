@@ -20,6 +20,7 @@ usage:
   inbox serve        --config <file>
   inbox check-config --config <file>
   inbox healthcheck  --config <file>
+  inbox import-sqlite --config <file> --from <sqlite file>
   inbox keygen       --out <file>
   inbox credential   --server-key <file> --out <file> [--password-stdin]
   inbox token        --out <file>
@@ -102,6 +103,35 @@ pub fn run(args: &[String]) -> Result<(), Failure> {
             let f = Flags::parse(rest, &["--config"], &[])?;
             let config = Config::load(&PathBuf::from(f.required("--config")?))?;
             healthcheck(config.server.listen).map_err(Failure::Fatal)
+        }
+        "import-sqlite" => {
+            let f = Flags::parse(rest, &["--config", "--from"], &[])?;
+            let config = Config::load(&PathBuf::from(f.required("--config")?))?;
+            let from = PathBuf::from(f.required("--from")?);
+            let pg = config
+                .postgres
+                .as_ref()
+                .ok_or_else(|| "--config must contain a postgres block".to_string())?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("cannot start runtime: {e}"))?;
+            let imported = runtime.block_on(async {
+                let store = crate::pg::PgStore::connect(pg).await?;
+                let result = store.import_sqlite(&from).await;
+                let _ = store.shutdown().await;
+                result
+            })?;
+            println!(
+                "imported {} devices, {} subscriptions, {} alerts, {} deliveries, {} connections from {}",
+                imported.devices,
+                imported.subscriptions,
+                imported.alerts,
+                imported.deliveries,
+                imported.connections,
+                from.display()
+            );
+            Ok(())
         }
         "keygen" => {
             let f = Flags::parse(rest, &["--out"], &[])?;

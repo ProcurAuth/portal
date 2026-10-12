@@ -153,6 +153,9 @@ ALTER TABLE alerts RENAME COLUMN description TO title;
 "#,
 ];
 
+/// The schema version this binary writes: the number of SQLite migrations.
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
+
 impl Db {
     /// Opens (creating if needed) and migrates the database, then starts its thread.
     pub fn open(path: &Path) -> Result<(Db, Closed), String> {
