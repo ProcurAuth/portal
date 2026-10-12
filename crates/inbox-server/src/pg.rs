@@ -29,6 +29,9 @@ use crate::util::{now_ms, random_id};
 
 /// An instance that has not updated its heartbeat for this long is lost: its sessions are closed.
 const INSTANCE_TTL_MS: i64 = 30_000;
+/// At start the database may not be reachable yet (the network of a new pod, a database that is being created or failing over):
+/// the connection is retried for this long before giving up.
+const STARTUP_RETRY: Duration = Duration::from_secs(60);
 /// A lost instance row is forgotten after this long.
 const INSTANCE_FORGET_MS: i64 = 3_600_000;
 /// Device ids per `inbox_wake` notification (a payload is limited to 8000 bytes).
@@ -182,10 +185,30 @@ impl PgStore {
             .build()
             .map_err(|e| format!("postgres: {e}"))?;
         let store = PgStore { pool, config, instance: random_id() };
+        store.wait_until_reachable().await?;
         store.migrate().await.map_err(|e| format!("postgres migration: {e}"))?;
         store.register_instance().await.map_err(|e| format!("postgres: {e}"))?;
         tracing::info!(event = "postgres_ready", instance = %store.instance, host = %cfg.host, database = %cfg.database);
         Ok(store)
+    }
+
+    /// Retries the first connection: a pod starts before its network is ready, and the database may be failing over.
+    async fn wait_until_reachable(&self) -> Result<(), String> {
+        let give_up = tokio::time::Instant::now() + STARTUP_RETRY;
+        let mut announced = false;
+        loop {
+            match self.pool.get().await {
+                Ok(_) => return Ok(()),
+                Err(e) if tokio::time::Instant::now() < give_up => {
+                    if !announced {
+                        tracing::warn!(event = "postgres_unreachable", error = %e, retry_for_s = STARTUP_RETRY.as_secs());
+                        announced = true;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(format!("postgres: {e}")),
+            }
+        }
     }
 
     pub fn instance(&self) -> &str {

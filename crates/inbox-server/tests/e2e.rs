@@ -1301,3 +1301,27 @@ async fn a_sqlite_installation_moves_to_postgres() {
     assert_eq!(st, 201);
     assert_eq!(conn.alert().await.title, "after the move");
 }
+
+/// A pod starts before its database is reachable (network not ready, database failing over): Inbox waits and retries
+/// instead of exiting.
+#[test]
+fn postgres_may_come_up_after_inbox() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut s = Server::setup_with(Some(admin_pg.clone()));
+    let database = s.pg.as_ref().map(|(_, d)| d.clone()).unwrap();
+    admin_pg.drop_database(&database);
+    let late = std::thread::spawn({
+        let (admin_pg, database) = (admin_pg.clone(), database.clone());
+        move || {
+            std::thread::sleep(Duration::from_secs(3));
+            admin_pg.create_database(&database);
+        }
+    });
+    s.start();
+    late.join().unwrap();
+    assert!(s.log().contains("postgres_unreachable"), "{}", s.log());
+    assert!(s.log().contains("postgres_ready"), "{}", s.log());
+}
