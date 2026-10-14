@@ -34,6 +34,10 @@ pub struct Config {
     /// Optional `postgres { ... }` block: PostgreSQL instead of SQLite, so that several instances can be active at once.
     #[serde(default)]
     pub postgres: Option<Postgres>,
+    /// Optional `cluster { ... }` block (with `postgres`): how the instances copy alerts to each other while the database has
+    /// no writable primary (see `peer.rs`).
+    #[serde(default)]
+    pub cluster: Option<Cluster>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +173,18 @@ pub struct Postgres {
     pub pool_size: u32,
     #[serde(deserialize_with = "duration")]
     pub connect_timeout: Duration,
+}
+
+/// Present: the instances copy the alerts they accept without the database (`spool.rs`) to each other, over plain HTTP.
+/// Absent: such an alert lives on the instance that accepted it until the database is back.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cluster {
+    /// Where this instance receives the requests of the other instances. Reachable from the pods of the service only.
+    pub listen: SocketAddr,
+    /// `host:port` names that list the instances (a headless Service name and `cluster.listen`'s port). Every address they
+    /// resolve to is asked who it is; this instance's own address is recognised and skipped.
+    pub peers: Vec<String>,
 }
 
 /// Present: the database is copied to a directory shared with the other instances that may take over.
@@ -353,6 +369,30 @@ impl Config {
             check(
                 self.replica.is_none(),
                 "the replica block is for SQLite: remove it when using postgres",
+            );
+        }
+        if let Some(c) = &self.cluster {
+            check(
+                self.postgres.is_some(),
+                "the cluster block needs the postgres block: it replicates what PostgreSQL cannot take",
+            );
+            check(
+                c.listen != s.listen && c.listen != s.admin_listen,
+                "cluster.listen must differ from server.listen and server.admin_listen",
+            );
+            check(
+                !c.peers.is_empty() && c.peers.len() <= 16,
+                "cluster.peers must list 1..16 host:port names",
+            );
+            check(
+                c.peers.iter().all(|p| {
+                    p.rsplit_once(':').is_some_and(|(host, port)| {
+                        !host.is_empty()
+                            && host.len() <= 253
+                            && port.parse::<u16>().is_ok_and(|n| n != 0)
+                    })
+                }),
+                "cluster.peers entries must be host:port",
             );
         }
         if let Some(r) = &self.replica {
@@ -570,6 +610,45 @@ postgres {
         // The standby replication is for SQLite.
         let replica = format!("{}{REPLICA}", with_postgres());
         assert!(Config::parse(&replica).unwrap_err().contains("replica block is for SQLite"));
+    }
+
+    const CLUSTER: &str = r#"
+cluster {
+  listen = "0.0.0.0:8082"
+  peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
+}
+"#;
+
+    #[test]
+    fn cluster_block_is_optional_strict_and_needs_postgres() {
+        assert!(Config::parse(&with_postgres()).unwrap().cluster.is_none());
+        let c = Config::parse(&format!("{}{CLUSTER}", with_postgres())).unwrap();
+        assert_eq!(c.cluster.unwrap().peers.len(), 1);
+        // Every attribute of the block is mandatory.
+        for line in CLUSTER.lines().filter(|l| l.contains(" = ")) {
+            let broken = CLUSTER.replace(&format!("{line}\n"), "");
+            assert!(
+                Config::parse(&format!("{}{broken}", with_postgres())).is_err(),
+                "accepted without: {line}"
+            );
+        }
+        // SQLite has no spool to replicate.
+        let sqlite = format!("{EXAMPLE}{CLUSTER}");
+        assert!(Config::parse(&sqlite).unwrap_err().contains("needs the postgres block"));
+        let bad = CLUSTER.replace("8082\"]", "\"]");
+        assert!(
+            Config::parse(&format!("{}{bad}", with_postgres())).unwrap_err().contains("host:port")
+        );
+        let bad = CLUSTER.replace("0.0.0.0:8082", "0.0.0.0:8080");
+        assert!(
+            Config::parse(&format!("{}{bad}", with_postgres()))
+                .unwrap_err()
+                .contains("must differ")
+        );
+        let empty = CLUSTER.replace("[\"inbox-peers.apps.svc.cluster.local:8082\"]", "[]");
+        assert!(
+            Config::parse(&format!("{}{empty}", with_postgres())).unwrap_err().contains("peers")
+        );
     }
 
     #[test]

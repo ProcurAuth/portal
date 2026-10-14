@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 inbox-core = { path = "../inbox-core" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
 tower = { version = "0.5", default-features = false }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 serde = { workspace = true }

@@ -1325,3 +1325,340 @@ fn postgres_may_come_up_after_inbox() {
     assert!(s.log().contains("postgres_unreachable"), "{}", s.log());
     assert!(s.log().contains("postgres_ready"), "{}", s.log());
 }
+
+// ---------------------------------------------------------------- degraded mode (PostgreSQL away)
+
+/// A TCP relay between Inbox and PostgreSQL that can play a lost node: `blackhole` keeps accepting and swallows every byte
+/// (the primary of a lost node answers nothing), `pass` forwards again, for new connections only: the ones that were open
+/// during the outage stay dead, as they would be after a failover.
+#[derive(Clone)]
+struct PgProxy {
+    port: u16,
+    state: std::sync::Arc<ProxyState>,
+}
+
+struct ProxyState {
+    /// Bumped at every blackhole: a connection made before it never carries data again.
+    epoch: std::sync::atomic::AtomicU64,
+    pass: std::sync::atomic::AtomicBool,
+}
+
+impl PgProxy {
+    fn start(target_host: &str, target_port: u16) -> PgProxy {
+        use std::sync::atomic::Ordering::SeqCst;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = std::sync::Arc::new(ProxyState {
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            pass: std::sync::atomic::AtomicBool::new(true),
+        });
+        let (host, shared) = (target_host.to_string(), state.clone());
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let epoch = shared.epoch.load(SeqCst);
+                let Ok(server) = TcpStream::connect((host.as_str(), target_port)) else { continue };
+                for (from, to) in
+                    [(client.try_clone().unwrap(), server.try_clone().unwrap()), (server, client)]
+                {
+                    let shared = shared.clone();
+                    std::thread::spawn(move || {
+                        let (mut from, mut to) = (from, to);
+                        let mut buf = [0u8; 8192];
+                        while let Ok(n) = from.read(&mut buf) {
+                            if n == 0 {
+                                break;
+                            }
+                            let open =
+                                shared.pass.load(SeqCst) && shared.epoch.load(SeqCst) == epoch;
+                            if open && to.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        let _ = to.shutdown(std::net::Shutdown::Both);
+                    });
+                }
+            }
+        });
+        PgProxy { port, state }
+    }
+
+    fn blackhole(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.state.epoch.fetch_add(1, SeqCst);
+        self.state.pass.store(false, SeqCst);
+    }
+
+    fn pass(&self) {
+        self.state.pass.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Points the PostgreSQL block of a server at `to` instead of the database.
+fn through(s: &Server, admin_pg: &PgAdmin, to: u16) {
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let from = format!("port = {}\n", admin_pg.port);
+    assert!(text.contains(&from), "no postgres port in the configuration");
+    std::fs::write(s.config(), text.replace(&from, &format!("port = {to}\n"))).unwrap();
+}
+
+/// Adds the `cluster` block: this instance listens on `listen` and looks for peers at `peers`.
+fn with_cluster(s: &Server, listen: u16, peers: &[u16]) {
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let list: Vec<String> = peers.iter().map(|p| format!("\"127.0.0.1:{p}\"")).collect();
+    std::fs::write(
+        s.config(),
+        format!(
+            "{text}\ncluster {{\n  listen = \"127.0.0.1:{listen}\"\n  peers = [{}]\n}}\n",
+            list.join(", ")
+        ),
+    )
+    .unwrap();
+}
+
+/// A long session timeout: the test phones send no pings.
+fn quiet_phones(s: &Server) {
+    let text = std::fs::read_to_string(s.config())
+        .unwrap()
+        .replace("resend_after = \"1s\"", "resend_after = \"30s\"")
+        .replace("session_timeout = \"10s\"", "session_timeout = \"120s\"")
+        .replace("unreachable_after = \"10s\"", "unreachable_after = \"120s\"");
+    std::fs::write(s.config(), text).unwrap();
+}
+
+fn wait_for(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn stored_alerts(s: &Server) -> Vec<Value> {
+    let (_, alerts) = admin(s.admin_port, "GET", "/api/admin/alerts", "");
+    alerts["alerts"].as_array().cloned().unwrap_or_default()
+}
+
+/// PostgreSQL stops answering (a lost node): the instance stays ready, accepts alerts at once, delivers them to the phone
+/// that is connected, keeps the session, and writes everything to the database when it is back, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alerts_are_accepted_and_delivered_while_postgresql_is_away() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let proxy = PgProxy::start(&admin_pg.host, admin_pg.port);
+    let mut a = Server::setup_with(Some(admin_pg.clone()));
+    through(&a, &admin_pg, proxy.port);
+    quiet_phones(&a);
+    a.start();
+    let phone = enroll_as(a.port, DEVICE_PW, "phone", "alice").await.unwrap();
+    let (mut conn, _) = Conn::open(a.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+    let (st, ready) = http(a.port, "GET", "/readyz", &[], "");
+    assert_eq!((st, ready.as_str()), (200, "ready"));
+
+    // The node of the primary is lost. The first alert may wait for the database to give up; the next ones do not.
+    proxy.blackhole();
+    let began = Instant::now();
+    let (st, first) =
+        post_alert(&a, "away-1", json!({"group": "infra", "title": "first, database away"}));
+    assert_eq!(st, 201, "{first}");
+    assert!(began.elapsed() < Duration::from_secs(4), "first alert took {:?}", began.elapsed());
+    let began = Instant::now();
+    let (st, second) =
+        post_alert(&a, "away-2", json!({"group": "infra", "title": "second, database away"}));
+    assert_eq!(st, 201, "{second}");
+    assert!(began.elapsed() < Duration::from_secs(1), "second alert took {:?}", began.elapsed());
+    assert_eq!(first["targets"], 1, "{first}");
+    assert_ne!(first["alert_id"], second["alert_id"]);
+
+    // A producer's retry finds the alert it sent: same id, a duplicate.
+    let (st, again) =
+        post_alert(&a, "away-1", json!({"group": "infra", "title": "first, database away"}));
+    assert_eq!(st, 200, "{again}");
+    assert_eq!(again["alert_id"], first["alert_id"]);
+    let (st, clash) = post_alert(&a, "away-1", json!({"group": "infra", "title": "another alert"}));
+    assert_eq!(st, 409, "{clash}");
+
+    // The instance stays in the service, and the phone, which never lost its session, has both alerts.
+    let (st, ready) = http(a.port, "GET", "/readyz", &[], "");
+    assert_eq!((st, ready.as_str()), (200, "degraded"));
+    let one = conn.alert().await;
+    let two = conn.alert().await;
+    let mut titles = vec![one.title.clone(), two.title.clone()];
+    titles.sort();
+    assert_eq!(titles, ["first, database away", "second, database away"]);
+    conn.ack(&one.alert_id, AckStage::Received).await;
+    conn.ack(&two.alert_id, AckStage::Received).await;
+    // What needs the database is refused, and the session goes on.
+    conn.send(&ClientMsg::Unsubscribe { group: "infra".into() }).await;
+    loop {
+        match conn.recv(Duration::from_secs(5)).await {
+            Recv::Msg(ServerMsg::Error { code, .. }) => {
+                assert_eq!(code, "unavailable");
+                break;
+            }
+            Recv::Msg(_) => continue,
+            other => panic!("expected an error, got {:?}", matches!(other, Recv::Timeout)),
+        }
+    }
+
+    // The database is back: both alerts are written, once, with their receipts, and nothing is sent again.
+    proxy.pass();
+    wait_for("the alerts to reach the database", Duration::from_secs(20), || {
+        stored_alerts(&a).len() == 2
+    });
+    wait_for("the receipts to reach the database", Duration::from_secs(10), || {
+        stored_alerts(&a).iter().all(|x| x["received"] == 1)
+    });
+    let stored = stored_alerts(&a);
+    let mut ids: Vec<String> =
+        stored.iter().map(|x| x["id"].as_str().unwrap().to_string()).collect();
+    ids.sort();
+    let mut sent = vec![
+        first["alert_id"].as_str().unwrap().to_string(),
+        second["alert_id"].as_str().unwrap().to_string(),
+    ];
+    sent.sort();
+    assert_eq!(ids, sent, "the database holds the ids the phone was given");
+    conn.no_alert(Duration::from_secs(2)).await;
+    let (st, ready) = http(a.port, "GET", "/readyz", &[], "");
+    assert_eq!((st, ready.as_str()), (200, "ready"));
+    // Back to normal: an alert goes through the database again.
+    let (st, normal) = post_alert(&a, "back-1", json!({"group": "infra", "title": "back"}));
+    assert_eq!(st, 201, "{normal}");
+    assert_eq!(conn.alert().await.title, "back");
+    let log = a.log();
+    for event in ["storage_degraded", "alert_spooled", "storage_recovered", "spool_replayed"] {
+        assert!(log.contains(event), "no {event} in the log:\n{log}");
+    }
+}
+
+/// Two instances, the database away: an alert accepted by one reaches the phone held by the other before the producer is
+/// answered, the same alert sent to both is one alert, and the database ends with one row per alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instances_copy_alerts_to_each_other_while_postgresql_is_away() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let proxy = PgProxy::start(&admin_pg.host, admin_pg.port);
+    let mut a = Server::setup_with(Some(admin_pg.clone()));
+    through(&a, &admin_pg, proxy.port);
+    quiet_phones(&a);
+    let mut b = a.sibling("instance-b");
+    let (cluster_a, cluster_b) = (free_port(), free_port());
+    with_cluster(&a, cluster_a, &[cluster_a, cluster_b]);
+    with_cluster(&b, cluster_b, &[cluster_a, cluster_b]);
+    a.start();
+    b.start();
+    wait_for("the instances to find each other", Duration::from_secs(10), || {
+        a.log().contains("peers_changed") && b.log().contains("peers_changed")
+    });
+
+    // The phone is enrolled through A and holds its session on B; A learns of it from the database, every 5 s.
+    let phone = enroll_as(a.port, DEVICE_PW, "phone", "alice").await.unwrap();
+    let (mut on_b, _) = Conn::open(b.port, &phone).await.unwrap();
+    on_b.subscribe("infra").await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    proxy.blackhole();
+    // The first call of each instance waits for the database to give up, the others do not.
+    let (st, first) = post_alert(&a, "pair-1", json!({"group": "infra", "title": "accepted by a"}));
+    assert_eq!(st, 201, "{first}");
+    let alert = on_b.alert().await;
+    assert_eq!(alert.title, "accepted by a");
+    assert_eq!(alert.alert_id, first["alert_id"].as_str().unwrap());
+    on_b.ack(&alert.alert_id, AckStage::Received).await;
+
+    // The same alert, sent to the other instance, is the same alert.
+    let (st, same) = post_alert(&b, "pair-1", json!({"group": "infra", "title": "accepted by a"}));
+    assert_eq!(st, 200, "{same}");
+    assert_eq!(same["alert_id"], first["alert_id"]);
+    // And an alert both accept at the same time is one alert for the phone.
+    let results: Vec<(u16, Value)> = std::thread::scope(|scope| {
+        let tasks: Vec<_> = (0..6)
+            .map(|i| {
+                let target = if i % 2 == 0 { &a } else { &b };
+                scope.spawn(move || {
+                    post_alert(
+                        target,
+                        "pair-2",
+                        json!({"group": "infra", "title": "accepted by both"}),
+                    )
+                })
+            })
+            .collect();
+        tasks.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert!(results.iter().all(|(st, _)| *st == 201 || *st == 200), "{results:?}");
+    let ids: std::collections::HashSet<_> =
+        results.iter().map(|(_, v)| v["alert_id"].to_string()).collect();
+    assert_eq!(ids.len(), 1, "one id for one idempotency key: {results:?}");
+    let both = on_b.alert().await;
+    assert_eq!(both.title, "accepted by both");
+    on_b.ack(&both.alert_id, AckStage::Received).await;
+    on_b.no_alert(Duration::from_secs(1)).await;
+
+    // The database is back: both instances write what they hold, the database keeps one row per alert and the receipts.
+    proxy.pass();
+    wait_for("the alerts to reach the database", Duration::from_secs(20), || {
+        stored_alerts(&a).len() == 2
+    });
+    wait_for("the receipts to reach the database", Duration::from_secs(10), || {
+        let alerts = stored_alerts(&b);
+        alerts.len() == 2 && alerts.iter().all(|x| x["received"] == 1)
+    });
+    on_b.no_alert(Duration::from_secs(3)).await;
+    assert_eq!(stored_alerts(&b).len(), 2);
+    // The copy to the other instance worked every time: the alerts were held by two instances before the 201.
+    let (log_a, log_b) = (a.log(), b.log());
+    assert!(log_a.contains("alert_spooled"), "{log_a}");
+    assert!(!log_a.contains("spool_unreplicated") && !log_b.contains("spool_unreplicated"));
+    assert!(log_a.contains("spool_replayed") && log_b.contains("spool_replayed"));
+}
+
+/// The peer listener answers only requests signed with the key derived from the server key, and not old ones.
+#[test]
+fn the_peer_port_refuses_requests_that_are_not_signed() {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    let cluster = free_port();
+    with_cluster(&a, cluster, &[cluster]);
+    a.start();
+    let key = inbox_core::server_key::ServerKey::decode(
+        std::fs::read_to_string(a.dir.join("server_key")).unwrap().trim(),
+    )
+    .unwrap();
+    let mut h = Sha256::new();
+    h.update(b"inbox-peer-v1\0");
+    h.update(&*key.noise_private);
+    let peer_key: [u8; 32] = h.finalize().into();
+    let sign = |ts: i64, path: &str, body: &str| {
+        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(&peer_key).unwrap();
+        m.update(format!("{ts}\n{path}\n{body}").as_bytes());
+        m.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            as i64;
+    let hello = "/internal/v1/hello";
+    let call = |ts: i64, sig: String| {
+        http(cluster, "GET", hello, &[("X-Peer-Time", ts.to_string()), ("X-Peer-Auth", sig)], "")
+    };
+    assert_eq!(http(cluster, "GET", hello, &[], "").0, 401, "no signature");
+    assert_eq!(call(now, "00".repeat(32)).0, 401, "wrong signature");
+    assert_eq!(call(now, sign(now, "/internal/v1/spool", "")).0, 401, "signed for another path");
+    let old = now - 120_000;
+    assert_eq!(call(old, sign(old, hello, "")).0, 401, "an old request");
+    let (st, body) = call(now, sign(now, hello, ""));
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"instance\""), "{body}");
+    // The device port does not serve the peer API.
+    assert_eq!(http(a.port, "GET", hello, &[], "").0, 404);
+}

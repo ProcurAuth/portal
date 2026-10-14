@@ -8,11 +8,16 @@
 //! Connections are plain TCP: Inbox has no TLS stack, and the database is reached inside the private network.
 
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::error::Error as _;
+use std::future::Future;
 use std::path::Path;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{
+    Manager, ManagerConfig, Object, Pool, PoolError, RecyclingMethod, Runtime,
+};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, NoTls};
@@ -24,6 +29,7 @@ use crate::db::{
 };
 use crate::hub::LiveInfo;
 use crate::secrets::read_secret;
+use crate::spool::{DbAck, Entry, Spool};
 use crate::store::Stats;
 use crate::util::{now_ms, random_id};
 
@@ -36,6 +42,14 @@ const STARTUP_RETRY: Duration = Duration::from_secs(60);
 const INSTANCE_FORGET_MS: i64 = 3_600_000;
 /// Device ids per `inbox_wake` notification (a payload is limited to 8000 bytes).
 const WAKE_CHUNK: usize = 100;
+/// No call to the database waits longer than this: a primary that does not answer (a lost node drops packets silently) must
+/// not hold an alert or a phone back. The next calls fail at once until the probe sees a writable primary again.
+const OP_TIMEOUT: Duration = Duration::from_secs(2);
+/// A probe of the database gives up after this, for each of its steps.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The alerts accepted this long ago or less are kept in memory, to answer a producer's retry during an outage.
+const RECENT_ALERTS_MS: i64 = 3_600_000;
+const RECENT_ALERTS_MAX: i64 = 5_000;
 
 /// Advisory lock keys: schema changes, enrollment limit and retention must not run twice at once.
 const LOCK_SCHEMA: i64 = 0x5041_4745_0001;
@@ -116,8 +130,81 @@ CREATE INDEX connections_open ON connections(instance) WHERE disconnected_at IS 
 /// The database clock, in milliseconds: liveness is judged by one clock, not by the instances' own.
 const DB_NOW: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
 
-fn db_error(e: impl Display) -> DbError {
-    DbError::Pg(e.to_string())
+/// Turns a failure of the driver or of the pool into a [`DbError`]: `Unavailable` when the database cannot be used right now
+/// (no connection, a failover in progress, a standby that refuses writes), `Pg` for everything else.
+trait Failure {
+    fn into_db_error(self) -> DbError;
+}
+
+fn db_error(e: impl Failure) -> DbError {
+    e.into_db_error()
+}
+
+/// SQLSTATEs of a database that is going away or is not a primary: connection exceptions (class 08), admin/crash shutdown,
+/// "cannot connect now" (starting up) and "read-only transaction".
+fn unavailable_state(code: &str) -> bool {
+    code.starts_with("08") || matches!(code, "57P01" | "57P02" | "57P03" | "25006")
+}
+
+impl Failure for tokio_postgres::Error {
+    fn into_db_error(self) -> DbError {
+        let text = self.to_string();
+        let down = match self.as_db_error() {
+            Some(db) => unavailable_state(db.code().code()),
+            // No answer from the server: the connection is closed, broken or never made.
+            None => {
+                self.is_closed()
+                    || self.source().is_some_and(|s| s.is::<std::io::Error>())
+                    || text.contains("connect")
+                    || text.contains("timeout")
+            }
+        };
+        if down { DbError::Unavailable(text) } else { DbError::Pg(text) }
+    }
+}
+
+impl Failure for PoolError {
+    fn into_db_error(self) -> DbError {
+        match self {
+            PoolError::Backend(e) => e.into_db_error(),
+            other => DbError::Unavailable(other.to_string()),
+        }
+    }
+}
+
+/// `Some(true)` on a primary, `Some(false)` on a standby, `None` when the connection does not answer.
+async fn is_writable(client: &tokio_postgres::Client) -> Option<bool> {
+    let rows =
+        tokio::time::timeout(PROBE_TIMEOUT, client.simple_query("SELECT pg_is_in_recovery()"))
+            .await
+            .ok()?
+            .ok()?;
+    rows.iter().find_map(|m| match m {
+        tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(|v| v == "f"),
+        _ => None,
+    })
+}
+
+/// What this instance remembers of the database, to serve phones and accept alerts while it is away.
+#[derive(Default)]
+struct Cache {
+    devices: HashMap<String, CachedDevice>,
+    /// Alerts stored in the database lately, by (source, idempotency key): a producer's retry during an outage finds them.
+    recent: HashMap<(String, String), RecentAlert>,
+}
+
+struct CachedDevice {
+    key: DeviceKey,
+    subscriptions: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct RecentAlert {
+    pub id: String,
+    pub group: String,
+    pub title: String,
+    /// Unix ms: when the alert was stored.
+    pub at: i64,
 }
 
 /// What the other instances tell this one.
@@ -154,6 +241,13 @@ pub struct PgStore {
     pool: Pool,
     config: tokio_postgres::Config,
     instance: String,
+    /// Since when (Unix ms) the database cannot be used, 0 while it can. Every call fails at once meanwhile.
+    down_since: AtomicI64,
+    /// The alerts accepted while it could not (`spool.rs`).
+    spool: Spool,
+    cache: RwLock<Cache>,
+    /// A connection kept for the probe, apart from the pool.
+    probe_conn: tokio::sync::Mutex<Option<tokio_postgres::Client>>,
 }
 
 impl PgStore {
@@ -169,7 +263,11 @@ impl PgStore {
             .password(password.as_bytes())
             .connect_timeout(cfg.connect_timeout)
             .keepalives(true)
-            .keepalives_idle(Duration::from_secs(20))
+            .keepalives_idle(Duration::from_secs(10))
+            .keepalives_interval(Duration::from_secs(2))
+            .keepalives_retries(2)
+            // A primary on a lost node drops packets without a reset: unanswered data ends the connection after this.
+            .tcp_user_timeout(OP_TIMEOUT + Duration::from_secs(1))
             .application_name("inbox");
         let manager = Manager::from_config(
             config.clone(),
@@ -184,7 +282,15 @@ impl PgStore {
             .recycle_timeout(Some(cfg.connect_timeout))
             .build()
             .map_err(|e| format!("postgres: {e}"))?;
-        let store = PgStore { pool, config, instance: random_id() };
+        let store = PgStore {
+            pool,
+            config,
+            instance: random_id(),
+            down_since: AtomicI64::new(0),
+            spool: Spool::default(),
+            cache: RwLock::new(Cache::default()),
+            probe_conn: tokio::sync::Mutex::new(None),
+        };
         store.wait_until_reachable().await?;
         store.migrate().await.map_err(|e| format!("postgres migration: {e}"))?;
         store.register_instance().await.map_err(|e| format!("postgres: {e}"))?;
@@ -216,12 +322,332 @@ impl PgStore {
     }
 
     async fn client(&self) -> Result<Object, DbError> {
+        if self.is_down() {
+            return Err(DbError::Unavailable("the database is away".into()));
+        }
         self.pool.get().await.map_err(db_error)
     }
 
     pub async fn ping(&self) -> Result<(), DbError> {
         let c = self.client().await?;
         c.query_one("SELECT 1", &[]).await.map(|_| ()).map_err(db_error)
+    }
+
+    // ------------------------------------------------------------ degraded mode
+
+    pub fn spool(&self) -> &Spool {
+        &self.spool
+    }
+
+    /// The database cannot be used right now: the instance runs on its memory (`spool.rs`).
+    pub fn is_down(&self) -> bool {
+        self.down_since.load(Ordering::Relaxed) != 0
+    }
+
+    /// Bounds a call to the database and keeps the breaker: a call that fails because the database is away, or does not
+    /// answer in time, makes every following call fail at once until [`PgStore::writable`] finds a primary again.
+    pub async fn guard<T>(
+        &self,
+        op: impl Future<Output = Result<T, DbError>>,
+    ) -> Result<T, DbError> {
+        if self.is_down() {
+            return Err(DbError::Unavailable("the database is away".into()));
+        }
+        let result = match tokio::time::timeout(OP_TIMEOUT, op).await {
+            Ok(r) => r,
+            Err(_) => Err(DbError::Unavailable("the database did not answer in time".into())),
+        };
+        if let Err(e @ DbError::Unavailable(_)) = &result {
+            self.mark_down(e);
+        }
+        result
+    }
+
+    pub fn mark_down(&self, reason: &DbError) {
+        if self
+            .down_since
+            .compare_exchange(0, now_ms(), Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            tracing::warn!(event = "storage_degraded", reason = %reason, spooled = self.spool.len());
+            // Whatever the pool holds points at the primary that was lost.
+            self.pool.retain(|_, _| false);
+        }
+    }
+
+    pub fn mark_up(&self) {
+        let since = self.down_since.swap(0, Ordering::Relaxed);
+        if since != 0 {
+            tracing::info!(
+                event = "storage_recovered",
+                down_ms = now_ms() - since,
+                spooled = self.spool.len()
+            );
+            self.pool.retain(|_, _| false);
+        }
+    }
+
+    /// One look at the database, on a connection of its own: is there a writable primary?
+    pub async fn writable(&self) -> bool {
+        self.writable_primary().await
+    }
+
+    async fn writable_primary(&self) -> bool {
+        let mut slot = self.probe_conn.lock().await;
+        if let Some(client) = slot.as_ref() {
+            if let Some(writable) = is_writable(client).await {
+                return writable;
+            }
+            // The connection went stale: make another one.
+            *slot = None;
+        }
+        let Ok(Ok((client, connection))) =
+            tokio::time::timeout(PROBE_TIMEOUT, self.config.connect(NoTls)).await
+        else {
+            return false;
+        };
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let answer = is_writable(&client).await;
+        if answer.is_some() {
+            *slot = Some(client);
+        }
+        answer.unwrap_or(false)
+    }
+
+    /// Reloads what the instance keeps of the database: devices with their subscriptions, and the alerts of the last hour.
+    pub async fn refresh_cache(&self) -> Result<(), DbError> {
+        let c = self.client().await?;
+        let devices = c
+            .query(
+                "SELECT id, public_key, revoked_at IS NOT NULL, name, user_name FROM devices",
+                &[],
+            )
+            .await
+            .map_err(db_error)?;
+        let subs = c
+            .query("SELECT device_id, group_id FROM subscriptions ORDER BY group_id", &[])
+            .await
+            .map_err(db_error)?;
+        let alerts = c
+            .query(
+                "SELECT source, idempotency_key, id, group_id, title, created_at FROM alerts
+                 WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
+                &[&(now_ms() - RECENT_ALERTS_MS), &RECENT_ALERTS_MAX],
+            )
+            .await
+            .map_err(db_error)?;
+        let mut fresh = Cache::default();
+        for r in &devices {
+            fresh.devices.insert(
+                r.get(0),
+                CachedDevice {
+                    key: DeviceKey {
+                        public_key: r.get(1),
+                        revoked: r.get(2),
+                        name: r.get(3),
+                        user_name: r.get(4),
+                    },
+                    subscriptions: Vec::new(),
+                },
+            );
+        }
+        for r in &subs {
+            let (device, group): (String, String) = (r.get(0), r.get(1));
+            if let Some(d) = fresh.devices.get_mut(&device) {
+                d.subscriptions.push(group);
+            }
+        }
+        for r in &alerts {
+            fresh.recent.insert(
+                (r.get(0), r.get(1)),
+                RecentAlert { id: r.get(2), group: r.get(3), title: r.get(4), at: r.get(5) },
+            );
+        }
+        // An alert this instance stored while the queries ran is not in their answer: it is kept.
+        let horizon = now_ms() - RECENT_ALERTS_MS;
+        let mut cache = self.cache.write().expect("cache lock");
+        for (k, v) in cache.recent.drain().filter(|(_, v)| v.at >= horizon) {
+            fresh.recent.entry(k).or_insert(v);
+        }
+        *cache = fresh;
+        Ok(())
+    }
+
+    /// The devices subscribed to `group`, as last seen in the database.
+    pub fn cached_targets(&self, group: &str) -> Vec<String> {
+        let cache = self.cache.read().expect("cache lock");
+        let mut ids: Vec<String> = cache
+            .devices
+            .iter()
+            .filter(|(_, d)| !d.key.revoked && d.subscriptions.iter().any(|g| g == group))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    pub fn cached_device(&self, id: &str) -> Option<DeviceKey> {
+        self.cache.read().expect("cache lock").devices.get(id).map(|d| d.key.clone())
+    }
+
+    /// Subscriptions and pseudonym of a device, as last seen in the database.
+    pub fn cached_profile(&self, id: &str) -> Option<(Vec<String>, String)> {
+        let cache = self.cache.read().expect("cache lock");
+        cache.devices.get(id).map(|d| (d.subscriptions.clone(), d.key.user_name.clone()))
+    }
+
+    pub fn cache_device(&self, id: &str, key: Option<DeviceKey>) {
+        let mut cache = self.cache.write().expect("cache lock");
+        match key {
+            Some(key) => {
+                let subscriptions =
+                    cache.devices.get(id).map(|d| d.subscriptions.clone()).unwrap_or_default();
+                cache.devices.insert(id.to_string(), CachedDevice { key, subscriptions });
+            }
+            None => {
+                cache.devices.remove(id);
+            }
+        }
+    }
+
+    pub fn cache_subscriptions(&self, id: &str, subscriptions: Vec<String>) {
+        if let Some(d) = self.cache.write().expect("cache lock").devices.get_mut(id) {
+            d.subscriptions = subscriptions;
+        }
+    }
+
+    pub fn cache_revoked(&self, id: &str) {
+        if let Some(d) = self.cache.write().expect("cache lock").devices.get_mut(id) {
+            d.key.revoked = true;
+            d.subscriptions.clear();
+        }
+    }
+
+    pub fn cache_alert(&self, source: &str, key: &str, alert: RecentAlert) {
+        let mut cache = self.cache.write().expect("cache lock");
+        if cache.recent.len() >= RECENT_ALERTS_MAX as usize * 2 {
+            cache.recent.clear();
+        }
+        cache.recent.insert((source.to_string(), key.to_string()), alert);
+    }
+
+    pub fn cached_alert(&self, source: &str, key: &str) -> Option<RecentAlert> {
+        self.cache
+            .read()
+            .expect("cache lock")
+            .recent
+            .get(&(source.to_string(), key.to_string()))
+            .cloned()
+    }
+
+    /// Writes what the instance held while the database was away: the alerts of the spool, then the receipts. Idempotent:
+    /// another instance may replay the same alert, and a crash half way replays it again. Returns the alerts written and the
+    /// devices that still wait for one (to wake).
+    pub async fn replay(&self) -> Result<(usize, Vec<String>), DbError> {
+        let mut written = 0;
+        let mut wake: Vec<String> = Vec::new();
+        for entry in self.spool.snapshot() {
+            if let Some(waiting) = self.replay_alert(&entry).await? {
+                written += 1;
+                wake.extend(waiting);
+            }
+        }
+        let acks = self.spool.take_db_acks();
+        if !acks.is_empty()
+            && let Err(e) = self.replay_acks(&acks).await
+        {
+            self.spool.restore_db_acks(acks);
+            return Err(e);
+        }
+        wake.sort();
+        wake.dedup();
+        Ok((written, wake))
+    }
+
+    /// One alert of the spool into the database, in one transaction. `Some(devices still waiting)` when it was written.
+    async fn replay_alert(&self, e: &Entry) -> Result<Option<Vec<String>>, DbError> {
+        let mut c = self.client().await?;
+        let tx = c.transaction().await.map_err(db_error)?;
+        tx.execute(
+            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (source, idempotency_key) DO NOTHING",
+            &[&e.id, &e.group, &e.title, &e.source, &e.key, &e.created_at],
+        )
+        .await
+        .map_err(db_error)?;
+        // Another instance (or this one, before the outage) may have stored it under another id.
+        let row = tx
+            .query_one(
+                "SELECT id, group_id, title FROM alerts WHERE source = $1 AND idempotency_key = $2",
+                &[&e.source, &e.key],
+            )
+            .await
+            .map_err(db_error)?;
+        let (stored, group, title): (String, String, String) = (row.get(0), row.get(1), row.get(2));
+        if group != e.group || title != e.title {
+            tracing::warn!(event = "spool_alert_conflict", alert.id = %e.id, alert.source = %e.source);
+            self.spool.remove_if_unchanged(&e.id, e.rev);
+            return Ok(None);
+        }
+        let devices: Vec<&str> = e.deliveries.iter().map(|d| d.device.as_str()).collect();
+        let attempts: Vec<i64> = e.deliveries.iter().map(|d| d.attempts).collect();
+        let first: Vec<Option<i64>> = e.deliveries.iter().map(|d| d.first_sent_at).collect();
+        let last: Vec<Option<i64>> = e.deliveries.iter().map(|d| d.last_sent_at).collect();
+        let received: Vec<Option<i64>> = e.deliveries.iter().map(|d| d.received_at).collect();
+        // Revoked or unknown devices are skipped; a delivery that exists keeps what it knows and gains what the spool knows.
+        tx.execute(
+            "INSERT INTO deliveries (alert_id, device_id, attempts, first_sent_at, last_sent_at, received_at)
+             SELECT $1, d.id, v.attempts, v.first_sent, v.last_sent, v.received
+             FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[])
+                  AS v(device, attempts, first_sent, last_sent, received)
+             JOIN devices d ON d.id = v.device AND d.revoked_at IS NULL
+             ORDER BY d.id
+             ON CONFLICT (alert_id, device_id) DO UPDATE SET
+                 received_at   = COALESCE(deliveries.received_at, EXCLUDED.received_at),
+                 attempts      = GREATEST(deliveries.attempts, EXCLUDED.attempts),
+                 first_sent_at = COALESCE(deliveries.first_sent_at, EXCLUDED.first_sent_at),
+                 last_sent_at  = GREATEST(deliveries.last_sent_at, EXCLUDED.last_sent_at)",
+            &[&stored, &devices, &attempts, &first, &last, &received],
+        )
+        .await
+        .map_err(db_error)?;
+        let waiting = e.waiting();
+        for chunk in waiting.chunks(WAKE_CHUNK) {
+            tx.execute("SELECT pg_notify('inbox_wake', $1)", &[&chunk.join(" ")])
+                .await
+                .map_err(db_error)?;
+        }
+        tx.commit().await.map_err(db_error)?;
+        self.cache_alert(
+            &e.source,
+            &e.key,
+            RecentAlert {
+                id: stored,
+                group: e.group.clone(),
+                title: e.title.clone(),
+                at: e.created_at,
+            },
+        );
+        self.spool.remove_if_unchanged(&e.id, e.rev);
+        Ok(Some(waiting))
+    }
+
+    async fn replay_acks(&self, acks: &[DbAck]) -> Result<(), DbError> {
+        let devices: Vec<&str> = acks.iter().map(|a| a.device.as_str()).collect();
+        let alerts: Vec<&str> = acks.iter().map(|a| a.alert_id.as_str()).collect();
+        let at: Vec<i64> = acks.iter().map(|a| a.at).collect();
+        let c = self.client().await?;
+        c.execute(
+            "UPDATE deliveries d SET received_at = COALESCE(d.received_at, v.at)
+             FROM unnest($1::text[], $2::text[], $3::bigint[]) AS v(device, alert, at)
+             WHERE d.device_id = v.device AND d.alert_id = v.alert",
+            &[&devices, &alerts, &at],
+        )
+        .await
+        .map_err(db_error)?;
+        Ok(())
     }
 
     async fn migrate(&self) -> Result<(), DbError> {

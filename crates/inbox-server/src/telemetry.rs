@@ -149,6 +149,8 @@ pub struct Metrics {
     pub sessions_active: UpDownCounter<i64>,
     pub session_closes: Counter<u64>,
     pub replica_sync_failures: Counter<u64>,
+    pub alerts_spooled: Counter<u64>,
+    pub spool_rejected: Counter<u64>,
 }
 
 impl Metrics {
@@ -204,6 +206,14 @@ impl Metrics {
                     "Writes that could not be copied to the replica before the answer",
                 )
                 .build(),
+            alerts_spooled: meter
+                .u64_counter("inbox_alerts_spooled_total")
+                .with_description("Alerts accepted without the database, by source kind")
+                .build(),
+            spool_rejected: meter
+                .u64_counter("inbox_spool_rejected_total")
+                .with_description("Alerts refused because the spool was full")
+                .build(),
         }
     }
 }
@@ -215,6 +225,10 @@ pub struct Gauges {
     pub oldest_pending_ms: std::sync::atomic::AtomicI64,
     pub unreachable_devices: std::sync::atomic::AtomicI64,
     pub enrolled_devices: std::sync::atomic::AtomicI64,
+    /// 1 while PostgreSQL has no usable primary and this instance runs on its memory.
+    pub storage_degraded: std::sync::atomic::AtomicI64,
+    /// Alerts held in memory, waiting for the database.
+    pub spool_alerts: std::sync::atomic::AtomicI64,
 }
 
 pub fn register_gauges(meter: &Meter, gauges: std::sync::Arc<Gauges>) {
@@ -237,6 +251,20 @@ pub fn register_gauges(meter: &Meter, gauges: std::sync::Arc<Gauges>) {
         .i64_observable_gauge("inbox_devices_unreachable")
         .with_description("Subscribed devices not seen within devices.unreachable_after")
         .with_callback(move |o| o.observe(g.unreachable_devices.load(Relaxed), &[]))
+        .build();
+    let g = gauges.clone();
+    meter
+        .i64_observable_gauge("inbox_storage_degraded")
+        .with_description(
+            "1 while the database has no usable primary and alerts are held in memory",
+        )
+        .with_callback(move |o| o.observe(g.storage_degraded.load(Relaxed), &[]))
+        .build();
+    let g = gauges.clone();
+    meter
+        .i64_observable_gauge("inbox_spool_alerts")
+        .with_description("Alerts accepted without the database and not yet written to it")
+        .with_callback(move |o| o.observe(g.spool_alerts.load(Relaxed), &[]))
         .build();
     let g = gauges;
     meter

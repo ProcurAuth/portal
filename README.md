@@ -181,7 +181,7 @@ Every producer endpoint takes `Authorization: Bearer <token>`, or `?token=<token
 for tools that cannot set headers (the URL may then appear in proxy logs). The
 admin front's `/doc` page gives ready-to-paste recipes for Grafana, Alertmanager
 and other alerting tools, with this server's real URLs.
-| `GET /healthz`, `GET /readyz` | Liveness, and readiness (checks the database). |
+| `GET /healthz`, `GET /readyz` | Liveness, and readiness (SQLite: checks the database; PostgreSQL: ready while the instance runs, `degraded` while the database has no primary). |
 | `GET /api/version` | Version, git revision, protocol version. |
 
 Errors are JSON, of the form `{"error": {"code": "...", "message": "..."}}`.
@@ -357,6 +357,40 @@ accepts alerts: the loss of an instance is only a reconnection for the phones it
   `inbox import-sqlite --config <config with a postgres block> --from <inbox.db or a snapshot>` copies devices,
   subscriptions, alerts, deliveries and the connection log in one transaction, into an empty database (it refuses
   otherwise). Stop the SQLite instance (or use its last snapshot) first, import, then start the PostgreSQL instances.
+
+### Degraded mode: the database has no primary
+
+A PostgreSQL failover takes from a few seconds to a few minutes. During that time the instances **keep accepting alerts and
+delivering them**, and the phones keep their sessions; the pods stay in the service (`/readyz` answers `200 degraded`).
+
+- Every call to the database is bounded (2 s). When one fails because the database is away, or does not answer, the
+  instance switches to its memory at once and a probe (every second, on its own connection) watches for a writable
+  primary (`pg_is_in_recovery() = false`). Events `storage_degraded` and `storage_recovered` are logged; the gauges
+  `inbox_storage_degraded` and `inbox_spool_alerts` and the counter `inbox_alerts_spooled_total` are exported.
+- An alert accepted meanwhile is validated as usual and kept in a **spool** (at most 10 000 alerts; beyond that the
+  producer gets `503 spool_full` and retries), with one delivery per device subscribed to its group, as last read from the
+  database (devices and subscriptions are reloaded every 5 s). Its id is derived from the source and the idempotency key,
+  so the same alert accepted by two instances has the same id, and a retry gets the same answer (`200`, same id).
+- **Before the producer is answered** the alert is copied to the other instances (`cluster` block): they hold it in their
+  spool and wake the phones connected to them. The alert therefore survives the loss of the instance that accepted it, as
+  long as one other instance had received the copy (`spool_unreplicated` is logged when none had). The phones connected
+  to the accepting instance are woken first, without waiting for the copies.
+- Receipts of the phones are kept too (and copied), so nothing is sent again. A phone deduplicates on the alert id anyway.
+- **When the database has a primary again**, each instance writes its spool, oldest first: `INSERT ... ON CONFLICT
+  (source, idempotency_key) DO NOTHING`, then the delivery rows with their state. Two instances writing the same alert, or
+  a crash half way, end with one alert row and one delivery row per device. Entries are dropped from the spool only once
+  committed, and only if nothing changed since they were copied. Instances that cannot reach the database at SIGTERM write
+  what they hold if they can, and log `spool_lost` otherwise.
+- **What needs the database still needs it:** enrolling a phone, changing a subscription or a pseudonym, revoking a device
+  (the phone is told `unavailable` and keeps its session; a device revoked during the outage can still connect until the
+  database is back), the admin front's history, the connection log (sessions opened meanwhile are not recorded). A phone
+  that was never loaded by an instance cannot open a session on it while the database is away (devices are cached every
+  5 s).
+- **Limits:** an alert accepted while the database is away exists only in memory. If every instance that holds it stops
+  before the database is back (all pods lost together), it is lost; the producer was answered `201`. The first alert after
+  the database goes away waits up to 2 s for the database to give up. A request to the database that timed out may still
+  have been committed: if the producer retries it during the outage and no instance remembers it, the phone can receive it
+  twice with different ids. A pod that starts while the database is away waits for it (60 s) and then exits.
 
 ## Limitations
 

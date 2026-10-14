@@ -37,7 +37,16 @@ pub enum DbError {
     Sqlite(rusqlite::Error),
     /// PostgreSQL (see `pg.rs`): the message of the driver or of the pool.
     Pg(String),
+    /// PostgreSQL cannot be used right now (no connection, no writable primary, a call that did not answer in time): the
+    /// caller falls back to the degraded mode (`spool.rs`) where it has one.
+    Unavailable(String),
     Closed,
+}
+
+impl DbError {
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, DbError::Unavailable(_))
+    }
 }
 
 impl std::fmt::Display for DbError {
@@ -45,6 +54,7 @@ impl std::fmt::Display for DbError {
         match self {
             DbError::Sqlite(e) => write!(f, "sqlite: {e}"),
             DbError::Pg(e) => write!(f, "postgres: {e}"),
+            DbError::Unavailable(e) => write!(f, "postgres unavailable: {e}"),
             DbError::Closed => f.write_str("database thread stopped"),
         }
     }
@@ -250,6 +260,7 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 
 // ---------------------------------------------------------------- devices
 
+#[derive(Clone)]
 pub struct DeviceKey {
     pub public_key: Vec<u8>,
     pub revoked: bool,
@@ -407,6 +418,7 @@ pub fn prune_subscriptions(conn: &Connection, groups: &[String]) -> rusqlite::Re
 
 // ---------------------------------------------------------------- alerts
 
+#[derive(Clone)]
 pub struct NewAlert {
     pub group: String,
     pub title: String,
@@ -474,6 +486,7 @@ fn delivery_devices(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<S
     rows.collect()
 }
 
+#[derive(Clone)]
 pub struct PendingDelivery {
     pub seq: i64,
     pub alert_id: String,

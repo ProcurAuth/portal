@@ -324,13 +324,14 @@ async fn established(
     let last_seen = Arc::new(AtomicI64::new(now_ms()));
     let app_version = inbox_core::enroll::validate_device_name(&app_version)
         .unwrap_or_else(|_| "unknown".into());
+    let connected_at = now_ms();
     app.hub.register(
         &device_id,
         Live {
             session_id,
             ip: ip.to_string(),
             app_version: app_version.clone(),
-            connected_at: now_ms(),
+            connected_at,
             last_seen: last_seen.clone(),
             wake: wake.clone(),
             kick: kick_tx,
@@ -347,8 +348,12 @@ async fn established(
             return;
         }
     };
+    if connection_id < 0 {
+        // Without the database nobody else learns of this session from it: tell the other instances directly.
+        app.cluster.forward_replaced(&device_id, connected_at);
+    }
     app.metrics.sessions_active.add(1, &[]);
-    tracing::info!(event = "device_connected");
+    tracing::info!(event = "device_connected", recorded = connection_id >= 0);
 
     let end =
         deliver(&app, &mut socket, &mut session, &device_id, &mut kick_rx, &wake, &last_seen).await;
@@ -470,6 +475,10 @@ async fn handle(
             let outcome = app.db.ack(device_id, &alert_id).await.map_err(End::Storage)?;
             app.metrics.acks.add(1, &[]);
             if let Some(o) = outcome {
+                if o.seq < 0 {
+                    // A delivery of the spool: the other instances hold a copy of it.
+                    app.cluster.forward_ack(device_id, &alert_id, now_ms());
+                }
                 if let Some(ms) = o.first_receipt_latency_ms {
                     app.metrics.delivery_latency.record(ms.max(0) as f64 / 1000.0, &[]);
                 }
@@ -487,7 +496,11 @@ async fn handle(
                 .await?;
                 return Ok(false);
             }
-            let subs = app.db.subscribe(device_id, &group).await.map_err(End::Storage)?;
+            let subs = match app.db.subscribe(device_id, &group).await {
+                Ok(subs) => subs,
+                Err(e) if e.is_unavailable() => return unavailable(socket, session).await,
+                Err(e) => return Err(End::Storage(e)),
+            };
             tracing::info!(event = "subscription_changed");
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
             Ok(false)
@@ -501,19 +514,37 @@ async fn handle(
                 send_msg(socket, session, &error).await?;
                 return Ok(false);
             };
-            app.db.set_user_name(device_id, &user_name).await.map_err(End::Storage)?;
+            match app.db.set_user_name(device_id, &user_name).await {
+                Ok(()) => {}
+                Err(e) if e.is_unavailable() => return unavailable(socket, session).await,
+                Err(e) => return Err(End::Storage(e)),
+            }
             tracing::info!(event = "user_name_changed", user.name = %user_name);
             send_msg(socket, session, &ServerMsg::UserName { user_name }).await?;
             Ok(false)
         }
         ClientMsg::Unsubscribe { group } => {
-            let subs = app.db.unsubscribe(device_id, &group).await.map_err(End::Storage)?;
+            let subs = match app.db.unsubscribe(device_id, &group).await {
+                Ok(subs) => subs,
+                Err(e) if e.is_unavailable() => return unavailable(socket, session).await,
+                Err(e) => return Err(End::Storage(e)),
+            };
             tracing::info!(event = "subscription_removed");
             send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions: subs }).await?;
             Ok(false)
         }
         ClientMsg::Ready => Err(End::Protocol("duplicate ready")),
     }
+}
+
+/// A change that needs the database, while it is away: the phone is told, and the session goes on.
+async fn unavailable(socket: &mut WebSocket, session: &mut Session) -> Result<bool, End> {
+    let error = ServerMsg::Error {
+        code: "unavailable".into(),
+        message: "the database is away, retry in a moment".into(),
+    };
+    send_msg(socket, session, &error).await?;
+    Ok(false)
 }
 
 async fn flush_deliveries(

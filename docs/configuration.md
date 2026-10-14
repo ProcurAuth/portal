@@ -6,8 +6,9 @@ and strict:
 - **Every attribute is mandatory.** There are no implicit defaults. The only
   optional elements are the `producer` blocks (zero producers is valid: the admin
   front can always send alerts), the endpoint settings of a disabled
-  `telemetry` block, the `replica` block (SQLite standby replication) and the `postgres`
-  block (PostgreSQL storage). When present, all their attributes are mandatory.
+  `telemetry` block, the `replica` block (SQLite standby replication), the `postgres`
+  block (PostgreSQL storage) and the `cluster` block (copies between instances while PostgreSQL is away).
+  When present, all their attributes are mandatory.
 - **Unknown attributes and blocks are rejected**, so a typo stops startup instead
   of being ignored.
 - **Semantic checks** (ranges, cross-field rules, references) run before anything
@@ -133,6 +134,26 @@ postgres {
   password_file   = "/run/secrets/inbox_db_password"
   pool_size       = 8
   connect_timeout = "5s"
+}
+```
+
+## `cluster` (optional, with `postgres`)
+
+With PostgreSQL, an instance keeps accepting alerts and serving its phones while the database has no writable primary (a
+failover, a lost node): see "Degraded mode" in the README. An alert accepted that way is held in memory, so before the
+producer is answered it is copied to the other instances, which hold it too and wake the phones connected to them. This
+block tells the instance where to receive those copies and how to find the others. Without it an alert accepted while the
+database is away lives on the instance that accepted it until the database is back. Only valid with a `postgres` block.
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `listen` | address | Where this instance receives the requests of the other instances (plain HTTP). It must differ from `server.listen` and `server.admin_listen`, and be reachable from the other instances only: requests are signed (HMAC-SHA256 keyed from the server key, refused when older than 60 s), but the port is not for the phones or the producers. |
+| `peers` | 1..16 `host:port` strings | Names that list the instances, with the port of `cluster.listen`: on Kubernetes the name of a headless Service selecting the pods. Every address a name resolves to is asked who it is, every 2 s; the address of this instance is recognised and skipped, so the list may include it. |
+
+```hcl
+cluster {
+  listen = "0.0.0.0:8082"
+  peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
 }
 ```
 

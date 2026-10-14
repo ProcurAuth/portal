@@ -80,6 +80,13 @@ telemetry {
 #   connect_timeout = "5s"
 # }
 
+# Optional (with postgres): how the instances copy to each other the alerts they accept while PostgreSQL has no writable
+# primary (see "Degraded mode" in the README). `peers` are host:port names that list the instances, e.g. a headless Service.
+# cluster {
+#   listen = "0.0.0.0:8082"
+#   peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
+# }
+
 # Optional (SQLite only): standby replication to a directory shared with the instances that may take over
 # (a ReadWriteMany volume). All attributes are mandatory when the block is present.
 # replica {

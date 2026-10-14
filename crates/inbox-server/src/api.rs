@@ -16,8 +16,9 @@ use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
 use crate::db::{InsertOutcome, NewAlert};
+use crate::spool::{self, Accepted as Spooled};
 use crate::state::{AppState, Producer};
-use crate::util::{hex, is_hex_id, truncate_chars};
+use crate::util::{hex, is_hex_id, now_ms, truncate_chars};
 
 pub struct ApiError {
     status: StatusCode,
@@ -117,7 +118,14 @@ pub async fn accept_alert(
     }
 
     let span = tracing::info_span!("alert.accept", alert.group = %alert.group, alert.source = %alert.source);
-    let outcome = app.db.insert_alert(alert).instrument(span).await.map_err(ApiError::storage)?;
+    let outcome = match app.db.insert_alert(alert.clone()).instrument(span).await {
+        Ok(outcome) => outcome,
+        // PostgreSQL has no usable primary: the alert is kept in memory and copied to the other instances (`spool.rs`).
+        Err(e) if e.is_unavailable() && app.db.spool().is_some() => {
+            return accept_without_database(app, alert, source_kind).await;
+        }
+        Err(e) => return Err(ApiError::storage(e)),
+    };
     match outcome {
         InsertOutcome::Created { alert_id, devices, .. } => {
             app.metrics.alerts_accepted.add(1, &[KeyValue::new("source", source_kind)]);
@@ -143,6 +151,75 @@ pub async fn accept_alert(
             "idempotency key already used for a different alert",
         )),
     }
+}
+
+/// The alert is accepted although the database cannot take it: kept in the spool, copied to the other instances before the
+/// answer, and delivered at once to the phones connected here. The database gets it when it has a primary again.
+async fn accept_without_database(
+    app: &AppState,
+    alert: NewAlert,
+    source_kind: &'static str,
+) -> Result<Accepted, ApiError> {
+    let pg = app.db.pg().expect("only PostgreSQL has a spool");
+    let conflict = || {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "idempotency key already used for a different alert",
+        )
+    };
+    // Stored a moment ago: the phones know it under that id, a retry must not create another.
+    if let Some(known) = pg.cached_alert(&alert.source, &alert.idempotency_key) {
+        if known.group != alert.group || known.title != alert.title {
+            return Err(conflict());
+        }
+        app.metrics.alerts_duplicate.add(1, &[KeyValue::new("source", source_kind)]);
+        let targets = pg.cached_targets(&alert.group).len();
+        return Ok(Accepted { alert_id: known.id, duplicate: true, targets });
+    }
+    let devices = pg.cached_targets(&alert.group);
+    let id = spool::alert_id(&alert.source, &alert.idempotency_key);
+    let (entry, duplicate) = match pg.spool().accept(
+        id,
+        alert.group,
+        alert.title,
+        alert.source,
+        alert.idempotency_key,
+        now_ms(),
+        devices,
+    ) {
+        Spooled::Created(entry) => {
+            app.metrics.alerts_accepted.add(1, &[KeyValue::new("source", source_kind)]);
+            app.metrics.alerts_spooled.add(1, &[KeyValue::new("source", source_kind)]);
+            app.metrics.deliveries_created.add(entry.deliveries.len() as u64, &[]);
+            tracing::warn!(
+                event = "alert_spooled",
+                alert.id = %entry.id,
+                targets = entry.deliveries.len()
+            );
+            (entry, false)
+        }
+        Spooled::Duplicate(entry) => {
+            app.metrics.alerts_duplicate.add(1, &[KeyValue::new("source", source_kind)]);
+            (entry, true)
+        }
+        Spooled::Conflict => return Err(conflict()),
+        Spooled::Full => {
+            app.metrics.spool_rejected.add(1, &[]);
+            tracing::error!(event = "spool_full", capacity = spool::MAX_SPOOLED);
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "spool_full",
+                "the database is away and too many alerts wait for it, retry",
+            ));
+        }
+    };
+    // The phones connected here first, then the copy: a peer that does not answer must not delay them.
+    app.hub.wake(&entry.waiting());
+    if app.cluster.replicate(&entry.wire()).await == 0 && app.cluster.enabled() {
+        tracing::warn!(event = "spool_unreplicated", alert.id = %entry.id);
+    }
+    Ok(Accepted { alert_id: entry.id, duplicate, targets: entry.deliveries.len() })
 }
 
 /// Waits for the shared copy that contains the alert just committed, before it is acknowledged or delivered: an

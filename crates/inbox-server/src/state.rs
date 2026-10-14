@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::config::Config;
 use crate::hub::Hub;
+use crate::peer::Cluster;
 use crate::ratelimit::AuthLimiter;
 use crate::replica::Replica;
 use crate::secrets::read_secret;
@@ -83,6 +84,8 @@ pub struct AppState {
     pub secrets: Secrets,
     pub db: Store,
     pub replica: Replica,
+    /// The other instances, for what is accepted while the database is away (disabled without a `cluster` block).
+    pub cluster: Cluster,
     pub hub: Hub,
     pub limiter: AuthLimiter,
     pub metrics: Metrics,

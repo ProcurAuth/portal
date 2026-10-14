@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::device;
 use crate::hub::Hub;
+use crate::peer::{self, Cluster};
 use crate::pg::{Event, PgStore};
 use crate::ratelimit::AuthLimiter;
 use crate::replica::{self, Replica};
@@ -102,6 +103,24 @@ async fn run(
         );
     }
 
+    // The copy of what was accepted without the database must be warm before anything is accepted.
+    if let Some(pg) = db.pg()
+        && let Err(e) = pg.refresh_cache().await
+    {
+        tracing::warn!(event = "cache_refresh_failed", error = %e);
+    }
+    let cluster = match (&config.cluster, db.pg()) {
+        (Some(c), Some(pg)) => Cluster::new(c, pg.instance().to_string(), &secrets.server_key),
+        _ => Cluster::disabled(),
+    };
+    let cluster_listener = match &config.cluster {
+        Some(c) => Some(
+            TcpListener::bind(c.listen)
+                .await
+                .map_err(|e| format!("cluster.listen {}: {e}", c.listen))?,
+        ),
+        None => None,
+    };
     let public = TcpListener::bind(config.server.listen)
         .await
         .map_err(|e| format!("server.listen {}: {e}", config.server.listen))?;
@@ -132,6 +151,7 @@ async fn run(
         secrets,
         db,
         replica,
+        cluster,
         hub: Hub::default(),
         metrics: Metrics::new(&meter),
         gauges,
@@ -179,6 +199,7 @@ async fn run(
         producers = app.secrets.producers.len(),
         telemetry = app.config.telemetry.enabled,
         replica = app.config.replica.is_some(),
+        cluster = app.cluster.enabled(),
         storage = if app.db.is_shared() { "postgres" } else { "sqlite" },
     );
 
@@ -208,7 +229,19 @@ async fn run(
             >(admin_app),
         )
         .with_graceful_shutdown(stop());
-    let servers = async { tokio::try_join!(async { public_srv.await }, async { admin_srv.await }) };
+    let cluster_srv = async {
+        match cluster_listener {
+            Some(listener) => {
+                axum::serve(listener, peer::router(app.clone()).into_make_service())
+                    .with_graceful_shutdown(stop())
+                    .await
+            }
+            None => Ok(()),
+        }
+    };
+    let servers = async {
+        tokio::try_join!(async { public_srv.await }, async { admin_srv.await }, cluster_srv)
+    };
     tokio::pin!(servers);
 
     let result = tokio::select! {
@@ -225,18 +258,35 @@ async fn run(
     };
     shutdown.trigger();
     flush_last_seen(&app).await;
-    if let Store::Pg(pg) = &app.db
-        && let Err(e) = pg.shutdown().await
-    {
-        tracing::warn!(event = "instance_shutdown_failed", error = %e);
+    if let Store::Pg(pg) = &app.db {
+        // What this instance holds for the database goes there before it stops, if the database is back.
+        if pg.spool().has_work() {
+            match pg.guard(pg.replay()).await {
+                Ok((alerts, _)) => tracing::info!(event = "spool_replayed", alerts),
+                Err(e) => tracing::error!(
+                    event = "spool_lost",
+                    alerts = pg.spool().len(),
+                    error = %e,
+                    "alerts accepted without the database are lost with this instance unless another instance holds a copy"
+                ),
+            }
+        }
+        if let Err(e) = pg.guard(pg.shutdown()).await {
+            tracing::warn!(event = "instance_shutdown_failed", error = %e);
+        }
     }
     tracing::info!(event = "stopped");
     result
 }
 
+/// With PostgreSQL the instance is ready whenever it runs: without a primary it still accepts alerts and serves its phones
+/// (`spool.rs`), and taking it out of the service would only remove that. SQLite needs its file.
 async fn readyz(State(app): State<Arc<AppState>>) -> impl IntoResponse {
     if app.shutdown.is_triggered() {
         return (StatusCode::SERVICE_UNAVAILABLE, "draining");
+    }
+    if app.db.is_shared() {
+        return (StatusCode::OK, if app.db.is_degraded() { "degraded" } else { "ready" });
     }
     match tokio::time::timeout(Duration::from_secs(2), app.db.ping()).await {
         Ok(Ok(())) => (StatusCode::OK, "ready"),
@@ -275,7 +325,7 @@ fn spawn_cluster(app: Arc<AppState>) {
                 _ = tick.tick() => {}
                 _ = a.shutdown.wait() => return,
             }
-            match beat_pg.heartbeat().await {
+            match beat_pg.guard(beat_pg.heartbeat()).await {
                 Ok(0) => {}
                 Ok(closed) => {
                     tracing::warn!(event = "lost_instance_sessions_closed", count = closed)
@@ -308,8 +358,70 @@ fn spawn_cluster(app: Arc<AppState>) {
     });
 }
 
+/// With a shared database: watches for a writable primary, writes what was accepted without one as soon as there is one, keeps
+/// the copy of devices and subscriptions fresh, and looks for the other instances.
+fn spawn_resilience(app: Arc<AppState>) {
+    let Some(pg) = app.db.pg().cloned() else { return };
+    let cluster = app.cluster.clone();
+    let a = app.clone();
+    tokio::spawn(async move { cluster.run_discovery(a).await });
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut refreshed = tokio::time::Instant::now();
+        // One failed look is not enough to leave a working database; a lost primary is also noticed by the calls that fail.
+        let mut failures = 0u32;
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = app.shutdown.wait() => return,
+            }
+            let was_down = pg.is_down();
+            if pg.writable().await {
+                failures = 0;
+                pg.mark_up();
+            } else {
+                failures += 1;
+                if failures >= 2 {
+                    pg.mark_down(&crate::db::DbError::Unavailable(
+                        "probe: no writable primary".into(),
+                    ));
+                }
+            }
+            app.gauges.storage_degraded.store(pg.is_down() as i64, Relaxed);
+            app.gauges.spool_alerts.store(pg.spool().len() as i64, Relaxed);
+            if pg.is_down() {
+                continue;
+            }
+            if was_down {
+                // Every session reads its deliveries again from the database.
+                app.hub.wake_all();
+            }
+            pg.spool().expire(app.delivery_cutoff());
+            if pg.spool().has_work() {
+                match pg.guard(pg.replay()).await {
+                    Ok((alerts, devices)) => {
+                        if alerts > 0 {
+                            tracing::info!(event = "spool_replayed", alerts);
+                        }
+                        app.hub.wake(&devices);
+                    }
+                    Err(e) => tracing::warn!(event = "spool_replay_failed", error = %e),
+                }
+                app.gauges.spool_alerts.store(pg.spool().len() as i64, Relaxed);
+            }
+            if refreshed.elapsed() >= Duration::from_secs(5)
+                && pg.guard(pg.refresh_cache()).await.is_ok()
+            {
+                refreshed = tokio::time::Instant::now();
+            }
+        }
+    });
+}
+
 fn spawn_background(app: Arc<AppState>) {
     spawn_cluster(app.clone());
+    spawn_resilience(app.clone());
     // Gauges and last-seen persistence.
     let a = app.clone();
     tokio::spawn(async move {
