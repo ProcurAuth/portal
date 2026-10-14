@@ -1,6 +1,6 @@
 # Security model
 
-`portal` is a ForwardAuth barrier and the launcher page of the lab. It has one superadmin defined by the environment and users with roles managed by the superadmin; it intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history live in one SQLite file. Services declare the roles they accept in `portal.roles`; the roles that exist are listed in the configuration, and `/auth/verify` enforces them (see "Roles and the gate" in the README).
+`portal` is a ForwardAuth barrier and the launcher page of the lab. It has one superadmin defined by the environment and users with roles managed by the superadmin; it intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history live in one SQLite file, or in a shared PostgreSQL database when several instances run (the `postgres` block). Services declare the roles they accept in `portal.roles`; the roles that exist are listed in the configuration, and `/auth/verify` enforces them (see "Roles and the gate" in the README).
 
 ## Core invariants
 
@@ -19,9 +19,9 @@
 - Argon2 concurrency is bounded;
 - login failures are rate-limited per IP and globally;
 - successful authentication creates a 256-bit opaque random session identifier;
-- active sessions are held only in bounded process RAM;
+- active sessions are held in bounded process RAM, or, with PostgreSQL, in the shared database as SHA-256 digests (never the cookie), with a copy kept by each instance for a few seconds;
 - logout revokes the exact session server-side;
-- process restart invalidates all sessions;
+- with SQLite a process restart invalidates all sessions; with PostgreSQL sessions survive it, and a logout, a deleted account or a changed password ends the session in the database at once and on the other instances within 5 seconds (their copy);
 - over HTTPS cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, `Path=/`, and SameSite Strict/Lax; over plain HTTP the same name without the prefix and without `Secure` (see "Plain HTTP");
 - a session only works from the client address and User-Agent that logged in (`session.bind`) and ends after `session.idle_timeout` without use;
 - the launcher is rendered server-side and references nothing outside the binary (CSP `default-src 'none'`, own style, own script, own images); every value taken from a label is HTML-escaped and every `href` is a local path or an http(s) URL;
@@ -56,7 +56,7 @@ session {
 
 The path must be absolute. The file must contain at least 32 bytes and is read with a finite upper bound. Inline HCL secrets are not supported.
 
-The secret protects HMAC-signed authentication control data such as the return target. Opaque active sessions remain in RAM only in both modes. `file` therefore does **not** make active sessions survive a process restart.
+The secret protects HMAC-signed authentication control data such as the return target and the anti-CSRF tokens. With SQLite, opaque active sessions remain in RAM only in both modes, so `file` does **not** make them survive a process restart. With PostgreSQL the sessions are in the database and `file` is required: every instance must sign with the same key, and `ephemeral` is rejected.
 
 ## Opaque sessions
 
@@ -65,6 +65,8 @@ Session IDs are random 32-byte values encoded with unpadded base64url. The cooki
 The server stores only a SHA-256 digest of the token plus an `Instant` expiration, a last-use time and a hash of the client binding. This makes logout true server-side revocation rather than merely deleting the browser cookie. A cookie presented with another binding is refused and leaves the session alone, so a thief cannot end the owner's session by trying it.
 
 The store is bounded by `session.max_active_sessions`. Expired entries are pruned during session operations. When capacity is reached, new sessions fail closed with `503`.
+
+With PostgreSQL the digest, the binding hash, the identity, the expiry and the last use are rows of the shared database, written by whichever instance served the login; the binding and the idle timeout are enforced by the same statement that finds the session, and a refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most, so a revocation made elsewhere takes up to 5 seconds to reach it; while the database is unreachable a copy checked less than 2 minutes ago is still honoured (bounded by the session's own expiry) rather than signing everybody out, and logins fail closed. The failed-login limiters stay per instance: with N instances an attacker has N times the budget.
 
 ## Plain HTTP
 

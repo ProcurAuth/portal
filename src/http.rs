@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body as _, Bytes, Incoming};
@@ -38,7 +38,7 @@ use crate::transport;
 use crate::ui;
 use crate::users::{check_new_password, normalize_login, Directory, UserRecord};
 use crate::util::{
-    constant_time_eq, html_escape, json_escape, parse_form, path_only,
+    blocking, constant_time_eq, html_escape, json_escape, parse_form, path_only,
     percent_decode_form, percent_encode_query_component, typed_login, validate_return_uri,
 };
 
@@ -64,6 +64,9 @@ const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
+/// With a shared database, how often at most a login the directory does not know makes a request
+/// read the accounts again.
+const UNKNOWN_LOGIN_REFRESH_GAP: Duration = Duration::from_secs(1);
 
 type ResponseBody = Full<Bytes>;
 type HttpResponse = Response<ResponseBody>;
@@ -123,12 +126,15 @@ impl AppState {
         store: Arc<Store>,
         tracker: Arc<Tracker>,
     ) -> Result<Self, String> {
-        let sessions = SessionStore::new(
+        let mut sessions = SessionStore::new(
             config.session.ttl,
             config.session.idle_timeout,
             config.session.max_active_sessions,
             Arc::clone(&tracker),
         );
+        if store.is_shared() {
+            sessions = sessions.shared(Arc::clone(&store));
+        }
         let users = Directory::new(store.load_users()?, config.users.max_users);
         let dummy_hash = hash_password(b"a password nobody has chosen")?;
         Ok(Self {
@@ -396,6 +402,13 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
         state.tracker.dropped(),
         state.tracker.flush_errors(),
     ));
+    if state.store.is_shared() {
+        body.push_str(
+            &state
+                .metrics
+                .render_shared(state.sessions.shared_errors(), state.users.refresh_errors()),
+        );
+    }
     metrics_response(StatusCode::OK, body)
 }
 
@@ -816,7 +829,7 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
     state.metrics.session_valid();
     let (roles, login) = match &session.principal {
         Principal::Superadmin => (None, state.superadmin_login.clone()),
-        Principal::User(login) => match state.users.roles_of(login) {
+        Principal::User(login) => match roles_of_known_user(state, login) {
             Some(roles) => (Some(roles), login.clone()),
             None => {
                 // The account was deleted while this session was open.
@@ -831,6 +844,22 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
         roles,
         login,
     })
+}
+
+/// The roles of an account, read again from the shared database first when the directory does not
+/// know it: the account may have been created, and its session opened, on another instance a moment
+/// ago, and a session must not be ended for that.
+fn roles_of_known_user(state: &AppState, login: &str) -> Option<Vec<String>> {
+    state.users.roles_of(login).or_else(|| {
+        refresh_directory_if_due(state).then(|| state.users.roles_of(login)).flatten()
+    })
+}
+
+/// A throttled read of the accounts from the shared database, for a request that met a login the
+/// directory does not hold. Always `false` with one instance, which is the only writer.
+fn refresh_directory_if_due(state: &AppState) -> bool {
+    state.store.is_shared()
+        && blocking(|| state.users.refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP))
 }
 
 fn ip_text(client: &Client) -> Option<String> {
@@ -1199,6 +1228,10 @@ async fn handle_login_post(
                 "authentication error\n",
             );
         }
+        Err(SessionIssueError::Storage) => {
+            state.metrics.login_internal_error();
+            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session store unavailable\n");
+        }
     });
 
     let mut response = redirect_response(StatusCode::SEE_OTHER, &rd);
@@ -1261,9 +1294,12 @@ fn identify(state: &AppState, typed: &str) -> Who {
         return Who::Superadmin;
     }
     match state.users.get(&login) {
-        Some(record) => Who::User(login, record),
-        None => Who::Unknown,
+        Some(record) => Some(record),
+        // Maybe created a moment ago on another instance.
+        None if refresh_directory_if_due(state) => state.users.get(&login),
+        None => None,
     }
+    .map_or(Who::Unknown, |record| Who::User(login, record))
 }
 
 /// The `Set-Cookie` value of a session.
@@ -1964,6 +2000,9 @@ fn switch_session(
         Err(SessionIssueError::Random) => {
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         }
+        Err(SessionIssueError::Storage) => {
+            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session store unavailable\n");
+        }
     };
     let cookie = session_cookie_header(state, client, token.as_str());
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err() {
@@ -2467,6 +2506,9 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
     line.push('}');
     eprintln!("{line}");
 }
+
+#[cfg(test)]
+mod cluster_tests;
 
 #[cfg(test)]
 mod tests {

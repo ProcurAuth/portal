@@ -291,8 +291,37 @@ pub fn short_agent(agent: &str) -> String {
     }
 }
 
+/// Runs blocking work (a call to the database) from code that may be on an async worker: the
+/// runtime is told to move its other tasks away from this thread meanwhile. Anywhere else (a plain
+/// thread, a test) it just runs.
+pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocking_work_runs_on_a_plain_thread_and_on_either_kind_of_runtime() {
+        assert_eq!(blocking(|| 1), 1);
+        let multi = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        // The call that would panic if the runtime were not told: another runtime's block_on.
+        let inner = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(
+            multi.block_on(async { blocking(|| inner.block_on(async { 2 })) }),
+            2
+        );
+        let single = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(single.block_on(async { blocking(|| 3) }), 3, "no hand-off on one thread");
+    }
+
     use super::*;
 
     #[test]

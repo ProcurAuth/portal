@@ -11,6 +11,7 @@ mod metrics;
 mod rate_limit;
 mod session;
 mod store;
+mod sync;
 mod tracking;
 mod transport;
 mod ui;
@@ -25,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use config::{Config, SessionSecretConfig};
+use config::{Config, SessionSecretConfig, StorageBackend};
 use crypto::{generate_session_secret, hash_password};
 use http::SuperAdmin;
 use store::Store;
@@ -48,7 +49,7 @@ fn real_main() -> Result<(), String> {
             let mut config = Config::load(&config_path)?;
             let superadmin = load_superadmin(&config)?;
             let signing_secret = load_session_secret(&mut config)?;
-            let store = Arc::new(Store::open(&config.storage.database)?);
+            let store = Arc::new(open_store(&config)?);
             let tracker = Tracker::start(
                 Arc::clone(&store),
                 tracking::FLUSH_EVERY,
@@ -61,7 +62,24 @@ fn real_main() -> Result<(), String> {
                 store,
                 tracker,
             )?);
+            sync::start(Arc::clone(&state))?;
             http::serve(state)
+        }
+        // Copies the accounts and the history of a SQLite file into the (empty) PostgreSQL database
+        // the configuration names. The file is only read.
+        "import-sqlite" => {
+            let (config_path, from) = parse_import_args(args.collect())?;
+            let config = Config::load(&config_path)?;
+            if !matches!(config.storage.backend, StorageBackend::Postgres(_)) {
+                return Err("import-sqlite needs a configuration with a postgres block".into());
+            }
+            let store = open_store(&config)?;
+            let report = store.import_sqlite(&from)?;
+            println!(
+                "imported {} accounts, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
+                report.users, report.sessions, report.accesses, report.audit, report.logins
+            );
+            Ok(())
         }
         "check-config" => {
             let config_path = parse_config_arg(args.collect())?;
@@ -70,6 +88,14 @@ fn real_main() -> Result<(), String> {
             superadmin.password_hash.zeroize();
             let mut signing_secret = load_session_secret(&mut config)?;
             signing_secret.zeroize();
+            if let StorageBackend::Postgres(postgres) = &config.storage.backend {
+                let mut password = read_secret_file(&postgres.password_file, 1024, "postgres password")?;
+                let empty = password.is_empty();
+                password.zeroize();
+                if empty {
+                    return Err(format!("postgres password is empty: {}", postgres.password_file.display()));
+                }
+            }
             println!("configuration ok");
             Ok(())
         }
@@ -112,6 +138,36 @@ fn parse_config_arg(args: Vec<String>) -> Result<PathBuf, String> {
         return Err("expected: --config <FILE>".into());
     }
     Ok(PathBuf::from(&args[1]))
+}
+
+/// `--config <FILE> --from <FILE>`.
+fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
+    match args.as_slice() {
+        [config_flag, config, from_flag, from] if config_flag == "--config" && from_flag == "--from" => {
+            Ok((PathBuf::from(config), PathBuf::from(from)))
+        }
+        _ => Err("expected: --config <FILE> --from <SQLITE FILE>".into()),
+    }
+}
+
+/// The database the configuration names. With PostgreSQL this waits up to a minute for it to answer.
+fn open_store(config: &Config) -> Result<Store, String> {
+    match &config.storage.backend {
+        StorageBackend::Sqlite(path) => Store::open(path),
+        StorageBackend::Postgres(postgres) => {
+            let mut raw = read_secret_file(&postgres.password_file, 1024, "postgres password")?;
+            while raw.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
+                raw.pop();
+            }
+            let password = String::from_utf8(raw.clone())
+                .map_err(|_| format!("postgres password is not UTF-8: {}", postgres.password_file.display()));
+            raw.zeroize();
+            let mut password = password?;
+            let store = Store::open_postgres(postgres, &password);
+            password.zeroize();
+            store
+        }
+    }
 }
 
 fn read_secret_file(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
@@ -236,7 +292,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal healthcheck --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|roles|services|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|roles|services|logins] > page.html\n  portal version",
         release_version()
     );
 }

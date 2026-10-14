@@ -3,8 +3,9 @@
 //!
 //! Requests only push small values into memory (a bounded channel for lifecycle events, two maps for
 //! the "session was seen" and "service was used" counters). One writer thread empties them into
-//! SQLite every few seconds in a single transaction, so the disk is never touched per request and a
-//! slow disk cannot slow a login down: when the channel is full an event is dropped and counted.
+//! the database every few seconds in a single transaction, so the database is never touched per
+//! request and a slow one cannot slow a login down: when the channel is full an event is dropped
+//! and counted. Each instance of a shared database has its own writer; they write disjoint events.
 //!
 //! No request path or query is kept, only the service the path belongs to.
 
@@ -165,7 +166,15 @@ impl Tracker {
         Arc::new(Self::new(None))
     }
 
-    /// Closes the sessions a previous run left open, then starts the writer thread.
+    /// A tracker whose events can be read back, for the tests of what emits them.
+    #[cfg(test)]
+    pub fn recording() -> (Arc<Self>, Receiver<Event>) {
+        let (tx, rx) = sync_channel(CHANNEL_CAPACITY);
+        (Arc::new(Self::new(Some(tx))), rx)
+    }
+
+    /// Closes the sessions a previous run left open (only with a SQLite file: sessions of a shared
+    /// database outlive a restart), then starts the writer thread.
     pub fn start(
         store: Arc<Store>,
         flush_every: Duration,
@@ -285,7 +294,7 @@ impl Tracker {
     }
 }
 
-fn log_error(event: &str, error: &str) {
+pub fn log_error(event: &str, error: &str) {
     eprintln!(
         "{{\"ts\":{},\"level\":\"error\",\"event\":\"{}\",\"error\":\"{}\"}}",
         unix_now(),

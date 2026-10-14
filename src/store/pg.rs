@@ -1,0 +1,1164 @@
+//! The PostgreSQL backend: any number of portal instances share one database.
+//!
+//! A small pool of blocking connections, plain TCP (no TLS stack, so no C dependency). Callers run
+//! these methods on blocking threads, like the SQLite ones. A connection that broke is replaced and
+//! the operation retried once, which is what a failover of the database looks like from here.
+//!
+//! The accounts, the history and the sessions live here. Every write that two instances could make
+//! at once is one statement or one transaction, so the instances never need to talk to each other.
+
+use std::ops::{Deref, DerefMut};
+use std::sync::{Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use postgres::error::SqlState;
+use postgres::{Client, NoTls};
+
+use super::*;
+use crate::config::PostgresConfig;
+use crate::tracking::{unix_now, AuditEvent, Batch, EndReason, Event, LoginAttempt, SessionStart};
+
+/// How long the first connection is retried: a pod starts before its network is ready, and the
+/// database may be failing over.
+pub const STARTUP_RETRY: Duration = Duration::from_secs(60);
+/// How long a caller waits for a free connection of the pool.
+const POOL_WAIT: Duration = Duration::from_secs(5);
+/// A statement that runs longer is cancelled by the server.
+const STATEMENT_TIMEOUT_MS: u64 = 15_000;
+
+/// Advisory locks: one per job that must not run twice at once.
+const LOCK_SCHEMA: i64 = 0x7074_6c01;
+const LOCK_APPLY: i64 = 0x7074_6c02;
+
+/// One entry per schema version, applied in order and recorded in `schema_migrations`.
+const SCHEMA: &[&str] = &["
+CREATE TABLE users (
+  id BIGSERIAL PRIMARY KEY,
+  login TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE TABLE user_roles (
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  PRIMARY KEY (user_id, role)
+);
+CREATE TABLE sessions_log (
+  sid BIGINT PRIMARY KEY,
+  login TEXT NOT NULL,
+  superadmin BOOLEAN NOT NULL,
+  impersonated BOOLEAN NOT NULL,
+  ip TEXT,
+  user_agent TEXT NOT NULL,
+  started_at BIGINT NOT NULL,
+  last_seen_at BIGINT NOT NULL,
+  ended_at BIGINT,
+  end_reason TEXT
+);
+CREATE INDEX sessions_log_login ON sessions_log (login, started_at);
+CREATE INDEX sessions_log_started ON sessions_log (started_at);
+CREATE TABLE service_access (
+  sid BIGINT NOT NULL,
+  service_id TEXT NOT NULL,
+  first_at BIGINT NOT NULL,
+  last_at BIGINT NOT NULL,
+  hits BIGINT NOT NULL,
+  ip TEXT,
+  PRIMARY KEY (sid, service_id)
+);
+CREATE TABLE audit_events (
+  id BIGSERIAL PRIMARY KEY,
+  ts BIGINT NOT NULL,
+  kind TEXT NOT NULL,
+  login TEXT,
+  actor TEXT,
+  ip TEXT,
+  user_agent TEXT NOT NULL
+);
+CREATE INDEX audit_events_ts ON audit_events (ts);
+CREATE TABLE login_attempts (
+  id BIGSERIAL PRIMARY KEY,
+  ts BIGINT NOT NULL,
+  ip TEXT,
+  login TEXT NOT NULL,
+  known BOOLEAN NOT NULL,
+  success BOOLEAN NOT NULL,
+  user_agent TEXT NOT NULL
+);
+CREATE INDEX login_attempts_ts ON login_attempts (ts);
+-- The live sessions, shared by every instance. The cookie is never stored, only its SHA-256.
+-- `login` is NULL for the superadmin.
+CREATE TABLE sessions (
+  digest BYTEA PRIMARY KEY,
+  binding BYTEA NOT NULL,
+  sid BIGINT NOT NULL UNIQUE,
+  login TEXT,
+  impersonated BOOLEAN NOT NULL,
+  created_at BIGINT NOT NULL,
+  expires_at BIGINT NOT NULL,
+  last_seen_at BIGINT NOT NULL
+);
+CREATE INDEX sessions_login ON sessions (login);
+"];
+
+/// What went wrong, with the cause when the server did not say (a refused connection reads
+/// "error connecting to server: Connection refused" rather than the first half only).
+fn db(error: postgres::Error) -> String {
+    let mut text = error.to_string();
+    if error.as_db_error().is_none() {
+        let mut cause = std::error::Error::source(&error);
+        while let Some(inner) = cause {
+            text.push_str(": ");
+            text.push_str(&inner.to_string());
+            cause = inner.source();
+        }
+    }
+    text
+}
+
+/// A failure that the same operation on a fresh connection may not have.
+fn is_transient(error: &postgres::Error) -> bool {
+    match error.code() {
+        // Not an answer of the server: the connection broke or timed out.
+        None => true,
+        Some(code) => {
+            *code == SqlState::T_R_DEADLOCK_DETECTED
+                || *code == SqlState::T_R_SERIALIZATION_FAILURE
+                || *code == SqlState::ADMIN_SHUTDOWN
+                || *code == SqlState::CRASH_SHUTDOWN
+                || *code == SqlState::CANNOT_CONNECT_NOW
+                // The service pointed at a primary that has just been demoted.
+                || *code == SqlState::READ_ONLY_SQL_TRANSACTION
+        }
+    }
+}
+
+struct PoolState {
+    idle: Vec<Client>,
+    /// Connections that exist: idle and lent.
+    open: usize,
+}
+
+struct Pool {
+    config: postgres::Config,
+    #[cfg(test)]
+    down: std::sync::atomic::AtomicBool,
+    max: usize,
+    state: Mutex<PoolState>,
+    freed: Condvar,
+}
+
+/// A connection on loan; it goes back to the pool when dropped, unless it broke.
+struct Conn<'a> {
+    pool: &'a Pool,
+    client: Option<Client>,
+}
+
+impl Deref for Conn<'_> {
+    type Target = Client;
+    fn deref(&self) -> &Client {
+        self.client.as_ref().expect("connection present until drop")
+    }
+}
+
+impl DerefMut for Conn<'_> {
+    fn deref_mut(&mut self) -> &mut Client {
+        self.client.as_mut().expect("connection present until drop")
+    }
+}
+
+impl Conn<'_> {
+    /// Does not go back to the pool.
+    fn discard(&mut self) {
+        if self.client.take().is_some() {
+            self.pool.release(None);
+        }
+    }
+}
+
+impl Drop for Conn<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            self.pool.release(Some(client));
+        }
+    }
+}
+
+impl Pool {
+    fn state(&self) -> std::sync::MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn release(&self, client: Option<Client>) {
+        let mut state = self.state();
+        match client {
+            Some(client) if !client.is_closed() => state.idle.push(client),
+            _ => state.open -= 1,
+        }
+        self.freed.notify_one();
+    }
+
+    fn get(&self) -> Result<Conn<'_>, String> {
+        #[cfg(test)]
+        if self.down.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("the database is down (test)".into());
+        }
+        let give_up = Instant::now() + POOL_WAIT;
+        let mut state = self.state();
+        loop {
+            while let Some(client) = state.idle.pop() {
+                if !client.is_closed() {
+                    return Ok(Conn {
+                        pool: self,
+                        client: Some(client),
+                    });
+                }
+                state.open -= 1;
+            }
+            if state.open < self.max {
+                state.open += 1;
+                drop(state);
+                return match self.config.connect(NoTls) {
+                    Ok(client) => Ok(Conn {
+                        pool: self,
+                        client: Some(client),
+                    }),
+                    Err(e) => {
+                        self.release(None);
+                        Err(db(e))
+                    }
+                };
+            }
+            let left = give_up.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("no free database connection".into());
+            }
+            state = self
+                .freed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+    }
+}
+
+pub struct Pg {
+    pool: Pool,
+}
+
+impl Pg {
+    /// Connects (retrying for `retry`, the database may not be reachable yet) and brings the schema
+    /// up to date.
+    pub fn connect(cfg: &PostgresConfig, password: &str, retry: Duration) -> Result<Self, String> {
+        let mut config = postgres::Config::new();
+        config
+            .host(&cfg.host)
+            .port(cfg.port)
+            .dbname(&cfg.database)
+            .user(&cfg.user)
+            .password(password.as_bytes())
+            .connect_timeout(cfg.connect_timeout)
+            .keepalives(true)
+            .keepalives_idle(Duration::from_secs(20))
+            .tcp_user_timeout(Duration::from_secs(20))
+            .application_name("portal")
+            .options(&format!("-c statement_timeout={STATEMENT_TIMEOUT_MS}"));
+        Self::start(config, cfg.pool_size, retry)
+    }
+
+    fn start(config: postgres::Config, pool_size: usize, retry: Duration) -> Result<Self, String> {
+        let pg = Self {
+            pool: Pool {
+                config,
+                #[cfg(test)]
+                down: std::sync::atomic::AtomicBool::new(false),
+                max: pool_size,
+                state: Mutex::new(PoolState {
+                    idle: Vec::new(),
+                    open: 0,
+                }),
+                freed: Condvar::new(),
+            },
+        };
+        pg.wait_until_reachable(retry)?;
+        pg.migrate()
+            .map_err(|e| format!("postgres schema migration: {e}"))?;
+        Ok(pg)
+    }
+
+    fn wait_until_reachable(&self, retry: Duration) -> Result<(), String> {
+        let give_up = Instant::now() + retry;
+        let mut announced = false;
+        loop {
+            match self.pool.get() {
+                Ok(_) => return Ok(()),
+                Err(error) if Instant::now() < give_up => {
+                    if !announced {
+                        eprintln!(
+                            "{{\"ts\":{},\"level\":\"warn\",\"event\":\"postgres_unreachable\",\"retry_for_s\":{},\"error\":\"{}\"}}",
+                            unix_now(),
+                            retry.as_secs(),
+                            crate::util::json_escape(&error)
+                        );
+                        announced = true;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+                Err(error) => return Err(format!("cannot reach postgres: {error}")),
+            }
+        }
+    }
+
+    /// Runs `operation` on a pooled connection; once more on a fresh one if the failure is the
+    /// kind a new connection cures (the operation is a whole transaction, so it can be repeated).
+    fn run<T>(
+        &self,
+        mut operation: impl FnMut(&mut Client) -> Result<T, postgres::Error>,
+    ) -> Result<T, String> {
+        let mut retried = false;
+        loop {
+            let mut conn = self.pool.get()?;
+            match operation(&mut conn) {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    let transient = is_transient(&error);
+                    if transient || conn.is_closed() {
+                        conn.discard();
+                    }
+                    if !transient || retried {
+                        return Err(db(error));
+                    }
+                    retried = true;
+                }
+            }
+        }
+    }
+
+    fn migrate(&self) -> Result<(), String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_SCHEMA])?;
+            tx.batch_execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL)",
+            )?;
+            let current: i64 = tx
+                .query_one(
+                    "SELECT COALESCE(MAX(version), 0)::bigint FROM schema_migrations",
+                    &[],
+                )?
+                .get(0);
+            if current as usize > SCHEMA.len() {
+                // Not a database failure: reported by the caller as it is.
+                return Ok(Err(format!(
+                    "the database schema is version {current}, this portal understands {}",
+                    SCHEMA.len()
+                )));
+            }
+            for (index, sql) in SCHEMA.iter().enumerate().skip(current as usize) {
+                tx.batch_execute(sql)?;
+                tx.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)",
+                    &[&((index + 1) as i64), &unix_now()],
+                )?;
+            }
+            tx.commit()?;
+            Ok(Ok(()))
+        })?
+    }
+
+    // Accounts --------------------------------------------------------------------------------
+
+    pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
+        self.run(|c| {
+            Ok(c.query(
+                "SELECT u.login, u.password_hash, u.created_at,
+                        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id
+                               ORDER BY r.role COLLATE \"C\")
+                   FROM users u ORDER BY u.login COLLATE \"C\"",
+                &[],
+            )?
+            .into_iter()
+            .map(|row| UserRow {
+                login: row.get(0),
+                password_hash: row.get(1),
+                created_at: row.get(2),
+                roles: row.get(3),
+            })
+            .collect())
+        })
+    }
+
+    pub fn insert_user(&self, user: &UserRow) -> Result<(), InsertError> {
+        let inserted = self
+            .run(|c| {
+                let mut tx = c.transaction()?;
+                let Some(row) = tx.query_opt(
+                    "INSERT INTO users (login, password_hash, created_at) VALUES ($1, $2, $3)
+                     ON CONFLICT (login) DO NOTHING RETURNING id",
+                    &[&user.login, &user.password_hash, &user.created_at],
+                )?
+                else {
+                    return Ok(false);
+                };
+                let id: i64 = row.get(0);
+                for role in &user.roles {
+                    tx.execute(
+                        "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                        &[&id, role],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(true)
+            })
+            .map_err(InsertError::Db)?;
+        if inserted {
+            Ok(())
+        } else {
+            Err(InsertError::Exists)
+        }
+    }
+
+    pub fn update_user(
+        &self,
+        login: &str,
+        password_hash: Option<&str>,
+        roles: &[String],
+    ) -> Result<bool, String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            let Some(row) = tx.query_opt(
+                "SELECT id FROM users WHERE login = $1 FOR UPDATE",
+                &[&login],
+            )?
+            else {
+                return Ok(false);
+            };
+            let id: i64 = row.get(0);
+            if let Some(hash) = password_hash {
+                tx.execute(
+                    "UPDATE users SET password_hash = $2 WHERE id = $1",
+                    &[&id, &hash],
+                )?;
+            }
+            tx.execute("DELETE FROM user_roles WHERE user_id = $1", &[&id])?;
+            for role in roles {
+                tx.execute(
+                    "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&id, role],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    pub fn remove_user(&self, login: &str) -> Result<bool, String> {
+        self.run(|c| Ok(c.execute("DELETE FROM users WHERE login = $1", &[&login])? > 0))
+    }
+
+    // History: writes -------------------------------------------------------------------------
+
+    pub fn apply(&self, batch: &Batch) -> Result<(), String> {
+        if batch.events.is_empty() && batch.hits.is_empty() && batch.seen.is_empty() {
+            return Ok(());
+        }
+        // The same rows in the same order on every instance, so two flushes never deadlock.
+        let mut hits: Vec<_> = batch.hits.iter().collect();
+        hits.sort_by(|a, b| a.0.cmp(b.0));
+        let mut seen: Vec<_> = batch.seen.iter().collect();
+        seen.sort_by_key(|(sid, _)| **sid);
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
+            let mut logged_attempts = false;
+            for event in &batch.events {
+                match event {
+                    Event::SessionStarted(start) => {
+                        tx.execute(
+                            "INSERT INTO sessions_log
+                               (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                             ON CONFLICT (sid) DO NOTHING",
+                            &[
+                                &(start.sid as i64),
+                                &start.login,
+                                &start.superadmin,
+                                &start.impersonated,
+                                &start.ip,
+                                &start.user_agent,
+                                &start.at,
+                            ],
+                        )?;
+                    }
+                    Event::SessionEnded { sid, reason, at } => {
+                        tx.execute(
+                            "UPDATE sessions_log
+                                SET ended_at = $2, end_reason = $3, last_seen_at = GREATEST(last_seen_at, $2)
+                              WHERE sid = $1 AND ended_at IS NULL",
+                            &[&(*sid as i64), at, &reason.as_str()],
+                        )?;
+                    }
+                    Event::Audit(audit) => insert_audit(&mut tx, audit)?,
+                    Event::Login(attempt) => {
+                        insert_login(&mut tx, attempt)?;
+                        logged_attempts = true;
+                    }
+                }
+            }
+            if logged_attempts {
+                tx.execute(
+                    "DELETE FROM login_attempts WHERE id <= (SELECT MAX(id) FROM login_attempts) - $1",
+                    &[&MAX_LOGIN_ROWS],
+                )?;
+            }
+            for ((sid, service), hit) in &hits {
+                tx.execute(
+                    "INSERT INTO service_access (sid, service_id, first_at, last_at, hits, ip)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (sid, service_id) DO UPDATE SET
+                       last_at = GREATEST(service_access.last_at, EXCLUDED.last_at),
+                       hits = service_access.hits + EXCLUDED.hits,
+                       ip = COALESCE(EXCLUDED.ip, service_access.ip)",
+                    &[
+                        &(*sid as i64),
+                        service,
+                        &hit.first_at,
+                        &hit.last_at,
+                        &(hit.hits as i64),
+                        &hit.ip,
+                    ],
+                )?;
+            }
+            for (sid, at) in &seen {
+                tx.execute(
+                    "UPDATE sessions_log SET last_seen_at = GREATEST(last_seen_at, $2)
+                      WHERE sid = $1 AND ended_at IS NULL",
+                    &[&(**sid as i64), *at],
+                )?;
+            }
+            tx.commit()
+        })
+    }
+
+    /// Closes the history rows of sessions that are no longer live and whose end nobody recorded
+    /// (an instance died before it flushed): they end at the last time they were seen. Only rows not
+    /// seen since `before` are looked at, so an end that is still waiting for its flush is not
+    /// taken for a lost one.
+    pub fn close_lost_sessions(&self, before: i64, reason: &str) -> Result<usize, String> {
+        self.run(|c| {
+            Ok(c.execute(
+                "UPDATE sessions_log SET ended_at = last_seen_at, end_reason = $2
+                  WHERE ended_at IS NULL AND last_seen_at < $1
+                    AND sid NOT IN (SELECT sid FROM sessions)",
+                &[&before, &reason],
+            )? as usize)
+        })
+    }
+
+    pub fn prune(&self, cutoff: i64) -> Result<(), String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
+            tx.execute("DELETE FROM sessions_log WHERE started_at < $1", &[&cutoff])?;
+            tx.execute(
+                "DELETE FROM service_access WHERE sid NOT IN (SELECT sid FROM sessions_log)",
+                &[],
+            )?;
+            tx.execute("DELETE FROM audit_events WHERE ts < $1", &[&cutoff])?;
+            tx.execute("DELETE FROM login_attempts WHERE ts < $1", &[&cutoff])?;
+            tx.commit()
+        })
+    }
+
+    // History: reads --------------------------------------------------------------------------
+
+    pub fn login_attempts(
+        &self,
+        now: i64,
+        page: u32,
+        only_failed: bool,
+    ) -> Result<LoginPage, String> {
+        self.run(|c| {
+            let matching: i64 = c
+                .query_one(
+                    "SELECT COUNT(*) FROM login_attempts WHERE (NOT $1::boolean OR NOT success)",
+                    &[&only_failed],
+                )?
+                .get(0);
+            let mut result = LoginPage {
+                matching: matching as u32,
+                ..LoginPage::default()
+            };
+            result.page = page.min(result.pages() - 1);
+            result.rows = c
+                .query(
+                    "SELECT ts, login, known, success, ip, user_agent FROM login_attempts
+                      WHERE (NOT $1::boolean OR NOT success)
+                      ORDER BY id DESC LIMIT $2 OFFSET $3",
+                    &[
+                        &only_failed,
+                        &LOGIN_PAGE_SIZE,
+                        &(i64::from(result.page) * LOGIN_PAGE_SIZE),
+                    ],
+                )?
+                .into_iter()
+                .map(|row| LoginRow {
+                    ts: row.get(0),
+                    login: row.get(1),
+                    known: row.get(2),
+                    success: row.get(3),
+                    ip: row.get(4),
+                    user_agent: row.get(5),
+                })
+                .collect();
+            let figures = c.query_one(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT success),
+                        COUNT(DISTINCT CASE WHEN NOT success THEN ip END)
+                   FROM login_attempts WHERE ts >= $1",
+                &[&(now - DAY)],
+            )?;
+            result.attempts_24h = figures.get::<_, i64>(0) as u32;
+            result.failed_24h = figures.get::<_, i64>(1) as u32;
+            result.addresses_24h = figures.get::<_, i64>(2) as u32;
+            Ok(result)
+        })
+    }
+
+    pub fn snapshot(&self, accounts: &[(String, bool)], now: i64) -> Result<Snapshot, String> {
+        self.run(|c| {
+            let first_day = now - now.rem_euclid(DAY) - (GRAPH_DAYS as i64 - 1) * DAY;
+            let mut snapshot = Snapshot {
+                days: day_stats(c, first_day, None)?,
+                first_day,
+                ..Snapshot::default()
+            };
+            for (login, superadmin) in accounts {
+                let days = day_stats(c, first_day, Some((login, *superadmin)))?;
+                let recent = c
+                    .query(
+                        "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated
+                           FROM sessions_log WHERE login = $1 AND superadmin = $2
+                          ORDER BY started_at DESC, sid DESC LIMIT $3",
+                        &[login, superadmin, &RECENT_SESSIONS],
+                    )?
+                    .into_iter()
+                    .map(|row| SessionRow {
+                        started_at: row.get(0),
+                        last_seen_at: row.get(1),
+                        ended_at: row.get(2),
+                        end_reason: row.get(3),
+                        ip: row.get(4),
+                        user_agent: row.get(5),
+                        impersonated: row.get(6),
+                    })
+                    .collect();
+                let services = c
+                    .query(
+                        "SELECT a.service_id, SUM(a.hits)::bigint, MAX(a.last_at)
+                           FROM service_access a JOIN sessions_log s ON s.sid = a.sid
+                          WHERE s.login = $1 AND s.superadmin = $2 AND NOT s.impersonated
+                          GROUP BY a.service_id ORDER BY MAX(a.last_at) DESC LIMIT $3",
+                        &[login, superadmin, &TOP_SERVICES],
+                    )?
+                    .into_iter()
+                    .map(|row| ServiceUse {
+                        service_id: row.get(0),
+                        hits: row.get::<_, i64>(1) as u64,
+                        last_at: row.get(2),
+                    })
+                    .collect();
+                let failed_30d: i64 = c
+                    .query_one(
+                        "SELECT COUNT(*) FROM audit_events WHERE kind = 'login_failed' AND login = $1 AND ts >= $2",
+                        &[login, &first_day],
+                    )?
+                    .get(0);
+                let last_login: Option<i64> = c
+                    .query_one(
+                        "SELECT MAX(started_at) FROM sessions_log
+                          WHERE login = $1 AND superadmin = $2 AND NOT impersonated",
+                        &[login, superadmin],
+                    )?
+                    .get(0);
+                snapshot.accounts.push(AccountActivity {
+                    login: login.clone(),
+                    sessions_30d: days.iter().map(|d| d.sessions).sum(),
+                    days,
+                    recent,
+                    services,
+                    failed_30d: failed_30d as u32,
+                    last_login,
+                });
+            }
+            snapshot.recent_events = c
+                .query(
+                    "SELECT ts, kind, login, actor, ip FROM audit_events ORDER BY ts DESC, id DESC LIMIT $1",
+                    &[&RECENT_EVENTS],
+                )?
+                .into_iter()
+                .map(|row| AuditRow {
+                    ts: row.get(0),
+                    kind: row.get(1),
+                    login: row.get(2),
+                    actor: row.get(3),
+                    ip: row.get(4),
+                })
+                .collect();
+            let unknown: i64 = c
+                .query_one(
+                    "SELECT COUNT(*) FROM audit_events WHERE kind = 'login_failed' AND login IS NULL AND ts >= $1",
+                    &[&first_day],
+                )?
+                .get(0);
+            snapshot.unknown_failures_30d = unknown as u32;
+            Ok(snapshot)
+        })
+    }
+
+    // Shared sessions -------------------------------------------------------------------------
+
+    /// Records a new session, and its line of the history in the same transaction, so no other
+    /// instance can see a session whose history row does not exist yet. `false`: `max_active`
+    /// sessions are live already. The count is read without a lock, so two instances racing at the
+    /// limit can overshoot it by one each.
+    pub fn session_insert(
+        &self,
+        digest: &[u8; 32],
+        binding: &[u8; 32],
+        session: &SharedSession,
+        start: &SessionStart,
+        max_active: usize,
+    ) -> Result<bool, String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            let inserted = tx.execute(
+                "INSERT INTO sessions
+                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
+                 SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint
+                  WHERE (SELECT COUNT(*) FROM sessions WHERE expires_at > $6) < $8",
+                &[
+                    &digest.as_slice(),
+                    &binding.as_slice(),
+                    &(session.sid as i64),
+                    &session.login,
+                    &session.impersonated,
+                    &start.at,
+                    &session.expires_at,
+                    &(max_active as i64),
+                ],
+            )?;
+            if inserted == 0 {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO sessions_log
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                 ON CONFLICT (sid) DO NOTHING",
+                &[
+                    &(start.sid as i64),
+                    &start.login,
+                    &start.superadmin,
+                    &start.impersonated,
+                    &start.ip,
+                    &start.user_agent,
+                    &start.at,
+                ],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// The live session of `digest` issued for `binding`, whose idle timer is renewed to `now`.
+    /// `None` when there is none, it ended, or the binding differs (which leaves it untouched).
+    pub fn session_touch(
+        &self,
+        digest: &[u8; 32],
+        binding: &[u8; 32],
+        now: i64,
+        idle_secs: i64,
+    ) -> Result<Option<SharedSession>, String> {
+        self.run(|c| {
+            Ok(c.query_opt(
+                "UPDATE sessions SET last_seen_at = $3
+                  WHERE digest = $1 AND binding = $2 AND expires_at > $3 AND last_seen_at > $3 - $4
+              RETURNING sid, login, impersonated, expires_at",
+                &[&digest.as_slice(), &binding.as_slice(), &now, &idle_secs],
+            )?
+            .map(shared_session))
+        })
+    }
+
+    /// Ends the session of `digest`; the session when this call is the one that ended it.
+    pub fn session_delete(&self, digest: &[u8; 32]) -> Result<Option<SharedSession>, String> {
+        self.run(|c| {
+            Ok(c.query_opt(
+                "DELETE FROM sessions WHERE digest = $1
+                 RETURNING sid, login, impersonated, expires_at",
+                &[&digest.as_slice()],
+            )?
+            .map(shared_session))
+        })
+    }
+
+    /// Ends every session of one user; the identifiers this call ended.
+    pub fn sessions_delete_user(&self, login: &str) -> Result<Vec<u64>, String> {
+        self.run(|c| {
+            Ok(c.query(
+                "DELETE FROM sessions WHERE login = $1 RETURNING sid",
+                &[&login],
+            )?
+            .into_iter()
+            .map(|row| row.get::<_, i64>(0) as u64)
+            .collect())
+        })
+    }
+
+    /// Ends the sessions past their lifetime or unused for `idle_secs`; each with whether it
+    /// expired (rather than idled out). Exactly one caller gets any given session back.
+    pub fn sessions_expire(&self, now: i64, idle_secs: i64) -> Result<Vec<(u64, bool)>, String> {
+        self.run(|c| {
+            Ok(c.query(
+                "DELETE FROM sessions WHERE expires_at <= $1 OR last_seen_at <= $1 - $2
+             RETURNING sid, expires_at <= $1",
+                &[&now, &idle_secs],
+            )?
+            .into_iter()
+            .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, bool>(1)))
+            .collect())
+        })
+    }
+
+    pub fn sessions_count(&self) -> Result<usize, String> {
+        self.run(|c| {
+            Ok(c.query_one("SELECT COUNT(*) FROM sessions", &[])?
+                .get::<_, i64>(0) as usize)
+        })
+    }
+
+    // Import ----------------------------------------------------------------------------------
+
+    /// Copies a SQLite dump into this database, in one transaction, and only into an empty one.
+    /// The sessions of the dump that were still open end where they were last seen: sessions do not
+    /// survive the move (they were in the memory of the old process).
+    pub fn import(&self, dump: &Dump) -> Result<ImportReport, String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
+            tx.batch_execute(
+                "LOCK TABLE users, user_roles, sessions_log, service_access, audit_events, login_attempts
+                   IN ACCESS EXCLUSIVE MODE",
+            )?;
+            for table in IMPORTED_TABLES {
+                let rows: i64 = tx
+                    .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])?
+                    .get(0);
+                if rows > 0 {
+                    return Ok(Err(format!(
+                        "the target database is not empty ({table} has {rows} rows): nothing was imported"
+                    )));
+                }
+            }
+            let user = tx.prepare("INSERT INTO users (id, login, password_hash, created_at) VALUES ($1, $2, $3, $4)")?;
+            let role = tx.prepare("INSERT INTO user_roles (user_id, role) VALUES ($1, $2)")?;
+            for (id, row) in &dump.users {
+                tx.execute(&user, &[id, &row.login, &row.password_hash, &row.created_at])?;
+                for name in &row.roles {
+                    tx.execute(&role, &[id, name])?;
+                }
+            }
+            let session = tx.prepare(
+                "INSERT INTO sessions_log
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )?;
+            for row in &dump.sessions {
+                let open = row.ended_at.is_none();
+                let ended_at = row.ended_at.or(open.then_some(row.last_seen_at));
+                let end_reason = match (&row.end_reason, open) {
+                    (reason, false) => reason.clone(),
+                    (_, true) => Some(EndReason::Restart.as_str().to_string()),
+                };
+                tx.execute(
+                    &session,
+                    &[
+                        &row.sid,
+                        &row.login,
+                        &row.superadmin,
+                        &row.impersonated,
+                        &row.ip,
+                        &row.user_agent,
+                        &row.started_at,
+                        &row.last_seen_at,
+                        &ended_at,
+                        &end_reason,
+                    ],
+                )?;
+            }
+            let access = tx.prepare(
+                "INSERT INTO service_access (sid, service_id, first_at, last_at, hits, ip)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )?;
+            for row in &dump.accesses {
+                tx.execute(
+                    &access,
+                    &[&row.sid, &row.service_id, &row.first_at, &row.last_at, &row.hits, &row.ip],
+                )?;
+            }
+            let audit = tx.prepare(
+                "INSERT INTO audit_events (id, ts, kind, login, actor, ip, user_agent)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )?;
+            for row in &dump.audit {
+                tx.execute(
+                    &audit,
+                    &[&row.id, &row.ts, &row.kind, &row.login, &row.actor, &row.ip, &row.user_agent],
+                )?;
+            }
+            let login = tx.prepare(
+                "INSERT INTO login_attempts (id, ts, ip, login, known, success, user_agent)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )?;
+            for row in &dump.logins {
+                tx.execute(
+                    &login,
+                    &[&row.id, &row.ts, &row.ip, &row.login, &row.known, &row.success, &row.user_agent],
+                )?;
+            }
+            // The rows kept their identifiers: the next ones continue after them.
+            for (table, column) in [
+                ("users", "id"),
+                ("audit_events", "id"),
+                ("login_attempts", "id"),
+            ] {
+                tx.execute(
+                    &format!(
+                        "SELECT setval(pg_get_serial_sequence('{table}', '{column}'),
+                                       GREATEST((SELECT COALESCE(MAX({column}), 0) FROM {table}), 1),
+                                       (SELECT COUNT(*) > 0 FROM {table}))"
+                    ),
+                    &[],
+                )?;
+            }
+            tx.commit()?;
+            Ok(Ok(ImportReport {
+                users: dump.users.len(),
+                sessions: dump.sessions.len(),
+                accesses: dump.accesses.len(),
+                audit: dump.audit.len(),
+                logins: dump.logins.len(),
+            }))
+        })?
+    }
+
+    /// A store in a schema of its own in the database `url` names (`postgres://user:password@host/db`).
+    #[cfg(test)]
+    pub fn open_isolated(url: &str) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let base: postgres::Config = url.parse().expect("a PostgreSQL URL");
+        // The process number repeats from one container to the next, so the clock tells runs apart.
+        let schema = format!(
+            "portal_test_{}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        base.connect(NoTls)
+            .expect("the test database answers")
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+        let mut config = base;
+        config.application_name(&schema).options(&format!(
+            "-c statement_timeout={STATEMENT_TIMEOUT_MS} -c search_path={schema}"
+        ));
+        Self::start(config, 4, Duration::from_secs(5)).unwrap()
+    }
+
+    /// Another instance of the portal on the same database: its own pool, the same schema.
+    #[cfg(test)]
+    pub fn sibling(&self) -> Self {
+        Self::start(
+            self.pool.config.clone(),
+            self.pool.max,
+            Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    /// Makes every new connection fail, as a database that went away does (the pooled ones are dropped).
+    #[cfg(test)]
+    pub fn go_down(&self) {
+        self.pool
+            .down
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut state = self.pool.state();
+        state.open -= state.idle.len();
+        state.idle.clear();
+    }
+
+    #[cfg(test)]
+    pub fn count(&self, table: &str) -> i64 {
+        self.run(|c| {
+            Ok(c.query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])?
+                .get(0))
+        })
+        .unwrap()
+    }
+}
+
+/// The tables the import fills, which must all be empty.
+const IMPORTED_TABLES: [&str; 5] = [
+    "users",
+    "sessions_log",
+    "service_access",
+    "audit_events",
+    "login_attempts",
+];
+
+fn shared_session(row: postgres::Row) -> SharedSession {
+    SharedSession {
+        sid: row.get::<_, i64>(0) as u64,
+        login: row.get(1),
+        impersonated: row.get(2),
+        expires_at: row.get(3),
+    }
+}
+
+fn insert_audit(
+    tx: &mut postgres::Transaction<'_>,
+    audit: &AuditEvent,
+) -> Result<(), postgres::Error> {
+    tx.execute(
+        "INSERT INTO audit_events (ts, kind, login, actor, ip, user_agent) VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &audit.at,
+            &audit.kind.as_str(),
+            &audit.login,
+            &audit.actor,
+            &audit.ip,
+            &audit.user_agent,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_login(
+    tx: &mut postgres::Transaction<'_>,
+    attempt: &LoginAttempt,
+) -> Result<(), postgres::Error> {
+    tx.execute(
+        "INSERT INTO login_attempts (ts, ip, login, known, success, user_agent) VALUES ($1, $2, $3, $4, $5, $6)",
+        &[
+            &attempt.at,
+            &attempt.ip,
+            &attempt.login,
+            &attempt.known,
+            &attempt.success,
+            &attempt.user_agent,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Real connections per day, like the SQLite side (see there).
+fn day_stats(
+    client: &mut Client,
+    first_day: i64,
+    account: Option<(&str, bool)>,
+) -> Result<Vec<DayStat>, postgres::Error> {
+    let mut days = vec![DayStat::default(); GRAPH_DAYS];
+    let (login, superadmin) = match account {
+        Some((login, superadmin)) => (Some(login), superadmin),
+        None => (None, false),
+    };
+    let rows = client.query(
+        "SELECT (started_at - $1) / 86400,
+                COUNT(*),
+                COALESCE(SUM(GREATEST(COALESCE(ended_at, last_seen_at) - started_at, 0)), 0)::bigint
+           FROM sessions_log
+          WHERE started_at >= $1 AND NOT impersonated
+            AND ($2::text IS NULL OR (login = $2 AND superadmin = $3))
+          GROUP BY 1",
+        &[&first_day, &login, &superadmin],
+    )?;
+    for row in rows {
+        let (day, sessions, seconds): (i64, i64, i64) = (row.get(0), row.get(1), row.get(2));
+        if let Some(slot) = usize::try_from(day).ok().and_then(|d| days.get_mut(d)) {
+            slot.sessions = sessions as u32;
+            slot.seconds = seconds;
+        }
+    }
+    Ok(days)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreachable_database_is_retried_for_the_given_time_then_reported() {
+        let mut config = postgres::Config::new();
+        config
+            .host("127.0.0.1")
+            .port(1)
+            .user("portal")
+            .connect_timeout(Duration::from_secs(1));
+        let begun = Instant::now();
+        let error = match Pg::start(config, 2, Duration::from_secs(2)) {
+            Ok(_) => panic!("nothing listens on port 1"),
+            Err(error) => error,
+        };
+        assert!(error.contains("cannot reach postgres"), "{error}");
+        assert!(
+            begun.elapsed() >= Duration::from_secs(2),
+            "it kept trying for the whole delay"
+        );
+    }
+
+    #[test]
+    fn a_connection_that_never_answered_is_transient() {
+        let connection_lost = postgres::Config::new()
+            .host("127.0.0.1")
+            .port(1)
+            .connect(NoTls)
+            .err()
+            .unwrap();
+        assert!(is_transient(&connection_lost), "no answer from the server at all");
+    }
+
+    #[test]
+    fn a_connection_the_server_closed_is_replaced_and_the_call_goes_through() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(pg) = Backend::Postgres(url.clone()).fresh() else {
+            unreachable!()
+        };
+        pg.insert_user(&UserRow {
+            login: "alice".into(),
+            password_hash: "h".into(),
+            roles: vec![],
+            created_at: 1,
+        })
+        .unwrap();
+        // What a failover does to the connections of the pool: the server ends them.
+        let application = pg.pool.config.get_application_name().unwrap().to_string();
+        let mut admin = url.parse::<postgres::Config>().unwrap().connect(NoTls).unwrap();
+        let killed = admin
+            .query(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+                &[&application],
+            )
+            .unwrap();
+        assert!(!killed.is_empty(), "there were connections to end");
+        assert_eq!(pg.load_users().unwrap().len(), 1, "a new connection took over");
+        assert_eq!(pg.load_users().unwrap().len(), 1);
+    }
+}

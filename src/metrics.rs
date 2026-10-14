@@ -463,6 +463,22 @@ impl Metrics {
     }
 }
 
+impl Metrics {
+    /// Series that exist only with a shared database.
+    pub fn render_shared(&self, session_errors: u64, directory_errors: u64) -> String {
+        let mut out = String::new();
+        out.push_str("# HELP portal_shared_store_errors_total Calls to the shared database that failed, by what they were for.\n");
+        out.push_str("# TYPE portal_shared_store_errors_total counter\n");
+        out.push_str(&format!(
+            "portal_shared_store_errors_total{{use=\"sessions\"}} {session_errors}\n"
+        ));
+        out.push_str(&format!(
+            "portal_shared_store_errors_total{{use=\"directory\"}} {directory_errors}\n"
+        ));
+        out
+    }
+}
+
 pub struct PasswordCheckMetricGuard<'a> {
     metrics: &'a Metrics,
 }
@@ -539,6 +555,9 @@ mod tests {
         metrics.user_admin("add", "ok");
         metrics.user_admin("add", "ok");
         metrics.user_admin("delete", "forbidden");
+        let shared = metrics.render_shared(4, 5);
+        assert!(shared.contains("portal_shared_store_errors_total{use=\"sessions\"} 4"));
+        assert!(shared.contains("portal_shared_store_errors_total{use=\"directory\"} 5"));
         let rendered = metrics.render_accounts(3, 2, 1);
         assert!(rendered.contains("portal_users 3"));
         assert!(rendered.contains("portal_user_admin_total{action=\"add\",result=\"ok\"} 2"));

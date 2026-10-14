@@ -30,12 +30,33 @@ pub struct UsersConfig {
     pub max_users: usize,
 }
 
-/// The SQLite file holding the accounts and the connection history.
+/// Where the accounts and the connection history live.
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
-    pub database: PathBuf,
+    pub backend: StorageBackend,
     /// Sessions, service accesses and audit events older than this are deleted.
     pub retention_days: u32,
+}
+
+#[derive(Clone, Debug)]
+pub enum StorageBackend {
+    /// One SQLite file: one instance owns it, and its sessions are in its memory.
+    Sqlite(PathBuf),
+    /// A shared PostgreSQL database (the `postgres` block): any number of instances are active at
+    /// once, and the sessions are in the database too.
+    Postgres(PostgresConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct PostgresConfig {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub user: String,
+    pub password_file: PathBuf,
+    /// Connections kept to the database.
+    pub pool_size: usize,
+    pub connect_timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -451,19 +472,22 @@ impl Config {
             return Err("users.max_users must be between 1 and 1024".into());
         }
 
-        let database = PathBuf::from(get_or(
-            &values,
-            "storage",
-            "database",
-            "/var/lib/portal/portal.db",
-        )?);
-        validate_secret_path(&database, "storage.database")?;
         let retention_days = parse_usize(
             get_or(&values, "storage", "retention_days", "90")?,
             "storage.retention_days",
         )?;
         if !(1..=3650).contains(&retention_days) {
             return Err("storage.retention_days must be between 1 and 3650".into());
+        }
+        let backend = parse_backend(&values)?;
+        if matches!(backend, StorageBackend::Postgres(_))
+            && matches!(session_secret, SessionSecretConfig::Ephemeral)
+        {
+            return Err(
+                "session.secret_mode must be file when the postgres block is present: every \
+                 instance has to sign with the same key"
+                    .into(),
+            );
         }
 
         let icons_dir = PathBuf::from(get_or(&values, "ui", "icons_dir", "/icons")?);
@@ -525,13 +549,82 @@ impl Config {
             roles: RolesConfig { names: role_names },
             users: UsersConfig { max_users },
             storage: StorageConfig {
-                database,
+                backend,
                 retention_days: retention_days as u32,
             },
             ui: UiConfig { icons_dir },
             logging: LoggingConfig { level },
         })
     }
+}
+
+/// SQLite unless the `postgres` block is there; then the file is not configured at all, so a
+/// configuration never names two places for the same data.
+fn parse_backend(values: &HashMap<(String, String), String>) -> Result<StorageBackend, String> {
+    let has_postgres = values.keys().any(|(block, _)| block == "postgres");
+    if !has_postgres {
+        let database = PathBuf::from(get_or(
+            values,
+            "storage",
+            "database",
+            "/var/lib/portal/portal.db",
+        )?);
+        validate_secret_path(&database, "storage.database")?;
+        return Ok(StorageBackend::Sqlite(database));
+    }
+    if values.contains_key(&("storage".to_string(), "database".to_string())) {
+        return Err("storage.database must not be set when the postgres block is present".into());
+    }
+    let host = get_required(values, "postgres", "host")?.to_string();
+    if host.is_empty()
+        || host.len() > 253
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+    {
+        return Err("postgres.host must be a host name or an address".into());
+    }
+    let port = parse_usize(get_or(values, "postgres", "port", "5432")?, "postgres.port")?;
+    let port = u16::try_from(port)
+        .ok()
+        .filter(|p| *p != 0)
+        .ok_or("postgres.port must be between 1 and 65535")?;
+    let database = get_required(values, "postgres", "database")?.to_string();
+    let user = get_required(values, "postgres", "user")?.to_string();
+    for (name, value) in [("database", &database), ("user", &user)] {
+        if value.is_empty()
+            || value.len() > 63
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
+            return Err(format!(
+                "postgres.{name} must be 1 to 63 letters, digits, '.', '-' or '_'"
+            ));
+        }
+    }
+    let password_file = PathBuf::from(get_required(values, "postgres", "password_file")?);
+    validate_secret_path(&password_file, "postgres.password_file")?;
+    let pool_size = parse_usize(
+        get_or(values, "postgres", "pool_size", "4")?,
+        "postgres.pool_size",
+    )?;
+    if !(1..=64).contains(&pool_size) {
+        return Err("postgres.pool_size must be between 1 and 64".into());
+    }
+    let connect_timeout = parse_duration(get_or(values, "postgres", "connect_timeout", "5s")?)?;
+    if !(Duration::from_secs(1)..=Duration::from_secs(60)).contains(&connect_timeout) {
+        return Err("postgres.connect_timeout must be between 1s and 60s".into());
+    }
+    Ok(StorageBackend::Postgres(PostgresConfig {
+        host,
+        port,
+        database,
+        user,
+        password_file,
+        pool_size,
+        connect_timeout,
+    }))
 }
 
 fn validate_known_keys(values: &HashMap<(String, String), String>) -> Result<(), String> {
@@ -550,6 +643,13 @@ fn validate_known_keys(values: &HashMap<(String, String), String>) -> Result<(),
         ("users", "max_users"),
         ("storage", "database"),
         ("storage", "retention_days"),
+        ("postgres", "host"),
+        ("postgres", "port"),
+        ("postgres", "database"),
+        ("postgres", "user"),
+        ("postgres", "password_file"),
+        ("postgres", "pool_size"),
+        ("postgres", "connect_timeout"),
         ("session", "cookie_name"),
         ("discovery", "interval"),
         ("discovery", "probe_timeout"),
@@ -723,6 +823,7 @@ fn parse_hcl_subset(raw: &str) -> Result<HashMap<(String, String), String>, Stri
         "roles",
         "users",
         "storage",
+        "postgres",
         "ui",
         "logging",
     ]
@@ -920,7 +1021,10 @@ mod tests {
         );
         assert!(cfg.roles.names.is_empty());
         assert_eq!(cfg.users.max_users, 64);
-        assert_eq!(cfg.storage.database, PathBuf::from("/var/lib/portal/portal.db"));
+        assert!(matches!(
+            &cfg.storage.backend,
+            StorageBackend::Sqlite(path) if path == &PathBuf::from("/var/lib/portal/portal.db")
+        ));
         assert_eq!(cfg.storage.retention_days, 90);
         assert_eq!(cfg.server.max_body_bytes, 8192);
         assert_eq!(cfg.server.max_connections, 1024);
@@ -1067,8 +1171,79 @@ mod tests {
         let cfg = Config::parse(&raw).unwrap();
         assert_eq!(cfg.roles.names, ["ops", "dev", "viewer"]);
         assert_eq!(cfg.users.max_users, 5);
-        assert_eq!(cfg.storage.database, PathBuf::from("/data/p.db"));
+        assert!(matches!(
+            &cfg.storage.backend,
+            StorageBackend::Sqlite(path) if path == &PathBuf::from("/data/p.db")
+        ));
         assert_eq!(cfg.storage.retention_days, 30);
+    }
+
+    /// The minimal configuration with the shared signing key a PostgreSQL setup needs.
+    fn shared_config() -> String {
+        minimal_config().replace(
+            "ttl = \"8h\"",
+            "ttl = \"8h\" secret_mode = \"file\" secret_file = \"/run/secrets/portal_session_secret\"",
+        )
+    }
+
+    const POSTGRES_BLOCK: &str = "postgres { host = \"postgresql-rw.data.svc.cluster.local\" database = \"portal\" user = \"portal\" password_file = \"/run/secrets/portal_db_password\" }";
+
+    #[test]
+    fn the_postgres_block_replaces_the_sqlite_file() {
+        let raw = format!("{}\nstorage {{ retention_days = 30 }}\n{POSTGRES_BLOCK}", shared_config());
+        let cfg = Config::parse(&raw).unwrap();
+        let StorageBackend::Postgres(pg) = &cfg.storage.backend else {
+            panic!("expected the postgres backend");
+        };
+        assert_eq!(pg.host, "postgresql-rw.data.svc.cluster.local");
+        assert_eq!((pg.port, pg.pool_size), (5432, 4));
+        assert_eq!(pg.connect_timeout, Duration::from_secs(5));
+        assert_eq!(pg.password_file, PathBuf::from("/run/secrets/portal_db_password"));
+        assert_eq!(cfg.storage.retention_days, 30, "retention applies to both");
+
+        let tuned = POSTGRES_BLOCK.replace(" }", " port = 6432 pool_size = 8 connect_timeout = \"2s\" }");
+        let cfg = Config::parse(&format!("{}\n{tuned}", shared_config())).unwrap();
+        let StorageBackend::Postgres(pg) = &cfg.storage.backend else {
+            panic!("expected the postgres backend");
+        };
+        assert_eq!((pg.port, pg.pool_size, pg.connect_timeout), (6432, 8, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn the_postgres_block_and_the_sqlite_file_exclude_each_other() {
+        let raw = format!(
+            "{}\nstorage {{ database = \"/data/p.db\" }}\n{POSTGRES_BLOCK}",
+            shared_config()
+        );
+        let error = Config::parse(&raw).err().unwrap();
+        assert!(error.contains("storage.database"), "{error}");
+    }
+
+    #[test]
+    fn postgres_needs_the_shared_signing_key() {
+        let raw = format!("{}\n{POSTGRES_BLOCK}", minimal_config());
+        let error = Config::parse(&raw).err().unwrap();
+        assert!(error.contains("session.secret_mode"), "{error}");
+    }
+
+    #[test]
+    fn rejects_bad_postgres_values() {
+        for block in [
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" }",
+            "postgres { host = \"db\" database = \"portal\" password_file = \"/p\" }",
+            "postgres { database = \"portal\" user = \"portal\" password_file = \"/p\" }",
+            "postgres { host = \"db host\" database = \"portal\" user = \"portal\" password_file = \"/p\" }",
+            "postgres { host = \"db\" database = \"po rtal\" user = \"portal\" password_file = \"/p\" }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"p\" }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"/p\" port = 0 }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"/p\" port = 70000 }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"/p\" pool_size = 0 }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"/p\" connect_timeout = \"0s\" }",
+            "postgres { host = \"db\" database = \"portal\" user = \"portal\" password_file = \"/p\" sslmode = \"require\" }",
+        ] {
+            let raw = format!("{}\n{block}", shared_config());
+            assert!(Config::parse(&raw).is_err(), "{block} must be rejected");
+        }
     }
 
     #[test]
@@ -1083,7 +1258,7 @@ mod tests {
             "storage { retention_days = 9999 }",
             "roles { label = \"x\" }",
         ] {
-            let raw = format!("{}\n{block}", minimal_config());
+            let raw = format!("{}\n{block}", shared_config());
             assert!(Config::parse(&raw).is_err(), "{block} must be rejected");
         }
     }

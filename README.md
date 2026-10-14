@@ -2,7 +2,7 @@
 
 Authentication service for Traefik `ForwardAuth`, and the launcher page of the lab, written in Rust: a superadmin defined by the environment, users with roles added from the settings pages, a role gate on every service, and a history of who signed in and what they used. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or annotation (Kubernetes IngressRoute), grouped in full-width rows, with their health and an offline icon library; see the repository README for the labels.
 
-The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio; discovery uses `reqwest` (rustls) for the Kubernetes API and health probes. Pages are rendered in Rust; the only script is the theme selector (the settings page of the users adds one small script for its password generator). Accounts and history live in one SQLite file (bundled in the static binary). There is no Redis, JavaScript framework, CDN, or runtime shell, and nothing is fetched from the internet at runtime.
+The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio; discovery uses `reqwest` (rustls) for the Kubernetes API and health probes. Pages are rendered in Rust; the only script is the theme selector (the settings page of the users adds one small script for its password generator). Accounts and history live in one SQLite file (bundled in the static binary) or, to run several active instances, in a shared PostgreSQL database (see [Several instances](#several-instances-postgresql)). There is no Redis, JavaScript framework, CDN, or runtime shell, and nothing is fetched from the internet at runtime.
 
 ## Authentication model
 
@@ -19,9 +19,9 @@ authentication {
 
 At startup the plaintext password is read with a strict size bound, hashed once with Argon2id, and the plaintext buffer is zeroized. The superadmin sees and may open everything, and is the only account that can manage the others.
 
-**Users** are added and deleted by the superadmin from the settings pages (the gear of the launcher). Their Argon2id hashes are stored in the SQLite file (`storage.database`); the request path reads an in-memory copy and never waits on the disk. A user holds any number of roles. Exactly one Argon2 check runs per login attempt whoever the login names (the superadmin's hash, the account's, or a dummy one), and the failure message is the same, so neither time nor wording tells whether a login exists.
+**Users** are added and deleted by the superadmin from the settings pages (the gear of the launcher). Their Argon2id hashes are stored in the database (the SQLite file `storage.database`, or PostgreSQL); the request path reads an in-memory copy and never waits on the database. A user holds any number of roles. Exactly one Argon2 check runs per login attempt whoever the login names (the superadmin's hash, the account's, or a dummy one), and the failure message is the same, so neither time nor wording tells whether a login exists.
 
-A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. The server keeps the active-session set in bounded RAM with an expiration time; logout deletes the session immediately. Restarting the process clears all sessions.
+A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. With SQLite the server keeps the active-session set in bounded RAM with an expiration time; logout deletes the session immediately, and restarting the process clears all sessions. With PostgreSQL the sessions live in the shared database (only the SHA-256 of the cookie is stored), so they are valid on every instance and survive a restart.
 
 ## Roles and the gate
 
@@ -83,7 +83,7 @@ A browser refused by the role gate lands on a 403 page that names the service (o
 
 **Log in as** gives the superadmin a session as the user (flagged *impersonated*: it is not counted as a connection of that user, and is tagged *via superadmin* in the history). A banner offers **Back to superadmin**, which needs no password because the impersonated session itself proves it was opened by the superadmin. Account management is refused while impersonating.
 
-History goes to SQLite (`storage.database`) and is kept `storage.retention_days` days (90 by default): sessions (login, address, user agent, start, last seen, end and why), the services each session used (counts per service, never a path or query) and administrative events (users added or deleted, impersonation, failed sign-ins) and the sign-in attempts above. The per-account failed counters count only logins that name an account; a login that does not exist is counted apart and appears, as typed, in the sign-in log (a person sometimes types a password in the login field: that is the one thing this log can hold that it should not, which is why it is short-lived and visible only to the superadmin). Requests only touch memory; one writer thread flushes every 15 seconds in a single transaction, and an event is dropped (and counted in `portal_tracking_dropped_total`) rather than slowing a request down. Sessions a previous run left open end with the reason *restart*. Times are UTC.
+History goes to the database (SQLite, or PostgreSQL) and is kept `storage.retention_days` days (90 by default): sessions (login, address, user agent, start, last seen, end and why), the services each session used (counts per service, never a path or query) and administrative events (users added or deleted, impersonation, failed sign-ins) and the sign-in attempts above. The per-account failed counters count only logins that name an account; a login that does not exist is counted apart and appears, as typed, in the sign-in log (a person sometimes types a password in the login field: that is the one thing this log can hold that it should not, which is why it is short-lived and visible only to the superadmin). Requests only touch memory; one writer thread flushes every 15 seconds in a single transaction, and an event is dropped (and counted in `portal_tracking_dropped_total`) rather than slowing a request down. With SQLite, sessions a previous run left open end with the reason *restart*; with PostgreSQL sessions outlive a restart, and only a session whose instance died before recording its end is closed that way (once it has been idle for longer than `session.idle_timeout`). Times are UTC.
 
 ```hcl
 users {
@@ -119,7 +119,48 @@ session {
 
 `file` reads at least 32 bytes from an absolute secret-file path. Inline HCL secrets are rejected.
 
-The secret signs authentication return targets and protects authentication-control data. Opaque sessions themselves remain process-local RAM state in both modes, so a restart always logs existing sessions out.
+The secret signs authentication return targets and the anti-CSRF tokens of the forms. With SQLite, opaque sessions remain process-local RAM state in both modes, so a restart always logs existing sessions out. With PostgreSQL the sessions are in the database, and `file` is **required**: every instance must sign with the same key, or a form served by one instance would be refused by the other (`ephemeral` is rejected with the `postgres` block).
+
+## Several instances (PostgreSQL)
+
+By default one process owns a SQLite file and keeps the sessions in its memory, so there can be one active instance. The optional `postgres` block moves everything to a shared PostgreSQL database instead; any number of instances then run at once, and losing one costs nothing but the requests it was serving.
+
+```hcl
+session {
+  secret_mode = "file"                       # required: every instance signs with the same key
+  secret_file = "/run/secrets/portal_session_secret"
+}
+
+storage {
+  retention_days = 90                        # storage.database must be absent with the postgres block
+}
+
+postgres {
+  host            = "postgresql-rw.data.svc.cluster.local"
+  port            = 5432                     # default
+  database        = "portal"
+  user            = "portal"
+  password_file   = "/run/secrets/portal_db_password"
+  pool_size       = 8                        # default 4, 1 to 64
+  connect_timeout = "5s"                     # default, 1s to 60s
+}
+```
+
+The client is a blocking PostgreSQL client over plain TCP: no TLS stack and no C dependency (the connection stays inside the cluster; the server must allow `scram-sha-256` over a non-TLS connection from the pods). At startup the first connection is retried for about a minute, then the schema is created or brought up to date under an advisory lock, so several instances starting together are safe. A statement that runs for more than 15 s is cancelled, and a broken connection is replaced and the operation retried once, which is what a failover of the database looks like.
+
+What is shared and how:
+
+- **Sessions** are rows of a `sessions` table (digest of the cookie, client binding, identity, expiry, last use). A login writes the session and its line of the history in one transaction. Each instance keeps a copy of what it checked, for **5 seconds**: ForwardAuth asks the database about one session once per 5 s, not once per request. The binding (address and User-Agent), the idle timeout (renewed at most every 5 s of activity) and the absolute lifetime are enforced exactly as with SQLite. A logout, a deleted account or a password change ends the session in the database at once and **stops working on the other instances within 5 seconds** (the copy). If the database cannot be reached, a session checked less than 2 minutes ago is still accepted, so a failover does not sign everybody out; new sign-ins fail with `503` meanwhile.
+- **Accounts** are read from the database every 5 seconds by every instance, so an account created, edited or deleted on one instance reaches the others within 5 seconds. A login the instance does not know yet makes it read the accounts again at once (at most once per second), so an account that was just created can sign in on any instance, and a session opened for it elsewhere is never ended for that reason.
+- **History** is written by every instance (batches every 15 s, as with SQLite). A session ended by logout, revocation, expiry or idleness is recorded once, by the instance whose call ended it: the database hands each ended session to exactly one caller. Starting or stopping an instance never closes the sessions of the others.
+- **Rate limiting stays per instance**: the failed-login limiters (per IP and global) are in memory, so with two instances an attacker gets up to twice the budget, and a lockout on one instance does not lock the other. `session.max_active_sessions` is checked against the database, but two instances racing at the limit can overshoot it by one each.
+- Liveness and readiness are unchanged (`/healthz` does not touch the database). `/metrics` adds `portal_shared_store_errors_total{use="sessions|directory"}`.
+
+`users.max_users` is checked by the instance that adds the account, against its own copy, so two instances adding at the same moment can exceed it by one.
+
+### Moving from SQLite to PostgreSQL
+
+`portal import-sqlite --config FILE --from SQLITE_FILE` copies the accounts (with their roles), the sessions of the history, the service accesses, the audit events and the sign-in log into the empty PostgreSQL database that the configuration names, in one transaction, and prints what it copied. It refuses a target that already holds any of that and then changes nothing. The SQLite file is only read (it may be the live one). Sessions do not move (they were in the memory of the old process): the ones the file still shows as open end where they were last seen, with the reason *restart*, and everybody signs in again after the switch. Changes made to the SQLite file after the import are not carried over, so stop changing accounts between the import and the switch.
 
 ## Local test
 
@@ -260,13 +301,13 @@ portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict  
 
 The scheme is read per request from `X-Forwarded-Proto`. A session is bound to the client address and User-Agent of the login (`session.bind = "ip_user_agent"`, also `user_agent` or `none`) and ends after `session.idle_timeout` (default `30m`) without use.
 
-The token contains no identity, expiration timestamp, claims, or signed application data. The server stores only a SHA-256 digest of each token and its monotonic expiration time.
+The token contains no identity, expiration timestamp, claims, or signed application data. The server stores only a SHA-256 digest of each token and its expiration time (in memory with SQLite, in the shared database with PostgreSQL).
 
 The session store is bounded by `session.max_active_sessions`. If full, a successful password check cannot create an additional session and returns `503` rather than evicting an arbitrary live session.
 
 ## Anti-bruteforce
 
-Two independent process-local controls run before Argon2:
+Two independent process-local controls run before Argon2 (with several instances each one has its own counters, see above):
 
 - per-IP failed-password limiter;
 - global failed-password limiter for distributed attacks.
@@ -328,6 +369,7 @@ When `Cargo.toml` is intentionally changed later, run the same maintenance scrip
 portal run --config FILE
 portal check-config --config FILE
 portal healthcheck --config FILE
+portal import-sqlite --config FILE --from SQLITE_FILE
 portal hash-password < password.txt
 portal version
 ```

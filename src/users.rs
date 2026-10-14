@@ -1,11 +1,16 @@
 //! The accounts, in memory. The database is the record; this is what the request path reads, so
-//! `/auth/verify` never waits on the disk. A single replica is the only writer, so the two cannot
-//! drift: every change goes to SQLite first, then here.
+//! `/auth/verify` never waits on the database. Every change goes to the database first, then here.
+//!
+//! With one instance that is all there is to it. With several (a shared database) the others change
+//! the accounts too, so [`Directory::refresh`] reads the database again every few seconds; a change
+//! made on one instance reaches the others within that time.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::store::UserRow;
+use crate::store::{Store, UserRow};
 
 pub const MIN_PASSWORD_BYTES: usize = 10;
 const MAX_LOGIN_CHARS: usize = 32;
@@ -21,27 +26,65 @@ pub struct UserRecord {
 pub struct Directory {
     users: RwLock<HashMap<String, UserRecord>>,
     max_users: usize,
+    /// Counts the changes made through this instance, so a refresh that read the database before one
+    /// of them does not overwrite it with older rows.
+    changes: AtomicU64,
+    /// Unix milliseconds of the last refresh that was started.
+    refreshed_at: AtomicU64,
+    refresh_errors: AtomicU64,
 }
 
 impl Directory {
     pub fn new(rows: Vec<UserRow>, max_users: usize) -> Self {
-        let users = rows
-            .into_iter()
-            .map(|row| {
-                (
-                    row.login,
-                    UserRecord {
-                        password_hash: row.password_hash,
-                        roles: row.roles,
-                        created_at: row.created_at,
-                    },
-                )
-            })
-            .collect();
         Self {
-            users: RwLock::new(users),
+            users: RwLock::new(records(rows)),
             max_users,
+            changes: AtomicU64::new(0),
+            refreshed_at: AtomicU64::new(0),
+            refresh_errors: AtomicU64::new(0),
         }
+    }
+
+    /// Replaces the accounts with what the database holds now. A change made here while the
+    /// database was being read wins: the next refresh brings the rest. `true` when it replaced.
+    pub fn refresh(&self, store: &Store) -> Result<bool, String> {
+        self.refreshed_at.store(now_millis(), Ordering::Relaxed);
+        let seen = self.changes.load(Ordering::Acquire);
+        let rows = store.load_users().inspect_err(|_| {
+            self.refresh_errors.fetch_add(1, Ordering::Relaxed);
+        })?;
+        Ok(self.replace_unless_changed(seen, rows))
+    }
+
+    /// A refresh for a request that met a login it does not know (an account created a moment ago on
+    /// another instance), unless one started less than `min_gap` ago: unknown logins cannot be used
+    /// to make the database work on every request.
+    pub fn refresh_if_due(&self, store: &Store, min_gap: Duration) -> bool {
+        let last = self.refreshed_at.load(Ordering::Relaxed);
+        let now = now_millis();
+        if now.saturating_sub(last) < min_gap.as_millis() as u64
+            || self
+                .refreshed_at
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return false;
+        }
+        self.refresh(store).unwrap_or(false)
+    }
+
+    pub fn refresh_errors(&self) -> u64 {
+        self.refresh_errors.load(Ordering::Relaxed)
+    }
+
+    /// `seen` is the change counter from before `rows` were read.
+    fn replace_unless_changed(&self, seen: u64, rows: Vec<UserRow>) -> bool {
+        let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
+        if self.changes.load(Ordering::Acquire) != seen {
+            return false;
+        }
+        *users = records(rows);
+        true
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, UserRecord>> {
@@ -76,15 +119,15 @@ impl Directory {
     }
 
     pub fn insert(&self, login: String, user: UserRecord) {
-        self.users
-            .write()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(login, user);
+        let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
+        self.changes.fetch_add(1, Ordering::AcqRel);
+        users.insert(login, user);
     }
 
     /// New roles, and a new password hash when the password changed. `false` if no such user.
     pub fn update(&self, login: &str, password_hash: Option<String>, roles: Vec<String>) -> bool {
         let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
+        self.changes.fetch_add(1, Ordering::AcqRel);
         match users.get_mut(login) {
             Some(user) => {
                 if let Some(hash) = password_hash {
@@ -98,12 +141,32 @@ impl Directory {
     }
 
     pub fn remove(&self, login: &str) -> bool {
-        self.users
-            .write()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(login)
-            .is_some()
+        let mut users = self.users.write().unwrap_or_else(|p| p.into_inner());
+        self.changes.fetch_add(1, Ordering::AcqRel);
+        users.remove(login).is_some()
     }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn records(rows: Vec<UserRow>) -> HashMap<String, UserRecord> {
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.login,
+                UserRecord {
+                    password_hash: row.password_hash,
+                    roles: row.roles,
+                    created_at: row.created_at,
+                },
+            )
+        })
+        .collect()
 }
 
 /// A login as stored: trimmed, lower case, `[a-z0-9._-]{1,32}`.
@@ -172,6 +235,38 @@ mod tests {
         assert!(dir.remove("bob"));
         assert!(!dir.remove("bob"));
         assert_eq!(dir.count(), 2);
+    }
+
+    #[test]
+    fn a_refresh_takes_what_the_database_holds() {
+        let store = Store::open_in_memory();
+        store.insert_user(&row("alice", &["ops"])).unwrap();
+        let dir = Directory::new(Vec::new(), 8);
+        assert!(dir.refresh(&store).unwrap());
+        assert_eq!(dir.roles_of("alice").unwrap(), ["ops"]);
+        store.remove_user("alice").unwrap();
+        store.insert_user(&row("bob", &[])).unwrap();
+        assert!(dir.refresh(&store).unwrap());
+        assert!(dir.get("alice").is_none(), "a removal elsewhere is picked up");
+        assert!(dir.get("bob").is_some());
+    }
+
+    #[test]
+    fn a_change_made_here_is_not_undone_by_a_refresh_that_read_before_it() {
+        let dir = Directory::new(Vec::new(), 8);
+        let seen = dir.changes.load(Ordering::Acquire);
+        let read_before_the_insert = vec![row("alice", &[])];
+        dir.insert(
+            "carol".into(),
+            UserRecord {
+                password_hash: "h".into(),
+                roles: vec![],
+                created_at: 1,
+            },
+        );
+        assert!(!dir.replace_unless_changed(seen, read_before_the_insert));
+        assert!(dir.get("carol").is_some(), "the insert is still there");
+        assert!(dir.get("alice").is_none(), "the stale rows were dropped");
     }
 
     #[test]
