@@ -5,8 +5,12 @@
 //!
 //! The server reads the document of each service of the catalogue, with a timeout and a size
 //! limit, and keeps the result. It reads it again after `access.actions_refresh`. A `404` means
-//! that the service does not publish actions. A different failure keeps the last good list and
-//! gives a problem for the settings pages.
+//! that the service does not publish actions. A different failure keeps the last good document
+//! and gives a problem for the settings pages.
+//!
+//! The PDP uses the last known document to decide a grant on a sub-resource: the grant applies
+//! only when the document declares the resource type for the action (see [`Registry::declares`]).
+//! A service without a known document has no applicable grant on a sub-resource.
 //!
 //! Interface: [`Registry`] (the results, shared), [`run`] (the refresh loop), [`parse`] (one
 //! document, checked).
@@ -75,6 +79,22 @@ impl Registry {
             .get(service)
             .filter(|entry| entry.known)
             .map(|entry| entry.actions.clone())
+    }
+
+    /// Whether the last known document of the service declares the resource type `kind` for the
+    /// action `action`. The last known document is the last good document or the last `404`.
+    /// It stays after a failed read of the same URL. `false`: the document is not known, or it
+    /// does not declare the type. The PDP fails closed on `false`.
+    pub fn declares(&self, service: &str, action: &str, kind: &str) -> bool {
+        self.read()
+            .get(service)
+            .filter(|entry| entry.known)
+            .is_some_and(|entry| {
+                entry
+                    .actions
+                    .iter()
+                    .any(|a| a.name == action && a.sub_resource_types().any(|k| k == kind))
+            })
     }
 
     /// `access`, then the names of the actions of the service.
@@ -171,16 +191,25 @@ impl Registry {
         out
     }
 
+    /// A failed read of the URL that `set` uses.
     #[cfg(test)]
-    pub fn set(&self, service: &str, actions: Vec<Action>) {
+    pub fn fail(&self, service: &str) {
         self.record(
             service,
-            "http://test/.well-known/access-actions",
-            Outcome::Actions(actions),
+            TEST_URL,
+            Outcome::Failed("the read failed".into()),
             Instant::now(),
         );
     }
+
+    #[cfg(test)]
+    pub fn set(&self, service: &str, actions: Vec<Action>) {
+        self.record(service, TEST_URL, Outcome::Actions(actions), Instant::now());
+    }
 }
+
+#[cfg(test)]
+const TEST_URL: &str = "http://test/.well-known/access-actions";
 
 /// The result of one read.
 #[derive(Debug, PartialEq, Eq)]
@@ -597,5 +626,53 @@ mod tests {
         );
         registry.record("a", "http://a/y", Outcome::Failed("down".into()), now);
         assert!(registry.declared("a").is_none(), "a new URL: not known");
+    }
+
+    fn typed(kinds: &[&str]) -> Action {
+        Action {
+            name: "query.run.write".into(),
+            resource_types: kinds.iter().map(|k| k.to_string()).collect(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_last_known_document_decides_which_types_a_service_declares() {
+        let registry = Registry::default();
+        let now = Instant::now();
+        let url = "http://a/x";
+        let declares = |kind: &str| registry.declares("a", "query.run.write", kind);
+        assert!(!declares("database"), "never read");
+        registry.record("a", url, Outcome::Failed("down".into()), now);
+        assert!(!declares("database"), "a failure is not a document");
+        registry.record(
+            "a",
+            url,
+            Outcome::Actions(vec![typed(&["service", "database"])]),
+            now,
+        );
+        assert!(declares("database"), "declared");
+        assert!(!declares("table"), "another type");
+        assert!(!declares("service"), "service is not a sub-resource type");
+        assert!(
+            !registry.declares("a", "other", "database"),
+            "another action"
+        );
+        assert!(
+            !registry.declares("b", "query.run.write", "database"),
+            "another service"
+        );
+        registry.record("a", url, Outcome::Failed("down".into()), now);
+        assert!(
+            declares("database"),
+            "a failed read keeps the last document"
+        );
+        registry.record("a", url, Outcome::Actions(vec![typed(&["service"])]), now);
+        assert!(!declares("database"), "the new document removes the type");
+        registry.record("a", url, Outcome::Failed("down".into()), now);
+        assert!(!declares("database"), "the removal stays after a failure");
+        registry.record("a", url, Outcome::Actions(vec![typed(&["database"])]), now);
+        registry.record("a", url, Outcome::Absent, now);
+        assert!(!declares("database"), "a 404: no action");
     }
 }

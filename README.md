@@ -50,6 +50,7 @@ The `<id>` is the id of the service in the catalogue. The id is the label `porta
 - A grant on a service covers all sub-resources of this service. For example, `query.run.read on service:db` covers each database of `db`.
 - A grant on a sub-resource covers only this sub-resource: the same type and the same id. It does not cover the whole service. It does not cover another sub-resource.
 - The service gives its resource types. Each action of `/.well-known/access-actions` has a list `resource_types`. A grant on a sub-resource names an action and one of its types. The type `service` is the whole service: it is not a sub-resource type.
+- A grant on a sub-resource applies only when the last known document of the service declares its type for its action. If the document does not declare the type, the PDP does not apply the grant. If portal never read the document of the service, the PDP does not apply any grant on a sub-resource of this service. A grant on the whole service does not need a declaration.
 - A type has 1 to 32 characters of `a-z`, `0-9` and `_`. A resource id has 1 to 128 characters, without a space or a control character. portal uses the id as it is. portal does not change its case.
 - `access` has no grant on a sub-resource. `access` opens the whole service.
 - A new user has no grant. The user sees no service until the superadmin gives a grant.
@@ -79,7 +80,7 @@ user "alice" {
 
 The server reads the `user` blocks at each start. When you remove a grant from the file, the grant stops at the next start. The server does not write the grants of the configuration to the database.
 
-A `user` block can give a grant on a sub-resource, for example `"query.run.write on service:db/database:analytics"`. A grant with a bad form stops the start. At start, portal does not know the services: the catalogue and the actions documents come at run time. Thus a resource type that the service does not declare does not stop the start. The Services settings page shows this grant under **Grants to check**.
+A `user` block can give a grant on a sub-resource, for example `"query.run.write on service:db/database:analytics"`. A grant with a bad form stops the start. At start, portal does not know the services: the catalogue and the actions documents come at run time. Thus a resource type that the service does not declare does not stop the start. The Services settings page shows this grant under **Grants to check**. At run time, the PDP does not apply a grant whose type the service does not declare (see "AuthZEN PDP").
 
 ### The gate
 
@@ -155,6 +156,7 @@ Rules:
 - The PDP answers a server only for its own resources. The resource `{"type": "service", "id": "<name of the server>"}` is the whole service. A request about the service of a different server gets `false`.
 - A resource of another type is a sub-resource, for example `{"type": "database", "id": "analytics"}`. The service of a sub-resource is always the server that asks: its token tells which server it is.
 - A grant on the service covers each of its sub-resources. A grant on a sub-resource covers only the same type and the same id. The three endpoints use the same rule.
+- A grant on a sub-resource applies only when the last known document of the service declares its type for its action. The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that does not declare the type removes the effect of the grant at once. If portal never read the document of the service, the PDP does not apply any grant on a sub-resource of this service. The decision is `false`, and the reason in the log is `the service does not declare the resource type`. A grant on the whole service is not affected. After a change of the `portal.actions` URL of a service, a failed read leaves no document. The PDP then does not apply the grants on its sub-resources.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
@@ -179,10 +181,11 @@ portal reads the actions of each service at `/.well-known/access-actions`. The U
 - The read has a timeout (`access.actions_timeout`) and a size limit of 64 KiB. portal reads the document again after `access.actions_refresh`.
 - The field `server` of the document must be the id of the service. Set `portal.id` to the name of the server.
 - A `404` means that the service does not publish actions. The service then has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
-- Any other failure keeps the last good list. The Services settings page shows the problem.
+- Any other failure keeps the last good document. The Services settings page shows the problem. The PDP also uses this document: see "AuthZEN PDP".
 - The page of a user shows one check box for each action of each service. The check box `access` comes first. A box that the page did not show keeps its grant. A grant does not end when a service stops to publish its action for a short time.
 - Under **Grants on sub-resources**, the page of a user shows the grants on sub-resources of each service. To add one, select the action and the resource type, then type the resource id. The lists show only the actions and the types that the service declares. portal does not list the resources of a service. **Remove** deletes one grant. A grant of the configuration shows the mark *configuration*. It cannot change on the page.
 - While a service has not answered, portal refuses a new grant on its sub-resources.
+- The Services page keeps the section **Grants to check**. It lists each grant on a sub-resource whose type the service does not declare. The PDP does not apply these grants. The section does not list the grants of a service that has not answered yet.
 
 ### Migration of the database
 
@@ -656,7 +659,7 @@ This block has a label and can occur more than one time. The grants of one user 
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `grants` | list of at most 512 quoted strings: grants such as "access on service:grafana" or "query.run.write on service:clickhouse-dash/database:analytics": an action, the word on, service: and the id of the service, then optionally / and a sub-resource as type:id | required | The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare. |
+| `grants` | list of at most 512 quoted strings: grants such as "access on service:grafana" or "query.run.write on service:clickhouse-dash/database:analytics": an action, the word on, service: and the id of the service, then optionally / and a sub-resource as type:id | required | The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare. The PDP does not apply this grant. |
 
 #### Block `pdp_client "<server>"`
 

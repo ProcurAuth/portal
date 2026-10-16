@@ -1166,6 +1166,89 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
 }
 
 #[test]
+fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_its_type() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = ["query.run.write on service:db/database:analytics", "query.run.read on service:db/table:t", "system.read on service:db"] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let row = crate::store::UserRow {
+        login: "carol".into(),
+        password_hash: password_hash(),
+        grants: Vec::new(),
+        created_at: 1,
+    };
+    node.state.store.insert_user(&row).unwrap();
+    crate::sync::run_round(&node.state, 1);
+    let decide = |action: &str, kind: &str, id: &str| -> bool {
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &evaluation("carol", action, kind, id),
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["decision"].as_bool().unwrap()
+    };
+    let write = || decide("query.run.write", "database", "analytics");
+
+    // The service was never read: no grant on a sub-resource applies. The grant on the whole
+    // service is not affected.
+    assert!(
+        !write(),
+        "never read: the grant on a sub-resource does not apply"
+    );
+    assert!(decide("system.read", "service", "db"));
+    assert!(
+        decide("system.read", "database", "analytics"),
+        "the grant on the service covers its sub-resources without a document"
+    );
+
+    // The document declares the type: the grant applies. A type of another action does not help.
+    publish_catalog(&node, &["query.run.read", "query.run.write", "system.read"]);
+    assert!(write(), "the type is declared");
+    assert!(!decide("query.run.write", "database", "logs"), "another id");
+
+    // A failed read keeps the last document.
+    node.state.actions.fail("db");
+    assert!(write(), "a failed read keeps the last document");
+
+    // The type of the grant is not declared for its action: the grant does not apply, and the
+    // other grants do.
+    assert!(
+        !decide("query.run.read", "table", "t"),
+        "the document declares database, not table"
+    );
+
+    // A new document without the type: the grant does not apply.
+    node.state.actions.set(
+        "db",
+        vec![crate::actions::Action {
+            name: "query.run.write".into(),
+            resource_types: vec!["service".into()],
+            description: String::new(),
+        }],
+    );
+    assert!(!write(), "the new document removes the type");
+    node.state.actions.fail("db");
+    assert!(!write(), "the removal stays after a failed read");
+    assert!(
+        decide("system.read", "database", "analytics"),
+        "the grant on the whole service stays"
+    );
+}
+
+#[test]
 fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
     each_backend(|backend| {
         let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");

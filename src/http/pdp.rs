@@ -5,7 +5,9 @@
 //! asks. The resource is `{"type": "service", "id": "<name>"}` of this server, or a sub-resource
 //! `{"type": "<type>", "id": "<id>"}`. The service of a sub-resource is always the server that
 //! asks: its token tells which server it is. A grant on the service covers all its sub-resources.
-//! A grant on a sub-resource covers only the same type and the same id.
+//! A grant on a sub-resource covers only the same type and the same id. It applies only when the
+//! last known document of the service declares this type for this action. The PDP fails closed:
+//! with no known document, or with a document without the type, the grant does not apply.
 //!
 //! Endpoints:
 //!
@@ -25,7 +27,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::grants::{check_action, covers, SubResource, ACCESS, SERVICE_TYPE};
+use crate::grants::{check_action, covers, Grant, SubResource, ACCESS, SERVICE_TYPE};
 
 const EVALUATION_PATH: &str = "/access/v1/evaluation";
 const EVALUATIONS_PATH: &str = "/access/v1/evaluations";
@@ -378,8 +380,23 @@ fn decide(
         return (false, "no such user");
     };
     let grants = state.policy.effective(&subject.id, &stored);
-    if covers(&grants, action, &client.name, target.as_ref()) {
+    // A grant on a sub-resource applies only when the last known document of the service declares
+    // its type for its action. Without a known document, it does not apply. A grant on the whole
+    // service needs no declaration.
+    let applicable: Vec<Grant> = grants
+        .iter()
+        .filter(|grant| match &grant.resource {
+            None => true,
+            Some(resource) => state
+                .actions
+                .declares(&grant.service, &grant.action, &resource.kind),
+        })
+        .cloned()
+        .collect();
+    if covers(&applicable, action, &client.name, target.as_ref()) {
         (true, "grant")
+    } else if covers(&grants, action, &client.name, target.as_ref()) {
+        (false, "the service does not declare the resource type")
     } else {
         (false, "no grant")
     }

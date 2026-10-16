@@ -777,7 +777,7 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare.",
+        doc: "The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare. The PDP does not apply this grant.",
     },
     Key {
         block: "pdp_client",

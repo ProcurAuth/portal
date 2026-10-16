@@ -652,7 +652,7 @@ fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
                     html_escape(&resource.id)
                 );
                 if service.is_some_and(|s| s.undeclared(grant)) {
-                    body.push_str(r##"<span class="warn" role="img" aria-label="The service does not declare this resource type for this action." title="The service does not declare this resource type for this action."><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##);
+                    body.push_str(r##"<span class="warn" role="img" aria-label="The service does not declare this resource type for this action. The PDP does not apply this grant." title="The service does not declare this resource type for this action. The PDP does not apply this grant."><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##);
                 }
                 if user.configured.contains(grant) {
                     body.push_str(r#" <span class="pill pill--muted" title="From the configuration: it cannot change here.">configuration</span>"#);
@@ -940,7 +940,7 @@ fn undeclared_grants(out: &mut String, view: &ServicesView) {
     }
     let _ = write!(
         out,
-        r#"<section class="panel" aria-labelledby="checks-title"><div class="panel__head"><h2 class="panel__title" id="checks-title">Grants to check</h2></div><p class="hint">The service does not declare the resource type of these grants for the action. The PDP applies a grant only to the same type and the same id. Correct the grant, or the document of the service.</p><div class="tableScroll"><table class="table"><thead><tr><th>User</th><th>Grant</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
+        r#"<section class="panel" aria-labelledby="checks-title"><div class="panel__head"><h2 class="panel__title" id="checks-title">Grants to check</h2></div><p class="hint">The service does not declare the resource type of these grants for the action. The PDP does not apply these grants. Correct the grant, or the document of the service.</p><div class="tableScroll"><table class="table"><thead><tr><th>User</th><th>Grant</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
     );
 }
 
