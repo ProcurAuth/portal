@@ -1,39 +1,95 @@
 # Security model
 
-`portal` is a ForwardAuth barrier and the launcher page of the lab. It has one superadmin defined by the environment and users with roles managed by the superadmin; it intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history live in one SQLite file, or in a shared PostgreSQL database when several instances run (the `postgres` block). Services declare the roles they accept in `portal.roles`; the roles that exist are listed in the configuration, and `/auth/verify` enforces them (see "Roles and the gate" in the README).
+`portal` is a ForwardAuth barrier, the launcher page of the lab, and the AuthZEN PDP of the deployment (section 11 of the MCP server contract). It has one superadmin, defined by the environment, and users with grants. It intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history are stored in one SQLite file. When several instances run, they use a shared PostgreSQL database instead (the `postgres` block).
+
+A grant is an action on a service. The grants come from the settings pages, from `user` blocks of the configuration, or from both (`access.grants_mode`). `/auth/verify` decides the action `access` with the grants in memory. The services decide their other actions. They ask the PDP. See "Grants and the gate" in the README.
 
 ## Core invariants
 
-- project code forbids `unsafe` Rust;
-- HTTP/1 parsing is delegated to Hyper;
-- request headers, connection count, body size, and read times are bounded;
-- unknown/invalid HCL configuration fails startup;
-- the superadmin password is read from a file, bounded, Argon2id-hashed once, then zeroized; user passwords are only ever stored as Argon2id hashes;
-- a login attempt costs exactly one Argon2 check whoever the login names (a dummy hash stands in for an unknown login) and fails with the same message;
-- a service with no `portal.roles` is open to the superadmin only: access is granted by naming a role, never by omission;
-- the role gate reads the forwarded path every way a proxy or a backend might and allows the request only if every reading is allowed; an unreadable URI is refused;
-- account administration (add, edit, delete, log in as) is superadmin-only, checked on the server, with a purpose-bound CSRF token and a same-origin check; a new password is hashed under the same Argon2 permit as a login and ends that account's sessions; every change is written to the audit history;
-- the 403 page names a service only by looking its id up in the catalogue, so nothing taken from the URL is ever shown;
-- the add-user form's **Generate** button draws a 20-character password in the browser with `crypto.getRandomValues` (rejection sampling over an alphabet without look-alike characters); it is shown to the superadmin to hand over and reaches the server only when the form is submitted;
-- the history records addresses and user agents (kept `storage.retention_days`), never a path, a query, a password, or what was typed in a login that does not exist;
-- Argon2 concurrency is bounded;
-- login failures are rate-limited per IP and globally;
-- successful authentication creates a 256-bit opaque random session identifier;
-- active sessions are held in bounded process RAM, or, with PostgreSQL, in the shared database as SHA-256 digests (never the cookie), with a copy kept by each instance for a few seconds;
-- logout revokes the exact session server-side;
-- with SQLite a process restart invalidates all sessions; with PostgreSQL sessions survive it, and a logout, a deleted account or a changed password ends the session in the database at once and on the other instances within 5 seconds (their copy);
-- over HTTPS cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, `Path=/`, and SameSite Strict/Lax; over plain HTTP the same name without the prefix and without `Secure` (see "Plain HTTP");
-- a session only works from the client address and User-Agent that logged in (`session.bind`) and ends after `session.idle_timeout` without use;
-- the launcher is rendered server-side and references nothing outside the binary (CSP `default-src 'none'`, own style, own script, own images); every value taken from a label is HTML-escaped and every `href` is a local path or an http(s) URL;
-- POST login/logout require CSRF (login: double-submit cookie; logout: HMAC of the session ID) plus same-origin Origin/Referer validation;
-- return paths are local path/query values only and are HMAC-signed;
-- dynamic HTTP header values are validated by typed Hyper header parsing;
-- Prometheus labels exclude unbounded or secret/user-controlled values;
-- security failures are fail-closed.
+- The project code must not contain `unsafe` Rust.
+- Hyper does the HTTP/1 parsing.
+- The server limits the request headers, the connection count, the body size, and the read times.
+- The startup fails if the HCL configuration is unknown or invalid.
+- The server reads the superadmin password from an environment variable or from a file. The read is bounded.
+- The server hashes the superadmin password once with Argon2id. Then the server zeroizes the password.
+- The server stores user passwords only as Argon2id hashes.
+- Each login attempt costs exactly one Argon2 check. This applies to every login name.
+- A dummy hash replaces an unknown login name.
+- A failed login returns the same message.
+- A new user has no grant and opens no service. Access comes from a grant only. The superadmin has all grants.
+- The gate reads the forwarded path in every way that a proxy or a backend can read it.
+- The gate allows the request only if every reading is allowed.
+- The gate refuses a URI that cannot be read.
+- The portal receives only the headers of a request (ForwardAuth). It never receives the body of a service.
+- The launcher lists only the services for which the user has `access`.
+- Discovery problems name workloads. Only the superadmin sees them.
+- Only the superadmin can administer accounts. This covers add, edit, delete, and log in as.
+- The server checks this rule on the server side.
+- Account administration uses a purpose-bound CSRF token and a same-origin check.
+- A new password is hashed under the same Argon2 permit as a login.
+- A new password ends the sessions of that account.
+- The server writes every change to the audit history.
+- The 403 page names no service. A user does not learn the name of a service that is not open to that user.
+- In the mode `static`, the settings pages refuse a change of grants. The server does not use the grants of the database.
+- In the mode `hybrid`, the settings pages cannot change a grant of the configuration.
+- The **Generate** button in the add-user form draws a 20-character password in the browser.
+- The button uses `crypto.getRandomValues` and rejection sampling over an alphabet without look-alike characters.
+- The superadmin sees the generated password, so that the superadmin can give it to the user.
+- The password reaches the server only when the superadmin submits the form.
+- The history records addresses and user agents. The server keeps them for `storage.retention_days`.
+- The history never records a path, a query, a password, or what was typed in a login that does not exist.
+- The server limits the Argon2 concurrency.
+- The server limits the rate of login failures per IP address and globally.
+- A successful authentication creates a random, opaque session identifier of 256 bits.
+- Active sessions are held in limited process RAM. With PostgreSQL, they are held in the shared database as SHA-256 digests. The database never stores the cookie.
+- Each instance keeps a copy of each active session for a few seconds.
+- A logout revokes the exact session on the server.
+- With SQLite, a process restart invalidates all sessions.
+- With PostgreSQL, sessions survive a process restart.
+- A logout, a deleted account, or a changed password ends the session in the database at once.
+- The other instances end their copy of the session within 5 seconds.
+- Over HTTPS, the cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, and `Path=/`. Their SameSite value is Strict or Lax.
+- Over plain HTTP, the cookies use the same name without the prefix. They have no `Secure` attribute (see "Plain HTTP").
+- A session works only from the client address and User-Agent that logged in (`session.bind`).
+- A session ends after `session.idle_timeout` without use.
+- The server renders the launcher. The launcher references nothing outside the binary.
+- The CSP of the launcher is `default-src 'none'`. The launcher uses its own style, its own script, and its own images.
+- The server HTML-escapes every value taken from a label.
+- Every `href` is a local path or an http(s) URL.
+- POST login and POST logout require CSRF protection. For login, the protection is a double-submit cookie. For logout, it is an HMAC of the session ID.
+- The server also validates the same origin with Origin and Referer.
+- Return paths are local path and query values only. The server signs them with HMAC.
+- The server validates dynamic HTTP header values with typed Hyper header parsing.
+- Prometheus labels never contain unbounded values, secret values, or values that users control.
+- Security failures fail closed.
+
+## Identity token
+
+With the `identity` block, `/auth/verify` gives a JWT to each service that a user can open (contract 11.3). The server signs the token with Ed25519 (`EdDSA`). The token holds `iss`, `sub` (the login), `aud` (the id of the service), `iat`, and `exp`. It holds no permission. Its life is `identity.token_ttl`. The default is 5 minutes. The maximum is 1 hour.
+
+- The server gets the private key from `identity.signing_key_env` or from `identity.signing_key_file`. The server reads the key once at start. A key that is not a PKCS#8 Ed25519 key stops the server. The effective configuration and the log show only its `kid`.
+- The server keeps one token for each session and each service. It issues the token again when half of its life is gone. The cache holds at most 16384 tokens. A token stays valid until `exp` after a logout. Keep `token_ttl` short.
+- Traefik must list the header in `authResponseHeaders`. Traefik then replaces a header of the same name that a client sends. A service must verify the signature, `iss`, `aud`, and `exp` of each token. A service must accept the token only in this header.
+
+## AuthZEN PDP
+
+With the `pdp` block, the server answers AuthZEN requests on a second listener (`pdp.listen_address`). Traefik does not route to this listener.
+
+- Each server has its own bearer token. A `pdp_client` block, with `_env` or `_file`, gives the token. The token must contain at least 32 bytes. Each server uses a different token. The PDP keeps only the SHA-256 of each token. The PDP compares tokens in constant time. The PDP returns `401` for a request without a valid token.
+- The PDP answers a server only for its own resources. For a question about the service of another server, the PDP returns `false`. A grant on a service covers all its resources.
+- The PDP fails closed. It returns `false` for an unknown user, an unknown subject type, or a bad action name. It returns `400` and no decision for a request that it cannot read. The PDP limits the body size (`pdp.max_body_bytes`). It limits the batch size (`pdp.max_evaluations`).
+- The log records each decision (`pdp_decision`). Each entry has the server, the subject, the action, the resource, the decision, and the reason. The counters `portal_pdp_decisions_total` and `portal_pdp_refused_total` are in `/metrics`.
+- The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS.
+
+## Actions of the services
+
+The server reads `/.well-known/access-actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses a whole document that has a bad action, a duplicate action, the action `access`, or a `server` that is not the id of the service.
+
+A person who can set the labels of a workload chooses the actions that the settings pages offer for it. This is the trust boundary of the discovery.
 
 ## Session secret modes
 
-Exactly two modes exist.
+Two modes exist.
 
 ### `ephemeral`
 
@@ -43,60 +99,64 @@ session {
 }
 ```
 
-A fresh 32-byte secret is generated with `getrandom` at process startup and zeroized with application state teardown.
+The process generates a fresh 32-byte secret with `getrandom` at startup. The process zeroizes the secret at application state teardown.
 
-### `file`
+### `provided`
 
 ```hcl
 session {
-  secret_mode = "file"
-  secret_file = "/run/secrets/portal_session_secret"
+  secret_mode = "provided"
+  secret_file = "/run/secrets/portal_session_secret"   # or: secret_env = "PORTAL_SESSION_SECRET"
 }
 ```
 
-The path must be absolute. The file must contain at least 32 bytes and is read with a finite upper bound. Inline HCL secrets are not supported.
+Give exactly one of `secret_env` (the name of an environment variable) or `secret_file` (an absolute path). The value must contain at least 32 bytes. The program reads it with a finite upper bound. The program removes one trailing line end from the content of the file. Inline HCL secrets are not supported.
 
-The secret protects HMAC-signed authentication control data such as the return target and the anti-CSRF tokens. With SQLite, opaque active sessions remain in RAM only in both modes, so `file` does **not** make them survive a process restart. With PostgreSQL the sessions are in the database and `file` is required: every instance must sign with the same key, and `ephemeral` is rejected.
+The secret protects HMAC-signed authentication control data. Examples are the return target and the anti-CSRF tokens. With SQLite, active opaque sessions stay in RAM in both modes. Therefore `provided` does **not** make them survive a process restart. With PostgreSQL, the sessions are in the database. `provided` is required. Every instance must sign with the same key. `ephemeral` is rejected.
 
 ## Opaque sessions
 
-Session IDs are random 32-byte values encoded with unpadded base64url. The cookie is not a JWT and contains no claims or expiration data.
+A session ID is a random 32-byte value. It is encoded with unpadded base64url. The cookie is not a JWT. It contains no claims and no expiration data.
 
-The server stores only a SHA-256 digest of the token plus an `Instant` expiration, a last-use time and a hash of the client binding. This makes logout true server-side revocation rather than merely deleting the browser cookie. A cookie presented with another binding is refused and leaves the session alone, so a thief cannot end the owner's session by trying it.
+The server stores only these values: a SHA-256 digest of the token, an `Instant` expiration, a last-use time, and a hash of the client binding. Logout therefore revokes the session on the server. It does not only delete the browser cookie. A cookie with another binding is refused. The refusal does not change the session. A thief cannot end the owner's session this way.
 
-The store is bounded by `session.max_active_sessions`. Expired entries are pruned during session operations. When capacity is reached, new sessions fail closed with `503`.
+The store is limited by `session.max_active_sessions`. The server removes expired entries during session operations. When capacity is reached, new sessions fail closed with `503`.
 
-With PostgreSQL the digest, the binding hash, the identity, the expiry and the last use are rows of the shared database, written by whichever instance served the login; the binding and the idle timeout are enforced by the same statement that finds the session, and a refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most, so a revocation made elsewhere takes up to 5 seconds to reach it; while the database is unreachable a copy checked less than 2 minutes ago is still honoured (bounded by the session's own expiry) rather than signing everybody out, and logins fail closed. The failed-login limiters stay per instance: with N instances an attacker has N times the budget.
+With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the last use are rows of the shared database. The instance that served the login writes these rows. The same statement enforces the binding and the idle timeout, and finds the session. A refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most. A revocation made on another instance takes up to 5 seconds to reach the copy. While the database is unreachable, a copy checked less than 2 minutes ago is still honoured. This copy is bounded by the session's own expiry. This rule prevents the sign-out of every user. Logins fail closed. The failed-login limiters stay per instance. With N instances, an attacker has N times the budget.
 
 ## Plain HTTP
 
-Traefik may serve plain HTTP (a LAN without certificates, a test stack). The scheme is read per request from the unique `X-Forwarded-Proto` value Traefik sets (`trustForwardHeader: false`); anything but a single `https` counts as HTTP. Browsers refuse `Secure` and `__Host-` cookies on HTTP, so over HTTP the cookies are named without the prefix (`portal`, `portal-csrf`) and carry no `Secure` attribute.
+Traefik can serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
 
-Over HTTP the password and the session cookie are readable on the network. The binding (client address and User-Agent, relayed by `authRequestHeaders: [Cookie, User-Agent]`) and the idle timeout limit what a stolen cookie is worth; only HTTPS removes the exposure. Use HTTPS wherever the network is not trusted.
+Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `portal-csrf`). They have no `Secure` attribute.
+
+Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie. The binding uses the client address and User-Agent, relayed by `authRequestHeaders: [Cookie, User-Agent]`. The idle timeout also limits the value of a stolen cookie. Only HTTPS removes the exposure. Use HTTPS on every network that is not trusted.
 
 ## Discovery and the launcher
 
-The catalogue comes from container labels (Docker socket, read-only mount) and IngressRoute annotations (in-cluster API, ServiceAccount limited to `get`/`list` on `ingressroutes` and `pods`). Whoever can create a container or an IngressRoute chooses what the launcher lists; that is the trust boundary and is acceptable for a single administrator. A workload with unusable labels is skipped and reported on the page, not half-listed.
+The catalogue comes from container labels. The labels come from the Docker socket, which is mounted read-only. The catalogue also comes from IngressRoute annotations. They come from the in-cluster API. The ServiceAccount is limited to `get` and `list` on `ingressroutes` and `pods`.
 
-Health probes are plain GET requests to URLs taken from labels, without redirects and without reading the body, with a timeout and bounded concurrency; they send nothing secret. The probe client does not verify certificates (it asks whether something answers).
+A person who can create a container or an IngressRoute chooses what the launcher lists. This is the trust boundary. It is acceptable for a single administrator. A workload with unusable labels is skipped. The page reports it. The workload is not listed in part.
 
-Icons are SVG files shipped in the image and indexed once at startup; a request can only name an indexed icon, never build a path. Each icon is served with `Content-Security-Policy: default-src 'none'; sandbox`.
+Health probes are plain GET requests to URLs taken from labels. They do not follow redirects. They do not read the body. They have a timeout and limited concurrency. They send nothing secret. The probe client does not verify certificates. It asks only whether something answers.
+
+Icons are SVG files. They are included in the image and indexed once at startup. A request can name only an indexed icon. A request cannot build a path. The server serves each icon with `Content-Security-Policy: default-src 'none'; sandbox`.
 
 ## Request-origin checks
 
-Before parsing the body of `POST /auth/login` or `POST /auth/logout`, the service verifies the request origin.
+Before the service parses the body of `POST /auth/login` or `POST /auth/logout`, the service verifies the request origin.
 
-- With Traefik forwarding metadata, both unique `X-Forwarded-Proto` and unique `X-Forwarded-Host` are required.
-- Without forwarded metadata, the direct expected origin is `http` plus the unique `Host` header.
-- If `Origin` exists, it must exactly match the normalized expected origin. A mismatch cannot fall back to Referer.
-- If `Origin` is absent, a unique absolute `Referer` with the same normalized origin is required.
-- `Origin: null`, duplicate headers, unsupported schemes, userinfo, and partial forwarded metadata are rejected.
+- With Traefik forwarding metadata, the service requires one unique `X-Forwarded-Proto` header and one unique `X-Forwarded-Host` header.
+- Without forwarded metadata, the expected origin is `http` plus the unique `Host` header.
+- If `Origin` exists, it must match the normalized expected origin exactly. A mismatch cannot use Referer instead.
+- If `Origin` is absent, the service requires one unique absolute `Referer` with the same normalized origin.
+- The service rejects `Origin: null`, duplicate headers, unsupported schemes, userinfo, and partial forwarded metadata.
 
-This check is defense in depth in addition to the CSRF token.
+This check is defense in depth. It works in addition to the CSRF token.
 
 ## HTTP resource limits
 
-The server configuration provides:
+The server configuration sets these limits:
 
 ```hcl
 server {
@@ -104,24 +164,39 @@ server {
   max_headers         = 64
   max_header_bytes    = "32KiB"
   header_read_timeout = "10s"
-  max_body_bytes      = "8KiB"
+  max_body_bytes      = "32KiB"
   body_read_timeout   = "10s"
 }
 ```
 
-Hyper's HTTP/1 connection parser receives the header bounds/timeouts. Application body collection is incremental, size-checked before each extension, and wrapped in a total read timeout.
+Hyper's HTTP/1 connection parser receives the header limits and timeouts. The application collects the body in parts. It checks the size before each extension. A total read timeout wraps the collection.
 
 ## Password controls
 
-Password failures are protected by a bounded per-IP limiter and a separate global limiter. The global limiter is intentionally not reset by a successful login. Both stores are process-local.
+Two limiters protect against password failures. The first is a limited per-IP limiter. The second is a separate global limiter. The global limiter is not reset on purpose by a successful login. Both stores are process-local.
 
-Argon2 checks run through an async semaphore and `spawn_blocking`, preventing CPU-heavy password hashing from blocking Tokio's I/O workers.
+Argon2 checks run through an async semaphore and `spawn_blocking`. This keeps the CPU-heavy hash calculations away from the Tokio I/O workers.
 
 ## Metrics and logs
 
-Security-relevant metrics include successful/failed logins, CSRF failures, origin failures (login, logout, users), IP/global rate-limit blocks, ForwardAuth results (including `denied`), session validation outcomes, active/capacity sessions, Argon2 checks, account administration results, history events dropped or failed to flush, HTTP request latency/status, and connection saturation. No label carries a login, address or user agent.
+Security-relevant metrics cover these items:
 
-Logs include events such as:
+- successful and failed logins;
+- CSRF failures;
+- origin failures (login, logout, users);
+- IP and global rate-limit blocks;
+- ForwardAuth results (including `denied`);
+- session validation outcomes;
+- active and capacity sessions;
+- Argon2 checks;
+- account administration results;
+- history events dropped or failed to flush;
+- HTTP request latency and status;
+- connection saturation.
+
+No metric label contains a login, an address, or a user agent.
+
+The log records events such as:
 
 ```text
 login_success
@@ -131,8 +206,8 @@ origin_check_failed
 session_capacity_reached
 ```
 
-Never log the password, session ID, CSRF token, HMAC secret, Cookie header, return-signature value, or Authorization header.
+Do not log the password, session ID, CSRF token, HMAC secret, Cookie header, return-signature value, or Authorization header.
 
 ## Dependency resolution
 
-`Cargo.lock` is generated explicitly with `./scripts/update-lockfile.sh` after a dependency change, reviewed, and committed. CI, Docker, and release builds require that committed resolution and perform actual test/build steps with `--frozen`. Release jobs never regenerate dependency resolution.
+The `Cargo.lock` file is generated explicitly with `./scripts/update-lockfile.sh` after a dependency change. It is reviewed and committed. CI, Docker, and release builds require the committed resolution. They run the actual test and build steps with `--frozen`. Release jobs never regenerate the dependency resolution.
