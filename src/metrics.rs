@@ -62,7 +62,7 @@ pub struct Metrics {
     login_internal_error: AtomicU64,
     logout_origin_failure: AtomicU64,
     users_origin_failure: AtomicU64,
-    /// `(action, result)` of the account administration routes.
+    /// The counts by `(action, result)` of the account administration routes.
     user_admin: Mutex<HashMap<(&'static str, &'static str), u64>>,
 
     verify_allowed: AtomicU64,
@@ -145,8 +145,9 @@ impl Metrics {
         self.users_origin_failure.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// One call of an account administration route: `action` is add, update, delete, impersonate
-    /// or impersonate_end; `result` is ok, rejected (bad input) or forbidden (not the superadmin).
+    /// Counts one call of an account administration route.
+    /// The `action` is add, update, delete, impersonate or impersonate_end.
+    /// The `result` is ok, rejected (bad input) or forbidden (not the superadmin).
     pub fn user_admin(&self, action: &'static str, result: &'static str) {
         let mut counters = self.user_admin.lock().expect("metrics admin mutex poisoned");
         let counter = counters.entry((action, result)).or_insert(0);
@@ -431,8 +432,9 @@ impl Metrics {
 }
 
 impl Metrics {
-    /// Series about the accounts and the history. No login, address or user agent ever appears in a
-    /// label: the detail lives in the database only.
+    /// Series about the accounts and the history.
+    /// No login, address or user agent ever appears in a label.
+    /// The detail is kept in the database only.
     pub fn render_accounts(&self, users: usize, tracking_dropped: u64, tracking_errors: u64) -> String {
         let mut out = String::new();
         out.push_str("# HELP portal_users Accounts in the database (the superadmin is not counted).\n");

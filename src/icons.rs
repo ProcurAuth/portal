@@ -1,4 +1,4 @@
-//! The offline icon library: three SVG sets shipped in the image under `/icons`.
+//! The offline icon library. The image ships three SVG sets under `/icons`.
 //!
 //! | set | origin | look |
 //! |---|---|---|
@@ -6,20 +6,22 @@
 //! | `si` | simple-icons | brand glyphs, monochrome |
 //! | `tb` | tabler icons (outline) | generic interface icons, monochrome |
 //!
-//! Nothing is fetched at runtime. A service names its icon in any of the forms people already
-//! use in Homepage labels (`notes`, `docker.png`, `si-grafana`) or with an explicit set
-//! (`di:notes`, `tb:server`); a bare name is looked up in `di`, then `si`, then `tb`.
+//! The library does not fetch anything at runtime.
+//! A service names its icon in one of the forms that Homepage labels use: `notes`, `docker.png` or `si-grafana`.
+//! A service can also name a set explicitly: `di:notes` or `tb:server`.
+//! A bare name is looked up in `di`, then `si`, then `tb`.
 //!
 //! Interface: [`Icons::load`], [`Icons::resolve`] (spec to [`Icon`]) and [`Icons::svg`] (bytes for
-//! the route). The directory is scanned once; the files are read on demand.
+//! the route). The directory is scanned once. The files are read on demand.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// An icon larger than this is not offered. A service icon is drawn at 24 pixels, and the browser
-/// parses and rasterises the whole document to do it: the library has logos of 250 KiB (embedded
-/// bitmaps) that cost a launcher more than the rest of the page. The ones a lab uses weigh 1 to 5 KiB.
+/// The library does not offer an icon larger than this limit.
+/// A service icon is drawn at 24 pixels. The browser parses and rasterises the whole document to do this.
+/// The library has logos of 250 KiB (embedded bitmaps). Each of these costs a launcher more than the rest of the page.
+/// The icons that a lab uses weigh 1 to 5 KiB.
 const MAX_SVG_BYTES: u64 = 32 * 1024;
 const EXTENSIONS: [&str; 6] = [".png", ".svg", ".webp", ".jpg", ".jpeg", ".ico"];
 
@@ -45,7 +47,7 @@ impl Set {
         Set::ALL.into_iter().find(|set| set.dir() == dir)
     }
 
-    /// Monochrome sets draw with `currentColor`/black: the page recolours them for the theme.
+    /// Monochrome sets draw with `currentColor` or black. The page recolours them for the theme.
     pub fn is_monochrome(self) -> bool {
         self != Set::Dashboard
     }
@@ -77,7 +79,7 @@ pub struct Icons {
 }
 
 impl Icons {
-    /// An empty library: every icon falls back to the service's initial.
+    /// Makes an empty library. Each service then shows its initial, not an icon.
     pub fn empty() -> Self {
         Self {
             root: PathBuf::new(),
@@ -85,7 +87,7 @@ impl Icons {
         }
     }
 
-    /// Indexes `root/{di,si,tb}/*.svg` within the size budget. A missing directory gives an empty
+    /// Indexes `root/{di,si,tb}/*.svg` files within the size limit. A missing directory gives an empty
     /// library.
     pub fn load(root: &Path) -> Self {
         let mut icons = Self {
@@ -115,7 +117,7 @@ impl Icons {
         self.names.iter().map(HashSet::len).sum()
     }
 
-    /// Maps what a label says (`docker.png`, `si-grafana`, `tb:server`) to an icon of the library.
+    /// Maps the name in a label (`docker.png`, `si-grafana`, `tb:server`) to an icon of the library.
     pub fn resolve(&self, spec: &str) -> Option<Icon> {
         let spec = spec.trim().to_ascii_lowercase();
         let (only, rest) = split_set(&spec);
@@ -140,8 +142,8 @@ impl Icons {
             .map(|set| Icon { set: *set, name })
     }
 
-    /// The SVG of a known icon. Only names found by the scan can be read: no path is built from
-    /// request input.
+    /// Gives the SVG of a known icon. Only names found by the scan can be read.
+    /// No path is built from request input.
     pub fn svg(&self, set: Set, name: &str) -> Option<Vec<u8>> {
         if !self.names[set.index()].contains(name) {
             return None;
