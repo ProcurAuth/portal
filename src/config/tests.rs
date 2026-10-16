@@ -99,7 +99,10 @@ fn line<'a>(config: &'a Config, key: &str) -> &'a Effective {
 fn parses_the_minimal_configuration_with_the_documented_defaults() {
     let (cfg, secrets) = ok(MINIMAL);
     assert_eq!(secrets.superadmin_login, "admin");
-    assert_eq!(secrets.superadmin_password.as_bytes(), b"a password for the tests");
+    assert_eq!(
+        secrets.superadmin_password.as_bytes(),
+        b"a password for the tests"
+    );
     assert!(secrets.session_secret.is_none());
     assert!(secrets.postgres_password.is_none());
     assert_eq!(cfg.access.grants_mode, Mode::Dynamic);
@@ -166,8 +169,14 @@ fn the_effective_configuration_gives_the_source_of_each_value_and_hides_the_secr
     assert_eq!(line(&cfg, "server.max_connections").value, "1024");
     assert_eq!(line(&cfg, "server.max_body_bytes").value, "\"32KiB\"");
     assert_eq!(line(&cfg, "logging.level").value, "\"info\"");
-    assert_eq!(line(&cfg, "authentication.superadmin_login").source, "env:PORTAL_LOGIN");
-    assert_eq!(line(&cfg, "authentication.superadmin_login").value, "<hidden>");
+    assert_eq!(
+        line(&cfg, "authentication.superadmin_login").source,
+        "env:PORTAL_LOGIN"
+    );
+    assert_eq!(
+        line(&cfg, "authentication.superadmin_login").value,
+        "<hidden>"
+    );
     assert_eq!(
         line(&cfg, "authentication.superadmin_password").source,
         "env:PORTAL_PASSWORD"
@@ -188,10 +197,19 @@ fn the_effective_configuration_gives_the_source_of_each_value_and_hides_the_secr
 #[test]
 fn a_key_that_does_not_apply_is_not_in_the_effective_configuration() {
     let (cfg, _) = ok(MINIMAL);
-    assert!(cfg.effective.iter().all(|l| !l.key.starts_with("postgres.")));
+    assert!(cfg
+        .effective
+        .iter()
+        .all(|l| !l.key.starts_with("postgres.")));
     assert!(cfg.effective.iter().all(|l| l.key != "session.secret"));
-    assert!(cfg.effective.iter().all(|l| l.key != "discovery.kubernetes_host_env"));
-    assert!(cfg.effective.iter().all(|l| l.key != "discovery.docker_socket"));
+    assert!(cfg
+        .effective
+        .iter()
+        .all(|l| l.key != "discovery.kubernetes_host_env"));
+    assert!(cfg
+        .effective
+        .iter()
+        .all(|l| l.key != "discovery.docker_socket"));
     let (cfg, _) = ok(&format!("{}\n{POSTGRES_BLOCK}", shared()));
     assert!(cfg.effective.iter().any(|l| l.key == "postgres.host"));
     assert!(cfg.effective.iter().all(|l| l.key != "storage.database"));
@@ -225,7 +243,11 @@ fn a_secret_comes_from_a_variable_or_from_a_file_and_the_file_loses_one_line_end
         &format!(r#"superadmin_password_file = "{}""#, two_ends.display()),
     );
     let (_, secrets) = ok(&raw);
-    assert_eq!(secrets.superadmin_password.as_bytes(), b"secret\n", "only the last line end goes");
+    assert_eq!(
+        secrets.superadmin_password.as_bytes(),
+        b"secret\n",
+        "only the last line end goes"
+    );
     fs::remove_file(two_ends).ok();
 }
 
@@ -247,9 +269,14 @@ fn all_four_secrets_accept_both_forms() {
             authentication {{ superadmin_login_env = "PORTAL_LOGIN" superadmin_password_{form} }}"#
         ));
         assert_eq!(secrets.superadmin_password.len(), 32);
-        let (_, secrets) = ok(&with(&format!(r#"session {{ secret_mode = "provided" secret_{form} }}"#)));
+        let (_, secrets) = ok(&with(&format!(
+            r#"session {{ secret_mode = "provided" secret_{form} }}"#
+        )));
         assert_eq!(secrets.session_secret.unwrap().len(), 32);
-        let block = POSTGRES_BLOCK.replace(r#"password_env = "PORTAL_DB_PASSWORD""#, &format!("password_{form}"));
+        let block = POSTGRES_BLOCK.replace(
+            r#"password_env = "PORTAL_DB_PASSWORD""#,
+            &format!("password_{form}"),
+        );
         let (_, secrets) = ok(&format!("{}\n{block}", shared()));
         assert_eq!(secrets.postgres_password.unwrap().len(), 32);
     }
@@ -259,11 +286,20 @@ fn all_four_secrets_accept_both_forms() {
 #[test]
 fn a_secret_in_clear_text_in_the_file_is_refused() {
     for (from, to) in [
-        (r#"superadmin_password_env = "PORTAL_PASSWORD""#, r#"superadmin_password = "hunter2hunter2""#),
-        (r#"superadmin_login_env    = "PORTAL_LOGIN""#, r#"superadmin_login = "admin""#),
+        (
+            r#"superadmin_password_env = "PORTAL_PASSWORD""#,
+            r#"superadmin_password = "hunter2hunter2""#,
+        ),
+        (
+            r#"superadmin_login_env    = "PORTAL_LOGIN""#,
+            r#"superadmin_login = "admin""#,
+        ),
     ] {
         let message = err(&MINIMAL.replace(from, to));
-        assert!(message.contains("must not be written in the file"), "{message}");
+        assert!(
+            message.contains("must not be written in the file"),
+            "{message}"
+        );
         assert!(!message.contains("hunter2"), "{message}");
     }
     let message = err(&with(
@@ -274,7 +310,10 @@ fn a_secret_in_clear_text_in_the_file_is_refused() {
     let message = err(&format!(
         "{}\n{}",
         shared(),
-        POSTGRES_BLOCK.replace("password_env = \"PORTAL_DB_PASSWORD\"", "password = \"clear\"")
+        POSTGRES_BLOCK.replace(
+            "password_env = \"PORTAL_DB_PASSWORD\"",
+            "password = \"clear\""
+        )
     ));
     assert!(message.contains("postgres.password"), "{message}");
 }
@@ -283,8 +322,14 @@ fn a_secret_in_clear_text_in_the_file_is_refused() {
 fn a_secret_needs_exactly_one_form() {
     let none = MINIMAL.replace(r#"superadmin_password_env = "PORTAL_PASSWORD""#, "");
     let message = err(&none);
-    assert!(message.contains("authentication.superadmin_password_env"), "{message}");
-    assert!(message.contains("authentication.superadmin_password_file"), "{message}");
+    assert!(
+        message.contains("authentication.superadmin_password_env"),
+        "{message}"
+    );
+    assert!(
+        message.contains("authentication.superadmin_password_file"),
+        "{message}"
+    );
 
     let both = MINIMAL.replace(
         r#"superadmin_password_env = "PORTAL_PASSWORD""#,
@@ -297,21 +342,32 @@ fn a_secret_needs_exactly_one_form() {
 #[test]
 fn a_missing_empty_or_unreadable_source_stops_the_start() {
     // The variable does not exist.
-    let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", "admin")]).err().unwrap();
+    let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", "admin")])
+        .err()
+        .unwrap();
     assert!(message.contains("PORTAL_PASSWORD"), "{message}");
     assert!(message.contains("superadmin_password_env"), "{message}");
     // The variable is empty.
-    let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", "admin"), ("PORTAL_PASSWORD", "")])
-        .err()
-        .unwrap();
-    assert!(message.contains("PORTAL_PASSWORD") && message.contains("empty"), "{message}");
+    let message = parse_with(
+        MINIMAL,
+        &[("PORTAL_LOGIN", "admin"), ("PORTAL_PASSWORD", "")],
+    )
+    .err()
+    .unwrap();
+    assert!(
+        message.contains("PORTAL_PASSWORD") && message.contains("empty"),
+        "{message}"
+    );
     // The file does not exist.
     let raw = MINIMAL.replace(
         r#"superadmin_password_env = "PORTAL_PASSWORD""#,
         r#"superadmin_password_file = "/nonexistent/portal-password""#,
     );
     let message = err(&raw);
-    assert!(message.contains("/nonexistent/portal-password"), "{message}");
+    assert!(
+        message.contains("/nonexistent/portal-password"),
+        "{message}"
+    );
     assert!(message.contains("superadmin_password_file"), "{message}");
     // The file is empty, or holds only a line end.
     for content in [&b""[..], &b"\n"[..]] {
@@ -358,16 +414,31 @@ fn the_session_secret_modes() {
     assert!(message.contains("session.secret_env"), "{message}");
     // `ephemeral` refuses one.
     let message = err(&with(r#"session { secret_env = "PORTAL_SESSION" }"#));
-    assert!(message.contains("session.secret_mode is ephemeral"), "{message}");
+    assert!(
+        message.contains("session.secret_mode is ephemeral"),
+        "{message}"
+    );
     // The old mode name is gone.
-    assert!(err(&with(r#"session { secret_mode = "file" secret_env = "PORTAL_SESSION" }"#))
-        .contains("session.secret_mode"));
+    assert!(err(&with(
+        r#"session { secret_mode = "file" secret_env = "PORTAL_SESSION" }"#
+    ))
+    .contains("session.secret_mode"));
     // At least 32 bytes.
     let raw = with(r#"session { secret_mode = "provided" secret_env = "SHORT" }"#);
-    let message = parse_with(&raw, &[("PORTAL_LOGIN", "a"), ("PORTAL_PASSWORD", "p"), ("SHORT", "abc")])
-        .err()
-        .unwrap();
-    assert!(message.contains("minimum is 32") && message.contains("env:SHORT"), "{message}");
+    let message = parse_with(
+        &raw,
+        &[
+            ("PORTAL_LOGIN", "a"),
+            ("PORTAL_PASSWORD", "p"),
+            ("SHORT", "abc"),
+        ],
+    )
+    .err()
+    .unwrap();
+    assert!(
+        message.contains("minimum is 32") && message.contains("env:SHORT"),
+        "{message}"
+    );
     assert!(!message.contains("abc"), "{message}");
 }
 
@@ -375,19 +446,39 @@ fn the_session_secret_modes() {
 
 #[test]
 fn a_superadmin_login_with_an_upper_case_letter_or_a_space_is_refused() {
-    for bad in ["Admin", "ADMIN", "ad min", " admin", "admin ", "ad\tmin", "adm\u{e9}N", "ad\u{0}min"] {
+    for bad in [
+        "Admin",
+        "ADMIN",
+        "ad min",
+        " admin",
+        "admin ",
+        "ad\tmin",
+        "adm\u{e9}N",
+        "ad\u{0}min",
+    ] {
         let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", bad), ("PORTAL_PASSWORD", "p")])
             .err()
             .unwrap_or_else(|| panic!("{bad:?} must be refused"));
-        assert!(message.contains("authentication.superadmin_login"), "{message}");
-        assert!(!message.contains(bad), "the login stays out of the error: {message}");
+        assert!(
+            message.contains("authentication.superadmin_login"),
+            "{message}"
+        );
+        assert!(
+            !message.contains(bad),
+            "the login stays out of the error: {message}"
+        );
     }
     for good in ["admin", "root-1", "a.b_c@example.org", "\u{e9}l\u{e8}ve"] {
-        let (_, secrets) = parse_with(MINIMAL, &[("PORTAL_LOGIN", good), ("PORTAL_PASSWORD", "p")]).unwrap();
+        let (_, secrets) =
+            parse_with(MINIMAL, &[("PORTAL_LOGIN", good), ("PORTAL_PASSWORD", "p")]).unwrap();
         assert_eq!(secrets.superadmin_login, good);
     }
     let long = "a".repeat(65);
-    assert!(parse_with(MINIMAL, &[("PORTAL_LOGIN", &long), ("PORTAL_PASSWORD", "p")]).is_err());
+    assert!(parse_with(
+        MINIMAL,
+        &[("PORTAL_LOGIN", &long), ("PORTAL_PASSWORD", "p")]
+    )
+    .is_err());
     let file = temp_file(b"Admin\n");
     let raw = MINIMAL.replace(
         r#"superadmin_login_env    = "PORTAL_LOGIN""#,
@@ -407,16 +498,30 @@ fn the_kubernetes_api_comes_from_the_variables_that_the_file_names() {
     let (cfg, _) = ok(&raw);
     assert_eq!(
         cfg.discovery.kubernetes,
-        Some(KubernetesApi { host: "10.43.0.1".into(), port: 443 })
+        Some(KubernetesApi {
+            host: "10.43.0.1".into(),
+            port: 443
+        })
     );
-    assert_eq!(line(&cfg, "discovery.kubernetes_host_env").value, "\"API_HOST\"");
-    assert_eq!(line(&cfg, "discovery.kubernetes_host").source, "env:API_HOST");
+    assert_eq!(
+        line(&cfg, "discovery.kubernetes_host_env").value,
+        "\"API_HOST\""
+    );
+    assert_eq!(
+        line(&cfg, "discovery.kubernetes_host").source,
+        "env:API_HOST"
+    );
     assert_eq!(line(&cfg, "discovery.kubernetes_port").value, "443");
 
     // An IPv6 address gets its brackets for the URL.
     let (cfg, _) = parse_with(
         &raw,
-        &[("PORTAL_LOGIN", "a"), ("PORTAL_PASSWORD", "p"), ("API_HOST", "fd00::1"), ("API_PORT", "6443")],
+        &[
+            ("PORTAL_LOGIN", "a"),
+            ("PORTAL_PASSWORD", "p"),
+            ("API_HOST", "fd00::1"),
+            ("API_PORT", "6443"),
+        ],
     )
     .unwrap();
     assert_eq!(cfg.discovery.kubernetes.unwrap().host, "[fd00::1]");
@@ -427,10 +532,16 @@ fn the_kubernetes_variables_are_mandatory_and_checked_at_start() {
     let names = r#"kubernetes_host_env = "API_HOST" kubernetes_port_env = "API_PORT""#;
     // The names are missing.
     let message = err(&with("discovery { kubernetes = true }"));
-    assert!(message.contains("discovery.kubernetes_host_env"), "{message}");
+    assert!(
+        message.contains("discovery.kubernetes_host_env"),
+        "{message}"
+    );
     // The names are present but the switch is off.
     let message = err(&with(&format!("discovery {{ {names} }}")));
-    assert!(message.contains("discovery.kubernetes_host_env must not be set"), "{message}");
+    assert!(
+        message.contains("discovery.kubernetes_host_env must not be set"),
+        "{message}"
+    );
     // A variable does not exist, is empty or is not a port.
     let raw = with(&format!("discovery {{ kubernetes = true {names} }}"));
     let base = [("PORTAL_LOGIN", "a"), ("PORTAL_PASSWORD", "p")];
@@ -465,7 +576,10 @@ fn a_number_in_quotes_and_a_word_without_quotes_are_refused() {
         assert!(message.contains(key), "{bad}: {message}");
     }
     for (key, raw) in [
-        ("security.login_rate_limit_enabled", r#"security { login_rate_limit_enabled = "true" }"#),
+        (
+            "security.login_rate_limit_enabled",
+            r#"security { login_rate_limit_enabled = "true" }"#,
+        ),
         ("session.bind", "session { bind = none }"),
         ("session.same_site", "session { same_site = Strict }"),
         ("logging.level", "logging { level = info }"),
@@ -481,7 +595,9 @@ fn a_number_in_quotes_and_a_word_without_quotes_are_refused() {
     // A path without quotes is not even a scalar.
     err(&with("metrics { path = /metrics }"));
     // The good forms.
-    ok(&with("users { max_users = 5 } security { login_rate_limit_enabled = false }"));
+    ok(&with(
+        "users { max_users = 5 } security { login_rate_limit_enabled = false }",
+    ));
 }
 
 #[test]
@@ -523,10 +639,26 @@ fn an_error_names_the_key_what_it_accepts_and_the_value() {
     let server_cases = [
         ("workers = 0", "server.workers", "0"),
         ("workers = 65", "server.workers", "65"),
-        (r#"header_read_timeout = "2m""#, "server.header_read_timeout", "\"2m\""),
-        (r#"header_read_timeout = "ten""#, "server.header_read_timeout", "\"ten\""),
-        (r#"max_body_bytes = "8GiB""#, "server.max_body_bytes", "\"8GiB\""),
-        (r#"listen_address = "nowhere""#, "server.listen_address", "\"nowhere\""),
+        (
+            r#"header_read_timeout = "2m""#,
+            "server.header_read_timeout",
+            "\"2m\"",
+        ),
+        (
+            r#"header_read_timeout = "ten""#,
+            "server.header_read_timeout",
+            "\"ten\"",
+        ),
+        (
+            r#"max_body_bytes = "8GiB""#,
+            "server.max_body_bytes",
+            "\"8GiB\"",
+        ),
+        (
+            r#"listen_address = "nowhere""#,
+            "server.listen_address",
+            "\"nowhere\"",
+        ),
     ];
     for (body, key, value) in server_cases {
         let raw = MINIMAL.replace(r#"listen_address = "0.0.0.0:4181""#, body);
@@ -541,11 +673,31 @@ fn an_error_names_the_key_what_it_accepts_and_the_value() {
         assert!(message.contains("expected"), "{message}");
     }
     let cases = [
-        (r#"session { same_site = "None" }"#, "session.same_site", "\"None\""),
-        (r#"session { cookie_name = "portal" }"#, "session.cookie_name", "\"portal\""),
-        (r#"metrics { path = "metrics" }"#, "metrics.path", "\"metrics\""),
-        (r#"discovery { docker_socket = "docker.sock" }"#, "discovery.docker_socket", "\"docker.sock\""),
-        (r#"access { grants_mode = "Static" }"#, "access.grants_mode", "\"Static\""),
+        (
+            r#"session { same_site = "None" }"#,
+            "session.same_site",
+            "\"None\"",
+        ),
+        (
+            r#"session { cookie_name = "portal" }"#,
+            "session.cookie_name",
+            "\"portal\"",
+        ),
+        (
+            r#"metrics { path = "metrics" }"#,
+            "metrics.path",
+            "\"metrics\"",
+        ),
+        (
+            r#"discovery { docker_socket = "docker.sock" }"#,
+            "discovery.docker_socket",
+            "\"docker.sock\"",
+        ),
+        (
+            r#"access { grants_mode = "Static" }"#,
+            "access.grants_mode",
+            "\"Static\"",
+        ),
         (r#"logging { level = "loud" }"#, "logging.level", "\"loud\""),
     ];
     for (block, key, value) in cases {
@@ -559,7 +711,10 @@ fn an_error_names_the_key_what_it_accepts_and_the_value() {
 #[test]
 fn a_cross_key_error_holds_the_values() {
     let message = err(&with(r#"session { ttl = "1h" idle_timeout = "2h" }"#));
-    assert!(message.contains("2h") && message.contains("1h"), "{message}");
+    assert!(
+        message.contains("2h") && message.contains("1h"),
+        "{message}"
+    );
 }
 
 // PTL-CFG-8: a value of something that is off.
@@ -584,19 +739,34 @@ fn the_values_of_a_limiter_that_is_off_are_refused() {
     ));
     assert!(!cfg.security.login_rate_limit_enabled);
     for key in [
-        "login_attempts_per_ip", "login_window", "login_lockout", "global_login_attempts",
-        "global_login_window", "global_login_lockout", "max_rate_limit_entries",
+        "login_attempts_per_ip",
+        "login_window",
+        "login_lockout",
+        "global_login_attempts",
+        "global_login_window",
+        "global_login_lockout",
+        "max_rate_limit_entries",
     ] {
-        assert!(cfg.effective.iter().all(|l| l.key != format!("security.{key}")), "{key}");
+        assert!(
+            cfg.effective
+                .iter()
+                .all(|l| l.key != format!("security.{key}")),
+            "{key}"
+        );
     }
     // One limiter on keeps the shared table size.
-    ok(&with("security { login_rate_limit_enabled = false max_rate_limit_entries = 100 }"));
+    ok(&with(
+        "security { login_rate_limit_enabled = false max_rate_limit_entries = 100 }",
+    ));
 }
 
 #[test]
 fn metrics_path_is_refused_when_the_metrics_are_off() {
     let message = err(&with(r#"metrics { enabled = false path = "/metrics" }"#));
-    assert!(message.contains("metrics.path must not be set when metrics.enabled is false"), "{message}");
+    assert!(
+        message.contains("metrics.path must not be set when metrics.enabled is false"),
+        "{message}"
+    );
     let (cfg, _) = ok(&with("metrics { enabled = false }"));
     assert!(!cfg.metrics.enabled);
     assert!(cfg.effective.iter().all(|l| l.key != "metrics.path"));
@@ -607,10 +777,14 @@ fn metrics_path_is_refused_when_the_metrics_are_off() {
 
 #[test]
 fn rejects_an_unknown_key_block_or_duplicate() {
-    assert!(err(&with(r#"logging { magic = "yes" }"#)).contains("unknown configuration key: logging.magic"));
+    assert!(err(&with(r#"logging { magic = "yes" }"#))
+        .contains("unknown configuration key: logging.magic"));
     assert!(err(&with("magic { }")).contains("magic"));
     assert!(err(&with(r#"logging { level = "info" level = "warn" }"#)).contains("duplicate"));
-    assert!(err(&with(r#"logging { level = "info" } logging { level = "warn" }"#)).contains("duplicate"));
+    assert!(err(&with(
+        r#"logging { level = "info" } logging { level = "warn" }"#
+    ))
+    .contains("duplicate"));
     // The old attribute names.
     assert!(err(&MINIMAL.replace("superadmin_login_env", "login_file")).contains("unknown"));
     assert!(err(&with(r#"session { secret_file_x = "/p" }"#)).contains("unknown"));
@@ -642,19 +816,33 @@ fn discovery_is_off_by_default_and_parses_its_keys() {
         r#"discovery { interval = "30s" probe_timeout = "200ms" docker_socket = "/var/run/docker.sock" }"#,
     ));
     assert!(cfg.discovery.kubernetes.is_none());
-    assert_eq!(cfg.discovery.docker_socket, Some(PathBuf::from("/var/run/docker.sock")));
+    assert_eq!(
+        cfg.discovery.docker_socket,
+        Some(PathBuf::from("/var/run/docker.sock"))
+    );
     assert_eq!(cfg.discovery.probe_timeout, Duration::from_millis(200));
-    for body in [r#"interval = "1s""#, r#"docker_socket = "docker.sock""#, r#"kubernetes = "maybe""#, r#"docker_socket = "/a/../b""#] {
+    for body in [
+        r#"interval = "1s""#,
+        r#"docker_socket = "docker.sock""#,
+        r#"kubernetes = "maybe""#,
+        r#"docker_socket = "/a/../b""#,
+    ] {
         err(&with(&format!("discovery {{ {body} }}")));
     }
 }
 
 #[test]
 fn parses_idle_timeout_and_binding_and_refuses_bad_ones() {
-    let (cfg, _) = ok(&with(r#"session { idle_timeout = "10m" bind = "user_agent" }"#));
+    let (cfg, _) = ok(&with(
+        r#"session { idle_timeout = "10m" bind = "user_agent" }"#,
+    ));
     assert_eq!(cfg.session.idle_timeout, Duration::from_secs(600));
     assert_eq!(cfg.session.bind, SessionBind::UserAgent);
-    for extra in [r#"idle_timeout = "10s""#, r#"idle_timeout = "9h""#, r#"bind = "ip""#] {
+    for extra in [
+        r#"idle_timeout = "10s""#,
+        r#"idle_timeout = "9h""#,
+        r#"bind = "ip""#,
+    ] {
         err(&with(&format!("session {{ {extra} }}")));
     }
 }
@@ -687,7 +875,10 @@ fn rejects_bad_users_and_storage_values() {
 
 #[test]
 fn the_postgres_block_replaces_the_sqlite_file() {
-    let raw = format!("{}\nstorage {{ retention_days = 30 }}\n{POSTGRES_BLOCK}", shared());
+    let raw = format!(
+        "{}\nstorage {{ retention_days = 30 }}\n{POSTGRES_BLOCK}",
+        shared()
+    );
     let (cfg, secrets) = ok(&raw);
     let StorageBackend::Postgres(pg) = &cfg.storage.backend else {
         panic!("expected the postgres backend");
@@ -695,24 +886,31 @@ fn the_postgres_block_replaces_the_sqlite_file() {
     assert_eq!(pg.host, "postgresql-rw.data.svc.cluster.local");
     assert_eq!((pg.port, pg.pool_size), (5432, 4));
     assert_eq!(pg.connect_timeout, Duration::from_secs(5));
-    assert_eq!(secrets.postgres_password.unwrap().as_bytes(), b"database password");
+    assert_eq!(
+        secrets.postgres_password.unwrap().as_bytes(),
+        b"database password"
+    );
     assert_eq!(cfg.storage.retention_days, 30, "retention applies to both");
     assert_eq!(line(&cfg, "postgres.password").value, "<hidden>");
 
-    let tuned = POSTGRES_BLOCK.replace(
-        "}",
-        r#"port = 6432 pool_size = 8 connect_timeout = "2s" }"#,
-    );
+    let tuned =
+        POSTGRES_BLOCK.replace("}", r#"port = 6432 pool_size = 8 connect_timeout = "2s" }"#);
     let (cfg, _) = ok(&format!("{}\n{tuned}", shared()));
     let StorageBackend::Postgres(pg) = &cfg.storage.backend else {
         panic!("expected the postgres backend");
     };
-    assert_eq!((pg.port, pg.pool_size, pg.connect_timeout), (6432, 8, Duration::from_secs(2)));
+    assert_eq!(
+        (pg.port, pg.pool_size, pg.connect_timeout),
+        (6432, 8, Duration::from_secs(2))
+    );
 }
 
 #[test]
 fn the_postgres_block_and_the_sqlite_file_exclude_each_other() {
-    let raw = format!("{}\nstorage {{ database = \"/data/p.db\" }}\n{POSTGRES_BLOCK}", shared());
+    let raw = format!(
+        "{}\nstorage {{ database = \"/data/p.db\" }}\n{POSTGRES_BLOCK}",
+        shared()
+    );
     let message = err(&raw);
     assert!(message.contains("storage.database"), "{message}");
 }
@@ -768,8 +966,13 @@ fn the_configuration_reference_in_the_readme_is_the_generated_one() {
         .expect("README.md must be next to Cargo.toml");
     let begin = "<!-- config-reference:begin -->\n";
     let end = "<!-- config-reference:end -->";
-    let start = readme.find(begin).expect("README.md has no config-reference:begin marker") + begin.len();
-    let stop = readme.find(end).expect("README.md has no config-reference:end marker");
+    let start = readme
+        .find(begin)
+        .expect("README.md has no config-reference:begin marker")
+        + begin.len();
+    let stop = readme
+        .find(end)
+        .expect("README.md has no config-reference:end marker");
     assert_eq!(
         &readme[start..stop],
         format!("{}\n", keys::reference().trim_end_matches('\n')),
@@ -782,7 +985,10 @@ fn the_configuration_reference_in_the_readme_is_the_generated_one() {
 #[test]
 fn the_old_access_block_does_not_exist() {
     let message = err(&with(r#"roles { names = "ops" }"#));
-    assert!(message.contains("unknown configuration block: roles"), "{message}");
+    assert!(
+        message.contains("unknown configuration block: roles"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -810,20 +1016,74 @@ fn user_blocks_give_grants_in_the_static_and_hybrid_modes() {
 }
 
 #[test]
+fn a_user_block_gives_grants_on_sub_resources() {
+    let (cfg, _) = ok(&with(
+        r#"access { grants_mode = "hybrid" }
+        user "alice" { grants = [
+          "query.run.write on service:clickhouse-dash/database:analytics",
+          "query.run.read on service:clickhouse-dash",
+        ] }"#,
+    ));
+    let alice = &cfg.access.configured_grants["alice"];
+    assert_eq!(
+        alice.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "query.run.read on service:clickhouse-dash",
+            "query.run.write on service:clickhouse-dash/database:analytics"
+        ]
+    );
+    assert_eq!(alice[1].resource.as_ref().unwrap().id, "analytics");
+}
+
+#[test]
 fn a_user_block_is_refused_in_the_dynamic_mode_and_a_bad_one_always() {
     let message = err(&with(r#"user "alice" { grants = [] }"#));
     assert!(message.contains("dynamic"), "{message}");
-    let hybrid = |block: &str| err(&with(&format!(r#"access {{ grants_mode = "hybrid" }} {block}"#)));
+    let hybrid = |block: &str| {
+        err(&with(&format!(
+            r#"access {{ grants_mode = "hybrid" }} {block}"#
+        )))
+    };
     for (block, expected) in [
-        (r#"user "alice" { grants = ["admin"] }"#, "user.alice.grants"),
-        (r#"user "alice" { grants = ["access on service:db", "access on service:db"] }"#, "two times"),
-        (r#"user "alice" { }"#, "missing required configuration key: user.alice.grants"),
-        (r#"user "alice" { grants = [] roles = [] }"#, "unknown configuration key: user.alice.roles"),
+        (
+            r#"user "alice" { grants = ["admin"] }"#,
+            "user.alice.grants",
+        ),
+        (
+            r#"user "alice" { grants = ["access on service:db", "access on service:db"] }"#,
+            "two times",
+        ),
+        (
+            r#"user "alice" { grants = ["access on service:db/database:a"] }"#,
+            "no grant on a sub-resource",
+        ),
+        (
+            r#"user "alice" { grants = ["query on service:db/database:a b"] }"#,
+            "user.alice.grants",
+        ),
+        (
+            r#"user "alice" { grants = ["query on service:db/Database:a"] }"#,
+            "resource type",
+        ),
+        (
+            r#"user "alice" { }"#,
+            "missing required configuration key: user.alice.grants",
+        ),
+        (
+            r#"user "alice" { grants = [] roles = [] }"#,
+            "unknown configuration key: user.alice.roles",
+        ),
         (r#"user "Alice" { grants = [] }"#, "expected a login"),
         (r#"user "admin" { grants = [] }"#, "superadmin"),
-        (r#"user "a" { grants = [] } user "a" { grants = [] }"#, "duplicate"),
+        (
+            r#"user "a" { grants = [] } user "a" { grants = [] }"#,
+            "duplicate",
+        ),
         (r#"user { grants = [] }"#, "needs a label"),
-        (r#"user "alice" { grants = "access on service:db" }"#, "list"),
+        (
+            r#"user "alice" { grants = "access on service:db" }"#,
+            "list",
+        ),
     ] {
         let message = hybrid(block);
         assert!(message.contains(expected), "{block}: {message}");
@@ -841,12 +1101,27 @@ fn the_identity_block_reads_its_key_and_gives_its_defaults() {
     assert_eq!(identity.token_ttl, Duration::from_secs(300));
     assert!(secrets.identity_key.is_some());
     for (block, expected) in [
-        (r#"identity { signing_key_env = "IDENTITY_KEY" }"#, "identity.issuer"),
+        (
+            r#"identity { signing_key_env = "IDENTITY_KEY" }"#,
+            "identity.issuer",
+        ),
         (r#"identity { issuer = "i" }"#, "identity.signing_key"),
-        (r#"identity { issuer = "i" signing_key = "x" signing_key_env = "IDENTITY_KEY" }"#, "must not be written"),
-        (r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" token_ttl = "2h" }"#, "identity.token_ttl"),
-        (r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" header = "Cookie" }"#, "identity.header"),
-        (r#"identity { issuer = "a b" signing_key_env = "IDENTITY_KEY" }"#, "identity.issuer"),
+        (
+            r#"identity { issuer = "i" signing_key = "x" signing_key_env = "IDENTITY_KEY" }"#,
+            "must not be written",
+        ),
+        (
+            r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" token_ttl = "2h" }"#,
+            "identity.token_ttl",
+        ),
+        (
+            r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" header = "Cookie" }"#,
+            "identity.header",
+        ),
+        (
+            r#"identity { issuer = "a b" signing_key_env = "IDENTITY_KEY" }"#,
+            "identity.issuer",
+        ),
     ] {
         let message = err(&with(block));
         assert!(message.contains(expected), "{block}: {message}");
@@ -875,20 +1150,40 @@ fn the_pdp_block_and_its_clients() {
 fn a_bad_pdp_configuration_stops_the_start() {
     let pdp = r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" }"#;
     for (extra, expected) in [
-        (r#"pdp_client "db" { token_env = "PDP_DB" }"#.to_string(), "needs the pdp block"),
         (
-            format!(r#"{pdp} pdp_client "db" {{ token_env = "PDP_DB" }} pdp_client "chat" {{ token_env = "PDP_DB" }}"#),
+            r#"pdp_client "db" { token_env = "PDP_DB" }"#.to_string(),
+            "needs the pdp block",
+        ),
+        (
+            format!(
+                r#"{pdp} pdp_client "db" {{ token_env = "PDP_DB" }} pdp_client "chat" {{ token_env = "PDP_DB" }}"#
+            ),
             "the same token",
         ),
-        (format!(r#"{pdp} pdp_client "db" {{ token_env = "SHORT" }}"#), "the minimum is 32"),
-        (format!(r#"{pdp} pdp_client "db" {{ token = "x" }}"#), "must not be written"),
-        (format!(r#"{pdp} pdp_client "Db" {{ token_env = "PDP_DB" }}"#), "service id"),
+        (
+            format!(r#"{pdp} pdp_client "db" {{ token_env = "SHORT" }}"#),
+            "the minimum is 32",
+        ),
+        (
+            format!(r#"{pdp} pdp_client "db" {{ token = "x" }}"#),
+            "must not be written",
+        ),
+        (
+            format!(r#"{pdp} pdp_client "Db" {{ token_env = "PDP_DB" }}"#),
+            "service id",
+        ),
         (
             r#"pdp { listen_address = "0.0.0.0:4181" url = "http://pdp:4181" }"#.to_string(),
             "must not use the port of server.listen_address",
         ),
-        (r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp/x" }"#.to_string(), "pdp.url"),
-        (r#"pdp { url = "http://pdp" }"#.to_string(), "pdp.listen_address"),
+        (
+            r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp/x" }"#.to_string(),
+            "pdp.url",
+        ),
+        (
+            r#"pdp { url = "http://pdp" }"#.to_string(),
+            "pdp.listen_address",
+        ),
     ] {
         let message = err(&with(&extra));
         assert!(message.contains(expected), "{extra}: {message}");

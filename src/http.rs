@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body as _, Bytes, Incoming};
 use hyper::header::{
-    HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, COOKIE, HOST, LOCATION,
-    ORIGIN, REFERER, RETRY_AFTER, SET_COOKIE, USER_AGENT,
+    HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, COOKIE, HOST, LOCATION, ORIGIN, REFERER,
+    RETRY_AFTER, SET_COOKIE, USER_AGENT,
 };
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -22,19 +22,17 @@ use crate::access::{self, may_open, Decision};
 use crate::actions;
 use crate::catalog::Catalog;
 use crate::config::{Config, LogLevel, Secret};
-use crate::grants::{self, Grant, Policy};
-use crate::identity::Signer;
-use crate::discovery;
-use crate::icons::{Icons, Set};
 use crate::crypto::{
     hash_password, new_csrf_token, sign_action_token, sign_return_uri, verify_action_token,
     verify_csrf, verify_password, verify_return_uri_signature,
 };
+use crate::discovery;
+use crate::grants::{self, Grant, Policy};
+use crate::icons::{Icons, Set};
+use crate::identity::Signer;
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
-use crate::session::{
-    Binding, NewSession, Principal, Session, SessionIssueError, SessionStore,
-};
+use crate::session::{Binding, NewSession, Principal, Session, SessionIssueError, SessionStore};
 use crate::store::{InsertError, LoginPage, Snapshot, Store, UserRow};
 use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
@@ -55,6 +53,8 @@ const DENIED_PATH: &str = "/auth/denied";
 const USERS_ADD_PATH: &str = "/auth/users/add";
 const USERS_DELETE_PATH: &str = "/auth/users/delete";
 const USERS_UPDATE_PATH: &str = "/auth/users/update";
+const GRANT_ADD_PATH: &str = "/auth/users/grant-add";
+const GRANT_DELETE_PATH: &str = "/auth/users/grant-delete";
 const IMPERSONATE_PATH: &str = "/auth/users/impersonate";
 const IMPERSONATE_END_PATH: &str = "/auth/users/impersonate-end";
 /// The anti-CSRF token protects the account administration forms.
@@ -255,7 +255,10 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
     let connection_gate = Arc::new(Semaphore::new(state.config.server.max_connections));
     let pdp_listener = match &state.config.pdp {
         Some(pdp) => Some(TcpListener::bind(pdp.listen_address).await.map_err(|e| {
-            format!("cannot listen on {} (pdp.listen_address): {e}", pdp.listen_address)
+            format!(
+                "cannot listen on {} (pdp.listen_address): {e}",
+                pdp.listen_address
+            )
         })?),
         None => None,
     };
@@ -284,11 +287,18 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
         "access_model",
         &[
             ("grants_mode", state.policy.mode.as_str().to_string()),
-            ("configured_users", state.policy.configured.len().to_string()),
+            (
+                "configured_users",
+                state.policy.configured.len().to_string(),
+            ),
             ("identity_token", state.signer.is_some().to_string()),
             (
                 "identity_key_id",
-                state.signer.as_ref().map(|s| s.kid().to_string()).unwrap_or_default(),
+                state
+                    .signer
+                    .as_ref()
+                    .map(|s| s.kid().to_string())
+                    .unwrap_or_default(),
             ),
             ("pdp", state.config.pdp.is_some().to_string()),
         ],
@@ -394,60 +404,59 @@ async fn handle_request(
         && path == state.config.metrics.path
     {
         handle_metrics(&state)
+    } else if path == VERIFY_PATH {
+        handle_verify(&state, request.headers(), &client)
+    } else if method == Method::GET && path == HEALTH_PATH {
+        text_response(StatusCode::OK, "ok\n")
+    } else if method == Method::GET && path == HOME_PATH {
+        handle_home(&state, request.headers(), &client).await
+    } else if method == Method::GET && path == STYLE_PATH {
+        static_response("text/css; charset=utf-8", ui::CSS)
+    } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
+        handle_icon(&state, &path)
+    } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
+        static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
+    } else if method == Method::GET && path == THEME_JS_PATH {
+        static_response("text/javascript; charset=utf-8", ui::THEME_JS)
+    } else if method == Method::GET && path == SETTINGS_JS_PATH {
+        static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
+    } else if method == Method::GET && is_settings_path(&path) {
+        handle_settings(&state, &path, &uri, request.headers(), &client).await
+    } else if method == Method::GET && path == SUCCESS_PATH {
+        handle_success(&state, request.headers(), &client)
+    } else if method == Method::GET && path == DENIED_PATH {
+        handle_denied(&state, request.headers(), &client)
+    } else if method == Method::POST && path == USERS_ADD_PATH {
+        handle_users_add(&state, request, &client).await
+    } else if method == Method::POST && path == USERS_DELETE_PATH {
+        handle_users_delete(&state, request, &client).await
+    } else if method == Method::POST && path == USERS_UPDATE_PATH {
+        handle_users_update(&state, request, &client).await
+    } else if method == Method::POST && path == GRANT_ADD_PATH {
+        handle_grant_add(&state, request, &client).await
+    } else if method == Method::POST && path == GRANT_DELETE_PATH {
+        handle_grant_delete(&state, request, &client).await
+    } else if method == Method::POST && path == IMPERSONATE_PATH {
+        handle_impersonate(&state, request, &client).await
+    } else if method == Method::POST && path == IMPERSONATE_END_PATH {
+        handle_impersonate_end(&state, request, &client).await
+    } else if method == Method::GET && path == LOGIN_PATH {
+        handle_login_get(&state, &uri, request.headers(), &client)
+    } else if method == Method::POST && path == LOGIN_PATH {
+        handle_login_post(&state, request, &client).await
+    } else if method == Method::GET && path == LOGOUT_PATH {
+        // The sign-out action is the POST of the launcher button. A plain visit changes nothing.
+        redirect_response(StatusCode::SEE_OTHER, HOME_PATH)
+    } else if method == Method::POST && path == LOGOUT_PATH {
+        handle_logout_post(&state, request, &client).await
     } else {
-        if path == VERIFY_PATH {
-            handle_verify(&state, request.headers(), &client)
-        } else if method == Method::GET && path == HEALTH_PATH {
-            text_response(StatusCode::OK, "ok\n")
-        } else if method == Method::GET && path == HOME_PATH {
-            handle_home(&state, request.headers(), &client).await
-        } else if method == Method::GET && path == STYLE_PATH {
-            static_response("text/css; charset=utf-8", ui::CSS)
-        } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
-            handle_icon(&state, &path)
-        } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
-            static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
-        } else if method == Method::GET && path == THEME_JS_PATH {
-            static_response("text/javascript; charset=utf-8", ui::THEME_JS)
-        } else if method == Method::GET && path == SETTINGS_JS_PATH {
-            static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
-        } else if method == Method::GET && is_settings_path(&path) {
-            handle_settings(&state, &path, &uri, request.headers(), &client).await
-        } else if method == Method::GET && path == SUCCESS_PATH {
-            handle_success(&state, request.headers(), &client)
-        } else if method == Method::GET && path == DENIED_PATH {
-            handle_denied(&state, request.headers(), &client)
-        } else if method == Method::POST && path == USERS_ADD_PATH {
-            handle_users_add(&state, request, &client).await
-        } else if method == Method::POST && path == USERS_DELETE_PATH {
-            handle_users_delete(&state, request, &client).await
-        } else if method == Method::POST && path == USERS_UPDATE_PATH {
-            handle_users_update(&state, request, &client).await
-        } else if method == Method::POST && path == IMPERSONATE_PATH {
-            handle_impersonate(&state, request, &client).await
-        } else if method == Method::POST && path == IMPERSONATE_END_PATH {
-            handle_impersonate_end(&state, request, &client).await
-        } else if method == Method::GET && path == LOGIN_PATH {
-            handle_login_get(&state, &uri, request.headers(), &client)
-        } else if method == Method::POST && path == LOGIN_PATH {
-            handle_login_post(&state, request, &client).await
-        } else if method == Method::GET && path == LOGOUT_PATH {
-            // The sign-out action is the POST of the launcher button. A plain visit changes nothing.
-            redirect_response(StatusCode::SEE_OTHER, HOME_PATH)
-        } else if method == Method::POST && path == LOGOUT_PATH {
-            handle_logout_post(&state, request, &client).await
-        } else {
-            handle_not_found(&state, &method, &uri, request.headers(), &client)
-        }
+        handle_not_found(&state, &method, &uri, request.headers(), &client)
     };
 
     let status = response.status().as_u16();
-    state.metrics.observe_http_request(
-        method_metric,
-        route_metric,
-        status,
-        started.elapsed(),
-    );
+    state
+        .metrics
+        .observe_http_request(method_metric, route_metric, status, started.elapsed());
 
     let request_log_level = if route_metric == "metrics" || route_metric == "health" {
         LogLevel::Debug
@@ -543,7 +552,10 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     };
 
     let original_path = path_only(original_uri);
-    if matches!(original_path, LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH) {
+    if matches!(
+        original_path,
+        LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH
+    ) {
         state.metrics.verify_allowed();
         return empty_response(StatusCode::NO_CONTENT);
     }
@@ -551,7 +563,9 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     // A path that a service declares with `portal.exclude` passes without a session, for example a webhook or a health probe.
     // Its caller cannot sign in. All other paths need a session.
     let catalog = current_catalog(state);
-    let method = unique_header_str(headers, "x-forwarded-method").ok().flatten();
+    let method = unique_header_str(headers, "x-forwarded-method")
+        .ok()
+        .flatten();
     if access::excluded(&catalog, method, original_uri).is_some() {
         state.metrics.verify_excluded();
         return empty_response(StatusCode::NO_CONTENT);
@@ -657,7 +671,11 @@ fn handle_not_found(
     if *method == Method::GET {
         html_response(
             StatusCode::NOT_FOUND,
-            ui::message_page("Page not found", "There is nothing at this address.", "Back to panel"),
+            ui::message_page(
+                "Page not found",
+                "There is nothing at this address.",
+                "Back to panel",
+            ),
         )
     } else {
         text_response(StatusCode::NOT_FOUND, "Not Found\n")
@@ -670,7 +688,8 @@ fn handle_denied(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     let Some(viewer) = current_viewer(state, headers, client) else {
         return redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH);
     };
-    let Ok(logout_token) = sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token) else {
+    let Ok(logout_token) = sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token)
+    else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
     html_response(
@@ -700,7 +719,9 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
         return text_response(StatusCode::NOT_FOUND, "Not Found\n");
     };
     let mut response = response_with_body(StatusCode::OK, Bytes::from(svg));
-    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml"));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("image/svg+xml"));
     response.headers_mut().insert(
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("public, max-age=86400"),
@@ -715,11 +736,7 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
 }
 
 /// The launcher. The portal checks the session itself. The route does not go through ForwardAuth.
-async fn handle_home(
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    client: &Client,
-) -> HttpResponse {
+async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client) -> HttpResponse {
     let Some(viewer) = current_viewer(state, headers, client) else {
         return match login_location(state, HOME_PATH) {
             Ok(location) => redirect_response(StatusCode::FOUND, &location),
@@ -766,8 +783,7 @@ fn is_superadmin(viewer: &Viewer) -> bool {
 fn is_settings_path(path: &str) -> bool {
     matches!(
         path,
-        ui::settings::USERS_PATH | ui::settings::SERVICES_PATH
-            | ui::settings::LOGINS_PATH
+        ui::settings::USERS_PATH | ui::settings::SERVICES_PATH | ui::settings::LOGINS_PATH
     )
 }
 
@@ -855,7 +871,12 @@ async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) ->
     match tokio::task::spawn_blocking(move || store.login_attempts(now, page, only_failed)).await {
         Ok(Ok(data)) => data,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "history_unreadable", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "history_unreadable",
+                &[("error", error)],
+            );
             LoginPage::default()
         }
         Err(_) => LoginPage::default(),
@@ -865,7 +886,10 @@ async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) ->
 /// The accounts and their history. The Users page uses them.
 async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, Snapshot) {
     let users = state.users.list();
-    let mut accounts: Vec<(String, bool)> = users.iter().map(|(login, _)| (login.clone(), false)).collect();
+    let mut accounts: Vec<(String, bool)> = users
+        .iter()
+        .map(|(login, _)| (login.clone(), false))
+        .collect();
     accounts.push((state.superadmin_login.clone(), true));
     let now = unix_now();
     let store = Arc::clone(&state.store);
@@ -873,7 +897,12 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
     let snapshot = match tokio::task::spawn_blocking(move || store.snapshot(&asked, now)).await {
         Ok(Ok(snapshot)) => snapshot,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "history_unreadable", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "history_unreadable",
+                &[("error", error)],
+            );
             Snapshot::blank(&accounts, now)
         }
         Err(_) => Snapshot::blank(&accounts, now),
@@ -883,20 +912,32 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
 
 /// Each service of the catalog, with the actions that the settings pages offer.
 /// The first action is `access`. The other actions are the actions that the service publishes.
+/// The resource types of the actions give the grants on sub-resources that the pages offer.
 fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions> {
     catalog
         .groups()
         .iter()
         .flat_map(|group| group.services.iter())
-        .map(|service| ui::ServiceActions {
-            id: service.id.clone(),
-            name: service.name.clone(),
-            actions: state
-                .actions
-                .actions(&service.id)
-                .into_iter()
-                .map(|a| (a.name, a.description))
-                .collect(),
+        .map(|service| {
+            let actions = state.actions.actions(&service.id);
+            ui::ServiceActions {
+                id: service.id.clone(),
+                name: service.name.clone(),
+                sub_resources: actions
+                    .iter()
+                    .map(|a| {
+                        let kinds: Vec<String> =
+                            a.sub_resource_types().map(str::to_string).collect();
+                        (a.name.clone(), kinds)
+                    })
+                    .filter(|(_, kinds)| !kinds.is_empty())
+                    .collect(),
+                known: state.actions.declared(&service.id).is_some(),
+                actions: actions
+                    .into_iter()
+                    .map(|a| (a.name, a.description))
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -961,7 +1002,12 @@ fn query_value_up_to(uri: &str, key: &str, max: usize) -> Option<String> {
 }
 
 fn current_catalog(state: &AppState) -> Arc<Catalog> {
-    Arc::clone(&state.catalog.read().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    Arc::clone(
+        &state
+            .catalog
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
 
 /// A browser with a session. The data has the session that the cookie represents, and what that session can do.
@@ -1008,7 +1054,9 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
 /// A session must not end for this reason.
 fn grants_of_known_user(state: &AppState, login: &str) -> Option<Vec<Grant>> {
     state.users.grants_of(login).or_else(|| {
-        refresh_directory_if_due(state).then(|| state.users.grants_of(login)).flatten()
+        refresh_directory_if_due(state)
+            .then(|| state.users.grants_of(login))
+            .flatten()
     })
 }
 
@@ -1016,7 +1064,11 @@ fn grants_of_known_user(state: &AppState, login: &str) -> Option<Vec<Grant>> {
 /// The result is always `false` with one instance, which is the only writer.
 fn refresh_directory_if_due(state: &AppState) -> bool {
     state.store.is_shared()
-        && blocking(|| state.users.refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP))
+        && blocking(|| {
+            state
+                .users
+                .refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP)
+        })
 }
 
 fn ip_text(client: &Client) -> Option<String> {
@@ -1028,7 +1080,13 @@ fn user_agent_text(headers: &HeaderMap) -> String {
     headers
         .get(USER_AGENT)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().filter(|c| !c.is_control()).take(160).collect())
+        .map(|value| {
+            value
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(160)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1057,10 +1115,7 @@ fn handle_login_get(
         match sign_return_uri(&state.signing_secret, HOME_PATH) {
             Ok(v) => v,
             Err(_) => {
-                return text_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "authentication error\n",
-                )
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n")
             }
         }
     };
@@ -1077,10 +1132,7 @@ fn handle_login_get(
         None => match new_csrf_token() {
             Ok(v) => v,
             Err(_) => {
-                return text_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "authentication error\n",
-                )
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n")
             }
         },
     };
@@ -1214,14 +1266,9 @@ async fn handle_login_post(
         .unwrap_or_else(|| "unknown".into());
     let ip_key = format!("ip:{client_ip_text}");
 
-    if let Some(response) = login_rate_limit_response(
-        state,
-        client.https,
-        &ip_key,
-        &client_ip_text,
-        &rd,
-        &sig,
-    ) {
+    if let Some(response) =
+        login_rate_limit_response(state, client.https, &ip_key, &client_ip_text, &rd, &sig)
+    {
         return response;
     }
 
@@ -1229,23 +1276,15 @@ async fn handle_login_post(
         Ok(v) => v,
         Err(_) => {
             state.metrics.login_internal_error();
-            return text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authentication error\n",
-            );
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         }
     };
 
     // Requests can wait in a queue behind the Argon2 semaphore. Check again after the request gets the permit.
     // This check stops a burst that the portal admitted before the first failures were recorded. Such a burst cannot drain the expensive password-check budget afterwards.
-    if let Some(response) = login_rate_limit_response(
-        state,
-        client.https,
-        &ip_key,
-        &client_ip_text,
-        &rd,
-        &sig,
-    ) {
+    if let Some(response) =
+        login_rate_limit_response(state, client.https, &ip_key, &client_ip_text, &rd, &sig)
+    {
         drop(permit);
         return response;
     }
@@ -1273,20 +1312,16 @@ async fn handle_login_post(
             Ok(v) => v && !matches!(who, Who::Unknown),
             Err(_) => {
                 state.metrics.login_internal_error();
-                return text_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "authentication error\n",
-                );
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
             }
         }
     };
 
     if !authenticated {
         if state.config.security.login_rate_limit_enabled {
-            state.ip_limiter.failure(
-                ip_key.clone(),
-                state.config.security.login_attempts_per_ip,
-            );
+            state
+                .ip_limiter
+                .failure(ip_key.clone(), state.config.security.login_attempts_per_ip);
         }
         if state.config.security.global_login_rate_limit_enabled {
             state.global_limiter.failure(
@@ -1326,10 +1361,7 @@ async fn handle_login_post(
         let csrf = match new_csrf_token() {
             Ok(v) => v,
             Err(_) => {
-                return text_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "authentication error\n",
-                )
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n")
             }
         };
         return login_page(
@@ -1352,55 +1384,59 @@ async fn handle_login_post(
         Who::User(login, _) => (Principal::User(login.clone()), login.clone()),
         Who::Unknown => unreachable!("an unknown login never authenticates"),
     };
-    let token = Zeroizing::new(match state.sessions.issue(
-        client.binding,
-        NewSession {
-            principal,
-            login: session_login,
-            impersonated: false,
-            ip: ip_text(client),
-            user_agent: user_agent_text(&headers),
+    let token = Zeroizing::new(
+        match state.sessions.issue(
+            client.binding,
+            NewSession {
+                principal,
+                login: session_login,
+                impersonated: false,
+                ip: ip_text(client),
+                user_agent: user_agent_text(&headers),
+            },
+        ) {
+            Ok(v) => v,
+            Err(SessionIssueError::Capacity) => {
+                state.metrics.session_capacity_rejected();
+                state.metrics.login_internal_error();
+                log(
+                    state,
+                    LogLevel::Error,
+                    "session_capacity_reached",
+                    &[("capacity", state.sessions.capacity().to_string())],
+                );
+                return text_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session capacity reached\n",
+                );
+            }
+            Err(SessionIssueError::Random) => {
+                state.metrics.login_internal_error();
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+            }
+            Err(SessionIssueError::Storage) => {
+                state.metrics.login_internal_error();
+                return text_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "session store unavailable\n",
+                );
+            }
         },
-    ) {
-        Ok(v) => v,
-        Err(SessionIssueError::Capacity) => {
-            state.metrics.session_capacity_rejected();
-            state.metrics.login_internal_error();
-            log(
-                state,
-                LogLevel::Error,
-                "session_capacity_reached",
-                &[("capacity", state.sessions.capacity().to_string())],
-            );
-            return text_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session capacity reached\n",
-            );
-        }
-        Err(SessionIssueError::Random) => {
-            state.metrics.login_internal_error();
-            return text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authentication error\n",
-            );
-        }
-        Err(SessionIssueError::Storage) => {
-            state.metrics.login_internal_error();
-            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session store unavailable\n");
-        }
-    });
+    );
 
     let mut response = redirect_response(StatusCode::SEE_OTHER, &rd);
     let cookie = session_cookie_header(state, client, token.as_str());
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err()
-        || append_dynamic_header(&mut response, SET_COOKIE, &expired_csrf_cookie(state, client.https)).is_err()
+        || append_dynamic_header(
+            &mut response,
+            SET_COOKIE,
+            &expired_csrf_cookie(state, client.https),
+        )
+        .is_err()
     {
         state.sessions.revoke(token.as_str(), EndReason::Revoked);
         state.metrics.login_internal_error();
-        return text_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "authentication error\n",
-        );
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
 
     state.metrics.login_success();
@@ -1548,10 +1584,7 @@ fn rate_limited_login_page(
     let csrf = match new_csrf_token() {
         Ok(v) => v,
         Err(_) => {
-            return text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authentication error\n",
-            )
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n")
         }
     };
     let mut response = login_page(
@@ -1564,10 +1597,7 @@ fn rate_limited_login_page(
         StatusCode::TOO_MANY_REQUESTS,
     );
     if set_dynamic_header(&mut response, RETRY_AFTER, &retry_after.to_string()).is_err() {
-        return text_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "authentication error\n",
-        );
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
     response
 }
@@ -1638,11 +1668,18 @@ async fn handle_logout_post(
     if !form.is_empty() {
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
-    if !verify_action_token(&state.signing_secret, LOGOUT_TOKEN, session_token.as_str(), &csrf) {
+    if !verify_action_token(
+        &state.signing_secret,
+        LOGOUT_TOKEN,
+        session_token.as_str(),
+        &csrf,
+    ) {
         return text_response(StatusCode::FORBIDDEN, "CSRF validation failed\n");
     }
 
-    state.sessions.revoke(session_token.as_str(), EndReason::Logout);
+    state
+        .sessions
+        .revoke(session_token.as_str(), EndReason::Logout);
     let mut response = redirect_response(StatusCode::SEE_OTHER, "/");
     let expired_session = format!(
         "{}=; {}",
@@ -1650,12 +1687,14 @@ async fn handle_logout_post(
         transport::cookie_attributes(client.https, state.config.session.same_site.as_str(), 0),
     );
     if append_dynamic_header(&mut response, SET_COOKIE, &expired_session).is_err()
-        || append_dynamic_header(&mut response, SET_COOKIE, &expired_csrf_cookie(state, client.https)).is_err()
+        || append_dynamic_header(
+            &mut response,
+            SET_COOKIE,
+            &expired_csrf_cookie(state, client.https),
+        )
+        .is_err()
     {
-        return text_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "authentication error\n",
-        );
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
     state.metrics.logout();
     response
@@ -1680,7 +1719,10 @@ async fn admin_request(
             "origin_check_failed",
             &[("route", "users".to_string())],
         );
-        return Err(text_response(StatusCode::FORBIDDEN, "Origin validation failed\n"));
+        return Err(text_response(
+            StatusCode::FORBIDDEN,
+            "Origin validation failed\n",
+        ));
     }
     if !content_type_is_form(request.headers()) {
         return Err(text_response(
@@ -1700,12 +1742,20 @@ async fn admin_request(
     {
         Ok(v) => Zeroizing::new(v),
         Err(BodyReadError::TooLarge) => {
-            return Err(text_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large\n"))
+            return Err(text_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Payload Too Large\n",
+            ))
         }
         Err(BodyReadError::Timeout) => {
-            return Err(text_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n"))
+            return Err(text_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "Request Timeout\n",
+            ))
         }
-        Err(BodyReadError::Io) => return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n")),
+        Err(BodyReadError::Io) => {
+            return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n"))
+        }
     };
     let mut form = match parse_form(&body) {
         Ok(v) => v,
@@ -1714,7 +1764,10 @@ async fn admin_request(
     let csrf = form.remove("csrf").unwrap_or_default();
     if !verify_action_token(&state.signing_secret, USERS_TOKEN, &viewer.token, &csrf) {
         state.metrics.user_admin(action, "forbidden");
-        return Err(text_response(StatusCode::FORBIDDEN, "CSRF validation failed\n"));
+        return Err(text_response(
+            StatusCode::FORBIDDEN,
+            "CSRF validation failed\n",
+        ));
     }
     Ok((viewer, form))
 }
@@ -1829,7 +1882,12 @@ async fn handle_users_add(
         Ok(Ok(())) => {}
         Ok(Err(InsertError::Exists)) => return rejected("exists"),
         Ok(Err(InsertError::Db(error))) => {
-            log(state, LogLevel::Error, "user_insert_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "user_insert_failed",
+                &[("error", error)],
+            );
             return rejected("error");
         }
         Err(_) => return rejected("error"),
@@ -1884,7 +1942,12 @@ async fn handle_users_delete(
     match tokio::task::spawn_blocking(move || store.remove_user(&target)).await {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "user_delete_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "user_delete_failed",
+                &[("error", error)],
+            );
             state.metrics.user_admin("delete", "rejected");
             return settings_redirect("error");
         }
@@ -1926,7 +1989,10 @@ async fn handle_users_update(
     // The grant boxes are the remaining fields. Their names have the form `g.<service>.<action>`.
     let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
-        match name.strip_prefix("g.").and_then(|rest| rest.split_once('.')) {
+        match name
+            .strip_prefix("g.")
+            .and_then(|rest| rest.split_once('.'))
+        {
             Some((service, action)) if value == "1" => match Grant::new(action, service) {
                 Ok(grant) => ticked.push(grant),
                 Err(_) => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
@@ -2009,16 +2075,26 @@ async fn handle_users_update(
     };
 
     let store = Arc::clone(&state.store);
-    let (target, hash_for_store, grants_for_store) = (login.clone(), new_hash.clone(), grants.clone());
+    let (target, hash_for_store, grants_for_store) =
+        (login.clone(), new_hash.clone(), grants.clone());
     match tokio::task::spawn_blocking(move || {
-        store.update_user(&target, hash_for_store.as_deref(), grants_for_store.as_deref())
+        store.update_user(
+            &target,
+            hash_for_store.as_deref(),
+            grants_for_store.as_deref(),
+        )
     })
     .await
     {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => return rejected("no-user"),
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "user_update_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "user_update_failed",
+                &[("error", error)],
+            );
             return rejected("error");
         }
         Err(_) => return rejected("error"),
@@ -2046,7 +2122,194 @@ async fn handle_users_update(
         );
     }
     state.metrics.user_admin("update", "ok");
-    settings_redirect(if change_password { "password-reset" } else { "user-updated" })
+    settings_redirect(if change_password {
+        "password-reset"
+    } else {
+        "user-updated"
+    })
+}
+
+/// Gives a user a grant on a sub-resource of a service. The form names the user, the service, the
+/// action, the resource type and the resource id. The service must publish the action with this
+/// resource type at `/.well-known/access-actions`. The server does not list the resources: the
+/// superadmin types the id. The id is used as typed: the server does not trim it or change its
+/// case.
+async fn handle_grant_add(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    let headers = request.headers().clone();
+    let (viewer, mut form) = match admin_request(state, request, client, "grant_add").await {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_superadmin(state, &viewer, "grant_add") {
+        return response;
+    }
+    let mut field = |name: &str| form.remove(name).unwrap_or_default();
+    let (login, service, action, kind, id) = (
+        field("login"),
+        field("service"),
+        field("action"),
+        field("type"),
+        field("id"),
+    );
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    }
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_add", "rejected");
+        settings_redirect(code)
+    };
+    if !state.policy.mode.editable() {
+        return rejected("grants-static");
+    }
+    let login = match normalize_login(&login) {
+        Ok(login) => login,
+        Err(_) => return rejected("no-user"),
+    };
+    let Some(current) = state.users.get(&login) else {
+        return rejected("no-user");
+    };
+    if grants::check_resource_id(&id).is_err() {
+        return rejected("grant-bad-id");
+    }
+    let Ok(grant) = Grant::on_resource(&action, &service, &kind, &id) else {
+        return rejected("grant-undeclared");
+    };
+    let in_catalog = current_catalog(state)
+        .groups()
+        .iter()
+        .flat_map(|group| group.services.iter())
+        .any(|s| s.id == service);
+    if !in_catalog {
+        return rejected("grant-undeclared");
+    }
+    // The resource types come from the service. While the service has not answered, no grant on
+    // a sub-resource is given.
+    let Some(declared) = state.actions.declared(&service) else {
+        return rejected("grant-not-known");
+    };
+    if crate::actions::check_declared(&declared, &grant).is_err() {
+        return rejected("grant-undeclared");
+    }
+    if state
+        .policy
+        .effective(&login, &current.grants)
+        .contains(&grant)
+    {
+        state.metrics.user_admin("grant_add", "ok");
+        return settings_redirect("unchanged");
+    }
+    if current.grants.len() >= grants::MAX_GRANTS_PER_USER {
+        return rejected("grant-limit");
+    }
+    let mut next = current.grants.clone();
+    next.push(grant);
+    next.sort();
+    match store_grants(state, &login, next, client, &headers).await {
+        Ok(()) => {
+            state.metrics.user_admin("grant_add", "ok");
+            settings_redirect("grant-added")
+        }
+        Err(code) => rejected(code),
+    }
+}
+
+/// Removes a grant on a sub-resource from a user. The form names the user and the grant in its
+/// text form. A grant of the configuration cannot be removed here.
+async fn handle_grant_delete(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    let headers = request.headers().clone();
+    let (viewer, mut form) = match admin_request(state, request, client, "grant_delete").await {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_superadmin(state, &viewer, "grant_delete") {
+        return response;
+    }
+    let login = form.remove("login").unwrap_or_default();
+    let text = form.remove("grant").unwrap_or_default();
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    }
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_delete", "rejected");
+        settings_redirect(code)
+    };
+    if !state.policy.mode.editable() {
+        return rejected("grants-static");
+    }
+    let login = match normalize_login(&login) {
+        Ok(login) => login,
+        Err(_) => return rejected("no-user"),
+    };
+    let Some(current) = state.users.get(&login) else {
+        return rejected("no-user");
+    };
+    let grant = match Grant::parse(&text) {
+        Ok(grant) if grant.resource.is_some() => grant,
+        _ => return rejected("no-grant"),
+    };
+    if !current.grants.contains(&grant) {
+        return rejected("no-grant");
+    }
+    let next: Vec<Grant> = current
+        .grants
+        .iter()
+        .filter(|held| **held != grant)
+        .cloned()
+        .collect();
+    match store_grants(state, &login, next, client, &headers).await {
+        Ok(()) => {
+            state.metrics.user_admin("grant_delete", "ok");
+            settings_redirect("grant-deleted")
+        }
+        Err(code) => rejected(code),
+    }
+}
+
+/// Writes the new stored grants of a user: first in the database, then in the directory. An audit
+/// event records the change. The change applies at the next request. The error is a notice code.
+async fn store_grants(
+    state: &Arc<AppState>,
+    login: &str,
+    grants: Vec<Grant>,
+    client: &Client,
+    headers: &HeaderMap,
+) -> Result<(), &'static str> {
+    let store = Arc::clone(&state.store);
+    let (target, for_store) = (login.to_string(), grants.clone());
+    match tokio::task::spawn_blocking(move || store.update_user(&target, None, Some(&for_store)))
+        .await
+    {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return Err("no-user"),
+        Ok(Err(error)) => {
+            log(
+                state,
+                LogLevel::Error,
+                "user_update_failed",
+                &[("error", error)],
+            );
+            return Err("error");
+        }
+        Err(_) => return Err("error"),
+    }
+    state.users.update(login, None, Some(grants));
+    audit(
+        state,
+        AuditKind::UserUpdated,
+        Some(login.to_string()),
+        Some(state.superadmin_login.clone()),
+        client,
+        headers,
+    );
+    Ok(())
 }
 
 /// "Log in as": the session of the superadmin becomes a session of the user. The session is flagged as impersonated.
@@ -2168,13 +2431,19 @@ fn switch_session(
         Ok(token) => Zeroizing::new(token),
         Err(SessionIssueError::Capacity) => {
             state.metrics.session_capacity_rejected();
-            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session capacity reached\n");
+            return text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session capacity reached\n",
+            );
         }
         Err(SessionIssueError::Random) => {
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         }
         Err(SessionIssueError::Storage) => {
-            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session store unavailable\n");
+            return text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session store unavailable\n",
+            );
         }
     };
     let cookie = session_cookie_header(state, client, token.as_str());
@@ -2228,16 +2497,17 @@ fn login_page(
     );
     let mut response = html_response(status, body);
     if append_dynamic_header(&mut response, SET_COOKIE, &csrf_cookie(state, csrf, https)).is_err() {
-        return text_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "authentication error\n",
-        );
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
     response
 }
 
 /// The session cookie of the request, valid or not.
-fn session_cookie<'a>(state: &AppState, headers: &'a HeaderMap, client: &Client) -> Option<&'a str> {
+fn session_cookie<'a>(
+    state: &AppState,
+    headers: &'a HeaderMap,
+    client: &Client,
+) -> Option<&'a str> {
     cookie_value(
         headers,
         transport::session_cookie_name(&state.config.session.cookie_name, client.https),
@@ -2251,20 +2521,23 @@ fn has_valid_session(state: &AppState, headers: &HeaderMap, client: &Client) -> 
 
 fn content_type_is_form(headers: &HeaderMap) -> bool {
     match unique_header_str_name(headers, CONTENT_TYPE) {
-        Ok(Some(v)) => v
-            .split(';')
-            .next()
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded")),
+        Ok(Some(v)) => v.split(';').next().is_some_and(|v| {
+            v.trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        }),
         _ => false,
     }
 }
 
-fn unique_header_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<Option<&'a str>, ()> {
+fn unique_header_str<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<Option<&'a str>, ()> {
     let name = HeaderName::from_static(name);
     unique_header_str_name(headers, name)
 }
 
-fn unique_header_str_name<'a>(headers: &'a HeaderMap, name: HeaderName) -> Result<Option<&'a str>, ()> {
+fn unique_header_str_name(headers: &HeaderMap, name: HeaderName) -> Result<Option<&str>, ()> {
     let mut values = headers.get_all(name).iter();
     let Some(first) = values.next() else {
         return Ok(None);
@@ -2376,16 +2649,16 @@ fn canonical_origin(value: &str, origin_header: bool) -> Option<CanonicalOrigin>
     if authority.as_str().contains('@') {
         return None;
     }
-    if origin_header {
-        if uri.query().is_some() || !matches!(uri.path(), "" | "/") {
-            return None;
-        }
+    if origin_header && (uri.query().is_some() || !matches!(uri.path(), "" | "/")) {
+        return None;
     }
     let host = authority.host().to_ascii_lowercase();
     if host.is_empty() {
         return None;
     }
-    let port = authority.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let port = authority
+        .port_u16()
+        .unwrap_or(if scheme == "https" { 443 } else { 80 });
     Some(CanonicalOrigin { scheme, host, port })
 }
 
@@ -2444,10 +2717,7 @@ async fn read_limited_body(
         .map_err(|_| BodyReadError::Timeout)?
 }
 
-async fn read_limited_body_inner(
-    mut body: Incoming,
-    max: usize,
-) -> Result<Vec<u8>, BodyReadError> {
+async fn read_limited_body_inner(mut body: Incoming, max: usize) -> Result<Vec<u8>, BodyReadError> {
     let mut out = Vec::with_capacity(body.size_hint().lower().min(max as u64) as usize);
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|_| BodyReadError::Io)?;
@@ -2480,10 +2750,9 @@ fn html_response(status: StatusCode, body: String) -> HttpResponse {
 /// An embedded asset, such as a stylesheet or a script. The content does not change per request. Therefore, it can be cached.
 fn static_response(content_type: &'static str, body: &str) -> HttpResponse {
     let mut response = response_with_body(StatusCode::OK, Bytes::copy_from_slice(body.as_bytes()));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response.headers_mut().insert(
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("public, max-age=3600"),
@@ -2639,6 +2908,8 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         USERS_ADD_PATH => "users_add",
         USERS_DELETE_PATH => "users_delete",
         USERS_UPDATE_PATH => "users_update",
+        GRANT_ADD_PATH => "grant_add",
+        GRANT_DELETE_PATH => "grant_delete",
         IMPERSONATE_PATH => "impersonate",
         IMPERSONATE_END_PATH => "impersonate_end",
         _ => "not_found",
@@ -2708,7 +2979,11 @@ mod tests {
         assert_eq!(csrf_shape(&"A".repeat(33)), None);
         assert_eq!(csrf_shape(&format!("{}\"", "A".repeat(31))), None);
         let issued = new_csrf_token().unwrap();
-        assert_eq!(csrf_shape(&issued), Some(issued), "what new_csrf_token issues is accepted");
+        assert_eq!(
+            csrf_shape(&issued),
+            Some(issued),
+            "what new_csrf_token issues is accepted"
+        );
     }
 
     #[test]
@@ -2719,15 +2994,17 @@ mod tests {
 
     #[test]
     fn query_return_pair_decodes_expected_fields() {
-        let (rd, sig) =
-            query_return_pair("/auth/login?rd=%2Fgrafana%3Fx%3D1&sig=abc").unwrap();
+        let (rd, sig) = query_return_pair("/auth/login?rd=%2Fgrafana%3Fx%3D1&sig=abc").unwrap();
         assert_eq!(rd.as_deref(), Some("/grafana?x=1"));
         assert_eq!(sig.as_deref(), Some("abc"));
     }
 
     #[test]
     fn origin_accepts_matching_direct_origin() {
-        let h = headers(&[("host", "localhost:4181"), ("origin", "http://localhost:4181")]);
+        let h = headers(&[
+            ("host", "localhost:4181"),
+            ("origin", "http://localhost:4181"),
+        ]);
         assert!(validate_post_origin(&h));
     }
 

@@ -468,12 +468,24 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
             actions: if service.id == "data-clickhouse-dash" {
                 vec![
                     ("query.run.read".into(), "Run read-only queries.".into()),
-                    ("query.run.write".into(), "Run queries that change data.".into()),
+                    (
+                        "query.run.write".into(),
+                        "Run queries that change data.".into(),
+                    ),
                     ("system.read".into(), "See the System page.".into()),
                 ]
             } else {
                 Vec::new()
             },
+            sub_resources: if service.id == "data-clickhouse-dash" {
+                vec![
+                    ("query.run.read".into(), vec!["database".into()]),
+                    ("query.run.write".into(), vec!["database".into()]),
+                ]
+            } else {
+                Vec::new()
+            },
+            known: true,
         })
         .collect()
 }
@@ -748,7 +760,14 @@ mod tests {
                 ..ctx()
             },
         );
-        for gone in ["id=\"settings\"", "modal", "r_ops", "userList", "tabInput", "class=\"warn\""] {
+        for gone in [
+            "id=\"settings\"",
+            "modal",
+            "r_ops",
+            "userList",
+            "tabInput",
+            "class=\"warn\"",
+        ] {
             assert!(!page.contains(gone), "{gone}");
         }
         assert!(
@@ -761,7 +780,11 @@ mod tests {
     #[test]
     fn a_page_inlines_only_the_icons_it_draws() {
         let launcher = home_page(&demo_catalog(), &Icons::empty(), &ctx());
-        assert_eq!(launcher.matches("<symbol ").count(), 4, "no gear for a user");
+        assert_eq!(
+            launcher.matches("<symbol ").count(),
+            4,
+            "no gear for a user"
+        );
         assert!(!launcher.contains("i-alert-triangle") && !launcher.contains("i-chevron-left"));
         for page in [
             auth_document("Authentication", "<p>x</p>"),
@@ -782,12 +805,20 @@ mod tests {
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }
         assert!(demo_page("nope", &Icons::empty()).is_none());
-        assert!(demo_page("roles", &Icons::empty()).is_none(), "the page does not exist");
+        assert!(
+            demo_page("roles", &Icons::empty()).is_none(),
+            "the page does not exist"
+        );
         let services = demo_page("services", &Icons::empty()).unwrap();
-        assert!(services.contains(r#"class="warn""#), "a demo service has a problem");
+        assert!(
+            services.contains(r#"class="warn""#),
+            "a demo service has a problem"
+        );
         assert!(services.contains("query.run.write") && services.contains("access only"));
         let logins = demo_page("logins", &Icons::empty()).unwrap();
-        assert!(logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert"));
+        assert!(
+            logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert")
+        );
     }
 
     #[test]

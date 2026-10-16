@@ -115,8 +115,10 @@ pub fn percent_decode_form(input: &str) -> Result<String, String> {
                 if i + 2 >= bytes.len() {
                     return Err("truncated percent-encoding".into());
                 }
-                let hi = from_hex(bytes[i + 1]).ok_or_else(|| "invalid percent-encoding".to_string())?;
-                let lo = from_hex(bytes[i + 2]).ok_or_else(|| "invalid percent-encoding".to_string())?;
+                let hi =
+                    from_hex(bytes[i + 1]).ok_or_else(|| "invalid percent-encoding".to_string())?;
+                let lo =
+                    from_hex(bytes[i + 2]).ok_or_else(|| "invalid percent-encoding".to_string())?;
                 out.push((hi << 4) | lo);
                 i += 3;
             }
@@ -190,8 +192,10 @@ fn percent_decode_uri_component(input: &str) -> Result<String, String> {
             if i + 2 >= bytes.len() {
                 return Err("truncated percent-encoding".into());
             }
-            let hi = from_hex(bytes[i + 1]).ok_or_else(|| "invalid percent-encoding".to_string())?;
-            let lo = from_hex(bytes[i + 2]).ok_or_else(|| "invalid percent-encoding".to_string())?;
+            let hi =
+                from_hex(bytes[i + 1]).ok_or_else(|| "invalid percent-encoding".to_string())?;
+            let lo =
+                from_hex(bytes[i + 2]).ok_or_else(|| "invalid percent-encoding".to_string())?;
             out.push((hi << 4) | lo);
             i += 3;
         } else {
@@ -251,11 +255,19 @@ pub fn format_duration(seconds: i64) -> String {
         60..=3_599 => format!("{} min", seconds / 60),
         3_600..=86_399 => {
             let (h, m) = (seconds / 3_600, (seconds % 3_600) / 60);
-            if m == 0 { format!("{h} h") } else { format!("{h} h {m} min") }
+            if m == 0 {
+                format!("{h} h")
+            } else {
+                format!("{h} h {m} min")
+            }
         }
         _ => {
             let (d, h) = (seconds / 86_400, (seconds % 86_400) / 3_600);
-            if h == 0 { format!("{d} d") } else { format!("{d} d {h} h") }
+            if h == 0 {
+                format!("{d} d")
+            } else {
+                format!("{d} d {h} h")
+            }
         }
     }
 }
@@ -276,7 +288,11 @@ pub fn short_agent(agent: &str) -> String {
     .find_map(|(token, name)| {
         let rest = agent.split_once(token)?.1;
         let version: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        Some(if version.is_empty() { (*name).to_string() } else { format!("{name} {version}") })
+        Some(if version.is_empty() {
+            (*name).to_string()
+        } else {
+            format!("{name} {version}")
+        })
     });
     let os = [
         ("Android", "Android"),
@@ -320,13 +336,21 @@ mod tests {
             .build()
             .unwrap();
         // This call panics when the runtime is not told first. The call is the block_on of another runtime.
-        let inner = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let inner = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         assert_eq!(
             multi.block_on(async { blocking(|| inner.block_on(async { 2 })) }),
             2
         );
-        let single = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        assert_eq!(single.block_on(async { blocking(|| 3) }), 3, "no hand-off on one thread");
+        let single = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert_eq!(
+            single.block_on(async { blocking(|| 3) }),
+            3,
+            "no hand-off on one thread"
+        );
     }
 
     use super::*;
@@ -338,7 +362,10 @@ mod tests {
 
     #[test]
     fn form_decoding() {
-        assert_eq!(percent_decode_form("hello+world%21").unwrap(), "hello world!");
+        assert_eq!(
+            percent_decode_form("hello+world%21").unwrap(),
+            "hello world!"
+        );
     }
 
     #[test]
@@ -346,7 +373,10 @@ mod tests {
         assert!(validate_return_uri("/grafana/d/abc?x=1", 4096));
         assert!(!validate_return_uri("https://evil.invalid", 4096));
         assert!(!validate_return_uri("//evil.invalid/x", 4096));
-        assert!(!validate_return_uri("/ok\r\nLocation:%20https://evil.invalid", 4096));
+        assert!(!validate_return_uri(
+            "/ok\r\nLocation:%20https://evil.invalid",
+            4096
+        ));
         assert!(!validate_return_uri("/%2f%2fevil.invalid", 4096));
         assert!(!validate_return_uri("/%5cevil.invalid", 4096));
         assert!(!validate_return_uri("/bad%ZZ", 4096));
@@ -371,9 +401,21 @@ mod tests {
     #[test]
     fn a_typed_login_cannot_carry_control_characters_or_hidden_text() {
         assert_eq!(typed_login("  Alice "), "Alice");
-        assert_eq!(typed_login("a\nb\r\nc"), "a\\u{a}b\\u{d}\\u{a}c", "no forged line");
-        assert_eq!(typed_login("\u{1b}[31mred"), "\\u{1b}[31mred", "no terminal escape");
-        assert_eq!(typed_login("x\0y"), "x\\u{0}y", "no NUL in the database text");
+        assert_eq!(
+            typed_login("a\nb\r\nc"),
+            "a\\u{a}b\\u{d}\\u{a}c",
+            "no forged line"
+        );
+        assert_eq!(
+            typed_login("\u{1b}[31mred"),
+            "\\u{1b}[31mred",
+            "no terminal escape"
+        );
+        assert_eq!(
+            typed_login("x\0y"),
+            "x\\u{0}y",
+            "no NUL in the database text"
+        );
         assert_eq!(
             typed_login("admin\u{202e}gnp.exe"),
             "admin\\u{202e}gnp.exe",
@@ -389,20 +431,37 @@ mod tests {
     fn a_typed_login_is_bounded_without_cutting_an_escape_in_half() {
         let long = "x".repeat(500);
         let kept = typed_login(&long);
-        assert_eq!(kept.chars().count(), TYPED_LOGIN_MAX + 1, "the limit plus an ellipsis");
+        assert_eq!(
+            kept.chars().count(),
+            TYPED_LOGIN_MAX + 1,
+            "the limit plus an ellipsis"
+        );
         assert!(kept.ends_with('\u{2026}'));
         let escapes = "\u{7}".repeat(100);
         let kept = typed_login(&escapes);
         assert!(kept.chars().count() <= TYPED_LOGIN_MAX + 1);
-        assert!(kept.trim_end_matches('\u{2026}').ends_with("\\u{7}"), "whole escapes only");
-        assert_eq!(typed_login(&"y".repeat(TYPED_LOGIN_MAX)), "y".repeat(TYPED_LOGIN_MAX));
+        assert!(
+            kept.trim_end_matches('\u{2026}').ends_with("\\u{7}"),
+            "whole escapes only"
+        );
+        assert_eq!(
+            typed_login(&"y".repeat(TYPED_LOGIN_MAX)),
+            "y".repeat(TYPED_LOGIN_MAX)
+        );
     }
 
     #[test]
     fn sql_and_markup_in_a_typed_login_stay_inert_text() {
         let nasty = "'; DROP TABLE users; --";
-        assert_eq!(typed_login(nasty), nasty, "kept as typed: only a bound parameter ever carries it");
-        assert_eq!(html_escape(&typed_login("<img src=x onerror=1>")), "&lt;img src=x onerror=1&gt;");
+        assert_eq!(
+            typed_login(nasty),
+            nasty,
+            "kept as typed: only a bound parameter ever carries it"
+        );
+        assert_eq!(
+            html_escape(&typed_login("<img src=x onerror=1>")),
+            "&lt;img src=x onerror=1&gt;"
+        );
         assert_eq!(
             json_escape(&typed_login("a\"},{\"event\":\"forged")),
             "a\\\"},{\\\"event\\\":\\\"forged"

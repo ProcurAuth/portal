@@ -103,7 +103,10 @@ fn real_main() -> Result<(), String> {
             let signer = identity_signer(&config, &mut secrets)?;
             print!("{}", config.render_effective());
             if let Some(signer) = signer {
-                println!("identity.key_id = {:?}  # derived from identity.signing_key", signer.kid());
+                println!(
+                    "identity.key_id = {:?}  # derived from identity.signing_key",
+                    signer.kid()
+                );
             }
             println!("configuration ok");
             Ok(())
@@ -169,7 +172,9 @@ fn parse_config_arg(args: Vec<String>) -> Result<PathBuf, String> {
 /// Parses the arguments of the import command: `--config <FILE> --from <FILE>`.
 fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
     match args.as_slice() {
-        [config_flag, config, from_flag, from] if config_flag == "--config" && from_flag == "--from" => {
+        [config_flag, config, from_flag, from]
+            if config_flag == "--config" && from_flag == "--from" =>
+        {
             Ok((PathBuf::from(config), PathBuf::from(from)))
         }
         _ => Err("expected: --config <FILE> --from <SQLITE FILE>".into()),

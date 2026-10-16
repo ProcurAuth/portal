@@ -4,16 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const DURATION_BUCKETS_US: [u64; 11] = [
-    1_000,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-    250_000,
-    500_000,
-    1_000_000,
-    2_500_000,
+    1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000,
     5_000_000,
 ];
 
@@ -37,7 +28,10 @@ impl DurationHistogram {
         let micros = duration.as_micros().min(u64::MAX as u128) as u64;
         self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_micros.fetch_add(micros, Ordering::Relaxed);
-        let mut buckets = self.buckets.lock().expect("metrics histogram mutex poisoned");
+        let mut buckets = self
+            .buckets
+            .lock()
+            .expect("metrics histogram mutex poisoned");
         for (index, upper) in DURATION_BUCKETS_US.iter().enumerate() {
             if micros <= *upper {
                 buckets[index] = buckets[index].saturating_add(1);
@@ -129,7 +123,10 @@ impl Metrics {
     }
 
     pub fn observe_http_request(&self, method: &str, route: &str, status: u16, duration: Duration) {
-        let mut requests = self.http_requests.lock().expect("metrics request mutex poisoned");
+        let mut requests = self
+            .http_requests
+            .lock()
+            .expect("metrics request mutex poisoned");
         let key = (method.to_string(), route.to_string(), status);
         let counter = requests.entry(key).or_insert(0);
         *counter = counter.saturating_add(1);
@@ -149,7 +146,10 @@ impl Metrics {
     /// The `action` is add, update, delete, impersonate or impersonate_end.
     /// The `result` is ok, rejected (bad input) or forbidden (not the superadmin).
     pub fn user_admin(&self, action: &'static str, result: &'static str) {
-        let mut counters = self.user_admin.lock().expect("metrics admin mutex poisoned");
+        let mut counters = self
+            .user_admin
+            .lock()
+            .expect("metrics admin mutex poisoned");
         let counter = counters.entry((action, result)).or_insert(0);
         *counter = counter.saturating_add(1);
     }
@@ -168,8 +168,10 @@ impl Metrics {
     }
 
     pub fn login_rate_limited_global(&self) {
-        self.login_rate_limited_global.fetch_add(1, Ordering::Relaxed);
-        self.rate_limit_blocks_global.fetch_add(1, Ordering::Relaxed);
+        self.login_rate_limited_global
+            .fetch_add(1, Ordering::Relaxed);
+        self.rate_limit_blocks_global
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn login_invalid_request(&self) {
@@ -229,7 +231,8 @@ impl Metrics {
     }
 
     pub fn session_capacity_rejected(&self) {
-        self.session_capacity_rejections.fetch_add(1, Ordering::Relaxed);
+        self.session_capacity_rejections
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn logout(&self) {
@@ -237,7 +240,8 @@ impl Metrics {
     }
 
     pub fn connection_accepted(&self) {
-        self.connections_accepted_total.fetch_add(1, Ordering::Relaxed);
+        self.connections_accepted_total
+            .fetch_add(1, Ordering::Relaxed);
         self.connections_active.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -246,12 +250,14 @@ impl Metrics {
     }
 
     pub fn connection_rejected(&self) {
-        self.connections_rejected_total.fetch_add(1, Ordering::Relaxed);
+        self.connections_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn password_check_started(&self) -> PasswordCheckMetricGuard<'_> {
         self.password_checks_total.fetch_add(1, Ordering::Relaxed);
-        self.password_checks_in_flight.fetch_add(1, Ordering::Relaxed);
+        self.password_checks_in_flight
+            .fetch_add(1, Ordering::Relaxed);
         PasswordCheckMetricGuard { metrics: self }
     }
 
@@ -290,7 +296,9 @@ impl Metrics {
             .lock()
             .expect("metrics request mutex poisoned")
             .iter()
-            .map(|((method, route, status), count)| (method.clone(), route.clone(), *status, *count))
+            .map(|((method, route, status), count)| {
+                (method.clone(), route.clone(), *status, *count)
+            })
             .collect();
         http_rows.sort();
         for (method, route, status, count) in http_rows {
@@ -303,7 +311,9 @@ impl Metrics {
             ));
         }
 
-        out.push_str("# HELP portal_http_request_duration_seconds HTTP request duration histogram.\n");
+        out.push_str(
+            "# HELP portal_http_request_duration_seconds HTTP request duration histogram.\n",
+        );
         out.push_str("# TYPE portal_http_request_duration_seconds histogram\n");
         let bucket_counts = *self
             .http_duration
@@ -320,112 +330,282 @@ impl Metrics {
         let duration_count = self.http_duration.count.load(Ordering::Relaxed);
         let duration_sum_us = self.http_duration.sum_micros.load(Ordering::Relaxed);
         out.push_str(&format!(
-            "portal_http_request_duration_seconds_bucket{{le=\"+Inf\"}} {}\n",
-            duration_count
+            "portal_http_request_duration_seconds_bucket{{le=\"+Inf\"}} {duration_count}\n"
         ));
         out.push_str(&format!(
             "portal_http_request_duration_seconds_sum {:.6}\n",
             duration_sum_us as f64 / 1_000_000.0
         ));
         out.push_str(&format!(
-            "portal_http_request_duration_seconds_count {}\n",
-            duration_count
+            "portal_http_request_duration_seconds_count {duration_count}\n"
         ));
 
         out.push_str("# HELP portal_login_attempts_total Login POST results.\n");
         out.push_str("# TYPE portal_login_attempts_total counter\n");
-        write_counter(&mut out, "portal_login_attempts_total", "result", "success", &self.login_success);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "failure", &self.login_failure);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "rate_limited_ip", &self.login_rate_limited_ip);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "rate_limited_global", &self.login_rate_limited_global);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "invalid_request", &self.login_invalid_request);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "csrf_failure", &self.login_csrf_failure);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "origin_failure", &self.login_origin_failure);
-        write_counter(&mut out, "portal_login_attempts_total", "result", "internal_error", &self.login_internal_error);
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "success",
+            &self.login_success,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "failure",
+            &self.login_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "rate_limited_ip",
+            &self.login_rate_limited_ip,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "rate_limited_global",
+            &self.login_rate_limited_global,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "invalid_request",
+            &self.login_invalid_request,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "csrf_failure",
+            &self.login_csrf_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "origin_failure",
+            &self.login_origin_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "internal_error",
+            &self.login_internal_error,
+        );
 
         out.push_str("# HELP portal_origin_rejections_total POST requests rejected by same-origin validation.\n");
         out.push_str("# TYPE portal_origin_rejections_total counter\n");
-        write_counter(&mut out, "portal_origin_rejections_total", "route", "login", &self.login_origin_failure);
-        write_counter(&mut out, "portal_origin_rejections_total", "route", "logout", &self.logout_origin_failure);
-        write_counter(&mut out, "portal_origin_rejections_total", "route", "users", &self.users_origin_failure);
+        write_counter(
+            &mut out,
+            "portal_origin_rejections_total",
+            "route",
+            "login",
+            &self.login_origin_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_origin_rejections_total",
+            "route",
+            "logout",
+            &self.logout_origin_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_origin_rejections_total",
+            "route",
+            "users",
+            &self.users_origin_failure,
+        );
 
-        out.push_str("# HELP portal_forward_auth_requests_total ForwardAuth verification results.\n");
+        out.push_str(
+            "# HELP portal_forward_auth_requests_total ForwardAuth verification results.\n",
+        );
         out.push_str("# TYPE portal_forward_auth_requests_total counter\n");
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "allowed", &self.verify_allowed);
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "denied", &self.verify_denied);
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "excluded", &self.verify_excluded);
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "redirected", &self.verify_redirected);
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "bad_request", &self.verify_bad_request);
-        write_counter(&mut out, "portal_forward_auth_requests_total", "result", "internal_error", &self.verify_internal_error);
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "allowed",
+            &self.verify_allowed,
+        );
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "denied",
+            &self.verify_denied,
+        );
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "excluded",
+            &self.verify_excluded,
+        );
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "redirected",
+            &self.verify_redirected,
+        );
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "bad_request",
+            &self.verify_bad_request,
+        );
+        write_counter(
+            &mut out,
+            "portal_forward_auth_requests_total",
+            "result",
+            "internal_error",
+            &self.verify_internal_error,
+        );
 
         out.push_str("# HELP portal_session_checks_total Session cookie validation results.\n");
         out.push_str("# TYPE portal_session_checks_total counter\n");
-        write_counter(&mut out, "portal_session_checks_total", "result", "valid", &self.session_valid);
-        write_counter(&mut out, "portal_session_checks_total", "result", "missing", &self.session_missing);
-        write_counter(&mut out, "portal_session_checks_total", "result", "invalid", &self.session_invalid);
+        write_counter(
+            &mut out,
+            "portal_session_checks_total",
+            "result",
+            "valid",
+            &self.session_valid,
+        );
+        write_counter(
+            &mut out,
+            "portal_session_checks_total",
+            "result",
+            "missing",
+            &self.session_missing,
+        );
+        write_counter(
+            &mut out,
+            "portal_session_checks_total",
+            "result",
+            "invalid",
+            &self.session_invalid,
+        );
 
         out.push_str("# HELP portal_sessions_issued_total Authentication sessions issued.\n");
         out.push_str("# TYPE portal_sessions_issued_total counter\n");
-        out.push_str(&format!("portal_sessions_issued_total {}\n", self.sessions_issued.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_sessions_issued_total {}\n",
+            self.sessions_issued.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_sessions_active Current active opaque sessions.\n");
         out.push_str("# TYPE portal_sessions_active gauge\n");
-        out.push_str(&format!("portal_sessions_active {}\n", active_sessions));
+        out.push_str(&format!("portal_sessions_active {active_sessions}\n"));
 
         out.push_str("# HELP portal_session_capacity Maximum active opaque sessions.\n");
         out.push_str("# TYPE portal_session_capacity gauge\n");
-        out.push_str(&format!("portal_session_capacity {}\n", session_capacity));
+        out.push_str(&format!("portal_session_capacity {session_capacity}\n"));
 
         out.push_str("# HELP portal_session_capacity_rejections_total Sessions refused because the in-memory session store was full.\n");
         out.push_str("# TYPE portal_session_capacity_rejections_total counter\n");
-        out.push_str(&format!("portal_session_capacity_rejections_total {}\n", self.session_capacity_rejections.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_session_capacity_rejections_total {}\n",
+            self.session_capacity_rejections.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_logouts_total Successful logout requests.\n");
         out.push_str("# TYPE portal_logouts_total counter\n");
-        out.push_str(&format!("portal_logouts_total {}\n", self.logouts.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_logouts_total {}\n",
+            self.logouts.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_password_checks_total Argon2 password checks executed.\n");
         out.push_str("# TYPE portal_password_checks_total counter\n");
-        out.push_str(&format!("portal_password_checks_total {}\n", self.password_checks_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_password_checks_total {}\n",
+            self.password_checks_total.load(Ordering::Relaxed)
+        ));
 
-        out.push_str("# HELP portal_password_checks_in_flight Current Argon2 password checks in flight.\n");
+        out.push_str(
+            "# HELP portal_password_checks_in_flight Current Argon2 password checks in flight.\n",
+        );
         out.push_str("# TYPE portal_password_checks_in_flight gauge\n");
-        out.push_str(&format!("portal_password_checks_in_flight {}\n", self.password_checks_in_flight.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_password_checks_in_flight {}\n",
+            self.password_checks_in_flight.load(Ordering::Relaxed)
+        ));
 
-        out.push_str("# HELP portal_rate_limit_blocks_total Requests blocked by login rate limiting.\n");
+        out.push_str(
+            "# HELP portal_rate_limit_blocks_total Requests blocked by login rate limiting.\n",
+        );
         out.push_str("# TYPE portal_rate_limit_blocks_total counter\n");
-        write_counter(&mut out, "portal_rate_limit_blocks_total", "scope", "ip", &self.rate_limit_blocks_ip);
-        write_counter(&mut out, "portal_rate_limit_blocks_total", "scope", "global", &self.rate_limit_blocks_global);
+        write_counter(
+            &mut out,
+            "portal_rate_limit_blocks_total",
+            "scope",
+            "ip",
+            &self.rate_limit_blocks_ip,
+        );
+        write_counter(
+            &mut out,
+            "portal_rate_limit_blocks_total",
+            "scope",
+            "global",
+            &self.rate_limit_blocks_global,
+        );
 
         out.push_str("# HELP portal_rate_limit_entries Current in-memory rate-limit entries.\n");
         out.push_str("# TYPE portal_rate_limit_entries gauge\n");
-        out.push_str(&format!("portal_rate_limit_entries{{scope=\"ip\"}} {}\n", ip_rate_limit_entries));
-        out.push_str(&format!("portal_rate_limit_entries{{scope=\"global\"}} {}\n", global_rate_limit_entries));
+        out.push_str(&format!(
+            "portal_rate_limit_entries{{scope=\"ip\"}} {ip_rate_limit_entries}\n"
+        ));
+        out.push_str(&format!(
+            "portal_rate_limit_entries{{scope=\"global\"}} {global_rate_limit_entries}\n"
+        ));
 
         out.push_str("# HELP portal_rate_limit_threshold Configured failed-login threshold.\n");
         out.push_str("# TYPE portal_rate_limit_threshold gauge\n");
-        out.push_str(&format!("portal_rate_limit_threshold{{scope=\"ip\"}} {}\n", ip_limit));
-        out.push_str(&format!("portal_rate_limit_threshold{{scope=\"global\"}} {}\n", global_limit));
+        out.push_str(&format!(
+            "portal_rate_limit_threshold{{scope=\"ip\"}} {ip_limit}\n"
+        ));
+        out.push_str(&format!(
+            "portal_rate_limit_threshold{{scope=\"global\"}} {global_limit}\n"
+        ));
 
         out.push_str("# HELP portal_workers Configured HTTP worker threads.\n");
         out.push_str("# TYPE portal_workers gauge\n");
-        out.push_str(&format!("portal_workers {}\n", workers));
+        out.push_str(&format!("portal_workers {workers}\n"));
 
         out.push_str("# HELP portal_connections_active Current accepted HTTP connections.\n");
         out.push_str("# TYPE portal_connections_active gauge\n");
-        out.push_str(&format!("portal_connections_active {}\n", self.connections_active.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_connections_active {}\n",
+            self.connections_active.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_connections_total Accepted HTTP connections.\n");
         out.push_str("# TYPE portal_connections_total counter\n");
-        out.push_str(&format!("portal_connections_total {}\n", self.connections_accepted_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_connections_total {}\n",
+            self.connections_accepted_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_connections_rejected_total Connections rejected because max_connections was reached.\n");
         out.push_str("# TYPE portal_connections_rejected_total counter\n");
-        out.push_str(&format!("portal_connections_rejected_total {}\n", self.connections_rejected_total.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "portal_connections_rejected_total {}\n",
+            self.connections_rejected_total.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_password_check_concurrency_limit Configured maximum concurrent Argon2 checks.\n");
         out.push_str("# TYPE portal_password_check_concurrency_limit gauge\n");
-        out.push_str(&format!("portal_password_check_concurrency_limit {}\n", max_concurrent_password_checks));
+        out.push_str(&format!(
+            "portal_password_check_concurrency_limit {max_concurrent_password_checks}\n"
+        ));
 
         out
     }
@@ -435,9 +615,16 @@ impl Metrics {
     /// Series about the accounts and the history.
     /// No login, address or user agent ever appears in a label.
     /// The detail is kept in the database only.
-    pub fn render_accounts(&self, users: usize, tracking_dropped: u64, tracking_errors: u64) -> String {
+    pub fn render_accounts(
+        &self,
+        users: usize,
+        tracking_dropped: u64,
+        tracking_errors: u64,
+    ) -> String {
         let mut out = String::new();
-        out.push_str("# HELP portal_users Accounts in the database (the superadmin is not counted).\n");
+        out.push_str(
+            "# HELP portal_users Accounts in the database (the superadmin is not counted).\n",
+        );
         out.push_str("# TYPE portal_users gauge\n");
         out.push_str(&format!("portal_users {users}\n"));
         out.push_str("# HELP portal_user_admin_total Account administration requests by action and result.\n");
@@ -457,10 +644,14 @@ impl Metrics {
         }
         out.push_str("# HELP portal_tracking_dropped_total History events lost because the writer queue was full.\n");
         out.push_str("# TYPE portal_tracking_dropped_total counter\n");
-        out.push_str(&format!("portal_tracking_dropped_total {tracking_dropped}\n"));
+        out.push_str(&format!(
+            "portal_tracking_dropped_total {tracking_dropped}\n"
+        ));
         out.push_str("# HELP portal_tracking_flush_errors_total History flushes that failed.\n");
         out.push_str("# TYPE portal_tracking_flush_errors_total counter\n");
-        out.push_str(&format!("portal_tracking_flush_errors_total {tracking_errors}\n"));
+        out.push_str(&format!(
+            "portal_tracking_flush_errors_total {tracking_errors}\n"
+        ));
         out
     }
 }
@@ -563,7 +754,9 @@ mod tests {
         let rendered = metrics.render_accounts(3, 2, 1);
         assert!(rendered.contains("portal_users 3"));
         assert!(rendered.contains("portal_user_admin_total{action=\"add\",result=\"ok\"} 2"));
-        assert!(rendered.contains("portal_user_admin_total{action=\"delete\",result=\"forbidden\"} 1"));
+        assert!(
+            rendered.contains("portal_user_admin_total{action=\"delete\",result=\"forbidden\"} 1")
+        );
         assert!(rendered.contains("portal_tracking_dropped_total 2"));
         assert!(rendered.contains("portal_tracking_flush_errors_total 1"));
     }

@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::catalog::Catalog;
-use crate::grants::{check_action, ACCESS};
+use crate::grants::{check_action, check_resource_type, Grant, ACCESS, SERVICE_TYPE};
 
 /// The largest document that the server reads.
 const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -47,6 +47,9 @@ struct Entry {
     actions: Vec<Action>,
     /// The last failure that was not a `404`.
     problem: Option<String>,
+    /// `actions` is the answer of the service: a good document or a `404`. A failure on a new URL
+    /// makes it `false`.
+    known: bool,
     read_at: Option<Instant>,
 }
 
@@ -63,6 +66,15 @@ impl Registry {
             .get(service)
             .map(|entry| entry.actions.clone())
             .unwrap_or_default()
+    }
+
+    /// The actions of a service when the server knows them: the last read gave a good document or
+    /// a `404`. `None`: the service is not in the catalogue, or no read has answered yet.
+    pub fn declared(&self, service: &str) -> Option<Vec<Action>> {
+        self.read()
+            .get(service)
+            .filter(|entry| entry.known)
+            .map(|entry| entry.actions.clone())
     }
 
     /// `access`, then the names of the actions of the service.
@@ -101,17 +113,20 @@ impl Registry {
                 entry.url = Some(url.to_string());
                 entry.actions = actions;
                 entry.problem = None;
+                entry.known = true;
             }
             Outcome::Absent => {
                 entry.url = Some(url.to_string());
                 entry.actions = Vec::new();
                 entry.problem = None;
+                entry.known = true;
             }
             Outcome::Failed(problem) => {
                 // A different URL: the last list belongs to another document.
                 if entry.url.as_deref() != Some(url) {
                     entry.actions = Vec::new();
                     entry.url = Some(url.to_string());
+                    entry.known = false;
                 }
                 entry.problem = Some(problem);
             }
@@ -191,6 +206,43 @@ struct RawAction {
     description: String,
 }
 
+impl Action {
+    /// The resource types of the action that a grant on a sub-resource can name: the declared
+    /// types without `service`.
+    pub fn sub_resource_types(&self) -> impl Iterator<Item = &str> {
+        self.resource_types
+            .iter()
+            .map(String::as_str)
+            .filter(|kind| *kind != SERVICE_TYPE)
+    }
+}
+
+/// Check a grant against the actions that its service declares. A grant on the whole service
+/// needs no declaration. A grant on a sub-resource needs an action of this name that declares the
+/// resource type.
+pub fn check_declared(actions: &[Action], grant: &Grant) -> Result<(), String> {
+    let Some(resource) = &grant.resource else {
+        return Ok(());
+    };
+    let Some(action) = actions.iter().find(|a| a.name == grant.action) else {
+        return Err(format!(
+            "the service {:?} does not publish the action {:?}",
+            grant.service, grant.action
+        ));
+    };
+    if action
+        .sub_resource_types()
+        .any(|kind| kind == resource.kind)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "the action {:?} of the service {:?} does not declare the resource type {:?}",
+            grant.action, grant.service, resource.kind
+        ))
+    }
+}
+
 /// Check one document of the service `service`. Any bad action makes the whole document bad.
 pub fn parse(service: &str, body: &[u8]) -> Result<Vec<Action>, String> {
     let document: Document =
@@ -208,21 +260,24 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Vec<Action>, String> {
     for raw in document.actions {
         check_action(&raw.name)?;
         if raw.name == ACCESS {
-            return Err("the action access is for the access gateway: remove it from the list".into());
+            return Err(
+                "the action access is for the access gateway: remove it from the list".into(),
+            );
         }
         if out.iter().any(|a| a.name == raw.name) {
-            return Err(format!("the action {:?} is in the list two times", raw.name));
+            return Err(format!(
+                "the action {:?} is in the list two times",
+                raw.name
+            ));
         }
         if raw.resource_types.len() > MAX_RESOURCE_TYPES {
-            return Err(format!("the action {:?} has more than {MAX_RESOURCE_TYPES} resource types", raw.name));
+            return Err(format!(
+                "the action {:?} has more than {MAX_RESOURCE_TYPES} resource types",
+                raw.name
+            ));
         }
         for kind in &raw.resource_types {
-            let valid = !kind.is_empty()
-                && kind.len() <= 32
-                && kind
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-            if !valid {
+            if check_resource_type(kind).is_err() {
                 return Err(format!(
                     "the action {:?} has a bad resource type {kind:?}",
                     raw.name
@@ -364,10 +419,16 @@ mod tests {
             ("db", r#"{"name":"a","resource_types":["Data base"]}"#),
             ("db", r#"{"name":"a","description":"line\nbreak"}"#),
         ] {
-            assert!(parse("db", &doc(server, actions)).is_err(), "{server} {actions}");
+            assert!(
+                parse("db", &doc(server, actions)).is_err(),
+                "{server} {actions}"
+            );
         }
         assert!(parse("db", b"not json").is_err());
-        let many = (0..65).map(|i| format!(r#"{{"name":"a{i}"}}"#)).collect::<Vec<_>>().join(",");
+        let many = (0..65)
+            .map(|i| format!(r#"{{"name":"a{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
         assert!(parse("db", &doc("db", &many)).is_err());
     }
 
@@ -400,7 +461,10 @@ mod tests {
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        Catalog::build(vec![parse_labels("db", &labels).unwrap().unwrap()], Vec::new())
+        Catalog::build(
+            vec![parse_labels("db", &labels).unwrap().unwrap()],
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -421,13 +485,26 @@ mod tests {
         runtime.block_on(round(&registry, &client, &catalog, Duration::ZERO));
         assert_eq!(registry.action_names("db"), ["access", "query.run.read"]);
         runtime.block_on(round(&registry, &client, &catalog, Duration::ZERO));
-        assert_eq!(registry.action_names("db"), ["access", "query.run.read"], "kept");
+        assert_eq!(
+            registry.action_names("db"),
+            ["access", "query.run.read"],
+            "kept"
+        );
         assert_eq!(registry.problems().len(), 1);
         runtime.block_on(round(&registry, &client, &catalog, Duration::ZERO));
-        assert_eq!(registry.action_names("db"), ["access"], "a 404: only access");
+        assert_eq!(
+            registry.action_names("db"),
+            ["access"],
+            "a 404: only access"
+        );
         assert!(registry.problems().is_empty());
         // A service that left the catalogue leaves the registry.
-        runtime.block_on(round(&registry, &client, &Catalog::default(), Duration::ZERO));
+        runtime.block_on(round(
+            &registry,
+            &client,
+            &Catalog::default(),
+            Duration::ZERO,
+        ));
         assert!(registry.read().is_empty());
     }
 
@@ -443,12 +520,82 @@ mod tests {
         let now = Instant::now();
         assert_eq!(registry.due(&wanted, Duration::from_secs(60), now).len(), 1);
         registry.record("a", "http://a/x", Outcome::Absent, now);
-        assert!(registry.due(&wanted, Duration::from_secs(60), now).is_empty());
+        assert!(registry
+            .due(&wanted, Duration::from_secs(60), now)
+            .is_empty());
         assert_eq!(
             registry
-                .due(&wanted, Duration::from_secs(60), now + Duration::from_secs(61))
+                .due(
+                    &wanted,
+                    Duration::from_secs(60),
+                    now + Duration::from_secs(61)
+                )
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_grant_on_a_sub_resource_needs_an_action_that_declares_its_type() {
+        let actions = parse(
+            "db",
+            &doc(
+                "db",
+                r#"{"name":"query.run.read","resource_types":["service","database"]},{"name":"system.read","resource_types":["service"]},{"name":"plain"}"#,
+            ),
+        )
+        .unwrap();
+        let ok = |text: &str| check_declared(&actions, &Grant::parse(text).unwrap());
+        assert!(ok("query.run.read on service:db/database:analytics").is_ok());
+        assert!(ok("query.run.read on service:db").is_ok());
+        assert!(
+            ok("unknown on service:db").is_ok(),
+            "a grant on the service needs no declaration"
+        );
+        assert!(
+            ok("query.run.read on service:db/table:x").is_err(),
+            "a type not declared"
+        );
+        assert!(
+            ok("system.read on service:db/database:x").is_err(),
+            "service only"
+        );
+        assert!(ok("plain on service:db/database:x").is_err(), "no type");
+        assert!(
+            ok("unknown on service:db/database:x").is_err(),
+            "no such action"
+        );
+        assert_eq!(
+            actions[0].sub_resource_types().collect::<Vec<_>>(),
+            ["database"]
+        );
+    }
+
+    #[test]
+    fn the_declared_actions_are_known_only_after_an_answer_of_the_service() {
+        let registry = Registry::default();
+        let now = Instant::now();
+        assert!(registry.declared("a").is_none(), "never read");
+        registry.record("a", "http://a/x", Outcome::Failed("down".into()), now);
+        assert!(
+            registry.declared("a").is_none(),
+            "a failure is not an answer"
+        );
+        registry.record("a", "http://a/x", Outcome::Absent, now);
+        assert_eq!(registry.declared("a"), Some(Vec::new()), "a 404: no action");
+        let read = Action {
+            name: "read".into(),
+            resource_types: vec!["database".into()],
+            description: String::new(),
+        };
+        registry.record("a", "http://a/x", Outcome::Actions(vec![read.clone()]), now);
+        registry.record("a", "http://a/x", Outcome::Failed("down".into()), now);
+        assert_eq!(
+            registry.declared("a"),
+            Some(vec![read]),
+            "the last good list stays"
+        );
+        registry.record("a", "http://a/y", Outcome::Failed("down".into()), now);
+        assert!(registry.declared("a").is_none(), "a new URL: not known");
     }
 }

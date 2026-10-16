@@ -222,7 +222,10 @@ mod tests {
     }
 
     fn access(services: &[&str]) -> Vec<Grant> {
-        services.iter().map(|s| Grant::new("access", s).unwrap()).collect()
+        services
+            .iter()
+            .map(|s| Grant::new("access", s).unwrap())
+            .collect()
     }
 
     #[test]
@@ -251,7 +254,11 @@ mod tests {
             "h2",
             "kept without a new hash"
         );
-        assert_eq!(dir.grants_of("alice").unwrap(), access(&["viewer"]), "kept without grants");
+        assert_eq!(
+            dir.grants_of("alice").unwrap(),
+            access(&["viewer"]),
+            "kept without grants"
+        );
         assert!(dir.update("alice", None, Some(vec![])));
         assert!(dir.grants_of("alice").unwrap().is_empty());
         assert!(!dir.update("nobody", None, None));
@@ -270,7 +277,10 @@ mod tests {
         store.remove_user("alice").unwrap();
         store.insert_user(&row("bob", &[])).unwrap();
         assert!(dir.refresh(&store).unwrap());
-        assert!(dir.get("alice").is_none(), "a removal elsewhere is picked up");
+        assert!(
+            dir.get("alice").is_none(),
+            "a removal elsewhere is picked up"
+        );
         assert!(dir.get("bob").is_some());
     }
 

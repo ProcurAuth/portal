@@ -2,7 +2,7 @@
 
 `portal` is a ForwardAuth barrier, the launcher page of the lab, and the AuthZEN PDP of the deployment (section 11 of the MCP server contract). It has one superadmin, defined by the environment, and users with grants. It intentionally does not implement groups, OAuth/OIDC, or password reset. Accounts and connection history are stored in one SQLite file. When several instances run, they use a shared PostgreSQL database instead (the `postgres` block).
 
-A grant is an action on a service. The grants come from the settings pages, from `user` blocks of the configuration, or from both (`access.grants_mode`). `/auth/verify` decides the action `access` with the grants in memory. The services decide their other actions. They ask the PDP. See "Grants and the gate" in the README.
+A grant is an action on a service, or on one sub-resource of a service. The grants come from the settings pages, from `user` blocks of the configuration, or from both (`access.grants_mode`). `/auth/verify` decides the action `access` with the grants in memory. The services decide their other actions. They ask the PDP. See "Grants and the gate" in the README.
 
 ## Core invariants
 
@@ -32,6 +32,8 @@ A grant is an action on a service. The grants come from the settings pages, from
 - The 403 page names no service. A user does not learn the name of a service that is not open to that user.
 - In the mode `static`, the settings pages refuse a change of grants. The server does not use the grants of the database.
 - In the mode `hybrid`, the settings pages cannot change a grant of the configuration.
+- The settings pages give a grant on a sub-resource only for an action and a resource type that the service declares. While the service has not answered, the pages refuse the grant. The resource id is exact. The server does not trim it or change its case. An id with a space or a control character is refused.
+- At start, the server does not know the services. Thus it checks only the form of a grant of the configuration. The Services page shows a grant whose type the service does not declare.
 - The **Generate** button in the add-user form draws a 20-character password in the browser.
 - The button uses `crypto.getRandomValues` and rejection sampling over an alphabet without look-alike characters.
 - The superadmin sees the generated password, so that the superadmin can give it to the user.
@@ -76,10 +78,11 @@ With the `identity` block, `/auth/verify` gives a JWT to each service that a use
 With the `pdp` block, the server answers AuthZEN requests on a second listener (`pdp.listen_address`). Traefik does not route to this listener.
 
 - Each server has its own bearer token. A `pdp_client` block, with `_env` or `_file`, gives the token. The token must contain at least 32 bytes. Each server uses a different token. The PDP keeps only the SHA-256 of each token. The PDP compares tokens in constant time. The PDP returns `401` for a request without a valid token.
-- The PDP answers a server only for its own resources. For a question about the service of another server, the PDP returns `false`. A grant on a service covers all its resources.
+- The PDP answers a server only for its own resources. For a question about the service of another server, the PDP returns `false`. A resource of a type other than `service` is a sub-resource of the service of the server that asks. The bearer token tells the server. The request cannot name another service for a sub-resource.
+- A grant on a service covers all its sub-resources. A grant on a sub-resource covers only the same type and the same id. It does not cover the service or another sub-resource.
 - The PDP fails closed. It returns `false` for an unknown user, an unknown subject type, or a bad action name. It returns `400` and no decision for a request that it cannot read. The PDP limits the body size (`pdp.max_body_bytes`). It limits the batch size (`pdp.max_evaluations`).
 - The log records each decision (`pdp_decision`). Each entry has the server, the subject, the action, the resource, the decision, and the reason. The counters `portal_pdp_decisions_total` and `portal_pdp_refused_total` are in `/metrics`.
-- The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS.
+- The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS. In K3s, the NetworkPolicy `allow-portal-pdp` admits to the port 4182 only the pods with the label `portal-pdp-client: "true"` in the namespaces `apps`, `observability` and `edge`.
 
 ## Actions of the services
 

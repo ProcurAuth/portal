@@ -35,7 +35,8 @@ const LOCK_SCHEMA: i64 = 0x7074_6c01;
 const LOCK_APPLY: i64 = 0x7074_6c02;
 
 /// One entry per schema version, applied in order and recorded in `schema_migrations`.
-const SCHEMA: &[&str] = &["
+const SCHEMA: &[&str] = &[
+    "
 CREATE TABLE users (
   id BIGSERIAL PRIMARY KEY,
   login TEXT NOT NULL UNIQUE,
@@ -103,7 +104,8 @@ CREATE TABLE sessions (
   last_seen_at BIGINT NOT NULL
 );
 CREATE INDEX sessions_login ON sessions (login);
-", "
+",
+    "
 -- Version 2: the grants of the users. The table of the old access model is dropped with its rows:
 -- after the migration, a user has the grants that the settings pages give again.
 DROP TABLE IF EXISTS user_roles;
@@ -114,17 +116,25 @@ CREATE TABLE user_grants (
   resource_id TEXT NOT NULL,
   PRIMARY KEY (user_id, action, resource_type, resource_id)
 );
-"];
+",
+    "
+-- Version 3: a grant can name a sub-resource of the service. The rows of version 2 are grants on
+-- the whole service: their two new columns are empty.
+ALTER TABLE user_grants
+  ADD COLUMN sub_resource_type TEXT NOT NULL DEFAULT '',
+  ADD COLUMN sub_resource_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_grants DROP CONSTRAINT user_grants_pkey;
+ALTER TABLE user_grants
+  ADD PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id);
+",
+];
 
-/// The grants of a row of `user_grants`. A row that is not a valid grant stops the read.
+/// The grants of the rows of `user_grants`. A row that is not a valid grant stops the read.
 /// The database holds only what the servers wrote.
-fn grants_from(rows: Vec<(String, String, String)>) -> Result<Vec<Grant>, String> {
-    rows.into_iter()
-        .map(|(action, kind, id)| {
-            if kind != crate::grants::SERVICE_TYPE {
-                return Err(format!("user_grants: unknown resource type {kind:?}"));
-            }
-            Grant::new(&action, &id).map_err(|e| format!("user_grants: {e}"))
+fn grants_from(rows: Vec<[String; 5]>) -> Result<Vec<Grant>, String> {
+    rows.iter()
+        .map(|[action, kind, id, sub_type, sub_id]| {
+            grant_from_row(action, kind, id, sub_type, sub_id)
         })
         .collect()
 }
@@ -135,10 +145,12 @@ fn insert_grants(
     grants: &[Grant],
 ) -> Result<(), postgres::Error> {
     for grant in grants {
+        let [kind, id, sub_type, sub_id] = grant_columns(grant);
         tx.execute(
-            "INSERT INTO user_grants (user_id, action, resource_type, resource_id)
-             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            &[&user_id, &grant.action, &crate::grants::SERVICE_TYPE, &grant.service],
+            "INSERT INTO user_grants
+               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            &[&user_id, &grant.action, &kind, &id, &sub_type, &sub_id],
         )?;
     }
     Ok(())
@@ -413,46 +425,54 @@ impl Pg {
     // Accounts --------------------------------------------------------------------------------
 
     pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
+        // One row for each grant, and one row for a user without a grant. The rows of a user
+        // follow each other.
         let rows = self.run(|c| {
             Ok(c.query(
-                "SELECT u.login, u.password_hash, u.created_at,
-                        ARRAY(SELECT g.action FROM user_grants g WHERE g.user_id = u.id
-                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\"),
-                        ARRAY(SELECT g.resource_type FROM user_grants g WHERE g.user_id = u.id
-                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\"),
-                        ARRAY(SELECT g.resource_id FROM user_grants g WHERE g.user_id = u.id
-                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\")
-                   FROM users u ORDER BY u.login COLLATE \"C\"",
+                "SELECT u.login, u.password_hash, u.created_at, g.action, g.resource_type,
+                        g.resource_id, g.sub_resource_type, g.sub_resource_id
+                   FROM users u LEFT JOIN user_grants g ON g.user_id = u.id
+                  ORDER BY u.login COLLATE \"C\", g.action COLLATE \"C\",
+                           g.resource_id COLLATE \"C\", g.sub_resource_type COLLATE \"C\",
+                           g.sub_resource_id COLLATE \"C\"",
                 &[],
             )?
             .into_iter()
             .map(|row| {
-                let (actions, kinds, ids): (Vec<String>, Vec<String>, Vec<String>) =
-                    (row.get(3), row.get(4), row.get(5));
+                let grant = match (
+                    row.get::<_, Option<String>>(3),
+                    row.get::<_, Option<String>>(4),
+                    row.get::<_, Option<String>>(5),
+                    row.get::<_, Option<String>>(6),
+                    row.get::<_, Option<String>>(7),
+                ) {
+                    (Some(a), Some(k), Some(i), Some(t), Some(d)) => Some([a, k, i, t, d]),
+                    _ => None,
+                };
                 (
                     row.get::<_, String>(0),
                     row.get::<_, String>(1),
                     row.get::<_, i64>(2),
-                    actions
-                        .into_iter()
-                        .zip(kinds)
-                        .zip(ids)
-                        .map(|((a, k), i)| (a, k, i))
-                        .collect::<Vec<_>>(),
+                    grant,
                 )
             })
             .collect::<Vec<_>>())
         })?;
-        rows.into_iter()
-            .map(|(login, password_hash, created_at, grants)| {
-                Ok(UserRow {
+        let mut users: Vec<UserRow> = Vec::new();
+        for (login, password_hash, created_at, grant) in rows {
+            if users.last().is_none_or(|last| last.login != login) {
+                users.push(UserRow {
                     login,
                     password_hash,
                     created_at,
-                    grants: grants_from(grants)?,
-                })
-            })
-            .collect()
+                    grants: Vec::new(),
+                });
+            }
+            if let (Some(user), Some(grant)) = (users.last_mut(), grant) {
+                user.grants.extend(grants_from(vec![grant])?);
+            }
+        }
+        Ok(users)
     }
 
     pub fn insert_user(&self, user: &UserRow) -> Result<(), InsertError> {
@@ -1183,7 +1203,10 @@ mod tests {
             .connect(NoTls)
             .err()
             .unwrap();
-        assert!(is_transient(&connection_lost), "no answer from the server at all");
+        assert!(
+            is_transient(&connection_lost),
+            "no answer from the server at all"
+        );
     }
 
     #[test]
@@ -1204,7 +1227,11 @@ mod tests {
         .unwrap();
         // This is what a failover does to the connections of the pool. The server ends them.
         let application = pg.pool.config.get_application_name().unwrap().to_string();
-        let mut admin = url.parse::<postgres::Config>().unwrap().connect(NoTls).unwrap();
+        let mut admin = url
+            .parse::<postgres::Config>()
+            .unwrap()
+            .connect(NoTls)
+            .unwrap();
         let killed = admin
             .query(
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
@@ -1212,7 +1239,11 @@ mod tests {
             )
             .unwrap();
         assert!(!killed.is_empty(), "there were connections to end");
-        assert_eq!(pg.load_users().unwrap().len(), 1, "a new connection took over");
+        assert_eq!(
+            pg.load_users().unwrap().len(),
+            1,
+            "a new connection took over"
+        );
         assert_eq!(pg.load_users().unwrap().len(), 1);
     }
 
@@ -1260,9 +1291,63 @@ mod tests {
         assert_eq!(users.len(), 1, "the account stays");
         assert!(users[0].grants.is_empty(), "a migrated user has no grant");
         let grant = Grant::new("access", "grafana").unwrap();
-        assert!(migrated.update_user("alice", None, Some(&[grant.clone()])).unwrap());
+        assert!(migrated
+            .update_user("alice", None, Some(&[grant.clone()]))
+            .unwrap());
         assert_eq!(migrated.load_users().unwrap()[0].grants, [grant]);
         // A second start finds nothing to do.
+        assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn the_migration_to_version_three_keeps_the_grants_and_adds_the_sub_resources() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        // This database was made by the portal of version 2.1.0: schema version 2, with grants.
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute(
+                "DROP TABLE user_grants;
+                 DELETE FROM schema_migrations WHERE version > 2;
+                 CREATE TABLE user_grants (
+                   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                   action TEXT NOT NULL,
+                   resource_type TEXT NOT NULL,
+                   resource_id TEXT NOT NULL,
+                   PRIMARY KEY (user_id, action, resource_type, resource_id));
+                 INSERT INTO users (id, login, password_hash, created_at)
+                   VALUES (1, 'alice', 'h', 1), (2, 'bob', 'h', 1);
+                 INSERT INTO user_grants (user_id, action, resource_type, resource_id)
+                   VALUES (1, 'access', 'service', 'db'), (1, 'query.run.read', 'service', 'db');",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        let kept = vec![
+            Grant::new("access", "db").unwrap(),
+            Grant::new("query.run.read", "db").unwrap(),
+        ];
+        let users = migrated.load_users().unwrap();
+        assert_eq!(users.len(), 2, "a user without a grant is kept");
+        assert_eq!(users[0].grants, kept, "the grants stay");
+        assert!(users[1].grants.is_empty());
+        let mut next = kept.clone();
+        next.push(Grant::parse("query.run.write on service:db/database:analytics").unwrap());
+        next.push(Grant::parse("query.run.write on service:db/database:logs").unwrap());
+        next.sort();
+        assert!(migrated.update_user("alice", None, Some(&next)).unwrap());
+        assert_eq!(migrated.load_users().unwrap()[0].grants, next);
         assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
     }
 }

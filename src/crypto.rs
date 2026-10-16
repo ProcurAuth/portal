@@ -29,8 +29,8 @@ pub fn hash_password(password: &[u8]) -> Result<String, String> {
         .map_err(|e| format!("cannot encode password salt: {e}"))?;
     salt_bytes.zeroize();
 
-    let params = Params::new(19_456, 2, 1, None)
-        .map_err(|e| format!("cannot configure Argon2: {e}"))?;
+    let params =
+        Params::new(19_456, 2, 1, None).map_err(|e| format!("cannot configure Argon2: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     argon2
         .hash_password(password, &salt)
@@ -66,7 +66,11 @@ pub fn verify_csrf(cookie: &str, form: &str) -> bool {
 /// bound to the session it acts for and to what it is for (`purpose`), so it stays valid as long
 /// as the page does (a cookie-based token would expire under an idle tab) and cannot be replayed
 /// on another action.
-pub fn sign_action_token(secret: &[u8], purpose: &str, session_token: &str) -> Result<String, String> {
+pub fn sign_action_token(
+    secret: &[u8],
+    purpose: &str,
+    session_token: &str,
+) -> Result<String, String> {
     let mac = sign(secret, format!("{purpose}\n{session_token}").as_bytes())?;
     Ok(Base64UrlUnpadded::encode_string(&mac))
 }
@@ -76,7 +80,11 @@ pub fn verify_action_token(secret: &[u8], purpose: &str, session_token: &str, to
         Ok(v) if v.len() == 32 => v,
         _ => return false,
     };
-    verify_mac(secret, format!("{purpose}\n{session_token}").as_bytes(), &mac)
+    verify_mac(
+        secret,
+        format!("{purpose}\n{session_token}").as_bytes(),
+        &mac,
+    )
 }
 
 pub fn sign_return_uri(secret: &[u8], uri: &str) -> Result<String, String> {
@@ -93,8 +101,8 @@ pub fn verify_return_uri_signature(secret: &[u8], uri: &str, signature: &str) ->
 }
 
 fn sign(secret: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .map_err(|_| "invalid HMAC secret length".to_string())?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| "invalid HMAC secret length".to_string())?;
     mac.update(data);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -131,11 +139,22 @@ mod tests {
         let token = sign_action_token(key, "logout", "session-a").unwrap();
         assert!(verify_action_token(key, "logout", "session-a", &token));
         assert!(!verify_action_token(key, "logout", "session-b", &token));
-        assert!(!verify_action_token(key, "users", "session-a", &token), "another purpose");
-        assert!(!verify_action_token(b"another-key-another-key-another!", "logout", "session-a", &token));
+        assert!(
+            !verify_action_token(key, "users", "session-a", &token),
+            "another purpose"
+        );
+        assert!(!verify_action_token(
+            b"another-key-another-key-another!",
+            "logout",
+            "session-a",
+            &token
+        ));
         assert!(!verify_action_token(key, "logout", "session-a", "short"));
         let uri_signature = sign_return_uri(key, "session-a").unwrap();
-        assert!(!verify_action_token(key, "logout", "session-a", &uri_signature), "domains are separated");
+        assert!(
+            !verify_action_token(key, "logout", "session-a", &uri_signature),
+            "domains are separated"
+        );
     }
 
     #[test]

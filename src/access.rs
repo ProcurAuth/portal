@@ -89,7 +89,11 @@ impl ExcludeRule {
         } else {
             format!("{} {path}", methods.join(","))
         };
-        Ok(Self { methods, parts, text })
+        Ok(Self {
+            methods,
+            parts,
+            text,
+        })
     }
 
     /// The normalised rule, for display.
@@ -107,7 +111,8 @@ impl ExcludeRule {
     }
 
     fn matches(&self, method: Option<&str>, segments: &[String]) -> bool {
-        if !self.methods.is_empty() && !method.is_some_and(|m| self.methods.iter().any(|x| x == m)) {
+        if !self.methods.is_empty() && !method.is_some_and(|m| self.methods.iter().any(|x| x == m))
+        {
             return false;
         }
         let mut at = 0;
@@ -518,13 +523,22 @@ mod exclude_tests {
     #[test]
     fn a_declared_path_is_open_for_its_methods_only() {
         assert!(open(Some("POST"), "/dagu/api/v1/webhooks/abc"));
-        assert!(open(Some("POST"), "/dagu/api/v1/webhooks/abc?token=1&x=/../y"));
+        assert!(open(
+            Some("POST"),
+            "/dagu/api/v1/webhooks/abc?token=1&x=/../y"
+        ));
         assert!(!open(Some("GET"), "/dagu/api/v1/webhooks/abc"));
-        assert!(!open(None, "/dagu/api/v1/webhooks/abc"), "no method, no match for a rule that names one");
+        assert!(
+            !open(None, "/dagu/api/v1/webhooks/abc"),
+            "no method, no match for a rule that names one"
+        );
         assert!(open(Some("GET"), "/dagu/api/v1/health"));
         assert!(!open(Some("POST"), "/dagu/api/v1/health"));
         assert!(open(Some("PUT"), "/dagu/hooks/a/b/c"));
-        assert!(!open(Some("PUT"), "/dagu/hooks"), "** needs at least one segment");
+        assert!(
+            !open(Some("PUT"), "/dagu/hooks"),
+            "** needs at least one segment"
+        );
     }
 
     #[test]
@@ -541,7 +555,10 @@ mod exclude_tests {
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/..%2f..%2fadmin"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/%2e%2e%2fsecret"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/a%5Cb"));
-        assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/%2e%2e/%2e%2e/auth/settings"));
+        assert!(!open(
+            Some("POST"),
+            "/dagu/api/v1/webhooks/%2e%2e/%2e%2e/auth/settings"
+        ));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/a%00b"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/a%zz"));
         // Dot segments that cancel each other still lead to a declared path.
@@ -581,17 +598,39 @@ mod exclude_tests {
 
     #[test]
     fn a_nested_service_keeps_its_own_path_whatever_the_parent_declares() {
-        assert!(!open(Some("POST"), "/dagu/admin/hooks/x"), "owned by Dagu admin, which declares nothing");
+        assert!(
+            !open(Some("POST"), "/dagu/admin/hooks/x"),
+            "owned by Dagu admin, which declares nothing"
+        );
         assert!(open(Some("POST"), "/dagu/hooks/x"));
     }
 
     #[test]
     fn rules_are_validated_when_the_label_is_read() {
         let parse = |line: &str| ExcludeRule::parse(line);
-        assert_eq!(parse("post /a/b").unwrap_err(), "\"post\" is not one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
+        assert_eq!(
+            parse("post /a/b").unwrap_err(),
+            "\"post\" is not one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+        );
         for bad in [
-            "a/b", "/", "/a//b", "/a/b/", "/*/b", "/**", "/a/**/b", "/a/./b", "/a/../b", "/a/b?x=1", "/a/b#x",
-            "/a/[0-9]+", "/a/b.*", "/a/fo*", "/a/%2e", "/a/b c d", "GET POST /a", "",
+            "a/b",
+            "/",
+            "/a//b",
+            "/a/b/",
+            "/*/b",
+            "/**",
+            "/a/**/b",
+            "/a/./b",
+            "/a/../b",
+            "/a/b?x=1",
+            "/a/b#x",
+            "/a/[0-9]+",
+            "/a/b.*",
+            "/a/fo*",
+            "/a/%2e",
+            "/a/b c d",
+            "GET POST /a",
+            "",
         ] {
             assert!(parse(bad).is_err(), "{bad:?} must be refused");
         }
@@ -599,6 +638,9 @@ mod exclude_tests {
         assert_eq!(rule.text(), "POST,PUT /a/*/c");
         assert!(rule.starts_with(&["a".to_string()]));
         assert!(!rule.starts_with(&["b".to_string()]));
-        assert!(!rule.starts_with(&["a".to_string(), "x".to_string()]), "a wildcard is not the written-out prefix");
+        assert!(
+            !rule.starts_with(&["a".to_string(), "x".to_string()]),
+            "a wildcard is not the written-out prefix"
+        );
     }
 }

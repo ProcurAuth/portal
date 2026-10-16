@@ -194,9 +194,9 @@ impl Resolved {
                 flag("login_rate_limit_enabled") || flag("global_login_rate_limit_enabled")
             }
             When::MetricsOn => self.bool("metrics", "enabled").unwrap_or(false),
-            When::SecretProvided => {
-                self.text("session", "secret_mode").is_ok_and(|mode| mode == "provided")
-            }
+            When::SecretProvided => self
+                .text("session", "secret_mode")
+                .is_ok_and(|mode| mode == "provided"),
             When::IdentityBlock => self.has_block("identity"),
             When::PdpBlock => self.has_block("pdp"),
             When::LabeledBlock => true,
@@ -348,9 +348,8 @@ fn resolve_labeled(
                 ))
             }
         };
-        let value = parse_scalar(key, &literal).map_err(|e| {
-            e.replacen(&key.path(), &key_path, 1)
-        })?;
+        let value =
+            parse_scalar(key, &literal).map_err(|e| e.replacen(&key.path(), &key_path, 1))?;
         effective.push(Effective {
             key: key_path,
             value: shown_value(key, &literal),
@@ -483,7 +482,10 @@ fn resolve_secret(
     let path = key.path();
     if !applies && plain.is_none() {
         if from_env.is_some() || from_file.is_some() {
-            return Err(format!("{path}_env and {path}_file must not be set when {}", key.when.refusal()));
+            return Err(format!(
+                "{path}_env and {path}_file must not be set when {}",
+                key.when.refusal()
+            ));
         }
         return Ok(());
     }
@@ -522,7 +524,9 @@ fn read_secret(
             ));
         }
         (Some(_), Some(_)) => {
-            return Err(format!("give exactly one of {path}_env and {path}_file, not both"));
+            return Err(format!(
+                "give exactly one of {path}_env and {path}_file, not both"
+            ));
         }
         (Some(lit), None) => {
             let attribute = format!("{path}_env");
@@ -541,7 +545,9 @@ fn read_secret(
                 format!("{attribute}: the environment variable {name} is not set, or its value is not valid UTF-8")
             })?;
             if value.is_empty() {
-                return Err(format!("{attribute}: the environment variable {name} is empty"));
+                return Err(format!(
+                    "{attribute}: the environment variable {name} is empty"
+                ));
             }
             (value.into_bytes(), format!("env:{name}"))
         }
@@ -569,13 +575,18 @@ fn read_secret(
             file_check.map_err(|reason| {
                 format!("invalid {attribute}: expected an absolute path without '..' ({reason}), got {file:?}")
             })?;
-            (read_secret_file(&attribute, Path::new(file), max_bytes)?, format!("file:{file}"))
+            (
+                read_secret_file(&attribute, Path::new(file), max_bytes)?,
+                format!("file:{file}"),
+            )
         }
     };
     let mut bytes = bytes;
     if bytes.len() > max_bytes {
         bytes.zeroize();
-        return Err(format!("{path}: the value is larger than {max_bytes} bytes ({source})"));
+        return Err(format!(
+            "{path}: the value is larger than {max_bytes} bytes ({source})"
+        ));
     }
     if bytes.is_empty() {
         return Err(format!("{path}: the value is empty ({source})"));

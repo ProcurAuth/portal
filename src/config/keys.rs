@@ -101,7 +101,9 @@ impl When {
             | When::LabeledBlock => "",
             When::NoPostgres => "Applies only without the `postgres` block.",
             When::KubernetesOn => "Applies only when `discovery.kubernetes` is `true`.",
-            When::LoginLimiterOn => "Applies only when `security.login_rate_limit_enabled` is `true`.",
+            When::LoginLimiterOn => {
+                "Applies only when `security.login_rate_limit_enabled` is `true`."
+            }
             When::GlobalLimiterOn => {
                 "Applies only when `security.global_login_rate_limit_enabled` is `true`."
             }
@@ -769,13 +771,13 @@ pub static LABELED_KEYS: &[Key] = &[
         block: "user",
         name: "grants",
         kind: Kind::List {
-            expected: "grants such as \"access on service:grafana\": an action, the word on, then service: and the id of the service",
+            expected: "grants such as \"access on service:grafana\" or \"query.run.write on service:clickhouse-dash/database:analytics\": an action, the word on, service: and the id of the service, then optionally / and a sub-resource as type:id",
             check: check_grant,
-            max_items: 512,
+            max_items: crate::grants::MAX_GRANTS_PER_USER,
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the resources of this service.",
+        doc: "The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare.",
     },
     Key {
         block: "pdp_client",
@@ -792,7 +794,9 @@ pub fn find(block: &str, name: &str) -> Option<&'static Key> {
 }
 
 pub fn find_labeled(block: &str, name: &str) -> Option<&'static Key> {
-    LABELED_KEYS.iter().find(|k| k.block == block && k.name == name)
+    LABELED_KEYS
+        .iter()
+        .find(|k| k.block == block && k.name == name)
 }
 
 /// The name of each block, for the closed list of the parser.
@@ -813,7 +817,10 @@ pub fn is_optional_block(block: &str) -> bool {
 // Checks of the text keys. Each returns the reason when the value is bad.
 
 fn check_socket_address(value: &str) -> Result<(), String> {
-    value.parse::<SocketAddr>().map(|_| ()).map_err(|e| e.to_string())
+    value
+        .parse::<SocketAddr>()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn check_absolute_path(value: &str) -> Result<(), String> {
@@ -837,7 +844,9 @@ fn check_grant(value: &str) -> Result<(), String> {
 fn check_header_name(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 64
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         return Err("not a header name".into());
     }
@@ -901,8 +910,20 @@ fn check_cookie_name(value: &str) -> Result<(), String> {
             b.is_ascii_alphanumeric()
                 || matches!(
                     b,
-                    b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
-                        | b'_' | b'`' | b'|' | b'~'
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
                 )
         })
     {
@@ -1015,7 +1036,11 @@ fn type_cell(key: &Key) -> String {
         Kind::Int { min, max } => format!("number, {min} to {max}"),
         Kind::Bool => "`true` or `false`".to_string(),
         Kind::Duration { min, max } => {
-            format!("duration, {} to {}", show_duration(*min), show_duration(*max))
+            format!(
+                "duration, {} to {}",
+                show_duration(*min),
+                show_duration(*max)
+            )
         }
         Kind::Size { min, max } => format!("size, {} to {}", show_size(*min), show_size(*max)),
         Kind::Enum(values) => values
@@ -1023,7 +1048,11 @@ fn type_cell(key: &Key) -> String {
             .map(|v| format!("`{v}`"))
             .collect::<Vec<_>>()
             .join(", "),
-        Kind::List { expected, max_items, .. } => {
+        Kind::List {
+            expected,
+            max_items,
+            ..
+        } => {
             format!("list of at most {max_items} quoted strings: {expected}")
         }
         Kind::Secret { .. } => format!(
@@ -1112,7 +1141,10 @@ mod tests {
             assert!(!key.doc.is_empty(), "{} has no description", key.path());
         }
         for block in &blocks {
-            assert!(KEYS.iter().any(|k| k.block == *block), "empty block {block}");
+            assert!(
+                KEYS.iter().any(|k| k.block == *block),
+                "empty block {block}"
+            );
         }
         let labeled = labeled_block_names();
         for key in LABELED_KEYS {
@@ -1151,7 +1183,11 @@ mod tests {
     fn the_reference_lists_every_key() {
         let reference = reference();
         for key in KEYS.iter().chain(LABELED_KEYS) {
-            assert!(reference.contains(&format!("| `{}` |", key.name)), "{}", key.path());
+            assert!(
+                reference.contains(&format!("| `{}` |", key.name)),
+                "{}",
+                key.path()
+            );
         }
     }
 }

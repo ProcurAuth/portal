@@ -13,7 +13,7 @@ use super::*;
 use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
@@ -85,41 +85,67 @@ CREATE TABLE user_grants (
 );
 ";
 
+/// Schema version 4: a grant can name a sub-resource of the service. SQLite cannot change a primary
+/// key, so the table is made again with its rows. The rows of version 3 are grants on the whole
+/// service: their two new columns are empty.
+const SUB_RESOURCE_SCHEMA: &str = "
+CREATE TABLE user_grants_v4 (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  sub_resource_type TEXT NOT NULL DEFAULT '',
+  sub_resource_id TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+);
+INSERT INTO user_grants_v4 (user_id, action, resource_type, resource_id)
+  SELECT user_id, action, resource_type, resource_id FROM user_grants;
+DROP TABLE user_grants;
+ALTER TABLE user_grants_v4 RENAME TO user_grants;
+";
+
 /// Reads the grants of one user. A row that is not a valid grant stops the read.
-/// The database holds only what the server wrote.
-fn grants_of(conn: &Connection, user_id: i64) -> Result<Vec<Grant>, String> {
+/// The database holds only what the server wrote. A file before version 4 has no sub-resource
+/// columns: `sub_resources` is `false` for it.
+fn grants_of(conn: &Connection, user_id: i64, sub_resources: bool) -> Result<Vec<Grant>, String> {
+    let sql = if sub_resources {
+        "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id
+           FROM user_grants WHERE user_id = ?1
+          ORDER BY action, resource_id, sub_resource_type, sub_resource_id"
+    } else {
+        "SELECT action, resource_type, resource_id, '', '' FROM user_grants
+          WHERE user_id = ?1 ORDER BY action, resource_id"
+    };
     let rows = conn
-        .prepare_cached(
-            "SELECT action, resource_type, resource_id FROM user_grants
-              WHERE user_id = ?1 ORDER BY action, resource_id",
-        )
+        .prepare_cached(sql)
         .map_err(db)?
         .query_map([user_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
-    rows.into_iter()
-        .map(|(action, kind, id)| {
-            if kind != crate::grants::SERVICE_TYPE {
-                return Err(format!("user_grants: unknown resource type {kind:?}"));
-            }
-            Grant::new(&action, &id).map_err(|e| format!("user_grants: {e}"))
+    rows.iter()
+        .map(|(action, kind, id, sub_type, sub_id)| {
+            grant_from_row(action, kind, id, sub_type, sub_id)
         })
         .collect()
 }
 
 fn insert_grants(conn: &Connection, user_id: i64, grants: &[Grant]) -> rusqlite::Result<()> {
     for grant in grants {
+        let [kind, id, sub_type, sub_id] = grant_columns(grant);
         conn.execute(
-            "INSERT OR IGNORE INTO user_grants (user_id, action, resource_type, resource_id)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![user_id, grant.action, crate::grants::SERVICE_TYPE, grant.service],
+            "INSERT OR IGNORE INTO user_grants
+               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![user_id, grant.action, kind, id, sub_type, sub_id],
         )?;
     }
     Ok(())
@@ -164,13 +190,14 @@ impl Sqlite {
             .map_err(db)?;
         // Each version adds its part. The part and the new version number are written in one transaction.
         let missing = match version {
-            0 => format!("{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA}"),
-            1 => format!("{LOGIN_SCHEMA} {GRANTS_SCHEMA}"),
-            2 => GRANTS_SCHEMA.to_string(),
+            0 => format!("{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA}"),
+            1 => format!("{LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA}"),
+            2 => format!("{GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA}"),
+            3 => SUB_RESOURCE_SCHEMA.to_string(),
             _ => String::new(),
         };
         match version {
-            0..=2 => conn
+            0..=3 => conn
                 .execute_batch(&format!(
                     "BEGIN; {missing} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
                 ))
@@ -220,7 +247,7 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         for (id, user) in &mut users {
-            user.grants = grants_of(&conn, *id)?;
+            user.grants = grants_of(&conn, *id, true)?;
         }
         Ok(users.into_iter().map(|(_, user)| user).collect())
     }
@@ -430,7 +457,11 @@ impl Sqlite {
             )
             .map_err(db)?
             .query_map(
-                params![only_failed, LOGIN_PAGE_SIZE, i64::from(result.page) * LOGIN_PAGE_SIZE],
+                params![
+                    only_failed,
+                    LOGIN_PAGE_SIZE,
+                    i64::from(result.page) * LOGIN_PAGE_SIZE
+                ],
                 |row| {
                     Ok(LoginRow {
                         ts: row.get(0)?,
@@ -691,7 +722,7 @@ impl Sqlite {
         let mut with_grants = Vec::with_capacity(users.len());
         for (id, mut user) in users {
             if version >= 3 {
-                user.grants = grants_of(conn, id)?;
+                user.grants = grants_of(conn, id, version >= 4)?;
             }
             with_grants.push((id, user));
         }
@@ -736,7 +767,9 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         let audit = conn
-            .prepare("SELECT id, ts, kind, login, actor, ip, user_agent FROM audit_events ORDER BY id")
+            .prepare(
+                "SELECT id, ts, kind, login, actor, ip, user_agent FROM audit_events ORDER BY id",
+            )
             .map_err(db)?
             .query_map([], |row| {
                 Ok(LoggedAudit {
@@ -794,7 +827,10 @@ mod tests {
         UserRow {
             login: login.into(),
             password_hash: "$argon2id$stub".into(),
-            grants: services.iter().map(|s| Grant::new("access", s).unwrap()).collect(),
+            grants: services
+                .iter()
+                .map(|s| Grant::new("access", s).unwrap())
+                .collect(),
             created_at: 1_000,
         }
     }
@@ -835,7 +871,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-
     #[test]
     fn a_newer_schema_is_refused() {
         let conn = Connection::open_in_memory().unwrap();
@@ -843,11 +878,11 @@ mod tests {
         assert!(Sqlite::init(conn).is_err());
     }
 
-
     #[test]
     fn a_database_at_version_one_gains_the_sign_in_log_when_opened() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&format!("{SCHEMA} PRAGMA user_version = 1;")).unwrap();
+        conn.execute_batch(&format!("{SCHEMA} PRAGMA user_version = 1;"))
+            .unwrap();
         conn.execute(
             "INSERT INTO users (login, password_hash, created_at) VALUES ('alice', 'h', 1)",
             [],
@@ -890,7 +925,9 @@ CREATE TABLE user_roles (
         assert!(users[0].grants.is_empty(), "a migrated user has no grant");
         // The new table works, and a second open changes nothing.
         let grant = Grant::new("access", "grafana").unwrap();
-        assert!(store.update_user("alice", None, Some(&[grant.clone()])).unwrap());
+        assert!(store
+            .update_user("alice", None, Some(&[grant.clone()]))
+            .unwrap());
         assert_eq!(store.load_users().unwrap()[0].grants, [grant]);
     }
 
@@ -917,4 +954,54 @@ CREATE TABLE user_roles (
         assert!(store.load_users().unwrap_err().contains("resource type"));
     }
 
+    #[test]
+    fn the_migration_to_version_four_keeps_the_grants_and_adds_the_sub_resources() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA} PRAGMA user_version = 3;"
+        ))
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+             INSERT INTO user_grants (user_id, action, resource_type, resource_id)
+               VALUES (1, 'access', 'service', 'db'), (1, 'query.run.read', 'service', 'db');",
+        )
+        .unwrap();
+        let store = Sqlite::init(conn).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(!has_table(&store, "user_grants_v4"));
+        let kept = vec![
+            Grant::new("access", "db").unwrap(),
+            Grant::new("query.run.read", "db").unwrap(),
+        ];
+        assert_eq!(
+            store.load_users().unwrap()[0].grants,
+            kept,
+            "the grants stay"
+        );
+        let mut next = kept.clone();
+        next.push(Grant::parse("query.run.write on service:db/database:analytics").unwrap());
+        next.push(Grant::parse("query.run.write on service:db/database:logs").unwrap());
+        next.sort();
+        assert!(store.update_user("alice", None, Some(&next)).unwrap());
+        assert_eq!(store.load_users().unwrap()[0].grants, next);
+        assert!(store.remove_user("alice").unwrap());
+        assert_eq!(store.count("user_grants"), 0, "the delete cascades");
+    }
+
+    #[test]
+    fn a_sub_resource_row_that_the_server_did_not_write_stops_the_read() {
+        let store = Sqlite::open_in_memory();
+        store.insert_user(&user("alice", &[])).unwrap();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO user_grants
+                   (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+                 VALUES (1, 'access', 'service', 'db', 'database', 'x')",
+                [],
+            )
+            .unwrap();
+        assert!(store.load_users().unwrap_err().contains("sub-resource"));
+    }
 }

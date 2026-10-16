@@ -2,8 +2,10 @@
 //!
 //! The servers of the deployment ask this PDP if a user can do an action. Each server has its own
 //! bearer token (a `pdp_client` block). The PDP answers only for the resources of the server that
-//! asks: the resource `service:<name>` of this server, or a smaller resource of it. A grant on a
-//! service covers all the resources of this service.
+//! asks. The resource is `{"type": "service", "id": "<name>"}` of this server, or a sub-resource
+//! `{"type": "<type>", "id": "<id>"}`. The service of a sub-resource is always the server that
+//! asks: its token tells which server it is. A grant on the service covers all its sub-resources.
+//! A grant on a sub-resource covers only the same type and the same id.
 //!
 //! Endpoints:
 //!
@@ -23,7 +25,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::grants::{check_action, holds, ACCESS, SERVICE_TYPE};
+use crate::grants::{check_action, covers, SubResource, ACCESS, SERVICE_TYPE};
 
 const EVALUATION_PATH: &str = "/access/v1/evaluation";
 const EVALUATIONS_PATH: &str = "/access/v1/evaluations";
@@ -80,7 +82,10 @@ pub async fn serve(state: Arc<AppState>, listener: TcpListener) {
             &state,
             LogLevel::Warn,
             "pdp_without_client",
-            &[("detail", "no pdp_client block: the PDP refuses every request".into())],
+            &[(
+                "detail",
+                "no pdp_client block: the PDP refuses every request".into(),
+            )],
         );
     }
     log(
@@ -97,7 +102,12 @@ pub async fn serve(state: Arc<AppState>, listener: TcpListener) {
         let (stream, remote_addr) = match listener.accept().await {
             Ok(v) => v,
             Err(error) => {
-                log(&state, LogLevel::Error, "pdp_accept_error", &[("error", error.to_string())]);
+                log(
+                    &state,
+                    LogLevel::Error,
+                    "pdp_accept_error",
+                    &[("error", error.to_string())],
+                );
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -129,7 +139,11 @@ pub async fn serve(state: Arc<AppState>, listener: TcpListener) {
 }
 
 /// One request of the PDP listener.
-async fn handle(state: &AppState, remote_addr: SocketAddr, request: Request<Incoming>) -> HttpResponse {
+async fn handle(
+    state: &AppState,
+    remote_addr: SocketAddr,
+    request: Request<Incoming>,
+) -> HttpResponse {
     let request_id = match unique_header_str(request.headers(), REQUEST_ID) {
         Ok(Some(id))
             if !id.is_empty()
@@ -141,7 +155,10 @@ async fn handle(state: &AppState, remote_addr: SocketAddr, request: Request<Inco
         Ok(None) => None,
         _ => {
             state.pdp_stats.bad_request.fetch_add(1, Ordering::Relaxed);
-            return json_response(StatusCode::BAD_REQUEST, &json!({"error": "invalid X-Request-ID"}));
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": "invalid X-Request-ID"}),
+            );
         }
     };
     let method = request.method().clone();
@@ -153,7 +170,10 @@ async fn handle(state: &AppState, remote_addr: SocketAddr, request: Request<Inco
             decide_request(state, &path, request, request_id.as_deref()).await
         }
         (_, METADATA_PATH | EVALUATION_PATH | EVALUATIONS_PATH | SEARCH_ACTION_PATH) => {
-            json_response(StatusCode::METHOD_NOT_ALLOWED, &json!({"error": "method not allowed"}))
+            json_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                &json!({"error": "method not allowed"}),
+            )
         }
         _ => json_response(StatusCode::NOT_FOUND, &json!({"error": "not found"})),
     };
@@ -178,7 +198,12 @@ async fn handle(state: &AppState, remote_addr: SocketAddr, request: Request<Inco
 
 /// The metadata of AuthZEN: the endpoints under `pdp.url`.
 fn metadata(state: &AppState) -> HttpResponse {
-    let base = state.config.pdp.as_ref().map(|p| p.url.as_str()).unwrap_or("");
+    let base = state
+        .config
+        .pdp
+        .as_ref()
+        .map(|p| p.url.as_str())
+        .unwrap_or("");
     json_response(
         StatusCode::OK,
         &json!({
@@ -220,7 +245,8 @@ async fn decide_request(
 ) -> HttpResponse {
     let Some(client) = client(state, request.headers()) else {
         state.pdp_stats.unauthorized.fetch_add(1, Ordering::Relaxed);
-        let mut response = json_response(StatusCode::UNAUTHORIZED, &json!({"error": "unauthorized"}));
+        let mut response =
+            json_response(StatusCode::UNAUTHORIZED, &json!({"error": "unauthorized"}));
         response.headers_mut().insert(
             hyper::header::WWW_AUTHENTICATE,
             HeaderValue::from_static("Bearer realm=\"portal-pdp\""),
@@ -228,7 +254,13 @@ async fn decide_request(
         return response;
     };
     let max = state.config.pdp.as_ref().map_or(0, |p| p.max_body_bytes);
-    let body = match read_limited_body(request.into_body(), max, state.config.server.body_read_timeout).await {
+    let body = match read_limited_body(
+        request.into_body(),
+        max,
+        state.config.server.body_read_timeout,
+    )
+    .await
+    {
         Ok(body) => body,
         Err(BodyReadError::TooLarge) => return bad_request(state, "the body is too large"),
         Err(BodyReadError::Timeout) => return bad_request(state, "the body came too slowly"),
@@ -265,10 +297,14 @@ fn entity(value: Option<&Value>, what: &str) -> Result<Entity, String> {
         .ok_or_else(|| format!("{what} must be an object"))?;
     let text = |name: &str| -> Result<String, String> {
         match object.get(name) {
-            Some(Value::String(text)) if !text.is_empty() && text.chars().count() <= MAX_ID_CHARS => {
+            Some(Value::String(text))
+                if !text.is_empty() && text.chars().count() <= MAX_ID_CHARS =>
+            {
                 Ok(text.clone())
             }
-            _ => Err(format!("{what}.{name} must be a string of 1 to {MAX_ID_CHARS} characters")),
+            _ => Err(format!(
+                "{what}.{name} must be a string of 1 to {MAX_ID_CHARS} characters"
+            )),
         }
     };
     check_properties(object, what)?;
@@ -284,8 +320,12 @@ fn action_name(value: Option<&Value>) -> Result<String, String> {
         .ok_or_else(|| "action must be an object".to_string())?;
     check_properties(object, "action")?;
     match object.get("name") {
-        Some(Value::String(name)) if !name.is_empty() && name.len() <= MAX_ID_CHARS => Ok(name.clone()),
-        _ => Err(format!("action.name must be a string of 1 to {MAX_ID_CHARS} characters")),
+        Some(Value::String(name)) if !name.is_empty() && name.len() <= MAX_ID_CHARS => {
+            Ok(name.clone())
+        }
+        _ => Err(format!(
+            "action.name must be a string of 1 to {MAX_ID_CHARS} characters"
+        )),
     }
 }
 
@@ -305,16 +345,32 @@ fn check_context(request: &Map<String, Value>) -> Result<(), String> {
 }
 
 /// The decision for one subject, action and resource, asked by `client`. Fails closed.
-fn decide(state: &AppState, client: &Client, subject: &Entity, action: &str, resource: &Entity) -> (bool, &'static str) {
+fn decide(
+    state: &AppState,
+    client: &Client,
+    subject: &Entity,
+    action: &str,
+    resource: &Entity,
+) -> (bool, &'static str) {
     if subject.kind != "user" {
         return (false, "the subject type is not user");
     }
     if check_action(action).is_err() {
         return (false, "the action name is not valid");
     }
-    if resource.kind == SERVICE_TYPE && resource.id != client.name {
-        return (false, "the resource is a service of another server");
-    }
+    // The service is always the server that asks. A resource of another type is a sub-resource
+    // of this service.
+    let target = if resource.kind == SERVICE_TYPE {
+        if resource.id != client.name {
+            return (false, "the resource is a service of another server");
+        }
+        None
+    } else {
+        Some(SubResource {
+            kind: resource.kind.clone(),
+            id: resource.id.clone(),
+        })
+    };
     if constant_time_eq(subject.id.as_bytes(), state.superadmin_login.as_bytes()) {
         return (true, "superadmin");
     }
@@ -322,7 +378,7 @@ fn decide(state: &AppState, client: &Client, subject: &Entity, action: &str, res
         return (false, "no such user");
     };
     let grants = state.policy.effective(&subject.id, &stored);
-    if holds(&grants, action, &client.name) {
+    if covers(&grants, action, &client.name, target.as_ref()) {
         (true, "grant")
     } else {
         (false, "no grant")
@@ -422,7 +478,8 @@ fn evaluations(
             .ok_or_else(|| format!("evaluations[{index}] must be an object"))?;
         let pick = |name: &str| item.get(name).or_else(|| request.get(name));
         let subject = entity(pick("subject"), &format!("evaluations[{index}].subject"))?;
-        let action = action_name(pick("action")).map_err(|e| format!("evaluations[{index}].{e}"))?;
+        let action =
+            action_name(pick("action")).map_err(|e| format!("evaluations[{index}].{e}"))?;
         let resource = entity(pick("resource"), &format!("evaluations[{index}].resource"))?;
         match item.get("context") {
             None | Some(Value::Object(_)) => {}
@@ -493,7 +550,9 @@ fn stored_grants_of(state: &AppState, login: &str) -> Option<Vec<crate::grants::
 
 fn json_response(status: StatusCode, value: &Value) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::from(value.to_string()));
-    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     response.headers_mut().insert(
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("no-store"),
@@ -510,16 +569,23 @@ mod tests {
     }
 
     fn user(id: &str) -> Entity {
-        Entity { kind: "user".into(), id: id.into() }
+        Entity {
+            kind: "user".into(),
+            id: id.into(),
+        }
     }
 
     fn resource(kind: &str, id: &str) -> Entity {
-        Entity { kind: kind.into(), id: id.into() }
+        Entity {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
 
     #[test]
     fn entities_need_their_members_and_refuse_other_shapes() {
-        let read = |text: &str| entity(serde_json::from_str::<Value>(text).ok().as_ref(), "subject");
+        let read =
+            |text: &str| entity(serde_json::from_str::<Value>(text).ok().as_ref(), "subject");
         assert!(read(r#"{"type":"user","id":"alice"}"#).is_ok());
         assert!(read(r#"{"type":"user","id":"alice","properties":{"x":1}}"#).is_ok());
         for bad in [
@@ -541,7 +607,10 @@ mod tests {
     fn a_client_is_kept_as_the_hash_of_its_token() {
         let c = client("db");
         assert_ne!(c.digest, [0u8; 32]);
-        assert_eq!(c.digest, <[u8; 32]>::from(Sha256::digest(b"a token of the tests, 32 bytes long")));
+        assert_eq!(
+            c.digest,
+            <[u8; 32]>::from(Sha256::digest(b"a token of the tests, 32 bytes long"))
+        );
         // The unit tests of the decisions are in the cluster tests, with a whole server.
         let _ = (user("a"), resource("service", "db"));
     }

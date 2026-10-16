@@ -105,6 +105,25 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
             false,
         ),
+        "grant-added" => ("Grant added.", true, false),
+        "grant-deleted" => ("Grant removed.", true, false),
+        "grant-bad-id" => (
+            "Invalid resource id: 1 to 128 characters, without a space.",
+            false,
+            false,
+        ),
+        "grant-undeclared" => (
+            "The service does not declare this resource type for this action. Open the page again.",
+            false,
+            false,
+        ),
+        "grant-not-known" => (
+            "The service has not given its actions yet. Try again in a moment.",
+            false,
+            false,
+        ),
+        "grant-limit" => ("The user has the largest number of grants.", false, false),
+        "no-grant" => ("That grant does not exist.", false, false),
         "no-user" => ("That user does not exist.", false, false),
         "error" => ("The action failed. See the portal logs.", false, false),
         _ => return None,
@@ -194,6 +213,38 @@ pub struct ServiceActions {
     pub name: String,
     /// The name and the description of each action that the service publishes.
     pub actions: Vec<(String, String)>,
+    /// The actions that a grant on a sub-resource can name. Each action has its resource types,
+    /// without `service`.
+    pub sub_resources: Vec<(String, Vec<String>)>,
+    /// The service answered: its actions and its resource types are known.
+    pub known: bool,
+}
+
+impl ServiceActions {
+    /// The service is known, and it does not declare the resource type of this grant on a
+    /// sub-resource for its action.
+    fn undeclared(&self, grant: &Grant) -> bool {
+        let Some(resource) = &grant.resource else {
+            return false;
+        };
+        self.known
+            && !self
+                .sub_resources
+                .iter()
+                .any(|(action, kinds)| *action == grant.action && kinds.contains(&resource.kind))
+    }
+
+    /// Each resource type of the service, one time, sorted.
+    fn resource_types(&self) -> Vec<&str> {
+        let mut kinds: Vec<&str> = self
+            .sub_resources
+            .iter()
+            .flat_map(|(_, kinds)| kinds.iter().map(String::as_str))
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        kinds
+    }
 }
 
 pub struct UsersView<'a> {
@@ -337,8 +388,12 @@ fn grant_boxes(out: &mut String, view: &UsersView, user: &UserCard) {
             r#"<fieldset class="grantBoxes"><legend>{}</legend>"#,
             html_escape(&service.name)
         );
-        let actions = std::iter::once((ACCESS, "Open the service."))
-            .chain(service.actions.iter().map(|(n, d)| (n.as_str(), d.as_str())));
+        let actions = std::iter::once((ACCESS, "Open the service.")).chain(
+            service
+                .actions
+                .iter()
+                .map(|(n, d)| (n.as_str(), d.as_str())),
+        );
         for (action, description) in actions {
             let held = holds(&user.grants, action, &service.id);
             let fixed = !view.mode.editable() || holds(&user.configured, action, &service.id);
@@ -512,6 +567,10 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
     }
 
     if !user.superadmin {
+        sub_resource_grants(out, view, user);
+    }
+
+    if !user.superadmin {
         let login = html_escape(&user.login);
         let token = html_escape(view.token);
         let _ = write!(
@@ -537,6 +596,104 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
         );
     }
     out.push_str("</div></details>");
+}
+
+/// The grants of a user on sub-resources, by service, with the forms that add and remove them.
+/// A service shows when the user has a grant on one of its sub-resources, or when the service
+/// declares resource types and the grants can change. The page does not list the resources: the
+/// superadmin types the id.
+fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
+    let editable = view.mode.editable();
+    let held: Vec<&Grant> = user
+        .grants
+        .iter()
+        .filter(|grant| grant.resource.is_some())
+        .collect();
+    // The services of the catalogue first, then the services that left it.
+    let mut groups: Vec<(&str, &str, Option<&ServiceActions>)> = view
+        .services
+        .iter()
+        .map(|s| (s.id.as_str(), s.name.as_str(), Some(s)))
+        .collect();
+    for grant in &held {
+        if !groups.iter().any(|(id, _, _)| *id == grant.service) {
+            groups.push((&grant.service, &grant.service, None));
+        }
+    }
+    let login = html_escape(&user.login);
+    let token = html_escape(view.token);
+    let mut body = String::new();
+    for (id, name, service) in groups {
+        let mine: Vec<&Grant> = held
+            .iter()
+            .filter(|grant| grant.service == id)
+            .copied()
+            .collect();
+        let offer = editable && service.is_some_and(|s| !s.sub_resources.is_empty());
+        if mine.is_empty() && !offer {
+            continue;
+        }
+        let _ = write!(
+            body,
+            r#"<div class="subGrants__service"><p class="subGrants__name">{}</p>"#,
+            html_escape(name)
+        );
+        if !mine.is_empty() {
+            body.push_str(r#"<ul class="subGrants__list">"#);
+            for grant in mine {
+                let Some(resource) = &grant.resource else {
+                    continue;
+                };
+                let _ = write!(
+                    body,
+                    r#"<li><code>{}</code> on <code>{}:{}</code>"#,
+                    html_escape(&grant.action),
+                    html_escape(&resource.kind),
+                    html_escape(&resource.id)
+                );
+                if service.is_some_and(|s| s.undeclared(grant)) {
+                    body.push_str(r##"<span class="warn" role="img" aria-label="The service does not declare this resource type for this action." title="The service does not declare this resource type for this action."><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##);
+                }
+                if user.configured.contains(grant) {
+                    body.push_str(r#" <span class="pill pill--muted" title="From the configuration: it cannot change here.">configuration</span>"#);
+                } else if editable {
+                    let _ = write!(
+                        body,
+                        r#"<form class="subGrants__remove" method="post" action="/auth/users/grant-delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="grant" value="{}"><button class="button" type="submit">Remove</button></form>"#,
+                        html_escape(&grant.to_string())
+                    );
+                }
+                body.push_str("</li>");
+            }
+            body.push_str("</ul>");
+        }
+        if let Some(service) = service.filter(|_| offer) {
+            let _ = write!(
+                body,
+                r#"<form class="subGrant" method="post" action="/auth/users/grant-add"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="service" value="{}"><label class="field">Action<select name="action" required>"#,
+                html_escape(&service.id)
+            );
+            for (action, _) in &service.sub_resources {
+                let _ = write!(body, "<option>{}</option>", html_escape(action));
+            }
+            body.push_str(r#"</select></label><label class="field">Resource type<select name="type" required>"#);
+            for kind in service.resource_types() {
+                let _ = write!(body, "<option>{}</option>", html_escape(kind));
+            }
+            body.push_str(r#"</select></label><label class="field">Resource id<input name="id" type="text" required maxlength="128" pattern="\S+" autocomplete="off" autocapitalize="off" spellcheck="false"></label><button class="button" type="submit">Add grant</button></form>"#);
+        }
+        body.push_str("</div>");
+    }
+    out.push_str("<h3>Grants on sub-resources</h3>");
+    if body.is_empty() {
+        out.push_str(if editable {
+            r#"<p class="hint">No grant on a sub-resource. No service declares a resource type.</p>"#
+        } else {
+            r#"<p class="hint">No grant on a sub-resource.</p>"#
+        });
+    } else {
+        let _ = write!(out, r#"<div class="subGrants">{body}</div>"#);
+    }
 }
 
 /// The services that the user can open. These are the services with the grant `access`. The
@@ -648,7 +805,12 @@ fn spark(days: &[DayStat], wide: bool) -> String {
         } else {
             &mut bars
         };
-        let _ = write!(target, "M{} {}h3v{height}h-3z", index * STEP, HEIGHT - height);
+        let _ = write!(
+            target,
+            "M{} {}h3v{height}h-3z",
+            index * STEP,
+            HEIGHT - height
+        );
     }
     let mut out = format!(
         r#"<svg class="spark{}" viewBox="0 0 {width} {HEIGHT}" preserveAspectRatio="none" role="img" aria-label="Connections per day over the last {} days: {total} in total">"#,
@@ -682,7 +844,7 @@ pub struct ServicesView<'a> {
 
 pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let mut out = String::from(
-        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who can open each service, and the actions that each service publishes at <code>/.well-known/access-actions</code>. A user opens a service with the grant <code>access</code>. The superadmin opens all of them. A service without actions has only <code>access</code>: for it, <code>access</code> is the full permission. <code>portal.exclude</code> opens paths of a service to anyone, signed in or not: it is listed here so that it can be audited.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Actions</th><th>Users with access</th><th>Open without sign-in</th></tr></thead><tbody>"#,
+        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who can open each service, and the actions that each service publishes at <code>/.well-known/access-actions</code>. A user opens a service with the grant <code>access</code>. The superadmin opens all of them. A service without actions has only <code>access</code>: for it, <code>access</code> is the full permission. A grant on a sub-resource names a resource type that the action declares, for example <code>database:analytics</code>. Give it on the Users page. <code>portal.exclude</code> opens paths of a service to anyone, signed in or not: it is listed here so that it can be audited.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Actions</th><th>Users with access</th><th>Open without sign-in</th></tr></thead><tbody>"#,
     );
     for group in view.catalog.groups() {
         for service in &group.services {
@@ -747,7 +909,39 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         }
     }
     out.push_str("</tbody></table></div></section>");
+    undeclared_grants(&mut out, view);
     page(Tab::Services, frame, &out, false)
+}
+
+/// The grants on sub-resources whose resource type the service does not declare for the action.
+/// At start, the server does not know the services: the catalogue and the actions documents come
+/// at run time. Thus a grant of the configuration can name a type that the service does not
+/// declare. This panel shows each such grant. The panel is absent when there is none.
+fn undeclared_grants(out: &mut String, view: &ServicesView) {
+    let mut rows = String::new();
+    for (login, grants) in view.holders {
+        for grant in grants {
+            let undeclared = view
+                .services
+                .iter()
+                .any(|s| s.id == grant.service && s.undeclared(grant));
+            if undeclared {
+                let _ = write!(
+                    rows,
+                    "<tr><td>{}</td><td><code>{}</code></td></tr>",
+                    html_escape(login),
+                    html_escape(&grant.to_string())
+                );
+            }
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let _ = write!(
+        out,
+        r#"<section class="panel" aria-labelledby="checks-title"><div class="panel__head"><h2 class="panel__title" id="checks-title">Grants to check</h2></div><p class="hint">The service does not declare the resource type of these grants for the action. The PDP applies a grant only to the same type and the same id. Correct the grant, or the document of the service.</p><div class="tableScroll"><table class="table"><thead><tr><th>User</th><th>Grant</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
+    );
 }
 
 // Logins --------------------------------------------------------------------------------------
@@ -837,7 +1031,11 @@ pub fn logins_page(frame: &Frame, view: &LoginsView) -> String {
                 logins_href(current - 1, view.only_failed)
             );
         }
-        let _ = write!(out, r#"<span class="hint">Page {} of {pages}</span>"#, current + 1);
+        let _ = write!(
+            out,
+            r#"<span class="hint">Page {} of {pages}</span>"#,
+            current + 1
+        );
         if current + 1 < pages {
             let _ = write!(
                 out,
@@ -924,7 +1122,9 @@ mod tests {
     }
 
     fn frame() -> Frame<'static> {
-        Frame { logout_token: "out<" }
+        Frame {
+            logout_token: "out<",
+        }
     }
 
     fn services() -> Vec<ServiceActions> {
@@ -932,6 +1132,8 @@ mod tests {
             id: id.into(),
             name: name.into(),
             actions: Vec::new(),
+            sub_resources: Vec::new(),
+            known: true,
         };
         vec![
             ServiceActions {
@@ -941,6 +1143,14 @@ mod tests {
                     ("dashboards.read".into(), "See the dashboards.".into()),
                     ("dashboards.write".into(), "Change the <dashboards>.".into()),
                 ],
+                sub_resources: vec![
+                    ("dashboards.read".into(), vec!["folder".into()]),
+                    (
+                        "dashboards.write".into(),
+                        vec!["folder".into(), "dashboard".into()],
+                    ),
+                ],
+                known: true,
             },
             plain("infra-notes", "Notes"),
             plain("infra-typo", "Typo"),
@@ -957,7 +1167,10 @@ mod tests {
             mode: Mode::Dynamic,
             catalog,
             services: services(),
-            users: vec![card("alice", &["grafana", "mixed"]), card("bob", &["mixed"])],
+            users: vec![
+                card("alice", &["grafana", "mixed"]),
+                card("bob", &["mixed"]),
+            ],
             superadmin: root,
             days: vec![DayStat::default(); 30],
             first_day: 1_788_000_000,
@@ -1028,12 +1241,18 @@ mod tests {
             (Tab::Logins, logins_page(&frame(), &logins(&blank, false))),
         ];
         for (tab, html) in &pages {
-            assert!(html.starts_with("<!doctype html>"), "{tab:?} is a page of its own");
+            assert!(
+                html.starts_with("<!doctype html>"),
+                "{tab:?} is a page of its own"
+            );
             assert!(html.contains(r#"<link rel="stylesheet" href="/auth/settings.css">"#));
             assert!(html.contains(r##"<a class="backLink" href="/">"##));
             assert!(html.contains(r#"action="/auth/logout""#) && html.contains("out&lt;"));
             assert_eq!(html.matches(r#"class="contentTabs__tab"#).count(), 3);
-            assert!(!html.contains("/auth/settings/roles"), "no page of the old model");
+            assert!(
+                !html.contains("/auth/settings/roles"),
+                "no page of the old model"
+            );
             assert_eq!(html.matches(r#"aria-current="page""#).count(), 1);
             assert!(html.contains(&format!(
                 r#"<a class="contentTabs__tab is-active" href="{}" aria-current="page">{}</a>"#,
@@ -1041,11 +1260,17 @@ mod tests {
                 tab.label()
             )));
             assert!(!html.contains(r#"class="modal"#), "no popup any more");
-            assert!(!html.contains("tabInput"), "tabs are links, not radio buttons");
+            assert!(
+                !html.contains("tabInput"),
+                "tabs are links, not radio buttons"
+            );
         }
         assert!(pages[0].1.contains("/auth/assets/settings.js"));
         for (_, html) in &pages[1..] {
-            assert!(!html.contains("settings.js"), "only the Users page needs the generator");
+            assert!(
+                !html.contains("settings.js"),
+                "only the Users page needs the generator"
+            );
         }
     }
 
@@ -1087,7 +1312,8 @@ mod tests {
     }
 
     #[test]
-    fn an_account_can_be_edited_with_its_current_grants_ticked_and_a_password_that_may_stay_empty() {
+    fn an_account_can_be_edited_with_its_current_grants_ticked_and_a_password_that_may_stay_empty()
+    {
         let cat = catalog();
         let html = users_page(&frame(), &view(&cat));
         assert_eq!(html.matches(r#"action="/auth/users/update""#).count(), 2);
@@ -1096,7 +1322,10 @@ mod tests {
         let alice = &html[start..end];
         assert!(alice.contains(r#"name="g.infra-grafana.access" value="1" checked"#));
         assert!(alice.contains(r#"name="g.infra-mixed.access" value="1" checked"#));
-        assert!(alice.contains(r#"name="g.infra-notes.access" value="1">"#), "not held: not ticked");
+        assert!(
+            alice.contains(r#"name="g.infra-notes.access" value="1">"#),
+            "not held: not ticked"
+        );
         assert!(alice.contains(r#"name="g.infra-grafana.dashboards.read" value="1">"#));
         assert!(
             alice.contains(r#"title="Change the &lt;dashboards&gt;.""#),
@@ -1132,7 +1361,9 @@ mod tests {
         assert!(
             html.contains(r#"<span class="pill pill--danger">3 failed sign-ins in 30 days</span>"#)
         );
-        assert!(html.contains(r#"2 tried a login that does not exist: see <a href="/auth/settings/logins">Logins</a>"#));
+        assert!(html.contains(
+            r#"2 tried a login that does not exist: see <a href="/auth/settings/logins">Logins</a>"#
+        ));
         let mut one = view(&cat);
         one.users[0].activity.failed_30d = 1;
         assert!(
@@ -1180,15 +1411,26 @@ mod tests {
         assert_eq!(peak_text(&days, first), " Peak: 5 on 2026-09-01.");
         assert_eq!(peak_text(&vec![DayStat::default(); 30], first), "");
         let svg = spark(&days, true);
-        assert_eq!(svg.matches("<path").count(), 3, "empty days, the others, today");
+        assert_eq!(
+            svg.matches("<path").count(),
+            3,
+            "empty days, the others, today"
+        );
         assert_eq!(svg.matches("spark__bar--today").count(), 1);
-        assert!(svg.contains("M12 2h3v30h-3z"), "the busiest day fills the graph: {svg}");
+        assert!(
+            svg.contains("M12 2h3v30h-3z"),
+            "the busiest day fills the graph: {svg}"
+        );
         assert!(svg.contains("M116 20h3v12h-3z"), "today is 2 of 5: {svg}");
         assert!(!svg.contains("style=") && !svg.contains("<rect") && !svg.contains("<title>"));
         assert!(svg.contains(r#"class="spark spark--wide""#));
         assert!(svg.contains("7 in total"));
         let quiet = spark(&vec![DayStat::default(); 30], false);
-        assert_eq!(quiet.matches("<path").count(), 1, "a path only when there is something to draw");
+        assert_eq!(
+            quiet.matches("<path").count(),
+            1,
+            "a path only when there is something to draw"
+        );
     }
 
     #[test]
@@ -1197,15 +1439,33 @@ mod tests {
         let actions = services();
         let holders = vec![
             ("alice".to_string(), access(&["grafana", "mixed"])),
-            ("bob".to_string(), vec![grant("dashboards.read", "infra-grafana")]),
+            (
+                "bob".to_string(),
+                vec![grant("dashboards.read", "infra-grafana")],
+            ),
         ];
         let mut v = services_view(&cat, &actions, &holders);
-        v.problems = vec![("infra-typo".into(), "http://typo/x gave the status <500>".into())];
+        v.problems = vec![(
+            "infra-typo".into(),
+            "http://typo/x gave the status <500>".into(),
+        )];
         let html = services_page(&frame(), &v);
-        assert!(html.contains(r#"<span class="pill pill--plain" title="See the dashboards.">dashboards.read</span>"#));
-        assert_eq!(html.matches("access only").count(), 3, "Notes, Typo and Mixed publish nothing");
-        assert_eq!(html.matches(r#"<span class="pill">alice</span>"#).count(), 2);
-        assert!(!html.contains(">bob<"), "an action without access does not open the service");
+        assert!(html.contains(
+            r#"<span class="pill pill--plain" title="See the dashboards.">dashboards.read</span>"#
+        ));
+        assert_eq!(
+            html.matches("access only").count(),
+            3,
+            "Notes, Typo and Mixed publish nothing"
+        );
+        assert_eq!(
+            html.matches(r#"<span class="pill">alice</span>"#).count(),
+            2
+        );
+        assert!(
+            !html.contains(">bob<"),
+            "an action without access does not open the service"
+        );
         assert_eq!(html.matches("Superadmin only").count(), 2, "Notes and Typo");
         assert_eq!(html.matches(r#"class="warn""#).count(), 1);
         assert!(html.contains("gave the status &lt;500&gt;"));
@@ -1221,8 +1481,14 @@ mod tests {
         );
         assert_eq!(html.matches(r#"action="/auth/users/delete""#).count(), 2);
         assert!(html.contains("Confirm delete"));
-        assert!(html.contains(r#"<span class="pill">2 services</span>"#), "alice");
-        assert!(html.contains(r#"<span class="pill">1 service</span>"#), "bob");
+        assert!(
+            html.contains(r#"<span class="pill">2 services</span>"#),
+            "alice"
+        );
+        assert!(
+            html.contains(r#"<span class="pill">1 service</span>"#),
+            "bob"
+        );
         assert!(html.contains("superadmin</span>"));
         assert!(html.contains("value=\"tok&lt;en\""), "the token is escaped");
     }
@@ -1265,7 +1531,10 @@ mod tests {
         let html = users_page(&frame(), &view(&cat));
         let add = &html[html.find(r#"action="/auth/users/add""#).unwrap()..];
         let add = &add[..add.find("</form>").unwrap()];
-        assert!(!add.contains(r#"name="g."#), "the add form has no grant box");
+        assert!(
+            !add.contains(r#"name="g."#),
+            "the add form has no grant box"
+        );
         assert!(add.contains("A new user has no grant"));
     }
 
@@ -1291,7 +1560,10 @@ mod tests {
         let end = html.find(r#"id="pw-bob""#).unwrap();
         let bob = &html[html[..end].rfind(r#"action="/auth/users/update""#).unwrap()..end];
         assert!(bob.contains(r#"title="From the configuration: it cannot change here."><input type="checkbox" checked disabled><span>access</span>"#));
-        assert!(!bob.contains("g.infra-notes.access"), "the form does not send it");
+        assert!(
+            !bob.contains("g.infra-notes.access"),
+            "the form does not send it"
+        );
         assert!(bob.contains(r#"name="g.infra-mixed.access" value="1" checked"#));
     }
 
@@ -1299,7 +1571,9 @@ mod tests {
     fn allowed_services_follow_the_access_grants() {
         let cat = catalog();
         let mut v = view(&cat);
-        v.users[1].grants.push(grant("dashboards.read", "infra-grafana"));
+        v.users[1]
+            .grants
+            .push(grant("dashboards.read", "infra-grafana"));
         let names = |u: &UserCard| -> Vec<String> {
             allowed_services(&v, u)
                 .iter()
@@ -1307,7 +1581,11 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&v.users[0]), ["Grafana", "Mixed"]);
-        assert_eq!(names(&v.users[1]), ["Mixed"], "an action alone does not open a service");
+        assert_eq!(
+            names(&v.users[1]),
+            ["Mixed"],
+            "an action alone does not open a service"
+        );
         assert_eq!(
             names(&v.superadmin).len(),
             4,
@@ -1347,16 +1625,26 @@ mod tests {
             ..LoginPage::default()
         };
         let html = logins_page(&frame(), &logins(&page, false));
-        assert!(html.contains("2026-10-10 09:11:42"), "seconds tell attempts apart");
+        assert!(
+            html.contains("2026-10-10 09:11:42"),
+            "seconds tell attempts apart"
+        );
         assert!(html.contains(r#"<code class="typed">admin</code> <span class="pill pill--muted">no such account</span>"#));
         assert!(html.contains(r#"<span class="pill pill--ok">Signed in</span>"#));
-        assert_eq!(html.matches(r#"<span class="pill pill--danger">Refused</span>"#).count(), 3);
+        assert_eq!(
+            html.matches(r#"<span class="pill pill--danger">Refused</span>"#)
+                .count(),
+            3
+        );
         assert!(html.contains("203.0.113.7") && html.contains("Firefox 131"));
         assert!(html.contains(r#"<span class="hint">(empty)</span>"#));
         assert!(html.contains(r#"<span class="stat__value stat__value--danger">3</span>"#));
         assert!(html.contains("The password is never recorded"));
         assert!(html.contains("4 attempts"));
-        assert!(!html.contains(r#"class="inbox""#), "one page needs no inbox");
+        assert!(
+            !html.contains(r#"class="inbox""#),
+            "one page needs no inbox"
+        );
     }
 
     #[test]
@@ -1387,17 +1675,165 @@ mod tests {
         };
         let html = logins_page(&frame(), &logins(&page, true));
         assert!(html.contains("Page 2 of 3"));
-        assert!(html.contains(r#"rel="prev" href="/auth/settings/logins?r=failed""#), "page 1 has no p");
+        assert!(
+            html.contains(r#"rel="prev" href="/auth/settings/logins?r=failed""#),
+            "page 1 has no p"
+        );
         assert!(html.contains(r#"rel="next" href="/auth/settings/logins?p=3&amp;r=failed""#));
         assert!(html.contains(r#"<a href="/auth/settings/logins?r=failed" class="is-active" aria-current="true">Refused</a>"#));
         assert!(html.contains(r#"<a href="/auth/settings/logins">All</a>"#));
         assert!(html.contains("120 refused"));
-        let last = LoginPage {
-            page: 2,
-            ..page
-        };
+        let last = LoginPage { page: 2, ..page };
         let html = logins_page(&frame(), &logins(&last, false));
         assert!(!html.contains(r#"rel="next""#));
         assert!(html.contains(r#"rel="prev" href="/auth/settings/logins?p=2""#));
+    }
+
+    fn sub(text: &str) -> Grant {
+        Grant::parse(text).unwrap()
+    }
+
+    /// The part of the Users page for one user: from the name of the user to the next card.
+    fn card_of<'a>(html: &'a str, login: &str) -> &'a str {
+        let start = html
+            .find(&format!(r#"<span class="user__name">{login}</span>"#))
+            .unwrap();
+        let rest = &html[start..];
+        let end = rest[1..]
+            .find(r#"<span class="user__name">"#)
+            .map_or(rest.len(), |i| i + 1);
+        &rest[..end]
+    }
+
+    #[test]
+    fn a_user_card_lists_the_grants_on_sub_resources_and_offers_the_declared_types() {
+        let cat = catalog();
+        let mut v = view(&cat);
+        v.users[0]
+            .grants
+            .push(sub("dashboards.write on service:infra-grafana/folder:ops"));
+        v.users[0]
+            .grants
+            .push(sub("dashboards.read on service:infra-grafana/team:<x>"));
+        v.users[0]
+            .grants
+            .push(sub("x.read on service:gone/thing:a"));
+        let html = users_page(&frame(), &v);
+        let alice = card_of(&html, "alice");
+        assert!(alice.contains("Grants on sub-resources"));
+        assert!(alice.contains(
+            r#"<li><code>dashboards.write</code> on <code>folder:ops</code><form class="subGrants__remove" method="post" action="/auth/users/grant-delete">"#
+        ));
+        assert!(alice.contains(
+            r#"name="grant" value="dashboards.write on service:infra-grafana/folder:ops""#
+        ));
+        assert!(
+            alice.contains("<code>team:&lt;x&gt;</code>"),
+            "the id is escaped"
+        );
+        assert_eq!(
+            alice.matches(r#"class="warn""#).count(),
+            1,
+            "Grafana does not declare team; the service that left is not known"
+        );
+        assert!(alice.contains(r#"<p class="subGrants__name">gone</p>"#));
+        assert_eq!(
+            alice.matches(r#"action="/auth/users/grant-add""#).count(),
+            1,
+            "only Grafana declares types"
+        );
+        assert!(alice.contains(r#"<input type="hidden" name="service" value="infra-grafana">"#));
+        assert!(alice.contains(
+            r#"<select name="action" required><option>dashboards.read</option><option>dashboards.write</option></select>"#
+        ));
+        assert!(alice.contains(
+            r#"<select name="type" required><option>dashboard</option><option>folder</option></select>"#
+        ));
+        assert!(alice.contains(r#"name="id" type="text" required maxlength="128""#));
+        assert!(
+            !alice.contains("<option>access</option>"),
+            "access has no sub-resource"
+        );
+        let bob = card_of(&html, "bob");
+        assert!(
+            !bob.contains("<li><code>"),
+            "bob has no grant on a sub-resource"
+        );
+        assert!(bob.contains(r#"action="/auth/users/grant-add""#));
+        assert!(
+            !card_of(&html, "root").contains("Grants on sub-resources"),
+            "the superadmin has all grants"
+        );
+    }
+
+    #[test]
+    fn a_grant_on_a_sub_resource_from_the_configuration_cannot_be_removed() {
+        let cat = catalog();
+        let configured = sub("dashboards.read on service:infra-grafana/folder:ops");
+        let mut v = view(&cat);
+        v.mode = Mode::Hybrid;
+        v.users[0].grants.push(configured.clone());
+        v.users[0].configured.push(configured);
+        let html = users_page(&frame(), &v);
+        let alice = card_of(&html, "alice");
+        assert!(alice.contains(r#"<span class="pill pill--muted" title="From the configuration: it cannot change here.">configuration</span>"#));
+        assert!(!alice.contains("grant-delete"));
+        let mut fixed = view(&cat);
+        fixed.mode = Mode::Static;
+        fixed.users[0]
+            .grants
+            .push(sub("dashboards.read on service:infra-grafana/folder:ops"));
+        let html = users_page(&frame(), &fixed);
+        assert!(!html.contains("grant-add") && !html.contains("grant-delete"));
+        assert!(card_of(&html, "alice").contains("<code>folder:ops</code>"));
+        assert!(card_of(&html, "bob").contains("No grant on a sub-resource.</p>"));
+    }
+
+    #[test]
+    fn the_services_page_lists_the_grants_whose_type_the_service_does_not_declare() {
+        let cat = catalog();
+        let actions = services();
+        let holders = vec![
+            (
+                "alice".to_string(),
+                vec![
+                    sub("dashboards.read on service:infra-grafana/folder:ops"),
+                    sub("dashboards.read on service:infra-grafana/dashboard:1"),
+                ],
+            ),
+            (
+                "bob".to_string(),
+                vec![sub("x.read on service:infra-notes/a:b")],
+            ),
+        ];
+        let html = services_page(&frame(), &services_view(&cat, &actions, &holders));
+        assert!(html.contains("Grants to check"));
+        assert!(html.contains(
+            "<tr><td>alice</td><td><code>dashboards.read on service:infra-grafana/dashboard:1</code></td></tr>"
+        ));
+        assert!(html.contains("<td>bob</td>"), "notes declares nothing");
+        assert!(!html.contains("folder:ops</code></td>"));
+        let mut unknown = services();
+        unknown[1].known = false;
+        let html = services_page(&frame(), &services_view(&cat, &unknown, &holders[1..]));
+        assert!(
+            !html.contains("Grants to check"),
+            "a service that has not answered is not judged"
+        );
+    }
+
+    #[test]
+    fn the_new_notices_are_in_the_list() {
+        for code in [
+            "grant-added",
+            "grant-deleted",
+            "grant-bad-id",
+            "grant-undeclared",
+            "grant-not-known",
+            "grant-limit",
+            "no-grant",
+        ] {
+            assert!(notice_for(code).is_some(), "{code}");
+        }
     }
 }

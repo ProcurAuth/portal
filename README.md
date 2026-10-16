@@ -38,11 +38,20 @@ A successful login creates a 256-bit random **opaque session ID**. The browser r
 
 ### Grants
 
-A grant is an action on a resource. Write it as `<action> on service:<id>`, for example `access on service:grafana`. The `<id>` is the id of the service in the catalogue. The id is the label `portal.id`, or the slug of the group and the name.
+A grant is an action on a resource. A grant has one of two forms:
+
+- `<action> on service:<id>`, for example `access on service:grafana`. The grant applies to the whole service.
+- `<action> on service:<id>/<type>:<resource id>`, for example `query.run.write on service:clickhouse-dash/database:analytics`. The grant applies to one sub-resource of the service.
+
+The `<id>` is the id of the service in the catalogue. The id is the label `portal.id`, or the slug of the group and the name.
 
 - `access` lets the user open the service. portal decides `access` in `/auth/verify`.
 - The other actions are the actions that the service publishes at `/.well-known/access-actions` (contract 11.4). The service decides these actions. The service asks the PDP of portal.
-- A grant on a service covers all resources of this service. For example, a grant covers a database of the service.
+- A grant on a service covers all sub-resources of this service. For example, `query.run.read on service:db` covers each database of `db`.
+- A grant on a sub-resource covers only this sub-resource: the same type and the same id. It does not cover the whole service. It does not cover another sub-resource.
+- The service gives its resource types. Each action of `/.well-known/access-actions` has a list `resource_types`. A grant on a sub-resource names an action and one of its types. The type `service` is the whole service: it is not a sub-resource type.
+- A type has 1 to 32 characters of `a-z`, `0-9` and `_`. A resource id has 1 to 128 characters, without a space or a control character. portal uses the id as it is. portal does not change its case.
+- `access` has no grant on a sub-resource. `access` opens the whole service.
 - A new user has no grant. The user sees no service until the superadmin gives a grant.
 - The superadmin has all grants. The superadmin has no `user` block.
 
@@ -69,6 +78,8 @@ user "alice" {
 ```
 
 The server reads the `user` blocks at each start. When you remove a grant from the file, the grant stops at the next start. The server does not write the grants of the configuration to the database.
+
+A `user` block can give a grant on a sub-resource, for example `"query.run.write on service:db/database:analytics"`. A grant with a bad form stops the start. At start, portal does not know the services: the catalogue and the actions documents come at run time. Thus a resource type that the service does not declare does not stop the start. The Services settings page shows this grant under **Grants to check**.
 
 ### The gate
 
@@ -141,12 +152,25 @@ pdp_client "db" {
 Rules:
 
 - Each server has its own `pdp_client` block and its own token. The label is the name of the server. The label is the id of its service. This id is also the audience of its identity tokens. The server sends `Authorization: Bearer <token>`. A request without a valid token gets status `401`.
-- The PDP answers a server only for its own resources. These are `service:<name of the server>`, or a smaller resource of another type. A request about the service of a different server gets `false`.
+- The PDP answers a server only for its own resources. The resource `{"type": "service", "id": "<name of the server>"}` is the whole service. A request about the service of a different server gets `false`.
+- A resource of another type is a sub-resource, for example `{"type": "database", "id": "analytics"}`. The service of a sub-resource is always the server that asks: its token tells which server it is.
+- A grant on the service covers each of its sub-resources. A grant on a sub-resource covers only the same type and the same id. The three endpoints use the same rule.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
 - The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason.
 - The PDP has no TLS. The deployment must limit the network of the PDP to the services and portal. This differs from AuthZEN, which requires TLS.
+- In K3s, the NetworkPolicy `allow-portal-pdp` (`#tools/k3s/network/policies.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-edge` does not select the portal pods. The policy `allow-portal-http` opens only the port 4181 of portal.
+
+A request about a sub-resource:
+
+```json
+{
+  "subject": {"type": "user", "id": "alice"},
+  "action": {"name": "query.run.write"},
+  "resource": {"type": "database", "id": "analytics"}
+}
+```
 
 ### Actions of the services
 
@@ -157,10 +181,14 @@ portal reads the actions of each service at `/.well-known/access-actions`. The U
 - A `404` means that the service does not publish actions. The service then has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
 - Any other failure keeps the last good list. The Services settings page shows the problem.
 - The page of a user shows one check box for each action of each service. The check box `access` comes first. A box that the page did not show keeps its grant. A grant does not end when a service stops to publish its action for a short time.
+- Under **Grants on sub-resources**, the page of a user shows the grants on sub-resources of each service. To add one, select the action and the resource type, then type the resource id. The lists show only the actions and the types that the service declares. portal does not list the resources of a service. **Remove** deletes one grant. A grant of the configuration shows the mark *configuration*. It cannot change on the page.
+- While a service has not answered, portal refuses a new grant on its sub-resources.
 
 ### Migration of the database
 
-At the first start of this version, the server changes the database. SQLite goes to schema version 3. PostgreSQL goes to version 2. The migration deletes the access data of the earlier versions. It adds the table of the grants. The accounts and the history stay. After the migration, no user has a grant. Give the grants again in the settings pages, or in `user` blocks. Until then, only the superadmin can open the services.
+At the first start of the version with grants, the server changes the database. SQLite goes to schema version 3. PostgreSQL goes to version 2. The migration deletes the access data of the earlier versions. It adds the table of the grants. The accounts and the history stay. After the migration, no user has a grant. Give the grants again in the settings pages, or in `user` blocks. Until then, only the superadmin can open the services.
+
+The grants on sub-resources need one more change. SQLite goes to schema version 4. PostgreSQL goes to version 3. The table `user_grants` gets the columns `sub_resource_type` and `sub_resource_id`. The migration keeps all grants. A grant of the earlier version applies to the whole service. An earlier portal refuses the new schema: it does not start on it.
 
 ### Paths open without a session (`portal.exclude`)
 
@@ -189,7 +217,7 @@ The Services settings page lists the rules of every service. The whole exposure 
 
 The superadmin gets a gear on the launcher. The gear opens the settings. The settings are **one HTML page per tab**. This is the same design as the pages of clickhouse-dash. Each page has a header with **Back to panel**. Below the header is a row of underlined tab links. The current tab has a line under it. The row has no fill. The page follows the row. The settings live under `/auth/settings`. Traefik already routes `/auth/` to the portal. The pages work without script. The pages answer 404 to anyone who is not the superadmin in its own right. This applies to a user, and to the superadmin who browses as a user. A page carries only what its tab shows. The launcher carries none of it. The browser therefore builds a small DOM on each page. A launcher with twelve services has about 150 elements. The settings used to add 700 more elements to it. There are three tabs:
 
-1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in and a graph of the connections. It shows the latest sessions (time, address, browser, duration, and how each session ended). It also shows the services that the account used and the services that it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The password generator is the only script of these pages. It loads on this page only.
+1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in and a graph of the connections. It shows the latest sessions (time, address, browser, duration, and how each session ended). It also shows the services that the account used and the services that it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. Below the services that the account can open, the card shows the grants on sub-resources. The card has one form for each service that declares resource types. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The password generator is the only script of these pages. It loads on this page only.
 2. **Services** (`/auth/settings/services`). The page lists each service. For each service, it shows its id. It shows the actions that the service publishes (`access only` if it publishes none). It shows the users who have `access` (`Superadmin only` if there is none). It shows the paths open without sign-in. It shows a warning when the actions document cannot be read.
 3. **Logins** (`/auth/settings/logins`). This tab shows the sign-in log. See below.
 
@@ -628,7 +656,7 @@ This block has a label and can occur more than one time. The grants of one user 
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `grants` | list of at most 512 quoted strings: grants such as "access on service:grafana": an action, the word on, then service: and the id of the service | required | The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the resources of this service. |
+| `grants` | list of at most 512 quoted strings: grants such as "access on service:grafana" or "query.run.write on service:clickhouse-dash/database:analytics": an action, the word on, service: and the id of the service, then optionally / and a sub-resource as type:id | required | The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant on a service covers all the sub-resources of this service. A grant on a sub-resource, `<action> on service:<id>/<type>:<resource id>`, covers only this sub-resource. The type has 1 to 32 characters of a-z, 0-9 and '_', and is not `service`. The resource id has 1 to 128 characters, without a space. The action `access` has no grant on a sub-resource. At start, the server checks only the form of each grant: the services and their resource types are known at run time. The Services page of the settings shows a grant whose type the service does not declare. |
 
 #### Block `pdp_client "<server>"`
 

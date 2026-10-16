@@ -31,6 +31,41 @@ pub const LOGIN_PAGE_SIZE: i64 = 50;
 /// Failures are bounded per minute by the rate limiter. This limit bounds what a long siege can leave in the database.
 const MAX_LOGIN_ROWS: i64 = 20_000;
 
+/// A row of `user_grants` as a grant. The columns `sub_resource_type` and `sub_resource_id` are
+/// both empty for a grant on the whole service. A row that is not a valid grant stops the read:
+/// the database holds only what the servers wrote.
+fn grant_from_row(
+    action: &str,
+    kind: &str,
+    id: &str,
+    sub_type: &str,
+    sub_id: &str,
+) -> Result<Grant, String> {
+    if kind != crate::grants::SERVICE_TYPE {
+        return Err(format!("user_grants: unknown resource type {kind:?}"));
+    }
+    let grant = match (sub_type, sub_id) {
+        ("", "") => Grant::new(action, id),
+        _ => Grant::on_resource(action, id, sub_type, sub_id),
+    };
+    grant.map_err(|e| format!("user_grants: {e}"))
+}
+
+/// The columns of a grant in `user_grants`: `resource_type`, `resource_id`, `sub_resource_type`
+/// and `sub_resource_id`.
+fn grant_columns(grant: &Grant) -> [&str; 4] {
+    let (sub_type, sub_id) = grant
+        .resource
+        .as_ref()
+        .map_or(("", ""), |r| (r.kind.as_str(), r.id.as_str()));
+    [
+        crate::grants::SERVICE_TYPE,
+        grant.service.as_str(),
+        sub_type,
+        sub_id,
+    ]
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserRow {
     pub login: String,
@@ -462,13 +497,17 @@ pub mod testing {
         let mut all = vec![Backend::Sqlite];
         match std::env::var(POSTGRES_ENV) {
             Ok(url) if !url.is_empty() => all.push(Backend::Postgres(url)),
-            _ => eprintln!("{POSTGRES_ENV} is not set: the PostgreSQL side of this test is skipped"),
+            _ => {
+                eprintln!("{POSTGRES_ENV} is not set: the PostgreSQL side of this test is skipped")
+            }
         }
         all
     }
 
     pub fn postgres() -> Option<Backend> {
-        backends().into_iter().find(|b| matches!(b, Backend::Postgres(_)))
+        backends()
+            .into_iter()
+            .find(|b| matches!(b, Backend::Postgres(_)))
     }
 
     /// Runs `test` once per available backend.
@@ -498,7 +537,10 @@ mod tests {
     }
 
     fn access(services: &[&str]) -> Vec<Grant> {
-        services.iter().map(|s| Grant::new("access", s).unwrap()).collect()
+        services
+            .iter()
+            .map(|s| Grant::new("access", s).unwrap())
+            .collect()
     }
 
     fn start(sid: u64, login: &str, superadmin: bool, impersonated: bool, at: i64) -> Event {
@@ -529,7 +571,6 @@ mod tests {
     #[test]
     fn users_round_trip_with_their_grants_and_reject_a_duplicate() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store.insert_user(&user("alice", &["ops", "dev"])).unwrap();
             store.insert_user(&user("bob", &[])).unwrap();
@@ -545,14 +586,12 @@ mod tests {
             assert!(store.remove_user("alice").unwrap());
             assert!(!store.remove_user("alice").unwrap());
             assert_eq!(store.load_users().unwrap().len(), 1);
-
         });
     }
 
     #[test]
     fn updating_a_user_replaces_its_grants_and_its_password_each_when_given() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store.insert_user(&user("alice", &["ops", "dev"])).unwrap();
             store.insert_user(&user("bob", &["ops"])).unwrap();
@@ -566,6 +605,10 @@ mod tests {
             };
             let mut viewer = access(&["viewer"]);
             viewer.push(Grant::new("query.run.read", "viewer").unwrap());
+            viewer.push(Grant::on_resource("query.run.write", "viewer", "database", "b").unwrap());
+            viewer.push(Grant::on_resource("query.run.write", "viewer", "database", "a").unwrap());
+            viewer.push(Grant::on_resource("query.run.write", "viewer", "table", "a").unwrap());
+            viewer.sort();
             assert!(store.update_user("alice", None, Some(&viewer)).unwrap());
             assert_eq!(row("alice").grants, viewer);
             assert_eq!(
@@ -578,16 +621,18 @@ mod tests {
             assert_eq!(row("alice").grants, viewer, "kept without grants");
             assert!(store.update_user("alice", None, Some(&[])).unwrap());
             assert!(row("alice").grants.is_empty());
-            assert_eq!(row("bob").grants, access(&["ops"]), "other users are untouched");
+            assert_eq!(
+                row("bob").grants,
+                access(&["ops"]),
+                "other users are untouched"
+            );
             assert!(!store.update_user("nobody", None, Some(&[])).unwrap());
-
         });
     }
 
     #[test]
     fn deleting_a_user_deletes_its_grants_but_keeps_its_history() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store.insert_user(&user("alice", &["ops"])).unwrap();
             store
@@ -600,14 +645,12 @@ mod tests {
             assert_eq!(store.count("user_grants"), 0);
             let snap = store.snapshot(&[("alice".into(), false)], NOW).unwrap();
             assert_eq!(snap.accounts[0].recent.len(), 1);
-
         });
     }
 
     #[test]
     fn a_session_lifecycle_services_and_failures_show_up_in_the_snapshot() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             let day = NOW - NOW.rem_euclid(DAY);
             let mut hits = HashMap::new();
@@ -691,14 +734,12 @@ mod tests {
             assert_eq!(snap.unknown_failures_30d, 1);
             assert_eq!(snap.recent_events.len(), 2);
             assert_eq!(snap.first_day, day - 29 * DAY);
-
         });
     }
 
     #[test]
     fn hits_accumulate_across_flushes_and_open_sessions_close_on_restart() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store
                 .apply(&Batch {
@@ -743,14 +784,12 @@ mod tests {
                 Some(300),
                 "ends when it was last seen"
             );
-
         });
     }
 
     #[test]
     fn sign_in_attempts_are_listed_newest_first_with_the_figures_of_the_last_day() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store
                 .apply(&Batch {
@@ -779,15 +818,16 @@ mod tests {
             let failed = store.login_attempts(NOW, 0, true).unwrap();
             assert_eq!(failed.matching, 3);
             assert!(failed.rows.iter().all(|row| !row.success));
-            assert_eq!(failed.attempts_24h, 4, "the figures do not depend on the filter");
-
+            assert_eq!(
+                failed.attempts_24h, 4,
+                "the figures do not depend on the filter"
+            );
         });
     }
 
     #[test]
     fn a_hostile_login_is_stored_and_read_back_as_the_text_it_is() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             let nasty = "x'); DROP TABLE users; DELETE FROM login_attempts; --";
             store
@@ -799,15 +839,17 @@ mod tests {
             store.insert_user(&user("alice", &[])).unwrap();
             let page = store.login_attempts(NOW, 0, false).unwrap();
             assert_eq!(page.rows[0].login, nasty);
-            assert_eq!(store.load_users().unwrap().len(), 1, "the tables are intact");
-
+            assert_eq!(
+                store.load_users().unwrap().len(),
+                1,
+                "the tables are intact"
+            );
         });
     }
 
     #[test]
     fn the_sign_in_log_pages_and_a_page_past_the_end_comes_back_to_the_last_one() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             let events = (0..(LOGIN_PAGE_SIZE + 5))
                 .map(|i| attempt("alice", false, "10.0.0.2", NOW - 1_000 + i))
@@ -819,23 +861,28 @@ mod tests {
                 })
                 .unwrap();
             let first = store.login_attempts(NOW, 0, false).unwrap();
-            assert_eq!((first.rows.len() as i64, first.pages()), (LOGIN_PAGE_SIZE, 2));
+            assert_eq!(
+                (first.rows.len() as i64, first.pages()),
+                (LOGIN_PAGE_SIZE, 2)
+            );
             let second = store.login_attempts(NOW, 1, false).unwrap();
             assert_eq!(second.rows.len(), 5);
-            assert_eq!(second.rows[0].ts, NOW - 1_000 + 4, "continues where the first page stopped");
+            assert_eq!(
+                second.rows[0].ts,
+                NOW - 1_000 + 4,
+                "continues where the first page stopped"
+            );
             let beyond = store.login_attempts(NOW, 99, false).unwrap();
             assert_eq!(beyond.page, 1);
             assert_eq!(beyond.rows.len(), 5);
             let empty = backend.fresh().login_attempts(NOW, 7, false).unwrap();
             assert_eq!((empty.page, empty.pages(), empty.rows.len()), (0, 1, 0));
-
         });
     }
 
     #[test]
     fn the_sign_in_log_is_pruned_by_age_and_capped_in_size() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             store
                 .apply(&Batch {
@@ -861,16 +908,22 @@ mod tests {
             store.apply(&flood(0, MAX_LOGIN_ROWS - 10)).unwrap();
             store.apply(&flood(MAX_LOGIN_ROWS, 30)).unwrap();
             let page = store.login_attempts(NOW, 0, false).unwrap();
-            assert_eq!(i64::from(page.matching), MAX_LOGIN_ROWS, "the oldest rows made room");
-            assert_eq!(page.rows[0].ts, MAX_LOGIN_ROWS + 29, "the newest are the ones kept");
-
+            assert_eq!(
+                i64::from(page.matching),
+                MAX_LOGIN_ROWS,
+                "the oldest rows made room"
+            );
+            assert_eq!(
+                page.rows[0].ts,
+                MAX_LOGIN_ROWS + 29,
+                "the newest are the ones kept"
+            );
         });
     }
 
     #[test]
     fn pruning_removes_old_rows_with_their_service_accesses() {
         each_backend(|backend| {
-
             let store = backend.fresh();
             let mut hits = HashMap::new();
             hits.insert(
@@ -913,7 +966,6 @@ mod tests {
             assert_eq!(store.count("sessions_log"), 1);
             assert_eq!(store.count("service_access"), 1);
             assert_eq!(store.count("audit_events"), 0);
-
         });
     }
 
@@ -972,17 +1024,30 @@ mod tests {
             .session_insert(&digest(1), &HERE, &session, &started(1, "alice", NOW), 10)
             .unwrap());
         let snap = store.snapshot(&[("alice".into(), false)], NOW).unwrap();
-        assert_eq!(snap.accounts[0].recent.len(), 1, "the history row exists at once");
+        assert_eq!(
+            snap.accounts[0].recent.len(),
+            1,
+            "the history row exists at once"
+        );
         assert_eq!(snap.accounts[0].recent[0].ended_at, None);
 
-        let found = store.session_touch(&digest(1), &HERE, NOW + 10, IDLE).unwrap();
+        let found = store
+            .session_touch(&digest(1), &HERE, NOW + 10, IDLE)
+            .unwrap();
         assert_eq!(found, Some(session));
         assert_eq!(
-            store.session_touch(&digest(1), &ELSEWHERE, NOW + 11, IDLE).unwrap(),
+            store
+                .session_touch(&digest(1), &ELSEWHERE, NOW + 11, IDLE)
+                .unwrap(),
             None,
             "another binding finds nothing"
         );
-        assert_eq!(store.session_touch(&digest(2), &HERE, NOW + 11, IDLE).unwrap(), None);
+        assert_eq!(
+            store
+                .session_touch(&digest(2), &HERE, NOW + 11, IDLE)
+                .unwrap(),
+            None
+        );
         // The refused attempt did not renew the idle timer. The session is unused since NOW + 10.
         assert_eq!(
             store
@@ -991,7 +1056,11 @@ mod tests {
             None,
             "idle for 100 s against a limit of 60"
         );
-        assert_eq!(store.sessions_count().unwrap(), 1, "found idle, but only a sweep ends it");
+        assert_eq!(
+            store.sessions_count().unwrap(),
+            1,
+            "found idle, but only a sweep ends it"
+        );
     }
 
     #[test]
@@ -1002,10 +1071,19 @@ mod tests {
         first
             .session_insert(&digest(1), &HERE, &session, &started(1, "alice", NOW), 10)
             .unwrap();
-        assert!(second.session_touch(&digest(1), &HERE, NOW + 1, IDLE).unwrap().is_some());
+        assert!(second
+            .session_touch(&digest(1), &HERE, NOW + 1, IDLE)
+            .unwrap()
+            .is_some());
         assert!(first.session_delete(&digest(1)).unwrap().is_some());
-        assert!(second.session_delete(&digest(1)).unwrap().is_none(), "already ended");
-        assert!(second.session_touch(&digest(1), &HERE, NOW + 2, IDLE).unwrap().is_none());
+        assert!(
+            second.session_delete(&digest(1)).unwrap().is_none(),
+            "already ended"
+        );
+        assert!(second
+            .session_touch(&digest(1), &HERE, NOW + 2, IDLE)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1026,14 +1104,31 @@ mod tests {
         insert(1, NOW + 50); // runs out of lifetime
         insert(2, NOW + 3600); // goes idle
         insert(3, NOW + 3600);
-        second.session_touch(&digest(3), &HERE, NOW + 100, IDLE).unwrap(); // kept alive
-        let mut ended = first.sessions_expire(NOW + 60, Duration::from_secs(90)).unwrap();
+        second
+            .session_touch(&digest(3), &HERE, NOW + 100, IDLE)
+            .unwrap(); // kept alive
+        let mut ended = first
+            .sessions_expire(NOW + 60, Duration::from_secs(90))
+            .unwrap();
         ended.sort();
-        assert_eq!(ended, [(1, true)], "only the first lived out its lifetime so far");
-        let mut ended = second.sessions_expire(NOW + 100, Duration::from_secs(90)).unwrap();
+        assert_eq!(
+            ended,
+            [(1, true)],
+            "only the first lived out its lifetime so far"
+        );
+        let mut ended = second
+            .sessions_expire(NOW + 100, Duration::from_secs(90))
+            .unwrap();
         ended.sort();
-        assert_eq!(ended, [(2, false)], "the second idled out; the third was used at NOW + 100");
-        assert!(first.sessions_expire(NOW + 100, Duration::from_secs(90)).unwrap().is_empty());
+        assert_eq!(
+            ended,
+            [(2, false)],
+            "the second idled out; the third was used at NOW + 100"
+        );
+        assert!(first
+            .sessions_expire(NOW + 100, Duration::from_secs(90))
+            .unwrap()
+            .is_empty());
         assert_eq!(first.sessions_count().unwrap(), 1);
     }
 
@@ -1062,7 +1157,12 @@ mod tests {
     fn deleting_the_sessions_of_a_user_leaves_the_others() {
         let Some(pg) = postgres() else { return };
         let store = pg.fresh();
-        for (n, login) in [(1u8, Some("alice")), (2, Some("alice")), (3, Some("bob")), (4, None)] {
+        for (n, login) in [
+            (1u8, Some("alice")),
+            (2, Some("alice")),
+            (3, Some("bob")),
+            (4, None),
+        ] {
             store
                 .session_insert(
                     &digest(n),
@@ -1105,9 +1205,17 @@ mod tests {
             .unwrap();
         assert_eq!(store.close_lost_sessions(500, "restart").unwrap(), 1);
         let snap = store.snapshot(&[("alice".into(), false)], 1_000).unwrap();
-        let open: Vec<_> = snap.accounts[0].recent.iter().filter(|s| s.ended_at.is_none()).collect();
+        let open: Vec<_> = snap.accounts[0]
+            .recent
+            .iter()
+            .filter(|s| s.ended_at.is_none())
+            .collect();
         assert_eq!(open.len(), 2, "the recent one and the live one stay open");
-        let closed = snap.accounts[0].recent.iter().find(|s| s.ended_at.is_some()).unwrap();
+        let closed = snap.accounts[0]
+            .recent
+            .iter()
+            .find(|s| s.ended_at.is_some())
+            .unwrap();
         assert_eq!(closed.end_reason.as_deref(), Some("restart"));
         assert_eq!(closed.ended_at, Some(100), "it ends when it was last seen");
     }
@@ -1118,8 +1226,13 @@ mod tests {
         let (first, second) = pair(&pg);
         first.insert_user(&user("alice", &["ops"])).unwrap();
         assert_eq!(second.load_users().unwrap()[0].grants, access(&["ops"]));
-        assert_eq!(second.insert_user(&user("alice", &[])), Err(InsertError::Exists));
-        assert!(second.update_user("alice", Some("h2"), Some(&access(&["dev"]))).unwrap());
+        assert_eq!(
+            second.insert_user(&user("alice", &[])),
+            Err(InsertError::Exists)
+        );
+        assert!(second
+            .update_user("alice", Some("h2"), Some(&access(&["dev"])))
+            .unwrap());
         assert_eq!(first.load_users().unwrap()[0].password_hash, "h2");
         assert!(first.remove_user("alice").unwrap());
         assert!(second.load_users().unwrap().is_empty());
@@ -1133,7 +1246,9 @@ mod tests {
         let second = std::sync::Arc::new(second);
         first
             .apply(&Batch {
-                events: (1..=20).map(|sid| start(sid, "alice", false, false, 100)).collect(),
+                events: (1..=20)
+                    .map(|sid| start(sid, "alice", false, false, 100))
+                    .collect(),
                 ..Batch::default()
             })
             .unwrap();
@@ -1149,12 +1264,23 @@ mod tests {
                         .map(|sid| {
                             (
                                 (*sid, "grafana".to_string()),
-                                Hit { first_at: 100, last_at: 200 + round, hits: 1, ip: None },
+                                Hit {
+                                    first_at: 100,
+                                    last_at: 200 + round,
+                                    hits: 1,
+                                    ip: None,
+                                },
                             )
                         })
                         .collect();
                     let seen = sids.iter().map(|sid| (*sid, 300 + round)).collect();
-                    store.apply(&Batch { hits, seen, ..Batch::default() }).unwrap();
+                    store
+                        .apply(&Batch {
+                            hits,
+                            seen,
+                            ..Batch::default()
+                        })
+                        .unwrap();
                 }
             })
         };
@@ -1187,7 +1313,11 @@ mod tests {
                 events: vec![
                     start(1, "alice", false, false, 100),
                     start(2, "root", true, false, 120),
-                    Event::SessionEnded { sid: 1, reason: EndReason::Logout, at: 400 },
+                    Event::SessionEnded {
+                        sid: 1,
+                        reason: EndReason::Logout,
+                        at: 400,
+                    },
                     Event::Audit(AuditEvent {
                         kind: AuditKind::UserAdded,
                         login: Some("alice".into()),
@@ -1201,7 +1331,12 @@ mod tests {
                 ],
                 hits: HashMap::from([(
                     (1u64, "grafana".to_string()),
-                    Hit { first_at: 150, last_at: 300, hits: 5, ip: Some("10.0.0.2".into()) },
+                    Hit {
+                        first_at: 150,
+                        last_at: 300,
+                        hits: 5,
+                        ip: Some("10.0.0.2".into()),
+                    },
                 )]),
                 seen: HashMap::from([(2u64, 500i64)]),
             })
@@ -1217,7 +1352,13 @@ mod tests {
         let report = target.import_sqlite(&path).unwrap();
         assert_eq!(
             report,
-            ImportReport { users: 2, sessions: 2, accesses: 1, audit: 1, logins: 2 }
+            ImportReport {
+                users: 2,
+                sessions: 2,
+                accesses: 1,
+                audit: 1,
+                logins: 2
+            }
         );
         assert_eq!(target.load_users().unwrap(), source.load_users().unwrap());
         assert_eq!(
@@ -1236,7 +1377,10 @@ mod tests {
         let root = &copied.accounts[1].recent[0];
         assert_eq!(root.end_reason.as_deref(), Some("restart"));
         assert_eq!(root.ended_at, Some(500));
-        assert_eq!(original.accounts[1].recent[0].ended_at, None, "the source is untouched");
+        assert_eq!(
+            original.accounts[1].recent[0].ended_at, None,
+            "the source is untouched"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1292,8 +1436,11 @@ mod tests {
     fn a_file_that_is_not_a_portal_database_is_refused_by_the_import() {
         let Some(pg) = postgres() else { return };
         let target = pg.fresh();
-        assert!(target.import_sqlite(Path::new("/nonexistent/portal.db")).is_err());
-        let dir = std::env::temp_dir().join(format!("portal-import-{}-foreign", std::process::id()));
+        assert!(target
+            .import_sqlite(Path::new("/nonexistent/portal.db"))
+            .is_err());
+        let dir =
+            std::env::temp_dir().join(format!("portal-import-{}-foreign", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("other.db");
         let _ = std::fs::remove_file(&path);

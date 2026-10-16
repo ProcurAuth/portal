@@ -165,15 +165,8 @@ fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> No
         identity_key: secrets.identity_key.take(),
         pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
     };
-    let mut state = AppState::new(
-        config,
-        superadmin,
-        SECRET.to_vec(),
-        store,
-        tracker,
-        access,
-    )
-    .unwrap();
+    let mut state =
+        AppState::new(config, superadmin, SECRET.to_vec(), store, tracker, access).unwrap();
     if let Some(ttl) = cache_ttl {
         state.sessions.set_cache_ttl(ttl);
     }
@@ -188,7 +181,9 @@ fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> No
             && send(port, "GET", "/healthz", &[], "").status == 200
     });
     // The first discovery round publishes an empty catalogue. The next round starts an hour later.
-    wait_until(Duration::from_secs(10), || node.state.discovery.refreshes() >= 1);
+    wait_until(Duration::from_secs(10), || {
+        node.state.discovery.refreshes() >= 1
+    });
     node
 }
 
@@ -374,7 +369,10 @@ fn an_account_created_on_one_instance_signs_in_and_is_known_on_the_other() {
 
         // The periodic refresh of the other instance loads it.
         crate::sync::run_round(&b.state, 1);
-        assert!(b.state.users.grants_of("carol").unwrap().is_empty(), "a new user has no grant");
+        assert!(
+            b.state.users.grants_of("carol").unwrap().is_empty(),
+            "a new user has no grant"
+        );
         let on_b = sign_in(&b, "carol", "a-long-password-1");
         assert_eq!(
             verify(&a, &on_b, AGENT),
@@ -503,7 +501,7 @@ fn publish_catalog(node: &Node, db_actions: &[&str]) {
             .iter()
             .map(|name| crate::actions::Action {
                 name: name.to_string(),
-                resource_types: vec!["service".into()],
+                resource_types: vec!["service".into(), "database".into()],
                 description: format!("The action {name}."),
             })
             .collect(),
@@ -548,7 +546,13 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         );
         publish_catalog(&node, &["query.run.read", "query.run.write"]);
         let root = sign_in(&node, "root", PASSWORD);
-        let add = post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, "login=alice&password=a-long-password-1");
+        let add = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-long-password-1",
+        );
         assert_eq!(add.location(), Some("/auth/settings?s=user-added"));
         let refused = post(
             &node,
@@ -563,7 +567,11 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         let alice = sign_in(&node, "alice", "a-long-password-1");
         let denied = open(&node, &alice, "/grafana/d/1");
         assert_eq!(denied.status, 302);
-        assert_eq!(denied.location(), Some(DENIED_PATH), "no service in the URL");
+        assert_eq!(
+            denied.location(),
+            Some(DENIED_PATH),
+            "no service in the URL"
+        );
         assert_eq!(open(&node, &alice, "/db/").status, 302);
         let launcher = page(&node, &alice, "/");
         assert!(launcher.body.contains("No service available"));
@@ -574,13 +582,22 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
 
         // The superadmin gives access and two actions on db.
         let update = |fields: &str| {
-            post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, &format!("login=alice{fields}"))
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                &format!("login=alice{fields}"),
+            )
         };
         let reply = update("&g.db.access=1&g.db.query.run.read=1&g.db.query.run.write=1");
         assert_eq!(reply.location(), Some("/auth/settings?s=user-updated"));
         let allowed = open(&node, &alice, "/db/query?x=1");
         assert_eq!(allowed.status, 204);
-        let token = allowed.header("x-identity-token").expect("an identity token").to_string();
+        let token = allowed
+            .header("x-identity-token")
+            .expect("an identity token")
+            .to_string();
         let c = claims(&token);
         assert_eq!(c["iss"], "https://portal.test");
         assert_eq!(c["sub"], "alice");
@@ -591,7 +608,11 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             Some(token.as_str()),
             "one token for each session and audience"
         );
-        assert_eq!(open(&node, &alice, "/grafana/").status, 302, "still no access to Grafana");
+        assert_eq!(
+            open(&node, &alice, "/grafana/").status,
+            302,
+            "still no access to Grafana"
+        );
         let launcher = page(&node, &alice, "/");
         assert!(launcher.body.contains(">Db<") && !launcher.body.contains("Grafana"));
         // A path that no service owns gets no token.
@@ -601,11 +622,17 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
 
         // The server refuses a grant that the page did not offer.
         let reply = update("&g.other-grafana.dashboards.read=1");
-        assert_eq!(reply.location(), Some("/auth/settings?s=edit-unknown-grant"));
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings?s=edit-unknown-grant")
+        );
 
         // An action that db no longer publishes keeps its grant. The page did not show the action.
         publish_catalog(&node, &["query.run.read"]);
-        assert_eq!(update("&g.db.access=1").location(), Some("/auth/settings?s=user-updated"));
+        assert_eq!(
+            update("&g.db.access=1").location(),
+            Some("/auth/settings?s=user-updated")
+        );
         let kept: Vec<String> = node
             .state
             .users
@@ -614,10 +641,16 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             .iter()
             .map(ToString::to_string)
             .collect();
-        assert_eq!(kept, ["access on service:db", "query.run.write on service:db"]);
+        assert_eq!(
+            kept,
+            ["access on service:db", "query.run.write on service:db"]
+        );
         // The database holds the same grants.
         let stored = node.state.store.load_users().unwrap();
-        assert_eq!(stored[0].grants, node.state.users.grants_of("alice").unwrap());
+        assert_eq!(
+            stored[0].grants,
+            node.state.users.grants_of("alice").unwrap()
+        );
 
         // Without access, the service is removed again.
         assert_eq!(update("").location(), Some("/auth/settings?s=user-updated"));
@@ -626,8 +659,14 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         // The superadmin opens every service. It gets a token with its own login.
         let as_root = open(&node, &root, "/grafana/");
         assert_eq!(as_root.status, 204);
-        assert_eq!(claims(as_root.header("x-identity-token").unwrap())["sub"], "root");
-        assert_eq!(claims(as_root.header("x-identity-token").unwrap())["aud"], "other-grafana");
+        assert_eq!(
+            claims(as_root.header("x-identity-token").unwrap())["sub"],
+            "root"
+        );
+        assert_eq!(
+            claims(as_root.header("x-identity-token").unwrap())["aud"],
+            "other-grafana"
+        );
     });
 }
 
@@ -641,8 +680,20 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
     );
     publish_catalog(&node, &[]);
     let root = sign_in(&node, "root", PASSWORD);
-    post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, "login=alice&password=a-long-password-1");
-    let reply = post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, "login=alice&g.db.access=1");
+    post(
+        &node,
+        &root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        "login=alice&password=a-long-password-1",
+    );
+    let reply = post(
+        &node,
+        &root,
+        USERS_UPDATE_PATH,
+        USERS_TOKEN,
+        "login=alice&g.db.access=1",
+    );
     assert_eq!(reply.location(), Some("/auth/settings?s=grants-static"));
     // A grant in the database does not count in this mode.
     node.state
@@ -651,8 +702,16 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
         .unwrap();
     crate::sync::run_round(&node.state, 1);
     let alice = sign_in(&node, "alice", "a-long-password-1");
-    assert_eq!(open(&node, &alice, "/grafana/").status, 204, "the configuration gives it");
-    assert_eq!(open(&node, &alice, "/db/").status, 302, "the database does not");
+    assert_eq!(
+        open(&node, &alice, "/grafana/").status,
+        204,
+        "the configuration gives it"
+    );
+    assert_eq!(
+        open(&node, &alice, "/db/").status,
+        302,
+        "the database does not"
+    );
 }
 
 /// A request to the PDP listener.
@@ -696,9 +755,13 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     wait_until(Duration::from_secs(10), || {
         TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
     });
-    let grants = |list: &[&str]| -> Vec<Grant> { list.iter().map(|g| Grant::parse(g).unwrap()).collect() };
+    let grants =
+        |list: &[&str]| -> Vec<Grant> { list.iter().map(|g| Grant::parse(g).unwrap()).collect() };
     for (login, held) in [
-        ("alice", grants(&["access on service:db", "query.run.write on service:db"])),
+        (
+            "alice",
+            grants(&["access on service:db", "query.run.write on service:db"]),
+        ),
         ("carol", Vec::new()),
     ] {
         let row = crate::store::UserRow {
@@ -711,7 +774,8 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     }
     crate::sync::run_round(&node.state, 1);
 
-    let ask = |token: Option<&str>, body: &str| pdp(pdp_port, "/access/v1/evaluation", token, body, None);
+    let ask =
+        |token: Option<&str>, body: &str| pdp(pdp_port, "/access/v1/evaluation", token, body, None);
     let decide = |token: &str, body: &str| -> bool {
         let reply = ask(Some(token), body);
         assert_eq!(reply.status, 200, "{}", reply.body);
@@ -722,19 +786,67 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     let body = evaluation("alice", "query.run.write", "service", "db");
     let unauthorized = ask(None, &body);
     assert_eq!(unauthorized.status, 401);
-    assert_eq!(unauthorized.header("www-authenticate"), Some("Bearer realm=\"portal-pdp\""));
-    assert_eq!(ask(Some("not a token of a server at all, 32 bytes"), &body).status, 401);
+    assert_eq!(
+        unauthorized.header("www-authenticate"),
+        Some("Bearer realm=\"portal-pdp\"")
+    );
+    assert_eq!(
+        ask(Some("not a token of a server at all, 32 bytes"), &body).status,
+        401
+    );
 
     // Decisions for db.
     assert!(decide(PDP_DB_TOKEN, &body));
-    assert!(decide(PDP_DB_TOKEN, &evaluation("alice", "query.run.write", "database", "analytics")), "a grant on the service covers its resources");
-    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "query.run.read", "service", "db")), "no grant");
-    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "access", "service", "chat")), "a resource of another server");
-    assert!(decide(PDP_DB_TOKEN, &evaluation("carol", "query.run.read", "service", "db")), "the configuration (hybrid)");
-    assert!(!decide(PDP_DB_TOKEN, &evaluation("carol", "query.run.write", "service", "db")));
-    assert!(!decide(PDP_DB_TOKEN, &evaluation("mallory", "access", "service", "db")), "no such user");
-    assert!(decide(PDP_DB_TOKEN, &evaluation("root", "system.read", "service", "db")), "the superadmin has all grants");
-    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "Query.Run", "service", "db")));
+    assert!(
+        decide(
+            PDP_DB_TOKEN,
+            &evaluation("alice", "query.run.write", "database", "analytics")
+        ),
+        "a grant on the service covers its resources"
+    );
+    assert!(
+        !decide(
+            PDP_DB_TOKEN,
+            &evaluation("alice", "query.run.read", "service", "db")
+        ),
+        "no grant"
+    );
+    assert!(
+        !decide(
+            PDP_DB_TOKEN,
+            &evaluation("alice", "access", "service", "chat")
+        ),
+        "a resource of another server"
+    );
+    assert!(
+        decide(
+            PDP_DB_TOKEN,
+            &evaluation("carol", "query.run.read", "service", "db")
+        ),
+        "the configuration (hybrid)"
+    );
+    assert!(!decide(
+        PDP_DB_TOKEN,
+        &evaluation("carol", "query.run.write", "service", "db")
+    ));
+    assert!(
+        !decide(
+            PDP_DB_TOKEN,
+            &evaluation("mallory", "access", "service", "db")
+        ),
+        "no such user"
+    );
+    assert!(
+        decide(
+            PDP_DB_TOKEN,
+            &evaluation("root", "system.read", "service", "db")
+        ),
+        "the superadmin has all grants"
+    );
+    assert!(!decide(
+        PDP_DB_TOKEN,
+        &evaluation("alice", "Query.Run", "service", "db")
+    ));
     let agent = serde_json::json!({
         "subject": {"type": "agent", "id": "alice"},
         "action": {"name": "access"},
@@ -742,15 +854,30 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     });
     assert!(!decide(PDP_DB_TOKEN, &agent.to_string()), "only users");
     // The same user for chat: no grant there.
-    assert!(!decide(PDP_CHAT_TOKEN, &evaluation("alice", "access", "service", "chat")));
-    assert!(decide(PDP_CHAT_TOKEN, &evaluation("root", "access", "service", "chat")));
+    assert!(!decide(
+        PDP_CHAT_TOKEN,
+        &evaluation("alice", "access", "service", "chat")
+    ));
+    assert!(decide(
+        PDP_CHAT_TOKEN,
+        &evaluation("root", "access", "service", "chat")
+    ));
 
     // A request that the PDP cannot read gets no decision.
     assert_eq!(ask(Some(PDP_DB_TOKEN), "{").status, 400);
-    assert_eq!(ask(Some(PDP_DB_TOKEN), r#"{"subject":{"type":"user"}}"#).status, 400);
+    assert_eq!(
+        ask(Some(PDP_DB_TOKEN), r#"{"subject":{"type":"user"}}"#).status,
+        400
+    );
 
     // The response returns X-Request-ID.
-    let reply = pdp(pdp_port, "/access/v1/evaluation", Some(PDP_DB_TOKEN), &body, Some("req-42"));
+    let reply = pdp(
+        pdp_port,
+        "/access/v1/evaluation",
+        Some(PDP_DB_TOKEN),
+        &body,
+        Some("req-42"),
+    );
     assert_eq!(reply.header("x-request-id"), Some("req-42"));
 
     // The batch: defaults at the top, three semantics.
@@ -767,7 +894,13 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
         if let Some(semantic) = semantic {
             body["options"] = serde_json::json!({"evaluations_semantic": semantic});
         }
-        let reply = pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &body.to_string(), None);
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/evaluations",
+            Some(PDP_DB_TOKEN),
+            &body.to_string(),
+            None,
+        );
         assert_eq!(reply.status, 200, "{}", reply.body);
         reply.json()["evaluations"]
             .as_array()
@@ -787,11 +920,28 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
         "evaluations": [{}, {}, {}, {}, {}]
     });
     assert_eq!(
-        pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &too_many.to_string(), None).status,
+        pdp(
+            pdp_port,
+            "/access/v1/evaluations",
+            Some(PDP_DB_TOKEN),
+            &too_many.to_string(),
+            None
+        )
+        .status,
         400
     );
-    let single = pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &body, None);
-    assert_eq!(single.json()["decision"], true, "without evaluations: one decision");
+    let single = pdp(
+        pdp_port,
+        "/access/v1/evaluations",
+        Some(PDP_DB_TOKEN),
+        &body,
+        None,
+    );
+    assert_eq!(
+        single.json()["decision"],
+        true,
+        "without evaluations: one decision"
+    );
 
     // The action search.
     let search = |subject: &str| {
@@ -799,7 +949,13 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
             "subject": {"type": "user", "id": subject},
             "resource": {"type": "service", "id": "db"}
         });
-        let reply = pdp(pdp_port, "/access/v1/search/action", Some(PDP_DB_TOKEN), &body.to_string(), None);
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/search/action",
+            Some(PDP_DB_TOKEN),
+            &body.to_string(),
+            None,
+        );
         assert_eq!(reply.status, 200, "{}", reply.body);
         reply.json()["results"]
             .as_array()
@@ -809,25 +965,352 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
             .collect::<Vec<String>>()
     };
     assert_eq!(search("alice"), ["access", "query.run.write"]);
-    assert_eq!(search("root"), ["access", "query.run.read", "query.run.write", "system.read"]);
+    assert_eq!(
+        search("root"),
+        ["access", "query.run.read", "query.run.write", "system.read"]
+    );
     assert!(search("mallory").is_empty());
 
     // The metadata needs no token. The server refuses the other methods.
-    let metadata = send(pdp_port, "GET", "/.well-known/authzen-configuration", &[], "");
+    let metadata = send(
+        pdp_port,
+        "GET",
+        "/.well-known/authzen-configuration",
+        &[],
+        "",
+    );
     assert_eq!(metadata.status, 200);
     let m = metadata.json();
-    assert_eq!(m["policy_decision_point"], format!("http://pdp.test:{pdp_port}"));
+    assert_eq!(
+        m["policy_decision_point"],
+        format!("http://pdp.test:{pdp_port}")
+    );
     assert_eq!(
         m["access_evaluations_endpoint"],
         format!("http://pdp.test:{pdp_port}/access/v1/evaluations")
     );
-    assert_eq!(send(pdp_port, "GET", "/access/v1/evaluation", &[], "").status, 405);
+    assert_eq!(
+        send(pdp_port, "GET", "/access/v1/evaluation", &[], "").status,
+        405
+    );
     // The PDP is not on the public listener.
     assert_eq!(
-        pdp(node.port, "/access/v1/evaluation", Some(PDP_DB_TOKEN), &body, None).status,
+        pdp(
+            node.port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &body,
+            None
+        )
+        .status,
         404
     );
     let metrics = send(node.port, "GET", "/metrics", &[], "");
-    assert!(metrics.body.contains("portal_pdp_decisions_total{decision=\"true\"}"));
+    assert!(metrics
+        .body
+        .contains("portal_pdp_decisions_total{decision=\"true\"}"));
 }
 
+#[test]
+fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = ["query.run.read on service:db/database:logs"] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
+            pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
+        ),
+    );
+    publish_catalog(&node, &["query.run.read", "query.run.write"]);
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let grants =
+        |list: &[&str]| -> Vec<Grant> { list.iter().map(|g| Grant::parse(g).unwrap()).collect() };
+    for (login, held) in [
+        (
+            "alice",
+            grants(&[
+                "access on service:db",
+                "query.run.read on service:db",
+                "query.run.write on service:db/database:analytics",
+            ]),
+        ),
+        ("carol", Vec::new()),
+    ] {
+        let row = crate::store::UserRow {
+            login: login.into(),
+            password_hash: password_hash(),
+            grants: held,
+            created_at: 1,
+        };
+        node.state.store.insert_user(&row).unwrap();
+    }
+    crate::sync::run_round(&node.state, 1);
+    let decide = |token: &str, body: &str| -> bool {
+        let reply = pdp(pdp_port, "/access/v1/evaluation", Some(token), body, None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["decision"].as_bool().unwrap()
+    };
+    let db = |subject: &str, action: &str, kind: &str, id: &str| {
+        decide(PDP_DB_TOKEN, &evaluation(subject, action, kind, id))
+    };
+
+    assert!(db("alice", "query.run.write", "database", "analytics"));
+    assert!(
+        !db("alice", "query.run.write", "database", "logs"),
+        "another id"
+    );
+    assert!(
+        !db("alice", "query.run.write", "database", "Analytics"),
+        "the id is exact"
+    );
+    assert!(
+        !db("alice", "query.run.write", "table", "analytics"),
+        "another type"
+    );
+    assert!(
+        !db("alice", "query.run.write", "service", "db"),
+        "not the whole service"
+    );
+    assert!(
+        db("alice", "query.run.read", "database", "logs"),
+        "the grant on the service"
+    );
+    assert!(
+        db("carol", "query.run.read", "database", "logs"),
+        "the configuration"
+    );
+    assert!(!db("carol", "query.run.read", "database", "analytics"));
+    assert!(!db("carol", "query.run.read", "service", "db"));
+    assert!(
+        !db("mallory", "query.run.read", "database", "logs"),
+        "no such user"
+    );
+    assert!(
+        db("root", "query.run.write", "database", "logs"),
+        "the superadmin"
+    );
+    // The service of a sub-resource is the server that asks: chat has no grant of alice.
+    assert!(!decide(
+        PDP_CHAT_TOKEN,
+        &evaluation("alice", "query.run.write", "database", "analytics")
+    ));
+
+    // The batch: one subject, a resource for each evaluation.
+    let body = serde_json::json!({
+        "subject": {"type": "user", "id": "alice"},
+        "action": {"name": "query.run.write"},
+        "evaluations": [
+            {"resource": {"type": "database", "id": "analytics"}},
+            {"resource": {"type": "database", "id": "logs"}},
+            {"resource": {"type": "service", "id": "db"}},
+            {"action": {"name": "query.run.read"}, "resource": {"type": "database", "id": "logs"}}
+        ]
+    });
+    let reply = pdp(
+        pdp_port,
+        "/access/v1/evaluations",
+        Some(PDP_DB_TOKEN),
+        &body.to_string(),
+        None,
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let decisions: Vec<bool> = reply.json()["evaluations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["decision"].as_bool().unwrap())
+        .collect();
+    assert_eq!(decisions, [true, false, false, true]);
+
+    // The action search on a sub-resource.
+    let search = |subject: &str, kind: &str, id: &str| {
+        let body = serde_json::json!({
+            "subject": {"type": "user", "id": subject},
+            "resource": {"type": kind, "id": id}
+        });
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/search/action",
+            Some(PDP_DB_TOKEN),
+            &body.to_string(),
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        search("alice", "database", "analytics"),
+        ["access", "query.run.read", "query.run.write"]
+    );
+    assert_eq!(
+        search("alice", "database", "logs"),
+        ["access", "query.run.read"]
+    );
+    assert_eq!(
+        search("alice", "service", "db"),
+        ["access", "query.run.read"]
+    );
+    assert_eq!(search("carol", "database", "logs"), ["query.run.read"]);
+    assert!(search("carol", "database", "analytics").is_empty());
+}
+
+#[test]
+fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        let root = sign_in(&node, "root", PASSWORD);
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=alice&password=a-long-password-1",
+            )
+            .location(),
+            Some("/auth/settings?s=user-added")
+        );
+        let add = |fields: &str| {
+            post(&node, &root, GRANT_ADD_PATH, USERS_TOKEN, fields)
+                .location()
+                .map(str::to_string)
+        };
+        let notice = |code: &str| Some(format!("/auth/settings?s={code}"));
+        let fields = "login=alice&service=db&action=query.run.write&type=database&id=analytics";
+        // The service has not answered yet: no grant on a sub-resource.
+        *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(
+            vec![listed(&[
+                ("portal.name", "Db"),
+                ("portal.id", "db"),
+                ("portal.href", "/db/"),
+                ("portal.actions", DB_ACTIONS_URL),
+            ])],
+            Vec::new(),
+        ));
+        assert_eq!(add(fields), notice("grant-not-known"));
+        publish_catalog(&node, &["query.run.read", "query.run.write"]);
+        assert_eq!(add(fields), notice("grant-added"));
+        assert_eq!(add(fields), notice("unchanged"));
+        for (bad, code) in [
+            (
+                "login=alice&service=db&action=query.run.write&type=table&id=a",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=system.read&type=database&id=a",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=access&type=database&id=a",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=service&id=db",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=chat&action=query.run.write&type=database&id=a",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id=a+b",
+                "grant-bad-id",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id=",
+                "grant-bad-id",
+            ),
+            (
+                "login=nobody&service=db&action=query.run.write&type=database&id=a",
+                "no-user",
+            ),
+        ] {
+            assert_eq!(add(bad), notice(code), "{bad}");
+        }
+        let extra = post(
+            &node,
+            &root,
+            GRANT_ADD_PATH,
+            USERS_TOKEN,
+            &format!("{fields}&other=1"),
+        );
+        assert_eq!(extra.status, 400, "an unknown field");
+        let expected =
+            vec![Grant::parse("query.run.write on service:db/database:analytics").unwrap()];
+        assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
+        assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
+        let page = page(&node, &root, "/auth/settings");
+        assert!(page.body.contains("<code>database:analytics</code>"));
+
+        // The edit form keeps the grant on the sub-resource: it shows only the grants on services.
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                "login=alice&g.db.access=1"
+            )
+            .location(),
+            Some("/auth/settings?s=user-updated")
+        );
+        assert_eq!(node.state.users.grants_of("alice").unwrap().len(), 2);
+
+        // A user cannot give a grant.
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert_eq!(
+            post(&node, &alice, GRANT_ADD_PATH, USERS_TOKEN, fields).status,
+            403
+        );
+
+        let delete = |grant: &str| {
+            post(
+                &node,
+                &root,
+                GRANT_DELETE_PATH,
+                USERS_TOKEN,
+                &format!(
+                    "login=alice&grant={}",
+                    grant
+                        .replace(' ', "+")
+                        .replace('/', "%2F")
+                        .replace(':', "%3A")
+                ),
+            )
+            .location()
+            .map(str::to_string)
+        };
+        assert_eq!(
+            delete("access on service:db"),
+            notice("no-grant"),
+            "only a sub-resource"
+        );
+        assert_eq!(
+            delete("query.run.write on service:db/database:logs"),
+            notice("no-grant")
+        );
+        assert_eq!(
+            delete("query.run.write on service:db/database:analytics"),
+            notice("grant-deleted")
+        );
+        assert_eq!(
+            node.state.users.grants_of("alice").unwrap(),
+            vec![Grant::new("access", "db").unwrap()]
+        );
+        assert_eq!(
+            node.state.store.load_users().unwrap()[0].grants,
+            vec![Grant::new("access", "db").unwrap()]
+        );
+    });
+}

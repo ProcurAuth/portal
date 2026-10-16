@@ -402,13 +402,25 @@ mod tests {
 
     #[test]
     fn labels_are_closed_and_unique() {
-        assert!(parse(r#"user "a" {} user "a" {}"#, BLOCKS).is_err(), "duplicate label");
+        assert!(
+            parse(r#"user "a" {} user "a" {}"#, BLOCKS).is_err(),
+            "duplicate label"
+        );
         assert!(parse(r#"user "a" {} user "b" {}"#, BLOCKS).is_ok());
         assert!(parse("user {}", BLOCKS).is_err(), "a label is mandatory");
-        assert!(parse(r#"server "x" {}"#, BLOCKS).is_err(), "server takes no label");
+        assert!(
+            parse(r#"server "x" {}"#, BLOCKS).is_err(),
+            "server takes no label"
+        );
         assert!(parse(r#"other "x" {}"#, BLOCKS).is_err());
-        assert!(parse(r#"user "a" { g = ["x" "y"] }"#, BLOCKS).is_err(), "a comma is mandatory");
-        assert!(parse(r#"user "a" { g = [1] }"#, BLOCKS).is_err(), "items are quoted");
+        assert!(
+            parse(r#"user "a" { g = ["x" "y"] }"#, BLOCKS).is_err(),
+            "a comma is mandatory"
+        );
+        assert!(
+            parse(r#"user "a" { g = [1] }"#, BLOCKS).is_err(),
+            "items are quoted"
+        );
         assert!(parse(r#"user "a" { g = ["x" }"#, BLOCKS).is_err());
         assert!(parse(r#"user "a" { g = [] g = [] }"#, BLOCKS).is_err());
     }

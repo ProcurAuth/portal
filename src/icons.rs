@@ -297,8 +297,16 @@ mod tests {
         ]);
         let memos = icons.resolve("memos").unwrap();
         assert_eq!(memos.set, Set::Simple, "the heavy colour logo is skipped");
-        assert_eq!(icons.resolve("di:memos"), None, "an explicit set does not fall back");
-        assert_eq!(icons.resolve("bulky"), None, "no lighter one: the tile shows the initial");
+        assert_eq!(
+            icons.resolve("di:memos"),
+            None,
+            "an explicit set does not fall back"
+        );
+        assert_eq!(
+            icons.resolve("bulky"),
+            None,
+            "no lighter one: the tile shows the initial"
+        );
         assert!(icons.svg(Set::Dashboard, "memos").is_none());
         fs::remove_dir_all(root).unwrap();
     }

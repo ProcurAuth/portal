@@ -313,7 +313,8 @@ impl SessionStore {
             user_agent: new.user_agent,
             at: now,
         };
-        match blocking(|| store.session_insert(&digest, &binding, &stored, &start, self.max_active)) {
+        match blocking(|| store.session_insert(&digest, &binding, &stored, &start, self.max_active))
+        {
             Ok(true) => {}
             Ok(false) => return Err(SessionIssueError::Capacity),
             Err(error) => {
@@ -423,7 +424,9 @@ impl SessionStore {
         self.sessions
             .lock()
             .expect("session store mutex poisoned")
-            .retain(|_, entry| !matches!(&entry.session.principal, Principal::User(l) if l == login));
+            .retain(
+                |_, entry| !matches!(&entry.session.principal, Principal::User(l) if l == login),
+            );
         match blocking(|| store.sessions_delete_user(login)) {
             Ok(ended) => {
                 for sid in &ended {
@@ -700,12 +703,23 @@ mod shared_tests {
     }
 
     impl Instance {
-        fn new(store: Store, ttl: Duration, idle: Duration, max: usize, cache_ttl: Duration) -> Self {
+        fn new(
+            store: Store,
+            ttl: Duration,
+            idle: Duration,
+            max: usize,
+            cache_ttl: Duration,
+        ) -> Self {
             let store = Arc::new(store);
             let (tracker, events) = Tracker::recording();
-            let mut sessions = SessionStore::new(ttl, idle, max, tracker).shared(Arc::clone(&store));
+            let mut sessions =
+                SessionStore::new(ttl, idle, max, tracker).shared(Arc::clone(&store));
             sessions.set_cache_ttl(cache_ttl);
-            Self { sessions, events, store }
+            Self {
+                sessions,
+                events,
+                store,
+            }
         }
 
         /// The sessions that ended on this instance, as this instance recorded them.
@@ -720,7 +734,12 @@ mod shared_tests {
         }
     }
 
-    fn instances(ttl: Duration, idle: Duration, max: usize, cache_ttl: Duration) -> Option<(Instance, Instance)> {
+    fn instances(
+        ttl: Duration,
+        idle: Duration,
+        max: usize,
+        cache_ttl: Duration,
+    ) -> Option<(Instance, Instance)> {
         let (first, second) = postgres()?.fresh_pair();
         Some((
             Instance::new(first, ttl, idle, max, cache_ttl),
@@ -740,14 +759,22 @@ mod shared_tests {
 
     #[test]
     fn a_session_opened_on_one_instance_is_valid_on_the_other_until_it_ends() {
-        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         let token = a.sessions.issue(HERE, user("alice")).unwrap();
         let on_a = a.sessions.validate(&token, &HERE).unwrap();
         let on_b = b.sessions.validate(&token, &HERE).unwrap();
         assert_eq!(on_a, on_b);
         assert_eq!(on_b.principal, Principal::User("alice".into()));
-        assert!(b.sessions.validate(&token, &ELSEWHERE).is_none(), "the binding holds across instances");
-        assert!(a.sessions.validate(&token, &HERE).is_some(), "a refused thief does not end it");
+        assert!(
+            b.sessions.validate(&token, &ELSEWHERE).is_none(),
+            "the binding holds across instances"
+        );
+        assert!(
+            a.sessions.validate(&token, &HERE).is_some(),
+            "a refused thief does not end it"
+        );
 
         assert_eq!(a.sessions.revoke(&token, EndReason::Logout), Some(on_a));
         assert!(b.sessions.validate(&token, &HERE).is_none());
@@ -759,7 +786,9 @@ mod shared_tests {
 
     #[test]
     fn the_superadmin_and_impersonation_survive_the_trip() {
-        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         let token = a
             .sessions
             .issue(
@@ -773,7 +802,10 @@ mod shared_tests {
                 },
             )
             .unwrap();
-        assert_eq!(b.sessions.validate(&token, &HERE).unwrap().principal, Principal::Superadmin);
+        assert_eq!(
+            b.sessions.validate(&token, &HERE).unwrap().principal,
+            Principal::Superadmin
+        );
         let mut as_alice = user("alice");
         as_alice.impersonated = true;
         let token = a.sessions.issue(HERE, as_alice).unwrap();
@@ -784,7 +816,9 @@ mod shared_tests {
 
     #[test]
     fn a_copy_keeps_the_request_path_off_the_database_but_not_for_longer_than_its_ttl() {
-        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::from_millis(400)) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::from_millis(400)) else {
+            return;
+        };
         let token = a.sessions.issue(HERE, user("alice")).unwrap();
         assert!(b.sessions.validate(&token, &HERE).is_some());
         a.sessions.revoke(&token, EndReason::Logout);
@@ -793,23 +827,36 @@ mod shared_tests {
             "the other instance still holds a copy it checked a moment ago"
         );
         sleep(Duration::from_millis(500));
-        assert!(b.sessions.validate(&token, &HERE).is_none(), "the copy is old: the database is asked again");
+        assert!(
+            b.sessions.validate(&token, &HERE).is_none(),
+            "the copy is old: the database is asked again"
+        );
         assert_eq!(b.sessions.shared_errors(), 0);
     }
 
     #[test]
     fn a_session_is_in_the_history_the_moment_it_is_issued_and_is_not_announced_twice() {
-        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         a.sessions.issue(HERE, user("alice")).unwrap();
-        let snapshot = b.store.snapshot(&[("alice".into(), false)], unix_now()).unwrap();
+        let snapshot = b
+            .store
+            .snapshot(&[("alice".into(), false)], unix_now())
+            .unwrap();
         assert_eq!(snapshot.accounts[0].recent.len(), 1);
         assert_eq!(snapshot.accounts[0].recent[0].ended_at, None);
-        assert!(a.events.try_recv().is_err(), "the start was written with the session");
+        assert!(
+            a.events.try_recv().is_err(),
+            "the start was written with the session"
+        );
     }
 
     #[test]
     fn deleting_a_user_ends_their_sessions_wherever_they_were_opened() {
-        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         let alice1 = a.sessions.issue(HERE, user("alice")).unwrap();
         let alice2 = b.sessions.issue(HERE, user("alice")).unwrap();
         let bob = a.sessions.issue(HERE, user("bob")).unwrap();
@@ -818,17 +865,25 @@ mod shared_tests {
         assert!(a.sessions.validate(&alice2, &HERE).is_none());
         assert!(a.sessions.validate(&bob, &HERE).is_some());
         assert_eq!(b.ended().len(), 2);
-        assert!(b.ended().iter().all(|(_, reason)| *reason == EndReason::UserDeleted));
+        assert!(b
+            .ended()
+            .iter()
+            .all(|(_, reason)| *reason == EndReason::UserDeleted));
         assert_eq!(a.sessions.revoke_user("alice", EndReason::UserDeleted), 0);
     }
 
     #[test]
     fn a_session_that_ran_out_is_refused_at_once_and_recorded_by_one_instance_only() {
-        let Some((a, b)) = instances(Duration::from_secs(1), HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(Duration::from_secs(1), HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         let token = a.sessions.issue(HERE, user("alice")).unwrap();
         assert!(b.sessions.validate(&token, &HERE).is_some());
         sleep(Duration::from_millis(2_200));
-        assert!(b.sessions.validate(&token, &HERE).is_none(), "refused before any sweep");
+        assert!(
+            b.sessions.validate(&token, &HERE).is_none(),
+            "refused before any sweep"
+        );
         a.sessions.sweep();
         b.sessions.sweep();
         let ended: Vec<_> = a.ended().into_iter().chain(b.ended()).collect();
@@ -839,12 +894,17 @@ mod shared_tests {
 
     #[test]
     fn an_idle_session_is_ended_unless_the_other_instance_kept_it_alive() {
-        let Some((a, b)) = instances(HOUR, Duration::from_secs(2), 8, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, Duration::from_secs(2), 8, Duration::ZERO) else {
+            return;
+        };
         let kept = a.sessions.issue(HERE, user("alice")).unwrap();
         let dropped = a.sessions.issue(HERE, user("bob")).unwrap();
         for _ in 0..3 {
             sleep(Duration::from_millis(900));
-            assert!(b.sessions.validate(&kept, &HERE).is_some(), "used on the other instance");
+            assert!(
+                b.sessions.validate(&kept, &HERE).is_some(),
+                "used on the other instance"
+            );
         }
         a.sessions.sweep();
         let ended = a.ended();
@@ -857,16 +917,26 @@ mod shared_tests {
 
     #[test]
     fn the_capacity_counts_the_sessions_of_every_instance() {
-        let Some((a, b)) = instances(HOUR, HOUR, 2, Duration::ZERO) else { return };
+        let Some((a, b)) = instances(HOUR, HOUR, 2, Duration::ZERO) else {
+            return;
+        };
         a.sessions.issue(HERE, user("alice")).unwrap();
         b.sessions.issue(HERE, user("bob")).unwrap();
-        assert_eq!(a.sessions.issue(HERE, user("carol")), Err(SessionIssueError::Capacity));
-        assert_eq!(b.sessions.issue(HERE, user("carol")), Err(SessionIssueError::Capacity));
+        assert_eq!(
+            a.sessions.issue(HERE, user("carol")),
+            Err(SessionIssueError::Capacity)
+        );
+        assert_eq!(
+            b.sessions.issue(HERE, user("carol")),
+            Err(SessionIssueError::Capacity)
+        );
     }
 
     #[test]
     fn a_database_that_went_away_does_not_sign_everybody_out() {
-        let Some((a, _b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else { return };
+        let Some((a, _b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
         let token = a.sessions.issue(HERE, user("alice")).unwrap();
         assert!(a.sessions.validate(&token, &HERE).is_some());
         a.store.go_down();
@@ -874,13 +944,22 @@ mod shared_tests {
             a.sessions.validate(&token, &HERE).is_some(),
             "checked a moment ago: still accepted"
         );
-        assert!(a.sessions.shared_errors() >= 1, "and the failure is counted");
+        assert!(
+            a.sessions.shared_errors() >= 1,
+            "and the failure is counted"
+        );
         assert!(
             a.sessions.validate(&token, &ELSEWHERE).is_none(),
             "the binding is still enforced from the copy"
         );
         let stranger = "A".repeat(43);
-        assert!(a.sessions.validate(&stranger, &HERE).is_none(), "an unknown cookie is not");
-        assert_eq!(a.sessions.issue(HERE, user("bob")), Err(SessionIssueError::Storage));
+        assert!(
+            a.sessions.validate(&stranger, &HERE).is_none(),
+            "an unknown cookie is not"
+        );
+        assert_eq!(
+            a.sessions.issue(HERE, user("bob")),
+            Err(SessionIssueError::Storage)
+        );
     }
 }

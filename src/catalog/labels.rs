@@ -60,10 +60,19 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
             }
             Some(url.to_string())
         }
-        _ => health_url.as_deref().and_then(url_origin).map(|o| format!("{o}{ACTIONS_PATH}")),
+        _ => health_url
+            .as_deref()
+            .and_then(url_origin)
+            .map(|o| format!("{o}{ACTIONS_PATH}")),
     };
-    let exclude = parse_exclude(labels.get("portal.exclude").map(String::as_str).unwrap_or(""), href)
-        .map_err(|e| fail(format!("exclude {e}")))?;
+    let exclude = parse_exclude(
+        labels
+            .get("portal.exclude")
+            .map(String::as_str)
+            .unwrap_or(""),
+        href,
+    )
+    .map_err(|e| fail(format!("exclude {e}")))?;
     let id = match labels
         .get("portal.id")
         .map(|v| v.trim())
@@ -426,7 +435,11 @@ mod tests {
         let long = "é".repeat(500);
         let service = parse(
             "x",
-            &labels(&[("portal.name", &long), ("portal.href", "/"), ("portal.id", "long")]),
+            &labels(&[
+                ("portal.name", &long),
+                ("portal.href", "/"),
+                ("portal.id", "long"),
+            ]),
         )
         .unwrap()
         .unwrap();
@@ -448,7 +461,10 @@ mod tests {
         assert_eq!(
             read(&[
                 ("portal.health", "http://db:80/up"),
-                ("portal.actions", "http://db-admin:9000/.well-known/access-actions"),
+                (
+                    "portal.actions",
+                    "http://db-admin:9000/.well-known/access-actions"
+                ),
             ])
             .as_deref(),
             Some("http://db-admin:9000/.well-known/access-actions"),
@@ -460,7 +476,11 @@ mod tests {
     fn a_label_that_does_not_exist_is_ignored() {
         let service = parse(
             "x",
-            &labels(&[("portal.name", "X"), ("portal.href", "/x/"), ("portal.unknown", "ops")]),
+            &labels(&[
+                ("portal.name", "X"),
+                ("portal.href", "/x/"),
+                ("portal.unknown", "ops"),
+            ]),
         )
         .unwrap()
         .unwrap();
@@ -472,7 +492,11 @@ mod tests {
         let long = "a".repeat(65);
         let result = parse(
             "x",
-            &labels(&[("portal.name", "X"), ("portal.href", "/x/"), ("portal.id", &long)]),
+            &labels(&[
+                ("portal.name", "X"),
+                ("portal.href", "/x/"),
+                ("portal.id", &long),
+            ]),
         );
         assert!(result.unwrap_err().contains("set a shorter portal.id"));
     }
@@ -498,10 +522,14 @@ mod exclude_tests {
     use super::*;
 
     fn labels(href: &str, exclude: &str) -> BTreeMap<String, String> {
-        [("portal.name", "Dagu"), ("portal.href", href), ("portal.exclude", exclude)]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+        [
+            ("portal.name", "Dagu"),
+            ("portal.href", href),
+            ("portal.exclude", exclude),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
     }
 
     #[test]
@@ -516,18 +544,35 @@ mod exclude_tests {
         .unwrap()
         .unwrap();
         let texts: Vec<&str> = service.exclude.iter().map(ExcludeRule::text).collect();
-        assert_eq!(texts, ["POST /dagu/api/v1/webhooks/*", "GET /dagu/api/v1/health"]);
+        assert_eq!(
+            texts,
+            ["POST /dagu/api/v1/webhooks/*", "GET /dagu/api/v1/health"]
+        );
     }
 
     #[test]
     fn no_label_means_nothing_is_excluded() {
-        assert!(parse("x", &labels("/dagu", "")).unwrap().unwrap().exclude.is_empty());
-        assert!(parse("x", &labels("https://example.org/", "")).unwrap().unwrap().exclude.is_empty());
+        assert!(parse("x", &labels("/dagu", ""))
+            .unwrap()
+            .unwrap()
+            .exclude
+            .is_empty());
+        assert!(parse("x", &labels("https://example.org/", ""))
+            .unwrap()
+            .unwrap()
+            .exclude
+            .is_empty());
     }
 
     #[test]
     fn a_service_can_only_open_paths_under_its_own_href() {
-        for rule in ["POST /grafana/api/x", "POST /dagu", "POST /*/api", "/", "POST /dagux/api"] {
+        for rule in [
+            "POST /grafana/api/x",
+            "POST /dagu",
+            "POST /*/api",
+            "/",
+            "POST /dagux/api",
+        ] {
             let err = parse("dagu", &labels("/dagu/api", rule)).unwrap_err();
             assert!(err.contains("exclude"), "{rule}: {err}");
         }
@@ -543,9 +588,18 @@ mod exclude_tests {
 
     #[test]
     fn a_bad_rule_makes_the_whole_label_unusable_and_is_reported_with_its_origin() {
-        let err = parse("apps/dagu", &labels("/dagu", "GET /dagu/ok\nGET /dagu/[a-z]+")).unwrap_err();
+        let err = parse(
+            "apps/dagu",
+            &labels("/dagu", "GET /dagu/ok\nGET /dagu/[a-z]+"),
+        )
+        .unwrap_err();
         assert!(err.starts_with("apps/dagu: exclude "), "{err}");
-        let many = (0..9).map(|i| format!("GET /dagu/p{i}")).collect::<Vec<_>>().join("\n");
-        assert!(parse("x", &labels("/dagu", &many)).unwrap_err().contains("more than 8 rules"));
+        let many = (0..9)
+            .map(|i| format!("GET /dagu/p{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(parse("x", &labels("/dagu", &many))
+            .unwrap_err()
+            .contains("more than 8 rules"));
     }
 }

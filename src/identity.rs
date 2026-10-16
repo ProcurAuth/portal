@@ -126,7 +126,11 @@ fn decode_key_text(text: &[u8]) -> Result<Vec<u8>, String> {
     let text = std::str::from_utf8(text)
         .map_err(|_| "identity.signing_key: the value is not text".to_string())?;
     let mut body = String::new();
-    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .peekable();
     let armored = lines.peek().is_some_and(|l| l.starts_with("-----"));
     if armored && lines.next() != Some("-----BEGIN PRIVATE KEY-----") {
         return Err(
@@ -188,7 +192,12 @@ mod tests {
     const OPENSSL_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n-----END PRIVATE KEY-----\n";
 
     fn signer() -> Signer {
-        Signer::new(OPENSSL_KEY.as_bytes(), "https://portal.test", Duration::from_secs(300)).unwrap()
+        Signer::new(
+            OPENSSL_KEY.as_bytes(),
+            "https://portal.test",
+            Duration::from_secs(300),
+        )
+        .unwrap()
     }
 
     fn decode(part: &str) -> serde_json::Value {
@@ -219,7 +228,11 @@ mod tests {
         assert_eq!(claims["aud"], "db");
         assert_eq!(claims["iat"], 1_000);
         assert_eq!(claims["exp"], 1_300);
-        assert_eq!(claims.as_object().unwrap().len(), 5, "no permission in the token");
+        assert_eq!(
+            claims.as_object().unwrap().len(),
+            5,
+            "no permission in the token"
+        );
         let signature = Base64UrlUnpadded::decode_vec(parts[2]).unwrap();
         let verifier = UnparsedPublicKey::new(&ED25519, public_key(&signer));
         let input = format!("{}.{}", parts[0], parts[1]);
@@ -231,9 +244,21 @@ mod tests {
     fn the_cache_gives_one_token_for_each_session_and_audience_until_half_of_its_life() {
         let signer = signer();
         let first = signer.token(1, "alice", "db", 1_000);
-        assert_eq!(signer.token(1, "alice", "db", 1_150), first, "half of the life is left");
-        assert_ne!(signer.token(1, "alice", "db", 1_151), first, "less than half is left");
-        assert_ne!(signer.token(1, "alice", "chat", 1_000), first, "another audience");
+        assert_eq!(
+            signer.token(1, "alice", "db", 1_150),
+            first,
+            "half of the life is left"
+        );
+        assert_ne!(
+            signer.token(1, "alice", "db", 1_151),
+            first,
+            "less than half is left"
+        );
+        assert_ne!(
+            signer.token(1, "alice", "chat", 1_000),
+            first,
+            "another audience"
+        );
         // Another session has its own entry. The signature is deterministic (Ed25519), so the
         // text is the same for the same claims.
         signer.token(2, "alice", "db", 1_000);
@@ -242,7 +267,10 @@ mod tests {
 
     #[test]
     fn the_key_text_is_a_pkcs8_pem_or_its_body_on_one_line() {
-        let body: String = OPENSSL_KEY.lines().filter(|l| !l.starts_with("-----")).collect();
+        let body: String = OPENSSL_KEY
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
         let one_line = Signer::new(body.as_bytes(), "i", Duration::from_secs(60)).unwrap();
         assert_eq!(one_line.kid(), signer().kid());
         let generated = testing::new_key_pem();
@@ -263,8 +291,11 @@ mod tests {
     #[test]
     fn the_kid_is_the_rfc_7638_thumbprint() {
         // RFC 8037, appendix A.3: the thumbprint of the key of appendix A.2.
-        let public = Base64UrlUnpadded::decode_vec("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo")
-            .unwrap();
-        assert_eq!(thumbprint(&public), "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k");
+        let public =
+            Base64UrlUnpadded::decode_vec("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo").unwrap();
+        assert_eq!(
+            thumbprint(&public),
+            "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
+        );
     }
 }

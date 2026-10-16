@@ -263,7 +263,10 @@ impl Config {
     pub fn render_effective(&self) -> String {
         let mut out = String::new();
         for line in &self.effective {
-            out.push_str(&format!("{} = {}  # {}\n", line.key, line.value, line.source));
+            out.push_str(&format!(
+                "{} = {}  # {}\n",
+                line.key, line.value, line.source
+            ));
         }
         out
     }
@@ -305,7 +308,8 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
     } else {
         if !secrets.pdp_tokens.is_empty() {
             return Err(
-                "a pdp_client block needs the pdp block: without it, the PDP listener is off".into(),
+                "a pdp_client block needs the pdp block: without it, the PDP listener is off"
+                    .into(),
             );
         }
         None
@@ -377,12 +381,14 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             login_attempts_per_ip: r.count("security", "login_attempts_per_ip")?,
             login_window: r.duration("security", "login_window")?,
             login_lockout: r.duration("security", "login_lockout")?,
-            global_login_rate_limit_enabled: r.bool("security", "global_login_rate_limit_enabled")?,
+            global_login_rate_limit_enabled: r
+                .bool("security", "global_login_rate_limit_enabled")?,
             global_login_attempts: r.count("security", "global_login_attempts")?,
             global_login_window: r.duration("security", "global_login_window")?,
             global_login_lockout: r.duration("security", "global_login_lockout")?,
             max_rate_limit_entries: r.count("security", "max_rate_limit_entries")?,
-            max_concurrent_password_checks: r.count("security", "max_concurrent_password_checks")?,
+            max_concurrent_password_checks: r
+                .count("security", "max_concurrent_password_checks")?,
         },
         metrics: MetricsConfig {
             enabled: r.bool("metrics", "enabled")?,
@@ -392,7 +398,9 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             interval: r.duration("discovery", "interval")?,
             probe_timeout: r.duration("discovery", "probe_timeout")?,
             kubernetes,
-            docker_socket: r.optional_text("discovery", "docker_socket")?.map(PathBuf::from),
+            docker_socket: r
+                .optional_text("discovery", "docker_socket")?
+                .map(PathBuf::from),
         },
         access,
         identity,
@@ -402,8 +410,9 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         },
         storage: StorageConfig {
             backend: storage_backend,
-            retention_days: u32::try_from(r.int("storage", "retention_days")?)
-                .map_err(|_| "internal error: storage.retention_days is out of range".to_string())?,
+            retention_days: u32::try_from(r.int("storage", "retention_days")?).map_err(|_| {
+                "internal error: storage.retention_days is out of range".to_string()
+            })?,
         },
         ui: UiConfig {
             icons_dir: PathBuf::from(r.text("ui", "icons_dir")?),
@@ -447,8 +456,12 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
     let login_secret = r
         .take_secret("authentication", "superadmin_login")
         .ok_or_else(|| missing("authentication.superadmin_login"))?;
-    let superadmin_login = check_login(login_secret.as_bytes())
-        .map_err(|reason| format!("authentication.superadmin_login: {reason} ({}; the value is hidden)", source_of(r, "authentication.superadmin_login")))?;
+    let superadmin_login = check_login(login_secret.as_bytes()).map_err(|reason| {
+        format!(
+            "authentication.superadmin_login: {reason} ({}; the value is hidden)",
+            source_of(r, "authentication.superadmin_login")
+        )
+    })?;
     drop(login_secret);
 
     let superadmin_password = r
@@ -511,9 +524,10 @@ fn build_access(r: &Resolved, superadmin_login: &str) -> Result<AccessConfig, St
         }
         let mut grants = Vec::new();
         for text in block.list("grants")? {
-            grants.push(Grant::parse(&text).map_err(|e| {
-                format!("invalid user.{login}.grants: item {text:?}: {e}")
-            })?);
+            grants.push(
+                Grant::parse(&text)
+                    .map_err(|e| format!("invalid user.{login}.grants: item {text:?}: {e}"))?,
+            );
         }
         grants.sort();
         configured_grants.insert(login.clone(), grants);
@@ -558,7 +572,8 @@ fn build_pdp_tokens(r: &mut Resolved) -> Result<Vec<(String, Secret)>, String> {
 /// The login is used as it is. The program does not trim it and does not change its case.
 /// A login that the form could not match is refused. No value changes silently.
 fn check_login(bytes: &[u8]) -> Result<String, String> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "the value is not valid UTF-8".to_string())?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| "the value is not valid UTF-8".to_string())?;
     if text.chars().count() > 64 {
         return Err("expected 1 to 64 characters".into());
     }
@@ -586,7 +601,9 @@ fn kubernetes_api(r: &mut Resolved, env: Env<'_>) -> Result<KubernetesApi, Strin
             format!("discovery.{attribute}: the environment variable {variable} is not set, or its value is not valid UTF-8")
         })?;
         if value.is_empty() {
-            return Err(format!("discovery.{attribute}: the environment variable {variable} is empty"));
+            return Err(format!(
+                "discovery.{attribute}: the environment variable {variable} is empty"
+            ));
         }
         Ok(value)
     };

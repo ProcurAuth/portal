@@ -651,3 +651,64 @@
     min-height: 48px;
   }
 }
+
+/* Grants on sub-resources ---------------------------------------------------------------- */
+
+/* One block for each service: the grants that the user has, then the form that adds one. */
+.subGrants {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.subGrants__name {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.subGrants__list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.subGrants__list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.subGrants__remove {
+  display: inline;
+}
+
+.subGrant {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+}
+
+.subGrant .field {
+  min-width: 140px;
+}
+
+.settings select {
+  height: 35px;
+  padding: 0 8px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-field);
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+  font-weight: 400;
+}
+
+.settings select:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
+}
