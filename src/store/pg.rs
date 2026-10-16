@@ -1,11 +1,13 @@
 //! The PostgreSQL backend: any number of portal instances share one database.
 //!
-//! A small pool of blocking connections, plain TCP (no TLS stack, so no C dependency). Callers run
-//! these methods on blocking threads, like the SQLite ones. A connection that broke is replaced and
-//! the operation retried once, which is what a failover of the database looks like from here.
+//! The backend uses a small pool of blocking connections. It uses plain TCP, with no TLS stack. Therefore, there is no C dependency.
+//! Callers run these methods on blocking threads, as they do for the SQLite backend.
+//! A connection that broke is replaced, and the operation is retried once.
+//! This is what a failover of the database looks like from here.
 //!
-//! The accounts, the history and the sessions live here. Every write that two instances could make
-//! at once is one statement or one transaction, so the instances never need to talk to each other.
+//! The accounts, the history and the sessions live in this database.
+//! Every write that two instances could make at once is one statement or one transaction.
+//! The instances do not need to talk to each other.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Condvar, Mutex};
@@ -17,10 +19,11 @@ use postgres::{Client, NoTls};
 
 use super::*;
 use crate::config::PostgresConfig;
+use crate::grants::Grant;
 use crate::tracking::{unix_now, AuditEvent, Batch, EndReason, Event, LoginAttempt, SessionStart};
 
-/// How long the first connection is retried: a pod starts before its network is ready, and the
-/// database may be failing over.
+/// How long the first connection is retried. A pod can start before its network is ready.
+/// The database can also be failing over.
 pub const STARTUP_RETRY: Duration = Duration::from_secs(60);
 /// How long a caller waits for a free connection of the pool.
 const POOL_WAIT: Duration = Duration::from_secs(5);
@@ -100,10 +103,49 @@ CREATE TABLE sessions (
   last_seen_at BIGINT NOT NULL
 );
 CREATE INDEX sessions_login ON sessions (login);
+", "
+-- Version 2: the grants of the users. The table of the old access model is dropped with its rows:
+-- after the migration, a user has the grants that the settings pages give again.
+DROP TABLE IF EXISTS user_roles;
+CREATE TABLE user_grants (
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  PRIMARY KEY (user_id, action, resource_type, resource_id)
+);
 "];
 
-/// What went wrong, with the cause when the server did not say (a refused connection reads
-/// "error connecting to server: Connection refused" rather than the first half only).
+/// The grants of a row of `user_grants`. A row that is not a valid grant stops the read.
+/// The database holds only what the servers wrote.
+fn grants_from(rows: Vec<(String, String, String)>) -> Result<Vec<Grant>, String> {
+    rows.into_iter()
+        .map(|(action, kind, id)| {
+            if kind != crate::grants::SERVICE_TYPE {
+                return Err(format!("user_grants: unknown resource type {kind:?}"));
+            }
+            Grant::new(&action, &id).map_err(|e| format!("user_grants: {e}"))
+        })
+        .collect()
+}
+
+fn insert_grants(
+    tx: &mut postgres::Transaction<'_>,
+    user_id: i64,
+    grants: &[Grant],
+) -> Result<(), postgres::Error> {
+    for grant in grants {
+        tx.execute(
+            "INSERT INTO user_grants (user_id, action, resource_type, resource_id)
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            &[&user_id, &grant.action, &crate::grants::SERVICE_TYPE, &grant.service],
+        )?;
+    }
+    Ok(())
+}
+
+/// What went wrong. The cause is included when the server does not state it.
+/// A refused connection reads "error connecting to server: Connection refused" rather than the first half only.
 fn db(error: postgres::Error) -> String {
     let mut text = error.to_string();
     if error.as_db_error().is_none() {
@@ -120,7 +162,7 @@ fn db(error: postgres::Error) -> String {
 /// A failure that the same operation on a fresh connection may not have.
 fn is_transient(error: &postgres::Error) -> bool {
     match error.code() {
-        // Not an answer of the server: the connection broke or timed out.
+        // This is not an answer from the server. The connection broke or timed out.
         None => true,
         Some(code) => {
             *code == SqlState::T_R_DEADLOCK_DETECTED
@@ -128,7 +170,7 @@ fn is_transient(error: &postgres::Error) -> bool {
                 || *code == SqlState::ADMIN_SHUTDOWN
                 || *code == SqlState::CRASH_SHUTDOWN
                 || *code == SqlState::CANNOT_CONNECT_NOW
-                // The service pointed at a primary that has just been demoted.
+                // The service points to a primary that has just been demoted.
                 || *code == SqlState::READ_ONLY_SQL_TRANSACTION
         }
     }
@@ -136,7 +178,7 @@ fn is_transient(error: &postgres::Error) -> bool {
 
 struct PoolState {
     idle: Vec<Client>,
-    /// Connections that exist: idle and lent.
+    /// The connections that exist. They are idle or lent.
     open: usize,
 }
 
@@ -149,7 +191,7 @@ struct Pool {
     freed: Condvar,
 }
 
-/// A connection on loan; it goes back to the pool when dropped, unless it broke.
+/// A connection on loan. It goes back to the pool when it is dropped, unless it broke.
 struct Conn<'a> {
     pool: &'a Pool,
     client: Option<Client>,
@@ -248,8 +290,8 @@ pub struct Pg {
 }
 
 impl Pg {
-    /// Connects (retrying for `retry`, the database may not be reachable yet) and brings the schema
-    /// up to date.
+    /// Connects and retries for `retry`. The database may not be reachable yet.
+    /// Then it brings the schema up to date.
     pub fn connect(cfg: &PostgresConfig, password: &str, retry: Duration) -> Result<Self, String> {
         let mut config = postgres::Config::new();
         config
@@ -310,8 +352,9 @@ impl Pg {
         }
     }
 
-    /// Runs `operation` on a pooled connection; once more on a fresh one if the failure is the
-    /// kind a new connection cures (the operation is a whole transaction, so it can be repeated).
+    /// Runs `operation` on a pooled connection.
+    /// If the failure is the kind that a new connection cures, it runs the operation once more on a fresh connection.
+    /// The operation is a whole transaction, so it can be repeated.
     fn run<T>(
         &self,
         mut operation: impl FnMut(&mut Client) -> Result<T, postgres::Error>,
@@ -349,7 +392,7 @@ impl Pg {
                 )?
                 .get(0);
             if current as usize > SCHEMA.len() {
-                // Not a database failure: reported by the caller as it is.
+                // This is not a database failure. The caller reports it as it is.
                 return Ok(Err(format!(
                     "the database schema is version {current}, this portal understands {}",
                     SCHEMA.len()
@@ -370,23 +413,46 @@ impl Pg {
     // Accounts --------------------------------------------------------------------------------
 
     pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
-        self.run(|c| {
+        let rows = self.run(|c| {
             Ok(c.query(
                 "SELECT u.login, u.password_hash, u.created_at,
-                        ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id
-                               ORDER BY r.role COLLATE \"C\")
+                        ARRAY(SELECT g.action FROM user_grants g WHERE g.user_id = u.id
+                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\"),
+                        ARRAY(SELECT g.resource_type FROM user_grants g WHERE g.user_id = u.id
+                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\"),
+                        ARRAY(SELECT g.resource_id FROM user_grants g WHERE g.user_id = u.id
+                               ORDER BY g.action COLLATE \"C\", g.resource_id COLLATE \"C\")
                    FROM users u ORDER BY u.login COLLATE \"C\"",
                 &[],
             )?
             .into_iter()
-            .map(|row| UserRow {
-                login: row.get(0),
-                password_hash: row.get(1),
-                created_at: row.get(2),
-                roles: row.get(3),
+            .map(|row| {
+                let (actions, kinds, ids): (Vec<String>, Vec<String>, Vec<String>) =
+                    (row.get(3), row.get(4), row.get(5));
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, i64>(2),
+                    actions
+                        .into_iter()
+                        .zip(kinds)
+                        .zip(ids)
+                        .map(|((a, k), i)| (a, k, i))
+                        .collect::<Vec<_>>(),
+                )
             })
-            .collect())
-        })
+            .collect::<Vec<_>>())
+        })?;
+        rows.into_iter()
+            .map(|(login, password_hash, created_at, grants)| {
+                Ok(UserRow {
+                    login,
+                    password_hash,
+                    created_at,
+                    grants: grants_from(grants)?,
+                })
+            })
+            .collect()
     }
 
     pub fn insert_user(&self, user: &UserRow) -> Result<(), InsertError> {
@@ -402,12 +468,7 @@ impl Pg {
                     return Ok(false);
                 };
                 let id: i64 = row.get(0);
-                for role in &user.roles {
-                    tx.execute(
-                        "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                        &[&id, role],
-                    )?;
-                }
+                insert_grants(&mut tx, id, &user.grants)?;
                 tx.commit()?;
                 Ok(true)
             })
@@ -423,7 +484,7 @@ impl Pg {
         &self,
         login: &str,
         password_hash: Option<&str>,
-        roles: &[String],
+        grants: Option<&[Grant]>,
     ) -> Result<bool, String> {
         self.run(|c| {
             let mut tx = c.transaction()?;
@@ -441,12 +502,9 @@ impl Pg {
                     &[&id, &hash],
                 )?;
             }
-            tx.execute("DELETE FROM user_roles WHERE user_id = $1", &[&id])?;
-            for role in roles {
-                tx.execute(
-                    "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    &[&id, role],
-                )?;
+            if let Some(grants) = grants {
+                tx.execute("DELETE FROM user_grants WHERE user_id = $1", &[&id])?;
+                insert_grants(&mut tx, id, grants)?;
             }
             tx.commit()?;
             Ok(true)
@@ -463,7 +521,7 @@ impl Pg {
         if batch.events.is_empty() && batch.hits.is_empty() && batch.seen.is_empty() {
             return Ok(());
         }
-        // The same rows in the same order on every instance, so two flushes never deadlock.
+        // Every instance writes the same rows in the same order. Therefore, two flushes never deadlock.
         let mut hits: Vec<_> = batch.hits.iter().collect();
         hits.sort_by(|a, b| a.0.cmp(b.0));
         let mut seen: Vec<_> = batch.seen.iter().collect();
@@ -541,10 +599,9 @@ impl Pg {
         })
     }
 
-    /// Closes the history rows of sessions that are no longer live and whose end nobody recorded
-    /// (an instance died before it flushed): they end at the last time they were seen. Only rows not
-    /// seen since `before` are looked at, so an end that is still waiting for its flush is not
-    /// taken for a lost one.
+    /// Closes the history rows of sessions that are no longer live. Nobody recorded the end of these sessions.
+    /// This happens when an instance stops before it flushes its records. Such rows end at the last time they were seen.
+    /// Only rows not seen since `before` are checked. Therefore, an end that still waits for its flush is not taken for a lost one.
     pub fn close_lost_sessions(&self, before: i64, reason: &str) -> Result<usize, String> {
         self.run(|c| {
             Ok(c.execute(
@@ -718,10 +775,10 @@ impl Pg {
 
     // Shared sessions -------------------------------------------------------------------------
 
-    /// Records a new session, and its line of the history in the same transaction, so no other
-    /// instance can see a session whose history row does not exist yet. `false`: `max_active`
-    /// sessions are live already. The count is read without a lock, so two instances racing at the
-    /// limit can overshoot it by one each.
+    /// Records a new session and its line of the history in the same transaction.
+    /// Therefore, no other instance can see a session whose history row does not exist yet.
+    /// Returns `false` when `max_active` sessions are already live.
+    /// The count is read without a lock. Two instances that race at the limit can overshoot it by one each.
     pub fn session_insert(
         &self,
         digest: &[u8; 32],
@@ -771,8 +828,8 @@ impl Pg {
         })
     }
 
-    /// The live session of `digest` issued for `binding`, whose idle timer is renewed to `now`.
-    /// `None` when there is none, it ended, or the binding differs (which leaves it untouched).
+    /// Returns the live session of `digest` that was issued for `binding`. Its idle timer is renewed to `now`.
+    /// Returns `None` when there is no such session, when it ended, or when the binding differs. In the last case, the session is not changed.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
@@ -791,7 +848,7 @@ impl Pg {
         })
     }
 
-    /// Ends the session of `digest`; the session when this call is the one that ended it.
+    /// Ends the session of `digest`. Returns the session only when this call is the one that ended it.
     pub fn session_delete(&self, digest: &[u8; 32]) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
@@ -803,7 +860,7 @@ impl Pg {
         })
     }
 
-    /// Ends every session of one user; the identifiers this call ended.
+    /// Ends every session of one user. Returns the identifiers that this call ended.
     pub fn sessions_delete_user(&self, login: &str) -> Result<Vec<u64>, String> {
         self.run(|c| {
             Ok(c.query(
@@ -816,8 +873,8 @@ impl Pg {
         })
     }
 
-    /// Ends the sessions past their lifetime or unused for `idle_secs`; each with whether it
-    /// expired (rather than idled out). Exactly one caller gets any given session back.
+    /// Ends the sessions past their lifetime or unused for `idle_secs`. Each result states whether the session expired, or whether it idled out.
+    /// Exactly one caller gets any given session back.
     pub fn sessions_expire(&self, now: i64, idle_secs: i64) -> Result<Vec<(u64, bool)>, String> {
         self.run(|c| {
             Ok(c.query(
@@ -840,15 +897,15 @@ impl Pg {
 
     // Import ----------------------------------------------------------------------------------
 
-    /// Copies a SQLite dump into this database, in one transaction, and only into an empty one.
-    /// The sessions of the dump that were still open end where they were last seen: sessions do not
-    /// survive the move (they were in the memory of the old process).
+    /// Copies a SQLite dump into this database, in one transaction. The database must be empty.
+    /// The sessions of the dump that were still open end where they were last seen.
+    /// Sessions do not survive the move. They were in the memory of the old process.
     pub fn import(&self, dump: &Dump) -> Result<ImportReport, String> {
         self.run(|c| {
             let mut tx = c.transaction()?;
             tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
             tx.batch_execute(
-                "LOCK TABLE users, user_roles, sessions_log, service_access, audit_events, login_attempts
+                "LOCK TABLE users, user_grants, sessions_log, service_access, audit_events, login_attempts
                    IN ACCESS EXCLUSIVE MODE",
             )?;
             for table in IMPORTED_TABLES {
@@ -862,12 +919,9 @@ impl Pg {
                 }
             }
             let user = tx.prepare("INSERT INTO users (id, login, password_hash, created_at) VALUES ($1, $2, $3, $4)")?;
-            let role = tx.prepare("INSERT INTO user_roles (user_id, role) VALUES ($1, $2)")?;
             for (id, row) in &dump.users {
                 tx.execute(&user, &[id, &row.login, &row.password_hash, &row.created_at])?;
-                for name in &row.roles {
-                    tx.execute(&role, &[id, name])?;
-                }
+                insert_grants(&mut tx, *id, &row.grants)?;
             }
             let session = tx.prepare(
                 "INSERT INTO sessions_log
@@ -927,7 +981,7 @@ impl Pg {
                     &[&row.id, &row.ts, &row.ip, &row.login, &row.known, &row.success, &row.user_agent],
                 )?;
             }
-            // The rows kept their identifiers: the next ones continue after them.
+            // The rows keep their identifiers. The next rows continue after them.
             for (table, column) in [
                 ("users", "id"),
                 ("audit_events", "id"),
@@ -953,13 +1007,13 @@ impl Pg {
         })?
     }
 
-    /// A store in a schema of its own in the database `url` names (`postgres://user:password@host/db`).
+    /// A store in a schema of its own, in the database that `url` names (`postgres://user:password@host/db`).
     #[cfg(test)]
     pub fn open_isolated(url: &str) -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let base: postgres::Config = url.parse().expect("a PostgreSQL URL");
-        // The process number repeats from one container to the next, so the clock tells runs apart.
+        // The process number repeats from one container to the next. Therefore, the clock tells runs apart.
         let schema = format!(
             "portal_test_{}_{}_{}",
             std::process::id(),
@@ -980,7 +1034,7 @@ impl Pg {
         Self::start(config, 4, Duration::from_secs(5)).unwrap()
     }
 
-    /// Another instance of the portal on the same database: its own pool, the same schema.
+    /// Another instance of the portal, on the same database. It has its own pool and uses the same schema.
     #[cfg(test)]
     pub fn sibling(&self) -> Self {
         Self::start(
@@ -991,7 +1045,7 @@ impl Pg {
         .unwrap()
     }
 
-    /// Makes every new connection fail, as a database that went away does (the pooled ones are dropped).
+    /// Makes every new connection fail, as a database that went away does. The pooled connections are dropped.
     #[cfg(test)]
     pub fn go_down(&self) {
         self.pool
@@ -1012,7 +1066,7 @@ impl Pg {
     }
 }
 
-/// The tables the import fills, which must all be empty.
+/// The tables that the import fills. All of them must be empty.
 const IMPORTED_TABLES: [&str; 5] = [
     "users",
     "sessions_log",
@@ -1066,7 +1120,7 @@ fn insert_login(
     Ok(())
 }
 
-/// Real connections per day, like the SQLite side (see there).
+/// Real connections per day, as on the SQLite side. See there.
 fn day_stats(
     client: &mut Client,
     first_day: i64,
@@ -1144,11 +1198,11 @@ mod tests {
         pg.insert_user(&UserRow {
             login: "alice".into(),
             password_hash: "h".into(),
-            roles: vec![],
+            grants: vec![],
             created_at: 1,
         })
         .unwrap();
-        // What a failover does to the connections of the pool: the server ends them.
+        // This is what a failover does to the connections of the pool. The server ends them.
         let application = pg.pool.config.get_application_name().unwrap().to_string();
         let mut admin = url.parse::<postgres::Config>().unwrap().connect(NoTls).unwrap();
         let killed = admin
@@ -1160,5 +1214,55 @@ mod tests {
         assert!(!killed.is_empty(), "there were connections to end");
         assert_eq!(pg.load_users().unwrap().len(), 1, "a new connection took over");
         assert_eq!(pg.load_users().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_migration_to_version_two_drops_the_old_access_data_and_adds_the_grants() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        // This database was made by an older portal. It has only version 1, with rows in the old table.
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute(
+                "DROP TABLE user_grants;
+                 DELETE FROM schema_migrations WHERE version > 1;
+                 CREATE TABLE user_roles (
+                   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                   role TEXT NOT NULL,
+                   PRIMARY KEY (user_id, role));
+                 INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+                 INSERT INTO user_roles (user_id, role) VALUES (1, 'ops'), (1, 'dev');",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        let old: i64 = admin
+            .query_one(
+                "SELECT COUNT(*) FROM information_schema.tables
+                  WHERE table_name = 'user_roles' AND table_schema = current_schema()",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(old, 0, "the old data is gone");
+        let users = migrated.load_users().unwrap();
+        assert_eq!(users.len(), 1, "the account stays");
+        assert!(users[0].grants.is_empty(), "a migrated user has no grant");
+        let grant = Grant::new("access", "grafana").unwrap();
+        assert!(migrated.update_user("alice", None, Some(&[grant.clone()])).unwrap());
+        assert_eq!(migrated.load_users().unwrap()[0].grants, [grant]);
+        // A second start finds nothing to do.
+        assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
     }
 }

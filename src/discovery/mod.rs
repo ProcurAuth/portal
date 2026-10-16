@@ -1,13 +1,18 @@
-//! Service discovery: where the catalogue comes from and what state each service is in.
+//! Service discovery: Defines where the catalogue comes from and the state of each service.
 //!
-//! Two sources, both optional: Kubernetes (Traefik IngressRoute annotations) and Docker
-//! (container labels). Each refresh lists the sources, turns every workload's labels into a
-//! [`Service`](crate::catalog::Service), resolves a health state, and publishes a new immutable
-//! [`Catalog`] snapshot. A source that fails keeps its last good answer and adds a problem message
-//! to the snapshot, so a flaky API does not blank the page.
+//! There are two sources. Both sources are optional. The sources are Kubernetes (Traefik
+//! IngressRoute annotations) and Docker (container labels). Each refresh does these steps:
 //!
-//! Interface: [`run`] (the refresh loop) and [`Stats`] (for `/metrics`). The loop publishes through
-//! a callback, so nothing here knows about the HTTP server.
+//! 1. It lists the sources.
+//! 2. It turns the labels of every workload into a [`Service`](crate::catalog::Service).
+//! 3. It resolves a health state.
+//! 4. It publishes a new immutable [`Catalog`] snapshot.
+//!
+//! A source that fails keeps its last good answer. It adds a problem message to the snapshot.
+//! A flaky API does not blank the page.
+//!
+//! The interface is [`run`] (the refresh loop) and [`Stats`] (for `/metrics`). The loop publishes
+//! through a callback. Nothing in this module knows about the HTTP server.
 
 mod docker;
 mod kube;
@@ -30,10 +35,10 @@ use kube::Kube;
 
 const MAX_CONCURRENT_CHECKS: usize = 8;
 
-/// What a source reports about one workload: its labels and, when it knows, how to tell if it runs.
+/// The data that a source reports about one workload. It contains the labels and, when the source knows them, how to check whether the workload runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workload {
-    /// `namespace/name` of a route, or the Compose service of a container.
+    /// The `namespace/name` of a route, or the Compose service of a container.
     pub origin: String,
     pub labels: BTreeMap<String, String>,
     pub hint: Hint,
@@ -42,16 +47,16 @@ pub struct Workload {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hint {
     None,
-    /// The container's own state (Docker).
+    /// The state of the container (Docker).
     Running(bool),
-    /// Ready pods matching an equality selector (Kubernetes).
+    /// The ready pods that match an equality selector (Kubernetes).
     Pods {
         namespace: String,
         selector: String,
     },
 }
 
-/// How the health of one service is found.
+/// The method that finds the health of one service.
 #[derive(Debug, PartialEq, Eq)]
 enum Check {
     None,
@@ -60,7 +65,7 @@ enum Check {
     Pods { namespace: String, selector: String },
 }
 
-/// A declared health URL wins; else what the source knows.
+/// A declared health URL has priority. Otherwise, the source uses what it knows.
 fn plan(service: &Service, hint: &Hint) -> Check {
     if let Some(url) = &service.health_url {
         return Check::Http(url.clone());
@@ -79,7 +84,7 @@ fn plan(service: &Service, hint: &Hint) -> Check {
     }
 }
 
-/// Counters for `/metrics`.
+/// The counters for `/metrics`.
 #[derive(Default)]
 pub struct Stats {
     refreshes: AtomicU64,
@@ -117,6 +122,12 @@ impl Stats {
                 .unwrap_or(0);
             self.last_success_unix.store(now, Ordering::Relaxed);
         }
+    }
+
+    /// The number of refreshes since the start.
+    #[cfg(test)]
+    pub fn refreshes(&self) -> u64 {
+        self.refreshes.load(Ordering::Relaxed)
     }
 
     pub fn render(&self) -> String {
@@ -169,20 +180,18 @@ impl Stats {
     }
 }
 
-/// The refresh loop. Runs until the process ends; each refresh hands a new snapshot to `publish`.
+/// The refresh loop. It runs until the process ends. Each refresh gives a new snapshot to `publish`.
 pub async fn run(
     config: DiscoveryConfig,
     stats: Arc<Stats>,
     publish: impl Fn(Catalog) + Send + 'static,
 ) {
     let mut setup_problems: Vec<String> = Vec::new();
-    let kube = if config.kubernetes {
-        Kube::in_cluster(config.probe_timeout)
+    let kube = config.kubernetes.as_ref().and_then(|api| {
+        Kube::in_cluster(api, config.probe_timeout)
             .map_err(|e| setup_problems.push(format!("kubernetes: {e}")))
             .ok()
-    } else {
-        None
-    };
+    });
     let docker = config.docker_socket.as_ref().and_then(|path| {
         Docker::new(path, config.probe_timeout)
             .map_err(|e| setup_problems.push(format!("docker: {e}")))
@@ -233,8 +242,9 @@ pub async fn run(
     }
 }
 
-/// Workloads to a catalogue: parse labels, resolve health, group. Order of `workloads` does not
-/// matter: they are sorted by origin first so duplicates always resolve the same way.
+/// Converts workloads to a catalogue. It parses the labels, resolves the health, and groups the
+/// services. The order of `workloads` does not matter. They are sorted by origin first.
+/// Duplicates always resolve the same way.
 async fn build_catalog(
     mut workloads: Vec<Workload>,
     mut problems: Vec<String>,
@@ -297,9 +307,10 @@ async fn build_catalog(
     )
 }
 
-/// Root certificates for the HTTP clients. The image has no CA store and `reqwest` refuses to build
-/// a client without trust roots, even one that never speaks TLS, so the Mozilla roots are embedded
-/// (as in `dns-updater`). The Kubernetes client trusts only the cluster CA and does not use these.
+/// Root certificates for the HTTP clients. The image has no CA store. `reqwest` refuses to build
+/// a client without trust roots. This applies even to a client that never speaks TLS. The Mozilla
+/// roots are therefore embedded (as in `dns-updater`). The Kubernetes client trusts only the
+/// cluster CA. It does not use these roots.
 fn embedded_roots() -> Vec<reqwest::Certificate> {
     webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
@@ -307,8 +318,13 @@ fn embedded_roots() -> Vec<reqwest::Certificate> {
         .collect()
 }
 
-/// Reads a response body, failing once it exceeds `limit` bytes.
-async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+/// The HTTP client of the probes. The other readers of the services also use it (the access actions).
+pub fn http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    probe::build_client(timeout)
+}
+
+/// Reads a response body. It fails when the body exceeds `limit` bytes.
+pub async fn read_capped(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     loop {
         match response.chunk().await {

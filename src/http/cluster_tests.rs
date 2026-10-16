@@ -1,7 +1,7 @@
-//! The portal as a whole, driven over HTTP the way Traefik and a browser drive it. With PostgreSQL two
-//! instances share one database (and one signing key, as the configuration demands); with SQLite
-//! there is one, and both "instances" of a test are it. Real servers on local ports, so the
-//! blocking calls to the database run on the async workers exactly as in production.
+//! The portal as a whole, driven over HTTP. Traefik and a browser drive it in the same way.
+//! With PostgreSQL, two instances share one database and one signing key, as the configuration demands.
+//! With SQLite, there is one database. Both "instances" of a test use it.
+//! The tests start real servers on local ports. The blocking calls to the database therefore run on the async workers, as in production.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -9,19 +9,34 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::*;
+use crate::grants::Grant;
 use crate::store::testing::{each_backend, Backend};
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 const SECRET: [u8; 32] = [b'k'; 32];
 const AGENT: &str = "ClusterTest/1.0";
+const PDP_DB_TOKEN: &str = "the PDP token of the server db, 32 bytes or more";
+const PDP_CHAT_TOKEN: &str = "the PDP token of the server chat, 32 bytes or more";
 
 struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
+    body: String,
 }
 
 impl Reply {
-    /// The value a `Set-Cookie` gives to the cookie `name`.
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(header, _)| header == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("{e}: {}", self.body))
+    }
+
+    /// Gives the value of the cookie `name` in a `Set-Cookie` header.
     fn cookie(&self, name: &str) -> Option<String> {
         self.headers
             .iter()
@@ -65,7 +80,7 @@ fn send(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &st
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
     let text = String::from_utf8_lossy(&raw);
-    let (head, _) = text.split_once("\r\n\r\n").expect("a complete response");
+    let (head, body) = text.split_once("\r\n\r\n").expect("a complete response");
     let mut lines = head.lines();
     let status = lines
         .next()
@@ -79,7 +94,11 @@ fn send(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &st
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
         .collect();
-    Reply { status, headers }
+    Reply {
+        status,
+        headers,
+        body: body.to_string(),
+    }
 }
 
 #[derive(Clone)]
@@ -95,30 +114,66 @@ fn password_hash() -> String {
 }
 
 fn start(store: Arc<Store>, cache_ttl: Option<Duration>) -> Node {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
+    start_with(store, cache_ttl, "")
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
-        .port();
-    let config = Config::parse(&format!(
-        r#"
+        .port()
+}
+
+/// A node with more configuration. The `extra` text is added to the file.
+/// The tests use these variables:
+/// `TEST_IDENTITY_KEY` (a new Ed25519 key), `TEST_PDP_DB` and `TEST_PDP_CHAT` (PDP tokens).
+fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> Node {
+    let port = free_port();
+    let key = crate::identity::testing::new_key_pem();
+    let (config, mut secrets) = Config::parse(
+        &format!(
+            r#"
         server {{ listen_address = "127.0.0.1:{port}" workers = 2 }}
         authentication {{
-          superadmin_login_file    = "/run/secrets/login"
-          superadmin_password_file = "/run/secrets/password"
+          superadmin_login_env    = "PORTAL_TEST_LOGIN"
+          superadmin_password_env = "PORTAL_TEST_PASSWORD"
         }}
-        roles {{ names = "ops, dev" }}
         users {{ max_users = 10 }}
-        session {{ secret_mode = "file" secret_file = "/run/secrets/session" }}
+        session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
+        discovery {{ interval = "1h" }}
+        {extra}
         "#
-    ))
+        ),
+        &|name| match name {
+            "PORTAL_TEST_LOGIN" => Some("root".to_string()),
+            "PORTAL_TEST_PASSWORD" => Some(PASSWORD.to_string()),
+            "PORTAL_TEST_SESSION" => Some("0123456789abcdef0123456789abcdef".to_string()),
+            "TEST_IDENTITY_KEY" => Some(key.clone()),
+            "TEST_PDP_DB" => Some(PDP_DB_TOKEN.to_string()),
+            "TEST_PDP_CHAT" => Some(PDP_CHAT_TOKEN.to_string()),
+            _ => None,
+        },
+    )
     .unwrap();
     let tracker = Tracker::start(Arc::clone(&store), Duration::from_millis(200), 90).unwrap();
     let superadmin = SuperAdmin {
         login: "root".into(),
         password_hash: password_hash(),
     };
-    let mut state = AppState::new(config, superadmin, SECRET.to_vec(), store, tracker).unwrap();
+    let access = AccessSecrets {
+        identity_key: secrets.identity_key.take(),
+        pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
+    };
+    let mut state = AppState::new(
+        config,
+        superadmin,
+        SECRET.to_vec(),
+        store,
+        tracker,
+        access,
+    )
+    .unwrap();
     if let Some(ttl) = cache_ttl {
         state.sessions.set_cache_ttl(ttl);
     }
@@ -132,10 +187,12 @@ fn start(store: Arc<Store>, cache_ttl: Option<Duration>) -> Node {
         TcpStream::connect(("127.0.0.1", port)).is_ok()
             && send(port, "GET", "/healthz", &[], "").status == 200
     });
+    // The first discovery round publishes an empty catalogue. The next round starts an hour later.
+    wait_until(Duration::from_secs(10), || node.state.discovery.refreshes() >= 1);
     node
 }
 
-/// Two nodes on one database, or the one SQLite node twice.
+/// Makes two nodes on one database, or the one SQLite node twice.
 fn cluster(backend: &Backend, cache_ttl: Option<Duration>) -> (Node, Node) {
     match backend {
         Backend::Sqlite => {
@@ -165,7 +222,7 @@ fn session_cookie_name(node: &Node) -> String {
     transport::session_cookie_name(&node.state.config.session.cookie_name, false).to_string()
 }
 
-/// Signs in the way the login form does, and returns the session cookie.
+/// Signs in as the login form does. It returns the session cookie.
 fn sign_in(node: &Node, login: &str, password: &str) -> String {
     let csrf = "A".repeat(32);
     let signature = sign_return_uri(&SECRET, "/").unwrap();
@@ -188,7 +245,7 @@ fn sign_in(node: &Node, login: &str, password: &str) -> String {
         .expect("a session cookie")
 }
 
-/// What Traefik gets from ForwardAuth: 204 lets the request through, 302 sends it to the login page.
+/// The result that Traefik gets from ForwardAuth. 204 lets the request through. 302 sends it to the login page.
 fn verify(node: &Node, session: &str, agent: &str) -> u16 {
     let cookie = format!("{}={session}", session_cookie_name(node));
     send(
@@ -206,7 +263,7 @@ fn verify(node: &Node, session: &str, agent: &str) -> u16 {
     .status
 }
 
-/// A POST of the settings or of the launcher, with the anti-CSRF token those forms carry.
+/// Makes a POST to the settings or to the launcher. The request has the anti-CSRF token that those forms carry.
 fn post(node: &Node, session: &str, path: &str, purpose: &str, fields: &str) -> Reply {
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={session}", session_cookie_name(node));
@@ -257,7 +314,7 @@ fn a_session_opened_on_one_instance_is_valid_on_the_other_and_a_logout_ends_it_o
             302,
             "ended on the instance that did it"
         );
-        // The other instance may keep what it checked for a few seconds, and no longer.
+        // The other instance can keep the check result for a few seconds. It cannot keep it longer.
         let waited = wait_until(Duration::from_secs(10), || {
             verify(&b, &session, AGENT) == 302
         });
@@ -267,7 +324,7 @@ fn a_session_opened_on_one_instance_is_valid_on_the_other_and_a_logout_ends_it_o
             backend.name()
         );
 
-        // The history says how it ended, whoever wrote it.
+        // The history shows how it ended, whoever wrote it.
         wait_until(Duration::from_secs(10), || {
             let snapshot = b
                 .state
@@ -309,15 +366,15 @@ fn an_account_created_on_one_instance_signs_in_and_is_known_on_the_other() {
                 &root,
                 USERS_ADD_PATH,
                 USERS_TOKEN,
-                &format!("login={login}&password=a-long-password-1&r_ops=1"),
+                &format!("login={login}&password=a-long-password-1"),
             )
         };
         assert_eq!(add("carol").status, 303);
         assert!(a.state.users.get("carol").is_some());
 
-        // The periodic refresh of the other instance brings it in.
+        // The periodic refresh of the other instance loads it.
         crate::sync::run_round(&b.state, 1);
-        assert_eq!(b.state.users.roles_of("carol").unwrap(), ["ops"]);
+        assert!(b.state.users.grants_of("carol").unwrap().is_empty(), "a new user has no grant");
         let on_b = sign_in(&b, "carol", "a-long-password-1");
         assert_eq!(
             verify(&a, &on_b, AGENT),
@@ -325,7 +382,7 @@ fn an_account_created_on_one_instance_signs_in_and_is_known_on_the_other() {
             "and her session is good on the first one"
         );
 
-        // Without waiting for a refresh: the login that is not known yet makes the instance look.
+        // Do not wait for a refresh. An unknown login makes the instance search for it.
         assert_eq!(add("dave").status, 303);
         if b.state.users.get("dave").is_none() {
             std::thread::sleep(Duration::from_millis(1_100));
@@ -346,11 +403,11 @@ fn a_session_opened_for_an_account_the_instance_has_not_heard_of_yet_is_not_ende
             &root,
             USERS_ADD_PATH,
             USERS_TOKEN,
-            "login=erin&password=a-long-password-1&r_dev=1",
+            "login=erin&password=a-long-password-1",
         );
         assert_eq!(reply.status, 303);
         let erin = sign_in(&a, "erin", "a-long-password-1");
-        // `b` never refreshed its accounts: the session must not be taken for one of a deleted account.
+        // `b` never refreshed its accounts. The session must not be accepted as one of a deleted account.
         std::thread::sleep(Duration::from_millis(1_100));
         assert_eq!(verify(&b, &erin, AGENT), 204);
         assert_eq!(verify(&a, &erin, AGENT), 204);
@@ -367,7 +424,7 @@ fn deleting_an_account_ends_its_sessions_on_every_instance() {
             &root,
             USERS_ADD_PATH,
             USERS_TOKEN,
-            "login=frank&password=a-long-password-1&r_ops=1",
+            "login=frank&password=a-long-password-1",
         );
         assert_eq!(reply.status, 303);
         crate::sync::run_round(&b.state, 1);
@@ -399,7 +456,7 @@ fn a_restart_keeps_the_sessions_of_a_shared_database_and_drops_those_of_a_file()
         let first = start(Arc::clone(&store), None);
         let session = sign_in(&first, "root", PASSWORD);
         assert_eq!(verify(&first, &session, AGENT), 204);
-        // The same database under a new process: a restart.
+        // The same database is used by a new process. This is a restart.
         let second = start(Arc::clone(&store), None);
         let expected = if store.is_shared() { 204 } else { 302 };
         assert_eq!(
@@ -410,3 +467,367 @@ fn a_restart_keeps_the_sessions_of_a_shared_database_and_drops_those_of_a_file()
         );
     });
 }
+
+// Grants, identity token, launcher, refusal page and PDP ----------------------------------------
+
+/// A service of the catalogue. Discovery makes the service from labels.
+fn listed(labels: &[(&str, &str)]) -> crate::catalog::Service {
+    let map = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    crate::catalog::parse_labels("test", &map).unwrap().unwrap()
+}
+
+/// The URL of the actions of the service `db` in the tests. The test fills the registry.
+const DB_ACTIONS_URL: &str = "http://test/.well-known/access-actions";
+
+/// The catalogue has two services. Grafana (`other-grafana`, only `access`) and Db (`db`, with actions).
+fn publish_catalog(node: &Node, db_actions: &[&str]) {
+    let catalog = Catalog::build(
+        vec![
+            listed(&[("portal.name", "Grafana"), ("portal.href", "/grafana/")]),
+            listed(&[
+                ("portal.name", "Db"),
+                ("portal.id", "db"),
+                ("portal.href", "/db/"),
+                ("portal.actions", DB_ACTIONS_URL),
+            ]),
+        ],
+        Vec::new(),
+    );
+    *node.state.catalog.write().unwrap() = Arc::new(catalog);
+    node.state.actions.set(
+        "db",
+        db_actions
+            .iter()
+            .map(|name| crate::actions::Action {
+                name: name.to_string(),
+                resource_types: vec!["service".into()],
+                description: format!("The action {name}."),
+            })
+            .collect(),
+    );
+}
+
+/// The result that Traefik gets from ForwardAuth for a browser that opens `uri`.
+fn open(node: &Node, session: &str, uri: &str) -> Reply {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    send(
+        node.port,
+        "GET",
+        VERIFY_PATH,
+        &[
+            ("X-Forwarded-Uri", uri),
+            ("X-Forwarded-Method", "GET"),
+            ("Cookie", &cookie),
+        ],
+        "",
+    )
+}
+
+fn page(node: &Node, session: &str, path: &str) -> Reply {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    send(node.port, "GET", path, &[("Cookie", &cookie)], "")
+}
+
+/// Gives the claims of a JWT. The function does not check the signature.
+fn claims(token: &str) -> serde_json::Value {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let part = token.split('.').nth(1).unwrap();
+    serde_json::from_slice(&Base64UrlUnpadded::decode_vec(part).unwrap()).unwrap()
+}
+
+#[test]
+fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_services() {
+    each_backend(|backend| {
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            Some(Duration::ZERO),
+            r#"identity { issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" token_ttl = "5m" }"#,
+        );
+        publish_catalog(&node, &["query.run.read", "query.run.write"]);
+        let root = sign_in(&node, "root", PASSWORD);
+        let add = post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, "login=alice&password=a-long-password-1");
+        assert_eq!(add.location(), Some("/auth/settings?s=user-added"));
+        let refused = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=bob&password=a-long-password-1&g.db.access=1",
+        );
+        assert_eq!(refused.status, 400, "a new user is added without grants");
+
+        // A new user has no grant. The user has no service, and the refusal names none.
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let denied = open(&node, &alice, "/grafana/d/1");
+        assert_eq!(denied.status, 302);
+        assert_eq!(denied.location(), Some(DENIED_PATH), "no service in the URL");
+        assert_eq!(open(&node, &alice, "/db/").status, 302);
+        let launcher = page(&node, &alice, "/");
+        assert!(launcher.body.contains("No service available"));
+        assert!(!launcher.body.contains("Grafana") && !launcher.body.contains(">Db<"));
+        let refusal = page(&node, &alice, DENIED_PATH);
+        assert_eq!(refusal.status, 403);
+        assert!(!refusal.body.contains("Grafana") && !refusal.body.contains("Db"));
+
+        // The superadmin gives access and two actions on db.
+        let update = |fields: &str| {
+            post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, &format!("login=alice{fields}"))
+        };
+        let reply = update("&g.db.access=1&g.db.query.run.read=1&g.db.query.run.write=1");
+        assert_eq!(reply.location(), Some("/auth/settings?s=user-updated"));
+        let allowed = open(&node, &alice, "/db/query?x=1");
+        assert_eq!(allowed.status, 204);
+        let token = allowed.header("x-identity-token").expect("an identity token").to_string();
+        let c = claims(&token);
+        assert_eq!(c["iss"], "https://portal.test");
+        assert_eq!(c["sub"], "alice");
+        assert_eq!(c["aud"], "db");
+        assert_eq!(c["exp"].as_i64().unwrap() - c["iat"].as_i64().unwrap(), 300);
+        assert_eq!(
+            open(&node, &alice, "/db/other").header("x-identity-token"),
+            Some(token.as_str()),
+            "one token for each session and audience"
+        );
+        assert_eq!(open(&node, &alice, "/grafana/").status, 302, "still no access to Grafana");
+        let launcher = page(&node, &alice, "/");
+        assert!(launcher.body.contains(">Db<") && !launcher.body.contains("Grafana"));
+        // A path that no service owns gets no token.
+        let free = open(&node, &alice, "/app.js");
+        assert_eq!(free.status, 204);
+        assert!(free.header("x-identity-token").is_none());
+
+        // The server refuses a grant that the page did not offer.
+        let reply = update("&g.other-grafana.dashboards.read=1");
+        assert_eq!(reply.location(), Some("/auth/settings?s=edit-unknown-grant"));
+
+        // An action that db no longer publishes keeps its grant. The page did not show the action.
+        publish_catalog(&node, &["query.run.read"]);
+        assert_eq!(update("&g.db.access=1").location(), Some("/auth/settings?s=user-updated"));
+        let kept: Vec<String> = node
+            .state
+            .users
+            .grants_of("alice")
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(kept, ["access on service:db", "query.run.write on service:db"]);
+        // The database holds the same grants.
+        let stored = node.state.store.load_users().unwrap();
+        assert_eq!(stored[0].grants, node.state.users.grants_of("alice").unwrap());
+
+        // Without access, the service is removed again.
+        assert_eq!(update("").location(), Some("/auth/settings?s=user-updated"));
+        assert_eq!(open(&node, &alice, "/db/").status, 302);
+
+        // The superadmin opens every service. It gets a token with its own login.
+        let as_root = open(&node, &root, "/grafana/");
+        assert_eq!(as_root.status, 204);
+        assert_eq!(claims(as_root.header("x-identity-token").unwrap())["sub"], "root");
+        assert_eq!(claims(as_root.header("x-identity-token").unwrap())["aud"], "other-grafana");
+    });
+}
+
+#[test]
+fn in_the_static_mode_only_the_configuration_gives_grants() {
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        r#"access { grants_mode = "static" }
+        user "alice" { grants = ["access on service:other-grafana"] }"#,
+    );
+    publish_catalog(&node, &[]);
+    let root = sign_in(&node, "root", PASSWORD);
+    post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, "login=alice&password=a-long-password-1");
+    let reply = post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, "login=alice&g.db.access=1");
+    assert_eq!(reply.location(), Some("/auth/settings?s=grants-static"));
+    // A grant in the database does not count in this mode.
+    node.state
+        .store
+        .update_user("alice", None, Some(&[Grant::new("access", "db").unwrap()]))
+        .unwrap();
+    crate::sync::run_round(&node.state, 1);
+    let alice = sign_in(&node, "alice", "a-long-password-1");
+    assert_eq!(open(&node, &alice, "/grafana/").status, 204, "the configuration gives it");
+    assert_eq!(open(&node, &alice, "/db/").status, 302, "the database does not");
+}
+
+/// A request to the PDP listener.
+fn pdp(port: u16, path: &str, token: Option<&str>, body: &str, request_id: Option<&str>) -> Reply {
+    let authorization = token.map(|t| format!("Bearer {t}"));
+    let mut headers: Vec<(&str, &str)> = vec![("Content-Type", "application/json")];
+    if let Some(value) = &authorization {
+        headers.push(("Authorization", value));
+    }
+    if let Some(id) = request_id {
+        headers.push(("X-Request-ID", id));
+    }
+    send(port, "POST", path, &headers, body)
+}
+
+fn evaluation(subject: &str, action: &str, kind: &str, id: &str) -> String {
+    serde_json::json!({
+        "subject": {"type": "user", "id": subject},
+        "action": {"name": action},
+        "resource": {"type": kind, "id": id},
+        "context": {}
+    })
+    .to_string()
+}
+
+#[test]
+fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = ["query.run.read on service:db"] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
+            pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
+        ),
+    );
+    publish_catalog(&node, &["query.run.read", "query.run.write", "system.read"]);
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let grants = |list: &[&str]| -> Vec<Grant> { list.iter().map(|g| Grant::parse(g).unwrap()).collect() };
+    for (login, held) in [
+        ("alice", grants(&["access on service:db", "query.run.write on service:db"])),
+        ("carol", Vec::new()),
+    ] {
+        let row = crate::store::UserRow {
+            login: login.into(),
+            password_hash: password_hash(),
+            grants: held,
+            created_at: 1,
+        };
+        node.state.store.insert_user(&row).unwrap();
+    }
+    crate::sync::run_round(&node.state, 1);
+
+    let ask = |token: Option<&str>, body: &str| pdp(pdp_port, "/access/v1/evaluation", token, body, None);
+    let decide = |token: &str, body: &str| -> bool {
+        let reply = ask(Some(token), body);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["decision"].as_bool().unwrap()
+    };
+
+    // The token: none, a wrong one.
+    let body = evaluation("alice", "query.run.write", "service", "db");
+    let unauthorized = ask(None, &body);
+    assert_eq!(unauthorized.status, 401);
+    assert_eq!(unauthorized.header("www-authenticate"), Some("Bearer realm=\"portal-pdp\""));
+    assert_eq!(ask(Some("not a token of a server at all, 32 bytes"), &body).status, 401);
+
+    // Decisions for db.
+    assert!(decide(PDP_DB_TOKEN, &body));
+    assert!(decide(PDP_DB_TOKEN, &evaluation("alice", "query.run.write", "database", "analytics")), "a grant on the service covers its resources");
+    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "query.run.read", "service", "db")), "no grant");
+    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "access", "service", "chat")), "a resource of another server");
+    assert!(decide(PDP_DB_TOKEN, &evaluation("carol", "query.run.read", "service", "db")), "the configuration (hybrid)");
+    assert!(!decide(PDP_DB_TOKEN, &evaluation("carol", "query.run.write", "service", "db")));
+    assert!(!decide(PDP_DB_TOKEN, &evaluation("mallory", "access", "service", "db")), "no such user");
+    assert!(decide(PDP_DB_TOKEN, &evaluation("root", "system.read", "service", "db")), "the superadmin has all grants");
+    assert!(!decide(PDP_DB_TOKEN, &evaluation("alice", "Query.Run", "service", "db")));
+    let agent = serde_json::json!({
+        "subject": {"type": "agent", "id": "alice"},
+        "action": {"name": "access"},
+        "resource": {"type": "service", "id": "db"}
+    });
+    assert!(!decide(PDP_DB_TOKEN, &agent.to_string()), "only users");
+    // The same user for chat: no grant there.
+    assert!(!decide(PDP_CHAT_TOKEN, &evaluation("alice", "access", "service", "chat")));
+    assert!(decide(PDP_CHAT_TOKEN, &evaluation("root", "access", "service", "chat")));
+
+    // A request that the PDP cannot read gets no decision.
+    assert_eq!(ask(Some(PDP_DB_TOKEN), "{").status, 400);
+    assert_eq!(ask(Some(PDP_DB_TOKEN), r#"{"subject":{"type":"user"}}"#).status, 400);
+
+    // The response returns X-Request-ID.
+    let reply = pdp(pdp_port, "/access/v1/evaluation", Some(PDP_DB_TOKEN), &body, Some("req-42"));
+    assert_eq!(reply.header("x-request-id"), Some("req-42"));
+
+    // The batch: defaults at the top, three semantics.
+    let batch = |semantic: Option<&str>| {
+        let mut body = serde_json::json!({
+            "subject": {"type": "user", "id": "alice"},
+            "resource": {"type": "service", "id": "db"},
+            "evaluations": [
+                {"action": {"name": "access"}},
+                {"action": {"name": "system.read"}},
+                {"action": {"name": "query.run.write"}}
+            ]
+        });
+        if let Some(semantic) = semantic {
+            body["options"] = serde_json::json!({"evaluations_semantic": semantic});
+        }
+        let reply = pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &body.to_string(), None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["evaluations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["decision"].as_bool().unwrap())
+            .collect::<Vec<bool>>()
+    };
+    assert_eq!(batch(None), [true, false, true]);
+    assert_eq!(batch(Some("execute_all")), [true, false, true]);
+    assert_eq!(batch(Some("deny_on_first_deny")), [true, false]);
+    assert_eq!(batch(Some("permit_on_first_permit")), [true]);
+    let too_many = serde_json::json!({
+        "subject": {"type": "user", "id": "alice"},
+        "action": {"name": "access"},
+        "resource": {"type": "service", "id": "db"},
+        "evaluations": [{}, {}, {}, {}, {}]
+    });
+    assert_eq!(
+        pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &too_many.to_string(), None).status,
+        400
+    );
+    let single = pdp(pdp_port, "/access/v1/evaluations", Some(PDP_DB_TOKEN), &body, None);
+    assert_eq!(single.json()["decision"], true, "without evaluations: one decision");
+
+    // The action search.
+    let search = |subject: &str| {
+        let body = serde_json::json!({
+            "subject": {"type": "user", "id": subject},
+            "resource": {"type": "service", "id": "db"}
+        });
+        let reply = pdp(pdp_port, "/access/v1/search/action", Some(PDP_DB_TOKEN), &body.to_string(), None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(search("alice"), ["access", "query.run.write"]);
+    assert_eq!(search("root"), ["access", "query.run.read", "query.run.write", "system.read"]);
+    assert!(search("mallory").is_empty());
+
+    // The metadata needs no token. The server refuses the other methods.
+    let metadata = send(pdp_port, "GET", "/.well-known/authzen-configuration", &[], "");
+    assert_eq!(metadata.status, 200);
+    let m = metadata.json();
+    assert_eq!(m["policy_decision_point"], format!("http://pdp.test:{pdp_port}"));
+    assert_eq!(
+        m["access_evaluations_endpoint"],
+        format!("http://pdp.test:{pdp_port}/access/v1/evaluations")
+    );
+    assert_eq!(send(pdp_port, "GET", "/access/v1/evaluation", &[], "").status, 405);
+    // The PDP is not on the public listener.
+    assert_eq!(
+        pdp(node.port, "/access/v1/evaluation", Some(PDP_DB_TOKEN), &body, None).status,
+        404
+    );
+    let metrics = send(node.port, "GET", "/metrics", &[], "");
+    assert!(metrics.body.contains("portal_pdp_decisions_total{decision=\"true\"}"));
+}
+

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use crate::catalog::Health;
 
-/// Client for probes. It follows no redirect and does not verify certificates: a probe asks
-/// "does something answer?", sends nothing secret, and an in-cluster service often has a private CA.
+/// Client for probes. It does not follow any redirect. It does not verify certificates. A probe
+/// asks "does something answer?" It sends nothing secret. An in-cluster service often has a
+/// private CA.
 pub fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .tls_certs_only(super::embedded_roots())
@@ -18,8 +19,8 @@ pub fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .map_err(|e| format!("cannot build the probe client: {e}"))
 }
 
-/// Up when the service answers with anything below 500 (a 401 or a redirect means it is running);
-/// down on a 5xx, a refused or timed-out connection.
+/// Up when the service answers with any status code below 500. A 401 or a redirect means that the
+/// service runs. Down on a 5xx response, a refused connection, or a timed-out connection.
 pub async fn http(client: &reqwest::Client, url: &str) -> Health {
     match client.get(url).send().await {
         Ok(response) if response.status().as_u16() < 500 => Health::Up,
@@ -71,7 +72,7 @@ mod tests {
             let url = serve(status);
             assert_eq!(runtime.block_on(http(&client, &url)), expected, "{status}");
         }
-        // A port nothing listens on.
+        // A port that no process listens on.
         let closed = {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             format!(

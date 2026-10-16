@@ -1,17 +1,18 @@
-//! The settings of the superadmin: one HTML page per tab (Users, Roles, Services, Logins), in the
-//! manner of clickhouse-dash: a header, a row of underlined tab links, then the page.
+//! The settings of the superadmin. There is one HTML page for each tab (Users, Services, Logins).
+//! The pages follow the manner of clickhouse-dash. Each page has a header, a row of underlined tab
+//! links, and then the page content.
 //!
-//! A page carries only what its tab shows, so the browser never builds the DOM of the others, and the
-//! launcher carries none of it. Everything works without script; the Users page loads one small
-//! script for its password generator. The graphs are inline SVG built here from attributes only (the
-//! CSP forbids `style`). Everything that comes from outside (logins, typed or stored, addresses, user
-//! agents, service names) is escaped.
+//! A page carries only what its tab shows. So the browser never builds the DOM of the other tabs.
+//! The launcher carries none of it. Everything works without script. The Users page loads one small
+//! script for its password generator. The graphs are inline SVG. This code builds them from
+//! attributes only, because the CSP forbids `style`. Everything that comes from outside is escaped.
+//! This includes logins (typed or stored), addresses, user agents and service names.
 
 use std::fmt::Write as _;
 
 use super::{document, sign_out_form, theme_switch};
-use crate::access::service_allows;
 use crate::catalog::{Catalog, Service};
+use crate::grants::{holds, Grant, Mode, ACCESS};
 use crate::store::{
     AccountActivity, AuditRow, DayStat, LoginPage, LoginRow, ServiceUse, SessionRow,
 };
@@ -20,25 +21,22 @@ use crate::util::{
 };
 
 pub const USERS_PATH: &str = "/auth/settings";
-pub const ROLES_PATH: &str = "/auth/settings/roles";
 pub const SERVICES_PATH: &str = "/auth/settings/services";
 pub const LOGINS_PATH: &str = "/auth/settings/logins";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Users,
-    Roles,
     Services,
     Logins,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Users, Tab::Roles, Tab::Services, Tab::Logins];
+    const ALL: [Tab; 3] = [Tab::Users, Tab::Services, Tab::Logins];
 
     fn path(self) -> &'static str {
         match self {
             Self::Users => USERS_PATH,
-            Self::Roles => ROLES_PATH,
             Self::Services => SERVICES_PATH,
             Self::Logins => LOGINS_PATH,
         }
@@ -47,30 +45,34 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::Users => "Users",
-            Self::Roles => "Roles",
             Self::Services => "Services",
             Self::Logins => "Logins",
         }
     }
 }
 
-/// What every settings page needs around its content.
+/// The data that every settings page needs around its content.
 pub struct Frame<'a> {
     pub logout_token: &'a str,
 }
 
-/// The outcome of the last action, from a fixed list of codes (the URL never carries text).
+/// The outcome of the last action. The outcome is one code from a fixed list. The URL never
+/// carries text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub text: &'static str,
     pub ok: bool,
-    /// The outcome of the add-user form: it stays open so the next try is one click away.
+    /// The outcome of the add-user form. The form stays open, so the next try needs one click.
     pub add_form: bool,
 }
 
 pub fn notice_for(code: &str) -> Option<Notice> {
     let (text, ok, add_form) = match code {
-        "user-added" => ("User added.", true, false),
+        "user-added" => (
+            "User added. A new user has no grant: give them with Edit.",
+            true,
+            false,
+        ),
         "user-updated" => ("Account updated.", true, false),
         "password-reset" => ("Password changed. Their sessions are closed.", true, false),
         "unchanged" => ("Nothing to change.", true, false),
@@ -87,19 +89,19 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
             true,
         ),
-        "unknown-role" => (
-            "That role is not defined in the configuration.",
-            false,
-            true,
-        ),
         "limit" => ("The user limit is reached.", false, true),
         "edit-weak-password" => (
             "The password must have at least 10 characters.",
             false,
             false,
         ),
-        "edit-unknown-role" => (
-            "That role is not defined in the configuration.",
+        "edit-unknown-grant" => (
+            "A grant of the form is not offered any more. Open the page again.",
+            false,
+            false,
+        ),
+        "grants-static" => (
+            "The grants come from the configuration only (access.grants_mode is static).",
             false,
             false,
         ),
@@ -110,7 +112,8 @@ pub fn notice_for(code: &str) -> Option<Notice> {
     Some(Notice { text, ok, add_form })
 }
 
-/// The page around a tab: header, tab links, then `content`. `script` loads the generator script.
+/// The page around a tab. It has a header, the tab links, then `content`. `script` loads the
+/// generator script.
 fn page(tab: Tab, frame: &Frame, content: &str, script: bool) -> String {
     let mut body = String::new();
     let _ = write!(
@@ -172,21 +175,35 @@ fn opt(value: &Option<String>) -> String {
 
 // Users ---------------------------------------------------------------------------------------
 
-/// One account and what is known about it.
+/// One account and the data that is known about it.
 pub struct UserCard {
     pub login: String,
-    pub roles: Vec<String>,
+    /// All the grants that apply. The list is empty for the superadmin, who has all grants.
+    pub grants: Vec<Grant>,
+    /// The grants of the configuration (a `user` block). These grants are read-only on the page.
+    pub configured: Vec<Grant>,
     pub created_at: Option<i64>,
     pub superadmin: bool,
     pub activity: AccountActivity,
 }
 
+/// A service and the actions that the page offers for it. The fields are `access`, then `actions`.
+#[derive(Clone, Debug)]
+pub struct ServiceActions {
+    pub id: String,
+    pub name: String,
+    /// The name and the description of each action that the service publishes.
+    pub actions: Vec<(String, String)>,
+}
+
 pub struct UsersView<'a> {
     pub notice: Option<Notice>,
-    /// The roles that exist (the configuration).
-    pub registry: &'a [String],
-    /// The whole catalogue, not the one filtered for display.
+    /// Where the grants come from.
+    pub mode: Mode,
+    /// The whole catalogue, not the filtered catalogue for display.
     pub catalog: &'a Catalog,
+    /// The services of the catalogue with their actions. The order is the order of the catalogue.
+    pub services: Vec<ServiceActions>,
     pub users: Vec<UserCard>,
     pub superadmin: UserCard,
     /// Every real connection, per day.
@@ -195,14 +212,14 @@ pub struct UsersView<'a> {
     pub recent_events: Vec<AuditRow>,
     pub unknown_failures_30d: u32,
     pub max_users: usize,
-    /// Anti-CSRF token of the administration forms.
+    /// The anti-CSRF token of the administration forms.
     pub token: &'a str,
 }
 
 pub fn users_page(frame: &Frame, view: &UsersView) -> String {
     let mut out = String::new();
     if let Some(notice) = view.notice {
-        // A failure interrupts: it is announced at once.
+        // A failure interrupts the page. The page announces the failure at once.
         let _ = write!(
             out,
             r#"<div class="notice {}" role="{}"><p>{}</p></div>"#,
@@ -216,7 +233,8 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
         );
     }
 
-    // What the administrator opens this for comes first: who the accounts are and what went wrong.
+    // The first items are the ones the administrator needs most: who the accounts are, and what
+    // went wrong.
     let failed = view.unknown_failures_30d
         + view.superadmin.activity.failed_30d
         + view
@@ -288,7 +306,8 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
     page(Tab::Users, frame, &out, true)
 }
 
-/// "Peak: 7 on 2026-10-04." for a graph, so its values do not live in tooltips only.
+/// Example text for a graph: "Peak: 7 on 2026-10-04." The text puts the values in the page.
+/// The values do not live in tooltips only.
 fn peak_text(days: &[DayStat], first_day: i64) -> String {
     let best = days
         .iter()
@@ -303,23 +322,71 @@ fn peak_text(days: &[DayStat], first_day: i64) -> String {
     }
 }
 
-/// The role boxes of a form; `held` are the roles ticked from the start.
-fn role_boxes(out: &mut String, view: &UsersView, held: &[String]) {
-    out.push_str(r#"<fieldset class="roleBoxes"><legend>Roles</legend>"#);
-    for role in view.registry {
+/// The grant boxes of the edit form. There is one row for each service, and `access` comes first.
+/// A grant of the configuration is ticked and cannot change. In the mode `static`, no box can change
+/// and the form sends no grants.
+fn grant_boxes(out: &mut String, view: &UsersView, user: &UserCard) {
+    if view.services.is_empty() {
+        out.push_str(r#"<p class="hint">No service in the catalogue.</p>"#);
+        return;
+    }
+    out.push_str(r#"<div class="grantList">"#);
+    for service in &view.services {
         let _ = write!(
             out,
-            r#"<label class="check"><input type="checkbox" name="r_{0}" value="1"{1}><span>{0}</span></label>"#,
-            html_escape(role),
-            if held.contains(role) { " checked" } else { "" },
+            r#"<fieldset class="grantBoxes"><legend>{}</legend>"#,
+            html_escape(&service.name)
         );
+        let actions = std::iter::once((ACCESS, "Open the service."))
+            .chain(service.actions.iter().map(|(n, d)| (n.as_str(), d.as_str())));
+        for (action, description) in actions {
+            let held = holds(&user.grants, action, &service.id);
+            let fixed = !view.mode.editable() || holds(&user.configured, action, &service.id);
+            let title = if fixed && view.mode.editable() {
+                "From the configuration: it cannot change here.".to_string()
+            } else {
+                description.to_string()
+            };
+            let _ = write!(
+                out,
+                r#"<label class="check"{}><input type="checkbox"{}{}{}><span>{}</span></label>"#,
+                if title.is_empty() {
+                    String::new()
+                } else {
+                    format!(r#" title="{}""#, html_escape(&title))
+                },
+                if fixed {
+                    String::new()
+                } else {
+                    format!(
+                        r#" name="g.{}.{}" value="1""#,
+                        html_escape(&service.id),
+                        html_escape(action)
+                    )
+                },
+                if held { " checked" } else { "" },
+                if fixed { " disabled" } else { "" },
+                html_escape(action),
+            );
+        }
+        out.push_str("</fieldset>");
     }
-    out.push_str("</fieldset>");
+    out.push_str("</div>");
+    match view.mode {
+        Mode::Static => out.push_str(
+            r#"<p class="hint">The grants come from the configuration (<code>user</code> blocks). This page does not change them.</p>"#,
+        ),
+        Mode::Hybrid => out.push_str(
+            r#"<p class="hint">A box that cannot change is a grant of the configuration.</p>"#,
+        ),
+        Mode::Dynamic => {}
+    }
 }
 
-/// A password field with its "Generate" button (script) and the line that says what was generated.
+/// A password field with its "Generate" button (script). The same block has the line that says what
+/// was generated.
 fn password_field(out: &mut String, id: &str, label: &str, required: bool, hint: &str) {
-    // The id may carry a login: escaped like everything that comes from outside.
+    // The id can contain a login. Escape the id like all data that comes from outside.
     let id = html_escape(id);
     let _ = write!(
         out,
@@ -329,7 +396,7 @@ fn password_field(out: &mut String, id: &str, label: &str, required: bool, hint:
 }
 
 fn add_form(out: &mut String, view: &UsersView) {
-    // Adding is the rare task: one button, and the form opens after a refused attempt.
+    // The add action is a rare task. It has one button. The form opens after a refused attempt.
     let _ = write!(
         out,
         r#"<details class="addUser"{}><summary class="button button--primary">Add a user</summary><form method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><div class="addUser__fields"><div class="field"><label for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
@@ -348,15 +415,8 @@ fn add_form(out: &mut String, view: &UsersView) {
         "At least 10 characters.",
     );
     out.push_str("</div>");
-    if view.registry.is_empty() {
-        out.push_str(
-            r#"<p class="hint">No role is defined in the configuration (<code>roles { names = "..." }</code>): a new user cannot open any service until one is bound to a role.</p>"#,
-        );
-    } else {
-        role_boxes(out, view, &[]);
-    }
     out.push_str(
-        r#"<button class="button button--primary" type="submit">Add user</button></form></details>"#,
+        r#"<p class="hint">A new user has no grant and sees no service. Give the grants with Edit.</p><button class="button button--primary" type="submit">Add user</button></form></details>"#,
     );
 }
 
@@ -373,17 +433,17 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
     );
     if user.superadmin {
         out.push_str(r#"<span class="pill pill--accent">superadmin</span>"#);
-    }
-    for role in &user.roles {
+    } else {
+        let open = allowed_services(view, user).len();
         let _ = write!(
             out,
             r#"<span class="pill{}">{}</span>"#,
-            if view.registry.contains(role) {
-                ""
-            } else {
-                " pill--muted"
-            },
-            html_escape(role)
+            if open == 0 { " pill--muted" } else { "" },
+            match open {
+                0 => "no service".to_string(),
+                1 => "1 service".to_string(),
+                n => format!("{n} services"),
+            }
         );
     }
     let _ = write!(
@@ -462,11 +522,7 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
             out,
             r#"<details class="confirm confirm--edit"><summary class="button">Edit</summary><form method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
         );
-        if view.registry.is_empty() {
-            out.push_str(r#"<p class="hint">No role is defined in the configuration.</p>"#);
-        } else {
-            role_boxes(out, view, &user.roles);
-        }
+        grant_boxes(out, view, user);
         password_field(
             out,
             &format!("pw-{}", user.login),
@@ -483,15 +539,14 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
     out.push_str("</div></details>");
 }
 
+/// The services that the user can open. These are the services with the grant `access`. The
+/// superadmin can open all services.
 fn allowed_services<'a>(view: &'a UsersView, user: &UserCard) -> Vec<&'a Service> {
     view.catalog
         .groups()
         .iter()
         .flat_map(|group| group.services.iter())
-        .filter(|service| {
-            let roles = (!user.superadmin).then_some(user.roles.as_slice());
-            service_allows(&service.roles, view.registry, roles)
-        })
+        .filter(|service| user.superadmin || holds(&user.grants, ACCESS, &service.id))
         .collect()
 }
 
@@ -561,7 +616,7 @@ fn audit_label(kind: &str) -> &'static str {
         "login_failed" => "Failed sign-in",
         "user_added" => "User added",
         "user_deleted" => "User deleted",
-        "user_updated" => "Roles changed",
+        "user_updated" => "Grants changed",
         "password_reset" => "Password reset",
         "impersonation_started" => "Signed in as a user",
         "impersonation_ended" => "Back to superadmin",
@@ -569,9 +624,10 @@ fn audit_label(kind: &str) -> &'static str {
     }
 }
 
-/// Bars, one per day, newest on the right, drawn as three paths (a path per kind of bar, not an
-/// element per day: a graph costs the browser four nodes, not sixty). Attributes only: no inline
-/// style. The values are in the text next to it, not in tooltips.
+/// Bars, one for each day, newest on the right. This code draws three paths, one path for each
+/// kind of bar. It does not draw one element for each day: a graph costs the browser four nodes, not
+/// sixty. It uses attributes only, and no inline style. The values are in the text next to it, not
+/// in tooltips.
 fn spark(days: &[DayStat], wide: bool) -> String {
     const STEP: usize = 4;
     const HEIGHT: i64 = 32;
@@ -612,117 +668,71 @@ fn spark(days: &[DayStat], wide: bool) -> String {
     out
 }
 
-// Roles ---------------------------------------------------------------------------------------
-
-pub struct RolesView<'a> {
-    /// The roles that exist (the configuration).
-    pub registry: &'a [String],
-    pub catalog: &'a Catalog,
-    /// Every account with the roles it holds.
-    pub holders: &'a [(String, Vec<String>)],
-}
-
-pub fn roles_page(frame: &Frame, view: &RolesView) -> String {
-    let mut out = String::from(
-        r#"<section class="panel" aria-labelledby="roles-title"><div class="panel__head"><h2 class="panel__title" id="roles-title">Roles</h2></div>"#,
-    );
-    if view.registry.is_empty() {
-        out.push_str(
-            r#"<p class="hint">No role is defined. Roles come from the portal configuration: <code>roles { names = "ops, dev" }</code>. Services bind to them with the <code>portal.roles</code> label or annotation.</p></section>"#,
-        );
-        return page(Tab::Roles, frame, &out, false);
-    }
-    out.push_str(
-        r#"<p class="hint">Defined in the portal configuration. A service lists the roles it accepts with <code>portal.roles</code>; a user holds any number of them.</p><div class="roleGrid">"#,
-    );
-    for role in view.registry {
-        let _ = write!(
-            out,
-            r#"<article class="roleCard"><h3>{}</h3><h4>Users</h4>"#,
-            html_escape(role)
-        );
-        let holders: Vec<&String> = view
-            .holders
-            .iter()
-            .filter(|(_, roles)| roles.contains(role))
-            .map(|(login, _)| login)
-            .collect();
-        if holders.is_empty() {
-            out.push_str(r#"<p class="hint">No user holds it.</p>"#);
-        } else {
-            out.push_str(r#"<p class="chips">"#);
-            for login in holders {
-                let _ = write!(
-                    out,
-                    r#"<span class="pill pill--plain">{}</span>"#,
-                    html_escape(login)
-                );
-            }
-            out.push_str("</p>");
-        }
-        out.push_str(r#"<h4>Services it opens</h4>"#);
-        let opened: Vec<&Service> = view
-            .catalog
-            .groups()
-            .iter()
-            .flat_map(|g| g.services.iter())
-            .filter(|s| s.roles.contains(role))
-            .collect();
-        if opened.is_empty() {
-            out.push_str(r#"<p class="hint">No service asks for it.</p>"#);
-        } else {
-            out.push_str(r#"<p class="chips">"#);
-            for service in opened {
-                let _ = write!(
-                    out,
-                    r#"<span class="pill pill--plain">{}</span>"#,
-                    html_escape(&service.name)
-                );
-            }
-            out.push_str("</p>");
-        }
-        out.push_str("</article>");
-    }
-    out.push_str("</div></section>");
-    page(Tab::Roles, frame, &out, false)
-}
-
 // Services ------------------------------------------------------------------------------------
 
 pub struct ServicesView<'a> {
-    pub registry: &'a [String],
     pub catalog: &'a Catalog,
+    /// The actions of each service.
+    pub services: &'a [ServiceActions],
+    /// Every account with the grants that apply to it.
+    pub holders: &'a [(String, Vec<Grant>)],
+    /// The services whose actions document the code cannot read: `(service id, problem)`.
+    pub problems: Vec<(String, String)>,
 }
 
 pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let mut out = String::from(
-        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who may open each service. A service is opened to the roles it names with <code>portal.roles</code>; a service with no role is open to the superadmin only, who may open all of them. <code>portal.exclude</code> opens paths of a service to anyone, signed in or not: it is listed here so that it can be audited.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Roles allowed</th><th>Open without sign-in</th></tr></thead><tbody>"#,
+        r#"<section class="panel" aria-labelledby="services-title"><div class="panel__head"><h2 class="panel__title" id="services-title">Services</h2></div><p class="hint">Who can open each service, and the actions that each service publishes at <code>/.well-known/access-actions</code>. A user opens a service with the grant <code>access</code>. The superadmin opens all of them. A service without actions has only <code>access</code>: for it, <code>access</code> is the full permission. <code>portal.exclude</code> opens paths of a service to anyone, signed in or not: it is listed here so that it can be audited.</p><div class="tableScroll"><table class="table"><thead><tr><th>Service</th><th>Group</th><th>Path</th><th>Actions</th><th>Users with access</th><th>Open without sign-in</th></tr></thead><tbody>"#,
     );
     for group in view.catalog.groups() {
         for service in &group.services {
-            let known: Vec<&String> = service
-                .roles
-                .iter()
-                .filter(|r| view.registry.contains(r))
-                .collect();
-            let has_unknown = known.len() < service.roles.len();
+            let problem = view.problems.iter().find(|(id, _)| *id == service.id);
             let _ = write!(
                 out,
-                r#"<tr><td><span class="svcName">{}</span>{}</td><td>{}</td><td><code>{}</code></td><td>"#,
+                r#"<tr><td><span class="svcName">{}</span>{}<br><code>{}</code></td><td>{}</td><td><code>{}</code></td><td>"#,
                 html_escape(&service.name),
-                if has_unknown {
-                    r##"<span class="warn" role="img" aria-label="A role bound to this service does not exist" title="A role bound to this service does not exist"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##
-                } else {
-                    ""
+                match problem {
+                    Some((_, text)) => format!(
+                        r##"<span class="warn" role="img" aria-label="{0}" title="{0}"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##,
+                        html_escape(text)
+                    ),
+                    None => String::new(),
                 },
+                html_escape(&service.id),
                 html_escape(&group.name),
                 html_escape(&service.href),
             );
-            if known.is_empty() {
+            let actions = view
+                .services
+                .iter()
+                .find(|s| s.id == service.id)
+                .map(|s| s.actions.as_slice())
+                .unwrap_or(&[]);
+            if actions.is_empty() {
+                out.push_str(r#"<span class="pill pill--muted">access only</span>"#);
+            } else {
+                out.push_str(r#"<span class="pill">access</span> "#);
+                for (name, description) in actions {
+                    let _ = write!(
+                        out,
+                        r#"<span class="pill pill--plain" title="{}">{}</span> "#,
+                        html_escape(description),
+                        html_escape(name)
+                    );
+                }
+            }
+            out.push_str("</td><td>");
+            let users: Vec<&String> = view
+                .holders
+                .iter()
+                .filter(|(_, grants)| holds(grants, ACCESS, &service.id))
+                .map(|(login, _)| login)
+                .collect();
+            if users.is_empty() {
                 out.push_str(r#"<span class="pill pill--muted">Superadmin only</span>"#);
             } else {
-                for role in known {
-                    let _ = write!(out, r#"<span class="pill">{}</span>"#, html_escape(role));
+                for login in users {
+                    let _ = write!(out, r#"<span class="pill">{}</span> "#, html_escape(login));
                 }
             }
             out.push_str("</td><td>");
@@ -874,11 +884,10 @@ mod tests {
     use crate::store::{AccountActivity, LoginRow, SessionRow};
     use std::collections::BTreeMap;
 
-    fn service(name: &str, href: &str, roles: &str) -> Service {
+    fn service(name: &str, href: &str) -> Service {
         let labels: BTreeMap<String, String> = [
             ("portal.name", name),
             ("portal.href", href),
-            ("portal.roles", roles),
             ("portal.group", "Infra"),
         ]
         .iter()
@@ -887,14 +896,23 @@ mod tests {
         parse_labels("x", &labels).unwrap().unwrap()
     }
 
-    fn registry() -> Vec<String> {
-        vec!["ops".into(), "dev".into()]
+    fn grant(action: &str, service: &str) -> Grant {
+        Grant::new(action, service).unwrap()
     }
 
-    fn card(login: &str, roles: &[&str]) -> UserCard {
+    /// `access` on each named service (ids `infra-<name>`).
+    fn access(services: &[&str]) -> Vec<Grant> {
+        services
+            .iter()
+            .map(|s| grant(ACCESS, &format!("infra-{s}")))
+            .collect()
+    }
+
+    fn card(login: &str, services: &[&str]) -> UserCard {
         UserCard {
             login: login.into(),
-            roles: roles.iter().map(|r| r.to_string()).collect(),
+            grants: access(services),
+            configured: Vec::new(),
             created_at: Some(1_791_000_000),
             superadmin: false,
             activity: AccountActivity {
@@ -909,15 +927,37 @@ mod tests {
         Frame { logout_token: "out<" }
     }
 
-    fn view<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a> {
+    fn services() -> Vec<ServiceActions> {
+        let plain = |id: &str, name: &str| ServiceActions {
+            id: id.into(),
+            name: name.into(),
+            actions: Vec::new(),
+        };
+        vec![
+            ServiceActions {
+                id: "infra-grafana".into(),
+                name: "Grafana".into(),
+                actions: vec![
+                    ("dashboards.read".into(), "See the dashboards.".into()),
+                    ("dashboards.write".into(), "Change the <dashboards>.".into()),
+                ],
+            },
+            plain("infra-notes", "Notes"),
+            plain("infra-typo", "Typo"),
+            plain("infra-mixed", "Mixed"),
+        ]
+    }
+
+    fn view(catalog: &Catalog) -> UsersView<'_> {
         let mut root = card("root", &[]);
         root.superadmin = true;
         root.created_at = None;
         UsersView {
             notice: None,
-            registry,
+            mode: Mode::Dynamic,
             catalog,
-            users: vec![card("alice", &["ops", "dev"]), card("bob", &["dev"])],
+            services: services(),
+            users: vec![card("alice", &["grafana", "mixed"]), card("bob", &["mixed"])],
             superadmin: root,
             days: vec![DayStat::default(); 30],
             first_day: 1_788_000_000,
@@ -931,13 +971,26 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::build(
             vec![
-                service("Grafana", "/grafana/", "ops"),
-                service("Notes", "/notes/", ""),
-                service("Typo", "/typo/", "opz"),
-                service("Mixed", "/mixed/", "dev, opz"),
+                service("Grafana", "/grafana/"),
+                service("Notes", "/notes/"),
+                service("Typo", "/typo/"),
+                service("Mixed", "/mixed/"),
             ],
             Vec::new(),
         )
+    }
+
+    fn services_view<'a>(
+        catalog: &'a Catalog,
+        actions: &'a [ServiceActions],
+        holders: &'a [(String, Vec<Grant>)],
+    ) -> ServicesView<'a> {
+        ServicesView {
+            catalog,
+            services: actions,
+            holders,
+            problems: Vec::new(),
+        }
     }
 
     fn login_row_of(login: &str, success: bool, known: bool) -> LoginRow {
@@ -961,32 +1014,16 @@ mod tests {
     }
 
     #[test]
-    fn every_page_is_a_whole_document_with_the_same_header_and_four_tab_links() {
-        let (cat, reg) = (catalog(), registry());
-        let holders = vec![("alice".to_string(), vec!["ops".to_string()])];
+    fn every_page_is_a_whole_document_with_the_same_header_and_three_tab_links() {
+        let cat = catalog();
+        let actions = services();
+        let holders = vec![("alice".to_string(), access(&["grafana"]))];
         let blank = LoginPage::default();
         let pages = [
-            (Tab::Users, users_page(&frame(), &view(&cat, &reg))),
-            (
-                Tab::Roles,
-                roles_page(
-                    &frame(),
-                    &RolesView {
-                        registry: &reg,
-                        catalog: &cat,
-                        holders: &holders,
-                    },
-                ),
-            ),
+            (Tab::Users, users_page(&frame(), &view(&cat))),
             (
                 Tab::Services,
-                services_page(
-                    &frame(),
-                    &ServicesView {
-                        registry: &reg,
-                        catalog: &cat,
-                    },
-                ),
+                services_page(&frame(), &services_view(&cat, &actions, &holders)),
             ),
             (Tab::Logins, logins_page(&frame(), &logins(&blank, false))),
         ];
@@ -995,7 +1032,8 @@ mod tests {
             assert!(html.contains(r#"<link rel="stylesheet" href="/auth/settings.css">"#));
             assert!(html.contains(r##"<a class="backLink" href="/">"##));
             assert!(html.contains(r#"action="/auth/logout""#) && html.contains("out&lt;"));
-            assert_eq!(html.matches(r#"class="contentTabs__tab"#).count(), 4);
+            assert_eq!(html.matches(r#"class="contentTabs__tab"#).count(), 3);
+            assert!(!html.contains("/auth/settings/roles"), "no page of the old model");
             assert_eq!(html.matches(r#"aria-current="page""#).count(), 1);
             assert!(html.contains(&format!(
                 r#"<a class="contentTabs__tab is-active" href="{}" aria-current="page">{}</a>"#,
@@ -1013,55 +1051,57 @@ mod tests {
 
     #[test]
     fn a_page_carries_only_its_own_tab() {
-        let (cat, reg) = (catalog(), registry());
-        let users = users_page(&frame(), &view(&cat, &reg));
+        let cat = catalog();
+        let users = users_page(&frame(), &view(&cat));
         assert!(users.contains("Accounts") && users.contains("Recent events"));
-        assert!(!users.contains("Roles it") && !users.contains("Sign-in attempts"));
-        let services = services_page(
-            &frame(),
-            &ServicesView {
-                registry: &reg,
-                catalog: &cat,
-            },
-        );
+        assert!(!users.contains("Users with access") && !users.contains("Sign-in attempts"));
+        let actions = services();
+        let services = services_page(&frame(), &services_view(&cat, &actions, &[]));
         assert!(services.contains("Superadmin only"));
         assert!(!services.contains("Accounts") && !services.contains(r#"class="user""#));
     }
 
     #[test]
     fn accounts_come_before_the_add_form_which_opens_only_after_a_refused_attempt() {
-        let (cat, reg) = (catalog(), registry());
-        let html = users_page(&frame(), &view(&cat, &reg));
+        let cat = catalog();
+        let html = users_page(&frame(), &view(&cat));
         assert!(html.find(">Accounts<").unwrap() < html.find("Add a user</summary>").unwrap());
         assert!(html.contains(r#"<details class="addUser"><summary"#));
         for refused in [
             "exists",
             "weak-password",
             "invalid-login",
-            "unknown-role",
             "limit",
             "reserved",
         ] {
-            let mut v = view(&cat, &reg);
+            let mut v = view(&cat);
             v.notice = notice_for(refused);
             assert!(
                 users_page(&frame(), &v).contains(r#"<details class="addUser" open>"#),
                 "{refused}"
             );
         }
-        let mut v = view(&cat, &reg);
+        let mut v = view(&cat);
         v.notice = notice_for("edit-weak-password");
         assert!(!users_page(&frame(), &v).contains(r#"<details class="addUser" open>"#));
     }
 
     #[test]
-    fn an_account_can_be_edited_with_its_current_roles_ticked_and_a_password_that_may_stay_empty() {
-        let (cat, reg) = (catalog(), registry());
-        let html = users_page(&frame(), &view(&cat, &reg));
+    fn an_account_can_be_edited_with_its_current_grants_ticked_and_a_password_that_may_stay_empty() {
+        let cat = catalog();
+        let html = users_page(&frame(), &view(&cat));
         assert_eq!(html.matches(r#"action="/auth/users/update""#).count(), 2);
-        let alice = &html[html.find("pw-alice").unwrap() - 600..html.find("pw-alice").unwrap()];
-        assert!(alice.contains(r#"name="r_ops" value="1" checked"#));
-        assert!(alice.contains(r#"name="r_dev" value="1" checked"#));
+        let end = html.find(r#"id="pw-alice""#).unwrap();
+        let start = html[..end].rfind(r#"action="/auth/users/update""#).unwrap();
+        let alice = &html[start..end];
+        assert!(alice.contains(r#"name="g.infra-grafana.access" value="1" checked"#));
+        assert!(alice.contains(r#"name="g.infra-mixed.access" value="1" checked"#));
+        assert!(alice.contains(r#"name="g.infra-notes.access" value="1">"#), "not held: not ticked");
+        assert!(alice.contains(r#"name="g.infra-grafana.dashboards.read" value="1">"#));
+        assert!(
+            alice.contains(r#"title="Change the &lt;dashboards&gt;.""#),
+            "the description of an action is escaped"
+        );
         assert!(html.contains(r#"id="pw-alice""#) && html.contains(r#"id="pw-bob""#));
         assert!(html.contains(r#"data-generate-password="pw-alice""#));
         assert!(html.contains("Leave empty to keep the current one."));
@@ -1082,8 +1122,8 @@ mod tests {
 
     #[test]
     fn failures_are_announced_and_the_failed_sign_ins_are_counted_in_the_accounts_header() {
-        let (cat, reg) = (catalog(), registry());
-        let mut v = view(&cat, &reg);
+        let cat = catalog();
+        let mut v = view(&cat);
         v.notice = notice_for("exists");
         v.unknown_failures_30d = 2;
         v.users[0].activity.failed_30d = 1;
@@ -1093,21 +1133,21 @@ mod tests {
             html.contains(r#"<span class="pill pill--danger">3 failed sign-ins in 30 days</span>"#)
         );
         assert!(html.contains(r#"2 tried a login that does not exist: see <a href="/auth/settings/logins">Logins</a>"#));
-        let mut one = view(&cat, &reg);
+        let mut one = view(&cat);
         one.users[0].activity.failed_30d = 1;
         assert!(
             users_page(&frame(), &one).contains("1 failed sign-in in 30 days"),
             "singular"
         );
-        let mut ok = view(&cat, &reg);
+        let mut ok = view(&cat);
         ok.notice = notice_for("user-added");
         assert!(users_page(&frame(), &ok).contains(r#"class="notice notice--ok" role="status""#));
     }
 
     #[test]
     fn tables_scroll_inside_a_box_and_an_empty_value_is_a_plain_hyphen() {
-        let (cat, reg) = (catalog(), registry());
-        let mut v = view(&cat, &reg);
+        let cat = catalog();
+        let mut v = view(&cat);
         v.recent_events = vec![AuditRow {
             ts: 1_791_000_000,
             kind: "password_reset".into(),
@@ -1152,44 +1192,45 @@ mod tests {
     }
 
     #[test]
-    fn a_service_bound_to_a_missing_role_gets_a_warning_without_naming_the_role() {
-        let (cat, reg) = (catalog(), registry());
-        let html = services_page(
-            &frame(),
-            &ServicesView {
-                registry: &reg,
-                catalog: &cat,
-            },
-        );
-        assert_eq!(html.matches(r#"class="warn""#).count(), 2, "Typo and Mixed");
-        assert!(!html.contains("opz"), "the missing role is never shown");
-        assert_eq!(
-            html.matches("Superadmin only").count(),
-            2,
-            "no role and a missing role both leave the service to the superadmin"
-        );
-        assert!(!html.contains("All users"));
+    fn the_services_page_shows_the_actions_the_users_with_access_and_the_problems() {
+        let cat = catalog();
+        let actions = services();
+        let holders = vec![
+            ("alice".to_string(), access(&["grafana", "mixed"])),
+            ("bob".to_string(), vec![grant("dashboards.read", "infra-grafana")]),
+        ];
+        let mut v = services_view(&cat, &actions, &holders);
+        v.problems = vec![("infra-typo".into(), "http://typo/x gave the status <500>".into())];
+        let html = services_page(&frame(), &v);
+        assert!(html.contains(r#"<span class="pill pill--plain" title="See the dashboards.">dashboards.read</span>"#));
+        assert_eq!(html.matches("access only").count(), 3, "Notes, Typo and Mixed publish nothing");
+        assert_eq!(html.matches(r#"<span class="pill">alice</span>"#).count(), 2);
+        assert!(!html.contains(">bob<"), "an action without access does not open the service");
+        assert_eq!(html.matches("Superadmin only").count(), 2, "Notes and Typo");
+        assert_eq!(html.matches(r#"class="warn""#).count(), 1);
+        assert!(html.contains("gave the status &lt;500&gt;"));
     }
 
     #[test]
-    fn users_show_roles_actions_and_a_two_step_delete() {
-        let (cat, reg) = (catalog(), registry());
-        let html = users_page(&frame(), &view(&cat, &reg));
+    fn users_show_grants_actions_and_a_two_step_delete() {
+        let cat = catalog();
+        let html = users_page(&frame(), &view(&cat));
         assert_eq!(
             html.matches(r#"action="/auth/users/impersonate""#).count(),
             2
         );
         assert_eq!(html.matches(r#"action="/auth/users/delete""#).count(), 2);
         assert!(html.contains("Confirm delete"));
-        assert!(html.contains(r#"name="r_ops""#) && html.contains(r#"name="r_dev""#));
+        assert!(html.contains(r#"<span class="pill">2 services</span>"#), "alice");
+        assert!(html.contains(r#"<span class="pill">1 service</span>"#), "bob");
         assert!(html.contains("superadmin</span>"));
         assert!(html.contains("value=\"tok&lt;en\""), "the token is escaped");
     }
 
     #[test]
     fn the_superadmin_card_has_no_delete_or_login_as() {
-        let (cat, reg) = (catalog(), registry());
-        let mut v = view(&cat, &reg);
+        let cat = catalog();
+        let mut v = view(&cat);
         v.users.clear();
         let html = users_page(&frame(), &v);
         assert!(!html.contains("/auth/users/delete\""));
@@ -1198,8 +1239,8 @@ mod tests {
 
     #[test]
     fn what_comes_from_outside_is_escaped() {
-        let (cat, reg) = (catalog(), registry());
-        let mut v = view(&cat, &reg);
+        let cat = catalog();
+        let mut v = view(&cat);
         v.users[0].login = "<b>x</b>".into();
         v.users[0].activity.recent.push(SessionRow {
             started_at: 1_791_000_000,
@@ -1219,47 +1260,46 @@ mod tests {
     }
 
     #[test]
-    fn the_roles_page_lists_holders_and_the_services_each_role_opens() {
-        let (cat, reg) = (catalog(), registry());
-        let holders = vec![
-            ("alice".to_string(), vec!["ops".to_string(), "dev".to_string()]),
-            ("bob".to_string(), vec!["dev".to_string()]),
-        ];
-        let html = roles_page(
-            &frame(),
-            &RolesView {
-                registry: &reg,
-                catalog: &cat,
-                holders: &holders,
-            },
-        );
-        assert!(html.contains("<h3>ops</h3>") && html.contains("<h3>dev</h3>"));
-        assert!(html.contains("alice") && html.contains("bob"));
-        assert!(html.contains("Grafana"));
+    fn a_new_user_is_added_without_grants() {
+        let cat = catalog();
+        let html = users_page(&frame(), &view(&cat));
+        let add = &html[html.find(r#"action="/auth/users/add""#).unwrap()..];
+        let add = &add[..add.find("</form>").unwrap()];
+        assert!(!add.contains(r#"name="g."#), "the add form has no grant box");
+        assert!(add.contains("A new user has no grant"));
     }
 
     #[test]
-    fn with_no_role_defined_the_form_and_the_roles_page_say_so() {
-        let (cat, reg) = (catalog(), Vec::<String>::new());
-        let html = users_page(&frame(), &view(&cat, &reg));
-        assert!(html.contains("No role is defined"));
-        assert!(!html.contains(r#"class="roleBoxes""#));
-        let roles = roles_page(
-            &frame(),
-            &RolesView {
-                registry: &reg,
-                catalog: &cat,
-                holders: &[],
-            },
-        );
-        assert!(roles.contains("No role is defined"));
-        assert!(!roles.contains("roleGrid"));
+    fn in_the_static_mode_no_box_can_change_and_the_form_sends_none() {
+        let cat = catalog();
+        let mut v = view(&cat);
+        v.mode = Mode::Static;
+        let html = users_page(&frame(), &v);
+        assert!(!html.contains(r#"name="g."#));
+        assert!(html.contains(r#"<input type="checkbox" checked disabled><span>access</span>"#));
+        assert!(html.contains("This page does not change them."));
     }
 
     #[test]
-    fn allowed_services_follow_the_roles_and_the_registry() {
-        let (cat, reg) = (catalog(), registry());
-        let v = view(&cat, &reg);
+    fn in_the_hybrid_mode_a_grant_of_the_configuration_is_read_only() {
+        let cat = catalog();
+        let mut v = view(&cat);
+        v.mode = Mode::Hybrid;
+        v.users[1].configured = access(&["notes"]);
+        v.users[1].grants.extend(access(&["notes"]));
+        let html = users_page(&frame(), &v);
+        let end = html.find(r#"id="pw-bob""#).unwrap();
+        let bob = &html[html[..end].rfind(r#"action="/auth/users/update""#).unwrap()..end];
+        assert!(bob.contains(r#"title="From the configuration: it cannot change here."><input type="checkbox" checked disabled><span>access</span>"#));
+        assert!(!bob.contains("g.infra-notes.access"), "the form does not send it");
+        assert!(bob.contains(r#"name="g.infra-mixed.access" value="1" checked"#));
+    }
+
+    #[test]
+    fn allowed_services_follow_the_access_grants() {
+        let cat = catalog();
+        let mut v = view(&cat);
+        v.users[1].grants.push(grant("dashboards.read", "infra-grafana"));
         let names = |u: &UserCard| -> Vec<String> {
             allowed_services(&v, u)
                 .iter()
@@ -1267,18 +1307,18 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&v.users[0]), ["Grafana", "Mixed"]);
-        assert_eq!(names(&v.users[1]), ["Mixed"]);
+        assert_eq!(names(&v.users[1]), ["Mixed"], "an action alone does not open a service");
         assert_eq!(
             names(&v.superadmin).len(),
             4,
-            "the superadmin opens every service, with or without a role"
+            "the superadmin opens every service"
         );
     }
 
     #[test]
     fn the_add_form_offers_a_generator() {
-        let (cat, reg) = (catalog(), registry());
-        let html = users_page(&frame(), &view(&cat, &reg));
+        let cat = catalog();
+        let html = users_page(&frame(), &view(&cat));
         assert!(html.contains(r#"data-generate-password="new-password""#));
         assert!(html.contains(r#"id="new-password-status""#));
         assert!(html.contains(r#"<label for="new-password">Password</label>"#));

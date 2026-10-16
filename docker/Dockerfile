@@ -34,6 +34,8 @@ FROM scratch
 COPY --from=builder /out/portal /portal
 
 EXPOSE 4181
+# The AuthZEN PDP of the services (config pdp block). Do not route it through Traefik.
+EXPOSE 4182
 
 HEALTHCHECK --interval=10s \
             --timeout=2s \

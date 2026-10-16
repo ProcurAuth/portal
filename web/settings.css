@@ -284,7 +284,14 @@
   outline-offset: 1px;
 }
 
-.roleBoxes {
+/* The grants of a user: one row for each service, the access box first. */
+.grantList {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.grantBoxes {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
@@ -293,11 +300,15 @@
   border: 0;
 }
 
-.roleBoxes legend {
+.grantBoxes legend {
   margin-bottom: 6px;
   padding: 0;
   font-size: 13px;
   font-weight: 600;
+}
+
+.check input:disabled + span {
+  color: var(--muted);
 }
 
 .check {
@@ -547,30 +558,6 @@
 .warn .icon {
   width: 16px;
   height: 16px;
-}
-
-/* Roles ---------------------------------------------------------------------------------- */
-
-.roleGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.roleCard {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--raised);
-}
-
-.roleCard h3 {
-  margin: 0 0 6px;
-  color: var(--text);
-  font-size: 14px;
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 /* Logins --------------------------------------------------------------------------------- */

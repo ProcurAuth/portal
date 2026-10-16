@@ -1,7 +1,7 @@
-//! What keeps several instances of the portal in step. They share nothing but the database, so each
-//! of them, every few seconds, reads the accounts again (a change made on another instance shows
-//! up) and sweeps the sessions that ran out. Nothing here runs with a SQLite file, which one
-//! process owns.
+//! What keeps several instances of the portal in step. The instances share only the database. Each
+//! instance reads the accounts again every few seconds. A change made on another instance then
+//! shows up. Each instance also sweeps the sessions that ran out. Nothing here runs with a SQLite
+//! file. One process owns a SQLite file.
 
 use std::sync::Arc;
 use std::thread;
@@ -10,12 +10,13 @@ use std::time::Duration;
 use crate::http::AppState;
 use crate::tracking::log_error;
 
-/// How often an instance looks at what the others did.
+/// The time between two rounds. An instance checks the changes that the other instances made.
 pub const EVERY: Duration = Duration::from_secs(5);
-/// The history rows of sessions that ended unrecorded are looked for once every this many rounds.
+/// The history rows of sessions that ended without a record are searched once in every
+/// CLEANUP_EVERY_ROUNDS rounds.
 const CLEANUP_EVERY_ROUNDS: u32 = 12;
 
-/// Starts the thread, when the store is a shared one.
+/// Starts the thread. The thread starts only when the store is a shared one.
 pub fn start(state: Arc<AppState>) -> Result<(), String> {
     if !state.store.is_shared() {
         return Ok(());
@@ -34,7 +35,7 @@ pub fn start(state: Arc<AppState>) -> Result<(), String> {
         .map_err(|e| format!("cannot start the synchronisation thread: {e}"))
 }
 
-/// One round. A failure is counted and logged and the next round tries again.
+/// Runs one round. A failure is counted and logged. The next round tries again.
 pub fn run_round(state: &AppState, round: u32) {
     if let Err(error) = state.users.refresh(&state.store) {
         log_error("directory_refresh_failed", &error);

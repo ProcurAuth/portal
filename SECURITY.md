@@ -83,13 +83,18 @@ With the `pdp` block, the server answers AuthZEN requests on a second listener (
 
 ## Actions of the services
 
-The server reads `/.well-known/access-actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses a whole document that has a bad action, a duplicate action, the action `access`, or a `server` that is not the id of the service.
+The server reads `/.well-known/access-actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses the whole document in these cases:
 
-A person who can set the labels of a workload chooses the actions that the settings pages offer for it. This is the trust boundary of the discovery.
+- a bad action;
+- a duplicate action;
+- the action `access`;
+- a `server` that is not the id of the service.
+
+A person who may set the labels of a workload chooses the actions that the settings pages offer for it. This is the trust boundary of the discovery.
 
 ## Session secret modes
 
-Two modes exist.
+Exactly two modes exist.
 
 ### `ephemeral`
 
@@ -112,13 +117,20 @@ session {
 
 Give exactly one of `secret_env` (the name of an environment variable) or `secret_file` (an absolute path). The value must contain at least 32 bytes. The program reads it with a finite upper bound. The program removes one trailing line end from the content of the file. Inline HCL secrets are not supported.
 
-The secret protects HMAC-signed authentication control data. Examples are the return target and the anti-CSRF tokens. With SQLite, active opaque sessions stay in RAM in both modes. Therefore `provided` does **not** make them survive a process restart. With PostgreSQL, the sessions are in the database. `provided` is required. Every instance must sign with the same key. `ephemeral` is rejected.
+The secret protects HMAC-signed authentication control data. Examples are the return target and the anti-CSRF tokens. With SQLite, active opaque sessions stay only in RAM in both modes. Therefore `provided` does **not** make them survive a process restart. With PostgreSQL, the sessions are in the database. `provided` is required. Every instance must sign with the same key. `ephemeral` is rejected.
 
 ## Opaque sessions
 
 A session ID is a random 32-byte value. It is encoded with unpadded base64url. The cookie is not a JWT. It contains no claims and no expiration data.
 
-The server stores only these values: a SHA-256 digest of the token, an `Instant` expiration, a last-use time, and a hash of the client binding. Logout therefore revokes the session on the server. It does not only delete the browser cookie. A cookie with another binding is refused. The refusal does not change the session. A thief cannot end the owner's session this way.
+The server stores only these values:
+
+- a SHA-256 digest of the token;
+- an `Instant` expiration;
+- a last-use time;
+- a hash of the client binding.
+
+Logout therefore revokes the session on the server. It does not only delete the browser cookie. A cookie with another binding is refused. The refusal does not change the session. A thief cannot end the owner's session this way.
 
 The store is limited by `session.max_active_sessions`. The server removes expired entries during session operations. When capacity is reached, new sessions fail closed with `503`.
 

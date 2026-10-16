@@ -42,8 +42,9 @@ pub fn json_escape(input: &str) -> String {
     out
 }
 
-/// Characters that draw nothing or reorder the text around them: soft hyphen, bidirectional
-/// controls and isolates, zero-width characters, line and paragraph separators, the byte order mark.
+/// These characters draw nothing or reorder the text around them. They are the soft hyphen, the
+/// bidirectional controls and isolates, the zero-width characters, the line and paragraph
+/// separators, and the byte order mark.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c as u32,
@@ -52,15 +53,19 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
-/// Longest login kept from a sign-in attempt, in characters (an escape counts for what it prints).
+/// The longest login that is kept from a sign-in attempt, in characters. An escape counts as the
+/// characters that it prints.
 pub const TYPED_LOGIN_MAX: usize = 64;
 
-/// What a visitor typed in the login field, made safe to keep and to show back. The text is data from
-/// anyone on the network, so it never travels raw: control characters and characters that hide or
-/// reorder text become a visible `\u{..}` escape (a newline cannot forge a log line, an escape
-/// sequence cannot drive a terminal, a right-to-left mark cannot disguise a row), the length is
-/// bounded, and the surrounding blanks go. Quotes and angle brackets stay as typed: they are
-/// harmless in the database (always a bound parameter) and are escaped where the page prints them.
+/// The text that a visitor typed in the login field. The text is made safe to keep and to show back.
+///
+/// The text is data from anyone on the network. It never travels raw. Control characters, and
+/// characters that hide or reorder text, become a visible `\u{..}` escape. A newline cannot forge
+/// a log line. An escape sequence cannot drive a terminal. A right-to-left mark cannot disguise a
+/// row. The length is bounded, and the surrounding blanks are removed.
+///
+/// Quotes and angle brackets stay as typed. They are harmless in the database, because the
+/// database always uses a bound parameter. The page escapes them where the page prints them.
 pub fn typed_login(input: &str) -> String {
     let mut out = String::new();
     let mut printed = 0usize;
@@ -155,9 +160,9 @@ pub fn validate_return_uri(uri: &str, max_len: usize) -> bool {
         return false;
     }
 
-    // Validate the path after one percent-decoding pass as well. This prevents
-    // redirect targets such as /%2f%2fevil.example or /%5cevil.example from
-    // becoming network-path/backslash URLs after user-agent normalization.
+    // Validate the path after one percent-decoding pass as well. This check prevents
+    // redirect targets, such as /%2f%2fevil.example or /%5cevil.example, from
+    // becoming network-path or backslash URLs. This happens after user-agent normalization.
     let path = path_only(uri);
     let decoded_path = match percent_decode_uri_component(path) {
         Ok(v) => v,
@@ -210,12 +215,13 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
-/// `2026-10-10 14:03` (UTC). The image has no time zone database and the pages have no script,
-/// so every time shown is UTC.
+/// `2026-10-10 14:03` (UTC). The image has no time zone database. The pages have no script.
+/// Therefore, every time shown is UTC.
 pub fn format_utc(unix: i64) -> String {
     let days = unix.div_euclid(86_400);
     let secs = unix.rem_euclid(86_400);
-    // Civil date from a day count (Howard Hinnant's algorithm), proleptic Gregorian.
+    // Compute the civil date from a day count. The method is Howard Hinnant's algorithm.
+    // The calendar is proleptic Gregorian.
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -232,12 +238,12 @@ pub fn format_utc(unix: i64) -> String {
     )
 }
 
-/// `2026-10-10 14:03:27` (UTC): the sign-in log, where seconds tell attempts apart.
+/// `2026-10-10 14:03:27` (UTC). The sign-in log uses this format. The seconds tell attempts apart.
 pub fn format_utc_secs(unix: i64) -> String {
     format!("{}:{:02}", format_utc(unix), unix.rem_euclid(60))
 }
 
-/// `45 s`, `12 min`, `2 h 5 min`, `3 d 4 h`.
+/// Examples of the output: `45 s`, `12 min`, `2 h 5 min`, `3 d 4 h`.
 pub fn format_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
     match seconds {
@@ -254,8 +260,9 @@ pub fn format_duration(seconds: i64) -> String {
     }
 }
 
-/// A User-Agent reduced to what a person recognises: `Firefox 131 · Linux`. Anything not
-/// recognised is cut short. Never trusted: the caller escapes it.
+/// Reduces a User-Agent to what a person recognises, for example `Firefox 131 · Linux`. The
+/// function cuts short anything that it does not recognise. The result is never trusted. The
+/// caller escapes it.
 pub fn short_agent(agent: &str) -> String {
     let browser = [
         ("Edg/", "Edge"),
@@ -291,9 +298,9 @@ pub fn short_agent(agent: &str) -> String {
     }
 }
 
-/// Runs blocking work (a call to the database) from code that may be on an async worker: the
-/// runtime is told to move its other tasks away from this thread meanwhile. Anywhere else (a plain
-/// thread, a test) it just runs.
+/// Runs blocking work, such as a call to the database, from code that may run on an async worker.
+/// The function tells the runtime to move its other tasks away from this thread while the work
+/// runs. Anywhere else, for example on a plain thread or in a test, the function only runs the work.
 pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -312,7 +319,7 @@ mod tests {
             .worker_threads(2)
             .build()
             .unwrap();
-        // The call that would panic if the runtime were not told: another runtime's block_on.
+        // This call panics when the runtime is not told first. The call is the block_on of another runtime.
         let inner = tokio::runtime::Builder::new_current_thread().build().unwrap();
         assert_eq!(
             multi.block_on(async { blocking(|| inner.block_on(async { 2 })) }),

@@ -45,7 +45,7 @@ configs:
       server {
         listen_address = "0.0.0.0:4181"
         workers             = 4
-        max_body_bytes      = "8KiB"
+        max_body_bytes      = "32KiB"
         max_connections     = 1024
         max_headers         = 64
         max_header_bytes    = "32KiB"
@@ -57,8 +57,9 @@ configs:
         superadmin_login_file    = "/run/secrets/portal_superadmin_login"
         superadmin_password_file = "/run/secrets/portal_superadmin_password"
       }
-      roles {
-        names = "ops, dev, viewer"
+      # A new user has no grant: give the grants in the settings pages.
+      access {
+        grants_mode = "dynamic"
       }
       storage {
         database = "/var/lib/portal/portal.db"
@@ -66,7 +67,7 @@ configs:
 
       session {
         # "ephemeral": random signing key generated at process startup.
-        # "file": read the signing key from session.secret_file.
+        # "provided": read the signing key from session.secret_file (or session.secret_env).
         # Opaque sessions themselves are always kept only in RAM and therefore
         # disappear on every process restart in both modes.
         secret_mode = "ephemeral"

@@ -1,13 +1,14 @@
 //! What happened, recorded: sessions (who, from where, how long), the services they used, and the
-//! administrative events. Nothing here sits on the request path.
+//! administrative events. Nothing in this module runs on the request path.
 //!
-//! Requests only push small values into memory (a bounded channel for lifecycle events, two maps for
-//! the "session was seen" and "service was used" counters). One writer thread empties them into
-//! the database every few seconds in a single transaction, so the database is never touched per
-//! request and a slow one cannot slow a login down: when the channel is full an event is dropped
-//! and counted. Each instance of a shared database has its own writer; they write disjoint events.
+//! Requests only push small values into memory. These values are a bounded channel for lifecycle
+//! events, and two maps for the "session was seen" and "service was used" counters. One writer
+//! thread empties them into the database every few seconds. Each flush uses a single transaction.
+//! The database is therefore never touched per request. A slow database cannot slow a login down.
+//! When the channel is full, an event is dropped and counted. Each instance of a shared database
+//! has its own writer. The writers write disjoint events.
 //!
-//! No request path or query is kept, only the service the path belongs to.
+//! The module keeps no request path and no query. It keeps only the service that the path belongs to.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +20,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::store::Store;
 use crate::util::json_escape;
 
-/// Lifecycle events waiting for the writer; beyond this they are dropped and counted.
+/// The maximum number of lifecycle events that wait for the writer. Events beyond this number are
+/// dropped and counted.
 const CHANNEL_CAPACITY: usize = 4096;
 const MAX_BATCH_EVENTS: usize = 1024;
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 3600);
-/// How often the writer empties the in-memory counters into the database.
+/// The interval at which the writer empties the in-memory counters into the database.
 pub const FLUSH_EVERY: Duration = Duration::from_secs(15);
 
 pub fn unix_now() -> i64 {
@@ -33,7 +35,7 @@ pub fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Why a session ended; stored as text.
+/// The reason why a session ended. The reason is stored as text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndReason {
     Logout,
@@ -98,23 +100,23 @@ pub struct SessionStart {
 #[derive(Clone, Debug)]
 pub struct AuditEvent {
     pub kind: AuditKind,
-    /// The account concerned. Absent for a failed login on a name that does not exist: what was
-    /// typed there is sometimes a password.
+    /// The account concerned. This field is absent for a failed login on a name that does not exist.
+    /// What was typed there is sometimes a password.
     pub login: Option<String>,
-    /// Who did it, for administrative actions.
+    /// The person who did the action. This field is used for administrative actions.
     pub actor: Option<String>,
     pub ip: Option<String>,
     pub user_agent: String,
     pub at: i64,
 }
 
-/// One sign-in attempt that reached the password check, kept to see who knocks and from where.
-/// The password never reaches this type.
+/// One sign-in attempt that reached the password check. The attempt is kept to show who tries to
+/// sign in, and from where. The password never reaches this type.
 #[derive(Clone, Debug)]
 pub struct LoginAttempt {
-    /// What was typed in the login field, already made safe by [`crate::util::typed_login`].
+    /// The text typed in the login field. The text is already made safe by [`crate::util::typed_login`].
     pub login: String,
-    /// The typed login names an account (the superadmin included).
+    /// The typed login names an account. The superadmin account is included.
     pub known: bool,
     pub success: bool,
     pub ip: Option<String>,
@@ -134,7 +136,7 @@ pub enum Event {
     Login(LoginAttempt),
 }
 
-/// What one session did on one service since the last flush.
+/// The hits of one session on one service since the last flush.
 #[derive(Clone, Debug)]
 pub struct Hit {
     pub first_at: i64,
@@ -143,7 +145,7 @@ pub struct Hit {
     pub ip: Option<String>,
 }
 
-/// What a flush writes.
+/// The data that one flush writes.
 #[derive(Default)]
 pub struct Batch {
     pub events: Vec<Event>,
@@ -160,21 +162,21 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// A tracker that records nothing, for the tests of what emits events.
+    /// A tracker that records nothing. Use it in the tests that check which code emits events.
     #[cfg(test)]
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self::new(None))
     }
 
-    /// A tracker whose events can be read back, for the tests of what emits them.
+    /// A tracker whose events can be read back. Use it in the tests that check what emits events.
     #[cfg(test)]
     pub fn recording() -> (Arc<Self>, Receiver<Event>) {
         let (tx, rx) = sync_channel(CHANNEL_CAPACITY);
         (Arc::new(Self::new(Some(tx))), rx)
     }
 
-    /// Closes the sessions a previous run left open (only with a SQLite file: sessions of a shared
-    /// database outlive a restart), then starts the writer thread.
+    /// Closes the sessions that a previous run left open. This step runs only with a SQLite file.
+    /// Sessions of a shared database outlive a restart. After this step, the writer thread starts.
     pub fn start(
         store: Arc<Store>,
         flush_every: Duration,
@@ -201,7 +203,7 @@ impl Tracker {
         }
     }
 
-    /// Never blocks: a full channel loses the event and counts it.
+    /// This function never blocks. When the channel is full, the event is lost and counted.
     pub fn emit(&self, event: Event) {
         let Some(tx) = &self.tx else { return };
         match tx.try_send(event) {
@@ -212,7 +214,7 @@ impl Tracker {
         }
     }
 
-    /// The session was used at `at`.
+    /// Records that the session was used at `at`.
     pub fn touch(&self, sid: u64, at: i64) {
         if self.tx.is_none() {
             return;
@@ -224,7 +226,7 @@ impl Tracker {
         }
     }
 
-    /// The session used `service_id` (a request that the gate let through).
+    /// Records that the session used `service_id`. The gate let this request through.
     pub fn service_hit(&self, sid: u64, service_id: &str, ip: Option<String>, at: i64) {
         if self.tx.is_none() {
             return;
@@ -263,8 +265,8 @@ impl Tracker {
                 Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => true,
             };
-            // Everything sent before a counter was bumped is in the channel by now; take it all
-            // first so a hit never reaches the database before its session row.
+            // Every event sent before a counter was bumped is now in the channel.
+            // Take all events first. A hit then never reaches the database before its session row.
             while events.len() < MAX_BATCH_EVENTS {
                 match rx.try_recv() {
                     Ok(event) => events.push(event),

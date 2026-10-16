@@ -1,7 +1,8 @@
-//! Kubernetes source: Traefik IngressRoute annotations, plus pod readiness for the status.
+//! Kubernetes source: Traefik IngressRoute annotations and pod readiness for the status.
 //!
-//! In-cluster only. The ServiceAccount token is read on each request (it rotates); the cluster
-//! CA is the only trusted root. The RBAC needed is `get` and `list` on `ingressroutes` and `pods`.
+//! This source works in the cluster only. The ServiceAccount token is read on each request
+//! because it rotates. The cluster CA is the only trusted root. The required RBAC is `get` and
+//! `list` on `ingressroutes` and `pods`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::{Hint, Workload};
+use crate::config::KubernetesApi;
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -22,19 +24,9 @@ pub struct Kube {
 }
 
 impl Kube {
-    pub fn in_cluster(timeout: Duration) -> Result<Self, String> {
-        let host = std::env::var("KUBERNETES_SERVICE_HOST").map_err(|_| {
-            "KUBERNETES_SERVICE_HOST is not set: not running in a cluster".to_string()
-        })?;
-        let port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
-            .or_else(|_| std::env::var("KUBERNETES_SERVICE_PORT"))
-            .unwrap_or_else(|_| "443".to_string());
-        let host = if host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host
-        };
-
+    /// The configuration gives `api`. It names the variables that hold the host and the port.
+    pub fn in_cluster(api: &KubernetesApi, timeout: Duration) -> Result<Self, String> {
+        let (host, port) = (&api.host, api.port);
         let ca_path = PathBuf::from(SERVICE_ACCOUNT_DIR).join("ca.crt");
         let ca = std::fs::read(&ca_path)
             .map_err(|e| format!("cannot read {}: {e}", ca_path.display()))?;
@@ -75,7 +67,7 @@ impl Kube {
         super::read_capped(response, MAX_BODY_BYTES).await
     }
 
-    /// Every IngressRoute with its annotations.
+    /// Returns every IngressRoute with its annotations.
     pub async fn workloads(&self) -> Result<Vec<Workload>, String> {
         let body = self
             .get("/apis/traefik.io/v1alpha1/ingressroutes?limit=1000")
@@ -83,7 +75,7 @@ impl Kube {
         parse_ingressroutes(&body)
     }
 
-    /// How many pods matching `selector` in `namespace` are ready.
+    /// Returns the number of ready pods that match `selector` in `namespace`.
     pub async fn ready_pods(&self, namespace: &str, selector: &str) -> Result<usize, String> {
         let body = self
             .get(&format!(
@@ -149,7 +141,7 @@ pub(super) fn parse_ingressroutes(body: &[u8]) -> Result<Vec<Workload>, String> 
         .collect())
 }
 
-/// Equality selectors only (`app=registry-ui,tier=web`): the value ends up in a URL.
+/// Use equality selectors only (`app=registry-ui,tier=web`). The value ends up in a URL.
 fn valid_selector(selector: &str) -> bool {
     !selector.is_empty()
         && selector.len() <= 256

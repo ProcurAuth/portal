@@ -1,9 +1,8 @@
 //! The sessions: who a cookie stands for.
 //!
-//! With one instance they live in its memory (a restart ends them). With a shared database they
-//! live in it, so a session opened on one instance is valid on the others and survives a restart;
-//! each instance then keeps a short-lived copy of what it checked, so the request path asks the
-//! database about one session once every few seconds instead of once per request.
+//! With one instance, the sessions are in its memory. A restart ends them.
+//! With a shared database, the sessions are in the database. A session opened on one instance is valid on the others and survives a restart.
+//! Each instance keeps a short-lived copy of what it checked. The request path asks the database about one session once every few seconds, not once per request.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -18,15 +17,15 @@ use crate::store::{SharedSession, Store};
 use crate::tracking::{log_error, unix_now, EndReason, Event, SessionStart, Tracker};
 use crate::util::blocking;
 
-/// How long an instance trusts what it learnt about a session from the shared database. A session
-/// ended on another instance (a logout, a deleted account) stops working here within this time.
+/// How long an instance trusts the data it read about a session from the shared database.
+/// A session ended on another instance (a logout or a deleted account) stops working here within this time.
 const CACHE_TTL: Duration = Duration::from_secs(5);
-/// When the shared database cannot be reached, a session checked less than this ago is still
-/// accepted, so a failover of the database does not sign everybody out.
+/// When the shared database cannot be reached, the instance still accepts a session that it checked less than this time ago.
+/// A failover of the database therefore does not sign out all users.
 const STALE_GRACE: Duration = Duration::from_secs(120);
-/// A history row is taken for lost (its instance died before saying how it ended) only this long
-/// after the session could last have been used: the end of a session that did end is flushed within
-/// [`crate::tracking::FLUSH_EVERY`].
+/// A history row is marked as lost only after this time has passed since the session could last have been used.
+/// A row is lost when its instance stops before it records how the session ended.
+/// The end of a session that did end is flushed within [`crate::tracking::FLUSH_EVERY`].
 const LOST_GRACE_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +39,10 @@ pub enum SessionIssueError {
 /// What a session cookie is tied to (see `transport::binding`).
 pub type Binding = [u8; 32];
 
-/// Who a session belongs to. The superadmin is the account defined by the environment; the others
-/// live in the database and are looked up by login (their roles are read live, so a change or a
-/// deletion applies to a session already open).
+/// Who a session belongs to.
+/// The superadmin is the account defined by the environment.
+/// The database stores the other accounts. The system looks them up by login.
+/// Their roles are read live. A change or a deletion applies to a session that is already open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Principal {
     Superadmin,
@@ -52,10 +52,10 @@ pub enum Principal {
 /// What a valid cookie stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
-    /// Random identifier of the session in the history (not the cookie value, which is secret).
+    /// Random identifier of the session in the history. It is not the cookie value, which is secret.
     pub sid: u64,
     pub principal: Principal,
-    /// The superadmin is browsing as this user: it is not a connection of the user.
+    /// The superadmin browses as this user. This is not a connection of the user.
     pub impersonated: bool,
 }
 
@@ -63,7 +63,7 @@ pub struct Session {
 #[derive(Clone, Debug)]
 pub struct NewSession {
     pub principal: Principal,
-    /// The login shown in the history (the superadmin's own login for the superadmin).
+    /// The login shown in the history. For the superadmin, this is the superadmin's own login.
     pub login: String,
     pub impersonated: bool,
     pub ip: Option<String>,
@@ -74,14 +74,14 @@ pub struct NewSession {
 struct Entry {
     expires_at: Instant,
     last_seen: Instant,
-    /// When the shared database last confirmed the session (unused with one instance).
+    /// The time when the shared database last confirmed the session. Not used with one instance.
     checked: Instant,
     binding: Binding,
     session: Session,
 }
 
 pub struct SessionStore {
-    /// The sessions of this instance; with a shared database, the copies it keeps of them.
+    /// The sessions of this instance. With a shared database, these are the copies that this instance keeps.
     sessions: Mutex<HashMap<[u8; 32], Entry>>,
     ttl: Duration,
     idle: Duration,
@@ -89,7 +89,7 @@ pub struct SessionStore {
     tracker: Arc<Tracker>,
     shared: Option<Arc<Store>>,
     cache_ttl: Duration,
-    /// Live sessions of every instance, as the last sweep counted them.
+    /// The live sessions of every instance, as the last sweep counted them.
     shared_active: AtomicUsize,
     shared_errors: AtomicU64,
 }
@@ -109,7 +109,7 @@ impl SessionStore {
         }
     }
 
-    /// Keeps the sessions in the shared `store` instead of in memory.
+    /// Keeps the sessions in the shared `store`, not in memory.
     pub fn shared(mut self, store: Arc<Store>) -> Self {
         self.shared = Some(store);
         self
@@ -120,7 +120,7 @@ impl SessionStore {
         self.cache_ttl = cache_ttl;
     }
 
-    /// Failures of the shared database that the sessions met (always 0 with one instance).
+    /// Failures of the shared database that the sessions met. The value is always 0 with one instance.
     pub fn shared_errors(&self) -> u64 {
         self.shared_errors.load(Ordering::Relaxed)
     }
@@ -141,8 +141,8 @@ impl SessionStore {
             return Err(SessionIssueError::Capacity);
         }
 
-        // A 256-bit random token has negligible collision probability, but keep
-        // the insertion fail-closed and bounded even if the OS RNG misbehaves.
+        // A 256-bit random token has a negligible collision probability.
+        // Keep the insertion fail-closed and bounded, even if the OS RNG misbehaves.
         for _ in 0..4 {
             let mut raw = [0u8; 32];
             if getrandom::fill(&mut raw).is_err() {
@@ -190,9 +190,10 @@ impl SessionStore {
         Err(SessionIssueError::Random)
     }
 
-    /// The session `token` stands for, if it is live and was issued for `binding`. A valid use
-    /// renews the idle timer. A mismatching binding (the cookie is used from elsewhere) is refused
-    /// and leaves the session alone, so a thief cannot end the owner's session by trying it.
+    /// The session that `token` stands for. The session must be live and must have been issued for `binding`.
+    /// A valid use renews the idle timer.
+    /// A binding that does not match means the cookie is used from elsewhere. The use is refused.
+    /// The session is left alone. A thief cannot end the owner's session by trying it.
     pub fn validate(&self, token: &str, binding: &Binding) -> Option<Session> {
         let digest = digest_encoded_token(token)?;
         if let Some(store) = &self.shared {
@@ -211,7 +212,7 @@ impl SessionStore {
         }
     }
 
-    /// Ends the session `token` stands for and returns it.
+    /// Ends the session that `token` stands for. Returns the session.
     pub fn revoke(&self, token: &str, reason: EndReason) -> Option<Session> {
         let digest = digest_encoded_token(token)?;
         if let Some(store) = &self.shared {
@@ -226,7 +227,7 @@ impl SessionStore {
         Some(entry.session)
     }
 
-    /// Ends every session of one user (the account was deleted); returns how many.
+    /// Ends every session of one user. Use this when the account was deleted. Returns the number of sessions ended.
     pub fn revoke_user(&self, login: &str, reason: EndReason) -> usize {
         if let Some(store) = &self.shared {
             return self.revoke_user_shared(store, login, reason);
@@ -302,7 +303,7 @@ impl SessionStore {
             impersonated: new.impersonated,
             expires_at: now + self.ttl.as_secs() as i64,
         };
-        // The history row is written with the session, so no instance meets a session without it.
+        // The history row is written with the session. Therefore, no instance meets a session without a history row.
         let start = SessionStart {
             sid: session.sid,
             login: new.login,
@@ -352,7 +353,7 @@ impl SessionStore {
         };
         if let Some((copy_binding, checked, session)) = &copy {
             if copy_binding != binding {
-                // Used from elsewhere: refused, and the owner's session is left alone.
+                // The cookie is used from elsewhere. Refuse the request. Leave the owner's session alone.
                 return None;
             }
             if now.duration_since(*checked) < self.cache_ttl {
@@ -408,10 +409,10 @@ impl SessionStore {
                 self.ended(&session, reason);
                 Some(session)
             }
-            // Another instance ended it first, and recorded it.
+            // Another instance ended the session first, and recorded it.
             Ok(None) => None,
             Err(error) => {
-                // It stays valid elsewhere until it expires; the failure is counted and logged.
+                // The session stays valid on other instances until it expires. Count and log the failure.
                 self.failed("session_revoke_failed", &error);
                 copy.map(|entry| entry.session)
             }
@@ -437,9 +438,9 @@ impl SessionStore {
         }
     }
 
-    /// Ends the sessions of every instance that ran out (lifetime or idle time), records how, and
-    /// counts the live ones. Run by every instance every few seconds: the database hands each ended
-    /// session to exactly one of them.
+    /// Ends the sessions that ran out on any instance. A session runs out by its lifetime or by its idle time.
+    /// Records how each session ended. Counts the live sessions.
+    /// Every instance runs this every few seconds. The database gives each ended session to exactly one instance.
     pub fn sweep(&self) {
         let Some(store) = &self.shared else { return };
         let now = unix_now();
@@ -466,8 +467,9 @@ impl SessionStore {
         self.prune_copies(&mut cache, Instant::now());
     }
 
-    /// Closes the history rows of sessions that ended without anybody recording it (an instance
-    /// died before it flushed). They end at the last time they were seen.
+    /// Closes the history rows of sessions that nobody recorded as ended.
+    /// This happens when an instance stops before it flushes its records.
+    /// Each row ends at the last time its session was seen.
     pub fn close_lost_history(&self) {
         let Some(store) = &self.shared else { return };
         let before = unix_now() - self.idle.as_secs() as i64 - LOST_GRACE_SECS;
@@ -476,7 +478,7 @@ impl SessionStore {
         }
     }
 
-    /// Forgets copies that expired or were checked too long ago to be of use.
+    /// Removes copies that expired. Also removes copies that were checked too long ago to be useful.
     fn prune_copies(&self, cache: &mut HashMap<[u8; 32], Entry>, now: Instant) {
         cache.retain(|_, entry| {
             entry.expires_at > now && now.duration_since(entry.checked) < STALE_GRACE
@@ -512,7 +514,7 @@ fn session_of(stored: SharedSession) -> Session {
 }
 
 fn digest_encoded_token(token: &str) -> Option<[u8; 32]> {
-    // 32 bytes encoded as unpadded base64url are exactly 43 ASCII bytes.
+    // 32 bytes, encoded as unpadded base64url, are exactly 43 ASCII bytes.
     if token.len() != 43 || !token.is_ascii() {
         return None;
     }
@@ -680,7 +682,7 @@ mod tests {
 
 #[cfg(test)]
 mod shared_tests {
-    //! The sessions of several instances, on a PostgreSQL database (skipped without one).
+    //! The sessions of several instances, on a PostgreSQL database. The tests are skipped without one.
 
     use super::*;
     use crate::store::testing::postgres;
@@ -706,7 +708,7 @@ mod shared_tests {
             Self { sessions, events, store }
         }
 
-        /// The sessions that ended on this instance, as it recorded them.
+        /// The sessions that ended on this instance, as this instance recorded them.
         fn ended(&self) -> Vec<(u64, EndReason)> {
             self.events
                 .try_iter()

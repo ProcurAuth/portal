@@ -1,13 +1,14 @@
-//! Which service a request belongs to, and who may open it.
+//! Which service a request belongs to, and who can open it.
 //!
-//! The gate runs in `/auth/verify`, which only sees the URI as the browser wrote it
-//! (`X-Forwarded-Uri`), while Traefik routes on the cleaned path. The two must not disagree: a
-//! request for `/grafana/../clickhouse/` is routed to ClickHouse, so it has to be judged as a
-//! ClickHouse request. The path is therefore read the ways a proxy or a backend might read it
-//! (`%2f` as a character or as a separator, `\` as a character or as a separator), and the request
-//! is allowed only if every reading is allowed.
+//! The gate runs in `/auth/verify`. This endpoint sees only the URI as the browser sent it
+//! (`X-Forwarded-Uri`). Traefik routes on the cleaned path. The two must not disagree. A
+//! request for `/grafana/../clickhouse/` is routed to ClickHouse. The gate must therefore judge
+//! it as a ClickHouse request. The gate reads the path in each way that a proxy or a backend
+//! might read it: `%2f` as a character or as a separator, and `\` as a character or as a
+//! separator. The gate allows the request only if every reading is allowed.
 
 use crate::catalog::Catalog;
+use crate::grants::{holds, Grant, ACCESS};
 
 const MAX_RULE_SEGMENTS: usize = 16;
 const MAX_SEGMENT_CHARS: usize = 64;
@@ -15,7 +16,7 @@ const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OP
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Part {
-    /// A segment written out: `[A-Za-z0-9._~-]`.
+    /// A literal segment. It uses the characters `[A-Za-z0-9._~-]`.
     Literal(String),
     /// `*`: exactly one segment.
     One,
@@ -23,9 +24,9 @@ enum Part {
     Rest,
 }
 
-/// A path a service declares reachable without signing in (`portal.exclude`, one rule per line):
-/// `[METHOD[,METHOD]] /path/with/*/and/**`. Segments are matched whole: there is no partial
-/// wildcard and no regular expression, so a rule reads the way the portal's own path model does.
+/// A path that a service declares as reachable without a user session (`portal.exclude`, one rule per line):
+/// `[METHOD[,METHOD]] /path/with/*/and/**`. The rule matches whole segments. There is no partial
+/// wildcard and no regular expression. A rule therefore reads in the same way as the portal path model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExcludeRule {
     methods: Vec<String>,
@@ -91,12 +92,12 @@ impl ExcludeRule {
         Ok(Self { methods, parts, text })
     }
 
-    /// The rule as normalised, for display.
+    /// The normalised rule, for display.
     pub fn text(&self) -> &str {
         &self.text
     }
 
-    /// Whether the written-out start of the rule is `prefix` (the path the service owns).
+    /// Whether the literal start of the rule is `prefix`. The prefix is the path that the service owns.
     pub fn starts_with(&self, prefix: &[String]) -> bool {
         prefix.len() <= self.parts.len()
             && prefix
@@ -132,17 +133,18 @@ impl ExcludeRule {
     }
 }
 
-/// A segment a wildcard may stand for: no separator hidden in it (`%2f` decoded), no control character.
+/// A segment that a wildcard can match. It has no hidden separator (`%2f` decoded) and no control character.
 fn plain(segment: &str) -> bool {
     !segment.is_empty() && !segment.contains(['/', '\\']) && !segment.chars().any(char::is_control)
 }
 
 /// The service whose `portal.exclude` rule lets this request through without a session, if any.
 ///
-/// Conservative on every point: the path is read every way a proxy or a backend might read it
-/// ([`path_readings`]) and every reading must be owned by the same service and match one of its
-/// rules; `/auth/*` is never excluded; a URI that cannot be read safely is never excluded. A rule
-/// only ever applies to the service that declared it and owns the path (longest prefix).
+/// The check is conservative. The gate reads the path in every way that a proxy or a backend
+/// might read it ([`path_readings`]). Every reading must belong to the same service and must
+/// match one of its rules. `/auth/*` is never excluded. A URI that cannot be read safely is
+/// never excluded. A rule applies only to the service that declared it and owns the path
+/// (longest prefix).
 pub fn excluded(catalog: &Catalog, method: Option<&str>, uri: &str) -> Option<String> {
     let readings = path_readings(uri)?;
     let mut prefix: Option<&Vec<String>> = None;
@@ -167,11 +169,12 @@ pub fn excluded(catalog: &Catalog, method: Option<&str>, uri: &str) -> Option<St
     hit
 }
 
-/// The segments of a path on this host once dot segments and empty segments are resolved.
+/// The segments of a path on this host, after the gate resolves dot segments and empty segments.
 pub type Segments = Vec<String>;
 
-/// The path prefix a service owns, from its `href`. `None` for an absolute URL (it lives on another
-/// host, nothing here can gate it) and for `/` (it would own everything).
+/// The path prefix that a service owns, taken from its `href`. The result is `None` for an
+/// absolute URL. Such a URL lives on another host, and nothing here can gate it. The result is
+/// also `None` for `/`, because that prefix would own everything.
 pub fn href_prefix(href: &str) -> Option<Segments> {
     if !href.starts_with('/') || href.starts_with("//") {
         return None;
@@ -185,8 +188,8 @@ pub fn href_prefix(href: &str) -> Option<Segments> {
     }
 }
 
-/// Every reading of the path of `uri`. `None` when the URI cannot be read safely (a NUL byte, a
-/// broken percent escape): such a request is refused.
+/// Every reading of the path of `uri`. The result is `None` when the URI cannot be read safely,
+/// for example because of a NUL byte or a broken percent escape. The gate refuses such a request.
 pub fn path_readings(uri: &str) -> Option<Vec<Segments>> {
     let path = uri.split(['?', '#']).next().unwrap_or("");
     if !path.starts_with('/') {
@@ -198,9 +201,9 @@ pub fn path_readings(uri: &str) -> Option<Vec<Segments>> {
     }
     // As written: an encoded slash stays inside its segment.
     let literal = clean(decoded.iter().map(String::as_str));
-    // As a backend that decodes before it routes: an encoded slash separates.
+    // As a backend that decodes the path before it routes: an encoded slash is a separator.
     let slashes = clean(decoded.iter().flat_map(|s| s.split('/')));
-    // And with a backslash read as a separator too.
+    // Also, a backslash is read as a separator.
     let backslashes = clean(decoded.iter().flat_map(|s| s.split(['/', '\\'])));
     let mut readings = vec![literal];
     for reading in [slashes, backslashes] {
@@ -243,7 +246,7 @@ fn percent_decode(raw: &str) -> Option<String> {
     if out.contains(&0) {
         return None;
     }
-    // Bytes that are not UTF-8 cannot spell a service prefix; they only have to stay distinct.
+    // Bytes that are not UTF-8 cannot spell a service prefix. They must only stay distinct.
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -256,44 +259,32 @@ fn hex(b: u8) -> Option<u8> {
     }
 }
 
-/// Whether a service bound to `service_roles` may be used by someone holding `user_roles` (`None`
-/// is the superadmin, who may use everything). A service without roles is open to nobody but the
-/// superadmin: access is granted by naming a role, never by omission. A role missing from `registry`
-/// does not exist: it opens the service to nobody either.
-pub fn service_allows(
-    service_roles: &[String],
-    registry: &[String],
-    user_roles: Option<&[String]>,
-) -> bool {
-    match user_roles {
+/// Whether `grants` let the user open the service `service`. `None` is the superadmin, who has
+/// all grants. A new user has no grant. Access comes only from a grant, never from an omission.
+pub fn may_open(grants: Option<&[Grant]>, service: &str) -> bool {
+    match grants {
         None => true,
-        Some(held) => service_roles
-            .iter()
-            .any(|role| registry.contains(role) && held.contains(role)),
+        Some(held) => holds(held, ACCESS, service),
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// The request may go through; `service` is the one it belongs to, if any.
+    /// The request is allowed. `service` is the service that the request belongs to, if any.
     Allow { service: Option<String> },
-    /// The request is refused; `service` is the one it belongs to, so the page can name it.
-    Deny { service: Option<String> },
+    /// The request is refused. The refusal does not state which service it concerns. A user cannot
+    /// learn the name of a service that is not open to that user.
+    Deny,
 }
 
-/// The gate. `roles` is `None` for the superadmin.
-pub fn decide(
-    catalog: &Catalog,
-    registry: &[String],
-    roles: Option<&[String]>,
-    uri: &str,
-) -> Decision {
+/// The gate. `grants` is `None` for the superadmin.
+pub fn decide(catalog: &Catalog, grants: Option<&[Grant]>, uri: &str) -> Decision {
     let readings = path_readings(uri);
     let Some(readings) = readings else {
-        return if roles.is_none() {
+        return if grants.is_none() {
             Decision::Allow { service: None }
         } else {
-            Decision::Deny { service: None }
+            Decision::Deny
         };
     };
     let mut service = None;
@@ -301,16 +292,9 @@ pub fn decide(
         let Some(owner) = catalog.owner(reading) else {
             continue;
         };
-        let allowed = owner
-            .services
-            .iter()
-            .find(|s| service_allows(&s.roles, registry, roles));
+        let allowed = owner.services.iter().find(|s| may_open(grants, &s.id));
         match allowed {
-            None => {
-                return Decision::Deny {
-                    service: owner.services.first().map(|s| s.id.clone()),
-                }
-            }
+            None => return Decision::Deny,
             Some(s) if index == 0 => service = Some(s.id.clone()),
             Some(_) => {}
         }
@@ -324,45 +308,37 @@ mod tests {
     use crate::catalog::{parse_labels, Catalog};
     use std::collections::BTreeMap;
 
-    fn svc(name: &str, href: &str, roles: &str) -> crate::catalog::Service {
-        let labels: BTreeMap<String, String> = [
-            ("portal.name", name),
-            ("portal.href", href),
-            ("portal.roles", roles),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    fn svc(name: &str, href: &str) -> crate::catalog::Service {
+        let labels: BTreeMap<String, String> = [("portal.name", name), ("portal.href", href)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         parse_labels("x", &labels).unwrap().unwrap()
     }
 
     fn catalog() -> Catalog {
         Catalog::build(
             vec![
-                svc("Grafana", "/grafana/", "ops"),
-                svc("ClickHouse", "/clickhouse/", "data"),
-                svc("Notes", "/notes/", ""),
-                svc("Nested", "/grafana/admin/", "root-only"),
-                svc("Typo", "/typo/", "opz"),
-                svc("External", "https://example.org/", "ops"),
+                svc("Grafana", "/grafana/"),
+                svc("ClickHouse", "/clickhouse/"),
+                svc("Notes", "/notes/"),
+                svc("Nested", "/grafana/admin/"),
+                svc("External", "https://example.org/"),
             ],
             Vec::new(),
         )
     }
 
-    fn registry() -> Vec<String> {
-        ["ops", "data", "root-only"]
+    /// `access` on each named service. The ids have the form `other-<name>`.
+    fn grants(services: &[&str]) -> Vec<Grant> {
+        services
             .iter()
-            .map(|r| r.to_string())
+            .map(|s| Grant::new(ACCESS, &format!("other-{s}")).unwrap())
             .collect()
     }
 
-    fn roles(list: &[&str]) -> Vec<String> {
-        list.iter().map(|r| r.to_string()).collect()
-    }
-
     fn verdict(held: &[&str], uri: &str) -> Decision {
-        decide(&catalog(), &registry(), Some(&roles(held)), uri)
+        decide(&catalog(), Some(&grants(held)), uri)
     }
 
     fn allowed(held: &[&str], uri: &str) -> bool {
@@ -409,33 +385,40 @@ mod tests {
     }
 
     #[test]
-    fn a_service_without_roles_is_open_to_the_superadmin_only() {
+    fn a_new_user_opens_nothing_and_the_superadmin_opens_everything() {
         assert!(!allowed(&[], "/notes/api/x"));
-        assert!(!allowed(&["ops", "data", "root-only"], "/notes"));
+        assert!(!allowed(&[], "/grafana/"));
         assert!(matches!(
-            decide(&catalog(), &registry(), None, "/notes/api/x"),
+            decide(&catalog(), None, "/notes/api/x"),
             Decision::Allow { .. }
         ));
     }
 
     #[test]
-    fn a_service_with_roles_needs_one_of_them() {
-        assert!(allowed(&["ops"], "/grafana/d/1"));
-        assert!(!allowed(&["data"], "/grafana/d/1"));
-        assert!(!allowed(&[], "/grafana/"));
-        assert!(allowed(&["data", "ops"], "/clickhouse/"));
+    fn a_service_needs_the_access_grant_on_it() {
+        assert!(allowed(&["grafana"], "/grafana/d/1"));
+        assert!(!allowed(&["clickhouse"], "/grafana/d/1"));
+        assert!(allowed(&["clickhouse", "grafana"], "/clickhouse/"));
+        let other_action = vec![Grant::new("query.run.read", "other-clickhouse").unwrap()];
+        assert!(
+            !matches!(
+                decide(&catalog(), Some(&other_action), "/clickhouse/"),
+                Decision::Allow { .. }
+            ),
+            "only access opens the service"
+        );
     }
 
     #[test]
     fn matching_is_on_whole_segments_and_the_longest_prefix_wins() {
         assert!(allowed(&[], "/grafana-evil/"), "another path, no service");
         assert!(
-            !allowed(&["ops"], "/grafana/admin/x"),
-            "the nested service needs root-only"
+            !allowed(&["grafana"], "/grafana/admin/x"),
+            "the nested service needs its own grant"
         );
-        assert!(allowed(&["ops", "root-only"], "/grafana/admin/x"));
+        assert!(allowed(&["grafana", "nested"], "/grafana/admin/x"));
         assert!(
-            allowed(&["ops"], "/grafana/administrator"),
+            allowed(&["grafana"], "/grafana/administrator"),
             "not the nested prefix"
         );
     }
@@ -448,16 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn a_role_missing_from_the_registry_opens_nothing_but_the_superadmin_may_pass() {
-        assert!(!allowed(&["opz"], "/typo/"), "the role does not exist");
-        assert!(matches!(
-            decide(&catalog(), &registry(), None, "/typo/"),
-            Decision::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn path_tricks_cannot_reach_a_service_the_user_may_not_open() {
+    fn path_tricks_cannot_reach_a_service_the_user_cannot_open() {
         for uri in [
             "/notes/../clickhouse/",
             "/notes/%2e%2e/clickhouse/",
@@ -472,42 +446,33 @@ mod tests {
             "/clickhouse%zz/",
         ] {
             assert!(
-                !allowed(&["ops"], uri),
-                "{uri} must be refused to an `ops` user"
+                !allowed(&["notes", "grafana"], uri),
+                "{uri} must be refused to a user without access to clickhouse"
             );
         }
-        // The superadmin is never held back.
+        // The superadmin is never blocked.
         assert!(matches!(
-            decide(&catalog(), &registry(), None, "/clickhouse%00/"),
+            decide(&catalog(), None, "/clickhouse%00/"),
             Decision::Allow { .. }
         ));
     }
 
     #[test]
-    fn a_refusal_names_the_service_it_concerns() {
-        assert_eq!(
-            verdict(&["data"], "/grafana/d/1"),
-            Decision::Deny {
-                service: Some("other-grafana".into())
-            }
-        );
-        assert_eq!(
-            verdict(&["ops"], "/clickhouse%00/"),
-            Decision::Deny { service: None },
-            "an unreadable path belongs to no service"
-        );
+    fn a_refusal_does_not_name_the_service() {
+        assert_eq!(verdict(&["clickhouse"], "/grafana/d/1"), Decision::Deny);
+        assert_eq!(verdict(&["grafana"], "/clickhouse%00/"), Decision::Deny);
     }
 
     #[test]
     fn the_service_a_request_belongs_to_is_reported_for_the_history() {
         assert_eq!(
-            verdict(&["ops"], "/grafana/d/1"),
+            verdict(&["grafana"], "/grafana/d/1"),
             Decision::Allow {
                 service: Some("other-grafana".into())
             }
         );
         assert_eq!(
-            verdict(&["ops"], "/app.js"),
+            verdict(&["grafana"], "/app.js"),
             Decision::Allow { service: None }
         );
     }
@@ -523,7 +488,6 @@ mod exclude_tests {
         let labels: BTreeMap<String, String> = [
             ("portal.name", name),
             ("portal.href", href),
-            ("portal.roles", "ops"),
             ("portal.exclude", exclude),
         ]
         .iter()
@@ -580,14 +544,15 @@ mod exclude_tests {
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/%2e%2e/%2e%2e/auth/settings"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/a%00b"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/a%zz"));
-        // Dot segments that cancel out still land on a declared path: judged as that path.
+        // Dot segments that cancel each other still lead to a declared path.
+        // The gate judges the request as that path.
         assert!(open(Some("GET"), "/dagu/api/v1/webhooks/../health"));
         assert!(!open(Some("POST"), "/dagu/api/v1/webhooks/../health"));
     }
 
     #[test]
     fn dot_segments_cannot_carry_a_request_out_of_the_service() {
-        // The path is cleaned first: these are requests for /test, /grafana/... or /auth/..., not for Dagu.
+        // The gate cleans the path first. These are requests for /test, /grafana/... or /auth/..., not for Dagu.
         for uri in [
             "/dagu/../test",
             "/dagu/%2e%2e/test",
@@ -601,7 +566,7 @@ mod exclude_tests {
                 assert!(!open(Some(method), uri), "{method} {uri}");
             }
         }
-        // A rule itself cannot be written with a dot segment.
+        // A rule itself cannot contain a dot segment.
         assert!(ExcludeRule::parse("POST /dagu/../test").is_err());
         assert!(ExcludeRule::parse("POST /dagu/./x").is_err());
     }

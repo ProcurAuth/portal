@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 
 mod access;
+mod actions;
 mod catalog;
 mod config;
 mod crypto;
 mod discovery;
+mod grants;
 mod http;
 mod icons;
+mod identity;
 mod metrics;
 mod rate_limit;
 mod session;
@@ -19,16 +22,15 @@ mod users;
 mod util;
 
 use std::env;
-use std::fs::File;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use config::{Config, SessionSecretConfig, StorageBackend};
+use config::{Config, Secrets, StorageBackend};
 use crypto::{generate_session_secret, hash_password};
-use http::SuperAdmin;
+use http::{AccessSecrets, SuperAdmin};
 use store::Store;
 use tracking::Tracker;
 use zeroize::Zeroize;
@@ -46,10 +48,16 @@ fn real_main() -> Result<(), String> {
     match command.as_str() {
         "run" => {
             let config_path = parse_config_arg(args.collect())?;
-            let mut config = Config::load(&config_path)?;
-            let superadmin = load_superadmin(&config)?;
-            let signing_secret = load_session_secret(&mut config)?;
-            let store = Arc::new(open_store(&config)?);
+            let (config, mut secrets) = Config::load(&config_path)?;
+            let superadmin = load_superadmin(&secrets)?;
+            let signing_secret = take_session_secret(&mut secrets)?;
+            let store = Arc::new(open_store(&config, &secrets)?);
+            let access = AccessSecrets {
+                identity_key: secrets.identity_key.take(),
+                pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
+            };
+            // The program erases the secrets that it still holds from memory here.
+            drop(secrets);
             let tracker = Tracker::start(
                 Arc::clone(&store),
                 tracking::FLUSH_EVERY,
@@ -61,19 +69,20 @@ fn real_main() -> Result<(), String> {
                 signing_secret,
                 store,
                 tracker,
+                access,
             )?);
             sync::start(Arc::clone(&state))?;
             http::serve(state)
         }
-        // Copies the accounts and the history of a SQLite file into the (empty) PostgreSQL database
-        // the configuration names. The file is only read.
+        // Copies the accounts and the history of a SQLite file into the (empty) PostgreSQL database.
+        // The configuration names the database. The file is only read.
         "import-sqlite" => {
             let (config_path, from) = parse_import_args(args.collect())?;
-            let config = Config::load(&config_path)?;
+            let (config, secrets) = Config::load(&config_path)?;
             if !matches!(config.storage.backend, StorageBackend::Postgres(_)) {
                 return Err("import-sqlite needs a configuration with a postgres block".into());
             }
-            let store = open_store(&config)?;
+            let store = open_store(&config, &secrets)?;
             let report = store.import_sqlite(&from)?;
             println!(
                 "imported {} accounts, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
@@ -81,22 +90,39 @@ fn real_main() -> Result<(), String> {
             );
             Ok(())
         }
+        // Check the file, the variables and the files that it names.
+        // Then print the value that applies to each key, with its source.
+        // The secrets are hidden.
         "check-config" => {
             let config_path = parse_config_arg(args.collect())?;
-            let mut config = Config::load(&config_path)?;
-            let mut superadmin = load_superadmin(&config)?;
+            let (config, mut secrets) = Config::load(&config_path)?;
+            let mut superadmin = load_superadmin(&secrets)?;
             superadmin.password_hash.zeroize();
-            let mut signing_secret = load_session_secret(&mut config)?;
-            signing_secret.zeroize();
-            if let StorageBackend::Postgres(postgres) = &config.storage.backend {
-                let mut password = read_secret_file(&postgres.password_file, 1024, "postgres password")?;
-                let empty = password.is_empty();
-                password.zeroize();
-                if empty {
-                    return Err(format!("postgres password is empty: {}", postgres.password_file.display()));
-                }
+            drop(take_session_secret(&mut secrets)?);
+            // The key must be a valid Ed25519 key. The check reads it as `run` does.
+            let signer = identity_signer(&config, &mut secrets)?;
+            print!("{}", config.render_effective());
+            if let Some(signer) = signer {
+                println!("identity.key_id = {:?}  # derived from identity.signing_key", signer.kid());
             }
             println!("configuration ok");
+            Ok(())
+        }
+        // The public key of the identity tokens. Each service uses it in `identity.public_keys_file`.
+        "identity-public-key" => {
+            let config_path = parse_config_arg(args.collect())?;
+            let (config, mut secrets) = Config::load(&config_path)?;
+            let signer = identity_signer(&config, &mut secrets)?
+                .ok_or("the configuration has no identity block")?;
+            print!("{}", signer.public_key_pem());
+            Ok(())
+        }
+        // The configuration reference in Markdown. It is generated from the table of keys.
+        "config-reference" => {
+            if args.next().is_some() {
+                return Err("config-reference takes no argument".into());
+            }
+            print!("{}", config::keys::reference());
             Ok(())
         }
         "healthcheck" => {
@@ -104,7 +130,7 @@ fn real_main() -> Result<(), String> {
             healthcheck(&config_path)
         }
         "hash-password" => hash_password_command(),
-        // A synthetic page on stdout: to look at the design without a runtime or a login.
+        // Prints a synthetic page on stdout. Use it to look at the design without a runtime or a login.
         "render-demo" => {
             let icons = match args.next() {
                 Some(dir) if dir != "-" => icons::Icons::load(Path::new(&dir)),
@@ -112,7 +138,7 @@ fn real_main() -> Result<(), String> {
             };
             let name = args.next().unwrap_or_else(|| "launcher".into());
             let page = ui::demo_page(&name, &icons).ok_or_else(|| {
-                format!("unknown page {name}: launcher, users, roles, services or logins")
+                format!("unknown page {name}: launcher, users, services or logins")
             })?;
             print!("{page}");
             Ok(())
@@ -140,7 +166,7 @@ fn parse_config_arg(args: Vec<String>) -> Result<PathBuf, String> {
     Ok(PathBuf::from(&args[1]))
 }
 
-/// `--config <FILE> --from <FILE>`.
+/// Parses the arguments of the import command: `--config <FILE> --from <FILE>`.
 fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
     match args.as_slice() {
         [config_flag, config, from_flag, from] if config_flag == "--config" && from_flag == "--from" => {
@@ -150,88 +176,51 @@ fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
     }
 }
 
-/// The database the configuration names. With PostgreSQL this waits up to a minute for it to answer.
-fn open_store(config: &Config) -> Result<Store, String> {
+/// Opens the database that the configuration names. With PostgreSQL, this waits up to a minute for the database to answer.
+fn open_store(config: &Config, secrets: &Secrets) -> Result<Store, String> {
     match &config.storage.backend {
         StorageBackend::Sqlite(path) => Store::open(path),
         StorageBackend::Postgres(postgres) => {
-            let mut raw = read_secret_file(&postgres.password_file, 1024, "postgres password")?;
-            while raw.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
-                raw.pop();
-            }
-            let password = String::from_utf8(raw.clone())
-                .map_err(|_| format!("postgres password is not UTF-8: {}", postgres.password_file.display()));
-            raw.zeroize();
-            let mut password = password?;
-            let store = Store::open_postgres(postgres, &password);
-            password.zeroize();
-            store
+            let password = secrets
+                .postgres_password
+                .as_ref()
+                .ok_or("internal error: the postgres block has no password")?;
+            let password = std::str::from_utf8(password.as_bytes())
+                .map_err(|_| "postgres.password is not valid UTF-8".to_string())?;
+            Store::open_postgres(postgres, password)
         }
     }
 }
 
-fn read_secret_file(path: &Path, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
-    let file = File::open(path)
-        .map_err(|e| format!("cannot open {label} {}: {e}", path.display()))?;
-    let mut value = Vec::new();
-    file.take(max_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut value)
-        .map_err(|e| format!("cannot read {label} {}: {e}", path.display()))?;
-    if value.len() > max_bytes {
-        value.zeroize();
-        return Err(format!("{label} exceeds {max_bytes} bytes: {}", path.display()));
+/// Creates the signer of the identity tokens from the `identity` block. The result is `None` without the block.
+fn identity_signer(
+    config: &Config,
+    secrets: &mut Secrets,
+) -> Result<Option<identity::Signer>, String> {
+    match (&config.identity, secrets.identity_key.take()) {
+        (Some(identity), Some(key)) => Ok(Some(identity::Signer::new(
+            key.as_bytes(),
+            &identity.issuer,
+            identity.token_ttl,
+        )?)),
+        _ => Ok(None),
     }
-    Ok(value)
 }
 
-/// The superadmin: its login (trimmed, lower case) and the Argon2id hash of its password. Both
-/// come from files the environment fills in.
-fn load_superadmin(config: &Config) -> Result<SuperAdmin, String> {
-    let login_path = &config.authentication.superadmin_login_file;
-    let raw = read_secret_file(login_path, 256, "superadmin login")?;
-    let login = String::from_utf8(raw)
-        .map_err(|_| format!("superadmin login is not UTF-8: {}", login_path.display()))?
-        .trim()
-        .to_ascii_lowercase();
-    if login.is_empty() || login.len() > 64 || login.chars().any(char::is_control) {
-        return Err(format!(
-            "superadmin login must be 1 to 64 printable characters: {}",
-            login_path.display()
-        ));
-    }
-
-    let path = &config.authentication.superadmin_password_file;
-    let mut password = read_secret_file(path, config.security.max_password_bytes, "superadmin password")?;
-    if password.is_empty() {
-        password.zeroize();
-        return Err(format!("superadmin password is empty: {}", path.display()));
-    }
-    let hashed = hash_password(&password);
-    password.zeroize();
+/// Creates the superadmin. It has the login from the configuration and the Argon2id hash of its password.
+fn load_superadmin(secrets: &Secrets) -> Result<SuperAdmin, String> {
+    let hashed = hash_password(secrets.superadmin_password.as_bytes())?;
     Ok(SuperAdmin {
-        login,
-        password_hash: hashed?,
+        login: secrets.superadmin_login.clone(),
+        password_hash: hashed,
     })
 }
 
-fn load_session_secret(config: &mut Config) -> Result<Vec<u8>, String> {
-    match std::mem::replace(&mut config.session.secret, SessionSecretConfig::Ephemeral) {
-        SessionSecretConfig::Ephemeral => generate_session_secret(),
-        SessionSecretConfig::File(path) => {
-            let mut secret = read_secret_file(&path, 4096, "session signing secret")?;
-            while secret.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
-                secret.pop();
-            }
-            if secret.len() < 32 {
-                let len = secret.len();
-                secret.zeroize();
-                return Err(format!(
-                    "session signing secret {} is too short: {len} bytes, minimum is 32",
-                    path.display()
-                ));
-            }
-            Ok(secret)
-        }
+/// Gives the signing key of the configuration. If the mode is `ephemeral`, it gives a new random key.
+fn take_session_secret(secrets: &mut Secrets) -> Result<Vec<u8>, String> {
+    match secrets.session_secret.take() {
+        None => generate_session_secret(),
+        Some(secret) => Ok(secret.as_bytes().to_vec()),
     }
 }
 
@@ -258,7 +247,7 @@ fn hash_password_command() -> Result<(), String> {
 }
 
 fn healthcheck(path: &Path) -> Result<(), String> {
-    let config = Config::load(path)?;
+    let (config, _secrets) = Config::load(path)?;
     let listen = config.server.listen_address;
     let ip = match listen.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -292,7 +281,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|roles|services|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|services|logins] > page.html\n  portal version",
         release_version()
     );
 }

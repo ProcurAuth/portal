@@ -1,10 +1,10 @@
-//! Where the portal keeps its state: accounts, the history the settings pages show, and, with
+//! Where the portal keeps its state: accounts, the history that the settings pages show, and, with
 //! PostgreSQL, the live sessions.
 //!
-//! Two backends behind one type. SQLite is one file owned by one process; PostgreSQL is shared by any
-//! number of instances (see [`crate::sync`]). Callers run these methods on blocking threads (the
-//! writer thread of [`crate::tracking`], or `spawn_blocking` from a handler); the request path reads
-//! the in-memory directory instead and never waits on the database.
+//! The store has two backends behind one type. SQLite is one file. One process owns it.
+//! PostgreSQL is shared by any number of instances (see [`crate::sync`]).
+//! Callers run these methods on blocking threads. Such a thread is the writer thread of [`crate::tracking`], or a `spawn_blocking` call from a handler.
+//! The request path reads the in-memory directory instead. It never waits on the database.
 
 mod pg;
 mod sqlite;
@@ -13,12 +13,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::PostgresConfig;
+use crate::grants::Grant;
 use crate::tracking::{Batch, SessionStart};
 
 use pg::Pg;
 use sqlite::Sqlite;
 
-/// Days drawn by the connection graphs, today included.
+/// Days drawn by the connection graphs. Today is included.
 pub const GRAPH_DAYS: usize = 30;
 const RECENT_SESSIONS: i64 = 8;
 const RECENT_EVENTS: i64 = 12;
@@ -26,15 +27,16 @@ const TOP_SERVICES: i64 = 12;
 const DAY: i64 = 86_400;
 /// Rows per page of the sign-in log.
 pub const LOGIN_PAGE_SIZE: i64 = 50;
-/// The sign-in log keeps at most this many rows, newest first: failures are bounded per minute by the
-/// rate limiter, and this bounds what a long siege can leave in the database.
+/// The sign-in log keeps at most this many rows, newest first.
+/// Failures are bounded per minute by the rate limiter. This limit bounds what a long siege can leave in the database.
 const MAX_LOGIN_ROWS: i64 = 20_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserRow {
     pub login: String,
     pub password_hash: String,
-    pub roles: Vec<String>,
+    /// The grants that the settings pages gave, sorted.
+    pub grants: Vec<Grant>,
     pub created_at: i64,
 }
 
@@ -47,7 +49,7 @@ pub enum InsertError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DayStat {
     pub sessions: u32,
-    /// Seconds spent connected, summed over the day's sessions.
+    /// Seconds spent connected, summed over the sessions of the day.
     pub seconds: i64,
 }
 
@@ -83,7 +85,7 @@ pub struct AuditRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginRow {
     pub ts: i64,
-    /// What was typed, already made safe when it was recorded.
+    /// What was typed. The text is made safe before it is recorded.
     pub login: String,
     /// The typed login named an account.
     pub known: bool,
@@ -98,7 +100,7 @@ pub struct LoginPage {
     pub rows: Vec<LoginRow>,
     /// Rows that match the filter, over every page.
     pub matching: u32,
-    /// Zero-based, already brought back into range.
+    /// Zero-based. The value is brought back into range.
     pub page: u32,
     pub attempts_24h: u32,
     pub failed_24h: u32,
@@ -131,14 +133,14 @@ pub struct Snapshot {
     /// Every real connection, all accounts.
     pub days: Vec<DayStat>,
     pub recent_events: Vec<AuditRow>,
-    /// Failed logins on a name that does not exist (the typed names are in the sign-in log).
+    /// Failed logins on a name that does not exist. The typed names are in the sign-in log.
     pub unknown_failures_30d: u32,
     /// Unix time of the first day drawn.
     pub first_day: i64,
 }
 
 impl Snapshot {
-    /// What the Users page shows when the history cannot be read: the accounts, with nothing recorded.
+    /// What the Users page shows when the history cannot be read. It shows the accounts, with no history recorded.
     pub fn blank(accounts: &[(String, bool)], now: i64) -> Self {
         Self {
             accounts: accounts
@@ -156,7 +158,7 @@ impl Snapshot {
     }
 }
 
-/// A live session as the shared store keeps it (what is not secret and not derived).
+/// A live session as the shared store keeps it. The store keeps only data that is not secret and not derived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedSession {
     pub sid: u64,
@@ -214,7 +216,7 @@ pub struct LoggedLogin {
     pub user_agent: String,
 }
 
-/// Everything a SQLite file holds that the import carries over. The accounts keep their identifier.
+/// Everything that the import carries over from a SQLite file. The accounts keep their identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dump {
     pub users: Vec<(i64, UserRow)>,
@@ -253,7 +255,7 @@ impl Store {
         Sqlite::open(path).map(Store::Sqlite)
     }
 
-    /// Connects to PostgreSQL, waiting for it for up to a minute, and brings the schema up to date.
+    /// Connects to PostgreSQL. The call waits up to one minute for it. Then it brings the schema up to date.
     pub fn open_postgres(config: &PostgresConfig, password: &str) -> Result<Self, String> {
         Pg::connect(config, password, pg::STARTUP_RETRY).map(|store| Store::Pg(Box::new(store)))
     }
@@ -263,19 +265,19 @@ impl Store {
         Store::Sqlite(Sqlite::open_in_memory())
     }
 
-    /// Several portal instances use this store at once: sessions live in it and the accounts have to
-    /// be read again from time to time.
+    /// Several portal instances use this store at once. Sessions are kept in it.
+    /// The accounts must be read again from time to time.
     pub fn is_shared(&self) -> bool {
         matches!(self, Store::Pg(_))
     }
 
-    /// Rows of a table, for the tests that look at what a method left behind.
+    /// Rows of a table. The tests use these rows to check what a method left behind.
     #[cfg(test)]
     pub fn count(&self, table: &str) -> i64 {
         backend!(self.count(table))
     }
 
-    /// What a lost connection looks like to the next calls (PostgreSQL only).
+    /// What a lost connection looks like to the next calls. This applies to PostgreSQL only.
     #[cfg(test)]
     pub fn go_down(&self) {
         if let Store::Pg(store) = self {
@@ -293,15 +295,15 @@ impl Store {
         backend!(self.insert_user(user))
     }
 
-    /// Replaces the roles of a user and, when given, its password hash, in one transaction.
-    /// `false` if no such user.
+    /// Replaces the password hash and the grants of a user. Each is replaced only when it is given.
+    /// The change runs in one transaction. `false` if no such user.
     pub fn update_user(
         &self,
         login: &str,
         password_hash: Option<&str>,
-        roles: &[String],
+        grants: Option<&[Grant]>,
     ) -> Result<bool, String> {
-        backend!(self.update_user(login, password_hash, roles))
+        backend!(self.update_user(login, password_hash, grants))
     }
 
     pub fn remove_user(&self, login: &str) -> Result<bool, String> {
@@ -315,8 +317,8 @@ impl Store {
         backend!(self.apply(batch))
     }
 
-    /// Sessions a previous run left open end at the last time they were seen. Only for a store one
-    /// process owns: in a shared one the sessions outlive a restart (see [`Store::close_lost_sessions`]).
+    /// Sessions that a previous run left open end at the last time they were seen. Use this only for a store that one process owns.
+    /// In a shared store, the sessions outlive a restart. See [`Store::close_lost_sessions`].
     pub fn close_open_sessions(&self, now: i64, reason: &str) -> Result<(), String> {
         match self {
             Store::Sqlite(store) => store.close_open_sessions(now, reason),
@@ -324,13 +326,13 @@ impl Store {
         }
     }
 
-    /// Deletes what started before `cutoff`.
+    /// Deletes the rows that started before `cutoff`.
     pub fn prune(&self, cutoff: i64) -> Result<(), String> {
         backend!(self.prune(cutoff))
     }
 
-    /// One page of the sign-in log, newest first; `only_failed` keeps the refused attempts. A page
-    /// past the end is brought back to the last one.
+    /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
+    /// A page past the end is brought back to the last page.
     pub fn login_attempts(
         &self,
         now: i64,
@@ -354,7 +356,7 @@ impl Store {
         }
     }
 
-    /// Records a session and its line of the history. `false`: the limit of live sessions is reached.
+    /// Records a session and its line of the history. Returns `false` when the limit of live sessions is reached.
     pub fn session_insert(
         &self,
         digest: &[u8; 32],
@@ -367,7 +369,7 @@ impl Store {
             .session_insert(digest, binding, session, start, max_active)
     }
 
-    /// The live session of `digest` for `binding`, its idle timer renewed to `now`.
+    /// Returns the live session of `digest` for `binding`. Its idle timer is renewed to `now`.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
@@ -379,17 +381,17 @@ impl Store {
             .session_touch(digest, binding, now, idle.as_secs() as i64)
     }
 
-    /// Ends one session; it is returned when this call is the one that ended it.
+    /// Ends one session. The session is returned only when this call ends it.
     pub fn session_delete(&self, digest: &[u8; 32]) -> Result<Option<SharedSession>, String> {
         self.shared()?.session_delete(digest)
     }
 
-    /// Ends every session of a user; the identifiers this call ended.
+    /// Ends every session of a user. Returns the identifiers that this call ended.
     pub fn sessions_delete_user(&self, login: &str) -> Result<Vec<u64>, String> {
         self.shared()?.sessions_delete_user(login)
     }
 
-    /// Ends the sessions past their lifetime or idle; each with whether it expired rather than idled.
+    /// Ends the sessions past their lifetime or idle time. Each result states whether the session expired. Otherwise, the session idled.
     pub fn sessions_expire(&self, now: i64, idle: Duration) -> Result<Vec<(u64, bool)>, String> {
         self.shared()?.sessions_expire(now, idle.as_secs() as i64)
     }
@@ -398,14 +400,14 @@ impl Store {
         self.shared()?.sessions_count()
     }
 
-    /// Closes the history rows of sessions that are gone and were last seen before `before`.
+    /// Closes the history rows of gone sessions that were last seen before `before`.
     pub fn close_lost_sessions(&self, before: i64, reason: &str) -> Result<usize, String> {
         self.shared()?.close_lost_sessions(before, reason)
     }
 
     // Import ----------------------------------------------------------------------------------
 
-    /// Copies a SQLite file into this (empty) PostgreSQL database.
+    /// Copies a SQLite file into this PostgreSQL database. The database must be empty.
     pub fn import_sqlite(&self, path: &Path) -> Result<ImportReport, String> {
         let target = self
             .shared()
@@ -416,9 +418,9 @@ impl Store {
 
 #[cfg(test)]
 pub mod testing {
-    //! Every backend a test can run on: SQLite always, PostgreSQL when `PORTAL_TEST_POSTGRES` holds the
-    //! URL of a database to use (`postgres://user:password@host:port/database`). Each PostgreSQL
-    //! store lives in a schema of its own, so tests run side by side and leave the rest alone.
+    //! Every backend that a test can run on. SQLite is always used. PostgreSQL is used when `PORTAL_TEST_POSTGRES` holds the
+    //! URL of a database (`postgres://user:password@host:port/database`).
+    //! Each PostgreSQL store lives in a schema of its own. Therefore, tests run side by side and do not change the rest of the database.
 
     use super::*;
 
@@ -446,7 +448,7 @@ pub mod testing {
             }
         }
 
-        /// Two instances on one empty database (PostgreSQL only).
+        /// Two instances on one empty database. This is for PostgreSQL only.
         pub fn fresh_pair(&self) -> (Store, Store) {
             let Store::Pg(first) = self.fresh() else {
                 panic!("two instances can share a PostgreSQL database only");
@@ -485,13 +487,18 @@ mod tests {
     use crate::tracking::{AuditEvent, AuditKind, EndReason, Event, Hit, LoginAttempt};
     use std::collections::HashMap;
 
-    fn user(login: &str, roles: &[&str]) -> UserRow {
+    /// An account with `access` on each named service.
+    fn user(login: &str, services: &[&str]) -> UserRow {
         UserRow {
             login: login.into(),
             password_hash: "$argon2id$stub".into(),
-            roles: roles.iter().map(|r| r.to_string()).collect(),
+            grants: access(services),
             created_at: 1_000,
         }
+    }
+
+    fn access(services: &[&str]) -> Vec<Grant> {
+        services.iter().map(|s| Grant::new("access", s).unwrap()).collect()
     }
 
     fn start(sid: u64, login: &str, superadmin: bool, impersonated: bool, at: i64) -> Event {
@@ -520,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn users_round_trip_with_their_roles_and_reject_a_duplicate() {
+    fn users_round_trip_with_their_grants_and_reject_a_duplicate() {
         each_backend(|backend| {
 
             let store = backend.fresh();
@@ -533,8 +540,8 @@ mod tests {
             let users = store.load_users().unwrap();
             assert_eq!(users.len(), 2);
             assert_eq!(users[0].login, "alice");
-            assert_eq!(users[0].roles, ["dev", "ops"]);
-            assert!(users[1].roles.is_empty());
+            assert_eq!(users[0].grants, access(&["dev", "ops"]), "sorted");
+            assert!(users[1].grants.is_empty());
             assert!(store.remove_user("alice").unwrap());
             assert!(!store.remove_user("alice").unwrap());
             assert_eq!(store.load_users().unwrap().len(), 1);
@@ -543,13 +550,13 @@ mod tests {
     }
 
     #[test]
-    fn updating_a_user_replaces_its_roles_and_optionally_its_password() {
+    fn updating_a_user_replaces_its_grants_and_its_password_each_when_given() {
         each_backend(|backend| {
 
             let store = backend.fresh();
             store.insert_user(&user("alice", &["ops", "dev"])).unwrap();
             store.insert_user(&user("bob", &["ops"])).unwrap();
-            let roles = |login: &str| {
+            let row = |login: &str| {
                 store
                     .load_users()
                     .unwrap()
@@ -557,26 +564,28 @@ mod tests {
                     .find(|u| u.login == login)
                     .unwrap()
             };
-            assert!(store
-                .update_user("alice", None, &["viewer".to_string()])
-                .unwrap());
-            assert_eq!(roles("alice").roles, ["viewer"]);
+            let mut viewer = access(&["viewer"]);
+            viewer.push(Grant::new("query.run.read", "viewer").unwrap());
+            assert!(store.update_user("alice", None, Some(&viewer)).unwrap());
+            assert_eq!(row("alice").grants, viewer);
             assert_eq!(
-                roles("alice").password_hash,
+                row("alice").password_hash,
                 "$argon2id$stub",
                 "kept without a new hash"
             );
-            assert!(store.update_user("alice", Some("new-hash"), &[]).unwrap());
-            assert_eq!(roles("alice").password_hash, "new-hash");
-            assert!(roles("alice").roles.is_empty());
-            assert_eq!(roles("bob").roles, ["ops"], "other users are untouched");
-            assert!(!store.update_user("nobody", None, &[]).unwrap());
+            assert!(store.update_user("alice", Some("new-hash"), None).unwrap());
+            assert_eq!(row("alice").password_hash, "new-hash");
+            assert_eq!(row("alice").grants, viewer, "kept without grants");
+            assert!(store.update_user("alice", None, Some(&[])).unwrap());
+            assert!(row("alice").grants.is_empty());
+            assert_eq!(row("bob").grants, access(&["ops"]), "other users are untouched");
+            assert!(!store.update_user("nobody", None, Some(&[])).unwrap());
 
         });
     }
 
     #[test]
-    fn deleting_a_user_deletes_its_roles_but_keeps_its_history() {
+    fn deleting_a_user_deletes_its_grants_but_keeps_its_history() {
         each_backend(|backend| {
 
             let store = backend.fresh();
@@ -588,7 +597,7 @@ mod tests {
                 })
                 .unwrap();
             store.remove_user("alice").unwrap();
-            assert_eq!(store.count("user_roles"), 0);
+            assert_eq!(store.count("user_grants"), 0);
             let snap = store.snapshot(&[("alice".into(), false)], NOW).unwrap();
             assert_eq!(snap.accounts[0].recent.len(), 1);
 
@@ -719,7 +728,7 @@ mod tests {
                     .unwrap();
             }
             if store.is_shared() {
-                // Sessions outlive a restart there: the ones nobody ended are found by their silence.
+                // Sessions outlive a restart there. The sessions that nobody ended are found by their silence.
                 store.close_lost_sessions(1_000, "restart").unwrap();
             } else {
                 store.close_open_sessions(1_000, "restart").unwrap();
@@ -974,7 +983,7 @@ mod tests {
             "another binding finds nothing"
         );
         assert_eq!(store.session_touch(&digest(2), &HERE, NOW + 11, IDLE).unwrap(), None);
-        // The refused attempt did not renew the idle timer: unused since NOW + 10.
+        // The refused attempt did not renew the idle timer. The session is unused since NOW + 10.
         assert_eq!(
             store
                 .session_touch(&digest(1), &HERE, NOW + 10 + 100, Duration::from_secs(60))
@@ -1108,9 +1117,9 @@ mod tests {
         let Some(pg) = postgres() else { return };
         let (first, second) = pair(&pg);
         first.insert_user(&user("alice", &["ops"])).unwrap();
-        assert_eq!(second.load_users().unwrap()[0].roles, ["ops"]);
+        assert_eq!(second.load_users().unwrap()[0].grants, access(&["ops"]));
         assert_eq!(second.insert_user(&user("alice", &[])), Err(InsertError::Exists));
-        assert!(second.update_user("alice", Some("h2"), &["dev".to_string()]).unwrap());
+        assert!(second.update_user("alice", Some("h2"), Some(&access(&["dev"]))).unwrap());
         assert_eq!(first.load_users().unwrap()[0].password_hash, "h2");
         assert!(first.remove_user("alice").unwrap());
         assert!(second.load_users().unwrap().is_empty());
@@ -1162,7 +1171,7 @@ mod tests {
         assert_eq!(snap.accounts[0].services[0].hits, 4 * 15 * 20);
     }
 
-    /// A SQLite file with a bit of everything in it, still open (as the running portal has it).
+    /// A SQLite file with sample data of every kind. The file is still open, as the running portal holds it.
     fn sqlite_file_with_history(name: &str) -> (std::path::PathBuf, Store) {
         let dir = std::env::temp_dir().join(format!("portal-import-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1223,7 +1232,7 @@ mod tests {
         assert_eq!(copied.accounts[0], original.accounts[0]);
         assert_eq!(copied.recent_events, original.recent_events);
         assert_eq!(copied.unknown_failures_30d, original.unknown_failures_30d);
-        // The superadmin's session was open: sessions do not move, so it ends where it was last seen.
+        // The superadmin's session was open. Sessions do not move. So, the session ends where it was last seen.
         let root = &copied.accounts[1].recent[0];
         assert_eq!(root.end_reason.as_deref(), Some("restart"));
         assert_eq!(root.ended_at, Some(500));

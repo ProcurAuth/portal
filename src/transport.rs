@@ -1,12 +1,13 @@
-//! How the browser reached the portal, and what a session cookie is tied to.
+//! How the browser reached the portal. What a session cookie is tied to.
 //!
-//! Traefik may serve plain HTTP (a LAN without certificates, a test stack) as well as HTTPS, and
-//! browsers refuse `Secure` and `__Host-` cookies on HTTP. So the cookie names and attributes
-//! follow the scheme of each request, taken from the `X-Forwarded-Proto` header that Traefik sets
-//! (`trustForwardHeader: false`: a client cannot choose it).
+//! Traefik can serve plain HTTP, for example on a LAN without certificates or in a test stack. It
+//! can also serve HTTPS. Browsers refuse `Secure` and `__Host-` cookies on HTTP. The cookie names
+//! and attributes therefore follow the scheme of each request. The scheme comes from the
+//! `X-Forwarded-Proto` header that Traefik sets. The value `trustForwardHeader: false` applies, so
+//! a client cannot choose the header.
 //!
-//! Over plain HTTP a cookie can be read on the network. The binding limits what a stolen one is
-//! worth: it only works from the client address and User-Agent that logged in.
+//! Over plain HTTP, a cookie can be read on the network. The binding limits the value of a stolen
+//! cookie. It works only from the client address and User-Agent that logged in.
 
 use std::net::IpAddr;
 
@@ -19,7 +20,8 @@ use crate::session::Binding;
 const HOST_PREFIX: &str = "__Host-";
 const MAX_USER_AGENT_BYTES: usize = 512;
 
-/// Whether the browser used HTTPS. Anything but a single `https` value counts as plain HTTP.
+/// Tells whether the browser used HTTPS. Only a single `https` value counts as HTTPS. Any other
+/// value counts as plain HTTP.
 pub fn is_https(headers: &HeaderMap) -> bool {
     let mut values = headers.get_all("x-forwarded-proto").iter();
     match (values.next(), values.next()) {
@@ -30,8 +32,8 @@ pub fn is_https(headers: &HeaderMap) -> bool {
     }
 }
 
-/// The session cookie name for this scheme: the configured `__Host-` name over HTTPS, the same
-/// name without the prefix over HTTP.
+/// The session cookie name for this scheme. Over HTTPS, the name is the configured `__Host-` name.
+/// Over HTTP, the name is the same name without the prefix.
 pub fn session_cookie_name(configured: &str, https: bool) -> &str {
     if https {
         configured
@@ -48,13 +50,15 @@ pub fn csrf_cookie_name(https: bool) -> &'static str {
     }
 }
 
-/// `Path`, `Max-Age`, `HttpOnly`, `SameSite`, and `Secure` over HTTPS only.
+/// This function sets the cookie attributes `Path`, `Max-Age`, `HttpOnly`, `SameSite`, and `Secure`.
+/// The attribute `Secure` is set over HTTPS only.
 pub fn cookie_attributes(https: bool, same_site: &str, max_age_secs: u64) -> String {
     let secure = if https { "; Secure" } else { "" };
     format!("Path=/; Max-Age={max_age_secs}; HttpOnly; SameSite={same_site}{secure}")
 }
 
-/// What a session issued now is tied to. Hashed, so the session store keeps no address.
+/// This function returns the binding of a session that is issued now. The result is a hash. The
+/// session store therefore keeps no address.
 pub fn binding(mode: SessionBind, headers: &HeaderMap, client_ip: Option<IpAddr>) -> Binding {
     let mut hasher = Sha256::new();
     hasher.update(b"portal-bind\0");

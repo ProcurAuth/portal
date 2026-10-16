@@ -1,9 +1,9 @@
-//! One workload's labels (Compose container labels, Kubernetes annotations) become a [`Service`].
+//! The labels of one workload (Compose container labels, Kubernetes annotations) become a [`Service`].
 //!
-//! Three dialects share one field set. `portal.*` is native and works in both runtimes (a
-//! Kubernetes annotation key may be a bare name). `homepage.*` (Docker) and `gethomepage.dev/*`
-//! (Kubernetes) are read so the existing labels keep working while they are migrated; a field set
-//! in `portal.*` always wins.
+//! Three dialects share one field set. `portal.*` is the native dialect. It works in both runtimes.
+//! A Kubernetes annotation key may be a bare name. The module reads `homepage.*` (Docker) and
+//! `gethomepage.dev/*` (Kubernetes). The existing labels keep working while they are migrated.
+//! If a field is set in `portal.*`, that value always wins.
 
 use std::collections::BTreeMap;
 
@@ -11,15 +11,19 @@ use super::{Health, Service};
 use crate::access::{href_prefix, ExcludeRule};
 
 const MAX_TEXT_CHARS: usize = 160;
-const MAX_ROLES: usize = 16;
 const MAX_EXCLUDES: usize = 8;
+/// The id is the audience of the identity tokens. It is also the resource id of the grants.
+const MAX_ID_CHARS: usize = crate::grants::MAX_SERVICE_CHARS;
+/// The path of the actions document. See contract 11.4.
+pub const ACTIONS_PATH: &str = "/.well-known/access-actions";
 const DEFAULT_GROUP: &str = "Other";
 
-/// Parses the labels of one workload. `origin` names it in errors and is the fallback display
-/// name (container, or `namespace/name` of the route).
+/// Parses the labels of one workload. `origin` names the workload in errors. It is also the
+/// fallback display name: the container name, or `namespace/name` of the route.
 ///
-/// `Ok(None)` means the workload does not ask to be listed. `Err` means it does but declares
-/// something unusable; the catalogue reports it and skips the entry.
+/// `Ok(None)` means that the workload does not ask to be listed. `Err` means that the workload
+/// asks to be listed but declares something unusable. The catalogue reports the error and skips
+/// the entry.
 pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<Service>, String> {
     if !is_listed(labels) {
         return Ok(None);
@@ -49,8 +53,15 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
             .map_err(|_| fail(format!("weight {raw:?} is not an integer")))?,
         None => 0,
     };
-    let roles = parse_roles(labels.get("portal.roles").map(String::as_str).unwrap_or(""))
-        .map_err(|e| fail(format!("roles {e}")))?;
+    let actions_url = match labels.get("portal.actions").map(|v| v.trim()) {
+        Some(url) if !url.is_empty() => {
+            if !is_http_url(url) {
+                return Err(fail(format!("actions {url:?} must be an http(s) URL")));
+            }
+            Some(url.to_string())
+        }
+        _ => health_url.as_deref().and_then(url_origin).map(|o| format!("{o}{ACTIONS_PATH}")),
+    };
     let exclude = parse_exclude(labels.get("portal.exclude").map(String::as_str).unwrap_or(""), href)
         .map_err(|e| fail(format!("exclude {e}")))?;
     let id = match labels
@@ -64,6 +75,11 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     if id.is_empty() {
         return Err(fail("id is empty after normalisation".into()));
     }
+    if id.chars().count() > MAX_ID_CHARS {
+        return Err(fail(format!(
+            "id {id:?} is longer than {MAX_ID_CHARS} characters: set a shorter portal.id"
+        )));
+    }
 
     Ok(Some(Service {
         id,
@@ -75,14 +91,14 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
         new_tab: field(labels, "target") == Some("_blank"),
         weight,
         health_url,
-        roles,
+        actions_url,
         exclude,
         health: Health::Unknown,
     }))
 }
 
-/// Whether the labels ask for a listing. Native: a name, unless disabled. Homepage-Docker: a name.
-/// Homepage-Kubernetes: `enabled: "true"` (the route carries the other fields).
+/// Whether the labels ask for a listing. Native: a name, unless it is disabled. Homepage-Docker: a name.
+/// Homepage-Kubernetes: `enabled: "true"`. The route carries the other fields.
 fn is_listed(labels: &BTreeMap<String, String>) -> bool {
     let value = |key: &str| labels.get(key).map(|v| v.trim());
     if value("portal.enabled") == Some("false") {
@@ -99,7 +115,7 @@ fn is_listed(labels: &BTreeMap<String, String>) -> bool {
     value("homepage.name").is_some_and(|v| !v.is_empty())
 }
 
-/// First non-empty value among the three dialects, native first.
+/// The first value that is not empty, among the three dialects. The native dialect comes first.
 fn field<'a>(labels: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
     [
         format!("portal.{name}"),
@@ -125,7 +141,7 @@ fn short_origin(origin: &str) -> &str {
     origin.rsplit('/').next().unwrap_or(origin)
 }
 
-/// Display text: no control characters, bounded length (cut on a character boundary).
+/// Display text. It has no control characters and a bounded length. The text is cut on a character boundary.
 fn text(raw: &str) -> Result<String, &'static str> {
     if raw.chars().any(char::is_control) {
         return Err("contains control characters");
@@ -133,8 +149,8 @@ fn text(raw: &str) -> Result<String, &'static str> {
     Ok(raw.chars().take(MAX_TEXT_CHARS).collect())
 }
 
-/// A path (`/grafana/`) or an http(s) URL. Anything else (`javascript:`, `//host`) is refused: the
-/// value ends up in an `href`.
+/// A path (`/grafana/`) or an http(s) URL. The parser refuses anything else (`javascript:`, `//host`).
+/// The value ends up in an `href`.
 fn is_safe_href(value: &str) -> bool {
     if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return false;
@@ -148,37 +164,19 @@ fn is_http_url(value: &str) -> bool {
         && value.len() > "https://".len()
 }
 
-/// A comma-separated role list (`portal.roles` label, `roles.names` configuration): lower-case,
-/// trimmed, de-duplicated, each `[a-z0-9_-]{1,32}`, at most [`MAX_ROLES`].
-pub fn parse_roles(raw: &str) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for item in raw
-        .split(',')
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty())
-    {
-        let valid = item.len() <= 32
-            && item
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
-        if !valid {
-            return Err(format!(
-                "{item:?} must be 1-32 characters of a-z, 0-9, - or _"
-            ));
-        }
-        if !out.contains(&item) {
-            out.push(item);
-        }
-    }
-    if out.len() > MAX_ROLES {
-        return Err(format!("more than {MAX_ROLES} roles"));
-    }
-    Ok(out)
+/// The `scheme://host[:port]` part of an http(s) URL. The path is not included.
+fn url_origin(url: &str) -> Option<&str> {
+    let scheme_end = url.find("://")? + 3;
+    let end = url[scheme_end..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| scheme_end + i);
+    (end > scheme_end).then(|| &url[..end])
 }
 
-/// The `portal.exclude` label: one rule per line (blank lines and `#` comments ignored), each a path
-/// under the service's own `href`, so a service can only open what it owns. Any unusable rule
-/// makes the whole label unusable: nothing is excluded then, and the problem is reported.
+/// The `portal.exclude` label: one rule per line. The parser ignores blank lines and `#` comments.
+/// Each rule is a path under the service's own `href`. A service can therefore open only the paths
+/// that it owns. If any rule is unusable, the whole label is unusable. Then nothing is excluded,
+/// and the parser reports the problem.
 fn parse_exclude(raw: &str, href: &str) -> Result<Vec<ExcludeRule>, String> {
     let lines: Vec<&str> = raw
         .lines()
@@ -205,7 +203,7 @@ fn parse_exclude(raw: &str, href: &str) -> Result<Vec<ExcludeRule>, String> {
     Ok(rules)
 }
 
-/// Lower-case, runs of anything but letters and digits become one `-`.
+/// Lower-case. Each run of characters that are not letters or digits becomes one `-`.
 pub(super) fn slug(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut pending_dash = false;
@@ -250,7 +248,6 @@ mod tests {
                     "portal.health",
                     "http://notes-server:8000/api/health/status",
                 ),
-                ("portal.roles", "Admin, ops,admin"),
             ]),
         )
         .unwrap()
@@ -260,10 +257,14 @@ mod tests {
         assert_eq!(service.href, "/notes/");
         assert!(service.new_tab);
         assert_eq!(service.weight, 40);
-        assert_eq!(service.roles, ["admin", "ops"]);
         assert_eq!(
             service.health_url.as_deref(),
             Some("http://notes-server:8000/api/health/status")
+        );
+        assert_eq!(
+            service.actions_url.as_deref(),
+            Some("http://notes-server:8000/.well-known/access-actions"),
+            "the origin of the health URL"
         );
         assert_eq!(service.icon.as_deref(), Some("notes"));
     }
@@ -294,7 +295,6 @@ mod tests {
             Some("http://cadvisor:8080/cadvisor/healthz")
         );
         assert_eq!(service.icon.as_deref(), Some("cadvisor.png"));
-        assert!(service.roles.is_empty());
     }
 
     #[test]
@@ -410,7 +410,7 @@ mod tests {
             &labels(&[
                 ("portal.name", "X"),
                 ("portal.href", "/"),
-                ("portal.roles", "ad min")
+                ("portal.actions", "/relative")
             ])
         )
         .is_err());
@@ -426,11 +426,55 @@ mod tests {
         let long = "é".repeat(500);
         let service = parse(
             "x",
-            &labels(&[("portal.name", &long), ("portal.href", "/")]),
+            &labels(&[("portal.name", &long), ("portal.href", "/"), ("portal.id", "long")]),
         )
         .unwrap()
         .unwrap();
         assert_eq!(service.name.chars().count(), MAX_TEXT_CHARS);
+    }
+
+    #[test]
+    fn the_actions_url_is_the_label_or_the_origin_of_the_health_url() {
+        let read = |extra: &[(&str, &str)]| {
+            let mut all = vec![("portal.name", "X"), ("portal.href", "/x/")];
+            all.extend_from_slice(extra);
+            parse("x", &labels(&all)).unwrap().unwrap().actions_url
+        };
+        assert_eq!(read(&[]), None, "no health URL, no label: only access");
+        assert_eq!(
+            read(&[("portal.health", "https://db.apps:8443/api/health?x=1")]).as_deref(),
+            Some("https://db.apps:8443/.well-known/access-actions")
+        );
+        assert_eq!(
+            read(&[
+                ("portal.health", "http://db:80/up"),
+                ("portal.actions", "http://db-admin:9000/.well-known/access-actions"),
+            ])
+            .as_deref(),
+            Some("http://db-admin:9000/.well-known/access-actions"),
+            "the label wins"
+        );
+    }
+
+    #[test]
+    fn a_label_that_does_not_exist_is_ignored() {
+        let service = parse(
+            "x",
+            &labels(&[("portal.name", "X"), ("portal.href", "/x/"), ("portal.unknown", "ops")]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(service.name, "X");
+    }
+
+    #[test]
+    fn an_id_longer_than_an_audience_can_be_is_refused() {
+        let long = "a".repeat(65);
+        let result = parse(
+            "x",
+            &labels(&[("portal.name", "X"), ("portal.href", "/x/"), ("portal.id", &long)]),
+        );
+        assert!(result.unwrap_err().contains("set a shorter portal.id"));
     }
 
     #[test]

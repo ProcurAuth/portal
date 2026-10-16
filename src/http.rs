@@ -18,9 +18,12 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::access::{self, service_allows, Decision};
+use crate::access::{self, may_open, Decision};
+use crate::actions;
 use crate::catalog::Catalog;
-use crate::config::{Config, LogLevel};
+use crate::config::{Config, LogLevel, Secret};
+use crate::grants::{self, Grant, Policy};
+use crate::identity::Signer;
 use crate::discovery;
 use crate::icons::{Icons, Set};
 use crate::crypto::{
@@ -54,7 +57,7 @@ const USERS_DELETE_PATH: &str = "/auth/users/delete";
 const USERS_UPDATE_PATH: &str = "/auth/users/update";
 const IMPERSONATE_PATH: &str = "/auth/users/impersonate";
 const IMPERSONATE_END_PATH: &str = "/auth/users/impersonate-end";
-/// Purpose of the anti-CSRF token of the account administration forms.
+/// The anti-CSRF token protects the account administration forms.
 const USERS_TOKEN: &str = "users";
 const LOGOUT_TOKEN: &str = "logout";
 
@@ -64,19 +67,19 @@ const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
-/// With a shared database, how often at most a login the directory does not know makes a request
-/// read the accounts again.
+/// With a shared database, this sets the maximum rate at which a request reads the accounts again.
+/// The trigger is a login that the directory does not know.
 const UNKNOWN_LOGIN_REFRESH_GAP: Duration = Duration::from_secs(1);
 
 type ResponseBody = Full<Bytes>;
 type HttpResponse = Response<ResponseBody>;
 
-/// What the portal knows about the browser behind one request.
+/// The data that the portal knows about the browser of one request.
 struct Client {
-    /// The browser used HTTPS: decides the cookie names and the `Secure` attribute.
+    /// True when the browser uses HTTPS. This value sets the cookie names and the `Secure` attribute.
     https: bool,
     ip: Option<IpAddr>,
-    /// What a session issued to this client is tied to.
+    /// The value that a session issued to this client is bound to.
     binding: Binding,
 }
 
@@ -90,9 +93,9 @@ impl Client {
     }
 }
 
-/// The account defined by the environment: never in the database, never deletable.
+/// The account that the environment defines. It is never in the database and cannot be deleted.
 pub struct SuperAdmin {
-    /// Lower case; what a login is compared with.
+    /// The login in lower case. The login of a request is compared with this value.
     pub login: String,
     pub password_hash: String,
 }
@@ -101,7 +104,7 @@ pub struct AppState {
     pub config: Config,
     pub superadmin_login: String,
     pub superadmin_hash: String,
-    /// Checked when the login does not exist, so an unknown login costs what a known one does.
+    /// The hash that the portal checks when the login does not exist. An unknown login then takes the same time as a known login.
     pub dummy_hash: String,
     pub signing_secret: Vec<u8>,
     pub sessions: SessionStore,
@@ -112,10 +115,27 @@ pub struct AppState {
     pub global_limiter: RateLimiter,
     pub password_gate: Arc<Semaphore>,
     pub metrics: Metrics,
-    /// The current service catalogue; discovery replaces the whole snapshot.
+    /// The current service catalog. Discovery replaces the whole snapshot.
     pub catalog: RwLock<Arc<Catalog>>,
     pub discovery: Arc<discovery::Stats>,
     pub icons: Icons,
+    /// The source of the grants, and the grants of the configuration.
+    pub policy: Policy,
+    /// The key that signs the identity tokens. The value is `None` without the `identity` block.
+    pub signer: Option<Signer>,
+    /// The actions that each service publishes.
+    pub actions: Arc<actions::Registry>,
+    /// The servers that can ask the PDP. Each server has the hash of its token.
+    pub pdp_clients: Vec<pdp::Client>,
+    pub pdp_stats: pdp::Stats,
+}
+
+/// The secrets of the access model: the key of the identity tokens and the tokens of the PDP clients.
+/// The server keeps only the key pair and the hashes of the tokens.
+#[derive(Default)]
+pub struct AccessSecrets {
+    pub identity_key: Option<Secret>,
+    pub pdp_tokens: Vec<(String, Secret)>,
 }
 
 impl AppState {
@@ -125,7 +145,27 @@ impl AppState {
         signing_secret: Vec<u8>,
         store: Arc<Store>,
         tracker: Arc<Tracker>,
+        access: AccessSecrets,
     ) -> Result<Self, String> {
+        let signer = match (&config.identity, &access.identity_key) {
+            (Some(identity), Some(key)) => Some(Signer::new(
+                key.as_bytes(),
+                &identity.issuer,
+                identity.token_ttl,
+            )?),
+            (None, None) => None,
+            _ => return Err("internal error: the identity block and its key do not agree".into()),
+        };
+        let pdp_clients = access
+            .pdp_tokens
+            .iter()
+            .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
+            .collect();
+        drop(access);
+        let policy = Policy::new(
+            config.access.grants_mode,
+            config.access.configured_grants.clone(),
+        );
         let mut sessions = SessionStore::new(
             config.session.ttl,
             config.session.idle_timeout,
@@ -155,6 +195,11 @@ impl AppState {
             catalog: RwLock::new(Arc::new(Catalog::default())),
             discovery: Arc::new(discovery::Stats::default()),
             icons: Icons::load(&config.ui.icons_dir),
+            policy,
+            signer,
+            actions: Arc::new(actions::Registry::default()),
+            pdp_clients,
+            pdp_stats: pdp::Stats::default(),
             sessions,
             users,
             store,
@@ -186,6 +231,19 @@ pub fn serve(state: Arc<AppState>) -> Result<(), String> {
 }
 
 async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
+    // The value of each key that applies, with its source. The portal hides the secrets.
+    for line in &state.config.effective {
+        log(
+            &state,
+            LogLevel::Info,
+            "config",
+            &[
+                ("key", line.key.clone()),
+                ("value", line.value.clone()),
+                ("source", line.source.clone()),
+            ],
+        );
+    }
     let listener = TcpListener::bind(state.config.server.listen_address)
         .await
         .map_err(|e| {
@@ -195,6 +253,12 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
             )
         })?;
     let connection_gate = Arc::new(Semaphore::new(state.config.server.max_connections));
+    let pdp_listener = match &state.config.pdp {
+        Some(pdp) => Some(TcpListener::bind(pdp.listen_address).await.map_err(|e| {
+            format!("cannot listen on {} (pdp.listen_address): {e}", pdp.listen_address)
+        })?),
+        None => None,
+    };
 
     let publisher = Arc::clone(&state);
     tokio::spawn(discovery::run(
@@ -204,6 +268,32 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
             *publisher.catalog.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(catalog);
         },
     ));
+    let reader = Arc::clone(&state);
+    tokio::spawn(actions::run(
+        Arc::clone(&state.actions),
+        move || current_catalog(&reader),
+        state.config.access.actions_timeout,
+        state.config.access.actions_refresh,
+    ));
+    if let Some(listener) = pdp_listener {
+        tokio::spawn(pdp::serve(Arc::clone(&state), listener));
+    }
+    log(
+        &state,
+        LogLevel::Info,
+        "access_model",
+        &[
+            ("grants_mode", state.policy.mode.as_str().to_string()),
+            ("configured_users", state.policy.configured.len().to_string()),
+            ("identity_token", state.signer.is_some().to_string()),
+            (
+                "identity_key_id",
+                state.signer.as_ref().map(|s| s.kid().to_string()).unwrap_or_default(),
+            ),
+            ("pdp", state.config.pdp.is_some().to_string()),
+        ],
+    );
+    warn_about_unused_grants(&state);
 
     log(
         &state,
@@ -326,7 +416,7 @@ async fn handle_request(
         } else if method == Method::GET && path == SUCCESS_PATH {
             handle_success(&state, request.headers(), &client)
         } else if method == Method::GET && path == DENIED_PATH {
-            handle_denied(&state, &uri, request.headers(), &client)
+            handle_denied(&state, request.headers(), &client)
         } else if method == Method::POST && path == USERS_ADD_PATH {
             handle_users_add(&state, request, &client).await
         } else if method == Method::POST && path == USERS_DELETE_PATH {
@@ -342,7 +432,7 @@ async fn handle_request(
         } else if method == Method::POST && path == LOGIN_PATH {
             handle_login_post(&state, request, &client).await
         } else if method == Method::GET && path == LOGOUT_PATH {
-            // Signing out is the POST of the launcher button; a plain visit changes nothing.
+            // The sign-out action is the POST of the launcher button. A plain visit changes nothing.
             redirect_response(StatusCode::SEE_OTHER, HOME_PATH)
         } else if method == Method::POST && path == LOGOUT_PATH {
             handle_logout_post(&state, request, &client).await
@@ -384,6 +474,34 @@ async fn handle_request(
     Ok(response)
 }
 
+/// In the mode `static`, the server does not use the grants that the database keeps.
+/// The server says so at start. Therefore, no user thinks that the grants apply.
+fn warn_about_unused_grants(state: &AppState) {
+    if state.policy.mode.uses_stored() {
+        return;
+    }
+    let users = state
+        .users
+        .list()
+        .into_iter()
+        .filter(|(_, record)| !record.grants.is_empty())
+        .count();
+    if users > 0 {
+        log(
+            state,
+            LogLevel::Warn,
+            "stored_grants_not_used",
+            &[
+                ("users", users.to_string()),
+                (
+                    "detail",
+                    "access.grants_mode is static: the grants that the settings pages gave are kept but not used".into(),
+                ),
+            ],
+        );
+    }
+}
+
 fn handle_metrics(state: &AppState) -> HttpResponse {
     let mut body = state.metrics.render(
         build_version(),
@@ -397,6 +515,9 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
         state.sessions.capacity(),
     );
     body.push_str(&state.discovery.render());
+    if state.config.pdp.is_some() {
+        body.push_str(&state.pdp_stats.render());
+    }
     body.push_str(&state.metrics.render_accounts(
         state.users.count(),
         state.tracker.dropped(),
@@ -427,8 +548,8 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
         return empty_response(StatusCode::NO_CONTENT);
     }
 
-    // A path a service declared with `portal.exclude` goes through without a session (a webhook, a
-    // health probe): its caller cannot sign in. Everything else needs one.
+    // A path that a service declares with `portal.exclude` passes without a session, for example a webhook or a health probe.
+    // Its caller cannot sign in. All other paths need a session.
     let catalog = current_catalog(state);
     let method = unique_header_str(headers, "x-forwarded-method").ok().flatten();
     if access::excluded(&catalog, method, original_uri).is_some() {
@@ -449,36 +570,66 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
         };
     };
 
-    match access::decide(
-        &catalog,
-        &state.config.roles.names,
-        viewer.roles.as_deref(),
-        original_uri,
-    ) {
+    // The `access` decision runs in the process. The grants are in memory.
+    match access::decide(&catalog, viewer.grants.as_deref(), original_uri) {
         Decision::Allow { service } => {
+            let mut response = empty_response(StatusCode::NO_CONTENT);
             if let Some(id) = service {
+                let now = unix_now();
                 state
                     .tracker
-                    .service_hit(viewer.session.sid, &id, ip_text(client), unix_now());
+                    .service_hit(viewer.session.sid, &id, ip_text(client), now);
+                // The identity token of the service (contract 11.3). Traefik copies it to the
+                // request with `authResponseHeaders`.
+                if let (Some(signer), Some(identity)) = (&state.signer, &state.config.identity) {
+                    let token = signer.token(viewer.session.sid, &viewer.login, &id, now);
+                    if let Ok(name) = HeaderName::from_bytes(identity.header.as_bytes()) {
+                        if set_dynamic_header(&mut response, name, &token).is_err() {
+                            state.metrics.verify_internal_error();
+                            return text_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "authentication error\n",
+                            );
+                        }
+                    }
+                }
+                log(
+                    state,
+                    LogLevel::Debug,
+                    "access_decision",
+                    &[
+                        ("subject", viewer.login.clone()),
+                        ("action", grants::ACCESS.to_string()),
+                        ("resource", format!("{}:{id}", grants::SERVICE_TYPE)),
+                        ("decision", "true".into()),
+                    ],
+                );
             }
             state.metrics.verify_allowed();
-            empty_response(StatusCode::NO_CONTENT)
+            response
         }
-        Decision::Deny { service } => {
+        Decision::Deny => {
             state.metrics.verify_denied();
-            // A browser navigating gets the "access denied" page (the answer to ForwardAuth cannot
-            // carry a page: Traefik caps its body); anything else gets a plain 403.
+            log(
+                state,
+                LogLevel::Info,
+                "access_decision",
+                &[
+                    ("subject", viewer.login.clone()),
+                    ("action", grants::ACCESS.to_string()),
+                    ("path", path_only(original_uri).chars().take(256).collect()),
+                    ("decision", "false".into()),
+                ],
+            );
+            // A browser that navigates to a page gets the "access denied" page.
+            // The answer to ForwardAuth cannot carry a page, because Traefik limits its body. Any other request gets a plain 403.
+            // The page does not name the service. The user does not see a service that is not open to them.
             let navigating = matches!(
                 unique_header_str(headers, "x-forwarded-method"),
                 Ok(Some("GET")) | Ok(Some("HEAD"))
             );
             if navigating {
-                // The page names the service from the catalogue; the id is data, never text to show.
-                let location = match service {
-                    Some(id) => format!("{DENIED_PATH}?s={}", percent_encode_query_component(&id)),
-                    None => DENIED_PATH.to_string(),
-                };
-                redirect_response(StatusCode::FOUND, &location)
+                redirect_response(StatusCode::FOUND, DENIED_PATH)
             } else {
                 text_response(StatusCode::FORBIDDEN, "Forbidden\n")
             }
@@ -486,8 +637,8 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     }
 }
 
-/// Any other path. Without a session the visitor is sent to the login page whether or not the
-/// path exists: signed out, a missing page cannot be told from a protected one.
+/// Any other path. Without a session, the portal sends the visitor to the login page.
+/// This occurs whether or not the path exists. Without a session, a missing page cannot be told apart from a protected page.
 fn handle_not_found(
     state: &AppState,
     method: &Method,
@@ -513,37 +664,22 @@ fn handle_not_found(
     }
 }
 
-/// `/auth/denied`: where the gate sends a browser whose roles do not open the service it asked for.
-fn handle_denied(state: &AppState, uri: &str, headers: &HeaderMap, client: &Client) -> HttpResponse {
+/// `/auth/denied`: the gate sends a browser here when its grants do not open the requested service.
+/// The page never names a service. The user does not see a service that is not open to them.
+fn handle_denied(state: &AppState, headers: &HeaderMap, client: &Client) -> HttpResponse {
     let Some(viewer) = current_viewer(state, headers, client) else {
         return redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH);
     };
     let Ok(logout_token) = sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token) else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
-    // Only a service of the catalogue is ever named: an unknown id gets the generic sentence.
-    let catalog = current_catalog(state);
-    let service = query_value_up_to(uri, "s", 128).and_then(|id| {
-        catalog
-            .groups()
-            .iter()
-            .flat_map(|group| group.services.iter())
-            .find(|service| service.id == id)
-            .map(|service| service.name.clone())
-    });
-    let text = match service {
-        Some(name) => format!(
-            "You do not have access to {name}. Ask the administrator to give your account a role for it."
-        ),
-        None => "You do not have access to this service. Ask the administrator to give your account a role for it.".to_string(),
-    };
     html_response(
         StatusCode::FORBIDDEN,
-        ui::denied_page(&text, &viewer.login, &logout_token),
+        ui::denied_page(ui::DENIED_TEXT, &viewer.login, &logout_token),
     )
 }
 
-/// The login URL that brings the browser back to `original_uri` once authenticated.
+/// The login URL. After authentication, it returns the browser to `original_uri`.
 fn login_location(state: &AppState, original_uri: &str) -> Result<String, ()> {
     let signature = sign_return_uri(&state.signing_secret, original_uri).map_err(|_| ())?;
     Ok(format!(
@@ -553,7 +689,7 @@ fn login_location(state: &AppState, original_uri: &str) -> Result<String, ()> {
     ))
 }
 
-/// `/auth/icons/<set>/<name>.svg`: one icon of the offline library.
+/// `/auth/icons/<set>/<name>.svg`: one icon from the offline library.
 fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
     let found = path
         .strip_prefix(ICONS_PREFIX)
@@ -570,7 +706,7 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
         HeaderValue::from_static("public, max-age=86400"),
     );
     apply_secure_headers(&mut response, false);
-    // Opened on its own, an SVG could run script: the icons are data, so allow nothing.
+    // An SVG that opens on its own can run script. The icons are data, so the policy allows no source at all.
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
@@ -578,7 +714,7 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
     response
 }
 
-/// The launcher. The portal checks the session itself (the route does not go through ForwardAuth).
+/// The launcher. The portal checks the session itself. The route does not go through ForwardAuth.
 async fn handle_home(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -597,11 +733,14 @@ async fn handle_home(
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
 
+    // The list has only the services that the viewer can open.
+    // The discovery problems name workloads, so only the superadmin sees them.
     let catalog = current_catalog(state);
-    let registry = &state.config.roles.names;
-    let shown = match &viewer.roles {
-        Some(roles) => Arc::new(catalog.filtered(|s| service_allows(&s.roles, registry, Some(roles)))),
-        None => Arc::clone(&catalog),
+    let superadmin = is_superadmin(&viewer);
+    let shown = match &viewer.grants {
+        Some(grants) => Arc::new(catalog.filtered(|s| may_open(Some(grants), &s.id), superadmin)),
+        None if superadmin => Arc::clone(&catalog),
+        None => Arc::new(catalog.filtered(|_| true, false)),
     };
 
     let page = ui::home_page(
@@ -613,13 +752,13 @@ async fn handle_home(
             logout_token: &logout_token,
             users_token: &users_token,
             hidden_services: catalog.service_count() - shown.service_count(),
-            settings: is_superadmin(&viewer),
+            settings: superadmin,
         },
     );
     html_response(StatusCode::OK, page)
 }
 
-/// The superadmin in its own right: not while browsing as a user.
+/// The superadmin in its own right. This does not apply while the superadmin browses as a user.
 fn is_superadmin(viewer: &Viewer) -> bool {
     viewer.session.principal == Principal::Superadmin && !viewer.session.impersonated
 }
@@ -627,15 +766,13 @@ fn is_superadmin(viewer: &Viewer) -> bool {
 fn is_settings_path(path: &str) -> bool {
     matches!(
         path,
-        ui::settings::USERS_PATH
-            | ui::settings::ROLES_PATH
-            | ui::settings::SERVICES_PATH
+        ui::settings::USERS_PATH | ui::settings::SERVICES_PATH
             | ui::settings::LOGINS_PATH
     )
 }
 
-/// One page of the settings, whose route is its tab. The portal checks the session itself (the route
-/// does not go through ForwardAuth); to anyone but the superadmin the page does not exist.
+/// One page of the settings. The route of the page is its tab. The portal checks the session itself.
+/// The route does not go through ForwardAuth. For any user other than the superadmin, the page does not exist.
 async fn handle_settings(
     state: &Arc<AppState>,
     path: &str,
@@ -663,31 +800,28 @@ async fn handle_settings(
         logout_token: &logout_token,
     };
     let catalog = current_catalog(state);
-    let registry = &state.config.roles.names;
     let page = match path {
-        ui::settings::ROLES_PATH => {
-            let holders: Vec<(String, Vec<String>)> = state
+        ui::settings::SERVICES_PATH => {
+            let services = service_grants(state, &catalog);
+            let holders: Vec<(String, Vec<Grant>)> = state
                 .users
                 .list()
                 .into_iter()
-                .map(|(login, record)| (login, record.roles))
+                .map(|(login, record)| {
+                    let grants = state.policy.effective(&login, &record.grants);
+                    (login, grants)
+                })
                 .collect();
-            ui::roles_page(
+            ui::services_page(
                 &frame,
-                &ui::RolesView {
-                    registry,
+                &ui::ServicesView {
                     catalog: &catalog,
+                    services: &services,
                     holders: &holders,
+                    problems: state.actions.problems(),
                 },
             )
         }
-        ui::settings::SERVICES_PATH => ui::services_page(
-            &frame,
-            &ui::ServicesView {
-                registry,
-                catalog: &catalog,
-            },
-        ),
         ui::settings::LOGINS_PATH => {
             let only_failed = query_value(uri, "r").as_deref() == Some("failed");
             let asked = query_value(uri, "p")
@@ -714,7 +848,7 @@ async fn handle_settings(
     html_response(StatusCode::OK, page)
 }
 
-/// One page of the sign-in log; an unreadable database gives an empty page and a line in the logs.
+/// One page of the sign-in log. If the database cannot be read, the page is empty and the logs get one line.
 async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) -> LoginPage {
     let store = Arc::clone(&state.store);
     let now = unix_now();
@@ -728,7 +862,7 @@ async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) ->
     }
 }
 
-/// The accounts and their history, for the Users page.
+/// The accounts and their history. The Users page uses them.
 async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, Snapshot) {
     let users = state.users.list();
     let mut accounts: Vec<(String, bool)> = users.iter().map(|(login, _)| (login.clone(), false)).collect();
@@ -747,6 +881,26 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
     (users, snapshot)
 }
 
+/// Each service of the catalog, with the actions that the settings pages offer.
+/// The first action is `access`. The other actions are the actions that the service publishes.
+fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions> {
+    catalog
+        .groups()
+        .iter()
+        .flat_map(|group| group.services.iter())
+        .map(|service| ui::ServiceActions {
+            id: service.id.clone(),
+            name: service.name.clone(),
+            actions: state
+                .actions
+                .actions(&service.id)
+                .into_iter()
+                .map(|a| (a.name, a.description))
+                .collect(),
+        })
+        .collect()
+}
+
 fn users_view<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
@@ -760,20 +914,23 @@ fn users_view<'a>(
         .into_iter()
         .map(|(login, record)| ui::UserCard {
             activity: activities.next().unwrap_or_default(),
+            grants: state.policy.effective(&login, &record.grants),
+            configured: state.policy.configured(&login).to_vec(),
             login,
-            roles: record.roles,
             created_at: Some(record.created_at),
             superadmin: false,
         })
         .collect();
     ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
-        registry: &state.config.roles.names,
+        mode: state.policy.mode,
         catalog,
+        services: service_grants(state, catalog),
         users: cards,
         superadmin: ui::UserCard {
             login: state.superadmin_login.clone(),
-            roles: Vec::new(),
+            grants: Vec::new(),
+            configured: Vec::new(),
             created_at: None,
             superadmin: true,
             activity: activities.next().unwrap_or_default(),
@@ -787,7 +944,7 @@ fn users_view<'a>(
     }
 }
 
-/// One query parameter, decoded, short. Anything else is ignored.
+/// One decoded query parameter that is short. The portal ignores anything else.
 fn query_value(uri: &str, key: &str) -> Option<String> {
     query_value_up_to(uri, key, 32)
 }
@@ -807,13 +964,13 @@ fn current_catalog(state: &AppState) -> Arc<Catalog> {
     Arc::clone(&state.catalog.read().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
-/// A signed-in browser: the session its cookie stands for and what that session may do.
+/// A browser with a session. The data has the session that the cookie represents, and what that session can do.
 struct Viewer {
     session: Session,
-    /// The cookie value (a secret): what the anti-CSRF tokens are bound to.
+    /// The cookie value, which is a secret. The anti-CSRF tokens are bound to this value.
     token: Zeroizing<String>,
-    /// The roles held; `None` for the superadmin, whom roles never hold back.
-    roles: Option<Vec<String>>,
+    /// The grants that apply. The value is `None` for the superadmin, who has all grants.
+    grants: Option<Vec<Grant>>,
     login: String,
 }
 
@@ -827,12 +984,12 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
         return None;
     };
     state.metrics.session_valid();
-    let (roles, login) = match &session.principal {
+    let (grants, login) = match &session.principal {
         Principal::Superadmin => (None, state.superadmin_login.clone()),
-        Principal::User(login) => match roles_of_known_user(state, login) {
-            Some(roles) => (Some(roles), login.clone()),
+        Principal::User(login) => match grants_of_known_user(state, login) {
+            Some(stored) => (Some(state.policy.effective(login, &stored)), login.clone()),
             None => {
-                // The account was deleted while this session was open.
+                // The account was deleted while the session was open.
                 state.sessions.revoke(token, EndReason::Revoked);
                 return None;
             }
@@ -841,22 +998,22 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
     Some(Viewer {
         session,
         token: Zeroizing::new(token.to_string()),
-        roles,
+        grants,
         login,
     })
 }
 
-/// The roles of an account, read again from the shared database first when the directory does not
-/// know it: the account may have been created, and its session opened, on another instance a moment
-/// ago, and a session must not be ended for that.
-fn roles_of_known_user(state: &AppState, login: &str) -> Option<Vec<String>> {
-    state.users.roles_of(login).or_else(|| {
-        refresh_directory_if_due(state).then(|| state.users.roles_of(login)).flatten()
+/// The stored grants of an account. When the directory does not know the account, the portal reads the grants again first from the shared database.
+/// The account can have been created on another instance a moment ago, and its session can have been opened there.
+/// A session must not end for this reason.
+fn grants_of_known_user(state: &AppState, login: &str) -> Option<Vec<Grant>> {
+    state.users.grants_of(login).or_else(|| {
+        refresh_directory_if_due(state).then(|| state.users.grants_of(login)).flatten()
     })
 }
 
-/// A throttled read of the accounts from the shared database, for a request that met a login the
-/// directory does not hold. Always `false` with one instance, which is the only writer.
+/// A rate-limited read of the accounts from the shared database, for a request with a login that the directory does not hold.
+/// The result is always `false` with one instance, which is the only writer.
 fn refresh_directory_if_due(state: &AppState) -> bool {
     state.store.is_shared()
         && blocking(|| state.users.refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP))
@@ -866,7 +1023,7 @@ fn ip_text(client: &Client) -> Option<String> {
     client.ip.map(|ip| ip.to_string())
 }
 
-/// The browser's User-Agent for the history: bounded and free of control characters.
+/// The User-Agent of the browser, for the history. The value has a length limit and no control characters.
 fn user_agent_text(headers: &HeaderMap) -> String {
     headers
         .get(USER_AGENT)
@@ -912,9 +1069,9 @@ fn handle_login_get(
         return redirect_response(StatusCode::SEE_OTHER, &rd);
     }
 
-    // A browser that already holds a token keeps it: another request for the login page (a second tab,
-    // a favicon fetch that Traefik sends through ForwardAuth, whose redirect lands here) must not
-    // replace the cookie under the form that is open, or its submit fails the CSRF check.
+    // A browser that already holds a token keeps it.
+    // Another request for the login page can come from a second tab, or from a favicon fetch that Traefik sends through ForwardAuth. The redirect of that fetch lands here.
+    // Such a request must not replace the cookie under the open form. If it does, the submit fails the CSRF check.
     let csrf = match existing_csrf_token(state, headers, client) {
         Some(v) => v,
         None => match new_csrf_token() {
@@ -930,8 +1087,8 @@ fn handle_login_get(
     login_page(state, client.https, &rd, &sig, &csrf, None, StatusCode::OK)
 }
 
-/// The anti-CSRF token the browser already holds, when it is one this portal issued (the shape of
-/// [`new_csrf_token`]: 32 URL-safe base64 characters).
+/// The anti-CSRF token that the browser already holds. The token must be one that this portal issued.
+/// It has the shape of [`new_csrf_token`]: 32 URL-safe base64 characters.
 fn existing_csrf_token(state: &AppState, headers: &HeaderMap, client: &Client) -> Option<String> {
     cookie_value(
         headers,
@@ -1079,9 +1236,8 @@ async fn handle_login_post(
         }
     };
 
-    // Requests can queue behind the Argon2 semaphore. Re-check after acquiring
-    // the permit so a burst that was admitted before the first failures were
-    // recorded cannot drain the expensive password-check budget afterwards.
+    // Requests can wait in a queue behind the Argon2 semaphore. Check again after the request gets the permit.
+    // This check stops a burst that the portal admitted before the first failures were recorded. Such a burst cannot drain the expensive password-check budget afterwards.
     if let Some(response) = login_rate_limit_response(
         state,
         client.https,
@@ -1094,11 +1250,11 @@ async fn handle_login_post(
         return response;
     }
 
-    // Exactly one Argon2 check whoever the login names: the superadmin's hash, the account's, or a
-    // dummy one when the login does not exist. Time and budget tell nothing about the login.
+    // Exactly one Argon2 check runs, whatever account the login names.
+    // The check uses the superadmin hash, the account hash, or a dummy hash when the login does not exist. Time and budget tell nothing about the login.
     let who = identify(state, &login_input);
-    // What is kept of the attempt: the login as typed, made safe, and whether it names an account.
-    // The password is not part of it.
+    // The portal keeps this information about the attempt: the login as typed, made safe, and whether it names an account.
+    // The password is not kept.
     let typed = typed_login(&login_input);
     let known = !matches!(who, Who::Unknown);
     let target_hash = match &who {
@@ -1157,7 +1313,7 @@ async fn handle_login_post(
             user_agent: user_agent_text(&headers),
             at: unix_now(),
         }));
-        // The audit event names an account only when the typed login is one, so the per-account
+        // The audit event names an account only when the typed login names an account. Therefore, the per-account
         // counters never count a typo or a probe.
         state.tracker.emit(Event::Audit(AuditEvent {
             kind: AuditKind::LoginFailed,
@@ -1266,7 +1422,7 @@ async fn handle_login_post(
     response
 }
 
-/// Who a login names.
+/// The account that a login names.
 enum Who {
     Superadmin,
     User(String, UserRecord),
@@ -1274,7 +1430,7 @@ enum Who {
 }
 
 impl Who {
-    /// The account to record a failed attempt against; none when the login does not exist.
+    /// The account that a failed attempt is recorded against. The value is none when the login does not exist.
     fn login(&self, state: &AppState) -> Option<String> {
         match self {
             Self::Superadmin => Some(state.superadmin_login.clone()),
@@ -1285,7 +1441,7 @@ impl Who {
 }
 
 fn identify(state: &AppState, typed: &str) -> Who {
-    // Lower case and trimmed, as logins are stored. A name far longer than any login is unknown.
+    // Convert the login to lower case and trim it, as the logins are stored. A name far longer than any login is unknown.
     let login = typed.trim().to_ascii_lowercase();
     if login.len() > 128 {
         return Who::Unknown;
@@ -1295,7 +1451,7 @@ fn identify(state: &AppState, typed: &str) -> Who {
     }
     match state.users.get(&login) {
         Some(record) => Some(record),
-        // Maybe created a moment ago on another instance.
+        // The account can have been created a moment ago on another instance.
         None if refresh_directory_if_due(state) => state.users.get(&login),
         None => None,
     }
@@ -1507,8 +1663,8 @@ async fn handle_logout_post(
 
 // Account administration ----------------------------------------------------------------------
 
-/// What every administration POST starts with: same origin, a form, a signed-in browser, a bounded
-/// body, a valid anti-CSRF token. Returns the viewer and the remaining form fields, or the answer.
+/// Every administration POST starts with these checks: the same origin, a form, a browser with a session, a limited
+/// body, and a valid anti-CSRF token. The function returns the viewer and the remaining form fields, or the answer.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
 async fn admin_request(
     state: &Arc<AppState>,
@@ -1563,7 +1719,7 @@ async fn admin_request(
     Ok((viewer, form))
 }
 
-/// Only the superadmin in its own right (not while browsing as a user) manages accounts.
+/// Only the superadmin in its own right manages accounts. This does not apply while the superadmin browses as a user.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
 fn require_superadmin(
     state: &AppState,
@@ -1578,7 +1734,7 @@ fn require_superadmin(
     }
 }
 
-/// Back to the Users page with the outcome of the action (a code from a fixed list).
+/// The response returns to the Users page. It shows the outcome of the action, as a code from a fixed list.
 fn settings_redirect(code: &str) -> HttpResponse {
     redirect_response(
         StatusCode::SEE_OTHER,
@@ -1620,18 +1776,11 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The role boxes are the remaining fields, named `r_<role>`.
-    let mut roles: Vec<String> = Vec::new();
-    for (name, value) in form.drain() {
-        match name.strip_prefix("r_") {
-            Some(role) if value == "1" => roles.push(role.to_string()),
-            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
-        }
+    // A new user has no grant. The form has no other field.
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
-    roles.sort();
-    roles.dedup();
 
-    let registry = &state.config.roles.names;
     let rejected = |code: &str| {
         state.metrics.user_admin("add", "rejected");
         settings_redirect(code)
@@ -1646,9 +1795,6 @@ async fn handle_users_add(
     if let Err(code) = check_new_password(&password, state.config.security.max_password_bytes) {
         return rejected(code);
     }
-    if roles.iter().any(|role| !registry.contains(role)) {
-        return rejected("unknown-role");
-    }
     if state.users.get(&login).is_some() {
         return rejected("exists");
     }
@@ -1656,7 +1802,7 @@ async fn handle_users_add(
         return rejected("limit");
     }
 
-    // Hashing costs what a login check costs: it takes the same permit.
+    // A hash calculation costs the same as a login check. It takes the same permit.
     let permit = match Arc::clone(&state.password_gate).acquire_owned().await {
         Ok(permit) => permit,
         Err(_) => return rejected("error"),
@@ -1674,7 +1820,7 @@ async fn handle_users_add(
     let row = UserRow {
         login: login.clone(),
         password_hash: password_hash.clone(),
-        roles: roles.clone(),
+        grants: Vec::new(),
         created_at: unix_now(),
     };
     let store = Arc::clone(&state.store);
@@ -1692,7 +1838,7 @@ async fn handle_users_add(
         login.clone(),
         UserRecord {
             password_hash,
-            roles,
+            grants: Vec::new(),
             created_at,
         },
     );
@@ -1758,9 +1904,9 @@ async fn handle_users_delete(
     settings_redirect("user-deleted")
 }
 
-/// Changes an account: its roles, and its password when a new one is given. The session of an
-/// account whose password changed ends at once; a change of roles takes effect at the next request
-/// (roles are read live).
+/// Changes an account: its grants, and its password when a new password is given. The session of an
+/// account whose password changed ends at once. A change of grants takes effect at the next request,
+/// because the grants are read live.
 async fn handle_users_update(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1775,17 +1921,19 @@ async fn handle_users_update(
         return response;
     }
     let login = form.remove("login").unwrap_or_default();
-    // Empty means "keep the password".
+    // An empty value means "keep the password".
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    let mut roles: Vec<String> = Vec::new();
+    // The grant boxes are the remaining fields. Their names have the form `g.<service>.<action>`.
+    let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
-        match name.strip_prefix("r_") {
-            Some(role) if value == "1" => roles.push(role.to_string()),
+        match name.strip_prefix("g.").and_then(|rest| rest.split_once('.')) {
+            Some((service, action)) if value == "1" => match Grant::new(action, service) {
+                Ok(grant) => ticked.push(grant),
+                Err(_) => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
+            },
             _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
         }
     }
-    roles.sort();
-    roles.dedup();
 
     let rejected = |code: &str| {
         state.metrics.user_admin("update", "rejected");
@@ -1798,26 +1946,51 @@ async fn handle_users_update(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
-    let registry = &state.config.roles.names;
-    if roles.iter().any(|role| !registry.contains(role)) {
-        return rejected("edit-unknown-role");
-    }
+    // The page shows one box for each grant that it offers. A box that the page did not show keeps
+    // its grant. An action that a service does not publish now is not lost.
+    let grants = if state.policy.mode.editable() {
+        let offered: Vec<Grant> = service_grants(state, &current_catalog(state))
+            .into_iter()
+            .flat_map(|service| {
+                std::iter::once(grants::ACCESS.to_string())
+                    .chain(service.actions.into_iter().map(|(name, _)| name))
+                    .filter_map(move |action| Grant::new(&action, &service.id).ok())
+            })
+            .collect();
+        if ticked.iter().any(|grant| !offered.contains(grant)) {
+            return rejected("edit-unknown-grant");
+        }
+        let mut next: Vec<Grant> = current
+            .grants
+            .iter()
+            .filter(|grant| !offered.contains(grant))
+            .cloned()
+            .chain(ticked)
+            .collect();
+        next.sort();
+        next.dedup();
+        Some(next)
+    } else {
+        if !ticked.is_empty() {
+            return rejected("grants-static");
+        }
+        None
+    };
     let change_password = !password.is_empty();
     if change_password {
         if let Err(code) = check_new_password(&password, state.config.security.max_password_bytes) {
             return rejected(&format!("edit-{code}"));
         }
     }
-    let mut held = current.roles.clone();
-    held.sort();
-    let roles_changed = held != roles;
-    if !change_password && !roles_changed {
+    let grants_changed = grants.as_ref().is_some_and(|next| *next != current.grants);
+    let grants = grants.filter(|_| grants_changed);
+    if !change_password && !grants_changed {
         state.metrics.user_admin("update", "ok");
         return settings_redirect("unchanged");
     }
 
     let new_hash = if change_password {
-        // Hashing costs what a login check costs: it takes the same permit.
+        // A hash calculation costs the same as a login check. It takes the same permit.
         let permit = match Arc::clone(&state.password_gate).acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => return rejected("error"),
@@ -1836,9 +2009,9 @@ async fn handle_users_update(
     };
 
     let store = Arc::clone(&state.store);
-    let (target, hash_for_store, roles_for_store) = (login.clone(), new_hash.clone(), roles.clone());
+    let (target, hash_for_store, grants_for_store) = (login.clone(), new_hash.clone(), grants.clone());
     match tokio::task::spawn_blocking(move || {
-        store.update_user(&target, hash_for_store.as_deref(), &roles_for_store)
+        store.update_user(&target, hash_for_store.as_deref(), grants_for_store.as_deref())
     })
     .await
     {
@@ -1850,7 +2023,7 @@ async fn handle_users_update(
         }
         Err(_) => return rejected("error"),
     }
-    state.users.update(&login, new_hash, roles);
+    state.users.update(&login, new_hash, grants);
     if change_password {
         state.sessions.revoke_user(&login, EndReason::Revoked);
         audit(
@@ -1862,7 +2035,7 @@ async fn handle_users_update(
             &headers,
         );
     }
-    if roles_changed {
+    if grants_changed {
         audit(
             state,
             AuditKind::UserUpdated,
@@ -1876,7 +2049,7 @@ async fn handle_users_update(
     settings_redirect(if change_password { "password-reset" } else { "user-updated" })
 }
 
-/// "Log in as": the superadmin's session becomes a session of the user, flagged as impersonated.
+/// "Log in as": the session of the superadmin becomes a session of the user. The session is flagged as impersonated.
 async fn handle_impersonate(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1925,8 +2098,8 @@ async fn handle_impersonate(
     response
 }
 
-/// "Back to superadmin": ends the impersonated session and opens a fresh superadmin one. The
-/// impersonated session itself proves it was opened by the superadmin: no password is asked.
+/// "Back to superadmin": ends the impersonated session and opens a new superadmin session. The
+/// impersonated session proves that the superadmin opened it. The portal asks for no password.
 async fn handle_impersonate_end(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -1969,8 +2142,8 @@ async fn handle_impersonate_end(
     response
 }
 
-/// Opens a session for `principal`, sets its cookie on `response`, and only then ends the current
-/// one: a failure leaves the browser with the session it had.
+/// Opens a session for `principal` and sets its cookie on `response`. Only after that, the function ends the current
+/// session. If a failure occurs, the browser keeps the session that it had.
 #[allow(clippy::too_many_arguments)]
 fn switch_session(
     state: &AppState,
@@ -2304,7 +2477,7 @@ fn html_response(status: StatusCode, body: String) -> HttpResponse {
     response
 }
 
-/// An embedded asset (stylesheet, script). Content never varies per request, so it can be cached.
+/// An embedded asset, such as a stylesheet or a script. The content does not change per request. Therefore, it can be cached.
 fn static_response(content_type: &'static str, body: &str) -> HttpResponse {
     let mut response = response_with_body(StatusCode::OK, Bytes::copy_from_slice(body.as_bytes()));
     response.headers_mut().insert(
@@ -2506,6 +2679,8 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
     line.push('}');
     eprintln!("{line}");
 }
+
+mod pdp;
 
 #[cfg(test)]
 mod cluster_tests;

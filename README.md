@@ -74,7 +74,7 @@ The server reads the `user` blocks at each start. When you remove a grant from t
 
 `/auth/verify` finds the service from the path in `X-Forwarded-Uri`. The service owns the longest path prefix of its `href`. The prefix matches whole segments. portal then decides `access` in its own process. portal uses the grants in memory.
 
-Traefik routes on the clean path. Traefik sends the raw URI. portal therefore reads the path in each way that a proxy or a backend can read it: `%2e%2e`, `//`, `%2f` as a character and as a separator, and `\`. portal lets the request through only if each reading is permitted. For example, portal judges `/grafana/../clickhouse/` as a request for ClickHouse.
+Traefik routes on the clean path, but sends the raw URI. portal therefore reads the path in every way that a proxy or a backend can read it. These ways include `%2e%2e`, `//`, `%2f` as a character and as a separator, and `\`. portal lets the request through only if every way is permitted. For example, portal judges `/grafana/../clickhouse/` as a request for ClickHouse.
 
 - A refused browser navigation goes to `/auth/denied`. Traefik limits the body of a ForwardAuth answer. The answer cannot hold the page. Other requests get a plain `403`.
 - The page `/auth/denied` does not give the name of a service. A user does not see a service that is not open to that user.
@@ -164,7 +164,7 @@ At the first start of this version, the server changes the database. SQLite goes
 
 ### Paths open without a session (`portal.exclude`)
 
-A caller that cannot log on (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
+A caller that cannot sign in (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
 
 ```yaml
 portal.exclude: |
@@ -189,7 +189,7 @@ The Services settings page lists the rules of every service. The whole exposure 
 
 The superadmin gets a gear on the launcher. The gear opens the settings. The settings are **one HTML page per tab**. This is the same design as the pages of clickhouse-dash. Each page has a header with **Back to panel**. Below the header is a row of underlined tab links. The current tab has a line under it. The row has no fill. The page follows the row. The settings live under `/auth/settings`. Traefik already routes `/auth/` to the portal. The pages work without script. The pages answer 404 to anyone who is not the superadmin in its own right. This applies to a user, and to the superadmin who browses as a user. A page carries only what its tab shows. The launcher carries none of it. The browser therefore builds a small DOM on each page. A launcher with twelve services has about 150 elements. The settings used to add 700 more elements to it. There are three tabs:
 
-1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in, a graph of its connections, its latest sessions (time, address, browser, duration, and how each session ended), the services it used, and the services it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The password generator is the only script of these pages. It loads on this page only.
+1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in and a graph of the connections. It shows the latest sessions (time, address, browser, duration, and how each session ended). It also shows the services that the account used and the services that it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The password generator is the only script of these pages. It loads on this page only.
 2. **Services** (`/auth/settings/services`). The page lists each service. For each service, it shows its id. It shows the actions that the service publishes (`access only` if it publishes none). It shows the users who have `access` (`Superadmin only` if there is none). It shows the paths open without sign-in. It shows a warning when the actions document cannot be read.
 3. **Logins** (`/auth/settings/logins`). This tab shows the sign-in log. See below.
 
@@ -282,15 +282,15 @@ This is what the instances share, and how:
 - **Sessions** are rows of a `sessions` table. A row holds the digest of the cookie, the client binding, the identity, the expiry and the last use. A login writes the session and its line of the history in one transaction. Each instance keeps a copy of what it checked. The copy is kept for **5 seconds**. ForwardAuth asks the database about one session once per 5 s, not once per request. The binding (address and User-Agent), the idle timeout and the absolute lifetime are enforced exactly as with SQLite. The idle timeout is renewed at most every 5 s of activity. A logout, a deleted account or a password change ends the session in the database at once. The session then stops working on the other instances within 5 seconds (the copy). If the database cannot be reached, a session that was checked less than 2 minutes ago is still accepted. A failover therefore does not sign everybody out. New sign-ins fail with `503` in the meantime.
 - **Accounts** are read from the database every 5 seconds by every instance. An account that is created, edited or deleted on one instance reaches the others within 5 seconds. A login that the instance does not know yet makes it read the accounts again at once. This happens at most once per second. An account that was just created can therefore sign in on any instance. A session that was opened for this account elsewhere is never ended for that reason.
 - **History** is written by every instance. The writes are batched every 15 s, as with SQLite. A session that ends by logout, revocation, expiry or idleness is recorded once. The instance whose call ended the session records it. The database gives each ended session to exactly one caller. The start or the stop of an instance never closes the sessions of the other instances.
-- **Rate limiting stays per instance**. The failed-login limiters (per IP and global) are in memory. With two instances, an attacker gets up to twice the budget. A lockout on one instance does not lock the other instance. `session.max_active_sessions` is checked against the database. Two instances that race at the limit can each overshoot it by one.
+- **Each instance has its own rate limits.** The failed-login limiters (per IP and global) are in memory. With two instances, an attacker gets up to twice the budget. A lockout on one instance does not lock the other instance. `session.max_active_sessions` is checked against the database. Two instances that race at the limit can each overshoot it by one.
 
 Liveness and readiness are unchanged. `/healthz` does not touch the database. `/metrics` adds `portal_shared_store_errors_total{use="sessions|directory"}`.
 
 The instance that adds an account checks `users.max_users` against its own copy. Two instances that add accounts at the same moment can exceed the limit by one.
 
-### Moving from SQLite to PostgreSQL
+### Migration from SQLite to PostgreSQL
 
-The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data to PostgreSQL. It copies these items: the accounts (with their grants), the sessions of the history, the service accesses, the audit events and the sign-in log. It copies them into the empty PostgreSQL database that the configuration names. The copy is one transaction. The command prints what it copied. The command refuses a target that already holds any of these items. In this case, it changes nothing. The command only reads the SQLite file. The SQLite file can be the live file. Sessions do not move. They were in the memory of the old process. The sessions that the file still shows as open end where they were last seen, with the reason *restart*. Everybody logs on again after the switch. Changes made to the SQLite file after the import are not copied. Do not change accounts between the import and the switch.
+The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data to PostgreSQL. It copies these items: the accounts (with their grants), the sessions of the history, the service accesses, the audit events and the sign-in log. It copies them into the empty PostgreSQL database that the configuration names. The copy is one transaction. The command prints what it copied. The command refuses a target that already holds any of these items. In this case, it changes nothing. The command only reads the SQLite file. The SQLite file can be the live file. Sessions do not move. They were in the memory of the old process. The sessions that the file still shows as open end where they were last seen, with the reason *restart*. Every user signs in again after the switch. Changes made to the SQLite file after the import are not copied. Do not change accounts between the import and the switch.
 
 ## Local test
 
@@ -308,7 +308,7 @@ Open this URL:
 http://localhost:4181/auth/login
 ```
 
-Log on as `admin` / `test1234`. The gear opens the settings pages.
+Sign in as `admin` / `test1234`. The gear opens the settings pages.
 
 Stop the stack with:
 
@@ -639,7 +639,7 @@ This block has a label and can occur more than one time. One server that asks th
 | `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token. |
 <!-- config-reference:end -->
 
-## HTTP hardening
+## HTTP protection
 
 Hyper parses HTTP/1. The application configures bounded HTTP behavior:
 
@@ -662,7 +662,7 @@ The crate uses `#![forbid(unsafe_code)]` for project code.
 1. a CSRF token. For login, the token is the double-submit cookie. For the other routes, the token is an HMAC of the session ID and of the purpose (`logout`, `users`). The form of the button carries the HMAC. The HMAC has no cookie that can expire under a page left open. A token for one action cannot be replayed on another action; and
 2. a same-origin `Origin` check. The program uses `Referer` only when `Origin` is absent.
 
-The account routes also check on the server that the session belongs to the superadmin. The session must not be an impersonated one. In K3s, these paths do not go through ForwardAuth. portal therefore cannot rely on the gate.
+The account routes also check on the server that the session belongs to the superadmin. The session must not be an impersonated one. In K3s, these paths do not pass through ForwardAuth. portal therefore cannot rely on the gate.
 
 The Sign out button sends a POST. This POST ends the session at once. `GET /auth/logout` only redirects to `/`.
 

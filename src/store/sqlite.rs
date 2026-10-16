@@ -1,8 +1,8 @@
 //! The SQLite backend: one file, one connection behind a mutex.
 //!
-//! Callers run these methods on blocking threads (the writer thread of [`crate::tracking`], or
-//! `spawn_blocking` from a handler); the request path reads the in-memory directory instead and
-//! never waits on the disk.
+//! Callers run these methods on blocking threads.
+//! Such a thread is the writer thread of [`crate::tracking`], or a `spawn_blocking` call from a handler.
+//! The request path reads the in-memory directory instead. It never waits on the disk.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -10,21 +10,18 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
 use super::*;
+use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
+/// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
 CREATE TABLE users (
   id INTEGER PRIMARY KEY,
   login TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   created_at INTEGER NOT NULL
-);
-CREATE TABLE user_roles (
-  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL,
-  PRIMARY KEY (user_id, role)
 );
 CREATE TABLE sessions_log (
   sid INTEGER PRIMARY KEY,
@@ -61,7 +58,7 @@ CREATE TABLE audit_events (
 CREATE INDEX audit_events_ts ON audit_events (ts);
 ";
 
-/// Added by schema version 2 (a database at version 1 gets it when opened).
+/// Added by schema version 2. A database at version 1 gets it when it is opened.
 const LOGIN_SCHEMA: &str = "
 CREATE TABLE login_attempts (
   id INTEGER PRIMARY KEY,
@@ -74,6 +71,59 @@ CREATE TABLE login_attempts (
 );
 CREATE INDEX login_attempts_ts ON login_attempts (ts);
 ";
+
+/// Schema version 3: the grants of the users. The table of the old access model is dropped with its rows.
+/// After the migration, a user has the grants that the settings pages give again.
+const GRANTS_SCHEMA: &str = "
+DROP TABLE IF EXISTS user_roles;
+CREATE TABLE user_grants (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  PRIMARY KEY (user_id, action, resource_type, resource_id)
+);
+";
+
+/// Reads the grants of one user. A row that is not a valid grant stops the read.
+/// The database holds only what the server wrote.
+fn grants_of(conn: &Connection, user_id: i64) -> Result<Vec<Grant>, String> {
+    let rows = conn
+        .prepare_cached(
+            "SELECT action, resource_type, resource_id FROM user_grants
+              WHERE user_id = ?1 ORDER BY action, resource_id",
+        )
+        .map_err(db)?
+        .query_map([user_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db)?;
+    rows.into_iter()
+        .map(|(action, kind, id)| {
+            if kind != crate::grants::SERVICE_TYPE {
+                return Err(format!("user_grants: unknown resource type {kind:?}"));
+            }
+            Grant::new(&action, &id).map_err(|e| format!("user_grants: {e}"))
+        })
+        .collect()
+}
+
+fn insert_grants(conn: &Connection, user_id: i64, grants: &[Grant]) -> rusqlite::Result<()> {
+    for grant in grants {
+        conn.execute(
+            "INSERT OR IGNORE INTO user_grants (user_id, action, resource_type, resource_id)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![user_id, grant.action, crate::grants::SERVICE_TYPE, grant.service],
+        )?;
+    }
+    Ok(())
+}
 
 pub struct Sqlite {
     conn: Mutex<Connection>,
@@ -103,7 +153,7 @@ impl Sqlite {
     fn init(conn: Connection) -> Result<Self, String> {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db)?;
-        // `journal_mode` answers with a row, so it is read rather than executed.
+        // `journal_mode` answers with a row. Therefore, the code reads it and does not execute it.
         let _: String = conn
             .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
             .map_err(db)?;
@@ -112,15 +162,17 @@ impl Sqlite {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
+        // Each version adds its part. The part and the new version number are written in one transaction.
+        let missing = match version {
+            0 => format!("{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA}"),
+            1 => format!("{LOGIN_SCHEMA} {GRANTS_SCHEMA}"),
+            2 => GRANTS_SCHEMA.to_string(),
+            _ => String::new(),
+        };
         match version {
-            0 => conn
+            0..=2 => conn
                 .execute_batch(&format!(
-                    "BEGIN; {SCHEMA} {LOGIN_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
-                ))
-                .map_err(db)?,
-            1 => conn
-                .execute_batch(&format!(
-                    "BEGIN; {LOGIN_SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                    "BEGIN; {missing} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
                 ))
                 .map_err(db)?,
             SCHEMA_VERSION => {}
@@ -159,7 +211,7 @@ impl Sqlite {
                     UserRow {
                         login: row.get(1)?,
                         password_hash: row.get(2)?,
-                        roles: Vec::new(),
+                        grants: Vec::new(),
                         created_at: row.get(3)?,
                     },
                 ))
@@ -167,15 +219,8 @@ impl Sqlite {
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        let mut roles = conn
-            .prepare("SELECT role FROM user_roles WHERE user_id = ?1 ORDER BY role")
-            .map_err(db)?;
         for (id, user) in &mut users {
-            user.roles = roles
-                .query_map([*id], |row| row.get::<_, String>(0))
-                .map_err(db)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db)?;
+            user.grants = grants_of(&conn, *id)?;
         }
         Ok(users.into_iter().map(|(_, user)| user).collect())
     }
@@ -196,23 +241,17 @@ impl Sqlite {
             Err(e) => return Err(InsertError::Db(db(e))),
         }
         let id = tx.last_insert_rowid();
-        for role in &user.roles {
-            tx.execute(
-                "INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?1, ?2)",
-                params![id, role],
-            )
-            .map_err(|e| InsertError::Db(db(e)))?;
-        }
+        insert_grants(&tx, id, &user.grants).map_err(|e| InsertError::Db(db(e)))?;
         tx.commit().map_err(|e| InsertError::Db(db(e)))
     }
 
-    /// Replaces the roles of a user and, when given, its password hash, in one transaction.
-    /// `false` if no such user.
+    /// Replaces the password hash and the grants of a user. Each is replaced only when it is given.
+    /// The change runs in one transaction. `false` if no such user.
     pub fn update_user(
         &self,
         login: &str,
         password_hash: Option<&str>,
-        roles: &[String],
+        grants: Option<&[Grant]>,
     ) -> Result<bool, String> {
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(db)?;
@@ -232,14 +271,10 @@ impl Sqlite {
             )
             .map_err(db)?;
         }
-        tx.execute("DELETE FROM user_roles WHERE user_id = ?1", [id])
-            .map_err(db)?;
-        for role in roles {
-            tx.execute(
-                "INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?1, ?2)",
-                params![id, role],
-            )
-            .map_err(db)?;
+        if let Some(grants) = grants {
+            tx.execute("DELETE FROM user_grants WHERE user_id = ?1", [id])
+                .map_err(db)?;
+            insert_grants(&tx, id, grants).map_err(db)?;
         }
         tx.commit().map_err(db)?;
         Ok(true)
@@ -346,7 +381,7 @@ impl Sqlite {
         Ok(())
     }
 
-    /// Deletes what started before `cutoff`.
+    /// Deletes the rows that started before `cutoff`.
     pub fn prune(&self, cutoff: i64) -> Result<(), String> {
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(db)?;
@@ -366,8 +401,8 @@ impl Sqlite {
 
     // History: reads --------------------------------------------------------------------------
 
-    /// One page of the sign-in log, newest first; `only_failed` keeps the refused attempts. A page
-    /// past the end is brought back to the last one.
+    /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
+    /// A page past the end is brought back to the last page.
     pub fn login_attempts(
         &self,
         now: i64,
@@ -563,8 +598,8 @@ fn insert_login(conn: &Connection, attempt: &LoginAttempt) -> Result<(), String>
     Ok(())
 }
 
-/// Real connections per day over [`GRAPH_DAYS`] days (an impersonated session is not a connection),
-/// for every account or for one.
+/// Real connections per day over [`GRAPH_DAYS`] days. An impersonated session is not a connection.
+/// The count is for every account, or for one account.
 fn day_stats(
     conn: &Connection,
     first_day: i64,
@@ -606,7 +641,7 @@ fn day_stats(
 }
 
 impl Sqlite {
-    /// Opens an existing file without touching it, to read everything that is in it (the import).
+    /// Opens an existing file without changing it. The import uses this to read all data in the file.
     pub fn open_read_only(path: &Path) -> Result<Self, String> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("cannot open the database {}: {e}", path.display()))?;
@@ -629,7 +664,7 @@ impl Sqlite {
     /// Every table, as the import copies it. A version 1 file has no sign-in log yet.
     pub fn dump(&self) -> Result<Dump, String> {
         let guard = self.conn();
-        // One read transaction: the live portal may write meanwhile, and the tables must be of one moment.
+        // The code uses one read transaction. The live portal may write in the meantime, so the tables must show one moment.
         let tx = guard.unchecked_transaction().map_err(db)?;
         let conn: &Connection = &tx;
         let version: i64 = conn
@@ -644,7 +679,7 @@ impl Sqlite {
                     UserRow {
                         login: row.get(1)?,
                         password_hash: row.get(2)?,
-                        roles: Vec::new(),
+                        grants: Vec::new(),
                         created_at: row.get(3)?,
                     },
                 ))
@@ -652,17 +687,13 @@ impl Sqlite {
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        let mut roles = conn
-            .prepare("SELECT role FROM user_roles WHERE user_id = ?1 ORDER BY role")
-            .map_err(db)?;
-        let mut with_roles = Vec::with_capacity(users.len());
+        // A file before version 3 has no grants. Its users get the grants again in the settings pages.
+        let mut with_grants = Vec::with_capacity(users.len());
         for (id, mut user) in users {
-            user.roles = roles
-                .query_map([id], |row| row.get::<_, String>(0))
-                .map_err(db)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db)?;
-            with_roles.push((id, user));
+            if version >= 3 {
+                user.grants = grants_of(conn, id)?;
+            }
+            with_grants.push((id, user));
         }
         let sessions = conn
             .prepare(
@@ -744,7 +775,7 @@ impl Sqlite {
             Vec::new()
         };
         Ok(Dump {
-            users: with_roles,
+            users: with_grants,
             sessions,
             accesses,
             audit,
@@ -759,13 +790,32 @@ mod tests {
 
     const NOW: i64 = 1_000_000;
 
-    fn user(login: &str, roles: &[&str]) -> UserRow {
+    fn user(login: &str, services: &[&str]) -> UserRow {
         UserRow {
             login: login.into(),
             password_hash: "$argon2id$stub".into(),
-            roles: roles.iter().map(|r| r.to_string()).collect(),
+            grants: services.iter().map(|s| Grant::new("access", s).unwrap()).collect(),
             created_at: 1_000,
         }
+    }
+
+    fn version(store: &Sqlite) -> i64 {
+        store
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn has_table(store: &Sqlite, name: &str) -> bool {
+        store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
     }
 
     #[test]
@@ -778,7 +828,10 @@ mod tests {
             store.insert_user(&user("alice", &["ops"])).unwrap();
         }
         let store = Sqlite::open(&path).unwrap();
-        assert_eq!(store.load_users().unwrap()[0].roles, ["ops"]);
+        assert_eq!(
+            store.load_users().unwrap()[0].grants,
+            [Grant::new("access", "ops").unwrap()]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -803,11 +856,65 @@ mod tests {
         let store = Sqlite::init(conn).unwrap();
         assert_eq!(store.load_users().unwrap().len(), 1, "what was there stays");
         assert_eq!(store.login_attempts(NOW, 0, false).unwrap().matching, 0);
-        let version: i64 = store
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(has_table(&store, "user_grants"));
+    }
+
+    /// The tables of a file that an older portal wrote. The file is at version 2.
+    /// It has the table of the old access model, with some rows in it.
+    const VERSION_2_ACCESS_TABLE: &str = "
+CREATE TABLE user_roles (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  PRIMARY KEY (user_id, role)
+);";
+
+    #[test]
+    fn the_migration_to_version_three_drops_the_old_access_data_and_adds_the_grants() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "{SCHEMA} {VERSION_2_ACCESS_TABLE} {LOGIN_SCHEMA} PRAGMA user_version = 2;"
+        ))
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+             INSERT INTO user_roles (user_id, role) VALUES (1, 'ops'), (1, 'dev');",
+        )
+        .unwrap();
+        let store = Sqlite::init(conn).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(!has_table(&store, "user_roles"), "the old data is gone");
+        assert!(has_table(&store, "user_grants"));
+        let users = store.load_users().unwrap();
+        assert_eq!(users.len(), 1, "the account stays");
+        assert!(users[0].grants.is_empty(), "a migrated user has no grant");
+        // The new table works, and a second open changes nothing.
+        let grant = Grant::new("access", "grafana").unwrap();
+        assert!(store.update_user("alice", None, Some(&[grant.clone()])).unwrap());
+        assert_eq!(store.load_users().unwrap()[0].grants, [grant]);
+    }
+
+    #[test]
+    fn a_new_database_is_at_the_last_version_without_the_old_access_table() {
+        let store = Sqlite::open_in_memory();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(!has_table(&store, "user_roles"));
+        assert!(has_table(&store, "user_grants"));
+    }
+
+    #[test]
+    fn a_grant_row_that_the_server_did_not_write_stops_the_read() {
+        let store = Sqlite::open_in_memory();
+        store.insert_user(&user("alice", &[])).unwrap();
+        store
             .conn()
-            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .execute(
+                "INSERT INTO user_grants (user_id, action, resource_type, resource_id)
+                 VALUES (1, 'access', 'database', 'x')",
+                [],
+            )
             .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
+        assert!(store.load_users().unwrap_err().contains("resource type"));
     }
 
 }

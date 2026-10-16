@@ -1,14 +1,13 @@
 //! Server-rendered pages: the launcher, the authentication cards and the settings pages.
 //!
-//! The browser receives finished HTML. The only script of every page is the theme selector (the
-//! Users settings page adds the password generator); everything else works without JavaScript. No
-//! page references anything outside this binary (the CSS and the scripts are served from `/auth/`,
-//! the icon sprite is inlined, reduced to the symbols the page draws).
+//! The browser receives finished HTML. Every page has one script only: the theme selector. The Users
+//! settings page adds the password generator. Everything else works without JavaScript. No page
+//! references anything outside this binary. The server serves the CSS and the scripts from `/auth/`.
+//! The server puts the icon sprite into the HTML, reduced to the symbols that the page draws.
 //!
-//! What a page costs the browser is a design input: a page carries only what it shows (the settings
-//! are pages of their own, not a hidden block of the launcher), its stylesheet only the rules it
-//! uses, and the login and error pages draw no icon at all.
-//!
+//! The cost of a page for the browser is a design input. A page carries only what it shows. The
+//! settings are pages of their own, not a hidden block of the launcher. A page has a stylesheet with
+//! only the rules that it uses. The login and error pages draw no icon at all.
 //! Interface: [`home_page`], [`auth_document`], [`message_page`], [`denied_page`], the settings pages
 //! of [`settings`], the embedded assets ([`CSS`], [`SETTINGS_CSS`], [`THEME_JS`], [`SETTINGS_JS`]),
 //! and [`demo_page`] (synthetic data for `portal render-demo`).
@@ -21,7 +20,7 @@ use crate::catalog::{parse_labels, Catalog, Group, Health, Service};
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
-    logins_page, notice_for, roles_page, services_page, users_page, Frame, LoginsView, RolesView,
+    logins_page, notice_for, services_page, users_page, Frame, LoginsView, ServiceActions,
     ServicesView, UserCard, UsersView,
 };
 
@@ -33,22 +32,27 @@ const SPRITE: &str = include_str!("../../web/sprite.svg");
 
 const MAX_LISTED_PROBLEMS: usize = 3;
 
-/// Who is looking at the launcher, and what the page may offer them.
+/// The text of the 403 page. The text does not name a service. A user does not learn the name of a
+/// service that is not open to them.
+pub const DENIED_TEXT: &str =
+    "You do not have access to this page. Ask the administrator to give your account access.";
+
+/// The viewer of the launcher, and what the page may offer that viewer.
 pub struct HomeContext<'a> {
-    /// Login of the signed-in account, for the "Viewing as" banner.
+    /// The login of the signed-in account. The login appears in the "Viewing as" banner.
     pub viewer: &'a str,
-    /// The superadmin is browsing as `viewer`.
+    /// The superadmin browses as `viewer`.
     pub impersonating: bool,
     pub logout_token: &'a str,
-    /// Anti-CSRF token of the account actions (the banner's "Back to superadmin").
+    /// The anti-CSRF token of the account actions. The banner's "Back to superadmin" action uses it.
     pub users_token: &'a str,
-    /// Services the roles of the viewer hide from the page.
+    /// The services that the viewer cannot open. The page does not show these services.
     pub hidden_services: usize,
-    /// The gear that opens the settings: only for the superadmin.
+    /// The gear that opens the settings. The page shows the gear only to the superadmin.
     pub settings: bool,
 }
 
-/// The launcher: one full-width row per group, a tile per service.
+/// The launcher. It has one full-width row for each group and one tile for each service.
 pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String {
     let mut body = String::new();
     body.push_str(&header(ctx));
@@ -59,7 +63,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
 
     if catalog.groups().is_empty() && ctx.hidden_services > 0 {
         body.push_str(
-            r#"<main class="empty"><h1>No service available</h1><p>None of the services is open to your roles. Ask the administrator.</p></main>"#,
+            r#"<main class="empty"><h1>No service available</h1><p>No service is open to your account. Ask the administrator.</p></main>"#,
         );
     } else if catalog.groups().is_empty() {
         body.push_str(
@@ -85,7 +89,8 @@ pub fn auth_document(title: &str, card_html: &str) -> String {
     document(title, "", &[], &body)
 }
 
-/// A card with a title, a sentence and one button back to the launcher: the 404 and the 403.
+/// A card with a title, a sentence and one button back to the launcher. The 404 and the 403 pages
+/// use this card.
 pub fn message_page(title: &str, text: &str, button: &str) -> String {
     auth_document(
         title,
@@ -98,8 +103,8 @@ pub fn message_page(title: &str, text: &str, button: &str) -> String {
     )
 }
 
-/// The 403: names the service when it is known, says what to do, and lets the visitor sign out
-/// (the account they hold may be the wrong one).
+/// The 403 page. It names the service when the service is known. It tells the visitor what to do. It
+/// lets the visitor sign out, because the account that the visitor holds can be the wrong account.
 pub fn denied_page(text: &str, viewer: &str, logout_token: &str) -> String {
     auth_document(
         "Access denied",
@@ -112,8 +117,8 @@ pub fn denied_page(text: &str, viewer: &str, logout_token: &str) -> String {
     )
 }
 
-/// A whole page. `head` holds the extra stylesheet of a page that has one; `icons` names the sprite
-/// symbols the page draws.
+/// A complete page. `head` holds the extra stylesheet of a page that has one. `icons` names the
+/// sprite symbols that the page draws.
 fn document(title: &str, head: &str, icons: &[&str], body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css">{head}<script src="/auth/assets/theme.js"></script></head><body>{}{body}</body></html>"#,
@@ -122,8 +127,8 @@ fn document(title: &str, head: &str, icons: &[&str], body: &str) -> String {
     )
 }
 
-/// The inline sprite reduced to `ids` (the file holds one `<symbol>` per line); nothing at all when
-/// the page draws no icon.
+/// Returns the inline sprite, reduced to `ids`. The sprite file holds one `<symbol>` on each line.
+/// The result is empty when the page draws no icon.
 fn sprite(ids: &[&str]) -> String {
     if ids.is_empty() {
         return String::new();
@@ -143,8 +148,8 @@ fn sprite(ids: &[&str]) -> String {
     out
 }
 
-/// The System / Dark / Light selector; the script fills in the pressed state and shows it (without
-/// script it stays hidden, since it would do nothing).
+/// The System / Dark / Light selector. The script sets the pressed state and shows the selector.
+/// Without script, the selector stays hidden, because it does nothing.
 fn theme_switch() -> String {
     let mut out = String::from(
         r#"<div class="themeSwitch" data-theme-switch role="group" aria-label="Theme">"#,
@@ -163,7 +168,8 @@ fn theme_switch() -> String {
     out
 }
 
-/// A form, not a link: signing out is a POST that ends the session at once, with no page in between.
+/// A form, not a link. The sign-out action is a POST request. It ends the session at once, with no
+/// page between.
 fn sign_out_form(token: &str) -> String {
     format!(
         r##"<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>Sign out</button></form>"##,
@@ -262,7 +268,8 @@ fn tile(out: &mut String, service: &Service, icons: &Icons) {
     );
 }
 
-/// The tile icon: the declared one, else one named like the service, else the service's initial.
+/// The tile icon. It uses the declared icon first. If there is none, it uses an icon named like the
+/// service. Otherwise, it uses the initial of the service.
 fn icon_html(service: &Service, icons: &Icons) -> String {
     let declared = service.icon.as_deref();
     let by_name = service.name.as_str();
@@ -284,7 +291,8 @@ fn icon_html(service: &Service, icons: &Icons) -> String {
     }
 }
 
-/// Placeholder glyph for a service whose icon is not in the library: its first letter or digit.
+/// The placeholder glyph for a service whose icon is not in the library. The glyph is the first
+/// letter or digit of the service name.
 fn monogram(name: &str) -> String {
     name.chars()
         .find(|c| c.is_alphanumeric())
@@ -292,8 +300,8 @@ fn monogram(name: &str) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// Synthetic services for `portal render-demo` and the tests. Parsed through the real label
-/// parser so the demo also exercises it.
+/// Synthetic services for `portal render-demo` and the tests. They are parsed through the real label
+/// parser. The demo also tests that parser.
 pub fn demo_catalog() -> Catalog {
     type Row<'a> = (&'a str, &'a [(&'a str, &'a str)], Health);
     let rows: [Row; 12] = [
@@ -305,7 +313,6 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.description", "Workflow automation and scripts"),
                 ("portal.href", "/notes/"),
                 ("portal.weight", "40"),
-                ("portal.roles", "ops, dev"),
             ],
             Health::Up,
         ),
@@ -317,7 +324,6 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.description", "OCI registry browser"),
                 ("portal.href", "/registry/"),
                 ("portal.weight", "20"),
-                ("portal.roles", "ops"),
             ],
             Health::Up,
         ),
@@ -365,7 +371,6 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.description", "Dashboards and alerts"),
                 ("portal.href", "/grafana/"),
                 ("portal.weight", "10"),
-                ("portal.roles", "ops, viewer"),
             ],
             Health::Down,
         ),
@@ -410,7 +415,6 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.description", "Query and explore ClickHouse"),
                 ("portal.href", "/clickhouse-dash/"),
                 ("portal.weight", "10"),
-                ("portal.roles", "data"),
             ],
             Health::Up,
         ),
@@ -451,17 +455,31 @@ pub fn demo_catalog() -> Catalog {
     Catalog::build(services, Vec::new())
 }
 
-/// The roles of the demo: `data`, asked by one demo service, is deliberately missing so the
-/// Services page shows the warning.
-pub fn demo_registry() -> Vec<String> {
-    ["ops", "dev", "viewer"]
+/// The actions of the demo services. One service publishes actions. The other services have only
+/// `access`.
+fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
+    catalog
+        .groups()
         .iter()
-        .map(|r| r.to_string())
+        .flat_map(|g| g.services.iter())
+        .map(|service| ServiceActions {
+            id: service.id.clone(),
+            name: service.name.clone(),
+            actions: if service.id == "data-clickhouse-dash" {
+                vec![
+                    ("query.run.read".into(), "Run read-only queries.".into()),
+                    ("query.run.write".into(), "Run queries that change data.".into()),
+                    ("system.read".into(), "See the System page.".into()),
+                ]
+            } else {
+                Vec::new()
+            },
+        })
         .collect()
 }
 
 /// Synthetic accounts and history for `portal render-demo`.
-fn demo_users<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a> {
+fn demo_users(catalog: &Catalog) -> UsersView<'_> {
     use crate::store::{AccountActivity, AuditRow, DayStat, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
     let first_day = now - now.rem_euclid(86_400) - 29 * 86_400;
@@ -476,10 +494,11 @@ fn demo_users<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a>
             })
             .collect()
     };
-    let card = |login: &str, roles: &[&str], seed: u32, superadmin: bool| {
+    let card = |login: &str, grants: &[&str], seed: u32, superadmin: bool| {
         UserCard {
         login: login.into(),
-        roles: roles.iter().map(|r| r.to_string()).collect(),
+        grants: grants.iter().map(|g| crate::grants::Grant::parse(g).unwrap()).collect(),
+        configured: Vec::new(),
         created_at: (!superadmin).then_some(now - 20 * 86_400),
         superadmin,
         activity: AccountActivity {
@@ -517,11 +536,21 @@ fn demo_users<'a>(catalog: &'a Catalog, registry: &'a [String]) -> UsersView<'a>
     };
     UsersView {
         notice: None,
-        registry,
+        mode: crate::grants::Mode::Dynamic,
         catalog,
+        services: demo_services(catalog),
         users: vec![
-            card("alice", &["ops", "dev"], 2, false),
-            card("bob", &["viewer"], 4, false),
+            card(
+                "alice",
+                &[
+                    "access on service:infra-notes",
+                    "access on service:data-clickhouse-dash",
+                    "query.run.read on service:data-clickhouse-dash",
+                ],
+                2,
+                false,
+            ),
+            card("bob", &["access on service:monitoring-grafana"], 4, false),
         ],
         superadmin: card("root", &[], 1, true),
         days: days(3),
@@ -578,11 +607,10 @@ fn demo_logins() -> crate::store::LoginPage {
     }
 }
 
-/// A page of `portal render-demo`: the launcher or one settings page, on synthetic data. `None` for a
-/// name that is not a page.
+/// A page of `portal render-demo`. The page is the launcher or one settings page, with synthetic data.
+/// The function returns `None` for a name that is not a page.
 pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
     let catalog = demo_catalog();
-    let registry = demo_registry();
     let frame = Frame {
         logout_token: "demo",
     };
@@ -599,30 +627,28 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 settings: true,
             },
         ),
-        "users" => users_page(&frame, &demo_users(&catalog, &registry)),
-        "roles" => {
-            let users = demo_users(&catalog, &registry);
-            let holders: Vec<(String, Vec<String>)> = users
+        "users" => users_page(&frame, &demo_users(&catalog)),
+        "services" => {
+            let users = demo_users(&catalog);
+            let holders: Vec<(String, Vec<crate::grants::Grant>)> = users
                 .users
                 .iter()
-                .map(|u| (u.login.clone(), u.roles.clone()))
+                .map(|u| (u.login.clone(), u.grants.clone()))
                 .collect();
-            roles_page(
+            services_page(
                 &frame,
-                &RolesView {
-                    registry: &registry,
+                &ServicesView {
                     catalog: &catalog,
+                    services: &users.services,
                     holders: &holders,
+                    problems: vec![(
+                        "infra-s3-browser".into(),
+                        "http://s3-browser:8080/.well-known/access-actions gave the status 500"
+                            .into(),
+                    )],
                 },
             )
         }
-        "services" => services_page(
-            &frame,
-            &ServicesView {
-                registry: &registry,
-                catalog: &catalog,
-            },
-        ),
         "logins" => logins_page(
             &frame,
             &LoginsView {
@@ -751,16 +777,15 @@ mod tests {
 
     #[test]
     fn every_demo_page_renders_and_an_unknown_one_does_not() {
-        for name in ["launcher", "users", "roles", "services", "logins"] {
+        for name in ["launcher", "users", "services", "logins"] {
             let page = demo_page(name, &Icons::empty()).unwrap();
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }
         assert!(demo_page("nope", &Icons::empty()).is_none());
-        let roles = demo_page("roles", &Icons::empty()).unwrap();
-        assert!(roles.contains("alice") && roles.contains("viewer"));
+        assert!(demo_page("roles", &Icons::empty()).is_none(), "the page does not exist");
         let services = demo_page("services", &Icons::empty()).unwrap();
-        assert!(services.contains(r#"class="warn""#), "a demo service asks for a missing role");
-        assert!(!services.contains(">data<"), "the missing role is never named");
+        assert!(services.contains(r#"class="warn""#), "a demo service has a problem");
+        assert!(services.contains("query.run.write") && services.contains("access only"));
         let logins = demo_page("logins", &Icons::empty()).unwrap();
         assert!(logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert"));
     }
@@ -785,13 +810,9 @@ mod tests {
     }
 
     #[test]
-    fn the_denied_page_names_the_service_and_offers_the_way_out() {
-        let page = denied_page(
-            "You do not have access to Grafana. Ask the administrator to give your account a role for it.",
-            "al<ice",
-            "tok<en",
-        );
-        assert!(page.contains("You do not have access to Grafana. Ask the administrator"));
+    fn the_denied_page_names_no_service_and_offers_the_way_out() {
+        let page = denied_page(DENIED_TEXT, "al<ice", "tok<en");
+        assert!(page.contains("You do not have access to this page. Ask the administrator"));
         assert!(page.contains(r#"<a class="button button--primary" href="/">Back to panel</a>"#));
         assert!(page.contains(r#"action="/auth/logout""#) && page.contains("Sign out"));
         assert!(page.contains("Signed in as <strong>al&lt;ice</strong>"));

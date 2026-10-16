@@ -1,23 +1,23 @@
 //! The service catalogue: what the portal lists, grouped and ordered.
 //!
-//! Services declare themselves through labels (see [`labels`]); nothing here is a central
-//! inventory. A [`Catalog`] is an immutable snapshot built from the parsed services of every
-//! source; it is cheap to share and replaced as a whole when discovery changes.
+//! Services declare themselves through labels (see [`labels`]). This module holds no central
+//! inventory. A [`Catalog`] is an immutable snapshot of the parsed services of every source.
+//! The snapshot is cheap to share. The portal replaces it as a whole when discovery changes.
 //!
-//! Interface: [`parse_labels`] (one workload's labels to a [`Service`]) and [`Catalog::build`]
-//! (services to ordered groups). Everything else is plain data.
+//! Interface: [`parse_labels`] takes the labels of one workload and returns a [`Service`].
+//! [`Catalog::build`] takes services and returns ordered groups. Everything else is plain data.
 
 mod labels;
 
 use std::collections::{HashMap, HashSet};
 
-pub use labels::{parse as parse_labels, parse_roles};
+pub use labels::parse as parse_labels;
 
 use crate::access::ExcludeRule;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Health {
-    /// No probe configured, or none answered yet.
+    /// No probe is configured, or no probe has answered yet.
     Unknown,
     Up,
     Down,
@@ -25,22 +25,25 @@ pub enum Health {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Service {
-    /// Stable identity: `portal.id`, else the slug of `group/name`. Two workloads with the same id
-    /// are one service (replicas, `global` containers); the first one seen is kept.
+    /// Stable identity: `portal.id`, or else the slug of `group/name`. Two workloads with the same
+    /// id are one service (replicas, `global` containers). The portal keeps the first one seen.
     pub id: String,
     pub group: String,
     pub name: String,
     pub description: String,
-    /// Icon reference as declared (`notes`, `docker.png`, ...); resolved by the icon library.
+    /// Icon reference as declared (`notes`, `docker.png`, ...). The icon library resolves it.
     pub icon: Option<String>,
-    /// A path on this host (`/grafana/`) or an absolute http(s) URL; validated at parse time.
+    /// A path on this host (`/grafana/`) or an absolute http(s) URL. The parser validates it.
     pub href: String,
     pub new_tab: bool,
     pub weight: i32,
     pub health_url: Option<String>,
-    /// Roles allowed to see and open the service. Empty means the default policy.
-    pub roles: Vec<String>,
-    /// Paths of the service reachable without signing in (`portal.exclude`); empty for almost every service.
+    /// Where the service publishes its actions (`/.well-known/access-actions`). The value comes from
+    /// the label `portal.actions`. If that label is absent, the origin of the health URL is used.
+    /// `None` means that the service has only `access`.
+    pub actions_url: Option<String>,
+    /// Paths of the service that are reachable without a session (`portal.exclude`).
+    /// The list is empty for almost every service.
     pub exclude: Vec<ExcludeRule>,
     pub health: Health,
 }
@@ -60,15 +63,14 @@ impl Group {
     }
 }
 
-/// A service seen by the gate: its id and the roles it asks for.
+/// A service that the gate sees. It has an id and the paths that it opens without a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateService {
     pub id: String,
-    pub roles: Vec<String>,
     pub exclude: Vec<ExcludeRule>,
 }
 
-/// The services that own one path prefix (usually one).
+/// The services that own one path prefix. Usually, there is one service.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateEntry {
     pub prefix: Vec<String>,
@@ -80,17 +82,17 @@ pub struct Catalog {
     groups: Vec<Group>,
     problems: Vec<String>,
     duplicates: usize,
-    /// Path prefixes of the services with a local `href`, longest first: what `/auth/verify`
-    /// matches a request against.
+    /// Path prefixes of the services with a local `href`, longest first. `/auth/verify` matches
+    /// a request against these prefixes.
     gate: Vec<GateEntry>,
 }
 
 impl Catalog {
-    /// Groups and orders `services`. `problems` are discovery messages worth showing to the
-    /// administrator (an unreachable source, a workload with unusable labels).
+    /// Groups and orders `services`. `problems` are discovery messages for the administrator.
+    /// Examples are an unreachable source or a workload with unusable labels.
     ///
-    /// Order is deterministic: services by weight then name; groups by their lightest service
-    /// then name. Duplicate ids keep the first service in input order.
+    /// The order is deterministic. Services are sorted by weight, then by name. Groups are sorted
+    /// by their lightest service, then by name. Duplicate ids keep the first service in input order.
     pub fn build(services: Vec<Service>, problems: Vec<String>) -> Self {
         let mut seen = HashSet::new();
         let mut duplicates = 0;
@@ -131,9 +133,11 @@ impl Catalog {
         }
     }
 
-    /// The same catalogue without the services `keep` refuses; groups left empty disappear. The
-    /// gate index is not carried over: this is for display, `/auth/verify` uses the full one.
-    pub fn filtered(&self, keep: impl Fn(&Service) -> bool) -> Catalog {
+    /// The same catalogue without the services that `keep` refuses. Groups that become empty are
+    /// removed. The gate index is not carried over. This catalogue is for display only, and
+    /// `/auth/verify` uses the full one. `problems` keeps the discovery problems. They name
+    /// workloads, so only the superadmin sees them.
+    pub fn filtered(&self, keep: impl Fn(&Service) -> bool, problems: bool) -> Catalog {
         let groups = self
             .groups
             .iter()
@@ -148,7 +152,11 @@ impl Catalog {
             .collect();
         Catalog {
             groups,
-            problems: self.problems.clone(),
+            problems: if problems {
+                self.problems.clone()
+            } else {
+                Vec::new()
+            },
             duplicates: self.duplicates,
             gate: Vec::new(),
         }
@@ -186,7 +194,6 @@ fn build_gate(groups: &[Group]) -> Vec<GateEntry> {
         };
         let gate_service = GateService {
             id: service.id.clone(),
-            roles: service.roles.clone(),
             exclude: service.exclude.clone(),
         };
         match entries.iter_mut().find(|e| e.prefix == prefix) {
@@ -221,7 +228,7 @@ mod tests {
             new_tab: false,
             weight,
             health_url: None,
-            roles: Vec::new(),
+            actions_url: None,
             exclude: Vec::new(),
             health: Health::Unknown,
         }
@@ -308,10 +315,9 @@ mod tests {
         assert_eq!(catalog.problems(), ["docker: socket unreachable"]);
     }
 
-    fn bound(name: &str, href: &str, roles: &[&str]) -> Service {
+    fn bound(name: &str, href: &str) -> Service {
         Service {
             href: href.into(),
-            roles: roles.iter().map(|r| r.to_string()).collect(),
             ..service("Infra", name, 0)
         }
     }
@@ -324,10 +330,10 @@ mod tests {
     fn the_gate_index_owns_the_longest_prefix_and_skips_what_it_cannot_gate() {
         let catalog = Catalog::build(
             vec![
-                bound("Grafana", "/grafana/", &["ops"]),
-                bound("Admin", "/grafana/admin/", &["root"]),
-                bound("Docs", "https://example.org/docs", &["ops"]),
-                bound("Home", "/", &[]),
+                bound("Grafana", "/grafana/"),
+                bound("Admin", "/grafana/admin/"),
+                bound("Docs", "https://example.org/docs"),
+                bound("Home", "/"),
             ],
             Vec::new(),
         );
@@ -362,10 +368,10 @@ mod tests {
     fn two_services_on_one_prefix_share_an_entry() {
         let catalog = Catalog::build(
             vec![
-                bound("One", "/shared/", &["a"]),
+                bound("One", "/shared/"),
                 Service {
                     group: "Other".into(),
-                    ..bound("Two", "/shared/", &["b"])
+                    ..bound("Two", "/shared/")
                 },
             ],
             Vec::new(),
@@ -378,15 +384,15 @@ mod tests {
     fn filtering_keeps_what_is_allowed_and_drops_empty_groups() {
         let catalog = Catalog::build(
             vec![
-                bound("Open", "/open/", &[]),
+                bound("Open", "/open/"),
                 Service {
                     group: "Secret".into(),
-                    ..bound("Hidden", "/hidden/", &["x"])
+                    ..bound("Hidden", "/hidden/")
                 },
             ],
             vec!["a problem".into()],
         );
-        let shown = catalog.filtered(|s| s.roles.is_empty());
+        let shown = catalog.filtered(|s| s.group != "Secret", true);
         assert_eq!(shown.service_count(), 1);
         assert_eq!(
             shown.groups().len(),
@@ -394,6 +400,10 @@ mod tests {
             "the group with nothing left disappears"
         );
         assert_eq!(shown.problems(), ["a problem"]);
+        assert!(
+            catalog.filtered(|_| true, false).problems().is_empty(),
+            "a user does not see the problems"
+        );
         assert_eq!(catalog.service_count(), 2, "the original is untouched");
     }
 }

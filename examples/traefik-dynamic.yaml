@@ -30,3 +30,7 @@ http:
         maxResponseBodySize: 4096
         authRequestHeaders:
           - Cookie
+        # The identity token of the service (portal identity block). Traefik copies it to the
+        # request, and removes a header of the same name that the client sends.
+        authResponseHeaders:
+          - X-Identity-Token
