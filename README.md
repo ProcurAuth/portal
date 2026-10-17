@@ -224,7 +224,7 @@ The Services settings page lists the rules of every service. The whole exposure 
 
 The superadmin gets a gear on the launcher. The gear opens the settings. The settings are **one HTML page per tab**. This is the same design as the pages of clickhouse-dash. Each page has a header with **Back to panel**. Below the header is a row of underlined tab links. The current tab has a line under it. The row has no fill. The page follows the row. The settings live under `/auth/settings`. Traefik already routes `/auth/` to the portal. The pages work without script. The pages answer 404 to anyone who is not the superadmin in its own right. This applies to a user, and to the superadmin who browses as a user. A page carries only what its tab shows. The launcher carries none of it. The browser therefore builds a small DOM on each page. A launcher with twelve services has about 150 elements. The settings used to add 700 more elements to it. There are three tabs:
 
-1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in and a graph of the connections. It shows the latest sessions (time, address, browser, duration, and how each session ended). It also shows the services that the account used and the services that it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. Below the services that the account can open, the card shows the grants on sub-resources. The card has one form for each service that declares resource types. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The password generator is the only script of these pages. It loads on this page only.
+1. **Users** (`/auth/settings`). The accounts appear first. Each account shows the number of failed sign-ins of the last 30 days as a red counter. **Add a user** is one button. It opens the form in place. The button also opens the form after a refused attempt. Each account has one card. The card shows the last sign-in and a graph of the connections. It shows the latest sessions (time, address, browser, duration, and how each session ended). It also shows the services that the account used and the services that it can open. The card has the buttons **Log in as**, **Edit** and **Delete**. **Delete** is a two-step action. **Edit** shows one row for each service. The row has the box `access`. The row has one more box for each action that the service publishes. **Edit** changes the grants. **Edit** also changes the password when a new password is typed. Leave the password field empty to keep the password. A new password ends the sessions of that account at once. A change of grants applies from the next request. In the mode `static`, the boxes cannot change. In the mode `hybrid`, a grant of the configuration cannot change. Below the services that the account can open, the card shows the grants on sub-resources. The card has one form for each service that declares resource types. A new user has no grant. The add form has no box. The **Generate** button of both forms fills the password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. Below the accounts, the page shows connections per day over 30 days. The bars are neutral. Today's bar uses the accent. The peak day is written out. A graph is one SVG of three paths. The page also shows the recent events. The page ends with the panel **Incident**. See "End all sessions" below. The password generator is the only script of these pages. It loads on this page only.
 2. **Services** (`/auth/settings/services`). The page lists each service. For each service, it shows its id. It shows the actions that the service publishes (`access only` if it publishes none). It shows the users who have `access` (`Superadmin only` if there is none). It shows the paths open without sign-in. It shows a warning when the actions document cannot be read.
 3. **Logins** (`/auth/settings/logins`). This tab shows the sign-in log. See below.
 
@@ -238,11 +238,22 @@ A browser that the gate refuses goes to a 403 page. The page does not give the n
 
 **Log in as** gives the superadmin a session as the user. The session is flagged *impersonated*. It is not counted as a connection of that user. The history tags it *via superadmin*. A banner offers **Back to superadmin**. This button needs no password. The impersonated session itself proves that the superadmin opened it. Account management is refused while the superadmin impersonates a user.
 
+### End all sessions
+
+Use this tool after an incident, for example after a suspected theft of a cookie. It ends every session of every account. The sessions of the superadmin end too. Accounts, grants and history stay. Each user must sign in again.
+
+There are two ways to start it:
+
+- **Settings page.** Open the tab **Users**. Click **End all sessions** in the panel **Incident**. The page shows a confirmation step. Click **Confirm: end all sessions**. Your own session ends. The portal sends the browser to the sign-in page. Only the superadmin in its own right can do this. The route is `POST /auth/users/end-sessions`. It needs the anti-CSRF token of the account routes and the field `confirm=end-all-sessions`. A request without the field, or with an extra field, gets 400 and changes nothing. A user, or the superadmin who browses as a user, gets 403.
+- **Command.** Run `portal end-sessions --config FILE`. The command deletes every session in the shared database and exits. It prints the number of sessions that it ended. It needs a `postgres` block in the file. With SQLite the sessions are in the memory of the portal process, and a different process cannot end them. The command then fails and changes nothing. Restart the portal to end the sessions of a SQLite configuration. In K3s, run the command in a portal pod with the file `/etc/portal/config.hcl`.
+
+Each use writes one audit event, `sessions_ended`. The page **Users** shows it as "All sessions ended". The actor is the superadmin login for the page, and `cli` for the command. The history closes each session with the reason `revoked`. The metric `portal_user_admin_total{action="end_sessions"}` counts the page calls. A running instance stops accepting a session of a shared database within 5 seconds, because it caches a session for that time.
+
 The history is stored in the database (SQLite or PostgreSQL). The program keeps the history for `storage.retention_days` days. The default is 90 days. The history contains these records:
 
 - sessions: login, address, user agent, start, last seen, end, and the reason for the end;
 - the services that each session used. The history holds counts per service. It never holds a path or a query;
-- administrative events: users added or deleted, impersonation, and failed sign-ins;
+- administrative events: users added or deleted, impersonation, all sessions ended, and failed sign-ins;
 - the sign-in attempts above.
 
 The per-account failed counters count only logins that name an account. A login that does not exist is counted apart. It appears in the sign-in log, as typed. A person sometimes types a password in the login field. This is the one item in this log that the log must not hold. That is why the log is short-lived. Only the superadmin can see it.
@@ -701,7 +712,7 @@ The crate uses `#![forbid(unsafe_code)]` for project code.
 
 ## CSRF and Origin/Referer verification
 
-`POST /auth/login`, `POST /auth/logout` and the account routes (`POST /auth/users/add`, `/delete`, `/impersonate`, `/impersonate-end`) require both:
+`POST /auth/login`, `POST /auth/logout` and the account routes (`POST /auth/users/add`, `/delete`, `/impersonate`, `/impersonate-end`, `/end-sessions`) require both:
 
 1. a CSRF token. For login, the token is the double-submit cookie. For the other routes, the token is an HMAC of the session ID and of the purpose (`logout`, `users`). The form of the button carries the HMAC. The HMAC has no cookie that can expire under a page left open. A token for one action cannot be replayed on another action; and
 2. a same-origin `Origin` check. The program uses `Referer` only when `Origin` is absent.
@@ -802,6 +813,7 @@ portal config-reference
 portal identity-public-key --config FILE
 portal healthcheck --config FILE
 portal import-sqlite --config FILE --from SQLITE_FILE
+portal end-sessions --config FILE
 portal hash-password < password.txt
 portal version
 ```

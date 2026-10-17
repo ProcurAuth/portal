@@ -70,6 +70,8 @@ pub enum AuditKind {
     PasswordReset,
     ImpersonationStarted,
     ImpersonationEnded,
+    /// The superadmin, or the command `portal end-sessions`, ended every session.
+    SessionsEnded,
 }
 
 impl AuditKind {
@@ -82,6 +84,7 @@ impl AuditKind {
             Self::PasswordReset => "password_reset",
             Self::ImpersonationStarted => "impersonation_started",
             Self::ImpersonationEnded => "impersonation_ended",
+            Self::SessionsEnded => "sessions_ended",
         }
     }
 }

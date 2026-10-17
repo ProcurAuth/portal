@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::config::PostgresConfig;
 use crate::grants::Grant;
-use crate::tracking::{Batch, SessionStart};
+use crate::tracking::{AuditEvent, AuditKind, Batch, EndReason, Event, SessionStart};
 
 use pg::Pg;
 use sqlite::Sqlite;
@@ -439,6 +439,38 @@ impl Store {
         self.shared()?.sessions_delete_user(login)
     }
 
+    /// Ends every session in the shared database, the superadmin sessions too. Returns the identifiers that this call ended.
+    pub fn sessions_delete_all(&self) -> Result<Vec<u64>, String> {
+        self.shared()?.sessions_delete_all()
+    }
+
+    /// The incident command `portal end-sessions`. It ends every session in the shared database and closes their history rows with the reason `revoked`.
+    /// It writes one audit event, with the actor `cli`. It returns the number of sessions that it ended.
+    /// A SQLite file holds no live session: the sessions are in the memory of the portal process. This call then fails and changes nothing.
+    pub fn end_all_sessions(&self, now: i64) -> Result<usize, String> {
+        let ended = self.shared().map_err(|_| {
+            "this configuration keeps the sessions in the memory of the portal process: restart the portal to end them".to_string()
+        })?.sessions_delete_all()?;
+        let mut batch = Batch::default();
+        for sid in &ended {
+            batch.events.push(Event::SessionEnded {
+                sid: *sid,
+                reason: EndReason::Revoked,
+                at: now,
+            });
+        }
+        batch.events.push(Event::Audit(AuditEvent {
+            kind: AuditKind::SessionsEnded,
+            login: None,
+            actor: Some("cli".into()),
+            ip: None,
+            user_agent: "portal end-sessions".into(),
+            at: now,
+        }));
+        self.apply(&batch)?;
+        Ok(ended.len())
+    }
+
     /// Ends the sessions past their lifetime or idle time. Each result states whether the session expired. Otherwise, the session idled.
     pub fn sessions_expire(&self, now: i64, idle: Duration) -> Result<Vec<(u64, bool)>, String> {
         self.shared()?.sessions_expire(now, idle.as_secs() as i64)
@@ -640,6 +672,21 @@ mod tests {
                 "other users are untouched"
             );
             assert!(!store.update_user("nobody", None, Some(&[])).unwrap());
+        });
+    }
+
+    #[test]
+    fn end_all_sessions_needs_a_shared_database_and_changes_nothing_without_one() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            if store.is_shared() {
+                assert_eq!(store.end_all_sessions(NOW), Ok(0));
+                assert_eq!(store.count("audit_events"), 1, "the command is audited");
+            } else {
+                let error = store.end_all_sessions(NOW).unwrap_err();
+                assert!(error.contains("restart the portal"), "{error}");
+                assert_eq!(store.count("audit_events"), 0);
+            }
         });
     }
 

@@ -297,6 +297,34 @@ impl SessionStore {
         before - sessions.len()
     }
 
+    /// Ends every session of every account, the superadmin included. This is the incident action.
+    /// With a shared database, it ends the sessions of all instances. Another instance stops accepting
+    /// its copy of a session within [`CACHE_TTL`]. Returns the number of sessions ended.
+    /// If the shared database fails, the sessions of this instance end and the call returns the error.
+    pub fn end_all(&self, reason: EndReason) -> Result<usize, String> {
+        let mut sessions = self.sessions.lock().expect("session store mutex poisoned");
+        let copies: Vec<Session> = sessions.drain().map(|(_, entry)| entry.session).collect();
+        drop(sessions);
+        let Some(store) = &self.shared else {
+            for session in &copies {
+                self.ended(session, reason);
+            }
+            return Ok(copies.len());
+        };
+        match blocking(|| store.sessions_delete_all()) {
+            Ok(ended) => {
+                for sid in &ended {
+                    self.ended_sid(*sid, reason);
+                }
+                Ok(ended.len())
+            }
+            Err(error) => {
+                self.failed("session_end_all_failed", &error);
+                Err(error)
+            }
+        }
+    }
+
     fn ended(&self, session: &Session, reason: EndReason) {
         self.ended_sid(session.sid, reason);
     }
@@ -639,6 +667,45 @@ mod tests {
         assert!(store.revoke(&token, EndReason::Logout).is_some());
         assert!(store.validate(&token, &HERE).is_none());
         assert_eq!(store.active_count(), 0);
+    }
+
+    #[test]
+    fn end_all_ends_every_session_the_superadmin_included_and_records_why() {
+        let (tracker, events) = Tracker::recording();
+        let store = SessionStore::new(HOUR, HOUR, 8, tracker);
+        let alice = store.issue(HERE, user("alice")).unwrap();
+        let bob = store.issue(HERE, user("bob")).unwrap();
+        let root = store
+            .issue(
+                HERE,
+                NewSession {
+                    principal: Principal::Superadmin,
+                    login: "root".into(),
+                    impersonated: false,
+                    ip: None,
+                    user_agent: String::new(),
+                    not_after: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(store.end_all(EndReason::Revoked), Ok(3));
+        for token in [&alice, &bob, &root] {
+            assert!(store.validate(token, &HERE).is_none());
+        }
+        assert_eq!(store.active_count(), 0);
+        let reasons: Vec<EndReason> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::SessionEnded { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons, vec![EndReason::Revoked; 3]);
+        assert_eq!(store.end_all(EndReason::Revoked), Ok(0), "nothing is left");
+        assert!(
+            store.issue(HERE, user("alice")).is_ok(),
+            "a new sign-in works after the incident"
+        );
     }
 
     #[test]
@@ -1082,6 +1149,44 @@ mod shared_tests {
     /// A new superadmin login, password or session secret gives a new credential generation.
     /// The sessions of the superadmin and the impersonated sessions of an old generation then
     /// stop on every instance. The sessions of the database users stay.
+    #[test]
+    fn end_all_ends_the_sessions_of_every_instance_and_the_superadmin_too() {
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
+        let alice = a.sessions.issue(HERE, user("alice")).unwrap();
+        let root = b.sessions.issue(HERE, superadmin(None)).unwrap();
+        let as_bob = a.sessions.issue(HERE, superadmin(Some("bob"))).unwrap();
+        assert!(b.sessions.validate(&alice, &HERE).is_some());
+        assert_eq!(a.sessions.end_all(EndReason::Revoked), Ok(3));
+        for token in [&alice, &root, &as_bob] {
+            assert!(a.sessions.validate(token, &HERE).is_none());
+            assert!(b.sessions.validate(token, &HERE).is_none());
+        }
+        let ended: Vec<_> = a.ended().into_iter().chain(b.ended()).collect();
+        assert_eq!(ended.len(), 3, "each session is recorded once: {ended:?}");
+        assert!(ended
+            .iter()
+            .all(|(_, reason)| *reason == EndReason::Revoked));
+        assert_eq!(a.sessions.end_all(EndReason::Revoked), Ok(0));
+    }
+
+    #[test]
+    fn the_end_sessions_command_empties_the_database_and_writes_one_audit_event() {
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
+        let alice = a.sessions.issue(HERE, user("alice")).unwrap();
+        let root = b.sessions.issue(HERE, superadmin(None)).unwrap();
+        assert_eq!(a.store.count("sessions"), 2);
+        assert_eq!(a.store.end_all_sessions(unix_now()), Ok(2));
+        assert_eq!(a.store.count("sessions"), 0);
+        assert!(a.sessions.validate(&alice, &HERE).is_none());
+        assert!(b.sessions.validate(&root, &HERE).is_none());
+        assert_eq!(a.store.count("audit_events"), 1);
+        assert_eq!(a.store.end_all_sessions(unix_now()), Ok(0));
+    }
+
     #[test]
     fn a_new_superadmin_generation_ends_the_old_superadmin_and_impersonated_sessions() {
         let Some(backend) = postgres() else {

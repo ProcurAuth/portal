@@ -933,6 +933,16 @@ impl Pg {
         })
     }
 
+    /// Ends every session, whoever owns it (the superadmin too). Returns the identifiers that this call ended.
+    pub fn sessions_delete_all(&self) -> Result<Vec<u64>, String> {
+        self.run(|c| {
+            Ok(c.query("DELETE FROM sessions RETURNING sid", &[])?
+                .into_iter()
+                .map(|row| row.get::<_, i64>(0) as u64)
+                .collect())
+        })
+    }
+
     /// Ends the sessions past their lifetime or unused for `idle_secs`. Each result states whether the session expired, or whether it idled out.
     /// Exactly one caller gets any given session back.
     pub fn sessions_expire(&self, now: i64, idle_secs: i64) -> Result<Vec<(u64, bool)>, String> {

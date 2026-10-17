@@ -151,6 +151,10 @@ With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the
 
 A row also holds the credential generation of the superadmin: HMAC-SHA-256 under the session secret of the superadmin login and password. The database never holds a plain hash of the superadmin password. Thus a reader of the database cannot test password guesses without the secret. A superadmin or impersonated row is valid only with the generation of the instance that reads it. At start, each instance deletes the superadmin and impersonated rows of the other generations. After a suspected theft of a superadmin cookie, rotate the superadmin password or the session secret: the rotation ends the stolen session on every instance.
 
+### Incident action: end all sessions
+
+The superadmin can end every session from the page **Users**. The command `portal end-sessions --config FILE` does the same on a PostgreSQL database. Both end the sessions of the superadmin too. The route `POST /auth/users/end-sessions` has the checks of the account routes: the `Origin` check, the anti-CSRF token and the superadmin in its own right. It also needs the field `confirm=end-all-sessions`. Each use writes the audit event `sessions_ended`. With a shared database, an instance can accept a cached session for up to 5 seconds after the end. The command does not work with SQLite, because the sessions are in the memory of the process: restart the portal.
+
 ## Plain HTTP
 
 Traefik can serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.

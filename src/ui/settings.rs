@@ -354,7 +354,18 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
         out.push_str("</tbody></table></div>");
     }
     out.push_str("</section>");
+    incident_panel(&mut out, view);
     page(Tab::Users, frame, &out, true)
+}
+
+/// The incident tool. One click opens the confirmation. A second click ends every session, the
+/// session of the superadmin included.
+fn incident_panel(out: &mut String, view: &UsersView) {
+    let _ = write!(
+        out,
+        r#"<section class="panel" aria-labelledby="incident-title"><div class="panel__head"><h2 class="panel__title" id="incident-title">Incident</h2></div><p class="hint">Ends every session of every account, yours included. Each user must sign in again. Accounts, grants and history stay.</p><details class="confirm"><summary class="button button--danger">End all sessions</summary><form method="post" action="/auth/users/end-sessions"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="confirm" value="end-all-sessions"><p class="hint">You will be signed out too.</p><button class="button button--danger" type="submit">Confirm: end all sessions</button></form></details></section>"#,
+        html_escape(view.token)
+    );
 }
 
 /// Example text for a graph: "Peak: 7 on 2026-10-04." The text puts the values in the page.
@@ -777,6 +788,7 @@ fn audit_label(kind: &str) -> &'static str {
         "password_reset" => "Password reset",
         "impersonation_started" => "Signed in as a user",
         "impersonation_ended" => "Back to superadmin",
+        "sessions_ended" => "All sessions ended",
         _ => "Event",
     }
 }

@@ -1909,3 +1909,110 @@ fn impersonation_and_return_keep_the_end_of_the_password_session() {
         );
     });
 }
+
+/// The incident action of the settings page. Only the superadmin in its own right ends every
+/// session, with the confirmation field and the anti-CSRF token. The superadmin signs out too.
+#[test]
+fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audited() {
+    each_backend(|backend| {
+        let (first, second) = cluster(backend, Some(Duration::ZERO));
+        let root = sign_in(&first, "root", PASSWORD);
+        let carol = user_without_grant(&first, &root, "carol");
+        let dave = user_without_grant(&first, &root, "dave");
+        let as_carol = {
+            // "Log in as" replaces the session that makes it: use a second superadmin session.
+            let second_root = sign_in(&first, "root", PASSWORD);
+            let reply = post(
+                &first,
+                &second_root,
+                IMPERSONATE_PATH,
+                USERS_TOKEN,
+                "login=carol",
+            );
+            assert_eq!(reply.status, 303);
+            reply.cookie(&session_cookie_name(&first)).unwrap()
+        };
+
+        let settings = page(&first, &root, "/auth/settings");
+        assert_eq!(settings.status, 200);
+        assert!(settings.body.contains(END_SESSIONS_PATH), "the form");
+        assert!(settings.body.contains("Confirm: end all sessions"));
+        // A user does not see the page and cannot use the route.
+        assert_eq!(
+            post(
+                &first,
+                &dave,
+                END_SESSIONS_PATH,
+                USERS_TOKEN,
+                "confirm=end-all-sessions"
+            )
+            .status,
+            403
+        );
+        // The superadmin who browses as a user is not the superadmin in its own right.
+        assert_eq!(
+            post(
+                &first,
+                &as_carol,
+                END_SESSIONS_PATH,
+                USERS_TOKEN,
+                "confirm=end-all-sessions"
+            )
+            .status,
+            403
+        );
+        // No confirmation, a wrong value or an extra field: nothing happens.
+        for fields in ["", "confirm=yes", "confirm=end-all-sessions&x=1"] {
+            let reply = post(&first, &root, END_SESSIONS_PATH, USERS_TOKEN, fields);
+            assert_eq!(reply.status, 400, "{fields:?}");
+        }
+        // A token of another purpose does not pass.
+        let wrong = post(
+            &first,
+            &root,
+            END_SESSIONS_PATH,
+            LOGOUT_TOKEN,
+            "confirm=end-all-sessions",
+        );
+        assert_eq!(wrong.status, 403, "a token of another form");
+        for session in [&root, &carol, &dave, &as_carol] {
+            assert_eq!(verify(&first, session, AGENT), 204, "nothing ended yet");
+        }
+
+        let reply = post(
+            &first,
+            &root,
+            END_SESSIONS_PATH,
+            USERS_TOKEN,
+            "confirm=end-all-sessions",
+        );
+        assert_eq!(reply.status, 303);
+        assert_eq!(reply.location(), Some(LOGIN_PATH));
+        let cookies: Vec<&str> = reply
+            .headers
+            .iter()
+            .filter(|(name, _)| name == "set-cookie")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(cookies.len(), 2, "the session cookie and the CSRF cookie");
+        assert!(
+            cookies.iter().all(|c| c.contains("Max-Age=0")),
+            "{cookies:?}"
+        );
+        for node in [&first, &second] {
+            for session in [&root, &carol, &dave, &as_carol] {
+                assert_eq!(verify(node, session, AGENT), 302, "every session ended");
+            }
+        }
+        assert_eq!(first.state.sessions.active_count(), 0);
+
+        // Accounts stay: the users sign in again. The history has one audit event.
+        let again = sign_in(&first, "root", PASSWORD);
+        let _ = sign_in(&first, "carol", "a-long-password-1");
+        wait_until(Duration::from_secs(10), || {
+            page(&first, &again, "/auth/settings")
+                .body
+                .contains("All sessions ended")
+        });
+    });
+}

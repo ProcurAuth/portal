@@ -90,6 +90,17 @@ fn real_main() -> Result<(), String> {
             );
             Ok(())
         }
+        // The incident command. It ends every session of the shared database, the superadmin sessions too.
+        // A running portal stops accepting a session within 5 s. With a SQLite file the command fails.
+        "end-sessions" => {
+            let config_path = parse_config_arg(args.collect())?;
+            let (config, secrets) = Config::load(&config_path)?;
+            require_shared_sessions(&config)?;
+            let store = open_store(&config, &secrets)?;
+            let ended = store.end_all_sessions(tracking::unix_now())?;
+            println!("ended {ended} sessions");
+            Ok(())
+        }
         // Check the file, the variables and the files that it names.
         // Then print the value that applies to each key, with its source.
         // The secrets are hidden.
@@ -183,6 +194,15 @@ fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
 }
 
 /// Opens the database that the configuration names. With PostgreSQL, this waits up to a minute for the database to answer.
+/// The command `end-sessions` works on the shared database only. With a SQLite file the sessions
+/// are in the memory of the portal process, and no other process can end them.
+fn require_shared_sessions(config: &Config) -> Result<(), String> {
+    match config.storage.backend {
+        StorageBackend::Postgres(_) => Ok(()),
+        StorageBackend::Sqlite(_) => Err("end-sessions needs a configuration with a postgres block: with a SQLite file the sessions are in the memory of the portal process, so restart the portal to end them".into()),
+    }
+}
+
 fn open_store(config: &Config, secrets: &Secrets) -> Result<Store, String> {
     match &config.storage.backend {
         StorageBackend::Sqlite(path) => Store::open(path),
@@ -294,7 +314,55 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|services|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|services|logins] > page.html\n  portal version",
         release_version()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(storage: &str) -> Config {
+        let (config, _) = Config::parse(
+            &format!(
+                r#"
+                server {{ listen_address = "127.0.0.1:4181" trusted_proxies = [] }}
+                authentication {{
+                  superadmin_login_env    = "T_LOGIN"
+                  superadmin_password_env = "T_PASSWORD"
+                }}
+                session {{ secret_mode = "provided" secret_env = "T_SESSION" }}
+                {storage}
+                "#
+            ),
+            &|name| match name {
+                "T_LOGIN" => Some("root".into()),
+                "T_PASSWORD" => Some("correct-horse-battery-staple".into()),
+                "T_SESSION" => Some("0123456789abcdef0123456789abcdef".into()),
+                "T_DB" => Some("a-database-password".into()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        config
+    }
+
+    #[test]
+    fn end_sessions_refuses_a_sqlite_configuration_before_it_opens_any_store() {
+        let error = require_shared_sessions(&config("")).unwrap_err();
+        assert!(error.contains("postgres block"), "{error}");
+        assert!(error.contains("restart the portal"), "{error}");
+    }
+
+    #[test]
+    fn end_sessions_accepts_a_postgres_configuration() {
+        let postgres = r#"postgres {
+            host = "db.example.org"
+            database = "portal"
+            user = "portal"
+            password_env = "T_DB"
+        }"#;
+        assert_eq!(require_shared_sessions(&config(postgres)), Ok(()));
+    }
 }

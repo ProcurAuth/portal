@@ -57,6 +57,9 @@ const GRANT_ADD_PATH: &str = "/auth/users/grant-add";
 const GRANT_DELETE_PATH: &str = "/auth/users/grant-delete";
 const IMPERSONATE_PATH: &str = "/auth/users/impersonate";
 const IMPERSONATE_END_PATH: &str = "/auth/users/impersonate-end";
+const END_SESSIONS_PATH: &str = "/auth/users/end-sessions";
+/// The value of the field `confirm` of the incident form. A POST without it does nothing.
+const END_SESSIONS_CONFIRM: &str = "end-all-sessions";
 /// The anti-CSRF token protects the account administration forms.
 const USERS_TOKEN: &str = "users";
 const LOGOUT_TOKEN: &str = "logout";
@@ -458,6 +461,8 @@ async fn handle_request(
         handle_impersonate(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_END_PATH {
         handle_impersonate_end(&state, request, &client).await
+    } else if method == Method::POST && path == END_SESSIONS_PATH {
+        handle_end_sessions(&state, request, &client).await
     } else if method == Method::GET && path == LOGIN_PATH {
         handle_login_get(&state, &uri, request.headers(), &client)
     } else if method == Method::POST && path == LOGIN_PATH {
@@ -1767,23 +1772,10 @@ async fn handle_logout_post(
     state
         .sessions
         .revoke(session_token.as_str(), EndReason::Logout);
-    let mut response = redirect_response(StatusCode::SEE_OTHER, "/");
-    let expired_session = format!(
-        "{}=; {}",
-        transport::session_cookie_name(&state.config.session.cookie_name, client.https),
-        transport::cookie_attributes(client.https, state.config.session.same_site.as_str(), 0),
-    );
-    if append_dynamic_header(&mut response, SET_COOKIE, &expired_session).is_err()
-        || append_dynamic_header(
-            &mut response,
-            SET_COOKIE,
-            &expired_csrf_cookie(state, client.https),
-        )
-        .is_err()
-    {
-        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    let response = signed_out_response(state, client, "/");
+    if response.status() == StatusCode::SEE_OTHER {
+        state.metrics.logout();
     }
-    state.metrics.logout();
     response
 }
 
@@ -2488,6 +2480,79 @@ async fn handle_impersonate_end(
             &headers,
         );
         state.metrics.user_admin("impersonate_end", "ok");
+    }
+    response
+}
+
+/// The incident action: ends every session, the superadmin sessions too. Only the superadmin in its own
+/// right can do it, and the form must carry the confirmation field. The browser of the superadmin
+/// loses its session as well, so the answer sends it to the sign-in page and deletes its cookies.
+async fn handle_end_sessions(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    let headers = request.headers().clone();
+    let (viewer, mut form) = match admin_request(state, request, client, "end_sessions").await {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_superadmin(state, &viewer, "end_sessions") {
+        return response;
+    }
+    let confirmed = form.remove("confirm").as_deref() == Some(END_SESSIONS_CONFIRM);
+    if !form.is_empty() || !confirmed {
+        state.metrics.user_admin("end_sessions", "rejected");
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    }
+    let ended = match state.sessions.end_all(EndReason::Revoked) {
+        Ok(ended) => ended,
+        Err(error) => {
+            log(
+                state,
+                LogLevel::Error,
+                "end_sessions_failed",
+                &[("error", error)],
+            );
+            state.metrics.user_admin("end_sessions", "rejected");
+            return settings_redirect("error");
+        }
+    };
+    audit(
+        state,
+        AuditKind::SessionsEnded,
+        None,
+        Some(state.superadmin_login.clone()),
+        client,
+        &headers,
+    );
+    log(
+        state,
+        LogLevel::Warn,
+        "sessions_ended",
+        &[("count", ended.to_string())],
+    );
+    state.metrics.user_admin("end_sessions", "ok");
+    signed_out_response(state, client, LOGIN_PATH)
+}
+
+/// A redirect that deletes the session cookie and the anti-CSRF cookie of the browser.
+fn signed_out_response(state: &AppState, client: &Client, location: &str) -> HttpResponse {
+    let mut response = redirect_response(StatusCode::SEE_OTHER, location);
+    let expired_session = format!(
+        "{}=; {}",
+        transport::session_cookie_name(&state.config.session.cookie_name, client.https),
+        transport::cookie_attributes(client.https, state.config.session.same_site.as_str(), 0),
+    );
+    if append_dynamic_header(&mut response, SET_COOKIE, &expired_session).is_err()
+        || append_dynamic_header(
+            &mut response,
+            SET_COOKIE,
+            &expired_csrf_cookie(state, client.https),
+        )
+        .is_err()
+    {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
     response
 }

@@ -145,7 +145,7 @@ impl Metrics {
     }
 
     /// Counts one call of an account administration route.
-    /// The `action` is add, update, delete, impersonate or impersonate_end.
+    /// The `action` is add, update, delete, impersonate, impersonate_end or end_sessions.
     /// The `result` is ok, rejected (bad input) or forbidden (not the superadmin).
     pub fn user_admin(&self, action: &'static str, result: &'static str) {
         let mut counters = self
