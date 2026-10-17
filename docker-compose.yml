@@ -51,6 +51,8 @@ configs:
         max_header_bytes    = "32KiB"
         header_read_timeout = "10s"
         body_read_timeout   = "10s"
+        # No proxy in front of this local test: the client address is the TCP peer.
+        trusted_proxies     = []
       }
 
       authentication {

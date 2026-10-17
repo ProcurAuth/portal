@@ -166,6 +166,13 @@ impl Resolved {
         }
     }
 
+    pub fn list(&self, block: &str, name: &str) -> Result<Vec<String>, String> {
+        match self.find(block, name)? {
+            Val::List(items) => Ok(items),
+            _ => Err(format!("internal error: {block}.{name} is not a list")),
+        }
+    }
+
     /// The text of a key that may be absent.
     pub fn optional_text(&self, block: &str, name: &str) -> Result<Option<String>, String> {
         if self.has(block, name) {

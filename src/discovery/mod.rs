@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::catalog::{parse_labels, Catalog, Health, Service};
+use crate::catalog::{closed_prefix, parse_labels, Catalog, Health, Service};
 use crate::config::DiscoveryConfig;
 
 use docker::Docker;
@@ -92,6 +92,7 @@ pub struct Stats {
     services: AtomicUsize,
     down: AtomicUsize,
     duplicates: AtomicUsize,
+    complete: AtomicUsize,
     errors: Mutex<BTreeMap<&'static str, u64>>,
 }
 
@@ -115,6 +116,8 @@ impl Stats {
         );
         self.duplicates
             .store(catalog.duplicates(), Ordering::Relaxed);
+        self.complete
+            .store(usize::from(catalog.is_complete()), Ordering::Relaxed);
         if healthy_refresh {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -155,6 +158,12 @@ impl Stats {
             "portal_catalog_duplicates",
             "Workloads ignored because their service id was already listed (replicas).",
             self.duplicates.load(Ordering::Relaxed) as u64,
+        );
+        gauge(
+            &mut out,
+            "portal_catalog_complete",
+            "1 when every source answered at least once. At 0, the gate lets only the superadmin through.",
+            self.complete.load(Ordering::Relaxed) as u64,
         );
         gauge(
             &mut out,
@@ -205,6 +214,11 @@ pub async fn run(
         }
     };
 
+    // A source that failed at setup never answers. The snapshot then never becomes complete.
+    let source_setup_failed = (config.kubernetes.is_some() && kube.is_none())
+        || (config.docker_socket.is_some() && docker.is_none());
+    let mut answered_kube = kube.is_none();
+    let mut answered_docker = docker.is_none();
     let mut last_kube: Vec<Workload> = Vec::new();
     let mut last_docker: Vec<Workload> = Vec::new();
     loop {
@@ -212,7 +226,10 @@ pub async fn run(
         let mut healthy = setup_problems.is_empty();
         if let Some(kube) = &kube {
             match kube.workloads().await {
-                Ok(workloads) => last_kube = workloads,
+                Ok(workloads) => {
+                    last_kube = workloads;
+                    answered_kube = true;
+                }
                 Err(e) => {
                     stats.source_error("kubernetes");
                     problems.push(format!("kubernetes: {e}"));
@@ -222,7 +239,10 @@ pub async fn run(
         }
         if let Some(docker) = &docker {
             match docker.workloads().await {
-                Ok(workloads) => last_docker = workloads,
+                Ok(workloads) => {
+                    last_docker = workloads;
+                    answered_docker = true;
+                }
                 Err(e) => {
                     stats.source_error("docker");
                     problems.push(format!("docker: {e}"));
@@ -235,11 +255,23 @@ pub async fn run(
             .chain(last_docker.iter())
             .cloned()
             .collect();
-        let catalog = build_catalog(workloads, problems, kube.as_ref(), client.as_ref()).await;
+        let mut catalog = build_catalog(workloads, problems, kube.as_ref(), client.as_ref()).await;
+        catalog.set_complete(is_complete(
+            source_setup_failed,
+            answered_kube,
+            answered_docker,
+        ));
         stats.record(&catalog, healthy);
         publish(catalog);
         tokio::time::sleep(config.interval).await;
     }
+}
+
+/// Tells whether a snapshot holds every service. Each configured source must have answered at
+/// least once, and no source may have failed at setup. After the first answer, a failed listing
+/// keeps the last good answer, so the snapshot stays complete.
+fn is_complete(source_setup_failed: bool, answered_kube: bool, answered_docker: bool) -> bool {
+    !source_setup_failed && answered_kube && answered_docker
 }
 
 /// Converts workloads to a catalogue. It parses the labels, resolves the health, and groups the
@@ -253,11 +285,16 @@ async fn build_catalog(
 ) -> Catalog {
     workloads.sort_by(|a, b| a.origin.cmp(&b.origin));
     let mut entries: Vec<(Service, Hint)> = Vec::new();
+    let mut closed = Vec::new();
     for workload in workloads {
         match parse_labels(&workload.origin, &workload.labels) {
             Ok(Some(service)) => entries.push((service, workload.hint)),
             Ok(None) => {}
-            Err(problem) => problems.push(problem),
+            Err(problem) => {
+                // The workload is not listed, but Traefik still routes it. Its path stays closed.
+                closed.extend(closed_prefix(&workload.labels));
+                problems.push(problem);
+            }
         }
     }
 
@@ -301,9 +338,10 @@ async fn build_catalog(
         }
     }
 
-    Catalog::build(
+    Catalog::build_with_closed(
         entries.into_iter().map(|(service, _)| service).collect(),
         problems,
+        closed,
     )
 }
 
@@ -499,6 +537,47 @@ mod tests {
             Health::Up,
             "a-… sorts first"
         );
+    }
+
+    /// One bad `portal.exclude` line makes the labels unusable. The service is not listed, but
+    /// its `href` stays closed in the gate: a user without a grant cannot open it.
+    #[test]
+    fn unusable_labels_keep_the_href_of_the_workload_closed() {
+        let catalog = runtime().block_on(build_catalog(
+            vec![workload(
+                "grafana",
+                &[
+                    ("portal.name", "Grafana"),
+                    ("portal.href", "/grafana/"),
+                    (
+                        "portal.exclude",
+                        "GET /grafana/api/health\nGET /grafana/api/[a-z]+",
+                    ),
+                ],
+                Hint::None,
+            )],
+            Vec::new(),
+            None,
+            None,
+        ));
+        assert_eq!(catalog.service_count(), 0);
+        assert!(catalog.problems().iter().any(|p| p.starts_with("grafana:")));
+        assert_eq!(
+            crate::access::decide(&catalog, Some(&[]), "/grafana/d/1"),
+            crate::access::Decision::Deny
+        );
+    }
+
+    /// The completeness of the snapshot: each configured source must have answered once.
+    #[test]
+    fn the_snapshot_is_complete_only_when_every_source_answered() {
+        assert!(is_complete(false, true, true));
+        assert!(!is_complete(true, true, true), "a source failed at setup");
+        assert!(
+            !is_complete(false, false, true),
+            "kubernetes never answered"
+        );
+        assert!(!is_complete(false, true, false), "docker never answered");
     }
 
     #[test]

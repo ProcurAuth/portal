@@ -276,12 +276,32 @@ pub static KEYS: &[Key] = &[
         doc: "The time that a client has to send the request body.",
     },
     Key {
+        block: "server",
+        name: "max_login_body_reads",
+        kind: Kind::Int { min: 1, max: 100_000 },
+        presence: Presence::Default("64"),
+        when: When::Always,
+        doc: "The largest number of sign-in requests whose body the server reads at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`.",
+    },
+    Key {
+        block: "server",
+        name: "trusted_proxies",
+        kind: Kind::List {
+            expected: "IP networks such as \"10.42.0.0/16\" or \"127.0.0.1/32\"; the address is the first address of the network",
+            check: check_cidr,
+            max_items: 64,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding and the login limiter.",
+    },
+    Key {
         block: "authentication",
         name: "superadmin_login",
         kind: Kind::Secret { max_bytes: 256 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it.",
+        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "authentication",
@@ -289,7 +309,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 16 * 1024 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes.",
+        doc: "The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "users",
@@ -540,7 +560,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::SecretProvided,
-        doc: "The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes.",
+        doc: "The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes. The server refuses the example value of `.env.example`. A new value ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "session",
@@ -620,7 +640,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 1_000_000 },
         presence: Presence::Default("100"),
         when: When::GlobalLimiterOn,
-        doc: "The number of failed logins from all clients in one window before the lockout.",
+        doc: "The number of failed logins from all clients in one window before the lockout. The superadmin login has a separate budget of the same size. Failures against other logins never lock out the superadmin.",
     },
     Key {
         block: "security",
@@ -636,7 +656,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(DAY) },
         presence: Presence::Default("30s"),
         when: When::GlobalLimiterOn,
-        doc: "The time that all logins stay locked out.",
+        doc: "The time that the logins of the budget stay locked out: all other logins, or the superadmin login.",
     },
     Key {
         block: "security",
@@ -815,6 +835,10 @@ pub fn is_optional_block(block: &str) -> bool {
 }
 
 // Checks of the text keys. Each returns the reason when the value is bad.
+
+fn check_cidr(value: &str) -> Result<(), String> {
+    crate::transport::Cidr::parse(value).map(|_| ())
+}
 
 fn check_socket_address(value: &str) -> Result<(), String> {
     value

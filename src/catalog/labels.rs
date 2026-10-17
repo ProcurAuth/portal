@@ -22,8 +22,8 @@ const DEFAULT_GROUP: &str = "Other";
 /// fallback display name: the container name, or `namespace/name` of the route.
 ///
 /// `Ok(None)` means that the workload does not ask to be listed. `Err` means that the workload
-/// asks to be listed but declares something unusable. The catalogue reports the error and skips
-/// the entry.
+/// asks to be listed but declares something unusable. The catalogue reports the error and does
+/// not list the workload. The gate keeps the path of its `href` closed (see [`closed_prefix`]).
 pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<Service>, String> {
     if !is_listed(labels) {
         return Ok(None);
@@ -106,6 +106,15 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     }))
 }
 
+/// The path prefix that stays closed for a workload whose labels are unusable. The prefix comes
+/// from the `href` as written. The result is `None` when the labels give no local `href`.
+///
+/// Traefik still routes the workload. If the gate forgot the prefix, a path of the workload
+/// would have no owner, and each signed-in user could open it.
+pub fn closed_prefix(labels: &BTreeMap<String, String>) -> Option<crate::access::Segments> {
+    field(labels, "href").and_then(href_prefix)
+}
+
 /// Whether the labels ask for a listing. Native: a name, unless it is disabled. Homepage-Docker: a name.
 /// Homepage-Kubernetes: `enabled: "true"`. The route carries the other fields.
 fn is_listed(labels: &BTreeMap<String, String>) -> bool {
@@ -184,8 +193,9 @@ fn url_origin(url: &str) -> Option<&str> {
 
 /// The `portal.exclude` label: one rule per line. The parser ignores blank lines and `#` comments.
 /// Each rule is a path under the service's own `href`. A service can therefore open only the paths
-/// that it owns. If any rule is unusable, the whole label is unusable. Then nothing is excluded,
-/// and the parser reports the problem.
+/// that it owns. If any rule is unusable, the whole label is unusable. Then the parser reports the
+/// problem, the service is not listed, and the gate keeps its `href` closed to every user except
+/// the superadmin.
 fn parse_exclude(raw: &str, href: &str) -> Result<Vec<ExcludeRule>, String> {
     let lines: Vec<&str> = raw
         .lines()

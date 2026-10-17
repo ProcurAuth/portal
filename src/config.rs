@@ -154,6 +154,10 @@ pub struct ServerConfig {
     pub max_header_bytes: usize,
     pub header_read_timeout: Duration,
     pub body_read_timeout: Duration,
+    /// The largest number of sign-in bodies that the server reads at the same time.
+    pub max_login_body_reads: usize,
+    /// The proxies whose `X-Forwarded-For` the server reads.
+    pub trusted_proxies: Vec<crate::transport::Cidr>,
 }
 
 pub struct SessionConfig {
@@ -283,6 +287,13 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             keys::show_duration(ttl)
         ));
     }
+    let max_connections = r.count("server", "max_connections")?;
+    let max_login_body_reads = r.count("server", "max_login_body_reads")?;
+    if max_login_body_reads >= max_connections {
+        return Err(format!(
+            "server.max_login_body_reads must be less than server.max_connections: max_login_body_reads is {max_login_body_reads}, max_connections is {max_connections}"
+        ));
+    }
     let postgres = r.has_block("postgres");
     if postgres && r.text("session", "secret_mode")? != "provided" {
         return Err(
@@ -357,6 +368,13 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             max_header_bytes: r.size("server", "max_header_bytes")?,
             header_read_timeout: r.duration("server", "header_read_timeout")?,
             body_read_timeout: r.duration("server", "body_read_timeout")?,
+            max_login_body_reads,
+            trusted_proxies: r
+                .list("server", "trusted_proxies")?
+                .iter()
+                .map(|net| crate::transport::Cidr::parse(net))
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("internal error: server.trusted_proxies: {e}"))?,
         },
         session: SessionConfig {
             cookie_name: r.text("session", "cookie_name")?,
@@ -451,6 +469,20 @@ fn source_of(r: &Resolved, key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The superadmin passwords that the repository publishes as examples: `.env.example` of the
+/// repository root, `.env.example` and the quick start of this README. Anybody who reads the
+/// repository knows them.
+const EXAMPLE_PASSWORDS: [&str; 2] = ["change-me-use-a-long-random-secret", "test1234"];
+/// The session secret that `.env.example` of the repository root publishes as an example.
+const EXAMPLE_SESSION_SECRETS: [&str; 1] = ["change-me-with-a-long-random-value"];
+
+/// Tells whether `value` is one of the published example values. The error never shows the value.
+fn is_example(value: &Secret, examples: &[&str]) -> bool {
+    examples
+        .iter()
+        .any(|example| value.as_bytes() == example.as_bytes())
+}
+
 fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
     let missing = |key: &str| format!("internal error: the secret {key} is missing");
     let login_secret = r
@@ -467,6 +499,12 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
     let superadmin_password = r
         .take_secret("authentication", "superadmin_password")
         .ok_or_else(|| missing("authentication.superadmin_password"))?;
+    if is_example(&superadmin_password, &EXAMPLE_PASSWORDS) {
+        return Err(format!(
+            "authentication.superadmin_password: the value is an example value that the repository publishes; give a new random value ({}; the value is hidden)",
+            source_of(r, "authentication.superadmin_password")
+        ));
+    }
 
     let session_secret = r.take_secret("session", "secret");
     if let Some(secret) = &session_secret {
@@ -474,6 +512,12 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
             return Err(format!(
                 "session.secret: the value has {} bytes, the minimum is 32 ({})",
                 secret.len(),
+                source_of(r, "session.secret")
+            ));
+        }
+        if is_example(secret, &EXAMPLE_SESSION_SECRETS) {
+            return Err(format!(
+                "session.secret: the value is an example value that the repository publishes; give a new random value ({}; the value is hidden)",
                 source_of(r, "session.secret")
             ));
         }

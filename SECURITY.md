@@ -17,6 +17,8 @@ A grant is an action on a service, or on one sub-resource of a service. The gran
 - A dummy hash replaces an unknown login name.
 - A failed login returns the same message.
 - A new user has no grant and opens no service. Access comes from a grant only. The superadmin has all grants.
+- A path that no service owns is open to each signed-in user only when the catalogue is complete. The catalogue is complete when each configured discovery source answered at least once. Until then, only the superadmin passes the gate.
+- A workload with unusable labels keeps the path of its `href` closed. A workload whose id another workload uses with another `href` also keeps its path closed. Only the superadmin passes a closed path.
 - The gate reads the forwarded path in every way that a proxy or a backend can read it.
 - The gate allows the request only if every reading is allowed.
 - The gate refuses a URI that cannot be read.
@@ -28,6 +30,9 @@ A grant is an action on a service, or on one sub-resource of a service. The gran
 - Account administration uses a purpose-bound CSRF token and a same-origin check.
 - A new password is hashed under the same Argon2 permit as a login.
 - A new password ends the sessions of that account.
+- A new superadmin login, password or session secret ends the sessions of the superadmin and the impersonated sessions. This also applies with PostgreSQL, where the other sessions survive a restart.
+- **Log in as** and **Back to superadmin** keep the end of the session that the password opened. A switch never gives a fresh `session.ttl`.
+- The server refuses at start the example superadmin passwords and the example session secret that the repository publishes. The error names the key and the source. It never shows the value.
 - The server writes every change to the audit history.
 - The 403 page names no service. A user does not learn the name of a service that is not open to that user.
 - In the mode `static`, the settings pages refuse a change of grants. The server does not use the grants of the database.
@@ -42,6 +47,8 @@ A grant is an action on a service, or on one sub-resource of a service. The gran
 - The history never records a path, a query, a password, or what was typed in a login that does not exist.
 - The server limits the Argon2 concurrency.
 - The server limits the rate of login failures per IP address and globally.
+- The global limiter has a separate budget for the superadmin login. Failures against other logins never refuse the sign-in of the superadmin.
+- The server reads a bounded number of sign-in bodies at the same time (`server.max_login_body_reads`). Slow sign-in bodies cannot hold every connection that ForwardAuth needs.
 - A successful authentication creates a random, opaque session identifier of 256 bits.
 - Active sessions are held in limited process RAM. With PostgreSQL, they are held in the shared database as SHA-256 digests. The database never stores the cookie.
 - Each instance keeps a copy of each active session for a few seconds.
@@ -53,6 +60,7 @@ A grant is an action on a service, or on one sub-resource of a service. The gran
 - Over HTTPS, the cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, and `Path=/`. Their SameSite value is Strict or Lax.
 - Over plain HTTP, the cookies use the same name without the prefix. They have no `Secure` attribute (see "Plain HTTP").
 - A session works only from the client address and User-Agent that logged in (`session.bind`).
+- The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. For any other peer, the client address is the address of the peer.
 - A session ends after `session.idle_timeout` without use.
 - The server renders the launcher. The launcher references nothing outside the binary.
 - The CSP of the launcher is `default-src 'none'`. The launcher uses its own style, its own script, and its own images.
@@ -61,6 +69,7 @@ A grant is an action on a service, or on one sub-resource of a service. The gran
 - POST login and POST logout require CSRF protection. For login, the protection is a double-submit cookie. For logout, it is an HMAC of the session ID.
 - The server also validates the same origin with Origin and Referer.
 - Return paths are local path and query values only. The server signs them with HMAC.
+- A return path with an ASCII control byte (0x00 to 0x1F, 0x7F) is refused, raw or after one percent-decode. A URL parser of the URL Standard removes TAB, CR and LF, so `/<TAB>/host` would become `//host`.
 - The server validates dynamic HTTP header values with typed Hyper header parsing.
 - Prometheus labels never contain unbounded values, secret values, or values that users control.
 - Security failures fail closed.
@@ -140,6 +149,8 @@ The store is limited by `session.max_active_sessions`. The server removes expire
 
 With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the last use are rows of the shared database. The instance that served the login writes these rows. The same statement enforces the binding and the idle timeout, and finds the session. A refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most. A revocation made on another instance takes up to 5 seconds to reach the copy. While the database is unreachable, a copy checked less than 2 minutes ago is still honoured. This copy is bounded by the session's own expiry. This rule prevents the sign-out of every user. Logins fail closed. The failed-login limiters stay per instance. With N instances, an attacker has N times the budget.
 
+A row also holds the credential generation of the superadmin: HMAC-SHA-256 under the session secret of the superadmin login and password. The database never holds a plain hash of the superadmin password. Thus a reader of the database cannot test password guesses without the secret. A superadmin or impersonated row is valid only with the generation of the instance that reads it. At start, each instance deletes the superadmin and impersonated rows of the other generations. After a suspected theft of a superadmin cookie, rotate the superadmin password or the session secret: the rotation ends the stolen session on every instance.
+
 ## Plain HTTP
 
 Traefik can serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
@@ -152,7 +163,9 @@ Over HTTP, an attacker on the network can read the password and the session cook
 
 The catalogue comes from container labels. The labels come from the Docker socket, which is mounted read-only. The catalogue also comes from IngressRoute annotations. They come from the in-cluster API. The ServiceAccount is limited to `get` and `list` on `ingressroutes` and `pods`.
 
-A person who can create a container or an IngressRoute chooses what the launcher lists. This is the trust boundary. It is acceptable for a single administrator. A workload with unusable labels is skipped. The page reports it. The workload is not listed in part.
+A person who can create a container or an IngressRoute chooses what the launcher lists. This is the trust boundary. It is acceptable for a single administrator. A workload with unusable labels is skipped. The page reports it. The workload is not listed in part. The gate keeps the path of its `href` closed, because Traefik still routes the workload.
+
+The gate opens a path that no service owns to each signed-in user. This rule is safe only when the catalogue holds every service. The first snapshot after a start is empty. A source that has not answered yet gives a snapshot without its services. Thus, until each configured source answered once, the gate lets only the superadmin through. A source that failed at setup keeps this state for the life of the process. The metric `portal_catalog_complete` shows the state.
 
 Health probes are plain GET requests to URLs taken from labels. They do not follow redirects. They do not read the body. They have a timeout and limited concurrency. They send nothing secret. The probe client does not verify certificates. It asks only whether something answers.
 
@@ -187,9 +200,15 @@ server {
 
 Hyper's HTTP/1 connection parser receives the header limits and timeouts. The application collects the body in parts. It checks the size before each extension. A total read timeout wraps the collection.
 
+`POST /auth/login` is the only route that reads a body before it knows the client. One connection can hold a slot for `header_read_timeout` plus `body_read_timeout`. The server therefore reads at most `server.max_login_body_reads` sign-in bodies at the same time. It refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `max_connections`, so ForwardAuth always has connections left.
+
+The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. The server reads the header from the right. It skips the trusted addresses and takes the first address that is not trusted. A peer that is not trusted, a missing header, two headers, or an entry that is not an address give the address of the peer. Keep the networks of this list small. In K3s, the NetworkPolicy `allow-portal-http` admits only the Traefik and Prometheus pods to the port 4181.
+
 ## Password controls
 
 Two limiters protect against password failures. The first is a limited per-IP limiter. The second is a separate global limiter. The global limiter is not reset on purpose by a successful login. Both stores are process-local.
+
+The global limiter has two budgets of the same size: one for the superadmin login, one for all other logins. Anonymous failures against other logins thus cannot refuse the sign-in of the superadmin. Failures against the superadmin login lock out only the superadmin. This has a cost: while one budget is locked out, the answer tells whether a typed login is the superadmin login. The superadmin login is not a secret, because each identity token carries it in `sub`.
 
 Argon2 checks run through an async semaphore and `spawn_blocking`. This keeps the CPU-heavy hash calculations away from the Tokio I/O workers.
 
@@ -227,3 +246,38 @@ Do not log the password, session ID, CSRF token, HMAC secret, Cookie header, ret
 ## Dependency resolution
 
 The `Cargo.lock` file is generated explicitly with `./scripts/update-lockfile.sh` after a dependency change. It is reviewed and committed. CI, Docker, and release builds require the committed resolution. They run the actual test and build steps with `--frozen`. Release jobs never regenerate the dependency resolution.
+
+## Known limits and deployment measures
+
+These limits come from the deployment, not from the code. The portal cannot remove them. Apply the measures below.
+
+### The session cookie goes to every service on the same origin
+
+The session cookie has `Path=/`. The browser sends it with each request to the origin of the portal. In K3s, the services are routed by path on the same origin (`/grafana/`, `/dagu/` and others). Traefik forwards the `Cookie` header to the service. A service, or a person who controls a service, therefore receives the session cookie, the client address and the User-Agent. With these three values, the service can act as the user, also as the superadmin.
+
+Measures:
+
+- Remove the portal cookie from the requests to the services. Use a Traefik middleware that removes the `Cookie` header, or only the portal cookie, on the routes of the services.
+- Better: give the portal its own host name, and give each service that you do not trust its own host name. A host-only `__Host-` cookie then never reaches these services.
+- Use the identity token (`X-Identity-Token`) in the services, not the cookie.
+- Keep `session.bind = "ip_user_agent"` and a short `session.idle_timeout`.
+
+### The settings pages share the origin of the services
+
+The settings pages and the account administration (`/auth/settings`, `/auth/users/*`) are on the same origin as the services. The `Origin` check and the anti-CSRF token do not separate the portal from a script that a service serves on the same origin. Such a script can read the settings pages and send the administration forms of the superadmin.
+
+Measures:
+
+- Serve the portal (`/auth/*`) on a host name of its own, and do not route services on that host name.
+- Do not route on the portal origin a service that lets its users publish HTML or JavaScript.
+- Open the settings pages only in a browser profile that does not open the services.
+
+### Traefik path normalisation
+
+The gate reads the path of `X-Forwarded-Uri` in each way that a proxy or a backend can read it, after it removes dot segments. Traefik must route on the same clean path. If Traefik routes on a path that still holds `..` or an encoded `/` (`%2F`), a request can match the route of a service while the gate reads it as a path without an owner.
+
+Measures:
+
+- On each entry point of Traefik, set `http.sanitizePath: true`. Set each key of `http.encodedCharacters` to `false`: `allowEncodedSlash`, `allowEncodedBackSlash`, `allowEncodedNullCharacter`, `allowEncodedSemicolon`, `allowEncodedPercent`, `allowEncodedQuestionMark` and `allowEncodedHash`. The Compose configuration of Traefik (`traefik/docker/compose.yaml`) sets these values. Set them also on the K3s entry point `websecure` (`traefik/k3s/controller.yaml`).
+- Check the effective configuration of the entry point after each upgrade of Traefik.
+

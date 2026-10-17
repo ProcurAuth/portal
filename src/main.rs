@@ -49,8 +49,8 @@ fn real_main() -> Result<(), String> {
         "run" => {
             let config_path = parse_config_arg(args.collect())?;
             let (config, mut secrets) = Config::load(&config_path)?;
-            let superadmin = load_superadmin(&secrets)?;
             let signing_secret = take_session_secret(&mut secrets)?;
+            let superadmin = load_superadmin(&secrets, &signing_secret)?;
             let store = Arc::new(open_store(&config, &secrets)?);
             let access = AccessSecrets {
                 identity_key: secrets.identity_key.take(),
@@ -96,9 +96,10 @@ fn real_main() -> Result<(), String> {
         "check-config" => {
             let config_path = parse_config_arg(args.collect())?;
             let (config, mut secrets) = Config::load(&config_path)?;
-            let mut superadmin = load_superadmin(&secrets)?;
+            let mut signing_secret = take_session_secret(&mut secrets)?;
+            let mut superadmin = load_superadmin(&secrets, &signing_secret)?;
             superadmin.password_hash.zeroize();
-            drop(take_session_secret(&mut secrets)?);
+            signing_secret.zeroize();
             // The key must be a valid Ed25519 key. The check reads it as `run` does.
             let signer = identity_signer(&config, &mut secrets)?;
             print!("{}", config.render_effective());
@@ -212,12 +213,19 @@ fn identity_signer(
     }
 }
 
-/// Creates the superadmin. It has the login from the configuration and the Argon2id hash of its password.
-fn load_superadmin(secrets: &Secrets) -> Result<SuperAdmin, String> {
+/// Creates the superadmin. It has the login from the configuration, the Argon2id hash of its
+/// password, and the credential generation under the session secret.
+fn load_superadmin(secrets: &Secrets, signing_secret: &[u8]) -> Result<SuperAdmin, String> {
     let hashed = hash_password(secrets.superadmin_password.as_bytes())?;
+    let generation = crypto::superadmin_generation(
+        signing_secret,
+        &secrets.superadmin_login,
+        secrets.superadmin_password.as_bytes(),
+    )?;
     Ok(SuperAdmin {
         login: secrets.superadmin_login.clone(),
         password_hash: hashed,
+        generation,
     })
 }
 

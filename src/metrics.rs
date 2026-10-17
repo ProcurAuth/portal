@@ -81,6 +81,7 @@ pub struct Metrics {
     connections_active: AtomicUsize,
     connections_accepted_total: AtomicU64,
     connections_rejected_total: AtomicU64,
+    login_body_rejected_total: AtomicU64,
 }
 
 impl Metrics {
@@ -119,6 +120,7 @@ impl Metrics {
             connections_active: AtomicUsize::new(0),
             connections_accepted_total: AtomicU64::new(0),
             connections_rejected_total: AtomicU64::new(0),
+            login_body_rejected_total: AtomicU64::new(0),
         }
     }
 
@@ -251,6 +253,11 @@ impl Metrics {
 
     pub fn connection_rejected(&self) {
         self.connections_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn login_body_rejected(&self) {
+        self.login_body_rejected_total
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -599,6 +606,13 @@ impl Metrics {
         out.push_str(&format!(
             "portal_connections_rejected_total {}\n",
             self.connections_rejected_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP portal_login_body_rejected_total Sign-in requests refused because server.max_login_body_reads bodies were already being read.\n");
+        out.push_str("# TYPE portal_login_body_rejected_total counter\n");
+        out.push_str(&format!(
+            "portal_login_body_rejected_total {}\n",
+            self.login_body_rejected_total.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP portal_password_check_concurrency_limit Configured maximum concurrent Argon2 checks.\n");

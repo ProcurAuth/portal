@@ -57,6 +57,8 @@ pub struct Session {
     pub principal: Principal,
     /// The superadmin browses as this user. This is not a connection of the user.
     pub impersonated: bool,
+    /// The absolute end of the session, in Unix time.
+    pub expires_at: i64,
 }
 
 /// What `issue` needs to open a session and to describe it in the history.
@@ -68,6 +70,10 @@ pub struct NewSession {
     pub impersonated: bool,
     pub ip: Option<String>,
     pub user_agent: String,
+    /// The latest end of the new session, in Unix time. A switch of session ("Log in as",
+    /// "Back to superadmin") gives the end of the current session. Thus a switch never extends
+    /// the lifetime that the password sign-in gave. `None` gives the full `session.ttl`.
+    pub not_after: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -88,6 +94,9 @@ pub struct SessionStore {
     max_active: usize,
     tracker: Arc<Tracker>,
     shared: Option<Arc<Store>>,
+    /// The credential generation of the superadmin (see [`crate::crypto::superadmin_generation`]).
+    /// The shared database refuses a superadmin or impersonated session of another generation.
+    generation: [u8; 32],
     cache_ttl: Duration,
     /// The live sessions of every instance, as the last sweep counted them.
     shared_active: AtomicUsize,
@@ -103,16 +112,56 @@ impl SessionStore {
             max_active,
             tracker,
             shared: None,
+            generation: [0; 32],
             cache_ttl: CACHE_TTL,
             shared_active: AtomicUsize::new(0),
             shared_errors: AtomicU64::new(0),
         }
     }
 
-    /// Keeps the sessions in the shared `store`, not in memory.
-    pub fn shared(mut self, store: Arc<Store>) -> Self {
+    /// Keeps the sessions in the shared `store`, not in memory. `generation` is the credential
+    /// generation of the superadmin. The store accepts a superadmin or impersonated session only
+    /// when its row carries this generation.
+    pub fn shared(mut self, store: Arc<Store>, generation: [u8; 32]) -> Self {
         self.shared = Some(store);
+        self.generation = generation;
         self
+    }
+
+    /// The end of a session issued at `now`: `session.ttl` later, but not after `not_after`.
+    fn expiry(&self, now: i64, not_after: Option<i64>) -> i64 {
+        let full = now.saturating_add(self.ttl.as_secs() as i64);
+        not_after.map_or(full, |bound| bound.min(full))
+    }
+
+    /// The life of a session issued at `now`: `session.ttl`, but not past `not_after`.
+    fn lifetime(&self, now: i64, not_after: Option<i64>) -> Duration {
+        match not_after {
+            None => self.ttl,
+            Some(bound) => self
+                .ttl
+                .min(Duration::from_secs(bound.saturating_sub(now).max(0) as u64)),
+        }
+    }
+
+    /// Ends the superadmin and impersonated sessions of the other credential generations in the
+    /// shared database. The program calls this at start. A rotation of the superadmin login, of
+    /// its password or of the session secret thus ends the old sessions on every instance.
+    /// Returns the number of sessions ended. The value is always 0 with one instance.
+    pub fn end_other_generations(&self) -> usize {
+        let Some(store) = &self.shared else { return 0 };
+        match blocking(|| store.sessions_end_other_generations(&self.generation)) {
+            Ok(ended) => {
+                for sid in &ended {
+                    self.ended_sid(*sid, EndReason::Revoked);
+                }
+                ended.len()
+            }
+            Err(error) => {
+                self.failed("session_generation_cleanup_failed", &error);
+                0
+            }
+        }
     }
 
     #[cfg(test)]
@@ -134,6 +183,9 @@ impl SessionStore {
         if let Some(store) = &self.shared {
             return self.issue_shared(store, binding, new);
         }
+        let now_unix = unix_now();
+        let expires_unix = self.expiry(now_unix, new.not_after);
+        let lifetime = self.lifetime(now_unix, new.not_after);
         let now = Instant::now();
         let mut sessions = self.sessions.lock().expect("session store mutex poisoned");
         self.prune(&mut sessions, now);
@@ -164,6 +216,7 @@ impl SessionStore {
                 sid: u64::from_be_bytes(sid),
                 principal: new.principal.clone(),
                 impersonated: new.impersonated,
+                expires_at: expires_unix,
             };
             self.tracker.emit(Event::SessionStarted(SessionStart {
                 sid: session.sid,
@@ -177,7 +230,7 @@ impl SessionStore {
             sessions.insert(
                 digest,
                 Entry {
-                    expires_at: now + self.ttl,
+                    expires_at: now + lifetime,
                     last_seen: now,
                     checked: now,
                     binding,
@@ -289,10 +342,12 @@ impl SessionStore {
         raw.zeroize();
 
         let now = unix_now();
+        let expires_at = self.expiry(now, new.not_after);
         let session = Session {
             sid: u64::from_be_bytes(sid),
             principal: new.principal.clone(),
             impersonated: new.impersonated,
+            expires_at,
         };
         let stored = SharedSession {
             sid: session.sid,
@@ -301,7 +356,7 @@ impl SessionStore {
                 Principal::User(login) => Some(login.clone()),
             },
             impersonated: new.impersonated,
-            expires_at: now + self.ttl.as_secs() as i64,
+            expires_at,
         };
         // The history row is written with the session. Therefore, no instance meets a session without a history row.
         let start = SessionStart {
@@ -313,8 +368,17 @@ impl SessionStore {
             user_agent: new.user_agent,
             at: now,
         };
-        match blocking(|| store.session_insert(&digest, &binding, &stored, &start, self.max_active))
-        {
+        let inserted = blocking(|| {
+            store.session_insert(
+                &digest,
+                &binding,
+                &stored,
+                &start,
+                self.max_active,
+                &self.generation,
+            )
+        });
+        match inserted {
             Ok(true) => {}
             Ok(false) => return Err(SessionIssueError::Capacity),
             Err(error) => {
@@ -323,12 +387,13 @@ impl SessionStore {
             }
         }
         let at = Instant::now();
+        let lifetime = self.lifetime(now, new.not_after);
         let mut cache = self.sessions.lock().expect("session store mutex poisoned");
         self.prune_copies(&mut cache, at);
         cache.insert(
             digest,
             Entry {
-                expires_at: at + self.ttl,
+                expires_at: at + lifetime,
                 last_seen: at,
                 checked: at,
                 binding,
@@ -363,7 +428,7 @@ impl SessionStore {
             }
         }
         let at = unix_now();
-        match blocking(|| store.session_touch(&digest, binding, at, self.idle)) {
+        match blocking(|| store.session_touch(&digest, binding, at, self.idle, &self.generation)) {
             Ok(Some(stored)) => {
                 let session = session_of(stored.clone());
                 let left = Duration::from_secs(stored.expires_at.saturating_sub(at).max(0) as u64);
@@ -513,6 +578,7 @@ fn session_of(stored: SharedSession) -> Session {
             None => Principal::Superadmin,
         },
         impersonated: stored.impersonated,
+        expires_at: stored.expires_at,
     }
 }
 
@@ -557,6 +623,7 @@ mod tests {
             impersonated: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
+            not_after: None,
         }
     }
 
@@ -649,6 +716,7 @@ mod tests {
                     impersonated: false,
                     ip: None,
                     user_agent: String::new(),
+                    not_after: None,
                 },
             )
             .unwrap();
@@ -669,6 +737,30 @@ mod tests {
         new.impersonated = true;
         let token = store.issue(HERE, new).unwrap();
         assert!(store.validate(&token, &HERE).unwrap().impersonated);
+    }
+
+    /// "Log in as" and "Back to superadmin" open new sessions. They carry the end of the session
+    /// that the password opened: a switch never gives a fresh lifetime.
+    #[test]
+    fn a_session_issued_with_an_upper_bound_ends_at_that_bound() {
+        let store = store(HOUR, HOUR, 8);
+        let first = store.issue(HERE, user("alice")).unwrap();
+        let bound = store.validate(&first, &HERE).unwrap().expires_at;
+        let now = unix_now();
+        assert!((now + 3599..=now + 3600).contains(&bound), "{bound} {now}");
+
+        let mut next = user("alice");
+        next.not_after = Some(bound);
+        let token = store.issue(HERE, next).unwrap();
+        assert_eq!(store.validate(&token, &HERE).unwrap().expires_at, bound);
+
+        let mut ended = user("alice");
+        ended.not_after = Some(unix_now());
+        let token = store.issue(HERE, ended).unwrap();
+        assert!(
+            store.validate(&token, &HERE).is_none(),
+            "the bound has passed: the session is already over"
+        );
     }
 
     #[test]
@@ -710,10 +802,26 @@ mod shared_tests {
             max: usize,
             cache_ttl: Duration,
         ) -> Self {
+            Self::build(store, ttl, idle, max, cache_ttl, [0; 32])
+        }
+
+        /// An instance whose superadmin credentials give `generation`.
+        fn with_generation(store: Store, generation: [u8; 32]) -> Self {
+            Self::build(store, HOUR, HOUR, 8, Duration::ZERO, generation)
+        }
+
+        fn build(
+            store: Store,
+            ttl: Duration,
+            idle: Duration,
+            max: usize,
+            cache_ttl: Duration,
+            generation: [u8; 32],
+        ) -> Self {
             let store = Arc::new(store);
             let (tracker, events) = Tracker::recording();
             let mut sessions =
-                SessionStore::new(ttl, idle, max, tracker).shared(Arc::clone(&store));
+                SessionStore::new(ttl, idle, max, tracker).shared(Arc::clone(&store), generation);
             sessions.set_cache_ttl(cache_ttl);
             Self {
                 sessions,
@@ -754,6 +862,7 @@ mod shared_tests {
             impersonated: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
+            not_after: None,
         }
     }
 
@@ -799,6 +908,7 @@ mod shared_tests {
                     impersonated: false,
                     ip: None,
                     user_agent: String::new(),
+                    not_after: None,
                 },
             )
             .unwrap();
@@ -929,6 +1039,82 @@ mod shared_tests {
         assert_eq!(
             b.sessions.issue(HERE, user("carol")),
             Err(SessionIssueError::Capacity)
+        );
+    }
+
+    #[test]
+    fn a_shared_session_issued_with_an_upper_bound_ends_at_that_bound() {
+        let Some((a, b)) = instances(HOUR, HOUR, 8, Duration::ZERO) else {
+            return;
+        };
+        let first = a.sessions.issue(HERE, user("alice")).unwrap();
+        let bound = b.sessions.validate(&first, &HERE).unwrap().expires_at;
+        let mut next = user("alice");
+        next.not_after = Some(bound);
+        let token = a.sessions.issue(HERE, next).unwrap();
+        assert_eq!(
+            b.sessions.validate(&token, &HERE).unwrap().expires_at,
+            bound
+        );
+        let mut ended = user("alice");
+        ended.not_after = Some(unix_now());
+        let token = a.sessions.issue(HERE, ended).unwrap();
+        assert!(b.sessions.validate(&token, &HERE).is_none());
+    }
+
+    fn superadmin(impersonating: Option<&str>) -> NewSession {
+        match impersonating {
+            None => NewSession {
+                principal: Principal::Superadmin,
+                login: "root".into(),
+                impersonated: false,
+                ip: None,
+                user_agent: String::new(),
+                not_after: None,
+            },
+            Some(login) => NewSession {
+                impersonated: true,
+                ..user(login)
+            },
+        }
+    }
+
+    /// A new superadmin login, password or session secret gives a new credential generation.
+    /// The sessions of the superadmin and the impersonated sessions of an old generation then
+    /// stop on every instance. The sessions of the database users stay.
+    #[test]
+    fn a_new_superadmin_generation_ends_the_old_superadmin_and_impersonated_sessions() {
+        let Some(backend) = postgres() else {
+            return;
+        };
+        let (first, second) = backend.fresh_pair();
+        let old = Instance::with_generation(first, [1; 32]);
+        let root = old.sessions.issue(HERE, superadmin(None)).unwrap();
+        let as_alice = old.sessions.issue(HERE, superadmin(Some("alice"))).unwrap();
+        let alice = old.sessions.issue(HERE, user("alice")).unwrap();
+        assert!(old.sessions.validate(&root, &HERE).is_some());
+
+        let new = Instance::with_generation(second, [2; 32]);
+        assert!(new.sessions.validate(&root, &HERE).is_none());
+        assert!(new.sessions.validate(&as_alice, &HERE).is_none());
+        assert!(new.sessions.validate(&alice, &HERE).is_some());
+        let fresh = new.sessions.issue(HERE, superadmin(None)).unwrap();
+        assert!(
+            old.sessions.validate(&fresh, &HERE).is_none(),
+            "an old instance refuses the rows of the new generation"
+        );
+
+        // At start, the new instance deletes the rows of the other generations.
+        assert_eq!(new.sessions.end_other_generations(), 2);
+        assert!(old.sessions.validate(&root, &HERE).is_none());
+        assert!(new.sessions.validate(&fresh, &HERE).is_some());
+        assert!(new.sessions.validate(&alice, &HERE).is_some());
+        assert_eq!(
+            new.ended()
+                .iter()
+                .filter(|(_, reason)| *reason == EndReason::Revoked)
+                .count(),
+            2
         );
     }
 

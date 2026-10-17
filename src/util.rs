@@ -151,11 +151,16 @@ pub fn parse_form(body: &[u8]) -> Result<HashMap<String, String>, String> {
     Ok(out)
 }
 
+/// Tells whether `uri` is a safe return target: a local path and query.
+///
+/// The function refuses every ASCII control byte (0x00 to 0x1F and 0x7F), in the raw value and in
+/// the decoded path. A URL parser of the URL Standard removes TAB, CR and LF before it reads the
+/// URL. Thus `/<TAB>/host` becomes `//host`, which is a link to another host.
 pub fn validate_return_uri(uri: &str, max_len: usize) -> bool {
     if uri.is_empty() || uri.len() > max_len || !uri.starts_with('/') || uri.starts_with("//") {
         return false;
     }
-    if uri.contains('#') || uri.bytes().any(|b| b == 0 || b == b'\r' || b == b'\n') {
+    if uri.contains('#') || uri.bytes().any(|b| b.is_ascii_control()) {
         return false;
     }
     if uri.contains('\\') {
@@ -174,9 +179,7 @@ pub fn validate_return_uri(uri: &str, max_len: usize) -> bool {
         || decoded_path.starts_with("//")
         || decoded_path.contains('\\')
         || decoded_path.contains('#')
-        || decoded_path
-            .bytes()
-            .any(|b| b == 0 || b == b'\r' || b == b'\n')
+        || decoded_path.bytes().any(|b| b.is_ascii_control())
     {
         return false;
     }
@@ -381,6 +384,26 @@ mod tests {
         assert!(!validate_return_uri("/%5cevil.invalid", 4096));
         assert!(!validate_return_uri("/bad%ZZ", 4096));
         assert!(!validate_return_uri("/path#fragment", 4096));
+    }
+
+    /// A URL parser of the URL Standard removes a TAB, a CR and an LF before it reads the URL.
+    /// `/<TAB>/evil.example/x` then becomes `//evil.example/x`, a link to another host.
+    #[test]
+    fn a_return_uri_with_an_ascii_control_byte_is_refused() {
+        for uri in [
+            "/\t/evil.example/x",
+            "/\t\t/x",
+            "/\x0b/x",
+            "/\x1f/x",
+            "/x\x7f",
+            "/%09/x",
+            "/%0b/x",
+            "/%7f/x",
+            "/ok?q=\t",
+        ] {
+            assert!(!validate_return_uri(uri, 4096), "{uri:?}");
+        }
+        assert!(validate_return_uri("/grafana/%20space?q=a%09b", 4096));
     }
 
     #[test]

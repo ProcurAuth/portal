@@ -57,6 +57,54 @@ impl Reply {
 }
 
 fn send(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Reply {
+    let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    send_on(stream, port, method, path, headers, body)
+}
+
+/// The same as [`send`], from the local address `source` (for example `127.0.0.2`). The server
+/// then sees another TCP peer.
+fn send_from(
+    source: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Reply {
+    send_on(
+        connect_from(source, port),
+        port,
+        method,
+        path,
+        headers,
+        body,
+    )
+}
+
+fn connect_from(source: &str, port: u16) -> TcpStream {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .unwrap();
+    let source: std::net::IpAddr = source.parse().unwrap();
+    runtime.block_on(async {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind((source, 0).into()).unwrap();
+        let stream = socket.connect(([127, 0, 0, 1], port).into()).await.unwrap();
+        let stream = stream.into_std().unwrap();
+        stream.set_nonblocking(false).unwrap();
+        stream
+    })
+}
+
+fn send_on(
+    mut stream: TcpStream,
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Reply {
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
@@ -72,7 +120,6 @@ fn send(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &st
     }
     request.push_str("\r\n");
     request.push_str(body);
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
@@ -107,9 +154,16 @@ struct Node {
     state: Arc<AppState>,
 }
 
-fn password_hash() -> String {
-    static HASH: OnceLock<String> = OnceLock::new();
-    HASH.get_or_init(|| hash_password(PASSWORD.as_bytes()).unwrap())
+/// The Argon2id hash of `password`. Each password is hashed once for all the tests.
+fn password_hash(password: &str) -> String {
+    static HASHES: OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        OnceLock::new();
+    HASHES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(password.to_string())
+        .or_insert_with(|| hash_password(password.as_bytes()).unwrap())
         .clone()
 }
 
@@ -129,26 +183,70 @@ fn free_port() -> u16 {
 /// The tests use these variables:
 /// `TEST_IDENTITY_KEY` (a new Ed25519 key), `TEST_PDP_DB` and `TEST_PDP_CHAT` (PDP tokens).
 fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> Node {
+    start_custom(store, cache_ttl, Custom::default(), extra)
+}
+
+/// The parts of the harness configuration that a test can replace.
+struct Custom {
+    /// More keys of the `server` block.
+    server: &'static str,
+    /// The body of the `discovery` block.
+    discovery: &'static str,
+    /// The superadmin login, its password and the session secret.
+    login: &'static str,
+    password: &'static str,
+    session_secret: &'static str,
+    /// Wait for a complete catalogue before the node is given to the test.
+    wait_complete: bool,
+}
+
+impl Default for Custom {
+    fn default() -> Self {
+        Self {
+            server: r#"trusted_proxies = ["127.0.0.1/32"]"#,
+            discovery: r#"interval = "1h""#,
+            login: "root",
+            password: PASSWORD,
+            session_secret: "0123456789abcdef0123456789abcdef",
+            wait_complete: true,
+        }
+    }
+}
+
+fn start_custom(
+    store: Arc<Store>,
+    cache_ttl: Option<Duration>,
+    custom: Custom,
+    extra: &str,
+) -> Node {
     let port = free_port();
     let key = crate::identity::testing::new_key_pem();
+    let Custom {
+        server,
+        discovery,
+        login,
+        password,
+        session_secret,
+        wait_complete,
+    } = custom;
     let (config, mut secrets) = Config::parse(
         &format!(
             r#"
-        server {{ listen_address = "127.0.0.1:{port}" workers = 2 }}
+        server {{ listen_address = "127.0.0.1:{port}" workers = 2 {server} }}
         authentication {{
           superadmin_login_env    = "PORTAL_TEST_LOGIN"
           superadmin_password_env = "PORTAL_TEST_PASSWORD"
         }}
         users {{ max_users = 10 }}
         session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
-        discovery {{ interval = "1h" }}
+        discovery {{ {discovery} }}
         {extra}
         "#
         ),
         &|name| match name {
-            "PORTAL_TEST_LOGIN" => Some("root".to_string()),
-            "PORTAL_TEST_PASSWORD" => Some(PASSWORD.to_string()),
-            "PORTAL_TEST_SESSION" => Some("0123456789abcdef0123456789abcdef".to_string()),
+            "PORTAL_TEST_LOGIN" => Some(login.to_string()),
+            "PORTAL_TEST_PASSWORD" => Some(password.to_string()),
+            "PORTAL_TEST_SESSION" => Some(session_secret.to_string()),
             "TEST_IDENTITY_KEY" => Some(key.clone()),
             "TEST_PDP_DB" => Some(PDP_DB_TOKEN.to_string()),
             "TEST_PDP_CHAT" => Some(PDP_CHAT_TOKEN.to_string()),
@@ -157,16 +255,28 @@ fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> No
     )
     .unwrap();
     let tracker = Tracker::start(Arc::clone(&store), Duration::from_millis(200), 90).unwrap();
+    // The signing secret of the tests is SECRET. A test that rotates it gives another session secret.
+    let signing_secret = if session_secret == Custom::default().session_secret {
+        SECRET.to_vec()
+    } else {
+        session_secret.as_bytes().to_vec()
+    };
     let superadmin = SuperAdmin {
-        login: "root".into(),
-        password_hash: password_hash(),
+        login: login.into(),
+        password_hash: password_hash(password),
+        generation: crate::crypto::superadmin_generation(
+            &signing_secret,
+            login,
+            password.as_bytes(),
+        )
+        .unwrap(),
     };
     let access = AccessSecrets {
         identity_key: secrets.identity_key.take(),
         pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
     };
     let mut state =
-        AppState::new(config, superadmin, SECRET.to_vec(), store, tracker, access).unwrap();
+        AppState::new(config, superadmin, signing_secret, store, tracker, access).unwrap();
     if let Some(ttl) = cache_ttl {
         state.sessions.set_cache_ttl(ttl);
     }
@@ -184,6 +294,12 @@ fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> No
     wait_until(Duration::from_secs(10), || {
         node.state.discovery.refreshes() >= 1
     });
+    if wait_complete {
+        assert!(
+            current_catalog(&node.state).is_complete(),
+            "the first round of a harness without a source is complete"
+        );
+    }
     node
 }
 
@@ -220,7 +336,7 @@ fn session_cookie_name(node: &Node) -> String {
 /// Signs in as the login form does. It returns the session cookie.
 fn sign_in(node: &Node, login: &str, password: &str) -> String {
     let csrf = "A".repeat(32);
-    let signature = sign_return_uri(&SECRET, "/").unwrap();
+    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
     let reply = send(
@@ -262,7 +378,7 @@ fn verify(node: &Node, session: &str, agent: &str) -> u16 {
 fn post(node: &Node, session: &str, path: &str, purpose: &str, fields: &str) -> Reply {
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={session}", session_cookie_name(node));
-    let csrf = sign_action_token(&SECRET, purpose, session).unwrap();
+    let csrf = sign_action_token(&node.state.signing_secret, purpose, session).unwrap();
     send(
         node.port,
         "POST",
@@ -766,7 +882,7 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     ] {
         let row = crate::store::UserRow {
             login: login.into(),
-            password_hash: password_hash(),
+            password_hash: password_hash(PASSWORD),
             grants: held,
             created_at: 1,
         };
@@ -1044,7 +1160,7 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
     ] {
         let row = crate::store::UserRow {
             login: login.into(),
-            password_hash: password_hash(),
+            password_hash: password_hash(PASSWORD),
             grants: held,
             created_at: 1,
         };
@@ -1183,7 +1299,7 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
     });
     let row = crate::store::UserRow {
         login: "carol".into(),
-        password_hash: password_hash(),
+        password_hash: password_hash(PASSWORD),
         grants: Vec::new(),
         created_at: 1,
     };
@@ -1394,6 +1510,402 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         assert_eq!(
             node.state.store.load_users().unwrap()[0].grants,
             vec![Grant::new("access", "db").unwrap()]
+        );
+    });
+}
+
+// Security regressions -------------------------------------------------------------------------
+
+/// Adds an account without a grant and signs it in.
+fn user_without_grant(node: &Node, root: &str, login: &str) -> String {
+    let reply = post(
+        node,
+        root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        &format!("login={login}&password=a-long-password-1"),
+    );
+    assert_eq!(reply.status, 303, "{:?}", reply.location());
+    sign_in(node, login, "a-long-password-1")
+}
+
+/// A source that never answered gives a snapshot without its services. The gate cannot tell an
+/// unowned path from a path of a missing service: only the superadmin passes.
+#[test]
+fn a_source_that_never_answered_keeps_the_gate_closed_to_users() {
+    let node = start_custom(
+        Arc::new(Store::open_in_memory()),
+        None,
+        Custom {
+            discovery: r#"interval = "1h" docker_socket = "/nonexistent/docker.sock""#,
+            wait_complete: false,
+            ..Custom::default()
+        },
+        "",
+    );
+    assert!(!current_catalog(&node.state).is_complete());
+    let root = sign_in(&node, "root", PASSWORD);
+    let alice = user_without_grant(&node, &root, "alice");
+    for uri in ["/grafana/d/1", "/an/unowned/path"] {
+        let reply = open(&node, &alice, uri);
+        assert_eq!(reply.status, 302, "{uri}");
+        assert_eq!(reply.location(), Some(DENIED_PATH), "{uri}");
+        assert_eq!(open(&node, &root, uri).status, 204, "{uri}");
+    }
+    let metrics = send(node.port, "GET", "/metrics", &[], "").body;
+    assert!(
+        metrics.contains("portal_catalog_complete 0"),
+        "the metric shows the state"
+    );
+}
+
+/// Posts the login form from the local address `source`, with more headers. The reply is
+/// returned as it is.
+fn login_from(
+    node: &Node,
+    source: &str,
+    login: &str,
+    password: &str,
+    headers: &[(&str, &str)],
+) -> Reply {
+    let csrf = "A".repeat(32);
+    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
+    let origin = format!("http://127.0.0.1:{}", node.port);
+    let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
+    let mut all = vec![
+        ("Origin", origin.as_str()),
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("Cookie", cookie.as_str()),
+    ];
+    all.extend_from_slice(headers);
+    send_from(
+        source,
+        node.port,
+        "POST",
+        LOGIN_PATH,
+        &all,
+        &format!("login={login}&password={password}&csrf={csrf}&rd=%2F&sig={signature}"),
+    )
+}
+
+/// ForwardAuth from the local address `source`, with more headers.
+fn verify_from(node: &Node, source: &str, session: &str, headers: &[(&str, &str)]) -> u16 {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    let mut all = vec![
+        ("X-Forwarded-Uri", "/app/"),
+        ("X-Forwarded-Method", "GET"),
+        ("Cookie", cookie.as_str()),
+    ];
+    all.extend_from_slice(headers);
+    send_from(source, node.port, "GET", VERIFY_PATH, &all, "").status
+}
+
+/// A URL parser of the URL Standard removes a TAB: `/<TAB>/evil.example/x` would be a link to
+/// another host. The gate refuses to sign such a return target.
+#[test]
+fn the_gate_refuses_a_return_target_with_a_control_byte() {
+    let node = start(Arc::new(Store::open_in_memory()), None);
+    for uri in ["/\t/evil.example/x", "/%09/evil.example/x", "/x\x0b/y"] {
+        let reply = send(
+            node.port,
+            "GET",
+            VERIFY_PATH,
+            &[("X-Forwarded-Uri", uri), ("X-Forwarded-Method", "GET")],
+            "",
+        );
+        assert_eq!(reply.status, 400, "{uri:?}: {:?}", reply.location());
+    }
+    let signature = sign_return_uri(&node.state.signing_secret, "/\t/evil.example/x").unwrap();
+    let root = sign_in(&node, "root", PASSWORD);
+    let reply = page(
+        &node,
+        &root,
+        &format!("{LOGIN_PATH}?rd=%2F%09%2Fevil.example%2Fx&sig={signature}"),
+    );
+    assert_eq!(reply.status, 303);
+    assert_eq!(reply.location(), Some("/"), "a signed bad target goes home");
+}
+
+/// Only a trusted proxy chooses the client address. A direct peer of the port cannot use the
+/// session binding of another address, and cannot use the login limiter of another address.
+#[test]
+fn x_forwarded_for_counts_only_from_a_trusted_proxy() {
+    let node = start(Arc::new(Store::open_in_memory()), None);
+    let victim = [("X-Forwarded-For", "2001:db8::7")];
+    let reply = login_from(&node, "127.0.0.1", "root", PASSWORD, &victim);
+    assert_eq!(reply.status, 303);
+    let root = reply.cookie(&session_cookie_name(&node)).unwrap();
+    assert_eq!(
+        verify_from(&node, "127.0.0.1", &root, &victim),
+        204,
+        "through the proxy"
+    );
+    assert_eq!(
+        verify_from(&node, "127.0.0.2", &root, &victim),
+        302,
+        "a direct peer cannot claim the address of the victim"
+    );
+    assert_eq!(
+        verify_from(
+            &node,
+            "127.0.0.1",
+            &root,
+            &[("X-Forwarded-For", "2001:db8::7, not-an-ip")]
+        ),
+        302,
+        "a broken chain gives the peer"
+    );
+
+    let target = [("X-Forwarded-For", "198.51.100.23")];
+    for _ in 0..5 {
+        let reply = login_from(&node, "127.0.0.2", "root", "wrong-password", &target);
+        assert_eq!(reply.status, 401);
+    }
+    assert_eq!(
+        login_from(&node, "127.0.0.2", "root", "wrong-password", &target).status,
+        429,
+        "the limiter keys the direct peer on its own address"
+    );
+    assert_eq!(
+        login_from(&node, "127.0.0.1", "root", PASSWORD, &target).status,
+        303,
+        "the address behind the proxy is not locked out"
+    );
+}
+
+/// Failures against other logins never use the budget of the superadmin. Failures against the
+/// superadmin login lock only the superadmin.
+#[test]
+fn anonymous_failures_do_not_lock_out_the_superadmin() {
+    let node = start_with(
+        Arc::new(Store::open_in_memory()),
+        None,
+        r#"security { global_login_attempts = 3 login_attempts_per_ip = 1000 }"#,
+    );
+    let root = sign_in(&node, "root", PASSWORD);
+    let reply = post(
+        &node,
+        &root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        "login=alice&password=a-long-password-1",
+    );
+    assert_eq!(reply.status, 303);
+    for login in ["nobody", "alice", "admin", "nobody"] {
+        let reply = login_from(&node, "127.0.0.1", login, "wrong-password", &[]);
+        assert!(
+            matches!(reply.status, 401 | 429),
+            "{login}: {}",
+            reply.status
+        );
+    }
+    assert_eq!(
+        login_from(&node, "127.0.0.1", "nobody", "wrong-password", &[]).status,
+        429,
+        "the global budget of the other logins is used up"
+    );
+    assert_eq!(
+        login_from(&node, "127.0.0.1", "ROOT", PASSWORD, &[]).status,
+        303,
+        "the superadmin still signs in"
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            login_from(&node, "127.0.0.1", "root", "wrong-password", &[]).status,
+            401
+        );
+    }
+    assert_eq!(
+        login_from(&node, "127.0.0.1", "root", PASSWORD, &[]).status,
+        429,
+        "failures against the superadmin lock the superadmin"
+    );
+}
+
+/// Slow sign-in bodies hold at most `server.max_login_body_reads` connections. The others get
+/// `503` at once, and ForwardAuth still gets a connection.
+#[test]
+fn slow_sign_in_bodies_leave_connections_for_forward_auth() {
+    let node = start_custom(
+        Arc::new(Store::open_in_memory()),
+        None,
+        Custom {
+            server: r#"trusted_proxies = ["127.0.0.1/32"] max_connections = 4 max_login_body_reads = 2 body_read_timeout = "20s""#,
+            ..Custom::default()
+        },
+        "",
+    );
+    let head = format!(
+        "POST {LOGIN_PATH} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 64\r\nUser-Agent: {AGENT}\r\n\r\n",
+        port = node.port
+    );
+    let mut slow = Vec::new();
+    for _ in 0..4 {
+        let mut stream = TcpStream::connect(("127.0.0.1", node.port)).unwrap();
+        stream.write_all(head.as_bytes()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(2_000)))
+            .unwrap();
+        slow.push(stream);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut refused = 0;
+    for stream in &mut slow {
+        let mut buffer = [0u8; 64];
+        if let Ok(n) = stream.read(&mut buffer) {
+            if String::from_utf8_lossy(&buffer[..n]).starts_with("HTTP/1.1 503") {
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!(refused, 2, "two bodies are read, the other two are refused");
+    let begun = Instant::now();
+    let reply = send(
+        node.port,
+        "GET",
+        VERIFY_PATH,
+        &[("X-Forwarded-Uri", "/app/"), ("X-Forwarded-Method", "GET")],
+        "",
+    );
+    assert_eq!(reply.status, 302, "ForwardAuth answers");
+    assert!(
+        begun.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        begun.elapsed()
+    );
+    drop(slow);
+}
+
+/// A rotation of the superadmin login, of its password or of the session secret ends the old
+/// superadmin and impersonated sessions, also with a shared database that keeps the sessions
+/// over a restart. The sessions of the database users stay with a shared database.
+#[test]
+fn a_superadmin_rotation_ends_the_old_superadmin_and_impersonated_sessions() {
+    each_backend(|backend| {
+        let store = Arc::new(backend.fresh());
+        let old = start(Arc::clone(&store), Some(Duration::ZERO));
+        let root = sign_in(&old, "root", PASSWORD);
+        let carol = user_without_grant(&old, &root, "carol");
+        let second_root = sign_in(&old, "root", PASSWORD);
+        let reply = post(
+            &old,
+            &second_root,
+            IMPERSONATE_PATH,
+            USERS_TOKEN,
+            "login=carol",
+        );
+        assert_eq!(reply.status, 303, "{:?}", reply.location());
+        let as_carol = reply.cookie(&session_cookie_name(&old)).unwrap();
+        assert_eq!(verify(&old, &as_carol, AGENT), 204);
+
+        let shared = store.is_shared();
+        for (name, custom) in [
+            (
+                "login",
+                Custom {
+                    login: "root2",
+                    ..Custom::default()
+                },
+            ),
+            (
+                "password",
+                Custom {
+                    password: "another-password-for-root",
+                    ..Custom::default()
+                },
+            ),
+            (
+                "session secret",
+                Custom {
+                    session_secret: "fedcba9876543210fedcba9876543210",
+                    ..Custom::default()
+                },
+            ),
+        ] {
+            let new = start_custom(Arc::clone(&store), Some(Duration::ZERO), custom, "");
+            assert_eq!(
+                verify(&new, &root, AGENT),
+                302,
+                "{name}: the old superadmin session"
+            );
+            assert_eq!(
+                page(&new, &root, "/auth/settings").status,
+                302,
+                "{name}: no settings page, the sign-in page"
+            );
+            assert_eq!(
+                verify(&new, &as_carol, AGENT),
+                302,
+                "{name}: the old impersonated session"
+            );
+            assert_eq!(
+                verify(&new, &carol, AGENT),
+                if shared { 204 } else { 302 },
+                "{name}: the session of a database user"
+            );
+        }
+        // The rows of the old generation are gone: the old instance refuses them too.
+        if shared {
+            assert_eq!(verify(&old, &root, AGENT), 302);
+        }
+    });
+}
+
+/// "Log in as" and "Back to superadmin" give no fresh lifetime. The last session ends when the
+/// sign-in with the password would have ended.
+#[test]
+fn impersonation_and_return_keep_the_end_of_the_password_session() {
+    each_backend(|backend| {
+        let node = start(Arc::new(backend.fresh()), Some(Duration::ZERO));
+        let root = sign_in(&node, "root", PASSWORD);
+        let _alice = user_without_grant(&node, &root, "alice");
+        let binding = {
+            let mut headers = HeaderMap::new();
+            headers.insert(USER_AGENT, HeaderValue::from_static(AGENT));
+            transport::binding(
+                node.state.config.session.bind,
+                &headers,
+                Some("127.0.0.1".parse().unwrap()),
+            )
+        };
+        let end = node
+            .state
+            .sessions
+            .validate(&root, &binding)
+            .unwrap()
+            .expires_at;
+        let ttl = node.state.config.session.ttl.as_secs();
+        std::thread::sleep(Duration::from_millis(1_100));
+
+        let reply = post(&node, &root, IMPERSONATE_PATH, USERS_TOKEN, "login=alice");
+        assert_eq!(reply.status, 303);
+        let as_alice = reply.cookie(&session_cookie_name(&node)).unwrap();
+        let reply = post(&node, &as_alice, IMPERSONATE_END_PATH, USERS_TOKEN, "");
+        assert_eq!(reply.status, 303);
+        let back = reply.cookie(&session_cookie_name(&node)).unwrap();
+        let max_age: u64 = reply
+            .headers
+            .iter()
+            .filter(|(name, _)| name == "set-cookie")
+            .find_map(|(_, value)| {
+                value
+                    .split("; ")
+                    .find_map(|part| part.strip_prefix("Max-Age="))
+                    .map(|n| n.parse().unwrap())
+            })
+            .unwrap();
+        assert!(
+            max_age < ttl,
+            "Max-Age {max_age} must be less than the ttl {ttl}"
+        );
+        assert_eq!(
+            node.state
+                .sessions
+                .validate(&back, &binding)
+                .unwrap()
+                .expires_at,
+            end,
+            "the session ends with the password session"
         );
     });
 }

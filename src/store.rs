@@ -392,6 +392,7 @@ impl Store {
     }
 
     /// Records a session and its line of the history. Returns `false` when the limit of live sessions is reached.
+    /// `generation` is the credential generation of the superadmin of this instance.
     pub fn session_insert(
         &self,
         digest: &[u8; 32],
@@ -399,21 +400,33 @@ impl Store {
         session: &SharedSession,
         start: &SessionStart,
         max_active: usize,
+        generation: &[u8; 32],
     ) -> Result<bool, String> {
         self.shared()?
-            .session_insert(digest, binding, session, start, max_active)
+            .session_insert(digest, binding, session, start, max_active, generation)
     }
 
     /// Returns the live session of `digest` for `binding`. Its idle timer is renewed to `now`.
+    /// A superadmin or impersonated session must carry `generation`.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
         idle: Duration,
+        generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.shared()?
-            .session_touch(digest, binding, now, idle.as_secs() as i64)
+            .session_touch(digest, binding, now, idle.as_secs() as i64, generation)
+    }
+
+    /// Ends the superadmin and impersonated sessions of every other credential generation.
+    /// Returns the identifiers that this call ended.
+    pub fn sessions_end_other_generations(
+        &self,
+        generation: &[u8; 32],
+    ) -> Result<Vec<u64>, String> {
+        self.shared()?.sessions_end_other_generations(generation)
     }
 
     /// Ends one session. The session is returned only when this call ends it.
@@ -974,6 +987,8 @@ mod tests {
     const HERE: [u8; 32] = [7; 32];
     const ELSEWHERE: [u8; 32] = [8; 32];
     const IDLE: Duration = Duration::from_secs(1800);
+    /// The credential generation of the superadmin in these tests.
+    const GEN: [u8; 32] = [9; 32];
 
     fn digest(n: u8) -> [u8; 32] {
         [n; 32]
@@ -1021,7 +1036,14 @@ mod tests {
         let store = pg.fresh();
         let session = shared_session(1, Some("alice"), NOW + 3600);
         assert!(store
-            .session_insert(&digest(1), &HERE, &session, &started(1, "alice", NOW), 10)
+            .session_insert(
+                &digest(1),
+                &HERE,
+                &session,
+                &started(1, "alice", NOW),
+                10,
+                &GEN
+            )
             .unwrap());
         let snap = store.snapshot(&[("alice".into(), false)], NOW).unwrap();
         assert_eq!(
@@ -1032,26 +1054,32 @@ mod tests {
         assert_eq!(snap.accounts[0].recent[0].ended_at, None);
 
         let found = store
-            .session_touch(&digest(1), &HERE, NOW + 10, IDLE)
+            .session_touch(&digest(1), &HERE, NOW + 10, IDLE, &GEN)
             .unwrap();
         assert_eq!(found, Some(session));
         assert_eq!(
             store
-                .session_touch(&digest(1), &ELSEWHERE, NOW + 11, IDLE)
+                .session_touch(&digest(1), &ELSEWHERE, NOW + 11, IDLE, &GEN)
                 .unwrap(),
             None,
             "another binding finds nothing"
         );
         assert_eq!(
             store
-                .session_touch(&digest(2), &HERE, NOW + 11, IDLE)
+                .session_touch(&digest(2), &HERE, NOW + 11, IDLE, &GEN)
                 .unwrap(),
             None
         );
         // The refused attempt did not renew the idle timer. The session is unused since NOW + 10.
         assert_eq!(
             store
-                .session_touch(&digest(1), &HERE, NOW + 10 + 100, Duration::from_secs(60))
+                .session_touch(
+                    &digest(1),
+                    &HERE,
+                    NOW + 10 + 100,
+                    Duration::from_secs(60),
+                    &GEN
+                )
                 .unwrap(),
             None,
             "idle for 100 s against a limit of 60"
@@ -1069,10 +1097,17 @@ mod tests {
         let (first, second) = pair(&pg);
         let session = shared_session(1, Some("alice"), NOW + 3600);
         first
-            .session_insert(&digest(1), &HERE, &session, &started(1, "alice", NOW), 10)
+            .session_insert(
+                &digest(1),
+                &HERE,
+                &session,
+                &started(1, "alice", NOW),
+                10,
+                &GEN,
+            )
             .unwrap();
         assert!(second
-            .session_touch(&digest(1), &HERE, NOW + 1, IDLE)
+            .session_touch(&digest(1), &HERE, NOW + 1, IDLE, &GEN)
             .unwrap()
             .is_some());
         assert!(first.session_delete(&digest(1)).unwrap().is_some());
@@ -1081,7 +1116,7 @@ mod tests {
             "already ended"
         );
         assert!(second
-            .session_touch(&digest(1), &HERE, NOW + 2, IDLE)
+            .session_touch(&digest(1), &HERE, NOW + 2, IDLE, &GEN)
             .unwrap()
             .is_none());
     }
@@ -1098,6 +1133,7 @@ mod tests {
                     &shared_session(u64::from(n), Some("alice"), expires_at),
                     &started(u64::from(n), "alice", NOW),
                     10,
+                    &GEN,
                 )
                 .unwrap()
         };
@@ -1105,7 +1141,7 @@ mod tests {
         insert(2, NOW + 3600); // goes idle
         insert(3, NOW + 3600);
         second
-            .session_touch(&digest(3), &HERE, NOW + 100, IDLE)
+            .session_touch(&digest(3), &HERE, NOW + 100, IDLE, &GEN)
             .unwrap(); // kept alive
         let mut ended = first
             .sessions_expire(NOW + 60, Duration::from_secs(90))
@@ -1144,6 +1180,7 @@ mod tests {
                     &shared_session(u64::from(n), None, at + 100),
                     &started(u64::from(n), "root", at),
                     2,
+                    &GEN,
                 )
                 .unwrap()
         };
@@ -1151,6 +1188,55 @@ mod tests {
         assert!(insert(2, NOW));
         assert!(!insert(3, NOW), "two are live");
         assert!(insert(3, NOW + 200), "the first two have run out by then");
+    }
+
+    /// A superadmin or impersonated row is valid only with the credential generation that it
+    /// carries. The rows of the database users do not depend on it.
+    #[test]
+    fn superadmin_rows_are_bound_to_the_credential_generation() {
+        let Some(pg) = postgres() else { return };
+        let store = pg.fresh();
+        let other = [3; 32];
+        let mut impersonated = shared_session(2, Some("alice"), NOW + 3600);
+        impersonated.impersonated = true;
+        for (n, session) in [
+            (1u8, shared_session(1, None, NOW + 3600)),
+            (2, impersonated),
+            (3, shared_session(3, Some("bob"), NOW + 3600)),
+        ] {
+            assert!(store
+                .session_insert(
+                    &digest(n),
+                    &HERE,
+                    &session,
+                    &started(u64::from(n), "x", NOW),
+                    10,
+                    &GEN
+                )
+                .unwrap());
+        }
+        for n in [1, 2] {
+            assert!(store
+                .session_touch(&digest(n), &HERE, NOW + 1, IDLE, &other)
+                .unwrap()
+                .is_none());
+            assert!(store
+                .session_touch(&digest(n), &HERE, NOW + 1, IDLE, &GEN)
+                .unwrap()
+                .is_some());
+        }
+        assert!(store
+            .session_touch(&digest(3), &HERE, NOW + 1, IDLE, &other)
+            .unwrap()
+            .is_some());
+        let mut ended = store.sessions_end_other_generations(&other).unwrap();
+        ended.sort();
+        assert_eq!(ended, [1, 2]);
+        assert!(store
+            .sessions_end_other_generations(&other)
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.sessions_count().unwrap(), 1);
     }
 
     #[test]
@@ -1170,6 +1256,7 @@ mod tests {
                     &shared_session(u64::from(n), login, NOW + 100),
                     &started(u64::from(n), login.unwrap_or("root"), NOW),
                     10,
+                    &GEN,
                 )
                 .unwrap();
         }
@@ -1201,6 +1288,7 @@ mod tests {
                 &shared_session(3, Some("alice"), NOW + 100),
                 &started(3, "alice", 100),
                 10,
+                &GEN,
             )
             .unwrap();
         assert_eq!(store.close_lost_sessions(500, "restart").unwrap(), 1);

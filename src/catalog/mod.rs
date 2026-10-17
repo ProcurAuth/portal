@@ -9,11 +9,12 @@
 
 mod labels;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+pub use labels::closed_prefix;
 pub use labels::parse as parse_labels;
 
-use crate::access::ExcludeRule;
+use crate::access::{ExcludeRule, Segments};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Health {
@@ -70,7 +71,8 @@ pub struct GateService {
     pub exclude: Vec<ExcludeRule>,
 }
 
-/// The services that own one path prefix. Usually, there is one service.
+/// The services that own one path prefix. Usually, there is one service. An entry without a
+/// service is a closed prefix: only the superadmin passes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateEntry {
     pub prefix: Vec<String>,
@@ -85,6 +87,9 @@ pub struct Catalog {
     /// Path prefixes of the services with a local `href`, longest first. `/auth/verify` matches
     /// a request against these prefixes.
     gate: Vec<GateEntry>,
+    /// True when the snapshot holds every service of every source. The snapshot of the start is
+    /// not complete. Discovery sets the value for each round.
+    complete: bool,
 }
 
 impl Catalog {
@@ -93,17 +98,41 @@ impl Catalog {
     ///
     /// The order is deterministic. Services are sorted by weight, then by name. Groups are sorted
     /// by their lightest service, then by name. Duplicate ids keep the first service in input order.
+    /// The result is complete. Discovery marks a snapshot that misses a source.
     pub fn build(services: Vec<Service>, problems: Vec<String>) -> Self {
-        let mut seen = HashSet::new();
+        Self::build_with_closed(services, problems, Vec::new())
+    }
+
+    /// The same as [`Catalog::build`]. Each prefix of `closed` stays closed in the gate: only the
+    /// superadmin passes it. A workload with unusable labels gives such a prefix.
+    ///
+    /// A duplicate id with another `href` also gives a closed prefix. The catalogue keeps the
+    /// first service, but Traefik still routes the `href` of the second one.
+    pub fn build_with_closed(
+        services: Vec<Service>,
+        mut problems: Vec<String>,
+        mut closed: Vec<Segments>,
+    ) -> Self {
+        let mut seen: HashMap<String, String> = HashMap::new();
         let mut duplicates = 0;
         let mut by_group: Vec<Group> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
 
         for service in services {
-            if !seen.insert(service.id.clone()) {
+            if let Some(first_href) = seen.get(&service.id) {
                 duplicates += 1;
+                if *first_href != service.href {
+                    if let Some(prefix) = crate::access::href_prefix(&service.href) {
+                        closed.push(prefix);
+                    }
+                    problems.push(format!(
+                        "{}: the id is already used with the href {first_href}; {} stays closed",
+                        service.id, service.href
+                    ));
+                }
                 continue;
             }
+            seen.insert(service.id.clone(), service.href.clone());
             let slot = *index.entry(service.group.clone()).or_insert_with(|| {
                 by_group.push(Group {
                     name: service.group.clone(),
@@ -124,13 +153,24 @@ impl Catalog {
             (lightest, g.name.to_lowercase())
         });
 
-        let gate = build_gate(&by_group);
+        let gate = build_gate(&by_group, closed);
         Self {
             groups: by_group,
             problems,
             duplicates,
             gate,
+            complete: true,
         }
+    }
+
+    /// Tells whether the snapshot holds every service of every source. The gate needs a complete
+    /// snapshot to know that a path has no owner.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub fn set_complete(&mut self, complete: bool) {
+        self.complete = complete;
     }
 
     /// The same catalogue without the services that `keep` refuses. Groups that become empty are
@@ -159,6 +199,7 @@ impl Catalog {
             },
             duplicates: self.duplicates,
             gate: Vec::new(),
+            complete: self.complete,
         }
     }
 
@@ -186,7 +227,7 @@ impl Catalog {
     }
 }
 
-fn build_gate(groups: &[Group]) -> Vec<GateEntry> {
+fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
     let mut entries: Vec<GateEntry> = Vec::new();
     for service in groups.iter().flat_map(|g| g.services.iter()) {
         let Some(prefix) = crate::access::href_prefix(&service.href) else {
@@ -202,6 +243,15 @@ fn build_gate(groups: &[Group]) -> Vec<GateEntry> {
                 prefix,
                 services: vec![gate_service],
             }),
+        }
+    }
+    // A closed prefix that a listed service also owns stays with that service.
+    for prefix in closed {
+        if !entries.iter().any(|e| e.prefix == prefix) {
+            entries.push(GateEntry {
+                prefix,
+                services: Vec::new(),
+            });
         }
     }
     entries.sort_by(|a, b| {
@@ -296,6 +346,37 @@ mod tests {
         );
         assert_eq!(catalog.service_count(), 1);
         assert_eq!(catalog.duplicates(), 2);
+    }
+
+    /// Two workloads with one id and two different hrefs: the second one is dropped. Its prefix
+    /// must stay closed, because Traefik still routes it.
+    #[test]
+    fn a_duplicate_id_with_another_href_keeps_the_dropped_prefix_closed() {
+        let first = Service {
+            id: "monitoring-grafana".into(),
+            ..bound("Elsewhere", "/elsewhere/")
+        };
+        let second = Service {
+            id: "monitoring-grafana".into(),
+            ..bound("Grafana", "/grafana/")
+        };
+        let catalog = Catalog::build(vec![first, second], Vec::new());
+        assert_eq!(catalog.service_count(), 1);
+        assert_eq!(catalog.duplicates(), 1);
+        let entry = catalog
+            .owner(&segments(&["grafana", "d", "1"]))
+            .expect("the dropped prefix stays in the gate");
+        assert!(entry.services.is_empty(), "nobody owns it: it is closed");
+        assert!(
+            catalog.problems().iter().any(|p| p.contains("/grafana/")),
+            "{:?}",
+            catalog.problems()
+        );
+        let replicas = Catalog::build(
+            vec![bound("Grafana", "/grafana/"), bound("Grafana", "/grafana/")],
+            Vec::new(),
+        );
+        assert!(replicas.problems().is_empty(), "replicas are not a problem");
     }
 
     #[test]

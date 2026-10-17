@@ -283,7 +283,15 @@ pub enum Decision {
 }
 
 /// The gate. `grants` is `None` for the superadmin.
+///
+/// A path that no service owns is open to each signed-in user. This rule needs a complete
+/// catalogue: an incomplete snapshot cannot prove that a path has no owner. Thus, until the
+/// catalogue is complete, only the superadmin passes. A closed prefix (an entry without a
+/// service) also lets only the superadmin pass.
 pub fn decide(catalog: &Catalog, grants: Option<&[Grant]>, uri: &str) -> Decision {
+    if grants.is_some() && !catalog.is_complete() {
+        return Decision::Deny;
+    }
     let readings = path_readings(uri);
     let Some(readings) = readings else {
         return if grants.is_none() {
@@ -299,6 +307,8 @@ pub fn decide(catalog: &Catalog, grants: Option<&[Grant]>, uri: &str) -> Decisio
         };
         let allowed = owner.services.iter().find(|s| may_open(grants, &s.id));
         match allowed {
+            // A closed prefix: the superadmin passes, and the request has no service.
+            None if grants.is_none() => {}
             None => return Decision::Deny,
             Some(s) if index == 0 => service = Some(s.id.clone()),
             Some(_) => {}
@@ -387,6 +397,57 @@ mod tests {
         );
         let backslash = path_readings("/grafana%5C..%5Cclickhouse").unwrap();
         assert!(backslash.contains(&vec!["clickhouse".to_string()]));
+    }
+
+    /// A snapshot that has not seen every source cannot prove that a path is unowned. Until the
+    /// catalogue is complete, only the superadmin passes the gate.
+    #[test]
+    fn an_incomplete_catalogue_lets_only_the_superadmin_through() {
+        let start = Catalog::default();
+        assert!(
+            !start.is_complete(),
+            "the snapshot of the start is not complete"
+        );
+        for uri in ["/grafana/d/1", "/unowned/asset.js"] {
+            assert_eq!(decide(&start, Some(&[]), uri), Decision::Deny, "{uri}");
+            assert_eq!(
+                decide(&start, Some(&grants(&["grafana"])), uri),
+                Decision::Deny,
+                "{uri}"
+            );
+            assert!(matches!(decide(&start, None, uri), Decision::Allow { .. }));
+        }
+        let mut partial = catalog();
+        partial.set_complete(false);
+        assert_eq!(
+            decide(&partial, Some(&grants(&["grafana"])), "/grafana/d/1"),
+            Decision::Deny
+        );
+        assert!(catalog().is_complete(), "a built catalogue is complete");
+    }
+
+    /// A workload with unusable labels, or a dropped duplicate id, keeps its prefix closed.
+    #[test]
+    fn a_closed_prefix_opens_only_to_the_superadmin() {
+        let closed = Catalog::build_with_closed(
+            vec![svc("Notes", "/notes/")],
+            Vec::new(),
+            vec![href_prefix("/grafana/").unwrap()],
+        );
+        assert_eq!(decide(&closed, Some(&[]), "/grafana/d/1"), Decision::Deny);
+        assert_eq!(
+            decide(&closed, Some(&grants(&["notes"])), "/grafana/d/1"),
+            Decision::Deny
+        );
+        assert_eq!(
+            decide(&closed, None, "/grafana/d/1"),
+            Decision::Allow { service: None }
+        );
+        assert!(matches!(
+            decide(&closed, Some(&grants(&["notes"])), "/notes/x"),
+            Decision::Allow { .. }
+        ));
+        assert_eq!(excluded(&closed, Some("GET"), "/grafana/api/health"), None);
     }
 
     #[test]

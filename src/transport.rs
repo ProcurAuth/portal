@@ -80,6 +80,100 @@ pub fn binding(mode: SessionBind, headers: &HeaderMap, client_ip: Option<IpAddr>
     hasher.finalize().into()
 }
 
+/// An IP network: an address and a prefix length, such as `10.42.0.0/16`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    /// Reads `address/prefix`. The address must be the first address of the network: the bits
+    /// after the prefix are zero. The function does not change a value to make it fit.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (address, prefix) = text
+            .split_once('/')
+            .ok_or_else(|| "expected an address, '/' and a prefix length".to_string())?;
+        let network: IpAddr = address
+            .parse()
+            .map_err(|_| format!("{address:?} is not an IP address"))?;
+        let max = if network.is_ipv4() { 32 } else { 128 };
+        let prefix: u8 = match prefix.parse::<u8>() {
+            Ok(n) if n <= max && (prefix == "0" || !prefix.starts_with('0')) => n,
+            _ => {
+                return Err(format!(
+                    "the prefix length must be a number from 0 to {max}"
+                ))
+            }
+        };
+        let cidr = Self { network, prefix };
+        if cidr.masked(network) != network {
+            return Err(format!(
+                "{address} has bits set after the prefix /{prefix}: write the first address of the network"
+            ));
+        }
+        Ok(cidr)
+    }
+
+    /// Tells whether `ip` is in the network. An IPv4 address in IPv6 form (`::ffff:a.b.c.d`)
+    /// counts as the IPv4 address.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
+        ip.is_ipv4() == self.network.is_ipv4() && self.masked(ip) == self.network
+    }
+
+    fn masked(&self, ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V4(v4) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                IpAddr::V4((u32::from(v4) & mask).into())
+            }
+            IpAddr::V6(v6) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                IpAddr::V6((u128::from(v6) & mask).into())
+            }
+        }
+    }
+}
+
+/// The address of the client.
+///
+/// The server reads `X-Forwarded-For` only when the TCP peer is a trusted proxy
+/// (`server.trusted_proxies`). The function then reads the header from the right. It skips the
+/// addresses of trusted proxies and returns the first address that is not trusted. If every
+/// address is trusted, it returns the leftmost one. In every other case it returns the peer:
+/// a peer that is not trusted, no header, two headers, or an entry that is not an address.
+pub fn client_ip(headers: &HeaderMap, peer: IpAddr, trusted: &[Cidr]) -> IpAddr {
+    let peer = peer.to_canonical();
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|net| net.contains(ip));
+    if !is_trusted(peer) {
+        return peer;
+    }
+    let mut values = headers.get_all("x-forwarded-for").iter();
+    let (Some(value), None) = (values.next(), values.next()) else {
+        return peer;
+    };
+    let Ok(text) = value.to_str() else {
+        return peer;
+    };
+    let mut leftmost = peer;
+    for part in text.rsplit(',') {
+        let Ok(ip) = part.trim().parse::<IpAddr>() else {
+            return peer;
+        };
+        let ip = ip.to_canonical();
+        if !is_trusted(ip) {
+            return ip;
+        }
+        leftmost = ip;
+    }
+    leftmost
+}
+
 fn user_agent(headers: &HeaderMap) -> &[u8] {
     let value = headers
         .get(hyper::header::USER_AGENT)
@@ -114,6 +208,100 @@ mod tests {
             ("x-forwarded-proto", "https"),
             ("x-forwarded-proto", "https")
         ])));
+    }
+
+    fn nets(list: &[&str]) -> Vec<Cidr> {
+        list.iter().map(|n| Cidr::parse(n).unwrap()).collect()
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_network_is_written_exactly() {
+        let net = Cidr::parse("10.42.0.0/16").unwrap();
+        assert!(net.contains(ip("10.42.3.17")));
+        assert!(net.contains(ip("::ffff:10.42.3.17")));
+        assert!(!net.contains(ip("10.43.0.1")));
+        assert!(Cidr::parse("0.0.0.0/0")
+            .unwrap()
+            .contains(ip("203.0.113.9")));
+        assert!(Cidr::parse("2001:db8::/32")
+            .unwrap()
+            .contains(ip("2001:db8::7")));
+        assert!(!Cidr::parse("2001:db8::/32")
+            .unwrap()
+            .contains(ip("10.0.0.1")));
+        for bad in [
+            "10.42.0.1/16",
+            "10.42.0.0",
+            "10.42.0.0/33",
+            "10.42.0.0/016",
+            "10.42.0.0/x",
+            "host/8",
+            "::/129",
+        ] {
+            assert!(Cidr::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Only a trusted proxy chooses the client address. A direct peer cannot choose it with
+    /// `X-Forwarded-For`, so it cannot use the session binding or the login limiter of another
+    /// address.
+    #[test]
+    fn x_forwarded_for_counts_only_from_a_trusted_peer() {
+        let trusted = nets(&["10.42.0.0/16"]);
+        let xff = |value: &'static str| headers(&[("x-forwarded-for", value)]);
+        assert_eq!(
+            client_ip(&xff("2001:db8::7"), ip("192.0.2.10"), &trusted),
+            ip("192.0.2.10"),
+            "the peer is not trusted"
+        );
+        assert_eq!(
+            client_ip(&xff("2001:db8::7"), ip("10.42.1.5"), &trusted),
+            ip("2001:db8::7")
+        );
+        assert_eq!(
+            client_ip(
+                &xff("198.51.100.1, 2001:db8::7, 10.42.0.9"),
+                ip("10.42.1.5"),
+                &trusted
+            ),
+            ip("2001:db8::7"),
+            "the first address from the right that is not trusted"
+        );
+        assert_eq!(
+            client_ip(&xff("10.42.0.8, 10.42.0.9"), ip("10.42.1.5"), &trusted),
+            ip("10.42.0.8"),
+            "every address is trusted: the leftmost one"
+        );
+        assert_eq!(
+            client_ip(&xff("2001:db8::7, not-an-ip"), ip("10.42.1.5"), &trusted),
+            ip("10.42.1.5"),
+            "a broken chain gives the peer"
+        );
+        assert_eq!(
+            client_ip(&headers(&[]), ip("10.42.1.5"), &trusted),
+            ip("10.42.1.5")
+        );
+        assert_eq!(
+            client_ip(
+                &headers(&[
+                    ("x-forwarded-for", "192.0.2.1"),
+                    ("x-forwarded-for", "192.0.2.2")
+                ]),
+                ip("10.42.1.5"),
+                &trusted
+            ),
+            ip("10.42.1.5"),
+            "two headers give the peer"
+        );
+        assert_eq!(
+            client_ip(&xff("2001:db8::7"), ip("10.42.1.5"), &[]),
+            ip("10.42.1.5"),
+            "no trusted proxy: the header never counts"
+        );
     }
 
     #[test]

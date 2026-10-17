@@ -67,6 +67,9 @@ const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
+/// The budget of the global limiter for the sign-ins that name the superadmin. Failures against
+/// other logins never use it. Anonymous failures thus cannot refuse the sign-in of the superadmin.
+const SUPERADMIN_RATE_LIMIT_KEY: &str = "superadmin";
 /// With a shared database, this sets the maximum rate at which a request reads the accounts again.
 /// The trigger is a login that the directory does not know.
 const UNKNOWN_LOGIN_REFRESH_GAP: Duration = Duration::from_secs(1);
@@ -98,6 +101,9 @@ pub struct SuperAdmin {
     /// The login in lower case. The login of a request is compared with this value.
     pub login: String,
     pub password_hash: String,
+    /// The credential generation (see [`crate::crypto::superadmin_generation`]). With a shared
+    /// database, a superadmin or impersonated session of another generation is refused.
+    pub generation: [u8; 32],
 }
 
 pub struct AppState {
@@ -114,6 +120,9 @@ pub struct AppState {
     pub ip_limiter: RateLimiter,
     pub global_limiter: RateLimiter,
     pub password_gate: Arc<Semaphore>,
+    /// The sign-in bodies that the server reads at the same time (`server.max_login_body_reads`).
+    /// Slow bodies cannot take every connection that ForwardAuth needs.
+    pub login_body_gate: Arc<Semaphore>,
     pub metrics: Metrics,
     /// The current service catalog. Discovery replaces the whole snapshot.
     pub catalog: RwLock<Arc<Catalog>>,
@@ -173,7 +182,10 @@ impl AppState {
             Arc::clone(&tracker),
         );
         if store.is_shared() {
-            sessions = sessions.shared(Arc::clone(&store));
+            sessions = sessions.shared(Arc::clone(&store), superadmin.generation);
+            // A new superadmin login, password or session secret ends the old superadmin and
+            // impersonated sessions on every instance.
+            sessions.end_other_generations();
         }
         let users = Directory::new(store.load_users()?, config.users.max_users);
         let dummy_hash = hash_password(b"a password nobody has chosen")?;
@@ -183,14 +195,16 @@ impl AppState {
                 config.security.login_lockout,
                 config.security.max_rate_limit_entries,
             ),
+            // Two budgets: one for the superadmin login, one for every other login.
             global_limiter: RateLimiter::new(
                 config.security.global_login_window,
                 config.security.global_login_lockout,
-                1,
+                2,
             ),
             password_gate: Arc::new(Semaphore::new(
                 config.security.max_concurrent_password_checks,
             )),
+            login_body_gate: Arc::new(Semaphore::new(config.server.max_login_body_reads)),
             metrics: Metrics::new(),
             catalog: RwLock::new(Arc::new(Catalog::default())),
             discovery: Arc::new(discovery::Stats::default()),
@@ -396,7 +410,11 @@ async fn handle_request(
         .to_string();
     let path = request.uri().path().to_string();
     let route_metric = route_metric_label(&state, &path);
-    let client_ip = client_ip(request.headers(), remote_addr.ip());
+    let client_ip = Some(transport::client_ip(
+        request.headers(),
+        remote_addr.ip(),
+        &state.config.server.trusted_proxies,
+    ));
     let client = Client::new(&state, request.headers(), client_ip);
 
     let response = if state.config.metrics.enabled
@@ -1211,13 +1229,42 @@ async fn handle_login_post(
     .map(str::to_string);
     let headers = request.headers().clone();
 
-    let body = match read_limited_body(
+    // An anonymous client can send a sign-in body slowly. Each slow body holds a connection for up
+    // to `server.body_read_timeout`. A bounded number of bodies is read at once, so these requests
+    // never hold every connection that ForwardAuth needs. The others are refused at once.
+    let Ok(body_permit) = Arc::clone(&state.login_body_gate).try_acquire_owned() else {
+        state.metrics.login_body_rejected();
+        log(
+            state,
+            LogLevel::Warn,
+            "login_body_capacity_reached",
+            &[
+                (
+                    "client_ip",
+                    client_ip
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                ),
+                (
+                    "max_login_body_reads",
+                    state.config.server.max_login_body_reads.to_string(),
+                ),
+            ],
+        );
+        let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n");
+        if set_dynamic_header(&mut response, RETRY_AFTER, "1").is_err() {
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+        }
+        return response;
+    };
+    let body = read_limited_body(
         request.into_body(),
         state.config.server.max_body_bytes,
         state.config.server.body_read_timeout,
     )
-    .await
-    {
+    .await;
+    drop(body_permit);
+    let body = match body {
         Ok(v) => Zeroizing::new(v),
         Err(BodyReadError::TooLarge) => {
             state.metrics.login_invalid_request();
@@ -1265,10 +1312,22 @@ async fn handle_login_post(
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unknown".into());
     let ip_key = format!("ip:{client_ip_text}");
+    // The global limiter has a separate budget for the superadmin login.
+    let global_key = if names_superadmin(state, &login_input) {
+        SUPERADMIN_RATE_LIMIT_KEY
+    } else {
+        GLOBAL_RATE_LIMIT_KEY
+    };
 
-    if let Some(response) =
-        login_rate_limit_response(state, client.https, &ip_key, &client_ip_text, &rd, &sig)
-    {
+    if let Some(response) = login_rate_limit_response(
+        state,
+        client.https,
+        &ip_key,
+        global_key,
+        &client_ip_text,
+        &rd,
+        &sig,
+    ) {
         return response;
     }
 
@@ -1282,9 +1341,15 @@ async fn handle_login_post(
 
     // Requests can wait in a queue behind the Argon2 semaphore. Check again after the request gets the permit.
     // This check stops a burst that the portal admitted before the first failures were recorded. Such a burst cannot drain the expensive password-check budget afterwards.
-    if let Some(response) =
-        login_rate_limit_response(state, client.https, &ip_key, &client_ip_text, &rd, &sig)
-    {
+    if let Some(response) = login_rate_limit_response(
+        state,
+        client.https,
+        &ip_key,
+        global_key,
+        &client_ip_text,
+        &rd,
+        &sig,
+    ) {
         drop(permit);
         return response;
     }
@@ -1325,7 +1390,7 @@ async fn handle_login_post(
         }
         if state.config.security.global_login_rate_limit_enabled {
             state.global_limiter.failure(
-                GLOBAL_RATE_LIMIT_KEY.to_string(),
+                global_key.to_string(),
                 state.config.security.global_login_attempts,
             );
         }
@@ -1393,6 +1458,8 @@ async fn handle_login_post(
                 impersonated: false,
                 ip: ip_text(client),
                 user_agent: user_agent_text(&headers),
+                // A sign-in with the password gets the full `session.ttl`.
+                not_after: None,
             },
         ) {
             Ok(v) => v,
@@ -1425,7 +1492,12 @@ async fn handle_login_post(
     );
 
     let mut response = redirect_response(StatusCode::SEE_OTHER, &rd);
-    let cookie = session_cookie_header(state, client, token.as_str());
+    let cookie = session_cookie_header(
+        state,
+        client,
+        token.as_str(),
+        state.config.session.ttl.as_secs(),
+    );
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err()
         || append_dynamic_header(
             &mut response,
@@ -1476,6 +1548,12 @@ impl Who {
     }
 }
 
+/// Whether the typed login names the superadmin. The comparison is the one of [`identify`].
+fn names_superadmin(state: &AppState, typed: &str) -> bool {
+    let login = typed.trim().to_ascii_lowercase();
+    login.len() <= 128 && constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes())
+}
+
 fn identify(state: &AppState, typed: &str) -> Who {
     // Convert the login to lower case and trim it, as the logins are stored. A name far longer than any login is unknown.
     let login = typed.trim().to_ascii_lowercase();
@@ -1494,8 +1572,13 @@ fn identify(state: &AppState, typed: &str) -> Who {
     .map_or(Who::Unknown, |record| Who::User(login, record))
 }
 
-/// The `Set-Cookie` value of a session.
-fn session_cookie_header(state: &AppState, client: &Client, token: &str) -> Zeroizing<String> {
+/// The `Set-Cookie` value of a session. `max_age_secs` is the time left before the session ends.
+fn session_cookie_header(
+    state: &AppState,
+    client: &Client,
+    token: &str,
+    max_age_secs: u64,
+) -> Zeroizing<String> {
     Zeroizing::new(format!(
         "{}={}; {}",
         transport::session_cookie_name(&state.config.session.cookie_name, client.https),
@@ -1503,15 +1586,19 @@ fn session_cookie_header(state: &AppState, client: &Client, token: &str) -> Zero
         transport::cookie_attributes(
             client.https,
             state.config.session.same_site.as_str(),
-            state.config.session.ttl.as_secs(),
+            max_age_secs,
         ),
     ))
 }
 
+/// The refusal of a sign-in that a limiter blocks. `global_key` selects the budget of the global
+/// limiter: the superadmin login has its own budget.
+#[allow(clippy::too_many_arguments)]
 fn login_rate_limit_response(
     state: &AppState,
     https: bool,
     ip_key: &str,
+    global_key: &str,
     client_ip_text: &str,
     rd: &str,
     sig: &str,
@@ -1544,17 +1631,17 @@ fn login_rate_limit_response(
     }
 
     if state.config.security.global_login_rate_limit_enabled {
-        if let Err(wait) = state.global_limiter.check(
-            GLOBAL_RATE_LIMIT_KEY,
-            state.config.security.global_login_attempts,
-        ) {
+        if let Err(wait) = state
+            .global_limiter
+            .check(global_key, state.config.security.global_login_attempts)
+        {
             state.metrics.login_rate_limited_global();
             log(
                 state,
                 LogLevel::Warn,
                 "login_rate_limited",
                 &[
-                    ("scope", "global".to_string()),
+                    ("scope", global_key.to_string()),
                     ("client_ip", client_ip_text.to_string()),
                     ("retry_after_seconds", wait.as_secs().max(1).to_string()),
                 ],
@@ -2407,6 +2494,9 @@ async fn handle_impersonate_end(
 
 /// Opens a session for `principal` and sets its cookie on `response`. Only after that, the function ends the current
 /// session. If a failure occurs, the browser keeps the session that it had.
+///
+/// The new session ends when the current session would have ended. A switch never gives a fresh
+/// `session.ttl`: only a sign-in with the password does.
 #[allow(clippy::too_many_arguments)]
 fn switch_session(
     state: &AppState,
@@ -2426,6 +2516,7 @@ fn switch_session(
             impersonated,
             ip: ip_text(client),
             user_agent: user_agent_text(headers),
+            not_after: Some(current.session.expires_at),
         },
     ) {
         Ok(token) => Zeroizing::new(token),
@@ -2446,7 +2537,13 @@ fn switch_session(
             );
         }
     };
-    let cookie = session_cookie_header(state, client, token.as_str());
+    let left = current.session.expires_at.saturating_sub(unix_now()).max(0) as u64;
+    let cookie = session_cookie_header(
+        state,
+        client,
+        token.as_str(),
+        left.min(state.config.session.ttl.as_secs()),
+    );
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err() {
         state.sessions.revoke(token.as_str(), EndReason::Revoked);
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
@@ -2572,17 +2669,6 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str, max_header: usize) -> Op
         found = Some(value);
     }
     found
-}
-
-fn client_ip(headers: &HeaderMap, remote_ip: IpAddr) -> Option<IpAddr> {
-    if let Ok(Some(xff)) = unique_header_str(headers, "x-forwarded-for") {
-        for part in xff.rsplit(',') {
-            if let Ok(ip) = part.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-    Some(remote_ip)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

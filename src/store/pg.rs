@@ -127,6 +127,12 @@ ALTER TABLE user_grants DROP CONSTRAINT user_grants_pkey;
 ALTER TABLE user_grants
   ADD PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id);
 ",
+    "
+-- Version 4: the credential generation of the superadmin: an HMAC under the session secret of the
+-- superadmin login and password. A superadmin or impersonated session is valid only while its row
+-- carries the generation of the instance. The rows of version 3 have no generation: they end.
+ALTER TABLE sessions ADD COLUMN admin_generation BYTEA;
+",
 ];
 
 /// The grants of the rows of `user_grants`. A row that is not a valid grant stops the read.
@@ -806,13 +812,16 @@ impl Pg {
         session: &SharedSession,
         start: &SessionStart,
         max_active: usize,
+        generation: &[u8; 32],
     ) -> Result<bool, String> {
         self.run(|c| {
             let mut tx = c.transaction()?;
             let inserted = tx.execute(
                 "INSERT INTO sessions
-                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
-                 SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint
+                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at,
+                    admin_generation)
+                 SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint,
+                        $9::bytea
                   WHERE (SELECT COUNT(*) FROM sessions WHERE expires_at > $6) < $8",
                 &[
                     &digest.as_slice(),
@@ -823,6 +832,7 @@ impl Pg {
                     &start.at,
                     &session.expires_at,
                     &(max_active as i64),
+                    &generation.as_slice(),
                 ],
             )?;
             if inserted == 0 {
@@ -850,21 +860,51 @@ impl Pg {
 
     /// Returns the live session of `digest` that was issued for `binding`. Its idle timer is renewed to `now`.
     /// Returns `None` when there is no such session, when it ended, or when the binding differs. In the last case, the session is not changed.
+    /// A session of the superadmin, or an impersonated session, must also carry `generation`.
+    /// A session of a database user does not depend on the superadmin credentials.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
         idle_secs: i64,
+        generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
                 "UPDATE sessions SET last_seen_at = $3
                   WHERE digest = $1 AND binding = $2 AND expires_at > $3 AND last_seen_at > $3 - $4
+                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $5)
               RETURNING sid, login, impersonated, expires_at",
-                &[&digest.as_slice(), &binding.as_slice(), &now, &idle_secs],
+                &[
+                    &digest.as_slice(),
+                    &binding.as_slice(),
+                    &now,
+                    &idle_secs,
+                    &generation.as_slice(),
+                ],
             )?
             .map(shared_session))
+        })
+    }
+
+    /// Ends the superadmin and impersonated sessions whose generation is not `generation`.
+    /// Returns the identifiers that this call ended.
+    pub fn sessions_end_other_generations(
+        &self,
+        generation: &[u8; 32],
+    ) -> Result<Vec<u64>, String> {
+        self.run(|c| {
+            Ok(c.query(
+                "DELETE FROM sessions
+                  WHERE (login IS NULL OR impersonated)
+                    AND admin_generation IS DISTINCT FROM $1
+              RETURNING sid",
+                &[&generation.as_slice()],
+            )?
+            .into_iter()
+            .map(|row| row.get::<_, i64>(0) as u64)
+            .collect())
         })
     }
 
@@ -1262,6 +1302,7 @@ mod tests {
         admin
             .batch_execute(
                 "DROP TABLE user_grants;
+                 ALTER TABLE sessions DROP COLUMN admin_generation;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1314,6 +1355,7 @@ mod tests {
         admin
             .batch_execute(
                 "DROP TABLE user_grants;
+                 ALTER TABLE sessions DROP COLUMN admin_generation;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1349,5 +1391,50 @@ mod tests {
         assert!(migrated.update_user("alice", None, Some(&next)).unwrap());
         assert_eq!(migrated.load_users().unwrap()[0].grants, next);
         assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    /// Version 4 adds the credential generation of the superadmin. A superadmin or impersonated
+    /// row of version 3 has no generation: it is refused, and the start deletes it. A row of a
+    /// database user stays.
+    #[test]
+    fn the_migration_to_version_four_ends_the_superadmin_sessions_of_version_three() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute(
+                "ALTER TABLE sessions DROP COLUMN admin_generation;
+                 DELETE FROM schema_migrations WHERE version > 3;
+                 INSERT INTO sessions
+                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
+                 VALUES ('\\x01', '\\x07', 1, NULL, false, 1, 9999999999, 1),
+                        ('\\x02', '\\x07', 2, 'alice', true, 1, 9999999999, 1),
+                        ('\\x03', '\\x07', 3, 'bob', false, 1, 9999999999, 1);",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        let generation = [5u8; 32];
+        let mut ended = migrated
+            .sessions_end_other_generations(&generation)
+            .unwrap();
+        ended.sort();
+        assert_eq!(ended, [1, 2], "the superadmin and impersonated rows end");
+        assert_eq!(
+            migrated.sessions_count().unwrap(),
+            1,
+            "the row of bob stays"
+        );
     }
 }

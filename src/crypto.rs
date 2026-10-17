@@ -100,6 +100,31 @@ pub fn verify_return_uri_signature(secret: &[u8], uri: &str, signature: &str) ->
     verify_mac(secret, format!("return\n{uri}").as_bytes(), &mac)
 }
 
+/// The credential generation of the superadmin: HMAC-SHA-256 under the session secret of the
+/// superadmin login and password.
+///
+/// A change of the login, of the password or of the session secret gives another value. The
+/// shared database keeps this value with each superadmin and impersonated session. It never
+/// keeps a plain hash of the password: a reader of the database cannot test password guesses
+/// without the session secret.
+pub fn superadmin_generation(
+    secret: &[u8],
+    login: &str,
+    password: &[u8],
+) -> Result<[u8; 32], String> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|_| "invalid HMAC secret length".to_string())?;
+    // A login has no control character. The line end therefore separates the two fields.
+    mac.update(b"superadmin-generation\n");
+    mac.update(login.as_bytes());
+    mac.update(b"\n");
+    mac.update(password);
+    let bytes = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
 fn sign(secret: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
     let mut mac =
         HmacSha256::new_from_slice(secret).map_err(|_| "invalid HMAC secret length".to_string())?;
@@ -154,6 +179,29 @@ mod tests {
         assert!(
             !verify_action_token(key, "logout", "session-a", &uri_signature),
             "domains are separated"
+        );
+    }
+
+    #[test]
+    fn the_superadmin_generation_changes_with_each_credential() {
+        let key = b"01234567890123456789012345678901";
+        let base = superadmin_generation(key, "root", b"password-1").unwrap();
+        assert_eq!(
+            base,
+            superadmin_generation(key, "root", b"password-1").unwrap()
+        );
+        assert_ne!(
+            base,
+            superadmin_generation(key, "root", b"password-2").unwrap()
+        );
+        assert_ne!(
+            base,
+            superadmin_generation(key, "admin", b"password-1").unwrap()
+        );
+        assert_ne!(
+            base,
+            superadmin_generation(b"another-key-another-key-another!", "root", b"password-1")
+                .unwrap()
         );
     }
 

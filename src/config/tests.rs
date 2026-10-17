@@ -19,7 +19,7 @@ const VARS: &[(&str, &str)] = &[
 
 /// A configuration with the two mandatory sections. Extra blocks come after it.
 const MINIMAL: &str = r#"
-    server { listen_address = "0.0.0.0:4181" }
+    server { listen_address = "0.0.0.0:4181" trusted_proxies = [] }
     authentication {
       superadmin_login_env    = "PORTAL_LOGIN"
       superadmin_password_env = "PORTAL_PASSWORD"
@@ -222,7 +222,7 @@ fn a_secret_comes_from_a_variable_or_from_a_file_and_the_file_loses_one_line_end
     let login = temp_file(b"root\n");
     let password = temp_file(b"pass word\r\n");
     let raw = format!(
-        r#"server {{ listen_address = "0.0.0.0:4181" }}
+        r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
         authentication {{ superadmin_login_file = "{}" superadmin_password_file = "{}" }}"#,
         login.display(),
         password.display()
@@ -260,12 +260,12 @@ fn all_four_secrets_accept_both_forms() {
     ];
     for form in &forms {
         let (_, secrets) = ok(&format!(
-            r#"server {{ listen_address = "0.0.0.0:4181" }}
+            r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
             authentication {{ superadmin_login_{form} superadmin_password_env = "PORTAL_PASSWORD" }}"#
         ));
         assert_eq!(secrets.superadmin_login, "0123456789abcdef0123456789abcdef");
         let (_, secrets) = ok(&format!(
-            r#"server {{ listen_address = "0.0.0.0:4181" }}
+            r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
             authentication {{ superadmin_login_env = "PORTAL_LOGIN" superadmin_password_{form} }}"#
         ));
         assert_eq!(secrets.superadmin_password.len(), 32);
@@ -1188,4 +1188,81 @@ fn a_bad_pdp_configuration_stops_the_start() {
         let message = err(&with(&extra));
         assert!(message.contains(expected), "{extra}: {message}");
     }
+}
+
+// Security regressions -------------------------------------------------------------------------
+
+/// The superadmin password and the session secret of the published examples (`.env.example`,
+/// the quick start of the README). Anybody who reads the repository knows them.
+#[test]
+fn the_published_example_secrets_stop_the_start_and_are_never_printed() {
+    for password in ["change-me-use-a-long-random-secret", "test1234"] {
+        let message = parse_with(
+            MINIMAL,
+            &[("PORTAL_LOGIN", "admin"), ("PORTAL_PASSWORD", password)],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("the example password {password:?} must be refused"));
+        assert!(
+            message.contains("authentication.superadmin_password"),
+            "{message}"
+        );
+        assert!(message.contains("env:PORTAL_PASSWORD"), "{message}");
+        assert!(
+            !message.contains(password),
+            "the value is hidden: {message}"
+        );
+    }
+    let message = parse_with(
+        &with(r#"session { secret_mode = "provided" secret_env = "PORTAL_SESSION" }"#),
+        &[
+            ("PORTAL_LOGIN", "admin"),
+            ("PORTAL_PASSWORD", "a password for the tests"),
+            ("PORTAL_SESSION", "change-me-with-a-long-random-value"),
+        ],
+    )
+    .err()
+    .expect("the example session secret must be refused");
+    assert!(message.contains("session.secret"), "{message}");
+    assert!(
+        !message.contains("change-me"),
+        "the value is hidden: {message}"
+    );
+}
+
+#[test]
+fn the_trusted_proxies_are_mandatory_and_written_exactly() {
+    let message = err(&MINIMAL.replace(" trusted_proxies = []", ""));
+    assert!(message.contains("server.trusted_proxies"), "{message}");
+    let (cfg, _) = ok(&MINIMAL.replace(
+        "trusted_proxies = []",
+        r#"trusted_proxies = ["10.42.0.0/16", "2001:db8::/32"]"#,
+    ));
+    assert_eq!(cfg.server.trusted_proxies.len(), 2);
+    assert_eq!(
+        line(&cfg, "server.trusted_proxies").value,
+        r#"["10.42.0.0/16", "2001:db8::/32"]"#
+    );
+    for bad in ["10.42.0.1/16", "10.42.0.0", "proxy"] {
+        let message = err(&MINIMAL.replace(
+            "trusted_proxies = []",
+            &format!(r#"trusted_proxies = ["{bad}"]"#),
+        ));
+        assert!(message.contains("server.trusted_proxies"), "{message}");
+        assert!(message.contains(bad), "{message}");
+    }
+}
+
+#[test]
+fn the_sign_in_bodies_must_leave_connections_for_forward_auth() {
+    let (cfg, _) = ok(&with(""));
+    assert_eq!(cfg.server.max_login_body_reads, 64);
+    let message = err(&with_server("max_connections = 64", ""));
+    assert!(message.contains("server.max_login_body_reads"), "{message}");
+    assert!(message.contains("server.max_connections"), "{message}");
+    let (cfg, _) = ok(&with_server(
+        "max_connections = 8 max_login_body_reads = 2",
+        "",
+    ));
+    assert_eq!(cfg.server.max_login_body_reads, 2);
 }

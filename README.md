@@ -32,7 +32,7 @@ At start, the program reads the password with a size limit. The program hashes t
 
 The superadmin adds and deletes **users** from the settings pages (the gear of the launcher). The database stores their Argon2id hashes. The database is the SQLite file `storage.database`, or PostgreSQL. The request path reads an in-memory copy. The request path never waits on the database. A user has a list of grants (see [Grants and the gate](#grants-and-the-gate)). Each login attempt runs exactly one Argon2 check. This applies to any login name. The check uses the superadmin hash, the hash of the account, or a dummy hash. The failure message is the same in all cases. Neither the time nor the wording shows whether a login exists.
 
-A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. With SQLite, the server keeps the active-session set in bounded RAM. Each session has an expiration time. Logout deletes the session at once. A restart of the process clears all sessions. With PostgreSQL, the sessions are in the shared database. Only the SHA-256 of the cookie is stored. The sessions are valid on every instance and survive a restart.
+A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. With SQLite, the server keeps the active-session set in bounded RAM. Each session has an expiration time. Logout deletes the session at once. A restart of the process clears all sessions. With PostgreSQL, the sessions are in the shared database. Only the SHA-256 of the cookie is stored. The sessions are valid on every instance and survive a restart. A session of the superadmin, and a session that the superadmin opened with **Log in as**, are valid only with the superadmin credentials that opened them. A new superadmin login, password or session secret ends these sessions on every instance (see [Several instances](#several-instances-postgresql)).
 
 ## Grants and the gate
 
@@ -91,6 +91,8 @@ Traefik routes on the clean path, but sends the raw URI. portal therefore reads 
 - A refused browser navigation goes to `/auth/denied`. Traefik limits the body of a ForwardAuth answer. The answer cannot hold the page. Other requests get a plain `403`.
 - The page `/auth/denied` does not give the name of a service. A user does not see a service that is not open to that user.
 - `/auth/*` is always open to a signed-in user. A path that no service owns (an absolute asset path) is open to each signed-in user.
+- The previous rule needs a complete catalogue. The catalogue is complete when each configured discovery source answered at least once. Until then, only the superadmin passes the gate. A source that failed at setup never makes the catalogue complete. The metric `portal_catalog_complete` shows the state. After the first answer, a failed listing keeps the last good answer, and the catalogue stays complete.
+- A workload with unusable labels is not listed. The gate keeps the path of its `href` closed: only the superadmin passes it. The same rule applies to a workload whose id another workload already uses with another `href`. The catalogue problems name both cases.
 - The launcher shows only the services for which the user has `access`. The discovery problems name workloads. Only the superadmin sees these problems.
 
 portal stays a ForwardAuth server. Traefik is the only proxy. portal receives only the headers of a request. portal never receives the body of a request or of a response.
@@ -162,7 +164,7 @@ Rules:
 - The PDP returns the header `X-Request-ID` of the request.
 - The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason.
 - The PDP has no TLS. The deployment must limit the network of the PDP to the services and portal. This differs from AuthZEN, which requires TLS.
-- In K3s, the NetworkPolicy `allow-portal-pdp` (`#tools/k3s/network/policies.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-edge` does not select the portal pods. The policy `allow-portal-http` opens only the port 4181 of portal.
+- In K3s, the NetworkPolicy `allow-portal-pdp` (`#tools/k3s/network/policies.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-edge` does not select the portal pods. The policy `allow-portal-http` opens only the port 4181 of portal, and only to the Traefik pods and the Prometheus pod. portal trusts `X-Forwarded-For` from the pod network (`server.trusted_proxies`). No other pod may reach the port 4181.
 
 A request about a sub-resource:
 
@@ -193,6 +195,8 @@ At the first start of the version with grants, the server changes the database. 
 
 The grants on sub-resources need one more change. SQLite goes to schema version 4. PostgreSQL goes to version 3. The table `user_grants` gets the columns `sub_resource_type` and `sub_resource_id`. The migration keeps all grants. A grant of the earlier version applies to the whole service. An earlier portal refuses the new schema: it does not start on it.
 
+The credential generation of the superadmin needs one more change on PostgreSQL. PostgreSQL goes to version 4. The table `sessions` gets the column `admin_generation`. The sessions of the superadmin and the impersonated sessions of version 3 end at the first start. The superadmin signs in again. The sessions of the users stay. An earlier portal refuses version 4: it does not start on it. SQLite does not change, because its sessions are in memory.
+
 ### Paths open without a session (`portal.exclude`)
 
 A caller that cannot sign in (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
@@ -211,7 +215,7 @@ The rules are strict by design:
 - a service can open only paths under **its own `href`**. It can open a path only while it owns that path. The longest prefix wins, as for the gate. For example, `/dagu/admin` declared by another service stays closed to Dagu's rules;
 - portal reads the path every way that a proxy or a backend might read it (`%2e%2e`, `//`, `%2f` as a character and as a separator, `\`). portal lets the request through only if **every** reading belongs to the same service and matches one of its rules. `/dagu/api/v1/webhooks/..%2f..%2fadmin` is not a webhook;
 - a wildcard never stands for a segment that hides a separator. `/auth/*` is never open;
-- a rule that cannot be read makes the **whole label** unusable. Examples are a regular expression, a bad method, a path outside the `href`, or more than 8 rules. In this case, nothing is opened. The service is reported in the catalogue problems. The service is not listed until it is fixed;
+- a rule that cannot be read makes the **whole label** unusable. Examples are a regular expression, a bad method, a path outside the `href`, or more than 8 rules. In this case, nothing is opened. The service is reported in the catalogue problems. The service is not listed until it is fixed. The gate keeps the path of its `href` closed: only the superadmin can open it;
 - portal ignores the query string. portal records nothing in a session, because there is no session. The request is counted in `portal_forward_auth_requests_total{result="excluded"}`.
 
 The Services settings page lists the rules of every service. The whole exposure can be audited in one place. A path that a rule opens is protected only by what the service does itself, for example by a webhook token. portal does not ask anything for these paths.
@@ -311,6 +315,7 @@ The client is a blocking PostgreSQL client. It uses plain TCP. It has no TLS sta
 This is what the instances share, and how:
 
 - **Sessions** are rows of a `sessions` table. A row holds the digest of the cookie, the client binding, the identity, the expiry and the last use. A login writes the session and its line of the history in one transaction. Each instance keeps a copy of what it checked. The copy is kept for **5 seconds**. ForwardAuth asks the database about one session once per 5 s, not once per request. The binding (address and User-Agent), the idle timeout and the absolute lifetime are enforced exactly as with SQLite. The idle timeout is renewed at most every 5 s of activity. A logout, a deleted account or a password change ends the session in the database at once. The session then stops working on the other instances within 5 seconds (the copy). If the database cannot be reached, a session that was checked less than 2 minutes ago is still accepted. A failover therefore does not sign everybody out. New sign-ins fail with `503` in the meantime.
+- **Superadmin sessions** also carry the credential generation of the superadmin. This value is an HMAC-SHA-256, under the session secret, of the superadmin login and password. The database never holds a plain hash of the password. An instance accepts a superadmin session or an impersonated session only with its own generation. At start, an instance deletes these sessions when they have another generation. Thus a new superadmin login, password or session secret ends the old superadmin sessions on every instance. Rotate the credential after a suspected theft of a superadmin cookie. During a rolling update, an old instance and a new instance refuse the superadmin sessions of each other. The sessions of the users stay.
 - **Accounts** are read from the database every 5 seconds by every instance. An account that is created, edited or deleted on one instance reaches the others within 5 seconds. A login that the instance does not know yet makes it read the accounts again at once. This happens at most once per second. An account that was just created can therefore sign in on any instance. A session that was opened for this account elsewhere is never ended for that reason.
 - **History** is written by every instance. The writes are batched every 15 s, as with SQLite. A session that ends by logout, revocation, expiry or idleness is recorded once. The instance whose call ended the session records it. The database gives each ended session to exactly one caller. The start or the stop of an instance never closes the sessions of the other instances.
 - **Each instance has its own rate limits.** The failed-login limiters (per IP and global) are in memory. With two instances, an attacker gets up to twice the budget. A lockout on one instance does not lock the other instance. `session.max_active_sessions` is checked against the database. Two instances that race at the limit can each overshoot it by one.
@@ -329,9 +334,12 @@ The Compose file contains the HCL directly through `configs.content`. The supera
 
 ```bash
 export PORTAL_SUPERADMIN_LOGIN='admin'
-export PORTAL_SUPERADMIN_PASSWORD='test1234'
+export PORTAL_SUPERADMIN_PASSWORD="$(head -c 18 /dev/urandom | base64)"
+echo "$PORTAL_SUPERADMIN_PASSWORD"
 docker compose up -d --build
 ```
+
+The program refuses the example passwords that the repository publishes (`.env.example`, earlier versions of this section). Give a new random value.
 
 Open this URL:
 
@@ -339,7 +347,7 @@ Open this URL:
 http://localhost:4181/auth/login
 ```
 
-Sign in as `admin` / `test1234`. The gear opens the settings pages.
+Sign in as `admin` with the password that `echo` printed. The gear opens the settings pages.
 
 Stop the stack with:
 
@@ -361,6 +369,9 @@ server {
   max_header_bytes   = "32KiB"
   header_read_timeout = "10s"
   body_read_timeout   = "10s"
+  max_login_body_reads = 64
+  # The pod network of the cluster, where Traefik runs. [] trusts no proxy.
+  trusted_proxies     = ["10.42.0.0/16"]
 }
 
 authentication {
@@ -507,6 +518,8 @@ The HTTP server.
 | `max_header_bytes` | size, 8KiB to 1MiB | `"32KiB"` | The largest size of the headers of a request. |
 | `header_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request headers. |
 | `body_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request body. |
+| `max_login_body_reads` | number, 1 to 100000 | `64` | The largest number of sign-in requests whose body the server reads at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`. |
+| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding and the login limiter. |
 
 #### Block `authentication`
 
@@ -514,8 +527,8 @@ The superadmin: the one account that is not in the database.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it. |
-| `superadmin_password` | secret: give `superadmin_password_env` (a variable name) or `superadmin_password_file` (an absolute path), not both | required | The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. |
+| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
+| `superadmin_password` | secret: give `superadmin_password_env` (a variable name) or `superadmin_password_file` (an absolute path), not both | required | The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions. |
 
 #### Block `users`
 
@@ -592,7 +605,7 @@ The sessions and the signing key.
 | `bind` | `ip_user_agent`, `user_agent`, `none` | `"ip_user_agent"` | What a session cookie is tied to: the client address and the User-Agent, the User-Agent only, or nothing. |
 | `same_site` | `Strict`, `Lax` | `"Strict"` | The SameSite attribute of the session cookie. |
 | `secret_mode` | `ephemeral`, `provided` | `"ephemeral"` | `ephemeral`: the server makes a new random signing key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key. |
-| `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes. Applies only when `session.secret_mode` is `provided`. |
+| `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes. The server refuses the example value of `.env.example`. A new value ends the sessions of the superadmin and the impersonated sessions. Applies only when `session.secret_mode` is `provided`. |
 | `max_active_sessions` | number, 1 to 1000000 | `4096` | The largest number of open sessions. A login above this number gets the status 503. |
 
 #### Block `security`
@@ -609,9 +622,9 @@ The limits and the login limiters.
 | `login_window` | duration, 1s to 1d | `"1m"` | The window in which the failed logins of one client address count. Applies only when `security.login_rate_limit_enabled` is `true`. |
 | `login_lockout` | duration, 1s to 1d | `"5m"` | The time that a client address stays locked out. Applies only when `security.login_rate_limit_enabled` is `true`. |
 | `global_login_rate_limit_enabled` | `true` or `false` | `true` | Turn the global limiter of failed logins on or off. A good login does not clear it. |
-| `global_login_attempts` | number, 1 to 1000000 | `100` | The number of failed logins from all clients in one window before the lockout. Applies only when `security.global_login_rate_limit_enabled` is `true`. |
+| `global_login_attempts` | number, 1 to 1000000 | `100` | The number of failed logins from all clients in one window before the lockout. The superadmin login has a separate budget of the same size. Failures against other logins never lock out the superadmin. Applies only when `security.global_login_rate_limit_enabled` is `true`. |
 | `global_login_window` | duration, 1s to 1d | `"1m"` | The window in which the failed logins of all clients count. Applies only when `security.global_login_rate_limit_enabled` is `true`. |
-| `global_login_lockout` | duration, 1s to 1d | `"30s"` | The time that all logins stay locked out. Applies only when `security.global_login_rate_limit_enabled` is `true`. |
+| `global_login_lockout` | duration, 1s to 1d | `"30s"` | The time that the logins of the budget stay locked out: all other logins, or the superadmin login. Applies only when `security.global_login_rate_limit_enabled` is `true`. |
 | `max_rate_limit_entries` | number, 64 to 1000000 | `4096` | The largest number of client addresses that the limiter remembers. Applies only when at least one login limiter is on. |
 | `max_concurrent_password_checks` | number, 1 to 64 | `1` | The largest number of Argon2 checks that run at the same time. |
 
@@ -710,7 +723,9 @@ __Host-portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=S
 portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict                       (plain HTTP)
 ```
 
-The program reads the scheme for each request from `X-Forwarded-Proto`. A session is bound to the client address and the User-Agent of the login. The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`.
+After **Log in as** or **Back to superadmin**, `Max-Age` is the time left: the new session ends when the session of the password sign-in would have ended. A switch never gives a fresh `session.ttl`.
+
+The program reads the scheme for each request from `X-Forwarded-Proto`. A session is bound to the client address and the User-Agent of the login. The client address follows the rule of `server.trusted_proxies` (see "Anti-bruteforce"). The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`.
 
 The token contains no identity, no expiration timestamp, no claims and no signed application data. The server stores only a SHA-256 digest of each token. It also stores the expiration time. With SQLite, this data is in memory. With PostgreSQL, this data is in the shared database.
 
@@ -723,13 +738,17 @@ Two independent controls run before Argon2. Each control is local to the process
 - per-IP failed-password limiter;
 - global failed-password limiter for distributed attacks.
 
+The global limiter has two budgets of the same size. One budget is for the superadmin login. The other budget is for all other logins. Failures against other logins thus never refuse the sign-in of the superadmin. Failures against the superadmin login lock out only the superadmin. While a budget is locked out, the answer tells whether a typed login is the superadmin login. The superadmin login is not a secret: the identity tokens carry it.
+
+The per-IP limiter uses the client address. The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. For any other peer, the client address is the address of the peer. A client that connects to the port directly thus cannot choose its address.
+
 Only failed password checks use the failure budgets. A successful authentication clears the per-IP state. It does not clear the global failure history. This is intentional.
 
 `max_concurrent_password_checks` separately limits the number of concurrent Argon2 operations.
 
 ## Prometheus
 
-When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; and uptime.
+When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime.
 
 Do not put client IPs, raw URIs, passwords, cookies or return targets into metric labels.
 
