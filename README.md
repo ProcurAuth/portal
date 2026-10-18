@@ -172,14 +172,18 @@ Rules:
 - Compatibility: a node without `properties.ancestors` is read as `[service of the server, node]`. This is correct only when its type has the parent `service`. Thus the requests of a service with a document of one level do not change.
 - If portal never read the document of the service, the decision on a node below the service is `false`, without a reason. The reason in the log is `the document of the service is not known`. A request about the whole service is not affected. After a change of the `portal.actions` URL of a service, a failed read leaves no document.
 - A grant covers the node that it names and each node below it. The PDP compares the types and the decoded ids of the chain segment by segment, as exact text. The three endpoints use the same rule.
+- `context.match` sets how a grant matches the resource. The default is `"node"`: the rule above. With `"subtree"`, a grant on a node below the resource also gives `true`. Example: a user with a grant on one database of the host `local` gets `true` for the host `local`, so that the service can show this host.
+- A service uses a `"subtree"` decision only to show or hide a navigation element. Each operation asks with `"node"` on its exact resource (contract 11.5).
+- Another value of `context.match`, or a value that is not a text, gives `{"decision": false, "context": {"reason": "invalid_request"}}`. This check comes first.
+- In a batch, the `context` of an item replaces the `context` at the top of the request (AuthZEN 1.0). An item without `context` uses the top-level one. The action search reads `context.match` too.
 - A grant below the service applies only when the last known document of the service follows it (see "Grants"). The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that changes the tree removes the effect of the grants that do not follow it, at once. The reason in the log is `the grant does not follow the document of the service`. A grant on the whole service is not affected.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
 - If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant.
-- The reason `invalid_resource` tells that the request of the service is not correct. It does not show the grants of a user.
+- The reasons `invalid_resource` and `invalid_request` tell that the request of the service is not correct. They do not show the grants of a user.
 - No other denial has a reason. The answer is `{"decision": false}`, so that it does not show the grants of a user. A subject type that is not `user` is one of these denials.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
-- The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`.
+- The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`. The record also has the match: `node`, `subtree` or `invalid`.
 - The PDP has no TLS. The deployment must limit the network of the PDP to the services and portal. This differs from AuthZEN, which requires TLS.
 - In K3s, the NetworkPolicy `allow-portal-pdp` (`#tools/k3s/network/policies.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-edge` does not select the portal pods. The policy `allow-portal-http` opens only the port 4181 of portal, and only to the Traefik pods and the Prometheus pod. portal trusts `X-Forwarded-For` from the pod network (`server.trusted_proxies`). No other pod may reach the port 4181.
 
@@ -228,6 +232,7 @@ portal reads the actions of each service at `/.well-known/access-actions`. The U
 - **Remove** deletes one grant. A grant of the configuration shows the mark *configuration*. It cannot change on the page. The forms are plain HTML: the page has no script for them.
 - While a service has not answered, portal refuses a new grant below it.
 - The Services page keeps the section **Grants to check**. It lists each grant below a service that does not follow the document of the service. The PDP does not apply these grants. The section does not list the grants of a service that has not answered yet.
+- The log also has one warning `grant_to_check` for each such grant, with the login, the grant and the problem. portal writes it at the first answer of the service after the start, and at each change of its document.
 
 ### Migration of the database
 
@@ -240,7 +245,7 @@ The credential generation of the superadmin needs one more change on PostgreSQL.
 The resource tree (portal 4.2.0) needs one more change. SQLite goes to schema version 5. PostgreSQL goes to version 5. The columns `sub_resource_type` and `sub_resource_id` of `user_grants` become one column `resource_path`. It holds the segments after the service in their text form, for example `host:local/database:analytics`. It is empty for a grant on the whole service. The primary key is the user, the action, the service and the path.
 
 - The migration keeps each grant. A grant on one sub-resource `(database, a/b)` becomes the path `database:a%2Fb`.
-- The migration does not add a level. A grant `database:analytics` stays at depth 1. When the document of the service puts `database` below `host`, this grant does not follow the tree. The PDP does not apply it, and the Services page lists it under **Grants to check**. Give the grant again on the new tree, for example `host:local/database:analytics`, then remove the old grant.
+- The migration does not add a level. A grant `database:analytics` stays at depth 1. When the document of the service puts `database` below `host`, this grant does not follow the tree. The PDP does not apply it. The Services page lists it under **Grants to check**, and the log has a warning `grant_to_check` for it. Give the grant again on the new tree, for example `host:local/database:analytics`, then remove the old grant.
 - A row that does not fit the new rules stops the migration. Examples: a type that does not start with `a-z`, an id of more than 256 bytes. The transaction rolls back. The database stays at the earlier version, and the new portal does not start. The error names `resource_path`.
 - An earlier portal refuses version 5: it does not start on it. During a rolling update, an instance of portal 4.1.0 that still operates cannot read or write the grants after the migration. It keeps the grants that it has in memory until it stops.
 
