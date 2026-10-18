@@ -694,7 +694,8 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         assert!(!launcher.body.contains("Grafana") && !launcher.body.contains(">Db<"));
         let refusal = page(&node, &alice, DENIED_PATH);
         assert_eq!(refusal.status, 403);
-        assert!(!refusal.body.contains("Grafana") && !refusal.body.contains("Db"));
+        // The page has a random CSRF token: match the service name as an element, not as a substring.
+        assert!(!refusal.body.contains("Grafana") && !refusal.body.contains(">Db<"));
 
         // The superadmin gives access and two actions on db.
         let update = |fields: &str| {
