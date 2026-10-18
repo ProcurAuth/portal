@@ -11,6 +11,7 @@
 use std::fmt::Write as _;
 
 use super::{document, sign_out_form, theme_switch};
+use crate::actions::{Document, Level};
 use crate::catalog::{Catalog, Service};
 use crate::grants::{holds, Grant, Mode, ACCESS};
 use crate::store::{
@@ -108,12 +109,12 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         "grant-added" => ("Grant added.", true, false),
         "grant-deleted" => ("Grant removed.", true, false),
         "grant-bad-id" => (
-            "Invalid resource id: 1 to 128 characters, without a space.",
+            "Invalid resource id: 1 to 256 bytes, without a control character.",
             false,
             false,
         ),
         "grant-undeclared" => (
-            "The service does not declare this resource type for this action. Open the page again.",
+            "The service does not declare this level for this action. Open the page again.",
             false,
             false,
         ),
@@ -213,37 +214,23 @@ pub struct ServiceActions {
     pub name: String,
     /// The name and the description of each action that the service publishes.
     pub actions: Vec<(String, String)>,
-    /// The actions that a grant on a sub-resource can name. Each action has its resource types,
-    /// without `service`.
-    pub sub_resources: Vec<(String, Vec<String>)>,
+    /// The last known document of the service: its tree of types and its actions. It is empty
+    /// while the service has not answered.
+    pub document: std::sync::Arc<Document>,
     /// The service answered: its actions and its resource types are known.
     pub known: bool,
 }
 
 impl ServiceActions {
-    /// The service is known, and it does not declare the resource type of this grant on a
-    /// sub-resource for its action.
+    /// The service is known, and the grant below the service does not follow its document: the
+    /// action does not list the type, or the path does not follow the parents.
     fn undeclared(&self, grant: &Grant) -> bool {
-        let Some(resource) = &grant.resource else {
-            return false;
-        };
-        self.known
-            && !self
-                .sub_resources
-                .iter()
-                .any(|(action, kinds)| *action == grant.action && kinds.contains(&resource.kind))
+        !grant.path.is_empty() && self.known && self.document.check_grant(grant).is_err()
     }
 
-    /// Each resource type of the service, one time, sorted.
-    fn resource_types(&self) -> Vec<&str> {
-        let mut kinds: Vec<&str> = self
-            .sub_resources
-            .iter()
-            .flat_map(|(_, kinds)| kinds.iter().map(String::as_str))
-            .collect();
-        kinds.sort_unstable();
-        kinds.dedup();
-        kinds
+    /// The levels that a new grant below the service can name.
+    fn levels(&self) -> Vec<Level> {
+        self.document.levels()
     }
 }
 
@@ -609,16 +596,34 @@ fn user_card(out: &mut String, view: &UsersView, user: &UserCard) {
     out.push_str("</div></details>");
 }
 
-/// The grants of a user on sub-resources, by service, with the forms that add and remove them.
-/// A service shows when the user has a grant on one of its sub-resources, or when the service
-/// declares resource types and the grants can change. The page does not list the resources: the
-/// superadmin types the id.
+/// The path of a grant for a human: each segment as its type and its decoded id, with `›`
+/// between the segments.
+fn path_html(grant: &Grant) -> String {
+    grant
+        .path
+        .iter()
+        .map(|segment| {
+            format!(
+                r#"{} <code>{}</code>"#,
+                html_escape(&segment.kind),
+                html_escape(&segment.id)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" › ")
+}
+
+/// The grants of a user below the services, by service, with the forms that add and remove them.
+/// A service shows when the user has such a grant, or when the service declares resource types
+/// and the grants can change. The page does not list the resources: the superadmin types the
+/// ids. The service has one form for each declared level, with one id field for each type of the
+/// chain. The page has no script.
 fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
     let editable = view.mode.editable();
     let held: Vec<&Grant> = user
         .grants
         .iter()
-        .filter(|grant| grant.resource.is_some())
+        .filter(|grant| !grant.path.is_empty())
         .collect();
     // The services of the catalogue first, then the services that left it.
     let mut groups: Vec<(&str, &str, Option<&ServiceActions>)> = view
@@ -640,8 +645,12 @@ fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
             .filter(|grant| grant.service == id)
             .copied()
             .collect();
-        let offer = editable && service.is_some_and(|s| !s.sub_resources.is_empty());
-        if mine.is_empty() && !offer {
+        let levels = if editable {
+            service.map(ServiceActions::levels).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if mine.is_empty() && levels.is_empty() {
             continue;
         }
         let _ = write!(
@@ -652,18 +661,14 @@ fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
         if !mine.is_empty() {
             body.push_str(r#"<ul class="subGrants__list">"#);
             for grant in mine {
-                let Some(resource) = &grant.resource else {
-                    continue;
-                };
                 let _ = write!(
                     body,
-                    r#"<li><code>{}</code> on <code>{}:{}</code>"#,
+                    r#"<li><code>{}</code> on {}"#,
                     html_escape(&grant.action),
-                    html_escape(&resource.kind),
-                    html_escape(&resource.id)
+                    path_html(grant)
                 );
                 if service.is_some_and(|s| s.undeclared(grant)) {
-                    body.push_str(r##"<span class="warn" role="img" aria-label="The service does not declare this resource type for this action. The PDP does not apply this grant." title="The service does not declare this resource type for this action. The PDP does not apply this grant."><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##);
+                    body.push_str(r##"<span class="warn" role="img" aria-label="The service does not declare this level for this action. The PDP does not apply this grant." title="The service does not declare this level for this action. The PDP does not apply this grant."><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg></span>"##);
                 }
                 if user.configured.contains(grant) {
                     body.push_str(r#" <span class="pill pill--muted" title="From the configuration: it cannot change here.">configuration</span>"#);
@@ -678,20 +683,36 @@ fn sub_resource_grants(out: &mut String, view: &UsersView, user: &UserCard) {
             }
             body.push_str("</ul>");
         }
-        if let Some(service) = service.filter(|_| offer) {
-            let _ = write!(
-                body,
-                r#"<form class="subGrant" method="post" action="/auth/users/grant-add"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="service" value="{}"><label class="field">Action<select name="action" required>"#,
-                html_escape(&service.id)
-            );
-            for (action, _) in &service.sub_resources {
-                let _ = write!(body, "<option>{}</option>", html_escape(action));
+        if let Some(service) = service {
+            for level in &levels {
+                let Some(kind) = level.chain.last() else {
+                    continue;
+                };
+                let _ = write!(
+                    body,
+                    r#"<form class="subGrant" method="post" action="/auth/users/grant-add"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="service" value="{}"><input type="hidden" name="type" value="{}"><span class="subGrant__level">{}</span><label class="field">Action<select name="action" required>"#,
+                    html_escape(&service.id),
+                    html_escape(kind),
+                    level
+                        .chain
+                        .iter()
+                        .map(|k| html_escape(k))
+                        .collect::<Vec<_>>()
+                        .join(" › ")
+                );
+                for action in &level.actions {
+                    let _ = write!(body, "<option>{}</option>", html_escape(action));
+                }
+                body.push_str("</select></label>");
+                for (index, step) in level.chain.iter().enumerate() {
+                    let _ = write!(
+                        body,
+                        r#"<label class="field">{}<input name="id{index}" type="text" required maxlength="256" autocomplete="off" autocapitalize="off" spellcheck="false"></label>"#,
+                        html_escape(step)
+                    );
+                }
+                body.push_str(r#"<button class="button" type="submit">Add grant</button></form>"#);
             }
-            body.push_str(r#"</select></label><label class="field">Resource type<select name="type" required>"#);
-            for kind in service.resource_types() {
-                let _ = write!(body, "<option>{}</option>", html_escape(kind));
-            }
-            body.push_str(r#"</select></label><label class="field">Resource id<input name="id" type="text" required maxlength="128" pattern="\S+" autocomplete="off" autocapitalize="off" spellcheck="false"></label><button class="button" type="submit">Add grant</button></form>"#);
         }
         body.push_str("</div>");
     }
@@ -925,7 +946,8 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     page(Tab::Services, frame, &out, false)
 }
 
-/// The grants on sub-resources whose resource type the service does not declare for the action.
+/// The grants below a service that do not follow its document: the action does not list the
+/// type, or the path does not follow the parents.
 /// At start, the server does not know the services: the catalogue and the actions documents come
 /// at run time. Thus a grant of the configuration can name a type that the service does not
 /// declare. This panel shows each such grant. The panel is absent when there is none.
@@ -952,7 +974,7 @@ fn undeclared_grants(out: &mut String, view: &ServicesView) {
     }
     let _ = write!(
         out,
-        r#"<section class="panel" aria-labelledby="checks-title"><div class="panel__head"><h2 class="panel__title" id="checks-title">Grants to check</h2></div><p class="hint">The service does not declare the resource type of these grants for the action. The PDP does not apply these grants. Correct the grant, or the document of the service.</p><div class="tableScroll"><table class="table"><thead><tr><th>User</th><th>Grant</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
+        r#"<section class="panel" aria-labelledby="checks-title"><div class="panel__head"><h2 class="panel__title" id="checks-title">Grants to check</h2></div><p class="hint">The service does not declare the level of these grants for the action: the action does not list the type, or the path does not follow the parents of the types. The PDP does not apply these grants. Correct the grant, or the document of the service.</p><div class="tableScroll"><table class="table"><thead><tr><th>User</th><th>Grant</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
     );
 }
 
@@ -1139,29 +1161,28 @@ mod tests {
         }
     }
 
+    /// The document of Grafana in the tests: a folder, and the dashboards of a folder.
+    const GRAFANA: &str = r#"{"server":"infra-grafana","resource_types":[{"name":"folder","parent":"service"},{"name":"dashboard","parent":"folder"}],"actions":[{"name":"dashboards.read","resource_types":["service","folder"],"description":"See the dashboards."},{"name":"dashboards.write","resource_types":["service","folder","dashboard"],"description":"Change the <dashboards>."}]}"#;
+
     fn services() -> Vec<ServiceActions> {
         let plain = |id: &str, name: &str| ServiceActions {
             id: id.into(),
             name: name.into(),
             actions: Vec::new(),
-            sub_resources: Vec::new(),
+            document: Default::default(),
             known: true,
         };
+        let grafana = crate::actions::parse("infra-grafana", GRAFANA.as_bytes()).unwrap();
         vec![
             ServiceActions {
                 id: "infra-grafana".into(),
                 name: "Grafana".into(),
-                actions: vec![
-                    ("dashboards.read".into(), "See the dashboards.".into()),
-                    ("dashboards.write".into(), "Change the <dashboards>.".into()),
-                ],
-                sub_resources: vec![
-                    ("dashboards.read".into(), vec!["folder".into()]),
-                    (
-                        "dashboards.write".into(),
-                        vec!["folder".into(), "dashboard".into()],
-                    ),
-                ],
+                actions: grafana
+                    .actions
+                    .iter()
+                    .map(|a| (a.name.clone(), a.description.clone()))
+                    .collect(),
+                document: std::sync::Arc::new(grafana),
                 known: true,
             },
             plain("infra-notes", "Notes"),
@@ -1718,15 +1739,18 @@ mod tests {
     }
 
     #[test]
-    fn a_user_card_lists_the_grants_on_sub_resources_and_offers_the_declared_types() {
+    fn a_user_card_lists_the_grants_on_sub_resources_and_offers_the_declared_levels() {
         let cat = catalog();
         let mut v = view(&cat);
+        v.users[0].grants.push(sub(
+            "dashboards.write on service:infra-grafana/folder:ops/dashboard:a%2Fb",
+        ));
         v.users[0]
             .grants
-            .push(sub("dashboards.write on service:infra-grafana/folder:ops"));
+            .push(sub("dashboards.read on service:infra-grafana/team:%3Cx%3E"));
         v.users[0]
             .grants
-            .push(sub("dashboards.read on service:infra-grafana/team:<x>"));
+            .push(sub("dashboards.write on service:infra-grafana/dashboard:d"));
         v.users[0]
             .grants
             .push(sub("x.read on service:gone/thing:a"));
@@ -1734,34 +1758,33 @@ mod tests {
         let alice = card_of(&html, "alice");
         assert!(alice.contains("Grants on sub-resources"));
         assert!(alice.contains(
-            r#"<li><code>dashboards.write</code> on <code>folder:ops</code><form class="subGrants__remove" method="post" action="/auth/users/grant-delete">"#
-        ));
+            r#"<li><code>dashboards.write</code> on folder <code>ops</code> › dashboard <code>a/b</code><form class="subGrants__remove" method="post" action="/auth/users/grant-delete">"#
+        ), "the ids are decoded for display");
         assert!(alice.contains(
-            r#"name="grant" value="dashboards.write on service:infra-grafana/folder:ops""#
-        ));
+            r#"name="grant" value="dashboards.write on service:infra-grafana/folder:ops/dashboard:a%2Fb""#
+        ), "the form keeps the text form");
         assert!(
-            alice.contains("<code>team:&lt;x&gt;</code>"),
+            alice.contains("team <code>&lt;x&gt;</code>"),
             "the id is escaped"
         );
         assert_eq!(
             alice.matches(r#"class="warn""#).count(),
-            1,
-            "Grafana does not declare team; the service that left is not known"
+            2,
+            "Grafana does not declare team, a dashboard needs its folder; the service that left is not known"
         );
         assert!(alice.contains(r#"<p class="subGrants__name">gone</p>"#));
         assert_eq!(
             alice.matches(r#"action="/auth/users/grant-add""#).count(),
-            1,
-            "only Grafana declares types"
+            2,
+            "one form for each level of Grafana"
         );
         assert!(alice.contains(r#"<input type="hidden" name="service" value="infra-grafana">"#));
         assert!(alice.contains(
-            r#"<select name="action" required><option>dashboards.read</option><option>dashboards.write</option></select>"#
+            r#"<input type="hidden" name="type" value="folder"><span class="subGrant__level">folder</span><label class="field">Action<select name="action" required><option>dashboards.read</option><option>dashboards.write</option></select></label><label class="field">folder<input name="id0" type="text" required maxlength="256""#
         ));
         assert!(alice.contains(
-            r#"<select name="type" required><option>dashboard</option><option>folder</option></select>"#
+            r#"<input type="hidden" name="type" value="dashboard"><span class="subGrant__level">folder › dashboard</span><label class="field">Action<select name="action" required><option>dashboards.write</option></select></label><label class="field">folder<input name="id0" type="text" required maxlength="256" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="field">dashboard<input name="id1""#
         ));
-        assert!(alice.contains(r#"name="id" type="text" required maxlength="128""#));
         assert!(
             !alice.contains("<option>access</option>"),
             "access has no sub-resource"
@@ -1797,7 +1820,7 @@ mod tests {
             .push(sub("dashboards.read on service:infra-grafana/folder:ops"));
         let html = users_page(&frame(), &fixed);
         assert!(!html.contains("grant-add") && !html.contains("grant-delete"));
-        assert!(card_of(&html, "alice").contains("<code>folder:ops</code>"));
+        assert!(card_of(&html, "alice").contains("folder <code>ops</code>"));
         assert!(card_of(&html, "bob").contains("No grant on a sub-resource.</p>"));
     }
 
@@ -1810,7 +1833,9 @@ mod tests {
                 "alice".to_string(),
                 vec![
                     sub("dashboards.read on service:infra-grafana/folder:ops"),
-                    sub("dashboards.read on service:infra-grafana/dashboard:1"),
+                    sub("dashboards.write on service:infra-grafana/folder:ops/dashboard:1"),
+                    sub("dashboards.read on service:infra-grafana/folder:ops/dashboard:1"),
+                    sub("dashboards.write on service:infra-grafana/dashboard:1"),
                 ],
             ),
             (
@@ -1821,8 +1846,13 @@ mod tests {
         let html = services_page(&frame(), &services_view(&cat, &actions, &holders));
         assert!(html.contains("Grants to check"));
         assert!(html.contains(
-            "<tr><td>alice</td><td><code>dashboards.read on service:infra-grafana/dashboard:1</code></td></tr>"
-        ));
+            "<tr><td>alice</td><td><code>dashboards.read on service:infra-grafana/folder:ops/dashboard:1</code></td></tr>"
+        ), "the action does not list dashboard");
+        assert!(html.contains(
+            "<tr><td>alice</td><td><code>dashboards.write on service:infra-grafana/dashboard:1</code></td></tr>"
+        ), "a dashboard without its folder");
+        assert!(!html
+            .contains("dashboards.write on service:infra-grafana/folder:ops/dashboard:1</code>"));
         assert!(html.contains("<td>bob</td>"), "notes declares nothing");
         assert!(!html.contains("folder:ops</code></td>"));
         let mut unknown = services();

@@ -13,7 +13,7 @@ use super::*;
 use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
@@ -104,17 +104,97 @@ DROP TABLE user_grants;
 ALTER TABLE user_grants_v4 RENAME TO user_grants;
 ";
 
+/// Schema version 5: the path of a grant is one column, `resource_path`. It holds the segments
+/// after the service in their text form, for example `host:local/database:analytics`. It is empty
+/// for a grant on the whole service. The rows of version 4 move by [`migrate_to_resource_path`].
+const RESOURCE_PATH_SCHEMA: &str = "
+CREATE TABLE user_grants_v5 (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_path TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path)
+);
+";
+
+/// The columns of `user_grants` in a file of a given schema version.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantColumns {
+    /// Version 3: grants on the whole service only.
+    ServiceOnly,
+    /// Version 4: `sub_resource_type` and `sub_resource_id`.
+    SubResource,
+    /// Version 5 and later: `resource_path`.
+    Path,
+}
+
+impl GrantColumns {
+    fn of(version: i64) -> Self {
+        match version {
+            ..=3 => Self::ServiceOnly,
+            4 => Self::SubResource,
+            _ => Self::Path,
+        }
+    }
+}
+
+/// Moves the grants of version 4 to the table of version 5. A grant on a sub-resource
+/// `(type, id)` becomes the path `type:<encoded id>`. A row that does not fit the rules of version
+/// 5 stops the migration: the caller rolls back, and the file stays at version 4.
+fn migrate_to_resource_path(conn: &Connection) -> Result<(), String> {
+    let rows = conn
+        .prepare(
+            "SELECT user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id
+               FROM user_grants",
+        )
+        .map_err(db)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(db)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db)?;
+    conn.execute_batch(RESOURCE_PATH_SCHEMA).map_err(db)?;
+    for (user_id, action, kind, id, sub_type, sub_id) in rows {
+        let path = migrated_path(&sub_type, &sub_id)?;
+        conn.execute(
+            "INSERT INTO user_grants_v5 (user_id, action, resource_type, resource_id, resource_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, action, kind, id, path],
+        )
+        .map_err(db)?;
+    }
+    conn.execute_batch("DROP TABLE user_grants; ALTER TABLE user_grants_v5 RENAME TO user_grants;")
+        .map_err(db)
+}
+
 /// Reads the grants of one user. A row that is not a valid grant stops the read.
-/// The database holds only what the server wrote. A file before version 4 has no sub-resource
-/// columns: `sub_resources` is `false` for it.
-fn grants_of(conn: &Connection, user_id: i64, sub_resources: bool) -> Result<Vec<Grant>, String> {
-    let sql = if sub_resources {
-        "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id
-           FROM user_grants WHERE user_id = ?1
-          ORDER BY action, resource_id, sub_resource_type, sub_resource_id"
-    } else {
-        "SELECT action, resource_type, resource_id, '', '' FROM user_grants
-          WHERE user_id = ?1 ORDER BY action, resource_id"
+/// The database holds only what the server wrote. `columns` gives the layout of the table: the
+/// import reads files of earlier versions.
+fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<Vec<Grant>, String> {
+    let sql = match columns {
+        GrantColumns::Path => {
+            "SELECT action, resource_type, resource_id, resource_path, ''
+               FROM user_grants WHERE user_id = ?1
+              ORDER BY action, resource_id, resource_path"
+        }
+        GrantColumns::SubResource => {
+            "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id
+               FROM user_grants WHERE user_id = ?1
+              ORDER BY action, resource_id, sub_resource_type, sub_resource_id"
+        }
+        GrantColumns::ServiceOnly => {
+            "SELECT action, resource_type, resource_id, '', '' FROM user_grants
+              WHERE user_id = ?1 ORDER BY action, resource_id"
+        }
     };
     let rows = conn
         .prepare_cached(sql)
@@ -131,21 +211,28 @@ fn grants_of(conn: &Connection, user_id: i64, sub_resources: bool) -> Result<Vec
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
-    rows.iter()
-        .map(|(action, kind, id, sub_type, sub_id)| {
-            grant_from_row(action, kind, id, sub_type, sub_id)
+    let mut grants = rows
+        .iter()
+        .map(|(action, kind, id, third, fourth)| {
+            let path = match columns {
+                GrantColumns::Path => third.clone(),
+                _ => migrated_path(third, fourth)?,
+            };
+            grant_from_row(action, kind, id, &path)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    grants.sort();
+    Ok(grants)
 }
 
 fn insert_grants(conn: &Connection, user_id: i64, grants: &[Grant]) -> rusqlite::Result<()> {
     for grant in grants {
-        let [kind, id, sub_type, sub_id] = grant_columns(grant);
+        let (kind, id, path) = grant_columns(grant);
         conn.execute(
             "INSERT OR IGNORE INTO user_grants
-               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![user_id, grant.action, kind, id, sub_type, sub_id],
+               (user_id, action, resource_type, resource_id, resource_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, grant.action, kind, id, path],
         )?;
     }
     Ok(())
@@ -176,7 +263,7 @@ impl Sqlite {
         Self::init(Connection::open_in_memory().unwrap()).unwrap()
     }
 
-    fn init(conn: Connection) -> Result<Self, String> {
+    fn init(mut conn: Connection) -> Result<Self, String> {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db)?;
         // `journal_mode` answers with a row. Therefore, the code reads it and does not execute it.
@@ -188,7 +275,8 @@ impl Sqlite {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        // Each version adds its part. The part and the new version number are written in one transaction.
+        // Each version adds its part. The parts and the new version number are written in one
+        // transaction: a failure leaves the file as it was.
         let missing = match version {
             0 => format!("{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA}"),
             1 => format!("{LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA}"),
@@ -197,11 +285,14 @@ impl Sqlite {
             _ => String::new(),
         };
         match version {
-            0..=3 => conn
-                .execute_batch(&format!(
-                    "BEGIN; {missing} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
-                ))
-                .map_err(db)?,
+            0..=4 => {
+                let tx = conn.transaction().map_err(db)?;
+                tx.execute_batch(&missing).map_err(db)?;
+                migrate_to_resource_path(&tx)?;
+                tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+                    .map_err(db)?;
+                tx.commit().map_err(db)?;
+            }
             SCHEMA_VERSION => {}
             newer => {
                 return Err(format!(
@@ -247,7 +338,7 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         for (id, user) in &mut users {
-            user.grants = grants_of(&conn, *id, true)?;
+            user.grants = grants_of(&conn, *id, GrantColumns::Path)?;
         }
         Ok(users.into_iter().map(|(_, user)| user).collect())
     }
@@ -722,7 +813,7 @@ impl Sqlite {
         let mut with_grants = Vec::with_capacity(users.len());
         for (id, mut user) in users {
             if version >= 3 {
-                user.grants = grants_of(conn, id, version >= 4)?;
+                user.grants = grants_of(conn, id, GrantColumns::of(version))?;
             }
             with_grants.push((id, user));
         }
@@ -997,11 +1088,141 @@ CREATE TABLE user_roles (
             .conn()
             .execute(
                 "INSERT INTO user_grants
-                   (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
-                 VALUES (1, 'access', 'service', 'db', 'database', 'x')",
+                   (user_id, action, resource_type, resource_id, resource_path)
+                 VALUES (1, 'access', 'service', 'db', 'database:x')",
                 [],
             )
             .unwrap();
         assert!(store.load_users().unwrap_err().contains("sub-resource"));
+    }
+
+    /// A file of portal 4.1.0: schema version 4, with grants on one sub-resource.
+    fn version_four(conn: &Connection, rows: &str) {
+        conn.execute_batch(&format!(
+            "{SCHEMA} {LOGIN_SCHEMA} {GRANTS_SCHEMA} {SUB_RESOURCE_SCHEMA} PRAGMA user_version = 4;
+             INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+             {rows}"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn the_migration_to_version_five_moves_each_grant_to_a_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        version_four(
+            &conn,
+            "INSERT INTO user_grants
+               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+             VALUES (1, 'access', 'service', 'db', '', ''),
+                    (1, 'query.run.read', 'service', 'db', 'database', 'analytics'),
+                    (1, 'query.run.write', 'service', 'db', 'database', 'a/b:c'),
+                    (1, 'query.run.write', 'service', 'db', 'database', 'été');",
+        );
+        let store = Sqlite::init(conn).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(!has_table(&store, "user_grants_v5"));
+        let paths: Vec<String> = store
+            .conn()
+            .prepare("SELECT resource_path FROM user_grants ORDER BY resource_path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            paths,
+            [
+                "",
+                "database:%C3%A9t%C3%A9",
+                "database:a%2Fb%3Ac",
+                "database:analytics"
+            ]
+        );
+        let mut expected: Vec<Grant> = [
+            "access on service:db",
+            "query.run.read on service:db/database:analytics",
+            "query.run.write on service:db/database:a%2Fb%3Ac",
+            "query.run.write on service:db/database:%C3%A9t%C3%A9",
+        ]
+        .iter()
+        .map(|text| Grant::parse(text).unwrap())
+        .collect();
+        expected.sort();
+        assert_eq!(store.load_users().unwrap()[0].grants, expected);
+        assert_eq!(expected[2].path[0].id, "a/b:c", "the id is the same");
+        // The new table takes grants on several levels.
+        let mut next = expected.clone();
+        next.push(Grant::parse("query.run.read on service:db/host:h/database:x").unwrap());
+        next.sort();
+        assert!(store.update_user("alice", None, Some(&next)).unwrap());
+        assert_eq!(store.load_users().unwrap()[0].grants, next);
+    }
+
+    #[test]
+    fn a_grant_that_does_not_fit_stops_the_migration_and_the_file_stays_at_version_four() {
+        let dir = std::env::temp_dir().join(format!("portal-v5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (row, why) in [
+            (
+                format!(
+                    "(1, 'q', 'service', 'db', 'database', '{}')",
+                    "é".repeat(129)
+                ),
+                "more than 256 bytes",
+            ),
+            (
+                "(1, 'q', 'service', 'db', '1database', 'x')".to_string(),
+                "a digit first",
+            ),
+        ] {
+            let path = dir.join("portal.db");
+            let _ = std::fs::remove_file(&path);
+            version_four(
+                &Connection::open(&path).unwrap(),
+                &format!(
+                    "INSERT INTO user_grants
+                       (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+                     VALUES {row};"
+                ),
+            );
+            let error = match Sqlite::open(&path) {
+                Ok(_) => panic!("{why}: the migration must stop"),
+                Err(error) => error,
+            };
+            assert!(error.contains("resource_path"), "{why}: {error}");
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 4, "{why}: the file did not change");
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM user_grants", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, 1, "{why}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_import_reads_a_file_of_version_four() {
+        let dir = std::env::temp_dir().join(format!("portal-v4-dump-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        version_four(
+            &Connection::open(&path).unwrap(),
+            "INSERT INTO user_grants
+               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+             VALUES (1, 'access', 'service', 'db', '', ''),
+                    (1, 'query.run.read', 'service', 'db', 'database', 'a b');",
+        );
+        let dump = Sqlite::open_read_only(&path).unwrap().dump().unwrap();
+        assert_eq!(
+            dump.users[0].1.grants,
+            [
+                Grant::parse("access on service:db").unwrap(),
+                Grant::parse("query.run.read on service:db/database:a%20b").unwrap()
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

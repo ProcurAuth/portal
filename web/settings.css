@@ -654,7 +654,7 @@
 
 /* Grants on sub-resources ---------------------------------------------------------------- */
 
-/* One block for each service: the grants that the user has, then the form that adds one. */
+/* One block for each service: the grants that the user has, then one form for each level. */
 .subGrants {
   display: grid;
   gap: 12px;
@@ -695,6 +695,13 @@
 
 .subGrant .field {
   min-width: 140px;
+}
+
+/* The chain of types of the form, for example "host › database": one line above the fields. */
+.subGrant__level {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .settings select {

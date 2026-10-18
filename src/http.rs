@@ -935,31 +935,28 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
 
 /// Each service of the catalog, with the actions that the settings pages offer.
 /// The first action is `access`. The other actions are the actions that the service publishes.
-/// The resource types of the actions give the grants on sub-resources that the pages offer.
+/// The tree of types of the last known document gives the grants below the service that the
+/// pages offer.
 fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions> {
     catalog
         .groups()
         .iter()
         .flat_map(|group| group.services.iter())
         .map(|service| {
-            let actions = state.actions.actions(&service.id);
+            let declared = state.actions.declared(&service.id);
+            let known = declared.is_some();
+            let document = declared.unwrap_or_default();
             ui::ServiceActions {
                 id: service.id.clone(),
                 name: service.name.clone(),
-                sub_resources: actions
-                    .iter()
-                    .map(|a| {
-                        let kinds: Vec<String> =
-                            a.sub_resource_types().map(str::to_string).collect();
-                        (a.name.clone(), kinds)
-                    })
-                    .filter(|(_, kinds)| !kinds.is_empty())
-                    .collect(),
-                known: state.actions.declared(&service.id).is_some(),
-                actions: actions
+                actions: state
+                    .actions
+                    .actions(&service.id)
                     .into_iter()
                     .map(|a| (a.name, a.description))
                     .collect(),
+                document,
+                known,
             }
         })
         .collect()
@@ -2208,10 +2205,11 @@ async fn handle_users_update(
     })
 }
 
-/// Gives a user a grant on a sub-resource of a service. The form names the user, the service, the
-/// action, the resource type and the resource id. The service must publish the action with this
-/// resource type at `/.well-known/access-actions`. The server does not list the resources: the
-/// superadmin types the id. The id is used as typed: the server does not trim it or change its
+/// Gives a user a grant on a node below a service. The form names the user, the service, the
+/// action, the type of the node, and one id for each type of its chain: `id0` for the type at
+/// depth 1, `id1` for the next one, and so on. The last known document of the service gives the
+/// chain of the type and the actions that list it. The server does not list the resources: the
+/// superadmin types the ids. Each id is used as typed: the server does not trim it or change its
 /// case.
 async fn handle_grant_add(
     state: &Arc<AppState>,
@@ -2227,13 +2225,19 @@ async fn handle_grant_add(
         return response;
     }
     let mut field = |name: &str| form.remove(name).unwrap_or_default();
-    let (login, service, action, kind, id) = (
+    let (login, service, action, kind) = (
         field("login"),
         field("service"),
         field("action"),
         field("type"),
-        field("id"),
     );
+    let mut ids: Vec<String> = Vec::new();
+    for index in 0..grants::MAX_DEPTH {
+        match form.remove(&format!("id{index}")) {
+            Some(id) => ids.push(id),
+            None => break,
+        }
+    }
     if !form.is_empty() {
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
@@ -2251,12 +2255,9 @@ async fn handle_grant_add(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
-    if grants::check_resource_id(&id).is_err() {
+    if ids.iter().any(|id| grants::check_resource_id(id).is_err()) {
         return rejected("grant-bad-id");
     }
-    let Ok(grant) = Grant::on_resource(&action, &service, &kind, &id) else {
-        return rejected("grant-undeclared");
-    };
     let in_catalog = current_catalog(state)
         .groups()
         .iter()
@@ -2265,12 +2266,27 @@ async fn handle_grant_add(
     if !in_catalog {
         return rejected("grant-undeclared");
     }
-    // The resource types come from the service. While the service has not answered, no grant on
-    // a sub-resource is given.
+    // The tree of types comes from the service. While the service has not answered, no grant
+    // below the service is given.
     let Some(declared) = state.actions.declared(&service) else {
         return rejected("grant-not-known");
     };
-    if crate::actions::check_declared(&declared, &grant).is_err() {
+    // The form gives one id for each type of the chain, from depth 1 to the type itself.
+    let Some(chain) = declared.chain(&kind) else {
+        return rejected("grant-undeclared");
+    };
+    if chain.len() != ids.len() {
+        return rejected("grant-undeclared");
+    }
+    let path: Result<Vec<grants::Segment>, String> = chain
+        .iter()
+        .zip(&ids)
+        .map(|(kind, id)| grants::Segment::new(kind, id))
+        .collect();
+    let Ok(grant) = path.and_then(|path| Grant::on_path(&action, &service, path)) else {
+        return rejected("grant-undeclared");
+    };
+    if declared.check_grant(&grant).is_err() {
         return rejected("grant-undeclared");
     }
     if state
@@ -2296,7 +2312,7 @@ async fn handle_grant_add(
     }
 }
 
-/// Removes a grant on a sub-resource from a user. The form names the user and the grant in its
+/// Removes a grant below a service from a user. The form names the user and the grant in its
 /// text form. A grant of the configuration cannot be removed here.
 async fn handle_grant_delete(
     state: &Arc<AppState>,
@@ -2331,7 +2347,7 @@ async fn handle_grant_delete(
         return rejected("no-user");
     };
     let grant = match Grant::parse(&text) {
-        Ok(grant) if grant.resource.is_some() => grant,
+        Ok(grant) if !grant.path.is_empty() => grant,
         _ => return rejected("no-grant"),
     };
     if !current.grants.contains(&grant) {

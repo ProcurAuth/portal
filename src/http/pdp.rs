@@ -2,12 +2,19 @@
 //!
 //! The servers of the deployment ask this PDP if a user can do an action. Each server has its own
 //! bearer token (a `pdp_client` block). The PDP answers only for the resources of the server that
-//! asks. The resource is `{"type": "service", "id": "<name>"}` of this server, or a sub-resource
-//! `{"type": "<type>", "id": "<id>"}`. The service of a sub-resource is always the server that
-//! asks: its token tells which server it is. A grant on the service covers all its sub-resources.
-//! A grant on a sub-resource covers only the same type and the same id. It applies only when the
-//! last known document of the service declares this type for this action. The PDP fails closed:
-//! with no known document, or with a document without the type, the grant does not apply.
+//! asks.
+//!
+//! The resource is a node of the resource tree of the server (contract 11.4). The server itself
+//! is `{"type": "service", "id": "<name>"}`. A node below it has `properties.ancestors`: the chain
+//! from the server to the parent of the node. The first ancestor must be the server that asks,
+//! and the chain must follow the parents of the last known document of this server. Otherwise,
+//! the answer is `false` with the reason `invalid_resource`. A node without `ancestors` is read as
+//! `[server, node]`: this is correct only when its type has the parent `service`.
+//!
+//! A grant covers the node that it names and each node below it (prefix match, segment by
+//! segment). A grant below the service applies only when the last known document declares its
+//! chain and lists its type for its action. The PDP fails closed: with no known document, the
+//! decision on a node below the server is `false`.
 //!
 //! Endpoints:
 //!
@@ -18,12 +25,13 @@
 //!
 //! The PDP fails closed: a request that it cannot read gets status `400`, a request without a
 //! valid token gets status `401`, and an unknown user, subject type or resource gets `false`.
-//! Each decision is in the log with the server, the subject, the action, the resource and the
-//! decision. The PDP echoes `X-Request-ID`.
+//! Each decision is in the log with the server, the subject, the action, the resource (in the
+//! text form of a grant path) and the decision. The PDP echoes `X-Request-ID`.
 //!
-//! One denial has a reason in the answer: when the subject is a `user` that does not exist, the
-//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. No other denial has
-//! a reason, so that an answer never shows the grants of a user.
+//! Two denials have a reason in the answer. When the subject is a `user` that does not exist, the
+//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. When the resource is
+//! not a correct node of the server, the reason is `invalid_resource`. No other denial has a
+//! reason, so that an answer never shows the grants of a user.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,7 +39,10 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::grants::{check_action, covers, Grant, SubResource, ACCESS, SERVICE_TYPE};
+use crate::grants::{
+    check_action, check_resource_id, check_resource_type, covers, encode_id, Grant, Segment,
+    ACCESS, MAX_DEPTH, SERVICE_TYPE,
+};
 
 const EVALUATION_PATH: &str = "/access/v1/evaluation";
 const EVALUATIONS_PATH: &str = "/access/v1/evaluations";
@@ -44,6 +55,8 @@ const MAX_ID_CHARS: usize = 256;
 const NO_SUCH_USER: &str = "no such user";
 /// The reason in the answer for the same case.
 const UNKNOWN_SUBJECT: &str = "unknown_subject";
+/// The reason in the answer for a resource that is not a correct node of the server.
+const INVALID_RESOURCE: &str = "invalid_resource";
 
 /// The token of one server, as its SHA-256: the PDP does not keep the token itself.
 pub struct Client {
@@ -305,6 +318,12 @@ fn entity(value: Option<&Value>, what: &str) -> Result<Entity, String> {
     let object = value
         .and_then(Value::as_object)
         .ok_or_else(|| format!("{what} must be an object"))?;
+    check_properties(object, what)?;
+    entity_of(object, what)
+}
+
+/// The members `type` and `id` of an object.
+fn entity_of(object: &Map<String, Value>, what: &str) -> Result<Entity, String> {
     let text = |name: &str| -> Result<String, String> {
         match object.get(name) {
             Some(Value::String(text))
@@ -317,11 +336,138 @@ fn entity(value: Option<&Value>, what: &str) -> Result<Entity, String> {
             )),
         }
     };
-    check_properties(object, what)?;
     Ok(Entity {
         kind: text("type")?,
         id: text("id")?,
     })
+}
+
+/// The resource of a request: the node and, when the request gives them, its ancestors from the
+/// server to the parent of the node.
+struct Resource {
+    node: Entity,
+    ancestors: Option<Vec<Entity>>,
+}
+
+/// Read the resource of a request. `properties.ancestors` is optional. When it is present, it
+/// must be an array of objects with `type` and `id`: else the request is bad (status `400`). The
+/// chain itself is checked later, against the document of the server.
+fn read_resource(value: Option<&Value>, what: &str) -> Result<Resource, String> {
+    let node = entity(value, what)?;
+    let properties = value
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("properties"))
+        .and_then(Value::as_object);
+    let ancestors = match properties.and_then(|p| p.get("ancestors")) {
+        None => None,
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let at = format!("{what}.properties.ancestors[{index}]");
+                    let object = item
+                        .as_object()
+                        .ok_or_else(|| format!("{at} must be an object"))?;
+                    entity_of(object, &at)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Some(_) => return Err(format!("{what}.properties.ancestors must be an array")),
+    };
+    Ok(Resource { node, ancestors })
+}
+
+impl Resource {
+    /// The text form of the resource for the log: `service:<id>`, then `/<type>:<id>` for each
+    /// node below, with the ids encoded. The text shows what the request gave, also when it is
+    /// not correct.
+    fn log_text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ancestors) = &self.ancestors {
+            parts.extend(
+                ancestors
+                    .iter()
+                    .map(|a| format!("{}:{}", a.kind, encode_id(&a.id))),
+            );
+        }
+        parts.push(format!("{}:{}", self.node.kind, encode_id(&self.node.id)));
+        parts.join("/")
+    }
+}
+
+/// Why a resource gives no chain.
+enum Unresolved {
+    /// The resource is not a correct node of the server: the answer has `invalid_resource`.
+    Invalid(&'static str),
+    /// The PDP has no known document of the server: it cannot check the chain. The answer is
+    /// `false` with no reason.
+    NoDocument,
+}
+
+/// The chain of a resource below the server that asks: empty for the server itself. Checks the
+/// first ancestor, the types and the ids, and the parents of the last known document.
+fn chain_of(
+    state: &AppState,
+    client: &Client,
+    resource: &Resource,
+) -> Result<Vec<Segment>, Unresolved> {
+    let node = &resource.node;
+    if node.kind == SERVICE_TYPE {
+        if resource.ancestors.as_ref().is_some_and(|a| !a.is_empty()) {
+            return Err(Unresolved::Invalid("the service has ancestors"));
+        }
+        if node.id != client.name {
+            return Err(Unresolved::Invalid(
+                "the resource is a service of another server",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let below: &[Entity] = match &resource.ancestors {
+        // Compatibility: a node without ancestors is a node of depth 1.
+        None => &[],
+        Some(ancestors) => {
+            let Some((first, rest)) = ancestors.split_first() else {
+                return Err(Unresolved::Invalid(
+                    "the ancestors do not start with the service",
+                ));
+            };
+            if first.kind != SERVICE_TYPE || first.id != client.name {
+                return Err(Unresolved::Invalid(
+                    "the first ancestor is not the service of the server that asks",
+                ));
+            }
+            rest
+        }
+    };
+    if below.len() + 1 > MAX_DEPTH {
+        return Err(Unresolved::Invalid("the chain is too deep"));
+    }
+    let mut chain = Vec::with_capacity(below.len() + 1);
+    for entity in below.iter().chain(std::iter::once(node)) {
+        if entity.kind == SERVICE_TYPE
+            || check_resource_type(&entity.kind).is_err()
+            || check_resource_id(&entity.id).is_err()
+        {
+            return Err(Unresolved::Invalid(
+                "a type or an id of the chain is not valid",
+            ));
+        }
+        chain.push(Segment {
+            kind: entity.kind.clone(),
+            id: entity.id.clone(),
+        });
+    }
+    let Some(document) = state.actions.declared(&client.name) else {
+        return Err(Unresolved::NoDocument);
+    };
+    if !document.follows(chain.iter().map(|s| s.kind.as_str())) {
+        return Err(Unresolved::Invalid(
+            "the chain does not follow the types of the service",
+        ));
+    }
+    Ok(chain)
 }
 
 fn action_name(value: Option<&Value>) -> Result<String, String> {
@@ -339,7 +485,7 @@ fn action_name(value: Option<&Value>) -> Result<String, String> {
     }
 }
 
-/// `properties` is optional and must be an object. The PDP does not use it.
+/// `properties` is optional and must be an object. The PDP reads only `ancestors` of a resource.
 fn check_properties(object: &Map<String, Value>, what: &str) -> Result<(), String> {
     match object.get("properties") {
         None | Some(Value::Object(_)) => Ok(()),
@@ -354,76 +500,75 @@ fn check_context(request: &Map<String, Value>) -> Result<(), String> {
     }
 }
 
-/// The decision for one subject, action and resource, asked by `client`. Fails closed.
+/// The decision for one subject, action and resource, asked by `client`, with the reason for
+/// the log and the reason for the answer. Fails closed.
 fn decide(
     state: &AppState,
     client: &Client,
     subject: &Entity,
     action: &str,
-    resource: &Entity,
-) -> (bool, &'static str) {
+    resource: &Resource,
+) -> (bool, &'static str, Option<&'static str>) {
     if subject.kind != "user" {
-        return (false, "the subject type is not user");
+        return (false, "the subject type is not user", None);
     }
     if check_action(action).is_err() {
-        return (false, "the action name is not valid");
+        return (false, "the action name is not valid", None);
     }
-    // The service is always the server that asks. A resource of another type is a sub-resource
-    // of this service.
-    let target = if resource.kind == SERVICE_TYPE {
-        if resource.id != client.name {
-            return (false, "the resource is a service of another server");
+    let chain = match chain_of(state, client, resource) {
+        Ok(chain) => chain,
+        Err(Unresolved::Invalid(why)) => return (false, why, Some(INVALID_RESOURCE)),
+        Err(Unresolved::NoDocument) => {
+            return (false, "the document of the service is not known", None)
         }
-        None
-    } else {
-        Some(SubResource {
-            kind: resource.kind.clone(),
-            id: resource.id.clone(),
-        })
     };
     if constant_time_eq(subject.id.as_bytes(), state.superadmin_login.as_bytes()) {
-        return (true, "superadmin");
+        return (true, "superadmin", None);
     }
     let Some(stored) = stored_grants_of(state, &subject.id) else {
-        return (false, NO_SUCH_USER);
+        return (false, NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
     };
     let grants = state.policy.effective(&subject.id, &stored);
-    // A grant on a sub-resource applies only when the last known document of the service declares
-    // its type for its action. Without a known document, it does not apply. A grant on the whole
-    // service needs no declaration.
+    // A grant below the service applies only when the last known document of the service
+    // declares its chain and lists its type for its action. Without a known document, it does
+    // not apply. A grant on the whole service needs no declaration.
+    let document = state.actions.declared(&client.name);
     let applicable: Vec<Grant> = grants
         .iter()
-        .filter(|grant| match &grant.resource {
-            None => true,
-            Some(resource) => state
-                .actions
-                .declares(&grant.service, &grant.action, &resource.kind),
+        .filter(|grant| {
+            grant.path.is_empty()
+                || document
+                    .as_ref()
+                    .is_some_and(|d| d.check_grant(grant).is_ok())
         })
         .cloned()
         .collect();
-    if covers(&applicable, action, &client.name, target.as_ref()) {
-        (true, "grant")
-    } else if covers(&grants, action, &client.name, target.as_ref()) {
-        (false, "the service does not declare the resource type")
+    if covers(&applicable, action, &client.name, &chain) {
+        (true, "grant", None)
+    } else if covers(&grants, action, &client.name, &chain) {
+        (
+            false,
+            "the grant does not follow the document of the service",
+            None,
+        )
     } else {
-        (false, "no grant")
+        (false, "no grant", None)
     }
 }
 
-/// The answer of one decision. `unknown_subject` is true only when the subject is a `user` that
-/// does not exist.
+/// The answer of one decision, with its reason when it has one.
 struct Answer {
     decision: bool,
-    unknown_subject: bool,
+    reason: Option<&'static str>,
 }
 
 impl Answer {
-    /// The AuthZEN member of the answer. Only an unknown subject has a reason.
+    /// The AuthZEN member of the answer. Only an unknown subject and an invalid resource have a
+    /// reason.
     fn json(&self) -> Value {
-        if self.unknown_subject {
-            json!({ "decision": self.decision, "context": { "reason": UNKNOWN_SUBJECT } })
-        } else {
-            json!({ "decision": self.decision })
+        match self.reason {
+            Some(reason) => json!({ "decision": self.decision, "context": { "reason": reason } }),
+            None => json!({ "decision": self.decision }),
         }
     }
 }
@@ -434,10 +579,10 @@ fn decide_and_log(
     client: &Client,
     subject: &Entity,
     action: &str,
-    resource: &Entity,
+    resource: &Resource,
     request_id: Option<&str>,
 ) -> Answer {
-    let (decision, reason) = decide(state, client, subject, action, resource);
+    let (decision, why, reason) = decide(state, client, subject, action, resource);
     if decision {
         state.pdp_stats.permit.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -451,16 +596,13 @@ fn decide_and_log(
             ("client", client.name.clone()),
             ("subject", subject.id.clone()),
             ("action", action.to_string()),
-            ("resource", format!("{}:{}", resource.kind, resource.id)),
+            ("resource", resource.log_text()),
             ("decision", decision.to_string()),
-            ("reason", reason.to_string()),
+            ("reason", why.to_string()),
             ("request_id", request_id.unwrap_or("").to_string()),
         ],
     );
-    Answer {
-        decision,
-        unknown_subject: reason == NO_SUCH_USER,
-    }
+    Answer { decision, reason }
 }
 
 fn evaluation(
@@ -471,7 +613,7 @@ fn evaluation(
 ) -> Result<Value, String> {
     let subject = entity(request.get("subject"), "subject")?;
     let action = action_name(request.get("action"))?;
-    let resource = entity(request.get("resource"), "resource")?;
+    let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
     Ok(decide_and_log(state, client, &subject, &action, &resource, request_id).json())
 }
@@ -525,7 +667,7 @@ fn evaluations(
         let subject = entity(pick("subject"), &format!("evaluations[{index}].subject"))?;
         let action =
             action_name(pick("action")).map_err(|e| format!("evaluations[{index}].{e}"))?;
-        let resource = entity(pick("resource"), &format!("evaluations[{index}].resource"))?;
+        let resource = read_resource(pick("resource"), &format!("evaluations[{index}].resource"))?;
         match item.get("context") {
             None | Some(Value::Object(_)) => {}
             Some(_) => return Err(format!("evaluations[{index}].context must be an object")),
@@ -550,7 +692,8 @@ fn evaluations(
 }
 
 /// The actions that the subject can do on the resource: `access` and the actions that the server
-/// publishes, kept when the decision is `true`. The answer has one page.
+/// publishes, kept when the decision is `true`. The resource has the same form as in an
+/// evaluation, with its ancestors. The answer has one page.
 fn search_action(
     state: &AppState,
     client: &Client,
@@ -558,7 +701,7 @@ fn search_action(
     request_id: Option<&str>,
 ) -> Result<Value, String> {
     let subject = entity(request.get("subject"), "subject")?;
-    let resource = entity(request.get("resource"), "resource")?;
+    let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
     match request.get("page") {
         None | Some(Value::Object(_)) => {}

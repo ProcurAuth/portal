@@ -455,37 +455,33 @@ pub fn demo_catalog() -> Catalog {
     Catalog::build(services, Vec::new())
 }
 
-/// The actions of the demo services. One service publishes actions. The other services have only
-/// `access`.
+/// The document of the demo service that publishes actions: a host, and the databases of a host.
+const DEMO_DOCUMENT: &str = r#"{"server":"data-clickhouse-dash","resource_types":[{"name":"host","parent":"service","description":"One ClickHouse server."},{"name":"database","parent":"host","description":"One database of a host."}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"],"description":"Run read-only queries."},{"name":"query.run.write","resource_types":["service","host","database"],"description":"Run queries that change data."},{"name":"system.read","resource_types":["service","host"],"description":"See the System page."}]}"#;
+
+/// The actions of the demo services. One service publishes actions and a tree of types. The
+/// other services have only `access`.
 fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
     catalog
         .groups()
         .iter()
         .flat_map(|g| g.services.iter())
-        .map(|service| ServiceActions {
-            id: service.id.clone(),
-            name: service.name.clone(),
-            actions: if service.id == "data-clickhouse-dash" {
-                vec![
-                    ("query.run.read".into(), "Run read-only queries.".into()),
-                    (
-                        "query.run.write".into(),
-                        "Run queries that change data.".into(),
-                    ),
-                    ("system.read".into(), "See the System page.".into()),
-                ]
+        .map(|service| {
+            let document = if service.id == "data-clickhouse-dash" {
+                crate::actions::parse(&service.id, DEMO_DOCUMENT.as_bytes()).unwrap_or_default()
             } else {
-                Vec::new()
-            },
-            sub_resources: if service.id == "data-clickhouse-dash" {
-                vec![
-                    ("query.run.read".into(), vec!["database".into()]),
-                    ("query.run.write".into(), vec!["database".into()]),
-                ]
-            } else {
-                Vec::new()
-            },
-            known: true,
+                crate::actions::Document::default()
+            };
+            ServiceActions {
+                id: service.id.clone(),
+                name: service.name.clone(),
+                actions: document
+                    .actions
+                    .iter()
+                    .map(|a| (a.name.clone(), a.description.clone()))
+                    .collect(),
+                document: std::sync::Arc::new(document),
+                known: true,
+            }
         })
         .collect()
 }
@@ -558,6 +554,7 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
                     "access on service:infra-notes",
                     "access on service:data-clickhouse-dash",
                     "query.run.read on service:data-clickhouse-dash",
+                    "query.run.write on service:data-clickhouse-dash/host:local/database:analytics",
                 ],
                 2,
                 false,

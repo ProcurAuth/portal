@@ -133,15 +133,53 @@ ALTER TABLE user_grants
 -- carries the generation of the instance. The rows of version 3 have no generation: they end.
 ALTER TABLE sessions ADD COLUMN admin_generation BYTEA;
 ",
+    r#"
+-- Version 5: the path of a grant is one column, resource_path: the segments after the service in
+-- their text form, for example host:local/database:analytics. It is empty for a grant on the whole
+-- service. A grant on one sub-resource (type, id) of version 4 becomes type:<encoded id>. The
+-- encoding is the percent-encoding of the grants: each byte outside A-Z a-z 0-9 - . _ ~ becomes
+-- %XX with upper-case hex digits. A row that does not fit stops the migration: the transaction
+-- rolls back, and the database stays at version 4.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM user_grants
+     WHERE (sub_resource_type <> '' OR sub_resource_id <> '')
+       AND (sub_resource_type !~ '^[a-z][a-z0-9_]{0,31}$'
+            OR sub_resource_type = 'service'
+            OR octet_length(convert_to(sub_resource_id, 'UTF8')) NOT BETWEEN 1 AND 256
+            OR sub_resource_id ~ '[[:cntrl:]]')
+  ) THEN
+    RAISE EXCEPTION 'user_grants: a grant on a sub-resource cannot move to resource_path: the type must be a-z first, then a-z, 0-9 and _, and the id 1 to 256 bytes without a control character';
+  END IF;
+END
+$$;
+ALTER TABLE user_grants ADD COLUMN resource_path TEXT NOT NULL DEFAULT '';
+UPDATE user_grants AS g
+   SET resource_path = g.sub_resource_type || ':' || (
+     SELECT string_agg(
+              CASE WHEN b BETWEEN 48 AND 57 OR b BETWEEN 65 AND 90 OR b BETWEEN 97 AND 122
+                        OR b IN (45, 46, 95, 126)
+                   THEN chr(b)
+                   ELSE '%' || upper(lpad(to_hex(b), 2, '0'))
+              END, '' ORDER BY i)
+       FROM (SELECT i, get_byte(convert_to(g.sub_resource_id, 'UTF8'), i) AS b
+               FROM generate_series(0, octet_length(convert_to(g.sub_resource_id, 'UTF8')) - 1) AS i
+            ) AS bytes)
+ WHERE g.sub_resource_type <> '';
+ALTER TABLE user_grants DROP CONSTRAINT user_grants_pkey;
+ALTER TABLE user_grants DROP COLUMN sub_resource_type, DROP COLUMN sub_resource_id;
+ALTER TABLE user_grants
+  ADD PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path);
+"#,
 ];
 
-/// The grants of the rows of `user_grants`. A row that is not a valid grant stops the read.
-/// The database holds only what the servers wrote.
-fn grants_from(rows: Vec<[String; 5]>) -> Result<Vec<Grant>, String> {
+/// The grants of the rows of `user_grants`: action, resource type, resource id, resource path.
+/// A row that is not a valid grant stops the read. The database holds only what the servers
+/// wrote.
+fn grants_from(rows: Vec<[String; 4]>) -> Result<Vec<Grant>, String> {
     rows.iter()
-        .map(|[action, kind, id, sub_type, sub_id]| {
-            grant_from_row(action, kind, id, sub_type, sub_id)
-        })
+        .map(|[action, kind, id, path]| grant_from_row(action, kind, id, path))
         .collect()
 }
 
@@ -151,12 +189,11 @@ fn insert_grants(
     grants: &[Grant],
 ) -> Result<(), postgres::Error> {
     for grant in grants {
-        let [kind, id, sub_type, sub_id] = grant_columns(grant);
+        let (kind, id, path) = grant_columns(grant);
         tx.execute(
-            "INSERT INTO user_grants
-               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-            &[&user_id, &grant.action, &kind, &id, &sub_type, &sub_id],
+            "INSERT INTO user_grants (user_id, action, resource_type, resource_id, resource_path)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+            &[&user_id, &grant.action, &kind, &id, &path],
         )?;
     }
     Ok(())
@@ -166,7 +203,11 @@ fn insert_grants(
 /// A refused connection reads "error connecting to server: Connection refused" rather than the first half only.
 fn db(error: postgres::Error) -> String {
     let mut text = error.to_string();
-    if error.as_db_error().is_none() {
+    // The text of an error of the server is only "db error": add the severity and the message of
+    // the server. The detail can hold the values of a row: it stays out of the logs.
+    if let Some(server) = error.as_db_error() {
+        text.push_str(&format!(": {}: {}", server.severity(), server.message()));
+    } else {
         let mut cause = std::error::Error::source(&error);
         while let Some(inner) = cause {
             text.push_str(": ");
@@ -436,11 +477,10 @@ impl Pg {
         let rows = self.run(|c| {
             Ok(c.query(
                 "SELECT u.login, u.password_hash, u.created_at, g.action, g.resource_type,
-                        g.resource_id, g.sub_resource_type, g.sub_resource_id
+                        g.resource_id, g.resource_path
                    FROM users u LEFT JOIN user_grants g ON g.user_id = u.id
                   ORDER BY u.login COLLATE \"C\", g.action COLLATE \"C\",
-                           g.resource_id COLLATE \"C\", g.sub_resource_type COLLATE \"C\",
-                           g.sub_resource_id COLLATE \"C\"",
+                           g.resource_id COLLATE \"C\", g.resource_path COLLATE \"C\"",
                 &[],
             )?
             .into_iter()
@@ -450,9 +490,8 @@ impl Pg {
                     row.get::<_, Option<String>>(4),
                     row.get::<_, Option<String>>(5),
                     row.get::<_, Option<String>>(6),
-                    row.get::<_, Option<String>>(7),
                 ) {
-                    (Some(a), Some(k), Some(i), Some(t), Some(d)) => Some([a, k, i, t, d]),
+                    (Some(a), Some(k), Some(i), Some(p)) => Some([a, k, i, p]),
                     _ => None,
                 };
                 (
@@ -477,6 +516,10 @@ impl Pg {
             if let (Some(user), Some(grant)) = (users.last_mut(), grant) {
                 user.grants.extend(grants_from(vec![grant])?);
             }
+        }
+        // The order of the text of a path is not the order of the grants.
+        for user in &mut users {
+            user.grants.sort();
         }
         Ok(users)
     }
@@ -1421,6 +1464,15 @@ mod tests {
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
                  DELETE FROM schema_migrations WHERE version > 3;
+                 DROP TABLE user_grants;
+                 CREATE TABLE user_grants (
+                   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                   action TEXT NOT NULL,
+                   resource_type TEXT NOT NULL,
+                   resource_id TEXT NOT NULL,
+                   sub_resource_type TEXT NOT NULL DEFAULT '',
+                   sub_resource_id TEXT NOT NULL DEFAULT '',
+                   PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id));
                  INSERT INTO sessions
                    (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
                  VALUES ('\\x01', '\\x07', 1, NULL, false, 1, 9999999999, 1),
@@ -1446,5 +1498,160 @@ mod tests {
             1,
             "the row of bob stays"
         );
+    }
+
+    /// The table `user_grants` of portal 4.1.0 (schema version 4), with `rows`.
+    fn version_four(admin: &mut Client, rows: &str) {
+        admin
+            .batch_execute(&format!(
+                "DELETE FROM schema_migrations WHERE version > 4;
+                 DROP TABLE user_grants;
+                 CREATE TABLE user_grants (
+                   user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                   action TEXT NOT NULL,
+                   resource_type TEXT NOT NULL,
+                   resource_id TEXT NOT NULL,
+                   sub_resource_type TEXT NOT NULL DEFAULT '',
+                   sub_resource_id TEXT NOT NULL DEFAULT '',
+                   PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id));
+                 INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+                 {rows}"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_migration_to_version_five_moves_each_grant_to_a_path() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        version_four(
+            &mut admin,
+            "INSERT INTO user_grants
+               (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+             VALUES (1, 'access', 'service', 'db', '', ''),
+                    (1, 'query.run.read', 'service', 'db', 'database', 'analytics'),
+                    (1, 'query.run.write', 'service', 'db', 'database', 'a/b:c ~x'),
+                    (1, 'query.run.write', 'service', 'db', 'database', 'été');",
+        );
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        let paths: Vec<String> = admin
+            .query(
+                "SELECT resource_path FROM user_grants ORDER BY resource_path COLLATE \"C\"",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "",
+                "database:%C3%A9t%C3%A9",
+                "database:a%2Fb%3Ac%20~x",
+                "database:analytics"
+            ],
+            "the SQL encoding is the encoding of the grants"
+        );
+        for (path, id) in [
+            ("database:%C3%A9t%C3%A9", "été"),
+            ("database:a%2Fb%3Ac%20~x", "a/b:c ~x"),
+        ] {
+            assert_eq!(
+                crate::grants::Segment::new("database", id)
+                    .unwrap()
+                    .to_string(),
+                path
+            );
+        }
+        let mut expected: Vec<Grant> = [
+            "access on service:db",
+            "query.run.read on service:db/database:analytics",
+            "query.run.write on service:db/database:a%2Fb%3Ac%20~x",
+            "query.run.write on service:db/database:%C3%A9t%C3%A9",
+        ]
+        .iter()
+        .map(|text| Grant::parse(text).unwrap())
+        .collect();
+        expected.sort();
+        assert_eq!(migrated.load_users().unwrap()[0].grants, expected);
+        let mut next = expected.clone();
+        next.push(Grant::parse("query.run.read on service:db/host:h/database:x").unwrap());
+        next.sort();
+        assert!(migrated.update_user("alice", None, Some(&next)).unwrap());
+        assert_eq!(migrated.load_users().unwrap()[0].grants, next);
+        // A second start finds nothing to do.
+        assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn a_grant_that_does_not_fit_stops_the_migration_and_the_database_stays_at_version_four() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        for (row, why) in [
+            (
+                format!(
+                    "(1, 'q', 'service', 'db', 'database', '{}')",
+                    "é".repeat(129)
+                ),
+                "more than 256 bytes",
+            ),
+            (
+                "(1, 'q', 'service', 'db', '1database', 'x')".to_string(),
+                "a digit first",
+            ),
+            (
+                "(1, 'q', 'service', 'db', '', 'x')".to_string(),
+                "an id without a type",
+            ),
+        ] {
+            let Store::Pg(fresh) = Backend::Postgres(url.clone()).fresh() else {
+                unreachable!()
+            };
+            let config = fresh.pool.config.clone();
+            let mut admin = config.connect(NoTls).unwrap();
+            version_four(
+                &mut admin,
+                &format!(
+                    "INSERT INTO user_grants
+                       (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id)
+                     VALUES {row};"
+                ),
+            );
+            drop(fresh);
+            let error = match Pg::start(config, 1, Duration::from_secs(5)) {
+                Ok(_) => panic!("{why}: the migration must stop"),
+                Err(error) => error,
+            };
+            assert!(error.contains("resource_path"), "{why}: {error}");
+            let version: i64 = admin
+                .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+                .unwrap()
+                .get(0);
+            assert_eq!(version, 4, "{why}: the database did not change");
+            let rows: i64 = admin
+                .query_one(
+                    "SELECT COUNT(*) FROM user_grants WHERE sub_resource_type IS NOT NULL",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            assert_eq!(rows, 1, "{why}: the old columns stay");
+        }
     }
 }

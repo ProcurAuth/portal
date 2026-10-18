@@ -1032,7 +1032,43 @@ fn a_user_block_gives_grants_on_sub_resources() {
             "query.run.write on service:clickhouse-dash/database:analytics"
         ]
     );
-    assert_eq!(alice[1].resource.as_ref().unwrap().id, "analytics");
+    assert_eq!(alice[1].path[0].id, "analytics");
+}
+
+#[test]
+fn a_user_block_gives_grants_on_several_levels_with_encoded_ids() {
+    let (cfg, _) = ok(&with(
+        r#"access { grants_mode = "hybrid" }
+        user "alice" { grants = [
+          "query.run.read on service:clickhouse-dash/host:local",
+          "query.run.write on service:clickhouse-dash/host:local/database:a%2Fb",
+        ] }"#,
+    ));
+    let alice = &cfg.access.configured_grants["alice"];
+    assert_eq!(alice[0].path.len(), 1);
+    assert_eq!(alice[1].path[1].id, "a/b", "the id is decoded");
+    assert_eq!(
+        alice[1].to_string(),
+        "query.run.write on service:clickhouse-dash/host:local/database:a%2Fb"
+    );
+    for (grant, expected) in [
+        (
+            "query.run.write on service:db/host:local/database:a%2fb",
+            "upper-case hex",
+        ),
+        ("query.run.write on service:db/host:%6Cocal", "as it is"),
+        ("query.run.write on service:db/host:a/b", "segment"),
+        (
+            "query.run.write on service:db/a:1/b:2/c:3/d:4/e:5",
+            "the maximum is 4",
+        ),
+    ] {
+        let message = err(&with(&format!(
+            r#"access {{ grants_mode = "hybrid" }} user "alice" {{ grants = ["{grant}"] }}"#
+        )));
+        assert!(message.contains("user.alice.grants"), "{message}");
+        assert!(message.contains(expected), "{grant}: {message}");
+    }
 }
 
 #[test]

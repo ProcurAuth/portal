@@ -1283,7 +1283,7 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
 }
 
 #[test]
-fn the_pdp_gives_a_reason_only_for_a_subject_that_does_not_exist() {
+fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
     let pdp_port = free_port();
     let node = start_with(
         Arc::new(Backend::Sqlite.fresh()),
@@ -1344,8 +1344,8 @@ fn the_pdp_gives_a_reason_only_for_a_subject_that_does_not_exist() {
     );
     assert_eq!(
         single("user", "carol", "access", "service", "chat"),
-        plain_false,
-        "an account, the service of another server"
+        serde_json::json!({"decision": false, "context": {"reason": "invalid_resource"}}),
+        "an account, the service of another server: the resource is not valid"
     );
     assert_eq!(
         single("user", "carol", "Query.Run", "service", "db"),
@@ -1444,16 +1444,16 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
     };
     let write = || decide("query.run.write", "database", "analytics");
 
-    // The service was never read: no grant on a sub-resource applies. The grant on the whole
-    // service is not affected.
+    // The service was never read: the PDP cannot check the chain of a node below the service.
+    // The grant on the whole service is not affected.
     assert!(
         !write(),
         "never read: the grant on a sub-resource does not apply"
     );
     assert!(decide("system.read", "service", "db"));
     assert!(
-        decide("system.read", "database", "analytics"),
-        "the grant on the service covers its sub-resources without a document"
+        !decide("system.read", "database", "analytics"),
+        "never read: no decision below the service"
     );
 
     // The document declares the type: the grant applies. A type of another action does not help.
@@ -1485,8 +1485,339 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
     node.state.actions.fail("db");
     assert!(!write(), "the removal stays after a failed read");
     assert!(
-        decide("system.read", "database", "analytics"),
+        decide("system.read", "service", "db"),
         "the grant on the whole service stays"
+    );
+    assert!(
+        !decide("system.read", "database", "analytics"),
+        "the document does not declare database any more"
+    );
+}
+
+/// A resource below the service with its ancestors (contract 11.5).
+fn node_of(kind: &str, id: &str, ancestors: &[(&str, &str)]) -> serde_json::Value {
+    let ancestors: Vec<serde_json::Value> = ancestors
+        .iter()
+        .map(|(kind, id)| serde_json::json!({"type": kind, "id": id}))
+        .collect();
+    serde_json::json!({"type": kind, "id": id, "properties": {"ancestors": ancestors}})
+}
+
+#[test]
+fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = [
+              "query.run.read on service:db/host:local",
+              "query.run.write on service:db/host:local/database:a%2Fb",
+              "system.read on service:db",
+              "query.run.write on service:db/database:old"
+            ] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 8 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
+            pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
+        ),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let row = crate::store::UserRow {
+        login: "carol".into(),
+        password_hash: password_hash(PASSWORD),
+        grants: Vec::new(),
+        created_at: 1,
+    };
+    node.state.store.insert_user(&row).unwrap();
+    crate::sync::run_round(&node.state, 1);
+    publish_tree(&node);
+    let ask = |token: &str, path: &str, body: serde_json::Value| -> serde_json::Value {
+        let reply = pdp(pdp_port, path, Some(token), &body.to_string(), None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()
+    };
+    let single = |subject: &str, action: &str, resource: serde_json::Value| {
+        ask(
+            PDP_DB_TOKEN,
+            "/access/v1/evaluation",
+            serde_json::json!({
+                "subject": {"type": "user", "id": subject},
+                "action": {"name": action},
+                "resource": resource
+            }),
+        )
+    };
+    let yes = serde_json::json!({"decision": true});
+    let no = serde_json::json!({"decision": false});
+    let invalid = serde_json::json!({"decision": false, "context": {"reason": "invalid_resource"}});
+    let service = [("service", "db")];
+    let local = [("service", "db"), ("host", "local")];
+    let other = [("service", "db"), ("host", "other")];
+
+    // Prefix match: the grant on the host covers the host and its databases.
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.read",
+            node_of("host", "local", &service)
+        ),
+        yes
+    );
+    assert_eq!(
+        single("carol", "query.run.read", node_of("database", "x", &local)),
+        yes
+    );
+    assert_eq!(
+        single("carol", "query.run.read", node_of("database", "x", &other)),
+        no,
+        "another host"
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.read",
+            node_of("host", "other", &service)
+        ),
+        no
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.read",
+            serde_json::json!({"type": "service", "id": "db"})
+        ),
+        no,
+        "not the whole service"
+    );
+    // The ids are decoded in the request: the grant on a%2Fb covers the database a/b.
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("database", "a/b", &local)
+        ),
+        yes
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("database", "a%2Fb", &local)
+        ),
+        no
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("host", "local", &service)
+        ),
+        no,
+        "not the parent"
+    );
+    // The grant on the service covers each node.
+    assert_eq!(
+        single("carol", "system.read", node_of("host", "other", &service)),
+        yes
+    );
+    // The superadmin, also on a node that no grant names.
+    assert_eq!(
+        single("root", "query.run.write", node_of("database", "z", &other)),
+        yes
+    );
+
+    // The chain must start with the service of the server that asks, and follow the parents.
+    for (resource, why) in [
+        (
+            node_of("database", "x", &service),
+            "a database without its host",
+        ),
+        (
+            serde_json::json!({"type": "database", "id": "x"}),
+            "no ancestors: depth 1, but database is at depth 2",
+        ),
+        (
+            node_of("database", "x", &[("service", "chat"), ("host", "local")]),
+            "the service of another server",
+        ),
+        (
+            node_of("database", "x", &[("host", "local")]),
+            "no service first",
+        ),
+        (node_of("database", "x", &[]), "empty ancestors"),
+        (
+            node_of("table", "x", &local),
+            "a type that the document does not declare",
+        ),
+        (node_of("host", "local", &local), "host below host"),
+        (
+            node_of("host", "local", &[("service", "db"), ("service", "db")]),
+            "service twice",
+        ),
+        (
+            serde_json::json!({"type": "service", "id": "db", "properties": {"ancestors": [{"type": "service", "id": "db"}]}}),
+            "the service has no ancestors",
+        ),
+        (
+            serde_json::json!({"type": "service", "id": "chat"}),
+            "the service of another server",
+        ),
+        (
+            node_of("database", "a\nb", &local),
+            "a control character in an id",
+        ),
+    ] {
+        assert_eq!(
+            single("carol", "query.run.read", resource),
+            invalid,
+            "{why}"
+        );
+    }
+    // An invalid resource comes before an unknown subject, and the superadmin gets it too.
+    assert_eq!(
+        single(
+            "mallory",
+            "query.run.read",
+            node_of("database", "x", &service)
+        ),
+        invalid
+    );
+    assert_eq!(
+        single("root", "query.run.read", node_of("database", "x", &service)),
+        invalid
+    );
+    // A valid chain and an unknown subject: unknown_subject, as before.
+    assert_eq!(
+        single(
+            "mallory",
+            "query.run.read",
+            node_of("database", "x", &local)
+        ),
+        serde_json::json!({"decision": false, "context": {"reason": "unknown_subject"}})
+    );
+    // A server without a known document: no decision below the service, and no reason.
+    assert_eq!(
+        ask(
+            PDP_CHAT_TOKEN,
+            "/access/v1/evaluation",
+            serde_json::json!({
+                "subject": {"type": "user", "id": "root"},
+                "action": {"name": "x.read"},
+                "resource": node_of("room", "r", &[("service", "chat")])
+            })
+        ),
+        no
+    );
+    // A request with ancestors of a bad shape is refused with status 400.
+    for bad in [
+        serde_json::json!({"type": "database", "id": "x", "properties": {"ancestors": "service:db"}}),
+        serde_json::json!({"type": "database", "id": "x", "properties": {"ancestors": [{"type": "service"}]}}),
+        serde_json::json!({"type": "database", "id": "x", "properties": {"ancestors": ["service"]}}),
+    ] {
+        let body = serde_json::json!({
+            "subject": {"type": "user", "id": "carol"},
+            "action": {"name": "query.run.read"},
+            "resource": bad
+        });
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &body.to_string(),
+            None,
+        );
+        assert_eq!(reply.status, 400, "{}", reply.body);
+    }
+
+    // The grant of the document of one level does not follow the tree: it does not apply, also
+    // with the old form of the request.
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("database", "old", &local)
+        ),
+        no
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            serde_json::json!({"type": "database", "id": "old"})
+        ),
+        invalid
+    );
+
+    // The batch: the same rules for each item, with the resource of the request as the default.
+    let batch = ask(
+        PDP_DB_TOKEN,
+        "/access/v1/evaluations",
+        serde_json::json!({
+            "subject": {"type": "user", "id": "carol"},
+            "action": {"name": "query.run.read"},
+            "resource": node_of("database", "x", &local),
+            "evaluations": [
+                {},
+                {"resource": node_of("database", "x", &other)},
+                {"resource": node_of("database", "x", &service)},
+                {"resource": node_of("host", "local", &service)},
+                {"action": {"name": "query.run.write"}, "resource": node_of("database", "a/b", &local)}
+            ]
+        }),
+    );
+    assert_eq!(
+        batch["evaluations"],
+        serde_json::json!([yes, no, invalid, yes, yes])
+    );
+
+    // The action search on a node with its ancestors.
+    let search = |resource: serde_json::Value| -> Vec<String> {
+        ask(
+            PDP_DB_TOKEN,
+            "/access/v1/search/action",
+            serde_json::json!({"subject": {"type": "user", "id": "carol"}, "resource": resource}),
+        )["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        search(node_of("database", "a/b", &local)),
+        ["query.run.read", "query.run.write", "system.read"]
+    );
+    assert_eq!(search(node_of("database", "x", &other)), ["system.read"]);
+    assert!(
+        search(node_of("database", "x", &service)).is_empty(),
+        "an invalid resource"
+    );
+
+    // Compatibility: a document of one level reads a node without ancestors as depth 1.
+    publish_catalog(&node, &["query.run.read", "query.run.write"]);
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            serde_json::json!({"type": "database", "id": "old"})
+        ),
+        yes
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("database", "old", &service)
+        ),
+        yes
+    );
+    assert_eq!(
+        single("carol", "query.run.read", node_of("database", "x", &local)),
+        invalid,
+        "no host in this document"
     );
 }
 
@@ -1512,7 +1843,7 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 .map(str::to_string)
         };
         let notice = |code: &str| Some(format!("/auth/settings?s={code}"));
-        let fields = "login=alice&service=db&action=query.run.write&type=database&id=analytics";
+        let fields = "login=alice&service=db&action=query.run.write&type=database&id0=analytics";
         // The service has not answered yet: no grant on a sub-resource.
         *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(
             vec![listed(&[
@@ -1529,35 +1860,43 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         assert_eq!(add(fields), notice("unchanged"));
         for (bad, code) in [
             (
-                "login=alice&service=db&action=query.run.write&type=table&id=a",
+                "login=alice&service=db&action=query.run.write&type=table&id0=a",
                 "grant-undeclared",
             ),
             (
-                "login=alice&service=db&action=system.read&type=database&id=a",
+                "login=alice&service=db&action=system.read&type=database&id0=a",
                 "grant-undeclared",
             ),
             (
-                "login=alice&service=db&action=access&type=database&id=a",
+                "login=alice&service=db&action=access&type=database&id0=a",
                 "grant-undeclared",
             ),
             (
-                "login=alice&service=db&action=query.run.write&type=service&id=db",
+                "login=alice&service=db&action=query.run.write&type=service&id0=db",
                 "grant-undeclared",
             ),
             (
-                "login=alice&service=chat&action=query.run.write&type=database&id=a",
+                "login=alice&service=chat&action=query.run.write&type=database&id0=a",
                 "grant-undeclared",
             ),
             (
-                "login=alice&service=db&action=query.run.write&type=database&id=a+b",
+                "login=alice&service=db&action=query.run.write&type=database",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id0=a&id1=b",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id0=a%0Ab",
                 "grant-bad-id",
             ),
             (
-                "login=alice&service=db&action=query.run.write&type=database&id=",
+                "login=alice&service=db&action=query.run.write&type=database&id0=",
                 "grant-bad-id",
             ),
             (
-                "login=nobody&service=db&action=query.run.write&type=database&id=a",
+                "login=nobody&service=db&action=query.run.write&type=database&id0=a",
                 "no-user",
             ),
         ] {
@@ -1576,7 +1915,7 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
         let page = page(&node, &root, "/auth/settings");
-        assert!(page.body.contains("<code>database:analytics</code>"));
+        assert!(page.body.contains("database <code>analytics</code>"));
 
         // The edit form keeps the grant on the sub-resource: it shows only the grants on services.
         assert_eq!(
@@ -1608,6 +1947,7 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 &format!(
                     "login=alice&grant={}",
                     grant
+                        .replace('%', "%25")
                         .replace(' ', "+")
                         .replace('/', "%2F")
                         .replace(':', "%3A")
@@ -1637,7 +1977,75 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
             node.state.store.load_users().unwrap()[0].grants,
             vec![Grant::new("access", "db").unwrap()]
         );
+
+        // A document with a tree: one id for each type of the chain.
+        publish_tree(&node);
+        for (fields, code) in [
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id0=local&id1=a%2Fb+c",
+                "grant-added",
+            ),
+            (
+                "login=alice&service=db&action=query.run.read&type=host&id0=local",
+                "grant-added",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=database&id0=a",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=query.run.write&type=host&id0=a&id1=b",
+                "grant-undeclared",
+            ),
+            (
+                "login=alice&service=db&action=system.read&type=database&id0=a&id1=b",
+                "grant-undeclared",
+            ),
+        ] {
+            assert_eq!(add(fields), notice(code), "{fields}");
+        }
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                GRANT_ADD_PATH,
+                USERS_TOKEN,
+                "login=alice&service=db&action=query.run.write&type=database&id0=a&id1=b&id4=c"
+            )
+            .status,
+            400,
+            "an id beyond the deepest level"
+        );
+        let mut expected = vec![
+            Grant::new("access", "db").unwrap(),
+            Grant::parse("query.run.read on service:db/host:local").unwrap(),
+            Grant::parse("query.run.write on service:db/host:local/database:a%2Fb%20c").unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
+        assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
+        let tree_page = self::page(&node, &root, "/auth/settings");
+        assert!(tree_page
+            .body
+            .contains("host <code>local</code> › database <code>a/b c</code>"));
+        assert!(tree_page
+            .body
+            .contains(r#"<span class="subGrant__level">host › database</span>"#));
+        assert_eq!(
+            delete("query.run.write on service:db/host:local/database:a%2Fb%20c"),
+            notice("grant-deleted")
+        );
     });
+}
+
+/// The document of `db` with a tree: `host` below the service, `database` below `host`.
+fn publish_tree(node: &Node) {
+    let document = crate::actions::parse(
+        "db",
+        br#"{"server":"db","resource_types":[{"name":"host","parent":"service"},{"name":"database","parent":"host"}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"]},{"name":"query.run.write","resource_types":["service","host","database"]},{"name":"system.read","resource_types":["service","host"]}]}"#,
+    )
+    .unwrap();
+    node.state.actions.set_document("db", document);
 }
 
 // Security regressions -------------------------------------------------------------------------

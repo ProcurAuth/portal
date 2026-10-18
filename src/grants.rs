@@ -1,24 +1,31 @@
-//! The grants of the users: an action on a resource.
+//! The grants of the users: an action on a node of the resource tree of a service.
 //!
-//! A grant has one of two text forms:
+//! The text form of a grant is `<action> on service:<id>[/<type>:<id>]...` (contract 11.8):
 //!
-//! - `<action> on service:<id>`, for example `access on service:grafana`. The grant applies to the
-//!   whole service.
-//! - `<action> on service:<id>/<type>:<resource id>`, for example
-//!   `query.run.write on service:clickhouse-dash/database:analytics`. The grant applies to one
-//!   sub-resource of the service.
+//! - `access on service:grafana`: the grant applies to the whole service.
+//! - `query.run.read on service:clickhouse-dash/host:local`: the grant applies to the host `local`
+//!   and to each node below it.
+//! - `query.run.write on service:clickhouse-dash/host:local/database:analytics`: the grant applies
+//!   to one database of the host `local`.
+//!
+//! The part after the service has 0 to [`MAX_DEPTH`] segments. Each id is percent-encoded
+//! (RFC 3986): each byte outside `A-Z a-z 0-9 - . _ ~` is `%XX`, with upper-case hex digits. Thus a
+//! `/` or a `:` in an id never divides a segment. The encoding is canonical: the parser refuses a
+//! different encoding of the same id. In memory, an id is decoded.
 //!
 //! The action `access` lets the user open the service: the access gateway decides it in
-//! `/auth/verify`. The action `access` has no grant on a sub-resource. The other actions are the
+//! `/auth/verify`. The action `access` has grants on the service only. The other actions are the
 //! names that a service publishes at `/.well-known/access-actions`. The service decides them: it
 //! asks the PDP of this server (see [`crate::pdp`]).
 //!
-//! A grant on a service covers all the sub-resources of this service. A grant on a sub-resource
-//! covers only this sub-resource. The superadmin has all grants. A new user has no grant.
+//! A grant covers the node that it names and each node below it: the PDP compares the segments
+//! one by one (prefix match). A grant on the service covers all the service. The superadmin has
+//! all grants. A new user has no grant. The service declares its tree of types; see
+//! [`crate::actions`] for the check of a grant against this tree.
 //!
-//! Interface: [`Grant`] (one grant, its text form), [`SubResource`] (a resource in a service),
-//! [`Mode`] (where the grants come from), [`Policy`] (the grants that apply to one user),
-//! [`holds`] and [`covers`] (the checks).
+//! Interface: [`Grant`] (one grant, its text form), [`Segment`] (one node below the service),
+//! [`encode_id`] and [`decode_id`] (the id encoding), [`Mode`] (where the grants come from),
+//! [`Policy`] (the grants that apply to one user), [`holds`] and [`covers`] (the checks).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -31,27 +38,30 @@ pub const MAX_ACTION_CHARS: usize = 64;
 pub const MAX_SERVICE_CHARS: usize = 64;
 /// The longest resource type.
 pub const MAX_RESOURCE_TYPE_CHARS: usize = 32;
-/// The longest id of a sub-resource.
-pub const MAX_RESOURCE_ID_CHARS: usize = 128;
+/// The longest id of a node, in bytes after decoding.
+pub const MAX_RESOURCE_ID_BYTES: usize = 256;
+/// The largest number of segments after the service, in a grant or in a request.
+pub const MAX_DEPTH: usize = 4;
 /// The largest number of grants of one user, in the configuration or in the database.
 pub const MAX_GRANTS_PER_USER: usize = 512;
-/// The resource type of a whole service.
+/// The resource type of a whole service. It is the root of each tree.
 pub const SERVICE_TYPE: &str = "service";
 
-/// A resource in a service, for example the database `analytics`. The service publishes its
-/// resource types. The id is exact: the server does not change its case.
+/// One node below the service, for example the database `analytics`. The service publishes its
+/// resource types. The id is decoded and exact: the server does not change its case.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SubResource {
+pub struct Segment {
     pub kind: String,
     pub id: String,
 }
 
-impl SubResource {
+impl Segment {
+    /// A segment with a decoded id. The type `service` is refused: it is the root.
     pub fn new(kind: &str, id: &str) -> Result<Self, String> {
         check_resource_type(kind)?;
         if kind == SERVICE_TYPE {
             return Err(format!(
-                "the resource type {SERVICE_TYPE:?} is the whole service: write `<action> on service:<id>`"
+                "the resource type {SERVICE_TYPE:?} is the whole service: it is never a segment"
             ));
         }
         check_resource_id(id)?;
@@ -60,21 +70,56 @@ impl SubResource {
             id: id.to_string(),
         })
     }
-}
 
-impl fmt::Display for SubResource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.kind, self.id)
+    /// A segment in its text form, `<type>:<encoded id>`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (kind, id) = text.split_once(':').ok_or_else(|| {
+            format!("the segment {text:?} must be <type>:<id>, for example host:local")
+        })?;
+        Self::new(kind, &decode_id(id)?)
     }
 }
 
-/// One grant: the user can do `action` on the service `service`. When `resource` is given, the
-/// grant applies only to this sub-resource of the service.
+impl fmt::Display for Segment {
+    /// The text form, `<type>:<encoded id>`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.kind, encode_id(&self.id))
+    }
+}
+
+/// The text form of a path: the segments joined by `/`. The path of the service itself is empty.
+pub fn path_text(path: &[Segment]) -> String {
+    path.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Read a path in its text form. An empty text is the service itself.
+pub fn parse_path(text: &str) -> Result<Vec<Segment>, String> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path = text
+        .split('/')
+        .map(Segment::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    if path.len() > MAX_DEPTH {
+        return Err(format!(
+            "the path has {} segments after the service, the maximum is {MAX_DEPTH}",
+            path.len()
+        ));
+    }
+    Ok(path)
+}
+
+/// One grant: the user can do `action` on the node `path` of the service `service`, and on each
+/// node below it. An empty `path` is the whole service.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Grant {
     pub action: String,
     pub service: String,
-    pub resource: Option<SubResource>,
+    pub path: Vec<Segment>,
 }
 
 impl Grant {
@@ -85,28 +130,43 @@ impl Grant {
         Ok(Self {
             action: action.to_string(),
             service: service.to_string(),
-            resource: None,
+            path: Vec::new(),
         })
     }
 
-    /// A grant on one sub-resource of the service. The action `access` is refused: it opens the
-    /// whole service.
-    pub fn on_resource(action: &str, service: &str, kind: &str, id: &str) -> Result<Self, String> {
+    /// A grant on a node of the service. An empty path is the whole service. The action `access`
+    /// has no grant below the service: it opens the whole service.
+    pub fn on_path(action: &str, service: &str, path: Vec<Segment>) -> Result<Self, String> {
         let mut grant = Self::new(action, service)?;
+        if path.is_empty() {
+            return Ok(grant);
+        }
         if action == ACCESS {
             return Err(format!(
                 "the action {ACCESS:?} opens the whole service: it has no grant on a sub-resource"
             ));
         }
-        grant.resource = Some(SubResource::new(kind, id)?);
+        if path.len() > MAX_DEPTH {
+            return Err(format!(
+                "the path has {} segments after the service, the maximum is {MAX_DEPTH}",
+                path.len()
+            ));
+        }
+        grant.path = path;
         Ok(grant)
     }
 
-    /// The text form: `<action> on service:<id>` or `<action> on service:<id>/<type>:<id>`. The
-    /// parser does not change the text: a text with a different case or more spaces is refused.
+    /// A grant from the columns of the database: the path in its text form.
+    pub fn from_path_text(action: &str, service: &str, path: &str) -> Result<Self, String> {
+        Self::on_path(action, service, parse_path(path)?)
+    }
+
+    /// The text form: `<action> on service:<id>[/<type>:<encoded id>]...`. The parser does not
+    /// change the text: a text with a different case, more spaces or a different encoding is
+    /// refused.
     pub fn parse(text: &str) -> Result<Self, String> {
         let (action, resource) = text.split_once(" on ").ok_or_else(|| {
-            "expected `<action> on service:<id>` or `<action> on service:<id>/<type>:<id>`"
+            "expected `<action> on service:<id>`, then optionally `/<type>:<id>` for each level"
                 .to_string()
         })?;
         let target = resource
@@ -114,24 +174,105 @@ impl Grant {
             .ok_or_else(|| "the resource must start with service:<id>".to_string())?;
         match target.split_once('/') {
             None => Self::new(action, target),
-            Some((service, sub)) => {
-                let (kind, id) = sub.split_once(':').ok_or_else(|| {
-                    format!("the sub-resource {sub:?} must be <type>:<id>, for example database:analytics")
-                })?;
-                Self::on_resource(action, service, kind, id)
+            Some((service, path)) => {
+                if path.is_empty() {
+                    return Err(format!(
+                        "the text {text:?} ends with '/': write a segment <type>:<id> after it"
+                    ));
+                }
+                let path = parse_path(path)?;
+                Self::on_path(action, service, path)
             }
         }
+    }
+
+    /// The text form of the path after the service. Empty for the whole service.
+    pub fn path_text(&self) -> String {
+        path_text(&self.path)
+    }
+
+    /// The type of the node that the grant names. `service` for the whole service.
+    pub fn kind(&self) -> &str {
+        self.path.last().map_or(SERVICE_TYPE, |s| s.kind.as_str())
     }
 }
 
 impl fmt::Display for Grant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} on {SERVICE_TYPE}:{}", self.action, self.service)?;
-        if let Some(resource) = &self.resource {
-            write!(f, "/{resource}")?;
+        for segment in &self.path {
+            write!(f, "/{segment}")?;
         }
         Ok(())
     }
+}
+
+/// Whether a byte stays as it is in an encoded id (the unreserved bytes of RFC 3986).
+fn unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// The text form of an id: each byte outside `A-Z a-z 0-9 - . _ ~` becomes `%XX`, with upper-case
+/// hex digits.
+pub fn encode_id(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if unreserved(byte) {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(char::from(b"0123456789ABCDEF"[usize::from(byte >> 4)]));
+            out.push(char::from(b"0123456789ABCDEF"[usize::from(byte & 0x0f)]));
+        }
+    }
+    out
+}
+
+/// Decode the text form of an id. Only the canonical form is accepted: an unreserved byte as it
+/// is, each other byte as `%XX` with upper-case hex digits. The decoded id must obey
+/// [`check_resource_id`].
+pub fn decode_id(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if unreserved(byte) {
+            out.push(byte);
+            index += 1;
+            continue;
+        }
+        if byte != b'%' {
+            return Err(format!(
+                "the id {text:?} has the character {:?}: encode each byte outside A-Z a-z 0-9 - . _ ~ as %XX",
+                char::from(byte)
+            ));
+        }
+        let hex = |at: usize| -> Option<u8> {
+            match bytes.get(at) {
+                Some(b @ b'0'..=b'9') => Some(b - b'0'),
+                Some(b @ b'A'..=b'F') => Some(b - b'A' + 10),
+                _ => None,
+            }
+        };
+        let (Some(high), Some(low)) = (hex(index + 1), hex(index + 2)) else {
+            return Err(format!(
+                "the id {text:?} has a bad escape: write %XX with two upper-case hex digits"
+            ));
+        };
+        let decoded = high << 4 | low;
+        if unreserved(decoded) {
+            return Err(format!(
+                "the id {text:?} encodes {:?}: write this character as it is",
+                char::from(decoded)
+            ));
+        }
+        out.push(decoded);
+        index += 3;
+    }
+    let id = String::from_utf8(out).map_err(|_| format!("the id {text:?} is not UTF-8"))?;
+    check_resource_id(&id)?;
+    Ok(id)
 }
 
 /// An action name: lower case parts of `a-z`, `0-9` and `_`, joined by `.`. At most 64 characters.
@@ -172,10 +313,11 @@ pub fn check_service_id(id: &str) -> Result<(), String> {
     }
 }
 
-/// A resource type: `a-z`, `0-9` and `_`, 1 to 32 characters. The type `service` is valid here.
+/// A resource type: `a-z` first, then `a-z`, `0-9` and `_`, 1 to 32 characters. The type
+/// `service` is valid here.
 pub fn check_resource_type(kind: &str) -> Result<(), String> {
-    let valid = !kind.is_empty()
-        && kind.len() <= MAX_RESOURCE_TYPE_CHARS
+    let valid = kind.len() <= MAX_RESOURCE_TYPE_CHARS
+        && kind.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && kind
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
@@ -183,21 +325,20 @@ pub fn check_resource_type(kind: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "the resource type {kind:?} must be a-z, 0-9 and _, 1 to {MAX_RESOURCE_TYPE_CHARS} characters"
+            "the resource type {kind:?} must start with a-z, then a-z, 0-9 and _, 1 to {MAX_RESOURCE_TYPE_CHARS} characters"
         ))
     }
 }
 
-/// The id of a sub-resource: 1 to 128 characters, without a space or a control character.
+/// The decoded id of a node: 1 to 256 bytes of UTF-8, without a control character.
 pub fn check_resource_id(id: &str) -> Result<(), String> {
-    let valid = !id.is_empty()
-        && id.chars().count() <= MAX_RESOURCE_ID_CHARS
-        && !id.chars().any(|c| c.is_whitespace() || c.is_control());
+    let valid =
+        !id.is_empty() && id.len() <= MAX_RESOURCE_ID_BYTES && !id.chars().any(char::is_control);
     if valid {
         Ok(())
     } else {
         Err(format!(
-            "the resource id {id:?} must be 1 to {MAX_RESOURCE_ID_CHARS} characters, without a space or a control character"
+            "the resource id {id:?} must be 1 to {MAX_RESOURCE_ID_BYTES} bytes, without a control character"
         ))
     }
 }
@@ -274,25 +415,19 @@ impl Policy {
     }
 }
 
-/// Whether `grants` hold `action` on the whole service `service`. A grant on a sub-resource does
+/// Whether `grants` hold `action` on the whole service `service`. A grant below the service does
 /// not count.
 pub fn holds(grants: &[Grant], action: &str, service: &str) -> bool {
-    covers(grants, action, service, None)
+    covers(grants, action, service, &[])
 }
 
-/// Whether `grants` let the user do `action` on `resource` of the service `service`. `None` is
-/// the whole service. A grant on the service covers all its sub-resources. A grant on a
-/// sub-resource covers only the same type and the same id.
-pub fn covers(
-    grants: &[Grant],
-    action: &str,
-    service: &str,
-    resource: Option<&SubResource>,
-) -> bool {
+/// Whether `grants` let the user do `action` on the node `chain` of the service `service`. The
+/// chain is the path from the service to the node; empty for the whole service. A grant covers
+/// the node when its path is a prefix of the chain: the types and the ids are equal, segment by
+/// segment.
+pub fn covers(grants: &[Grant], action: &str, service: &str, chain: &[Segment]) -> bool {
     grants.iter().any(|grant| {
-        grant.action == action
-            && grant.service == service
-            && (grant.resource.is_none() || grant.resource.as_ref() == resource)
+        grant.action == action && grant.service == service && chain.starts_with(&grant.path)
     })
 }
 
@@ -406,34 +541,78 @@ mod tests {
         assert!(!holds(&grants, "query.run.write", "b"));
     }
 
+    fn seg(kind: &str, id: &str) -> Segment {
+        Segment::new(kind, id).unwrap()
+    }
+
     #[test]
-    fn a_grant_on_a_sub_resource_reads_and_writes_the_same_text() {
+    fn a_grant_with_segments_reads_and_writes_the_same_text() {
         for text in [
             "query.run.write on service:clickhouse-dash/database:analytics",
-            "query.run.read on service:db/table:analytics.events",
-            "files.read on service:s3/bucket:a/b:c",
+            "query.run.read on service:db/host:local",
+            "query.run.read on service:db/host:local/database:analytics.events",
+            "files.read on service:s3/bucket:a%2Fb%3Ac",
+            "files.read on service:s3/host:h/bucket:b/prefix:x/object:%C3%A9t%C3%A9%20report",
+            "files.read on service:s3/object:~a-b_c.d",
         ] {
             assert_eq!(grant(text).to_string(), text);
         }
-        let g = grant("query.run.write on service:clickhouse-dash/database:analytics");
+        let g = grant("query.run.write on service:clickhouse-dash/host:local/database:analytics");
         assert_eq!(g.service, "clickhouse-dash");
-        assert_eq!(
-            g.resource,
-            Some(SubResource {
-                kind: "database".into(),
-                id: "analytics".into()
-            })
-        );
-        let s3 = grant("files.read on service:s3/bucket:a/b:c");
-        assert_eq!(s3.resource.unwrap().id, "a/b:c", "the id keeps its / and :");
+        assert_eq!(g.path, [seg("host", "local"), seg("database", "analytics")]);
+        assert_eq!(g.path_text(), "host:local/database:analytics");
+        assert_eq!(g.kind(), "database");
+        assert_eq!(grant("x on service:a").kind(), SERVICE_TYPE);
+        let s3 = grant("files.read on service:s3/bucket:a%2Fb%3Ac");
+        assert_eq!(s3.path[0].id, "a/b:c", "the id is decoded in memory");
         assert!(
             grant("x on service:a") < grant("x on service:a/database:b"),
             "the grant on the service sorts first"
         );
+        assert_eq!(
+            Grant::from_path_text("x", "a", "host:h/database:d").unwrap(),
+            grant("x on service:a/host:h/database:d")
+        );
+        assert_eq!(
+            Grant::from_path_text("x", "a", "").unwrap(),
+            grant("x on service:a")
+        );
     }
 
     #[test]
-    fn a_bad_grant_on_a_sub_resource_is_refused() {
+    fn an_id_has_one_text_form() {
+        assert_eq!(encode_id("analytics"), "analytics");
+        assert_eq!(encode_id("a/b:c d"), "a%2Fb%3Ac%20d");
+        assert_eq!(encode_id("été"), "%C3%A9t%C3%A9");
+        assert_eq!(encode_id("%41"), "%2541");
+        for id in ["a", "a/b", "été", "%", "a b", "~-._", &"x".repeat(256)] {
+            assert_eq!(decode_id(&encode_id(id)).unwrap(), id);
+        }
+        for bad in [
+            "a%2fb", // lower-case hex
+            "%41",   // an unreserved byte that needs no escape
+            "a/b",   // a raw separator
+            "a:b",   // a raw separator
+            "a b",   // a raw space
+            "é",     // a raw byte outside the set
+            "%2",    // a short escape
+            "%G0",   // not hex
+            "%C3",   // not UTF-8
+            "%0A",   // a control character
+            "",      // empty
+        ] {
+            assert!(decode_id(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(decode_id(&"x".repeat(257)).is_err(), "more than 256 bytes");
+        assert!(
+            decode_id(&"%C3%A9".repeat(129)).is_err(),
+            "the limit is in bytes after decoding"
+        );
+        assert!(decode_id(&"%C3%A9".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn a_bad_grant_with_segments_is_refused() {
         for bad in [
             "access on service:db/database:analytics",
             "query on service:db/",
@@ -442,59 +621,95 @@ mod tests {
             "query on service:db/:analytics",
             "query on service:db/Database:analytics",
             "query on service:db/data-base:analytics",
+            "query on service:db/1database:analytics",
             "query on service:db/service:db",
+            "query on service:db/host:h/service:db",
             "query on service:db/database:a b",
+            "query on service:db/database:a%2fb",
+            "query on service:db/database:%61",
             "query on service:db/database:a\tb",
+            "query on service:db/host:h//database:a",
+            "query on service:db/host:h/",
             "query on service:Db/database:a",
+            "query on service:db/a:1/b:2/c:3/d:4/e:5",
         ] {
             assert!(Grant::parse(bad).is_err(), "{bad:?} must be refused");
         }
-        let long_id = format!("query on service:db/database:{}", "a".repeat(129));
-        assert!(Grant::parse(&long_id).is_err());
+        assert!(Grant::parse("query on service:db/a:1/b:2/c:3/d:4").is_ok());
         let long_type = format!("query on service:db/{}:a", "a".repeat(33));
         assert!(Grant::parse(&long_type).is_err());
-        assert!(Grant::parse(&format!("query on service:db/database:{}", "é".repeat(128))).is_ok());
-        assert!(Grant::on_resource("access", "db", "database", "x").is_err());
+        assert!(Grant::on_path("access", "db", vec![seg("database", "x")]).is_err());
+        assert!(Grant::on_path("access", "db", Vec::new()).is_ok());
+        assert!(Segment::new("service", "db").is_err());
+        assert!(Grant::from_path_text("x", "db", "database:a/").is_err());
     }
 
     #[test]
-    fn a_grant_on_the_service_covers_its_sub_resources_and_not_the_reverse() {
-        let analytics = SubResource::new("database", "analytics").unwrap();
-        let logs = SubResource::new("database", "logs").unwrap();
-        let table = SubResource::new("table", "analytics").unwrap();
-        let service = vec![grant("query.run.read on service:db")];
-        assert!(covers(&service, "query.run.read", "db", None));
-        assert!(covers(&service, "query.run.read", "db", Some(&analytics)));
-        assert!(covers(&service, "query.run.read", "db", Some(&table)));
-        assert!(!covers(
+    fn a_grant_covers_its_node_and_each_node_below_it() {
+        let local = seg("host", "local");
+        let other = seg("host", "other");
+        let analytics = seg("database", "analytics");
+        let logs = seg("database", "logs");
+        let service = vec![grant("read on service:db")];
+        assert!(covers(&service, "read", "db", &[]));
+        assert!(covers(&service, "read", "db", &[local.clone()]));
+        assert!(covers(
             &service,
-            "query.run.read",
-            "other",
-            Some(&analytics)
+            "read",
+            "db",
+            &[local.clone(), analytics.clone()]
         ));
-        assert!(!covers(&service, "query.run.write", "db", Some(&analytics)));
-        let one = vec![grant("query.run.write on service:db/database:analytics")];
-        assert!(covers(&one, "query.run.write", "db", Some(&analytics)));
+        assert!(!covers(&service, "read", "other", &[local.clone()]));
+        assert!(!covers(&service, "write", "db", &[local.clone()]));
+
+        let host = vec![grant("read on service:db/host:local")];
+        assert!(covers(&host, "read", "db", &[local.clone()]));
+        assert!(covers(&host, "read", "db", &[local.clone(), logs.clone()]));
         assert!(
-            !covers(&one, "query.run.write", "db", Some(&logs)),
-            "another id"
+            !covers(&host, "read", "db", &[other.clone(), logs.clone()]),
+            "another host"
+        );
+        assert!(!covers(&host, "read", "db", &[]), "not the whole service");
+        assert!(!holds(&host, "read", "db"));
+        assert!(
+            !covers(&host, "read", "db", &[seg("host", "Local")]),
+            "the id is exact"
         );
         assert!(
-            !covers(&one, "query.run.write", "db", Some(&table)),
+            !covers(&host, "read", "db", &[seg("server", "local")]),
             "another type"
         );
+
+        let one = vec![grant("write on service:db/host:local/database:analytics")];
+        assert!(covers(
+            &one,
+            "write",
+            "db",
+            &[local.clone(), analytics.clone()]
+        ));
+        assert!(!covers(&one, "write", "db", &[local.clone(), logs.clone()]));
         assert!(
-            !covers(&one, "query.run.write", "db", None),
-            "not the whole service"
+            !covers(&one, "write", "db", &[local.clone()]),
+            "not the parent"
         );
-        assert!(!holds(&one, "query.run.write", "db"));
         assert!(
-            !covers(&one, "query.run.read", "db", Some(&analytics)),
-            "another action"
+            !covers(&one, "write", "db", &[other.clone(), analytics.clone()]),
+            "the same database on another host"
         );
         assert!(
-            !covers(&one, "query.run.write", "db2", Some(&analytics)),
-            "another service"
+            !covers(&one, "write", "db", &[analytics.clone()]),
+            "the database without its host"
+        );
+
+        let encoded = vec![grant("read on service:s3/bucket:a%2Fb")];
+        assert!(covers(&encoded, "read", "s3", &[seg("bucket", "a/b")]));
+        assert!(
+            !covers(&encoded, "read", "s3", &[seg("bucket", "a%2Fb")]),
+            "the ids are compared decoded"
+        );
+        assert!(
+            !covers(&encoded, "read", "s3", &[seg("bucket", "a"), seg("b", "x")]),
+            "a / in an id never divides a segment"
         );
     }
 }

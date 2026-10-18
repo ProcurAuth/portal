@@ -31,39 +31,38 @@ pub const LOGIN_PAGE_SIZE: i64 = 50;
 /// Failures are bounded per minute by the rate limiter. This limit bounds what a long siege can leave in the database.
 const MAX_LOGIN_ROWS: i64 = 20_000;
 
-/// A row of `user_grants` as a grant. The columns `sub_resource_type` and `sub_resource_id` are
-/// both empty for a grant on the whole service. A row that is not a valid grant stops the read:
-/// the database holds only what the servers wrote.
-fn grant_from_row(
-    action: &str,
-    kind: &str,
-    id: &str,
-    sub_type: &str,
-    sub_id: &str,
-) -> Result<Grant, String> {
+/// A row of `user_grants` as a grant. The column `resource_path` holds the segments after the
+/// service in their text form (`host:local/database:analytics`). It is empty for a grant on the
+/// whole service. A row that is not a valid grant stops the read: the database holds only what
+/// the servers wrote.
+fn grant_from_row(action: &str, kind: &str, id: &str, path: &str) -> Result<Grant, String> {
     if kind != crate::grants::SERVICE_TYPE {
         return Err(format!("user_grants: unknown resource type {kind:?}"));
     }
-    let grant = match (sub_type, sub_id) {
-        ("", "") => Grant::new(action, id),
-        _ => Grant::on_resource(action, id, sub_type, sub_id),
-    };
-    grant.map_err(|e| format!("user_grants: {e}"))
+    Grant::from_path_text(action, id, path).map_err(|e| format!("user_grants: {e}"))
 }
 
-/// The columns of a grant in `user_grants`: `resource_type`, `resource_id`, `sub_resource_type`
-/// and `sub_resource_id`.
-fn grant_columns(grant: &Grant) -> [&str; 4] {
-    let (sub_type, sub_id) = grant
-        .resource
-        .as_ref()
-        .map_or(("", ""), |r| (r.kind.as_str(), r.id.as_str()));
-    [
+/// The columns of a grant in `user_grants`: `resource_type`, `resource_id` and `resource_path`.
+fn grant_columns(grant: &Grant) -> (&'static str, &str, String) {
+    (
         crate::grants::SERVICE_TYPE,
         grant.service.as_str(),
-        sub_type,
-        sub_id,
-    ]
+        grant.path_text(),
+    )
+}
+
+/// The text form of a grant on one sub-resource of schema version 4 (SQLite) or 3 (PostgreSQL):
+/// `<type>:<encoded id>`. The migration to `resource_path` uses it. The type and the id must be
+/// valid for this version, else the migration stops and the database does not change.
+fn migrated_path(kind: &str, id: &str) -> Result<String, String> {
+    if kind.is_empty() && id.is_empty() {
+        return Ok(String::new());
+    }
+    crate::grants::Segment::new(kind, id)
+        .map(|segment| segment.to_string())
+        .map_err(|e| {
+            format!("user_grants: the grant on {kind:?} {id:?} cannot move to resource_path: {e}")
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -650,9 +649,17 @@ mod tests {
             };
             let mut viewer = access(&["viewer"]);
             viewer.push(Grant::new("query.run.read", "viewer").unwrap());
-            viewer.push(Grant::on_resource("query.run.write", "viewer", "database", "b").unwrap());
-            viewer.push(Grant::on_resource("query.run.write", "viewer", "database", "a").unwrap());
-            viewer.push(Grant::on_resource("query.run.write", "viewer", "table", "a").unwrap());
+            for text in [
+                "query.run.write on service:viewer/database:b",
+                "query.run.write on service:viewer/database:a",
+                "query.run.write on service:viewer/table:a",
+                "query.run.write on service:viewer/host:h/database:a",
+                "query.run.write on service:viewer/host:h/database:a%2Fb%20c",
+                "query.run.write on service:viewer/host:h%3A1/database:%C3%A9",
+                "query.run.read on service:viewer/a:1/b:2/c:3/d:4",
+            ] {
+                viewer.push(Grant::parse(text).unwrap());
+            }
             viewer.sort();
             assert!(store.update_user("alice", None, Some(&viewer)).unwrap());
             assert_eq!(row("alice").grants, viewer);
