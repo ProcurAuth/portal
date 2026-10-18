@@ -147,7 +147,7 @@ pdp_client "db" {
 
 | Endpoint | Use |
 |---|---|
-| `POST /access/v1/evaluation` | One decision: `subject`, `action`, `resource`, `context`. The answer is `{"decision": true}` or `{"decision": false}`. |
+| `POST /access/v1/evaluation` | One decision: `subject`, `action`, `resource`, `context`. The answer is `{"decision": true}` or `{"decision": false}`. If the subject does not exist, the answer has a reason (see the rules below). |
 | `POST /access/v1/evaluations` | A batch. The top-level members are the defaults of each item. `options.evaluations_semantic` is `execute_all` (default), `deny_on_first_deny` or `permit_on_first_permit`. The batch has at most `pdp.max_evaluations` items. |
 | `POST /access/v1/search/action` | The actions that the subject can do on the resource. The answer is one page. |
 | `GET /.well-known/authzen-configuration` | The endpoints under `pdp.url`. This endpoint needs no token. |
@@ -160,6 +160,8 @@ Rules:
 - A grant on the service covers each of its sub-resources. A grant on a sub-resource covers only the same type and the same id. The three endpoints use the same rule.
 - A grant on a sub-resource applies only when the last known document of the service declares its type for its action. The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that does not declare the type removes the effect of the grant at once. If portal never read the document of the service, the PDP does not apply any grant on a sub-resource of this service. The decision is `false`, and the reason in the log is `the service does not declare the resource type`. A grant on the whole service is not affected. After a change of the `portal.actions` URL of a service, a failed read leaves no document. The PDP then does not apply the grants on its sub-resources.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
+- If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant.
+- No other denial has a reason. The answer is `{"decision": false}`, so that it does not show the grants of a user. A subject type that is not `user` is one of these denials.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
 - The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason.

@@ -20,6 +20,10 @@
 //! valid token gets status `401`, and an unknown user, subject type or resource gets `false`.
 //! Each decision is in the log with the server, the subject, the action, the resource and the
 //! decision. The PDP echoes `X-Request-ID`.
+//!
+//! One denial has a reason in the answer: when the subject is a `user` that does not exist, the
+//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. No other denial has
+//! a reason, so that an answer never shows the grants of a user.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -36,6 +40,10 @@ const METADATA_PATH: &str = "/.well-known/authzen-configuration";
 const REQUEST_ID: &str = "x-request-id";
 const MAX_REQUEST_ID: usize = 128;
 const MAX_ID_CHARS: usize = 256;
+/// The reason in the log for a `user` subject that does not exist.
+const NO_SUCH_USER: &str = "no such user";
+/// The reason in the answer for the same case.
+const UNKNOWN_SUBJECT: &str = "unknown_subject";
 
 /// The token of one server, as its SHA-256: the PDP does not keep the token itself.
 pub struct Client {
@@ -377,7 +385,7 @@ fn decide(
         return (true, "superadmin");
     }
     let Some(stored) = stored_grants_of(state, &subject.id) else {
-        return (false, "no such user");
+        return (false, NO_SUCH_USER);
     };
     let grants = state.policy.effective(&subject.id, &stored);
     // A grant on a sub-resource applies only when the last known document of the service declares
@@ -402,6 +410,24 @@ fn decide(
     }
 }
 
+/// The answer of one decision. `unknown_subject` is true only when the subject is a `user` that
+/// does not exist.
+struct Answer {
+    decision: bool,
+    unknown_subject: bool,
+}
+
+impl Answer {
+    /// The AuthZEN member of the answer. Only an unknown subject has a reason.
+    fn json(&self) -> Value {
+        if self.unknown_subject {
+            json!({ "decision": self.decision, "context": { "reason": UNKNOWN_SUBJECT } })
+        } else {
+            json!({ "decision": self.decision })
+        }
+    }
+}
+
 /// Decide and write the decision in the log (contract 11.7).
 fn decide_and_log(
     state: &AppState,
@@ -410,7 +436,7 @@ fn decide_and_log(
     action: &str,
     resource: &Entity,
     request_id: Option<&str>,
-) -> bool {
+) -> Answer {
     let (decision, reason) = decide(state, client, subject, action, resource);
     if decision {
         state.pdp_stats.permit.fetch_add(1, Ordering::Relaxed);
@@ -431,7 +457,10 @@ fn decide_and_log(
             ("request_id", request_id.unwrap_or("").to_string()),
         ],
     );
-    decision
+    Answer {
+        decision,
+        unknown_subject: reason == NO_SUCH_USER,
+    }
 }
 
 fn evaluation(
@@ -444,8 +473,7 @@ fn evaluation(
     let action = action_name(request.get("action"))?;
     let resource = entity(request.get("resource"), "resource")?;
     check_context(request)?;
-    let decision = decide_and_log(state, client, &subject, &action, &resource, request_id);
-    Ok(json!({ "decision": decision }))
+    Ok(decide_and_log(state, client, &subject, &action, &resource, request_id).json())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -506,8 +534,9 @@ fn evaluations(
     }
     let mut out = Vec::with_capacity(parsed.len());
     for (subject, action, resource) in &parsed {
-        let decision = decide_and_log(state, client, subject, action, resource, request_id);
-        out.push(json!({ "decision": decision }));
+        let answer = decide_and_log(state, client, subject, action, resource, request_id);
+        let decision = answer.decision;
+        out.push(answer.json());
         let stop = match semantic {
             Semantic::ExecuteAll => false,
             Semantic::DenyOnFirstDeny => !decision,
@@ -549,7 +578,9 @@ fn search_action(
     }
     let results: Vec<Value> = names
         .into_iter()
-        .filter(|name| decide_and_log(state, client, &subject, name, &resource, request_id))
+        .filter(|name| {
+            decide_and_log(state, client, &subject, name, &resource, request_id).decision
+        })
         .map(|name| json!({ "name": name }))
         .collect();
     Ok(json!({ "results": results, "page": { "next_token": "" } }))

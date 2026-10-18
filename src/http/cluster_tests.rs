@@ -1282,6 +1282,131 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
 }
 
 #[test]
+fn the_pdp_gives_a_reason_only_for_a_subject_that_does_not_exist() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = ["query.run.read on service:db"] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    publish_catalog(&node, &["query.run.read", "query.run.write", "system.read"]);
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let row = crate::store::UserRow {
+        login: "carol".into(),
+        password_hash: password_hash(PASSWORD),
+        grants: Vec::new(),
+        created_at: 1,
+    };
+    node.state.store.insert_user(&row).unwrap();
+    crate::sync::run_round(&node.state, 1);
+    let unknown = serde_json::json!({"decision": false, "context": {"reason": "unknown_subject"}});
+    let plain_false = serde_json::json!({"decision": false});
+    let ask = |path: &str, body: String| -> serde_json::Value {
+        let reply = pdp(pdp_port, path, Some(PDP_DB_TOKEN), &body, None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()
+    };
+    let single = |subject_kind: &str, subject: &str, action: &str, kind: &str, id: &str| {
+        ask(
+            "/access/v1/evaluation",
+            serde_json::json!({
+                "subject": {"type": subject_kind, "id": subject},
+                "action": {"name": action},
+                "resource": {"type": kind, "id": id}
+            })
+            .to_string(),
+        )
+    };
+
+    // A user that does not exist: the reason is in the answer.
+    assert_eq!(
+        single("user", "mallory", "access", "service", "db"),
+        unknown
+    );
+    assert_eq!(
+        single("user", "mallory", "query.run.read", "database", "logs"),
+        unknown,
+        "also on a sub-resource"
+    );
+    // The other denials have no reason: the answer does not show the grants.
+    assert_eq!(
+        single("user", "carol", "query.run.write", "service", "db"),
+        plain_false,
+        "an account without the grant"
+    );
+    assert_eq!(
+        single("user", "carol", "access", "service", "chat"),
+        plain_false,
+        "an account, the service of another server"
+    );
+    assert_eq!(
+        single("user", "carol", "Query.Run", "service", "db"),
+        plain_false,
+        "an account, an action name that is not valid"
+    );
+    assert_eq!(
+        single("group", "mallory", "access", "service", "db"),
+        plain_false,
+        "a subject type that is not user"
+    );
+    assert_eq!(
+        single("group", "carol", "access", "service", "db"),
+        plain_false,
+        "a subject type that is not user, an existing login"
+    );
+    // A permit has no reason.
+    assert_eq!(
+        single("user", "carol", "query.run.read", "service", "db"),
+        serde_json::json!({"decision": true})
+    );
+    assert_eq!(
+        single("user", "root", "access", "service", "db"),
+        serde_json::json!({"decision": true}),
+        "the superadmin"
+    );
+
+    // The batch: the reason is in the item of the unknown subject only.
+    let body = serde_json::json!({
+        "action": {"name": "query.run.read"},
+        "resource": {"type": "service", "id": "db"},
+        "evaluations": [
+            {"subject": {"type": "user", "id": "carol"}},
+            {"subject": {"type": "user", "id": "mallory"}},
+            {"subject": {"type": "user", "id": "carol"}, "action": {"name": "system.read"}},
+            {"subject": {"type": "group", "id": "mallory"}}
+        ]
+    });
+    let batch = ask("/access/v1/evaluations", body.to_string());
+    assert_eq!(
+        batch["evaluations"],
+        serde_json::json!([
+            {"decision": true},
+            {"decision": false, "context": {"reason": "unknown_subject"}},
+            {"decision": false},
+            {"decision": false}
+        ])
+    );
+    // A batch without `evaluations` is one decision, with the same reason.
+    let one = ask(
+        "/access/v1/evaluations",
+        serde_json::json!({
+            "subject": {"type": "user", "id": "mallory"},
+            "action": {"name": "access"},
+            "resource": {"type": "service", "id": "db"}
+        })
+        .to_string(),
+    );
+    assert_eq!(one, unknown);
+}
+
+#[test]
 fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_its_type() {
     let pdp_port = free_port();
     let node = start_with(
