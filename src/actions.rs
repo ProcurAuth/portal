@@ -259,11 +259,19 @@ impl Registry {
         self.entries.write().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Record the result of one read.
-    fn record(&self, service: &str, url: &str, outcome: Outcome, now: Instant) {
+    /// Record the result of one read. Gives the new document when the known document of the
+    /// service changes: a first answer, or an answer that differs from the last one.
+    fn record(
+        &self,
+        service: &str,
+        url: &str,
+        outcome: Outcome,
+        now: Instant,
+    ) -> Option<Arc<Document>> {
         let mut entries = self.write();
         let entry = entries.entry(service.to_string()).or_default();
         entry.read_at = Some(now);
+        let before = entry.known.then(|| Arc::clone(&entry.document));
         match outcome {
             Outcome::Document(document) => {
                 entry.url = Some(url.to_string());
@@ -286,6 +294,11 @@ impl Registry {
                 }
                 entry.problem = Some(problem);
             }
+        }
+        let after = entry.known.then(|| Arc::clone(&entry.document));
+        match (before, after) {
+            (Some(before), Some(after)) if before == after => None,
+            (_, after) => after,
         }
     }
 
@@ -572,13 +585,14 @@ fn wanted(catalog: &Catalog) -> HashMap<String, Option<String>> {
         .collect()
 }
 
-/// One round: read every document that is due.
+/// One round: read every document that is due. Gives the services whose known document changed,
+/// with the new document.
 async fn round(
     registry: &Registry,
     client: &reqwest::Client,
     catalog: &Catalog,
     refresh: Duration,
-) {
+) -> Vec<(String, Arc<Document>)> {
     let wanted = wanted(catalog);
     registry.retain(&wanted);
     let due = registry.due(&wanted, refresh, Instant::now());
@@ -593,17 +607,24 @@ async fn round(
             (service, url, outcome)
         });
     }
+    let mut changed = Vec::new();
     while let Some(result) = reads.join_next().await {
         if let Ok((service, url, outcome)) = result {
-            registry.record(&service, &url, outcome, Instant::now());
+            if let Some(document) = registry.record(&service, &url, outcome, Instant::now()) {
+                changed.push((service, document));
+            }
         }
     }
+    changed
 }
 
-/// The refresh loop. `catalog` gives the current catalogue. Runs until the process ends.
+/// The refresh loop. `catalog` gives the current catalogue. `changed` receives each service whose
+/// known document changed: the first answer after the start, and each different answer. Runs
+/// until the process ends.
 pub async fn run(
     registry: Arc<Registry>,
     catalog: impl Fn() -> Arc<Catalog> + Send + 'static,
+    changed: impl Fn(&str, &Document) + Send + 'static,
     timeout: Duration,
     refresh: Duration,
 ) {
@@ -612,7 +633,9 @@ pub async fn run(
         Err(_) => return,
     };
     loop {
-        round(&registry, &client, &catalog(), refresh).await;
+        for (service, document) in round(&registry, &client, &catalog(), refresh).await {
+            changed(&service, &document);
+        }
         tokio::time::sleep(TICK).await;
     }
 }
@@ -993,6 +1016,42 @@ mod tests {
         );
         registry.record("a", "http://a/y", Outcome::Failed("down".into()), now);
         assert!(registry.declared("a").is_none(), "a new URL: not known");
+    }
+
+    #[test]
+    fn a_read_reports_the_document_only_when_it_changes() {
+        let registry = Registry::default();
+        let now = Instant::now();
+        let url = "http://a/x";
+        let one = Document::one_level(vec![Action {
+            name: "read".into(),
+            resource_types: vec!["database".into()],
+            description: String::new(),
+        }]);
+        assert!(registry
+            .record("a", url, Outcome::Failed("down".into()), now)
+            .is_none());
+        assert_eq!(
+            registry
+                .record("a", url, Outcome::Document(one.clone()), now)
+                .as_deref(),
+            Some(&one),
+            "the first answer"
+        );
+        assert!(
+            registry
+                .record("a", url, Outcome::Document(one.clone()), now)
+                .is_none(),
+            "the same document"
+        );
+        assert!(registry
+            .record("a", url, Outcome::Failed("down".into()), now)
+            .is_none());
+        assert_eq!(
+            registry.record("a", url, Outcome::Absent, now).as_deref(),
+            Some(&Document::default()),
+            "a 404 removes the actions"
+        );
     }
 
     #[test]

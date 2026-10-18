@@ -1796,6 +1796,197 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         "an invalid resource"
     );
 
+    // context.match = "subtree": a grant on a node below the resource also gives true.
+    let with_context =
+        |subject: &str, action: &str, resource: serde_json::Value, context: serde_json::Value| {
+            ask(
+                PDP_DB_TOKEN,
+                "/access/v1/evaluation",
+                serde_json::json!({
+                    "subject": {"type": "user", "id": subject},
+                    "action": {"name": action},
+                    "resource": resource,
+                    "context": context
+                }),
+            )
+        };
+    let subtree = serde_json::json!({"match": "subtree"});
+    let node_match = serde_json::json!({"match": "node"});
+    let invalid_request =
+        serde_json::json!({"decision": false, "context": {"reason": "invalid_request"}});
+    let db_service = serde_json::json!({"type": "service", "id": "db"});
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("host", "local", &service),
+            subtree.clone()
+        ),
+        yes,
+        "the database a/b is below the host local"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("host", "local", &service),
+            node_match.clone()
+        ),
+        no,
+        "node is the default"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            db_service.clone(),
+            subtree.clone()
+        ),
+        yes,
+        "the service shows"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("host", "other", &service),
+            subtree.clone()
+        ),
+        no,
+        "nothing below the host other"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("database", "x", &local),
+            subtree.clone()
+        ),
+        no,
+        "a sibling of the database a/b"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.read",
+            node_of("database", "x", &local),
+            subtree.clone()
+        ),
+        yes,
+        "a grant above the resource still counts"
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("database", "old", &local),
+            subtree.clone()
+        ),
+        no
+    );
+    assert_eq!(
+        with_context(
+            "root",
+            "query.run.write",
+            node_of("host", "other", &service),
+            subtree.clone()
+        ),
+        yes,
+        "the superadmin"
+    );
+    assert_eq!(
+        with_context(
+            "mallory",
+            "query.run.write",
+            node_of("host", "local", &service),
+            subtree.clone()
+        ),
+        serde_json::json!({"decision": false, "context": {"reason": "unknown_subject"}})
+    );
+    assert_eq!(
+        with_context(
+            "carol",
+            "query.run.write",
+            node_of("database", "x", &service),
+            subtree.clone()
+        ),
+        invalid
+    );
+    for bad in [
+        serde_json::json!({"match": "tree"}),
+        serde_json::json!({"match": "Subtree"}),
+        serde_json::json!({"match": 1}),
+        serde_json::json!({"match": null}),
+    ] {
+        assert_eq!(
+            with_context(
+                "carol",
+                "query.run.write",
+                node_of("host", "local", &service),
+                bad.clone()
+            ),
+            invalid_request,
+            "{bad}"
+        );
+        assert_eq!(
+            with_context(
+                "root",
+                "query.run.write",
+                node_of("database", "x", &service),
+                bad.clone()
+            ),
+            invalid_request,
+            "the match comes first"
+        );
+    }
+    // The batch: the default context of the request, replaced by the context of an item.
+    let batch = ask(
+        PDP_DB_TOKEN,
+        "/access/v1/evaluations",
+        serde_json::json!({
+            "subject": {"type": "user", "id": "carol"},
+            "action": {"name": "query.run.write"},
+            "resource": node_of("host", "local", &service),
+            "context": {"match": "subtree"},
+            "evaluations": [
+                {},
+                {"context": {}},
+                {"context": {"match": "node"}},
+                {"resource": node_of("host", "other", &service)},
+                {"context": {"match": "x"}}
+            ]
+        }),
+    );
+    assert_eq!(
+        batch["evaluations"],
+        serde_json::json!([yes, no, no, no, invalid_request])
+    );
+    let batch = ask(
+        PDP_DB_TOKEN,
+        "/access/v1/evaluations",
+        serde_json::json!({
+            "subject": {"type": "user", "id": "carol"},
+            "action": {"name": "query.run.write"},
+            "resource": node_of("host", "local", &service),
+            "evaluations": [{}, {"context": {"match": "subtree"}}]
+        }),
+    );
+    assert_eq!(batch["evaluations"], serde_json::json!([no, yes]));
+
+    // The grants that do not follow the tree, for the warning of the log.
+    let to_check = crate::http::grants_to_check(
+        &node.state,
+        "db",
+        &node.state.actions.declared("db").unwrap(),
+    );
+    assert_eq!(
+        to_check
+            .iter()
+            .map(|(login, grant, _)| format!("{login} {grant}"))
+            .collect::<Vec<_>>(),
+        ["carol query.run.write on service:db/database:old"]
+    );
+
     // Compatibility: a document of one level reads a node without ancestors as depth 1.
     publish_catalog(&node, &["query.run.read", "query.run.write"]);
     assert_eq!(

@@ -289,9 +289,11 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
         },
     ));
     let reader = Arc::clone(&state);
+    let checker = Arc::clone(&state);
     tokio::spawn(actions::run(
         Arc::clone(&state.actions),
         move || current_catalog(&reader),
+        move |service, document| log_grants_to_check(&checker, service, document),
         state.config.access.actions_timeout,
         state.config.access.actions_refresh,
     ));
@@ -931,6 +933,65 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
         Err(_) => Snapshot::blank(&accounts, now),
     };
     (users, snapshot)
+}
+
+/// Writes one warning for each grant below `service` that does not follow its new document: the
+/// PDP does not apply this grant. The refresh loop of the documents calls it at the first answer
+/// of a service after the start and at each change of its document. The Services page shows the
+/// same grants under "Grants to check".
+fn log_grants_to_check(state: &AppState, service: &str, document: &actions::Document) {
+    for (login, grant, problem) in grants_to_check(state, service, document) {
+        log(
+            state,
+            LogLevel::Warn,
+            "grant_to_check",
+            &[
+                ("login", login),
+                ("grant", grant.to_string()),
+                ("problem", problem),
+                (
+                    "detail",
+                    "the PDP does not apply this grant: give it again on the tree of the service"
+                        .into(),
+                ),
+            ],
+        );
+    }
+}
+
+/// The grants below `service` that do not follow `document`, with the login and the problem. The
+/// accounts come first, then the `user` blocks without an account.
+fn grants_to_check(
+    state: &AppState,
+    service: &str,
+    document: &actions::Document,
+) -> Vec<(String, Grant, String)> {
+    let mut holders: Vec<(String, Vec<Grant>)> = state
+        .users
+        .list()
+        .into_iter()
+        .map(|(login, record)| {
+            let grants = state.policy.effective(&login, &record.grants);
+            (login, grants)
+        })
+        .collect();
+    for (login, grants) in &state.policy.configured {
+        if !holders.iter().any(|(known, _)| known == login) {
+            holders.push((login.clone(), grants.clone()));
+        }
+    }
+    let mut out = Vec::new();
+    for (login, grants) in holders {
+        for grant in grants {
+            if grant.service != service || grant.path.is_empty() {
+                continue;
+            }
+            if let Err(problem) = document.check_grant(&grant) {
+                out.push((login.clone(), grant, problem));
+            }
+        }
+    }
+    out
 }
 
 /// Each service of the catalog, with the actions that the settings pages offer.

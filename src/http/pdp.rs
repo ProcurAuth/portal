@@ -12,7 +12,9 @@
 //! `[server, node]`: this is correct only when its type has the parent `service`.
 //!
 //! A grant covers the node that it names and each node below it (prefix match, segment by
-//! segment). A grant below the service applies only when the last known document declares its
+//! segment). With `context.match = "subtree"`, a grant on a node below the resource also gives
+//! `true`: a server uses this answer only to show or hide a navigation element (contract 11.5).
+//! The default is `"node"`. Another value gives `false` with the reason `invalid_request`. A grant below the service applies only when the last known document declares its
 //! chain and lists its type for its action. The PDP fails closed: with no known document, the
 //! decision on a node below the server is `false`.
 //!
@@ -28,7 +30,8 @@
 //! Each decision is in the log with the server, the subject, the action, the resource (in the
 //! text form of a grant path) and the decision. The PDP echoes `X-Request-ID`.
 //!
-//! Two denials have a reason in the answer. When the subject is a `user` that does not exist, the
+//! Three denials have a reason in the answer. A `context.match` that is not `"node"` or
+//! `"subtree"` gives `invalid_request`. When the subject is a `user` that does not exist, the
 //! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. When the resource is
 //! not a correct node of the server, the reason is `invalid_resource`. No other denial has a
 //! reason, so that an answer never shows the grants of a user.
@@ -57,6 +60,39 @@ const NO_SUCH_USER: &str = "no such user";
 const UNKNOWN_SUBJECT: &str = "unknown_subject";
 /// The reason in the answer for a resource that is not a correct node of the server.
 const INVALID_RESOURCE: &str = "invalid_resource";
+/// The reason in the answer for a `context.match` that is not `"node"` or `"subtree"`.
+const INVALID_REQUEST: &str = "invalid_request";
+
+/// How a grant matches the resource (`context.match`, contract 11.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Match {
+    /// The default: a grant on the resource or on a node above it.
+    Node,
+    /// Also a grant on a node below the resource. Only for navigation.
+    Subtree,
+    /// A value that is not `"node"` or `"subtree"`: the decision is `false`.
+    Invalid,
+}
+
+impl Match {
+    /// The match of a `context` object. A missing `context` or a missing `match` is `"node"`.
+    fn of(context: Option<&Value>) -> Self {
+        match context.and_then(|c| c.get("match")) {
+            None => Self::Node,
+            Some(Value::String(text)) if text == "node" => Self::Node,
+            Some(Value::String(text)) if text == "subtree" => Self::Subtree,
+            Some(_) => Self::Invalid,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Subtree => "subtree",
+            Self::Invalid => "invalid",
+        }
+    }
+}
 
 /// The token of one server, as its SHA-256: the PDP does not keep the token itself.
 pub struct Client {
@@ -500,6 +536,17 @@ fn check_context(request: &Map<String, Value>) -> Result<(), String> {
     }
 }
 
+/// Whether one of `grants` gives `action` on a node below the node `chain` of the service: its
+/// path is longer than the chain and starts with it.
+fn extends(grants: &[Grant], action: &str, service: &str, chain: &[Segment]) -> bool {
+    grants.iter().any(|grant| {
+        grant.action == action
+            && grant.service == service
+            && grant.path.len() > chain.len()
+            && grant.path.starts_with(chain)
+    })
+}
+
 /// The decision for one subject, action and resource, asked by `client`, with the reason for
 /// the log and the reason for the answer. Fails closed.
 fn decide(
@@ -508,7 +555,15 @@ fn decide(
     subject: &Entity,
     action: &str,
     resource: &Resource,
+    matching: Match,
 ) -> (bool, &'static str, Option<&'static str>) {
+    if matching == Match::Invalid {
+        return (
+            false,
+            "context.match is not node or subtree",
+            Some(INVALID_REQUEST),
+        );
+    }
     if subject.kind != "user" {
         return (false, "the subject type is not user", None);
     }
@@ -545,7 +600,11 @@ fn decide(
         .collect();
     if covers(&applicable, action, &client.name, &chain) {
         (true, "grant", None)
-    } else if covers(&grants, action, &client.name, &chain) {
+    } else if matching == Match::Subtree && extends(&applicable, action, &client.name, &chain) {
+        (true, "grant below the resource", None)
+    } else if covers(&grants, action, &client.name, &chain)
+        || (matching == Match::Subtree && extends(&grants, action, &client.name, &chain))
+    {
         (
             false,
             "the grant does not follow the document of the service",
@@ -580,9 +639,10 @@ fn decide_and_log(
     subject: &Entity,
     action: &str,
     resource: &Resource,
+    matching: Match,
     request_id: Option<&str>,
 ) -> Answer {
-    let (decision, why, reason) = decide(state, client, subject, action, resource);
+    let (decision, why, reason) = decide(state, client, subject, action, resource, matching);
     if decision {
         state.pdp_stats.permit.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -597,6 +657,7 @@ fn decide_and_log(
             ("subject", subject.id.clone()),
             ("action", action.to_string()),
             ("resource", resource.log_text()),
+            ("match", matching.as_str().to_string()),
             ("decision", decision.to_string()),
             ("reason", why.to_string()),
             ("request_id", request_id.unwrap_or("").to_string()),
@@ -615,7 +676,11 @@ fn evaluation(
     let action = action_name(request.get("action"))?;
     let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
-    Ok(decide_and_log(state, client, &subject, &action, &resource, request_id).json())
+    let matching = Match::of(request.get("context"));
+    Ok(decide_and_log(
+        state, client, &subject, &action, &resource, matching, request_id,
+    )
+    .json())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -672,11 +737,15 @@ fn evaluations(
             None | Some(Value::Object(_)) => {}
             Some(_) => return Err(format!("evaluations[{index}].context must be an object")),
         }
-        parsed.push((subject, action, resource));
+        // The context of an item replaces the default context of the request (AuthZEN 1.0).
+        let matching = Match::of(pick("context"));
+        parsed.push((subject, action, resource, matching));
     }
     let mut out = Vec::with_capacity(parsed.len());
-    for (subject, action, resource) in &parsed {
-        let answer = decide_and_log(state, client, subject, action, resource, request_id);
+    for (subject, action, resource, matching) in &parsed {
+        let answer = decide_and_log(
+            state, client, subject, action, resource, *matching, request_id,
+        );
         let decision = answer.decision;
         out.push(answer.json());
         let stop = match semantic {
@@ -693,7 +762,8 @@ fn evaluations(
 
 /// The actions that the subject can do on the resource: `access` and the actions that the server
 /// publishes, kept when the decision is `true`. The resource has the same form as in an
-/// evaluation, with its ancestors. The answer has one page.
+/// evaluation, with its ancestors, and `context.match` has the same meaning. The answer has one
+/// page.
 fn search_action(
     state: &AppState,
     client: &Client,
@@ -703,6 +773,7 @@ fn search_action(
     let subject = entity(request.get("subject"), "subject")?;
     let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
+    let matching = Match::of(request.get("context"));
     match request.get("page") {
         None | Some(Value::Object(_)) => {}
         Some(_) => return Err("page must be an object".into()),
@@ -722,7 +793,10 @@ fn search_action(
     let results: Vec<Value> = names
         .into_iter()
         .filter(|name| {
-            decide_and_log(state, client, &subject, name, &resource, request_id).decision
+            decide_and_log(
+                state, client, &subject, name, &resource, matching, request_id,
+            )
+            .decision
         })
         .map(|name| json!({ "name": name }))
         .collect();
