@@ -14,6 +14,11 @@
 //! that the service does not publish actions. A different failure keeps the last good document
 //! and gives a problem for the settings pages.
 //!
+//! The PDP can ask for an early read of one document (see [`Registry::read_soon`]). The PDP does
+//! this when a service sends a resource that the last known document does not accept: the
+//! service can have a new tree. The early read goes through the same round, with the same limits.
+//! There is at most one early read of a service in each `access.actions_refresh` interval.
+//!
 //! The PDP uses the last known document to check the chain of a resource and to decide which
 //! grants apply (see [`Document::check_grant`]). A service without a known document has no
 //! applicable grant below the service.
@@ -26,7 +31,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::catalog::Catalog;
@@ -206,12 +211,18 @@ struct Entry {
     /// URL makes it `false`.
     known: bool,
     read_at: Option<Instant>,
+    /// The PDP asked for an early read. The next round reads the document, also when it is fresh.
+    early: bool,
+    /// The time of the last early read that the PDP asked for.
+    early_at: Option<Instant>,
 }
 
 /// The actions of each service, by service id.
 #[derive(Default)]
 pub struct Registry {
     entries: RwLock<HashMap<String, Entry>>,
+    /// Wakes the refresh loop before the end of its tick.
+    wake: Notify,
 }
 
 impl Registry {
@@ -249,6 +260,28 @@ impl Registry {
             .collect();
         out.sort();
         out
+    }
+
+    /// Asks for an early read of the document of `service`, and wakes the refresh loop. The
+    /// request applies only to a service that the loop knows, and at most once in each `refresh`
+    /// interval for each service. Gives `true` when the loop reads the document again soon.
+    pub fn read_soon(&self, service: &str, refresh: Duration, now: Instant) -> bool {
+        {
+            let mut entries = self.write();
+            let Some(entry) = entries.get_mut(service) else {
+                return false;
+            };
+            if entry
+                .early_at
+                .is_some_and(|at| now.saturating_duration_since(at) < refresh)
+            {
+                return false;
+            }
+            entry.early = true;
+            entry.early_at = Some(now);
+        }
+        self.wake.notify_one();
+        true
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Entry>> {
@@ -314,25 +347,31 @@ impl Registry {
         }
     }
 
-    /// The services whose document is due: never read, read from another URL, or read more than
-    /// `refresh` ago.
+    /// The services whose document is due: never read, read from another URL, read more than
+    /// `refresh` ago, or marked for an early read. This call consumes the early marks. A request
+    /// that comes during the read thus gives one more read.
     fn due(
         &self,
         wanted: &HashMap<String, Option<String>>,
         refresh: Duration,
         now: Instant,
     ) -> Vec<(String, String)> {
-        let entries = self.read();
+        let mut entries = self.write();
         let mut out: Vec<(String, String)> = wanted
             .iter()
             .filter_map(|(id, url)| {
                 let url = url.as_ref()?;
-                let fresh = entries.get(id).is_some_and(|entry| {
-                    entry.url.as_deref() == Some(url.as_str())
-                        && entry
-                            .read_at
-                            .is_some_and(|at| now.saturating_duration_since(at) < refresh)
-                });
+                let fresh = match entries.get_mut(id) {
+                    Some(entry) => {
+                        let early = std::mem::take(&mut entry.early);
+                        !early
+                            && entry.url.as_deref() == Some(url.as_str())
+                            && entry
+                                .read_at
+                                .is_some_and(|at| now.saturating_duration_since(at) < refresh)
+                    }
+                    None => false,
+                };
                 (!fresh).then(|| (id.clone(), url.clone()))
             })
             .collect();
@@ -620,7 +659,8 @@ async fn round(
 
 /// The refresh loop. `catalog` gives the current catalogue. `changed` receives each service whose
 /// known document changed: the first answer after the start, and each different answer. Runs
-/// until the process ends.
+/// until the process ends. The loop waits one tick between two rounds. [`Registry::read_soon`]
+/// stops this wait.
 pub async fn run(
     registry: Arc<Registry>,
     catalog: impl Fn() -> Arc<Catalog> + Send + 'static,
@@ -636,8 +676,14 @@ pub async fn run(
         for (service, document) in round(&registry, &client, &catalog(), refresh).await {
             changed(&service, &document);
         }
-        tokio::time::sleep(TICK).await;
+        wait(&registry, TICK).await;
     }
+}
+
+/// Waits `tick`, or less when [`Registry::read_soon`] wakes the loop. A request that comes during
+/// a round stays stored, so the next wait ends at once.
+async fn wait(registry: &Registry, tick: Duration) {
+    let _ = tokio::time::timeout(tick, registry.wake.notified()).await;
 }
 
 #[cfg(test)]
@@ -982,6 +1028,101 @@ mod tests {
                 )
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn an_early_read_makes_the_document_due_at_once_and_once_in_each_interval() {
+        let registry = Registry::default();
+        let wanted: HashMap<String, Option<String>> =
+            [("a".to_string(), Some("http://a/x".to_string()))]
+                .into_iter()
+                .collect();
+        let refresh = Duration::from_secs(300);
+        let now = Instant::now();
+        assert!(
+            !registry.read_soon("a", refresh, now),
+            "a service that the loop does not know yet: its first read is due anyway"
+        );
+        registry.record("a", "http://a/x", Outcome::Absent, now);
+        assert!(registry.due(&wanted, refresh, now).is_empty(), "fresh");
+
+        let first = now + Duration::from_secs(1);
+        assert!(registry.read_soon("a", refresh, first));
+        assert_eq!(
+            registry.due(&wanted, refresh, first),
+            [("a".to_string(), "http://a/x".to_string())],
+            "due at once"
+        );
+        assert!(
+            registry.due(&wanted, refresh, first).is_empty(),
+            "the round consumes the request"
+        );
+        registry.record("a", "http://a/x", Outcome::Absent, first);
+
+        let again = first + Duration::from_secs(299);
+        assert!(
+            !registry.read_soon("a", refresh, again),
+            "a second request in the same interval"
+        );
+        assert!(registry.due(&wanted, refresh, again).is_empty());
+
+        let later = first + refresh;
+        assert!(registry.read_soon("a", refresh, later), "a new interval");
+        assert_eq!(registry.due(&wanted, refresh, later).len(), 1);
+    }
+
+    #[test]
+    fn an_early_read_wakes_the_loop_and_a_tick_ends_the_wait_without_it() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let registry = Registry::default();
+        registry.record("a", "http://a/x", Outcome::Absent, Instant::now());
+        let long = Duration::from_secs(3600);
+        // A request before the wait: the permit stays, the wait ends at once.
+        assert!(registry.read_soon("a", Duration::from_secs(60), Instant::now()));
+        let started = Instant::now();
+        runtime.block_on(wait(&registry, long));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // No request: the tick ends the wait.
+        let started = Instant::now();
+        runtime.block_on(wait(&registry, Duration::from_millis(50)));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn the_loop_reads_a_fresh_document_again_after_an_early_request() {
+        let one = String::from_utf8(doc("db", r#"{"name":"query.run.read"}"#)).unwrap();
+        let two = String::from_utf8(doc(
+            "db",
+            r#"{"name":"query.run.read"},{"name":"query.run.write"}"#,
+        ))
+        .unwrap();
+        let base = serve(vec![("200 OK", one), ("200 OK", two)]);
+        let catalog = catalog_with("db", &base);
+        let registry = Registry::default();
+        let client = crate::discovery::http_client(Duration::from_secs(2)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let refresh = Duration::from_secs(300);
+        runtime.block_on(round(&registry, &client, &catalog, refresh));
+        assert_eq!(registry.action_names("db"), ["access", "query.run.read"]);
+        assert!(
+            runtime
+                .block_on(round(&registry, &client, &catalog, refresh))
+                .is_empty(),
+            "fresh: no read"
+        );
+        assert!(registry.read_soon("db", refresh, Instant::now()));
+        let changed = runtime.block_on(round(&registry, &client, &catalog, refresh));
+        assert_eq!(changed.len(), 1, "the early read gives the new document");
+        assert_eq!(
+            registry.action_names("db"),
+            ["access", "query.run.read", "query.run.write"]
         );
     }
 

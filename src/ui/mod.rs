@@ -16,7 +16,7 @@ pub mod settings;
 
 use std::fmt::Write as _;
 
-use crate::catalog::{parse_labels, Catalog, Group, Health, Service};
+use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Service};
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
@@ -53,6 +53,11 @@ pub struct HomeContext<'a> {
 }
 
 /// The launcher. It has one full-width row for each group and one tile for each service.
+///
+/// `catalog` holds only the services that the viewer can open. A row has a head with the name of
+/// the group, its count and its badges. When the viewer sees one group only, the head is not
+/// necessary: the page omits it, unless the group has a down or an unhealthy service. The section
+/// then keeps the name of the group as its accessible name.
 pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String {
     let mut body = String::new();
     body.push_str(&header(ctx));
@@ -71,8 +76,9 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         );
     } else {
         body.push_str(r#"<main class="rows"><h1 class="visually-hidden">Services</h1>"#);
+        let single = catalog.groups().len() == 1;
         for (index, group) in catalog.groups().iter().enumerate() {
-            group_row(&mut body, index, group, icons);
+            group_row(&mut body, index, group, icons, single);
         }
         body.push_str("</main>");
     }
@@ -215,26 +221,59 @@ fn problems_notice(problems: &[String]) -> String {
     out
 }
 
-fn group_row(out: &mut String, index: usize, group: &Group, icons: &Icons) {
+/// One row. `single` tells that the row is the only row of the page. A single row without a
+/// down or an unhealthy service has no head.
+fn group_row(out: &mut String, index: usize, group: &Group, icons: &Icons, single: bool) {
     let count = group.services.len();
-    let _ = write!(
-        out,
-        r#"<section class="group" aria-labelledby="g-{index}"><div class="group__head"><h2 class="group__title" id="g-{index}">{}</h2><span class="group__count">{count} {}</span>"#,
-        html_escape(&group.name),
-        if count == 1 { "service" } else { "services" },
-    );
     let down = group.down_count();
-    if down > 0 {
+    let unhealthy = group.unhealthy_count();
+    if single && down == 0 && unhealthy == 0 {
         let _ = write!(
             out,
-            r#"<span class="badge badge--danger">{down} down</span>"#
+            r#"<section class="group" aria-label="{}">"#,
+            html_escape(&group.name)
         );
+    } else {
+        let _ = write!(
+            out,
+            r#"<section class="group" aria-labelledby="g-{index}"><div class="group__head"><h2 class="group__title" id="g-{index}">{}</h2><span class="group__count">{count} {}</span>"#,
+            html_escape(&group.name),
+            if count == 1 { "service" } else { "services" },
+        );
+        if down > 0 {
+            let _ = write!(
+                out,
+                r#"<span class="badge badge--danger">{down} down</span>"#
+            );
+        }
+        if unhealthy > 0 {
+            let _ = write!(
+                out,
+                r#"<span class="badge badge--warning">{unhealthy} unhealthy</span>"#
+            );
+        }
+        out.push_str("</div>");
     }
-    out.push_str(r#"</div><ul class="tiles">"#);
+    out.push_str(r#"<ul class="tiles">"#);
     for service in &group.services {
         tile(out, service, icons);
     }
     out.push_str("</ul></section>");
+}
+
+/// The state word of a tile, and the modifier of its class. A down service shows `down`. A
+/// service that runs shows the result of the runtime health check when the runtime has one,
+/// else `up`. A healthy service has the same green dot as `up`. The word is always present:
+/// the colour is never the only sign of the state.
+fn tile_state(service: &Service) -> Option<(&'static str, &'static str)> {
+    match (service.health, service.runtime) {
+        (Health::Down, _) => Some(("down", "down")),
+        (_, Some(RuntimeHealth::Healthy)) => Some(("up", "healthy")),
+        (_, Some(RuntimeHealth::Starting)) => Some(("starting", "starting")),
+        (_, Some(RuntimeHealth::Unhealthy)) => Some(("unhealthy", "unhealthy")),
+        (Health::Up, None) => Some(("up", "up")),
+        (Health::Unknown, None) => None,
+    }
 }
 
 fn tile(out: &mut String, service: &Service, icons: &Icons) {
@@ -248,11 +287,11 @@ fn tile(out: &mut String, service: &Service, icons: &Icons) {
     } else {
         format!(r#" title="{}""#, html_escape(&service.description))
     };
-    let state = match service.health {
-        Health::Up => r#"<span class="tile__state tile__state--up">up</span>"#,
-        Health::Down => r#"<span class="tile__state tile__state--down">down</span>"#,
-        Health::Unknown => "",
-    };
+    let state = tile_state(service)
+        .map(|(modifier, word)| {
+            format!(r#"<span class="tile__state tile__state--{modifier}">{word}</span>"#)
+        })
+        .unwrap_or_default();
     let class = if service.health == Health::Down {
         "tile tile--down"
     } else {
@@ -301,9 +340,15 @@ fn monogram(name: &str) -> String {
 }
 
 /// Synthetic services for `portal render-demo` and the tests. They are parsed through the real label
-/// parser. The demo also tests that parser.
+/// parser. The demo also tests that parser. The demo shows each state of a tile: `up`, `healthy`,
+/// `unhealthy`, `starting`, `down`, and no state.
 pub fn demo_catalog() -> Catalog {
-    type Row<'a> = (&'a str, &'a [(&'a str, &'a str)], Health);
+    type Row<'a> = (
+        &'a str,
+        &'a [(&'a str, &'a str)],
+        Health,
+        Option<RuntimeHealth>,
+    );
     let rows: [Row; 12] = [
         (
             "notes",
@@ -315,6 +360,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "40"),
             ],
             Health::Up,
+            None,
         ),
         (
             "registry-ui",
@@ -326,6 +372,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "20"),
             ],
             Health::Up,
+            Some(RuntimeHealth::Healthy),
         ),
         (
             "dns-updater",
@@ -340,6 +387,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "10"),
             ],
             Health::Up,
+            Some(RuntimeHealth::Healthy),
         ),
         (
             "traefik",
@@ -351,6 +399,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "30"),
             ],
             Health::Up,
+            None,
         ),
         (
             "s3-browser",
@@ -362,6 +411,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "50"),
             ],
             Health::Unknown,
+            None,
         ),
         (
             "grafana",
@@ -373,6 +423,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "10"),
             ],
             Health::Down,
+            None,
         ),
         (
             "prometheus",
@@ -384,6 +435,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "20"),
             ],
             Health::Up,
+            Some(RuntimeHealth::Unhealthy),
         ),
         (
             "cadvisor",
@@ -395,6 +447,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "30"),
             ],
             Health::Up,
+            Some(RuntimeHealth::Starting),
         ),
         (
             "session-tracer",
@@ -406,6 +459,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "40"),
             ],
             Health::Up,
+            None,
         ),
         (
             "clickhouse-dash",
@@ -417,6 +471,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "10"),
             ],
             Health::Up,
+            Some(RuntimeHealth::Healthy),
         ),
         (
             "pgweb",
@@ -428,6 +483,7 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "20"),
             ],
             Health::Up,
+            None,
         ),
         (
             "inbox",
@@ -439,16 +495,18 @@ pub fn demo_catalog() -> Catalog {
                 ("portal.weight", "30"),
             ],
             Health::Unknown,
+            None,
         ),
     ];
     let mut services = Vec::new();
-    for (origin, labels, health) in rows {
+    for (origin, labels, health, runtime) in rows {
         let map = labels
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         if let Ok(Some(mut service)) = parse_labels(origin, &map) {
             service.health = health;
+            service.runtime = runtime;
             services.push(service);
         }
     }
@@ -869,6 +927,122 @@ mod tests {
         let broken = home_page(&down, &Icons::empty(), &ctx());
         assert!(broken.matches(r#"class="tile tile--down""#).count() > healthy);
         assert!(broken.contains(r#"tile__state--down">down</span>"#));
+    }
+
+    #[test]
+    fn the_runtime_health_gives_one_state_word_and_down_wins() {
+        let mut service = service("A", "", "/a/");
+        let mut state = |health, runtime| {
+            service.health = health;
+            service.runtime = runtime;
+            tile_state(&service)
+        };
+        use RuntimeHealth::{Healthy, Starting, Unhealthy};
+        assert_eq!(state(Health::Down, None), Some(("down", "down")));
+        assert_eq!(state(Health::Down, Some(Healthy)), Some(("down", "down")));
+        assert_eq!(state(Health::Down, Some(Unhealthy)), Some(("down", "down")));
+        assert_eq!(state(Health::Up, Some(Healthy)), Some(("up", "healthy")));
+        assert_eq!(
+            state(Health::Up, Some(Starting)),
+            Some(("starting", "starting"))
+        );
+        assert_eq!(
+            state(Health::Up, Some(Unhealthy)),
+            Some(("unhealthy", "unhealthy"))
+        );
+        assert_eq!(state(Health::Up, None), Some(("up", "up")));
+        assert_eq!(
+            state(Health::Unknown, Some(Unhealthy)),
+            Some(("unhealthy", "unhealthy"))
+        );
+        assert_eq!(
+            state(Health::Unknown, Some(Healthy)),
+            Some(("up", "healthy"))
+        );
+        assert_eq!(state(Health::Unknown, None), None);
+    }
+
+    #[test]
+    fn the_demo_shows_each_state_and_a_warning_badge_for_the_unhealthy_services() {
+        let page = home_page(&demo_catalog(), &Icons::empty(), &ctx());
+        for state in [
+            r#"tile__state--up">up</span>"#,
+            r#"tile__state--up">healthy</span>"#,
+            r#"tile__state--unhealthy">unhealthy</span>"#,
+            r#"tile__state--starting">starting</span>"#,
+            r#"tile__state--down">down</span>"#,
+        ] {
+            assert!(page.contains(state), "{state}");
+        }
+        assert_eq!(
+            page.matches(r#"<span class="badge badge--warning">1 unhealthy</span>"#)
+                .count(),
+            1
+        );
+        assert_eq!(
+            page.matches(r#"class="tile tile--down""#).count(),
+            1,
+            "an unhealthy tile keeps the plain tile"
+        );
+    }
+
+    fn in_group(group: &str, name: &str, href: &str) -> Service {
+        Service {
+            group: group.into(),
+            ..service(name, "", href)
+        }
+    }
+
+    #[test]
+    fn a_single_group_has_no_head_unless_it_has_something_to_report() {
+        let one = Catalog::build(
+            vec![in_group("Infra", "A", "/a/"), in_group("Infra", "B", "/b/")],
+            Vec::new(),
+        );
+        let page = home_page(&one, &Icons::empty(), &ctx());
+        assert!(!page.contains("group__head") && !page.contains("group__title"));
+        assert!(page.contains(r#"<section class="group" aria-label="Infra"><ul class="tiles">"#));
+        assert!(page.contains(r#"<h1 class="visually-hidden">Services</h1>"#));
+        assert_eq!(page.matches(r#"<a class="tile"#).count(), 2);
+
+        let two = Catalog::build(
+            vec![in_group("Infra", "A", "/a/"), in_group("Data", "B", "/b/")],
+            Vec::new(),
+        );
+        let page = home_page(&two, &Icons::empty(), &ctx());
+        assert_eq!(page.matches(r#"<div class="group__head">"#).count(), 2);
+        assert_eq!(page.matches(r#"aria-labelledby="g-"#).count(), 2);
+
+        let mut down = in_group("Infra", "A", "/a/");
+        down.health = Health::Down;
+        let page = home_page(
+            &Catalog::build(vec![down, in_group("Infra", "B", "/b/")], Vec::new()),
+            &Icons::empty(),
+            &ctx(),
+        );
+        assert_eq!(page.matches(r#"<div class="group__head">"#).count(), 1);
+        assert!(page.contains(r#"<span class="badge badge--danger">1 down</span>"#));
+
+        let mut sick = in_group("Infra", "A", "/a/");
+        sick.health = Health::Up;
+        sick.runtime = Some(RuntimeHealth::Unhealthy);
+        let page = home_page(
+            &Catalog::build(vec![sick], Vec::new()),
+            &Icons::empty(),
+            &ctx(),
+        );
+        assert!(page.contains(r#"<span class="badge badge--warning">1 unhealthy</span>"#));
+        assert!(page.contains(r#"<h2 class="group__title" id="g-0">Infra</h2>"#));
+    }
+
+    #[test]
+    fn the_name_of_a_single_group_is_escaped_in_its_accessible_name() {
+        let page = home_page(
+            &Catalog::build(vec![in_group(r#"a"b<c"#, "A", "/a/")], Vec::new()),
+            &Icons::empty(),
+            &ctx(),
+        );
+        assert!(page.contains(r#"aria-label="a&quot;b&lt;c""#), "{page}");
     }
 
     #[test]

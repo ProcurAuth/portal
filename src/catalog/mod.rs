@@ -24,6 +24,18 @@ pub enum Health {
     Down,
 }
 
+/// The result of the health check of the runtime: the Docker `HEALTHCHECK` of a container, or
+/// the readiness probes of the pods. It adds detail to [`Health`]. It does not change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeHealth {
+    /// The check passes.
+    Healthy,
+    /// The check fails.
+    Unhealthy,
+    /// The check has not passed yet. The workload starts.
+    Starting,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Service {
     /// Stable identity: `portal.id`, or else the slug of `group/name`. Two workloads with the same
@@ -47,6 +59,9 @@ pub struct Service {
     /// The list is empty for almost every service.
     pub exclude: Vec<ExcludeRule>,
     pub health: Health,
+    /// The health check of the runtime. `None` when the runtime has no check for this service,
+    /// or when discovery does not ask the runtime.
+    pub runtime: Option<RuntimeHealth>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +75,15 @@ impl Group {
         self.services
             .iter()
             .filter(|s| s.health == Health::Down)
+            .count()
+    }
+
+    /// The services that run, but whose runtime health check fails. A down service is not in
+    /// this count.
+    pub fn unhealthy_count(&self) -> usize {
+        self.services
+            .iter()
+            .filter(|s| s.health != Health::Down && s.runtime == Some(RuntimeHealth::Unhealthy))
             .count()
     }
 }
@@ -281,6 +305,7 @@ mod tests {
             actions_url: None,
             exclude: Vec::new(),
             health: Health::Unknown,
+            runtime: None,
         }
     }
 
@@ -386,6 +411,22 @@ mod tests {
         let mut down = service("Infra", "B", 0);
         down.health = Health::Down;
         let catalog = Catalog::build(vec![up, down, service("Infra", "C", 0)], Vec::new());
+        assert_eq!(catalog.groups()[0].down_count(), 1);
+    }
+
+    #[test]
+    fn unhealthy_count_counts_only_services_that_run_with_a_failed_check() {
+        let mut sick = service("Infra", "A", 0);
+        sick.health = Health::Up;
+        sick.runtime = Some(RuntimeHealth::Unhealthy);
+        let mut down = service("Infra", "B", 0);
+        down.health = Health::Down;
+        down.runtime = Some(RuntimeHealth::Unhealthy);
+        let mut starting = service("Infra", "C", 0);
+        starting.health = Health::Up;
+        starting.runtime = Some(RuntimeHealth::Starting);
+        let catalog = Catalog::build(vec![sick, down, starting], Vec::new());
+        assert_eq!(catalog.groups()[0].unhealthy_count(), 1);
         assert_eq!(catalog.groups()[0].down_count(), 1);
     }
 

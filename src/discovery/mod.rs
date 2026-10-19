@@ -5,8 +5,13 @@
 //!
 //! 1. It lists the sources.
 //! 2. It turns the labels of every workload into a [`Service`](crate::catalog::Service).
-//! 3. It resolves a health state.
+//! 3. It resolves a health state, and the runtime health when the runtime has a health check.
 //! 4. It publishes a new immutable [`Catalog`] snapshot.
+//!
+//! The health state ([`Health`]) tells up or down. The runtime health
+//! ([`RuntimeHealth`](crate::catalog::RuntimeHealth)) adds the result of the health check of the
+//! runtime: the Docker `HEALTHCHECK`, or the readiness probes of the pods. It does not change the
+//! health state.
 //!
 //! A source that fails keeps its last good answer. It adds a problem message to the snapshot.
 //! A flaky API does not blank the page.
@@ -27,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::catalog::{closed_prefix, parse_labels, Catalog, Health, Service};
+use crate::catalog::{closed_prefix, parse_labels, Catalog, Health, RuntimeHealth, Service};
 use crate::config::DiscoveryConfig;
 
 use docker::Docker;
@@ -42,6 +47,9 @@ pub struct Workload {
     pub origin: String,
     pub labels: BTreeMap<String, String>,
     pub hint: Hint,
+    /// The result of the `HEALTHCHECK` of a container (Docker). The Kubernetes source gives it
+    /// later, from the pods of `hint`.
+    pub runtime: Option<RuntimeHealth>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +73,9 @@ enum Check {
     Pods { namespace: String, selector: String },
 }
 
-/// A declared health URL has priority. Otherwise, the source uses what it knows.
+/// A declared health URL has priority. Otherwise, the source uses what it knows. With a declared
+/// health URL, discovery does not ask for the pods, so the service has no runtime health from the
+/// pods.
 fn plan(service: &Service, hint: &Hint) -> Check {
     if let Some(url) = &service.health_url {
         return Check::Http(url.clone());
@@ -288,7 +298,11 @@ async fn build_catalog(
     let mut closed = Vec::new();
     for workload in workloads {
         match parse_labels(&workload.origin, &workload.labels) {
-            Ok(Some(service)) => entries.push((service, workload.hint)),
+            Ok(Some(mut service)) => {
+                // The `HEALTHCHECK` result costs nothing. It also applies with a health URL.
+                service.runtime = workload.runtime;
+                entries.push((service, workload.hint));
+            }
             Ok(None) => {}
             Err(problem) => {
                 // The workload is not listed, but Traefik still routes it. Its path stays closed.
@@ -299,7 +313,7 @@ async fn build_catalog(
     }
 
     let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_CHECKS));
-    let mut checks: JoinSet<(usize, Health)> = JoinSet::new();
+    let mut checks: JoinSet<(usize, Health, Option<RuntimeHealth>)> = JoinSet::new();
     for (index, (service, hint)) in entries.iter_mut().enumerate() {
         match plan(service, hint) {
             Check::None => {}
@@ -311,7 +325,8 @@ async fn build_catalog(
                 let limit = Arc::clone(&limit);
                 checks.spawn(async move {
                     let _permit = limit.acquire_owned().await;
-                    (index, probe::http(&client, &url).await)
+                    let health = probe::http(&client, &url).await;
+                    (index, health, None)
                 });
             }
             Check::Pods {
@@ -322,19 +337,20 @@ async fn build_catalog(
                 let limit = Arc::clone(&limit);
                 checks.spawn(async move {
                     let _permit = limit.acquire_owned().await;
-                    let health = match kube.ready_pods(&namespace, &selector).await {
-                        Ok(0) => Health::Down,
-                        Ok(_) => Health::Up,
-                        Err(_) => Health::Unknown,
-                    };
-                    (index, health)
+                    match kube.pods(&namespace, &selector).await {
+                        Ok(pods) if pods.ready == 0 => (index, Health::Down, pods.runtime),
+                        Ok(pods) => (index, Health::Up, pods.runtime),
+                        Err(_) => (index, Health::Unknown, None),
+                    }
                 });
             }
         }
     }
     while let Some(result) = checks.join_next().await {
-        if let Ok((index, health)) = result {
-            entries[index].0.health = health;
+        if let Ok((index, health, runtime)) = result {
+            let service = &mut entries[index].0;
+            service.health = health;
+            service.runtime = runtime.or(service.runtime);
         }
     }
 
@@ -403,6 +419,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             hint,
+            runtime: None,
         }
     }
 
@@ -512,6 +529,53 @@ mod tests {
         assert_eq!(monitoring.services[1].health, Health::Up);
         assert_eq!(catalog.problems().len(), 2);
         assert!(catalog.problems().iter().any(|p| p.starts_with("broken:")));
+    }
+
+    /// The `HEALTHCHECK` result of a container reaches the service, also when a health URL
+    /// gives up or down.
+    #[test]
+    fn the_runtime_health_of_a_container_reaches_its_service() {
+        let mut checked = workload(
+            "a",
+            &[("portal.name", "A"), ("portal.href", "/a/")],
+            Hint::Running(true),
+        );
+        checked.runtime = Some(RuntimeHealth::Unhealthy);
+        let mut probed = workload(
+            "b",
+            &[
+                ("portal.name", "B"),
+                ("portal.href", "/b/"),
+                ("portal.health", "http://b:8080/up"),
+            ],
+            Hint::Running(true),
+        );
+        probed.runtime = Some(RuntimeHealth::Starting);
+        let catalog = runtime().block_on(build_catalog(
+            vec![
+                checked,
+                probed,
+                workload(
+                    "c",
+                    &[("portal.name", "C"), ("portal.href", "/c/")],
+                    Hint::Running(true),
+                ),
+            ],
+            Vec::new(),
+            None,
+            None,
+        ));
+        let services = &catalog.groups()[0].services;
+        assert_eq!(
+            (services[0].health, services[0].runtime),
+            (Health::Up, Some(RuntimeHealth::Unhealthy))
+        );
+        assert_eq!(
+            services[1].runtime,
+            Some(RuntimeHealth::Starting),
+            "the health URL does not remove it"
+        );
+        assert_eq!(services[2].runtime, None, "no HEALTHCHECK");
     }
 
     #[test]

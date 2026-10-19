@@ -341,7 +341,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(10), max: secs(DAY) },
         presence: Presence::Default("5m"),
         when: When::Always,
-        doc: "The time between two reads of the `/.well-known/access-actions` documents.",
+        doc: "The time between two reads of the `/.well-known/access-actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP.",
     },
     Key {
         block: "identity",

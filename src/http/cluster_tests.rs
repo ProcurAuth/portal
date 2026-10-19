@@ -1347,6 +1347,16 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         serde_json::json!({"decision": false, "context": {"reason": "invalid_resource"}}),
         "an account, the service of another server: the resource is not valid"
     );
+    // HOM-PTL-1: the invalid resource asked for an early read of the document of db. A second
+    // request in the same interval does nothing.
+    assert!(
+        !node.state.actions.read_soon(
+            "db",
+            node.state.config.access.actions_refresh,
+            std::time::Instant::now()
+        ),
+        "the PDP already asked for an early read in this interval"
+    );
     assert_eq!(
         single("user", "carol", "Query.Run", "service", "db"),
         plain_false,
@@ -1533,6 +1543,8 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
     };
     node.state.store.insert_user(&row).unwrap();
     crate::sync::run_round(&node.state, 1);
+    // The catalogue holds db: an early read of its document keeps it in the registry.
+    publish_catalog(&node, &[]);
     publish_tree(&node);
     let ask = |token: &str, path: &str, body: serde_json::Value| -> serde_json::Value {
         let reply = pdp(pdp_port, path, Some(token), &body.to_string(), None);

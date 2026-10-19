@@ -35,6 +35,10 @@
 //! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. When the resource is
 //! not a correct node of the server, the reason is `invalid_resource`. No other denial has a
 //! reason, so that an answer never shows the grants of a user.
+//!
+//! An `invalid_resource` can come from a new tree of the server that the PDP does not know yet.
+//! The PDP then asks for an early read of the document of the server, at most once in each
+//! `access.actions_refresh` interval (see [`crate::actions::Registry::read_soon`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -643,6 +647,9 @@ fn decide_and_log(
     request_id: Option<&str>,
 ) -> Answer {
     let (decision, why, reason) = decide(state, client, subject, action, resource, matching);
+    if reason == Some(INVALID_RESOURCE) {
+        read_document_soon(state, client, request_id);
+    }
     if decision {
         state.pdp_stats.permit.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -664,6 +671,26 @@ fn decide_and_log(
         ],
     );
     Answer { decision, reason }
+}
+
+/// Asks for an early read of the document of the server after an `invalid_resource`. The log has
+/// one line when the read is scheduled.
+fn read_document_soon(state: &AppState, client: &Client, request_id: Option<&str>) {
+    let refresh = state.config.access.actions_refresh;
+    if state
+        .actions
+        .read_soon(&client.name, refresh, std::time::Instant::now())
+    {
+        log(
+            state,
+            LogLevel::Info,
+            "actions_read_early",
+            &[
+                ("service", client.name.clone()),
+                ("request_id", request_id.unwrap_or("").to_string()),
+            ],
+        );
+    }
 }
 
 fn evaluation(

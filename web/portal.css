@@ -331,6 +331,11 @@ a {
   color: var(--danger);
 }
 
+.badge--warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -472,6 +477,25 @@ a {
   border-radius: 999px;
   background: var(--danger-bg);
   color: var(--danger);
+}
+
+/* The runtime health check of a service that runs. "healthy" reuses the green dot of "up";
+   "starting" is a neutral outlined pill and "unhealthy" a warning pill. The word always states
+   the status, so colour is never the only sign. Both keep 4.5:1 or more in each theme. */
+.tile__state--starting,
+.tile__state--unhealthy {
+  padding: 0 7px;
+  border-radius: 999px;
+}
+
+.tile__state--starting {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--muted);
+}
+
+.tile__state--unhealthy {
+  background: var(--warning-bg);
+  color: var(--warning);
 }
 
 /* Empty and degraded states ---------------------------------------------- */

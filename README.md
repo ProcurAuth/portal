@@ -169,6 +169,7 @@ Rules:
 - A resource of another type is a node below the service, for example a database. `resource.properties.ancestors` gives the chain from the service to the parent of the node: `[{"type": "service", "id": "db"}, {"type": "host", "id": "local"}]`. The ids are not encoded in a request.
 - The first ancestor must be the service of the server that asks: its token tells which server it is. The chain (the ancestors, then the resource) must follow the parents of the last known document of the service. The chain has at most 4 nodes below the service.
 - A resource that does not obey these rules gets `{"decision": false, "context": {"reason": "invalid_resource"}}`. The service of another server gets the same answer. This check comes before the subject: the superadmin and an unknown user get the same answer.
+- An `invalid_resource` answer also starts an early read of the document of the server that asks (see "Actions of the services"). The server can have a new tree that portal does not know yet.
 - Compatibility: a node without `properties.ancestors` is read as `[service of the server, node]`. This is correct only when its type has the parent `service`. Thus the requests of a service with a document of one level do not change.
 - If portal never read the document of the service, the decision on a node below the service is `false`, without a reason. The reason in the log is `the document of the service is not known`. A request about the whole service is not affected. After a change of the `portal.actions` URL of a service, a failed read leaves no document.
 - A grant covers the node that it names and each node below it. The PDP compares the types and the decoded ids of the chain segment by segment, as exact text. The three endpoints use the same rule.
@@ -206,6 +207,7 @@ A request about a database of the host `local`:
 portal reads the actions of each service at `/.well-known/access-actions`. The URL comes from the label `portal.actions`. This label is an absolute http or https URL. If the label is missing, the URL is the origin of the health URL (`portal.health`) with this path. A service without these two labels has only `access`.
 
 - The read has a timeout (`access.actions_timeout`) and a size limit of 64 KiB. portal reads the document again after `access.actions_refresh`.
+- When the PDP gives `invalid_resource` to a service, portal reads the document of this service again at once. The service can have a new tree that portal does not know yet. portal does this at most once in each `access.actions_refresh` interval for each service. The early read has the same timeout, size limit and number of concurrent reads as the other reads. The log has one line `actions_read_early` with the service.
 - The field `server` of the document must be the id of the service. Set `portal.id` to the name of the server.
 - The top-level list `resource_types` declares the tree of types (contract 11.4). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
 - When the document has this list, each type in the list of an action is `service` or a declared type. A type occurs one time in the list of an action.
@@ -271,6 +273,42 @@ The rules are strict by design:
 - portal ignores the query string. portal records nothing in a session, because there is no session. The request is counted in `portal_forward_auth_requests_total{result="excluded"}`.
 
 The Services settings page lists the rules of every service. The whole exposure can be audited in one place. A path that a rule opens is protected only by what the service does itself, for example by a webhook token. portal does not ask anything for these paths.
+
+## Launcher
+
+The launcher (`/`) shows one row for each group and one tile for each service. The launcher shows only the services that the viewer can open.
+
+### State of a service
+
+portal finds two states for each service:
+
+- The health state: up or down. A declared `portal.health` URL gives it (HTTP probe). Otherwise, the runtime gives it: the state of the container (Docker), or the number of ready pods of `portal.pods` (K3s). One ready pod gives up.
+- The runtime health: healthy, unhealthy or starting. The health check of the runtime gives it, when the runtime has one. It adds detail to the health state. It does not change it. The metric `portal_catalog_services_down` counts only the health state.
+
+Each tile shows one state word. The word always tells the state, so the colour is never the only sign.
+
+| Word | Meaning | Look |
+|---|---|---|
+| `down` | The health state is down. This word has priority over the runtime health. | Red pill. The whole tile is red. |
+| `unhealthy` | The health check of the runtime fails. | Warning pill. |
+| `starting` | The health check of the runtime has not passed yet. | Neutral pill. |
+| `healthy` | The health check of the runtime passes. | Green dot, the same as `up`. |
+| `up` | The health state is up. The runtime has no health check for the service. | Green dot. |
+| no word | No check applies, or no check has answered yet. | None. |
+
+The runtime health for each runtime:
+
+- **Docker, Compose and Swarm.** The result of the `HEALTHCHECK` of the container. portal reads it from the list of the containers, the same request as the labels. A recent Engine API gives the member `Health.Status`. An older API gives the end of the `Status` text: `(healthy)`, `(unhealthy)` or `(health: starting)`. A container without `HEALTHCHECK` has no runtime health. A stopped container has no runtime health. A `portal.health` URL does not remove the runtime health.
+- **Swarm.** A task container gets a new name for each task. portal uses the label `com.docker.swarm.service.name` as the origin when the label `com.docker.compose.service` is not there. Thus the origin of the service does not change from one task to the next.
+- **K3s.** The readiness probes of the containers of the pods of `portal.pods`. portal reads them from the same pod list as the number of ready pods. This list holds the spec and the status of each pod. Thus the runtime health needs no other request and no other RBAC verb: `get` and `list` on `pods` are sufficient.
+  - portal uses only the pods that have a container with a readiness probe. A terminating pod does not count. Without such a pod, the service has no runtime health.
+  - A ready pod is healthy. A pod that is not ready is starting when its phase is `Pending`, when a container has `started` at `false`, or when a container waits. A container that waits with a reason other than `ContainerCreating` or `PodInitializing`, for example `CrashLoopBackOff`, makes its pod unhealthy. Another pod that is not ready is unhealthy.
+  - One unhealthy pod makes the service unhealthy. The service is starting when a pod starts and no probed pod is ready. Otherwise, the service is healthy.
+  - With a `portal.health` URL, portal does not read the pods. The service then has no runtime health.
+
+### Group heads
+
+Each row has a head. The head shows the name of the group, the number of services, and the badges `N down` (red) and `N unhealthy` (warning). When the viewer sees one group only, the head gives no useful data. The launcher then does not show it, unless the group has a down or an unhealthy service. The row keeps the name of the group as its accessible name. With two groups or more, each row has its head.
 
 ## Settings pages and history
 
@@ -609,7 +647,7 @@ The grants of the users, and the actions that the services publish.
 |---|---|---|---|
 | `grants_mode` | `static`, `dynamic`, `hybrid` | `"dynamic"` | Where the grants come from. `static`: only the `user` blocks; the settings pages show the grants and do not change them. `dynamic`: only the settings pages; a `user` block stops the server. `hybrid`: both; the grants of a `user` block are read-only in the settings pages. |
 | `actions_timeout` | duration, 100ms to 30s | `"2s"` | The time that the server waits for the `/.well-known/access-actions` document of one service. |
-| `actions_refresh` | duration, 10s to 1d | `"5m"` | The time between two reads of the `/.well-known/access-actions` documents. |
+| `actions_refresh` | duration, 10s to 1d | `"5m"` | The time between two reads of the `/.well-known/access-actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP. |
 
 #### Block `identity`
 
