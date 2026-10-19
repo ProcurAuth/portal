@@ -133,7 +133,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "add-unknown-service" => (
-            "A service of the form is not offered any more. Open the form again.",
+            "A box of the form is not offered any more. Open the form again.",
             false,
             true,
         ),
@@ -554,11 +554,15 @@ fn password_field(out: &mut String, id: &str, label: &str, required: bool, hint:
 
 fn add_form(out: &mut String, view: &UsersView) {
     // The add action is a rare task. The form shows when the address asks for it, or after a
-    // refused attempt. The script of the generator loads with the form only.
+    // refused attempt. The script of the generator loads with the form only. The form has two
+    // columns, as the key form of clickhouse-dash: the identity at the left, the permissions at
+    // the right. One request makes the account and its grants.
+    let access = view.mode.editable() && !view.services.is_empty();
     let _ = write!(
         out,
-        r#"<form class="addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="subTitle">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="addUser__fields"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
-        html_escape(view.token)
+        r#"<form class="addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="subTitle">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="permForm{}"><div class="permForm__side"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
+        html_escape(view.token),
+        if access { "" } else { " permForm--alone" },
     );
     password_field(
         out,
@@ -567,39 +571,8 @@ fn add_form(out: &mut String, view: &UsersView) {
         true,
         "At least 10 characters.",
     );
-    out.push_str("</div>");
-    if view.mode.editable() && !view.services.is_empty() {
-        access_pick(out, view);
-    }
-    let _ = write!(
-        out,
-        r#"<div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
-    );
-}
-
-/// The access of the new account, optional. One box for each service, by group: a box opens the
-/// service. A list of accounts copies the grants of one of them, once, without a link. The form
-/// sends one POST, so the account and its grants exist together.
-fn access_pick(out: &mut String, view: &UsersView) {
-    out.push_str(r#"<fieldset class="accessPick"><legend class="field__label">Access (optional). A new account sees no service.</legend>"#);
-    for (group, services) in by_group(view.catalog, &view.services) {
-        let _ = write!(
-            out,
-            r#"<div class="accessPick__group"><span class="accessPick__name">{}</span><span class="chips">"#,
-            html_escape(&group)
-        );
-        for service in services {
-            let _ = write!(
-                out,
-                r#"<label class="chip"><input type="checkbox" name="g.{}.access" value="1">{}</label>"#,
-                html_escape(&service.id),
-                html_escape(&service.name),
-            );
-        }
-        out.push_str("</span></div>");
-    }
-    if !view.users.is_empty() {
-        out.push_str(r#"<label class="field accessPick__copy"><span class="field__label">Copy the access of</span><select name="copy"><option value="" selected>Nobody</option>"#);
+    if access && !view.users.is_empty() {
+        out.push_str(r#"<label class="field"><span class="field__label">Copy the access of</span><select name="copy" aria-describedby="copy-hint"><option value="" selected>Nobody</option>"#);
         for user in &view.users {
             let _ = write!(
                 out,
@@ -607,9 +580,27 @@ fn access_pick(out: &mut String, view: &UsersView) {
                 html_escape(&user.login)
             );
         }
-        out.push_str("</select></label>");
+        out.push_str(r#"</select><p class="hint" id="copy-hint">One copy of all its grants. Later changes of that account do not follow.</p></label>"#);
     }
-    out.push_str(r#"<p class="hint">A box opens the service. Set its actions and its resources on the next page. A copy gives the same grants once: later changes of the other account do not follow.</p></fieldset>"#);
+    out.push_str("</div>");
+    if access {
+        out.push_str(r#"<fieldset class="permForm__perms"><legend class="field__label">Permissions (optional). A new account sees no service.</legend>"#);
+        permission_cards(
+            out,
+            view.catalog,
+            &view.services,
+            &[],
+            &[],
+            true,
+            None,
+            None,
+        );
+        out.push_str("</fieldset>");
+    }
+    let _ = write!(
+        out,
+        r#"</div><div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
+    );
 }
 
 // One account ---------------------------------------------------------------------------------
@@ -728,84 +719,61 @@ fn by_group<'a>(
     groups
 }
 
-/// The access of one account: the services that it has a grant for, one line each, then one
-/// control that gives access to another service. The line of a service opens its editor, which has
-/// its own Save button. A service without any grant has no line: a new account sees no service.
+/// The access of one account, as the permissions of a key in clickhouse-dash: one card for each
+/// service, by group. The head of a card has the box `access`, the name and a count. The card
+/// opens on the actions of the service and the grants on resources. A card with a grant starts
+/// open. One form and one Save send every box of the page.
 fn access_part(out: &mut String, view: &UserView) {
     let user = &view.user;
     let editable = view.mode.editable();
     let opened = summary(view.catalog, &view.services, user).services;
     out.push_str(r#"<section class="part" aria-labelledby="access-title">"#);
+    let controls = if editable && !view.services.is_empty() {
+        r#"<button class="button button--primary" type="submit" form="grants">Save access</button>"#
+    } else {
+        ""
+    };
     part_head(
         out,
         "access-title",
         "Access",
         &format!("Opens {opened} of {}", view.services.len()),
-        "",
+        controls,
     );
-    out.push_str(r#"<p class="part__lede">A new account sees no service. Give access to a service, then set its actions and its resources on its line.</p>"#);
+    out.push_str(r#"<p class="part__lede">The box of a service opens it. Open a card to choose its actions and to see its grants on resources. A new account sees no service.</p>"#);
     match view.mode {
         Mode::Static => out.push_str(r#"<p class="alertLine alertLine--info">The grants come from the configuration (<code>user</code> blocks, <code>access.grants_mode = "static"</code>). This page shows them and cannot change them.</p>"#),
         Mode::Hybrid if !user.configured.is_empty() => out.push_str(r#"<p class="alertLine alertLine--info">Some grants come from the configuration (<code>user</code> block). They show the mark <em>configuration</em> and cannot change here.</p>"#),
         _ => {}
     }
-    let granted: Vec<&ServiceActions> = view
-        .services
-        .iter()
-        .filter(|s| user.grants.iter().any(|g| g.service == s.id))
-        .collect();
-    if view.services.is_empty() {
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
-    } else if granted.is_empty() {
+    if editable {
         let _ = write!(
             out,
-            r#"<p class="empty">{} has no access: no service shows on the panel.</p>"#,
-            html_escape(&user.login)
+            r#"<form id="grants" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><input type="hidden" name="grants" value="1"></form>"#,
+            html_escape(view.token),
+            html_escape(&user.login),
         );
-    } else {
-        out.push_str(r#"<div class="tableBox"><table class="table accessTable"><thead><tr><th scope="col">Service</th><th scope="col">Access</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
-        for service in granted {
-            let _ = write!(
-                out,
-                r#"<tr><th scope="row" data-label="Service">{}</th><td data-label="Access">{}</td><td class="accessTable__end" data-label="Edit"><a class="button button--small" href="{}" aria-label="{} access to {}">{}</a></td></tr>"#,
-                service_name(service),
-                access_line(service, &user.grants),
-                access_href(&user.login, &service.id),
-                if editable { "Edit" } else { "Show" },
-                html_escape(&service.name),
-                if editable { "Edit" } else { "Show" },
-            );
-        }
-        out.push_str("</tbody></table></div>");
     }
-    if editable {
-        let closed: Vec<&ServiceActions> = view
-            .services
-            .iter()
-            .filter(|s| !holds(&user.grants, ACCESS, &s.id))
-            .collect();
-        if !closed.is_empty() {
-            let _ = write!(
-                out,
-                r#"<form class="pick" method="get" action="{ACCESS_PATH}"><input type="hidden" name="user" value="{}"><input type="hidden" name="give" value="1"><label class="field"><span class="field__label">Give access to a service</span><select name="service" required><option value="" selected disabled>Choose a service</option>"#,
-                html_escape(&user.login)
-            );
-            for (group, services) in by_group(view.catalog, closed) {
-                let _ = write!(out, r#"<optgroup label="{}">"#, html_escape(&group));
-                for service in services {
-                    let _ = write!(
-                        out,
-                        r#"<option value="{}">{}</option>"#,
-                        html_escape(&service.id),
-                        html_escape(&service.name)
-                    );
-                }
-                out.push_str("</optgroup>");
-            }
-            out.push_str(
-                r#"</select></label><button class="button" type="submit">Add</button></form>"#,
-            );
-        }
+    if view.services.is_empty() {
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+    } else {
+        let holder = Holder {
+            login: &user.login,
+            token: view.token,
+            grants: &user.grants,
+            configured: &user.configured,
+            editable,
+        };
+        permission_cards(
+            out,
+            view.catalog,
+            &view.services,
+            &user.grants,
+            &user.configured,
+            editable,
+            Some("grants"),
+            Some(&holder),
+        );
     }
     // The services that left the catalogue but still have grants of this account.
     let gone: Vec<&Grant> = user
@@ -824,16 +792,168 @@ fn access_part(out: &mut String, view: &UserView) {
         }
         out.push_str("</ul>");
     }
+    if editable && !view.services.is_empty() {
+        out.push_str(r#"<div class="formActions"><button class="button button--primary" type="submit" form="grants">Save access</button></div>"#);
+    }
     out.push_str("</section>");
 }
 
-/// The name of a service and its id, for a table row or a head.
-fn service_name(service: &ServiceActions) -> String {
-    format!(
-        r#"<span class="svcRow__name">{}</span> <code class="svcRow__id">{}</code>"#,
+/// The account that a list of cards shows: who it is and what it holds.
+struct Holder<'a> {
+    login: &'a str,
+    token: &'a str,
+    grants: &'a [Grant],
+    configured: &'a [Grant],
+    editable: bool,
+}
+
+/// The first sentence of a description, for the line under an action.
+fn first_sentence(text: &str) -> &str {
+    match text.find(". ") {
+        Some(end) => &text[..=end],
+        None => text,
+    }
+}
+
+/// The cards of the permissions, by group of the catalogue. `grants` ticks the boxes. A box that
+/// belongs to the form of another element names it in `form`. `holder` adds the grants on
+/// resources of the account to each card: only a page that edits one account passes it.
+#[allow(clippy::too_many_arguments)]
+fn permission_cards(
+    out: &mut String,
+    catalog: &Catalog,
+    services: &[ServiceActions],
+    grants: &[Grant],
+    configured: &[Grant],
+    editable: bool,
+    form: Option<&str>,
+    holder: Option<&Holder>,
+) {
+    out.push_str(r#"<div class="perms">"#);
+    for (group, members) in by_group(catalog, services) {
+        let _ = write!(
+            out,
+            r#"<h3 class="perms__group">{}</h3>"#,
+            html_escape(&group)
+        );
+        for service in members {
+            service_card(out, service, grants, configured, editable, form, holder);
+        }
+    }
+    out.push_str("</div>");
+}
+
+/// One card: the head has the box `access`, the name, the id and the count of what is ticked. A
+/// click on the box does not open the card. The body has one box for each action with its first
+/// sentence under it, then the grants on resources.
+fn service_card(
+    out: &mut String,
+    service: &ServiceActions,
+    grants: &[Grant],
+    configured: &[Grant],
+    editable: bool,
+    form: Option<&str>,
+    holder: Option<&Holder>,
+) {
+    let opens = holds(grants, ACCESS, &service.id);
+    let below: Vec<&Grant> = grants
+        .iter()
+        .filter(|g| g.service == service.id && !g.path.is_empty())
+        .collect();
+    let ticked = usize::from(opens)
+        + service
+            .actions
+            .iter()
+            .filter(|(name, _)| holds(grants, name, &service.id))
+            .count();
+    let total = service.actions.len() + 1;
+    let access_fixed = !editable || holds(configured, ACCESS, &service.id);
+    // A service with no action and no level has nothing to open: its card is one line.
+    let flat = service.actions.is_empty() && below.is_empty() && service.levels().is_empty();
+    let (tag, head) = if flat {
+        ("div", "div")
+    } else {
+        ("details", "summary")
+    };
+    let _ = write!(
+        out,
+        r#"<{tag} class="perm{}"{}><{head} class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service.">{}<span class="perm__name">{}</span></label><code class="svcRow__id">{}</code>"#,
+        if ticked > 0 || !below.is_empty() {
+            " has-grants"
+        } else {
+            ""
+        },
+        if (ticked > 0 || !below.is_empty()) && !flat {
+            " open"
+        } else {
+            ""
+        },
+        grant_box(&service.id, ACCESS, opens, access_fixed, form),
         html_escape(&service.name),
-        html_escape(&service.id)
-    )
+        html_escape(&service.id),
+    );
+    if access_fixed && editable && opens {
+        out.push_str(r#"<span class="badge">configuration</span>"#);
+    }
+    let to_check = below.iter().filter(|g| service.undeclared(g)).count();
+    if to_check > 0 {
+        let _ = write!(
+            out,
+            r#"<span class="badge badge--warn">{to_check} to check</span>"#
+        );
+    }
+    if flat {
+        out.push_str("</div></div>");
+        return;
+    }
+    let _ = write!(
+        out,
+        r##"<span class="perm__count">{ticked}/{total}{}</span><svg class="icon perm__chevron" aria-hidden="true"><use href="#i-chevron-right"/></svg></summary><div class="perm__body">"##,
+        if below.is_empty() {
+            String::new()
+        } else {
+            format!(", {} on resources", below.len())
+        },
+    );
+    if !service.actions.is_empty() {
+        out.push_str(r#"<ul class="perm__actions">"#);
+        for (action, description) in &service.actions {
+            let held = holds(grants, action, &service.id);
+            let fixed = !editable || holds(configured, action, &service.id);
+            let _ = write!(
+                out,
+                r#"<li><label class="perm__action" title="{}">{}<code>{}</code><span class="perm__tip">{}</span></label></li>"#,
+                html_escape(description),
+                grant_box(&service.id, action, held, fixed, form),
+                html_escape(action),
+                html_escape(first_sentence(description)),
+            );
+        }
+        out.push_str("</ul>");
+    }
+    if let Some(holder) = holder {
+        out.push_str(r#"<div class="perm__res">"#);
+        if !below.is_empty() {
+            let _ = write!(
+                out,
+                r#"<ul class="grantRows" aria-label="Grants on resources of {}">"#,
+                html_escape(&service.name)
+            );
+            for grant in &below {
+                resource_grant(out, holder, service, grant);
+            }
+            out.push_str("</ul>");
+        }
+        if holder.editable && !service.levels().is_empty() {
+            let _ = write!(
+                out,
+                r#"<a class="linkButton" href="{}">Add a grant on a resource</a>"#,
+                access_href(holder.login, &service.id)
+            );
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("</div></details>");
 }
 
 /// What a set of grants gives on one service, in one line: open or not, the actions on the whole
@@ -990,7 +1110,7 @@ fn access_form(out: &mut String, view: &AccessView) {
             out,
             r#"<li><label class="option{}">{}<span class="option__name"><code>{}</code></span><span class="option__text">{}</span>{}</label></li>"#,
             if checked { " is-on" } else { "" },
-            grant_box(&service.id, action, checked, fixed),
+            grant_box(&service.id, action, checked, fixed, None),
             html_escape(action),
             html_escape(description),
             if configured && editable {
@@ -1031,16 +1151,24 @@ fn access_form(out: &mut String, view: &AccessView) {
     out.push_str("</section>");
 }
 
-/// The one box of the form `editor`. A fixed box (configuration, or the mode `static`) has no
-/// name, so the form does not send it.
-fn grant_box(service: &str, action: &str, checked: bool, fixed: bool) -> String {
+/// One check box. A fixed box (configuration, or the mode `static`) has no name, so the form does
+/// not send it. `form` names the form that the box belongs to, when the box is not inside it.
+fn grant_box(
+    service: &str,
+    action: &str,
+    checked: bool,
+    fixed: bool,
+    form: Option<&str>,
+) -> String {
     format!(
         r#"<input type="checkbox"{}{}{}>"#,
         if fixed {
             String::new()
         } else {
             format!(
-                r#" name="g.{}.{}" value="1""#,
+                r#"{} name="g.{}.{}" value="1""#,
+                form.map(|id| format!(r#" form="{id}""#))
+                    .unwrap_or_default(),
                 html_escape(service),
                 html_escape(action)
             )
@@ -1085,8 +1213,15 @@ fn resource_part(out: &mut String, view: &AccessView) {
             r#"<ul class="grantRows" aria-label="Grants on resources of {}">"#,
             html_escape(&service.name)
         );
+        let holder = Holder {
+            login: &user.login,
+            token: view.token,
+            grants: &user.grants,
+            configured: &user.configured,
+            editable,
+        };
         for grant in below {
-            resource_grant(out, view, grant);
+            resource_grant(out, &holder, service, grant);
         }
         out.push_str("</ul>");
     }
@@ -1099,11 +1234,9 @@ fn resource_part(out: &mut String, view: &AccessView) {
 /// One grant below a service, written as a sentence: the action, the path and "and everything
 /// below". The row then has the mark of a broader grant, the problem when the service does not
 /// declare it, and the mark of the configuration or the Remove button.
-fn resource_grant(out: &mut String, view: &AccessView, grant: &Grant) {
-    let user = &view.user;
-    let service = &view.service;
+fn resource_grant(out: &mut String, holder: &Holder, service: &ServiceActions, grant: &Grant) {
     let problem = service.problem(grant);
-    let covering = covered_by(&user.grants, grant);
+    let covering = covered_by(holder.grants, grant);
     let _ = write!(
         out,
         r#"<li class="grantRow{}"><span class="sentence"><code class="grantRow__action"{}>{}</code> <span class="muted">on</span> {} <span class="muted">and everything below</span></span>"#,
@@ -1134,14 +1267,14 @@ fn resource_grant(out: &mut String, view: &AccessView, grant: &Grant) {
             reach_text(other)
         );
     }
-    if user.configured.contains(grant) {
+    if holder.configured.contains(grant) {
         out.push_str(r#"<span class="badge grantRow__end">configuration</span>"#);
-    } else if view.mode.editable() {
+    } else if holder.editable {
         let _ = write!(
             out,
             r#"<form class="grantRow__end" method="post" action="/auth/users/grant-delete"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><input type="hidden" name="grant" value="{}"><button class="button button--small" type="submit" aria-label="Remove {} on {}">Remove</button></form>"#,
-            html_escape(view.token),
-            html_escape(&user.login),
+            html_escape(holder.token),
+            html_escape(holder.login),
             html_escape(&grant.to_string()),
             html_escape(&grant.action),
             html_escape(&grant.path_text()),
@@ -2320,16 +2453,21 @@ mod tests {
         assert!(html.contains("/auth/assets/settings.js"));
         let add = &html[html.find(r#"action="/auth/users/add""#).unwrap()..];
         let add = &add[..add.find("</form>").unwrap()];
-        // The form opens a service with a box, by group, and copies the access of an account.
-        assert!(add.contains(r#"<span class="accessPick__name">Infra</span>"#));
-        assert!(add.contains(
-            r#"<label class="chip"><input type="checkbox" name="g.infra-grafana.access" value="1">Grafana</label>"#
-        ));
+        // The form has the identity at the left and one card for each service at the right, by
+        // group. A card has the box `access` and one box for each action. It copies an account.
+        assert!(add.contains(r#"<div class="permForm"><div class="permForm__side">"#));
+        assert!(add.contains(r#"<h3 class="perms__group">Infra</h3>"#));
+        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1"><span class="perm__name">Grafana</span>"#));
+        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1"><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
+        assert!(add.contains(r#"<select name="copy" aria-describedby="copy-hint"><option value="" selected>Nobody</option><option value="alice">alice</option>"#));
         assert!(
-            !add.contains("dashboards.read"),
-            "a box opens the service only"
+            !add.contains(" open>") && !add.contains(" open "),
+            "no card starts open"
         );
-        assert!(add.contains(r#"<select name="copy"><option value="" selected>Nobody</option><option value="alice">alice</option>"#));
+        assert!(
+            !add.contains(r#"form="grants""#),
+            "the boxes are in the form"
+        );
         let mut fixed = view(&cat);
         fixed.add_open = true;
         fixed.mode = Mode::Static;
@@ -2357,7 +2495,7 @@ mod tests {
     }
 
     #[test]
-    fn the_account_page_lists_only_the_services_with_a_grant_and_keeps_the_password_apart() {
+    fn the_account_page_has_one_card_for_each_service_in_one_form_and_keeps_the_password_apart() {
         let cat = catalog();
         let mut alice = card("alice", &["grafana", "mixed"]);
         alice.grants.push(grant("dashboards.read", "infra-grafana"));
@@ -2366,41 +2504,66 @@ mod tests {
             .push(sub("dashboards.write on service:infra-grafana/folder:ops"));
         let html = user_page(&frame(), &user_view(&cat, alice));
         assert!(html.contains("Opens 2 of 4"));
-        // A line for each service with a grant. A service without a grant has no line.
-        assert!(html.contains(r#"<th scope="row" data-label="Service"><span class="svcRow__name">Grafana</span> <code class="svcRow__id">infra-grafana</code></th><td data-label="Access"><strong>open</strong> <span class="muted" aria-hidden="true">·</span> <code>dashboards.read</code> <span class="muted" aria-hidden="true">·</span> 1 resource grant</td>"#));
+        assert!(html.contains(r#"<form id="grants" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="tok&lt;en"><input type="hidden" name="login" value="alice"><input type="hidden" name="grants" value="1"></form>"#));
+        // A card with a grant starts open and says what it holds. The others stay closed.
+        assert!(html.contains(r#"<details class="perm has-grants" open><summary class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-grafana.access" value="1" checked><span class="perm__name">Grafana</span></label><code class="svcRow__id">infra-grafana</code>"#));
+        assert!(html.contains(r#"<span class="perm__count">2/3, 1 on resources</span>"#));
+        // A service with no action has one line and nothing to open.
+        assert!(html.contains(r#"<div class="perm"><div class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-notes.access" value="1">"#));
+        // Each action has its box and its first sentence in text.
+        assert!(html.contains(r#"<input type="checkbox" form="grants" name="g.infra-grafana.dashboards.read" value="1" checked><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
+        assert!(html.contains("Change the &lt;dashboards&gt;."), "escaped");
+        // The grants on resources are in the card, with a way to add one.
         assert!(
-            html.contains(r#"href="/auth/settings/access?user=alice&amp;service=infra-grafana""#)
+            html.contains(r#"<code class="grantRow__action""#) && html.contains("Remove</button>")
         );
-        assert!(html.contains(r#"href="/auth/settings/access?user=alice&amp;service=infra-mixed""#));
-        assert!(!html.contains(r#"<span class="svcRow__name">Notes</span>"#));
-        // The control that gives access lists the services that the account does not open.
-        assert!(html.contains(r#"<form class="pick" method="get" action="/auth/settings/access"><input type="hidden" name="user" value="alice"><input type="hidden" name="give" value="1">"#));
-        assert!(html.contains(r#"<option value="infra-notes">Notes</option>"#));
-        assert!(!html.contains(r#"<option value="infra-grafana">"#));
-        // No global save: the page has no box and no grant form of the whole account.
-        assert!(!html.contains("Save access") && !html.contains(r#"name="g."#));
+        assert!(html.contains(r#"<a class="linkButton" href="/auth/settings/access?user=alice&amp;service=infra-grafana">Add a grant on a resource</a>"#));
+        assert!(html.contains(">Save access</button>"));
         // The password form sends no box and no `grants` field.
         let start = html.rfind(r#"action="/auth/users/update""#).unwrap();
         let password = &html[start..start + html[start..].find("</form>").unwrap()];
         assert!(password.contains(r#"id="pw-alice""#) && password.contains(" required"));
         assert!(!password.contains(r#"name="grants""#) && !password.contains(r#"name="g."#));
-        assert_eq!(html.matches(r#"action="/auth/users/update""#).count(), 1);
+        assert_eq!(html.matches(r#"action="/auth/users/update""#).count(), 2);
         assert!(html.contains(r#"action="/auth/users/impersonate""#));
         assert!(html.contains("Confirm: delete alice"));
     }
 
     #[test]
-    fn a_new_account_has_no_line_and_a_service_that_is_open_for_it_leaves_the_list_of_choices() {
+    fn the_cards_close_their_elements_so_a_one_line_card_does_not_swallow_the_next() {
+        let cat = catalog();
+        let html = user_page(
+            &frame(),
+            &user_view(&cat, card("alice", &["notes", "grafana"])),
+        );
+        let start = html.find(r#"<div class="perms">"#).unwrap();
+        let end = html.find("</section>").unwrap();
+        let cards = &html[start..end];
+        for tag in ["div", "details", "summary", "ul", "li", "label"] {
+            assert_eq!(
+                cards.matches(&format!("<{tag}")).count(),
+                cards.matches(&format!("</{tag}>")).count(),
+                "<{tag}> is closed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_account_has_only_closed_cards() {
         let cat = catalog();
         let html = user_page(&frame(), &user_view(&cat, card("carol", &[])));
-        assert!(html.contains("carol has no access: no service shows on the panel."));
-        assert!(!html.contains(r#"class="table accessTable""#));
-        assert!(html.contains(r#"<option value="infra-grafana">Grafana</option>"#));
-        let all = user_page(
-            &frame(),
-            &user_view(&cat, card("dave", &["grafana", "notes", "typo", "mixed"])),
+        assert!(html.contains("Opens 0 of 4"));
+        assert!(!html.contains(" has-grants") && !html.contains("<details class=\"perm\" open"));
+        assert_eq!(
+            html.matches(r#"<details class="perm">"#).count(),
+            1,
+            "Grafana"
         );
-        assert!(!all.contains(r#"class="pick""#), "nothing left to give");
+        assert_eq!(
+            html.matches(r#"<div class="perm">"#).count(),
+            3,
+            "one line each"
+        );
     }
 
     #[test]
@@ -2572,8 +2735,9 @@ mod tests {
         let mut page = user_view(&cat, bob);
         page.mode = Mode::Static;
         let html = user_page(&frame(), &page);
-        assert!(!html.contains(r#"class="pick""#), "no way to give access");
-        assert!(html.contains(">Show</a>") && !html.contains(">Edit</a>"));
+        assert!(!html.contains(r#"id="grants""#) && !html.contains(">Save access<"));
+        assert!(!html.contains(r#"name="g."#) && !html.contains("Add a grant on a resource"));
+        assert!(html.contains("cannot change them"));
     }
 
     #[test]

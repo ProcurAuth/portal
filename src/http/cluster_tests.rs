@@ -676,8 +676,8 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         // The add form can open a service. An action, an unknown field or a service id that is
         // not valid is a bad request. A service that the catalogue lacks is a notice.
         for bad in [
-            "login=bob&password=a-long-password-1&g.db.query.run.read=1",
             "login=bob&password=a-long-password-1&g.db.access=2",
+            "login=bob&password=a-long-password-1&g.db",
             "login=bob&password=a-long-password-1&other=1",
             "login=bob&password=a-long-password-1&g.DB.access=1",
         ] {
@@ -697,6 +697,18 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             )
             .location(),
             Some("/auth/settings?s=add-unknown-service")
+        );
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=bob&password=a-long-password-1&g.db.system.read=1",
+            )
+            .location(),
+            Some("/auth/settings?s=add-unknown-service"),
+            "an action that the service does not publish"
         );
         assert_eq!(
             post(
@@ -2181,7 +2193,10 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         ));
         // The page of the account lists the service with its grant: one line.
         let account = self::page(&node, &root, "/auth/settings/users/alice");
-        assert!(account.body.contains("1 resource grant"));
+        assert!(
+            account.body.contains("1/3, 1 on resources")
+                || account.body.contains(", 1 on resources")
+        );
         // The editor of an unknown service or account does not exist.
         for gone in [
             "/auth/settings/access?user=alice&service=chat",
@@ -2350,12 +2365,16 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
         };
         // One POST makes the account and its grants: the database holds both.
         assert_eq!(
-            add("login=alice&g.db.access=1&g.other-grafana.access=1"),
+            add("login=alice&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1"),
             Some("/auth/settings/users/alice?s=user-added-access".into())
         );
         assert_eq!(
             grants_of("alice"),
-            ["access on service:db", "access on service:other-grafana"]
+            [
+                "access on service:db",
+                "access on service:other-grafana",
+                "query.run.read on service:db"
+            ]
         );
         assert_eq!(
             node.state.store.load_users().unwrap()[0].grants,

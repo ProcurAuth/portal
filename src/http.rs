@@ -2126,17 +2126,21 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The form can open services at once (`g.<service>.access`) and copy the grants of an account
-    // (`copy`). A new user has no other grant.
+    // The form can give grants at once (`g.<service>.<action>`, as the page of an account) and
+    // copy the grants of an account (`copy`). A new user has no other grant.
     let copy = form.remove("copy").unwrap_or_default();
-    let mut opened: Vec<String> = Vec::new();
+    let mut ticked: Vec<(String, String)> = Vec::new();
     for (name, value) in form.drain() {
         match name
             .strip_prefix("g.")
-            .and_then(|rest| rest.strip_suffix(".access"))
+            .and_then(|rest| rest.split_once('.'))
         {
-            Some(service) if value == "1" && grants::check_service_id(service).is_ok() => {
-                opened.push(service.to_string());
+            Some((service, action))
+                if value == "1"
+                    && grants::check_service_id(service).is_ok()
+                    && grants::check_action(action).is_ok() =>
+            {
+                ticked.push((service.to_string(), action.to_string()));
             }
             _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
         }
@@ -2163,7 +2167,7 @@ async fn handle_users_add(
         return rejected("limit");
     }
     let mut new_grants: Vec<Grant> = Vec::new();
-    if !opened.is_empty() || !copy.is_empty() {
+    if !ticked.is_empty() || !copy.is_empty() {
         if !state.policy.mode.editable() {
             return rejected("grants-static");
         }
@@ -2175,11 +2179,19 @@ async fn handle_users_add(
                 .flat_map(|group| group.services.iter())
                 .any(|s| s.id == id)
         };
-        for service in &opened {
-            if !in_catalog(service) {
+        // A box is valid when the page offers it: the service is in the catalogue, and the action
+        // is `access` or an action that the service publishes.
+        for (service, action) in &ticked {
+            let offered = action == grants::ACCESS
+                || state
+                    .actions
+                    .action_names(service)
+                    .iter()
+                    .any(|name| name == action);
+            if !in_catalog(service) || !offered {
                 return rejected("add-unknown-service");
             }
-            match Grant::new(grants::ACCESS, service) {
+            match Grant::new(action, service) {
                 Ok(grant) => new_grants.push(grant),
                 Err(_) => return rejected("add-unknown-service"),
             }
