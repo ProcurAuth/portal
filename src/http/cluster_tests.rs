@@ -669,7 +669,10 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             USERS_TOKEN,
             "login=alice&password=a-long-password-1",
         );
-        assert_eq!(add.location(), Some("/auth/settings?s=user-added"));
+        assert_eq!(
+            add.location(),
+            Some("/auth/settings/users/alice?s=user-added")
+        );
         let refused = post(
             &node,
             &root,
@@ -704,11 +707,14 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
                 &root,
                 USERS_UPDATE_PATH,
                 USERS_TOKEN,
-                &format!("login=alice{fields}"),
+                &format!("grants=1&login=alice{fields}"),
             )
         };
         let reply = update("&g.db.access=1&g.db.query.run.read=1&g.db.query.run.write=1");
-        assert_eq!(reply.location(), Some("/auth/settings?s=user-updated"));
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/users/alice?s=user-updated")
+        );
         let allowed = open(&node, &alice, "/db/query?x=1");
         assert_eq!(allowed.status, 204);
         let token = allowed
@@ -741,14 +747,14 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         let reply = update("&g.other-grafana.dashboards.read=1");
         assert_eq!(
             reply.location(),
-            Some("/auth/settings?s=edit-unknown-grant")
+            Some("/auth/settings/users/alice?s=edit-unknown-grant")
         );
 
         // An action that db no longer publishes keeps its grant. The page did not show the action.
         publish_catalog(&node, &["query.run.read"]);
         assert_eq!(
             update("&g.db.access=1").location(),
-            Some("/auth/settings?s=user-updated")
+            Some("/auth/settings/users/alice?s=user-updated")
         );
         let kept: Vec<String> = node
             .state
@@ -770,7 +776,10 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         );
 
         // Without access, the service is removed again.
-        assert_eq!(update("").location(), Some("/auth/settings?s=user-updated"));
+        assert_eq!(
+            update("").location(),
+            Some("/auth/settings/users/alice?s=user-updated")
+        );
         assert_eq!(open(&node, &alice, "/db/").status, 302);
 
         // The superadmin opens every service. It gets a token with its own login.
@@ -809,9 +818,12 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
         &root,
         USERS_UPDATE_PATH,
         USERS_TOKEN,
-        "login=alice&g.db.access=1",
+        "grants=1&login=alice&g.db.access=1",
     );
-    assert_eq!(reply.location(), Some("/auth/settings?s=grants-static"));
+    assert_eq!(
+        reply.location(),
+        Some("/auth/settings/users/alice?s=grants-static")
+    );
     // A grant in the database does not count in this mode.
     node.state
         .store
@@ -2038,14 +2050,14 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 "login=alice&password=a-long-password-1",
             )
             .location(),
-            Some("/auth/settings?s=user-added")
+            Some("/auth/settings/users/alice?s=user-added")
         );
         let add = |fields: &str| {
             post(&node, &root, GRANT_ADD_PATH, USERS_TOKEN, fields)
                 .location()
                 .map(str::to_string)
         };
-        let notice = |code: &str| Some(format!("/auth/settings?s={code}"));
+        let notice = |code: &str| Some(format!("/auth/settings/users/alice?s={code}"));
         let fields = "login=alice&service=db&action=query.run.write&type=database&id0=analytics";
         // The service has not answered yet: no grant on a sub-resource.
         *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(
@@ -2103,7 +2115,12 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 "no-user",
             ),
         ] {
-            assert_eq!(add(bad), notice(code), "{bad}");
+            let expected = if code == "no-user" {
+                Some(format!("/auth/settings?s={code}"))
+            } else {
+                notice(code)
+            };
+            assert_eq!(add(bad), expected, "{bad}");
         }
         let extra = post(
             &node,
@@ -2117,8 +2134,10 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
             vec![Grant::parse("query.run.write on service:db/database:analytics").unwrap()];
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let page = page(&node, &root, "/auth/settings");
-        assert!(page.body.contains("database <code>analytics</code>"));
+        let page = page(&node, &root, "/auth/settings/users/alice");
+        assert!(page.body.contains(
+            r#"<span class="path__type">database</span> <code class="path__id">analytics</code>"#
+        ));
 
         // The edit form keeps the grant on the sub-resource: it shows only the grants on services.
         assert_eq!(
@@ -2127,10 +2146,10 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 &root,
                 USERS_UPDATE_PATH,
                 USERS_TOKEN,
-                "login=alice&g.db.access=1"
+                "grants=1&login=alice&g.db.access=1"
             )
             .location(),
-            Some("/auth/settings?s=user-updated")
+            Some("/auth/settings/users/alice?s=user-updated")
         );
         assert_eq!(node.state.users.grants_of("alice").unwrap().len(), 2);
 
@@ -2227,13 +2246,11 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         expected.sort();
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let tree_page = self::page(&node, &root, "/auth/settings");
+        let tree_page = self::page(&node, &root, "/auth/settings/users/alice");
+        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code></span><span class="path__sep" aria-hidden="true">/</span><span class="path__seg"><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
         assert!(tree_page
             .body
-            .contains("host <code>local</code> › database <code>a/b c</code>"));
-        assert!(tree_page
-            .body
-            .contains(r#"<span class="subGrant__level">host › database</span>"#));
+            .contains("<code>service:db/host:&lt;id&gt;/database:&lt;id&gt;</code>"));
         assert_eq!(
             delete("query.run.write on service:db/host:local/database:a%2Fb%20c"),
             notice("grant-deleted")
@@ -2747,7 +2764,7 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
         let again = sign_in(&first, "root", PASSWORD);
         let _ = sign_in(&first, "carol", "a-long-password-1");
         wait_until(Duration::from_secs(10), || {
-            page(&first, &again, "/auth/settings")
+            page(&first, &again, "/auth/settings/logins")
                 .body
                 .contains("All sessions ended")
         });

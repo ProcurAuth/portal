@@ -20,8 +20,8 @@ use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Servic
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
-    logins_page, notice_for, services_page, users_page, Frame, LoginsView, ServiceActions,
-    ServicesView, UserCard, UsersView,
+    logins_page, notice_for, services_page, user_page, users_page, Frame, LoginsView,
+    ServiceActions, ServicesView, UserCard, UserView, UsersView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -546,20 +546,9 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
 
 /// Synthetic accounts and history for `portal render-demo`.
 fn demo_users(catalog: &Catalog) -> UsersView<'_> {
-    use crate::store::{AccountActivity, AuditRow, DayStat, ServiceUse, SessionRow};
+    use crate::store::{AccountActivity, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
-    let first_day = now - now.rem_euclid(86_400) - 29 * 86_400;
-    let days = |seed: u32| -> Vec<DayStat> {
-        (0..30u32)
-            .map(|i| {
-                let sessions = (i * 7 + seed) % 5;
-                DayStat {
-                    sessions,
-                    seconds: i64::from(sessions) * 1_800,
-                }
-            })
-            .collect()
-    };
+    let days = demo_days;
     let card = |login: &str, grants: &[&str], seed: u32, superadmin: bool| {
         UserCard {
         login: login.into(),
@@ -602,6 +591,7 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
     };
     UsersView {
         notice: None,
+        add_open: false,
         mode: crate::grants::Mode::Dynamic,
         catalog,
         services: demo_services(catalog),
@@ -620,28 +610,51 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
             card("bob", &["access on service:monitoring-grafana"], 4, false),
         ],
         superadmin: card("root", &[], 1, true),
-        days: days(3),
-        first_day,
-        recent_events: vec![
-            AuditRow {
-                ts: now - 300,
-                kind: "user_added".into(),
-                login: Some("bob".into()),
-                actor: Some("root".into()),
-                ip: Some("192.168.1.20".into()),
-            },
-            AuditRow {
-                ts: now - 4_000,
-                kind: "login_failed".into(),
-                login: Some("alice".into()),
-                actor: None,
-                ip: Some("192.168.1.99".into()),
-            },
-        ],
         unknown_failures_30d: 3,
         max_users: 64,
         token: "demo",
     }
+}
+
+/// The days of the demo graphs: a fixed pattern, so a page renders the same each time.
+fn demo_days(seed: u32) -> Vec<crate::store::DayStat> {
+    (0..30u32)
+        .map(|i| {
+            let sessions = (i * 7 + seed) % 5;
+            crate::store::DayStat {
+                sessions,
+                seconds: i64::from(sessions) * 1_800,
+            }
+        })
+        .collect()
+}
+
+/// The first day of the demo graphs.
+fn demo_first_day() -> i64 {
+    let now = 1_791_623_502_i64;
+    now - now.rem_euclid(86_400) - 29 * 86_400
+}
+
+/// Synthetic audit events for `portal render-demo`.
+fn demo_events() -> Vec<crate::store::AuditRow> {
+    use crate::store::AuditRow;
+    let now = 1_791_623_502_i64;
+    vec![
+        AuditRow {
+            ts: now - 300,
+            kind: "user_added".into(),
+            login: Some("bob".into()),
+            actor: Some("root".into()),
+            ip: Some("192.168.1.20".into()),
+        },
+        AuditRow {
+            ts: now - 4_000,
+            kind: "login_failed".into(),
+            login: Some("alice".into()),
+            actor: None,
+            ip: Some("192.168.1.99".into()),
+        },
+    ]
 }
 
 /// Synthetic sign-in attempts for `portal render-demo`.
@@ -695,6 +708,21 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
             },
         ),
         "users" => users_page(&frame, &demo_users(&catalog)),
+        "user" => {
+            let mut users = demo_users(&catalog);
+            user_page(
+                &frame,
+                &UserView {
+                    notice: None,
+                    mode: users.mode,
+                    catalog: &catalog,
+                    services: std::mem::take(&mut users.services),
+                    user: users.users.remove(0),
+                    first_day: demo_first_day(),
+                    token: "demo",
+                },
+            )
+        }
         "services" => {
             let users = demo_users(&catalog);
             let holders: Vec<(String, Vec<crate::grants::Grant>)> = users
@@ -722,6 +750,9 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 page: &demo_logins(),
                 only_failed: false,
                 retention_days: 90,
+                days: &demo_days(3),
+                first_day: demo_first_day(),
+                recent_events: &demo_events(),
             },
         ),
         _ => return None,
@@ -849,13 +880,17 @@ mod tests {
             assert!(!page.contains("<symbol") && !page.contains("class=\"sprite\""));
         }
         let settings = demo_page("users", &Icons::empty()).unwrap();
-        assert_eq!(settings.matches("<symbol ").count(), 6);
+        assert_eq!(
+            settings.matches("<symbol ").count(),
+            5,
+            "the header icons and the back chevron"
+        );
         assert!(settings.contains(r#"<symbol id="i-chevron-left""#));
     }
 
     #[test]
     fn every_demo_page_renders_and_an_unknown_one_does_not() {
-        for name in ["launcher", "users", "services", "logins"] {
+        for name in ["launcher", "users", "user", "services", "logins"] {
             let page = demo_page(name, &Icons::empty()).unwrap();
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }
@@ -866,10 +901,13 @@ mod tests {
         );
         let services = demo_page("services", &Icons::empty()).unwrap();
         assert!(
-            services.contains(r#"class="warn""#),
+            services.contains(r#"class="callout callout--warn""#),
             "a demo service has a problem"
         );
-        assert!(services.contains("query.run.write") && services.contains("access only"));
+        assert!(
+            services.contains("query.run.write")
+                && services.contains("only: opening the service is the full permission")
+        );
         let logins = demo_page("logins", &Icons::empty()).unwrap();
         assert!(
             logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert")

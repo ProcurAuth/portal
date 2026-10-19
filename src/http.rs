@@ -809,7 +809,7 @@ fn is_settings_path(path: &str) -> bool {
     matches!(
         path,
         ui::settings::USERS_PATH | ui::settings::SERVICES_PATH | ui::settings::LOGINS_PATH
-    )
+    ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
 }
 
 /// One page of the settings. The route of the page is its tab. The portal checks the session itself.
@@ -864,6 +864,7 @@ async fn handle_settings(
             )
         }
         ui::settings::LOGINS_PATH => {
+            let (_, snapshot) = load_admin_data(state).await;
             let only_failed = query_value(uri, "r").as_deref() == Some("failed");
             let asked = query_value(uri, "p")
                 .and_then(|p| p.parse::<u32>().ok())
@@ -877,13 +878,27 @@ async fn handle_settings(
                     page: &data,
                     only_failed,
                     retention_days: state.config.storage.retention_days,
+                    days: &snapshot.days,
+                    first_day: snapshot.first_day,
+                    recent_events: &snapshot.recent_events,
                 },
             )
         }
-        _ => {
+        ui::settings::USERS_PATH => {
             let (users, snapshot) = load_admin_data(state).await;
             let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
             ui::users_page(&frame, &view)
+        }
+        _ => {
+            // The page of one account: the login must be an account or the superadmin.
+            let asked = path
+                .strip_prefix(ui::settings::USER_PATH_PREFIX)
+                .unwrap_or_default();
+            let (users, snapshot) = load_admin_data(state).await;
+            match user_view(state, &catalog, uri, &users_token, asked, users, snapshot) {
+                Some(view) => ui::user_page(&frame, &view),
+                None => return handle_not_found(state, &Method::GET, uri, headers, client),
+            }
         }
     };
     html_response(StatusCode::OK, page)
@@ -1045,6 +1060,7 @@ fn users_view<'a>(
         .collect();
     ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+        add_open: query_value(uri, "add").as_deref() == Some("1"),
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
@@ -1057,13 +1073,59 @@ fn users_view<'a>(
             superadmin: true,
             activity: activities.next().unwrap_or_default(),
         },
-        days: snapshot.days,
-        first_day: snapshot.first_day,
-        recent_events: snapshot.recent_events,
         unknown_failures_30d: snapshot.unknown_failures_30d,
         max_users: state.config.users.max_users,
         token: users_token,
     }
+}
+
+/// The data of the page of one account. `None`: no account and not the superadmin has the login
+/// `asked`. The login of the address must be the login as the server keeps it.
+fn user_view<'a>(
+    state: &'a AppState,
+    catalog: &'a Catalog,
+    uri: &str,
+    users_token: &'a str,
+    asked: &str,
+    users: Vec<(String, UserRecord)>,
+    snapshot: Snapshot,
+) -> Option<ui::UserView<'a>> {
+    let first_day = snapshot.first_day;
+    // The snapshot keeps the order of the accounts, then the superadmin last.
+    let mut activities = snapshot.accounts.into_iter();
+    let mut found = None;
+    for (login, record) in users {
+        let activity = activities.next().unwrap_or_default();
+        if login == asked {
+            found = Some(ui::UserCard {
+                activity,
+                grants: state.policy.effective(&login, &record.grants),
+                configured: state.policy.configured(&login).to_vec(),
+                login,
+                created_at: Some(record.created_at),
+                superadmin: false,
+            });
+        }
+    }
+    if found.is_none() && asked == state.superadmin_login {
+        found = Some(ui::UserCard {
+            login: state.superadmin_login.clone(),
+            grants: Vec::new(),
+            configured: Vec::new(),
+            created_at: None,
+            superadmin: true,
+            activity: activities.next().unwrap_or_default(),
+        });
+    }
+    Some(ui::UserView {
+        notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+        mode: state.policy.mode,
+        catalog,
+        services: service_grants(state, catalog),
+        user: found?,
+        first_day,
+        token: users_token,
+    })
 }
 
 /// One decoded query parameter that is short. The portal ignores anything else.
@@ -1932,6 +1994,15 @@ fn settings_redirect(code: &str) -> HttpResponse {
     )
 }
 
+/// The response returns to the page of the account `login`, with the outcome of the action. The
+/// login is the login as the server keeps it: it needs no encoding in a path.
+fn user_redirect(login: &str, code: &str) -> HttpResponse {
+    redirect_response(
+        StatusCode::SEE_OTHER,
+        &format!("{}?s={code}", ui::settings::user_path(login)),
+    )
+}
+
 fn audit(
     state: &AppState,
     kind: AuditKind,
@@ -2029,6 +2100,7 @@ async fn handle_users_add(
         }
         Err(_) => return rejected("error"),
     }
+    let login_for_page = login.clone();
     state.users.insert(
         login.clone(),
         UserRecord {
@@ -2046,7 +2118,7 @@ async fn handle_users_add(
         &headers,
     );
     state.metrics.user_admin("add", "ok");
-    settings_redirect("user-added")
+    user_redirect(&login_for_page, "user-added")
 }
 
 async fn handle_users_delete(
@@ -2123,6 +2195,9 @@ async fn handle_users_update(
     let login = form.remove("login").unwrap_or_default();
     // An empty value means "keep the password".
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
+    // The form of the boxes carries `grants`. Without it, the request changes no grant: the
+    // password form of the same page sends no box.
+    let edit_grants = form.remove("grants").as_deref() == Some("1");
     // The grant boxes are the remaining fields. Their names have the form `g.<service>.<action>`.
     let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
@@ -2149,9 +2224,18 @@ async fn handle_users_update(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
+    let rejected = |code: &str| {
+        state.metrics.user_admin("update", "rejected");
+        user_redirect(&login, code)
+    };
     // The page shows one box for each grant that it offers. A box that the page did not show keeps
     // its grant. An action that a service does not publish now is not lost.
-    let grants = if state.policy.mode.editable() {
+    let grants = if !edit_grants {
+        if !ticked.is_empty() {
+            return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+        }
+        None
+    } else if state.policy.mode.editable() {
         let offered: Vec<Grant> = service_grants(state, &current_catalog(state))
             .into_iter()
             .flat_map(|service| {
@@ -2189,7 +2273,7 @@ async fn handle_users_update(
     let grants = grants.filter(|_| grants_changed);
     if !change_password && !grants_changed {
         state.metrics.user_admin("update", "ok");
-        return settings_redirect("unchanged");
+        return user_redirect(&login, "unchanged");
     }
 
     let new_hash = if change_password {
@@ -2252,18 +2336,21 @@ async fn handle_users_update(
         audit(
             state,
             AuditKind::UserUpdated,
-            Some(login),
+            Some(login.clone()),
             Some(state.superadmin_login.clone()),
             client,
             &headers,
         );
     }
     state.metrics.user_admin("update", "ok");
-    settings_redirect(if change_password {
-        "password-reset"
-    } else {
-        "user-updated"
-    })
+    user_redirect(
+        &login,
+        if change_password {
+            "password-reset"
+        } else {
+            "user-updated"
+        },
+    )
 }
 
 /// Gives a user a grant on a node below a service. The form names the user, the service, the
@@ -2316,6 +2403,10 @@ async fn handle_grant_add(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_add", "rejected");
+        user_redirect(&login, code)
+    };
     if ids.iter().any(|id| grants::check_resource_id(id).is_err()) {
         return rejected("grant-bad-id");
     }
@@ -2356,7 +2447,7 @@ async fn handle_grant_add(
         .contains(&grant)
     {
         state.metrics.user_admin("grant_add", "ok");
-        return settings_redirect("unchanged");
+        return user_redirect(&login, "unchanged");
     }
     if current.grants.len() >= grants::MAX_GRANTS_PER_USER {
         return rejected("grant-limit");
@@ -2367,7 +2458,7 @@ async fn handle_grant_add(
     match store_grants(state, &login, next, client, &headers).await {
         Ok(()) => {
             state.metrics.user_admin("grant_add", "ok");
-            settings_redirect("grant-added")
+            user_redirect(&login, "grant-added")
         }
         Err(code) => rejected(code),
     }
@@ -2407,6 +2498,10 @@ async fn handle_grant_delete(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_delete", "rejected");
+        user_redirect(&login, code)
+    };
     let grant = match Grant::parse(&text) {
         Ok(grant) if !grant.path.is_empty() => grant,
         _ => return rejected("no-grant"),
@@ -2423,7 +2518,7 @@ async fn handle_grant_delete(
     match store_grants(state, &login, next, client, &headers).await {
         Ok(()) => {
             state.metrics.user_admin("grant_delete", "ok");
-            settings_redirect("grant-deleted")
+            user_redirect(&login, "grant-deleted")
         }
         Err(code) => rejected(code),
     }
