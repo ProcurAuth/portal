@@ -3,10 +3,12 @@
    1. The boxes of the permission cards follow the tree of a service. A box with data-action and
       data-path stands for one grant: the path is empty for the whole service, else `host:prod` and
       so on. Ticking a box ticks the same action on each node below it. Unticking a box unticks the
-      same action on each node below it and on each node above it. Thus a click on the action of
-      the whole service ticks it for every host, and a host that is unticked after that leaves the
-      whole service: the other hosts keep their own boxes. A box that is disabled does not change.
-      Without this script, the server applies the same rule when it saves.
+      same action on each node below it and on each node above it. When the last node below a box
+      is ticked, the box above it ticks too. Thus a click on the action of the whole service ticks
+      it for every host, a host that is unticked after that leaves the whole service while the
+      other hosts keep their own boxes, and every host ticked one by one ticks the whole service.
+      A box that is disabled does not change. Without this script, the server drops the grants
+      that a broader grant covers when it saves.
 
    2. "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
    CSPRNG (rejection sampling, so every character is equally likely), shown in clear so it can be
@@ -46,6 +48,28 @@
       var there = other.getAttribute("data-path") || "";
       if (below(path, there)) other.checked = box.checked;
       else if (!box.checked && below(there, path)) other.checked = false;
+    }
+    if (!box.checked) return;
+    // The nodes above, from the nearest: each one ticks when every node below it is ticked.
+    var above = [];
+    for (var j = 0; j < boxes.length; j += 1) {
+      var up = boxes[j];
+      if (up.disabled || up.getAttribute("data-action") !== action) continue;
+      if (below(up.getAttribute("data-path") || "", path)) above.push(up);
+    }
+    above.sort(function (a, b) {
+      return (b.getAttribute("data-path") || "").length - (a.getAttribute("data-path") || "").length;
+    });
+    for (var k = 0; k < above.length; k += 1) {
+      var upPath = above[k].getAttribute("data-path") || "";
+      var all = true;
+      for (var m = 0; m < boxes.length; m += 1) {
+        var under = boxes[m];
+        if (under.getAttribute("data-action") !== action || under === above[k]) continue;
+        if (below(upPath, under.getAttribute("data-path") || "") && !under.checked) all = false;
+      }
+      if (!all) break;
+      above[k].checked = true;
     }
   });
 
