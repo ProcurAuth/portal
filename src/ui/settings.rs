@@ -11,7 +11,7 @@
 //! - The editor of one (account, service) pair has its own Save. It has the box `access`, the
 //!   actions on the whole service and the grants on resources, written as sentences. A grant on a
 //!   resource has two steps: the level, then the ids of that chain and the action.
-//! - The add-user form can give access to services at once, or copy the access of another account.
+//! - The add-user form gives access to services at once, with the same cards as the page of an account.
 //! - The Services page shows how a grant reads, the grants to check, and the actions and the tree
 //!   of resource types of each service. The page of one service shows who has access to it.
 //! - The Activity page shows the connections, the recent changes and the sign-in attempts.
@@ -137,7 +137,6 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
             true,
         ),
-        "add-unknown-copy" => ("The account to copy does not exist.", false, true),
         "password-reset" => (
             "Password changed. The sessions of this account are closed.",
             true,
@@ -554,15 +553,14 @@ fn password_field(out: &mut String, id: &str, label: &str, required: bool, hint:
 
 fn add_form(out: &mut String, view: &UsersView) {
     // The add action is a rare task. The form shows when the address asks for it, or after a
-    // refused attempt. The script of the generator loads with the form only. The form has two
-    // columns, as the key form of clickhouse-dash: the identity at the left, the permissions at
-    // the right. One request makes the account and its grants.
+    // refused attempt. The script of the generator loads with the form only. The login and the
+    // password are on the top row. Under them, the permissions are cards in columns, by group.
+    // One request makes the account and its grants.
     let access = view.mode.editable() && !view.services.is_empty();
     let _ = write!(
         out,
-        r#"<form class="addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="subTitle">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="permForm{}"><div class="permForm__side"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
+        r#"<form class="addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="subTitle">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="addUser__fields"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
         html_escape(view.token),
-        if access { "" } else { " permForm--alone" },
     );
     password_field(
         out,
@@ -571,17 +569,6 @@ fn add_form(out: &mut String, view: &UsersView) {
         true,
         "At least 10 characters.",
     );
-    if access && !view.users.is_empty() {
-        out.push_str(r#"<label class="field"><span class="field__label">Copy the access of</span><select name="copy" aria-describedby="copy-hint"><option value="" selected>Nobody</option>"#);
-        for user in &view.users {
-            let _ = write!(
-                out,
-                r#"<option value="{0}">{0}</option>"#,
-                html_escape(&user.login)
-            );
-        }
-        out.push_str(r#"</select><p class="hint" id="copy-hint">One copy of all its grants. Later changes of that account do not follow.</p></label>"#);
-    }
     out.push_str("</div>");
     if access {
         out.push_str(r#"<fieldset class="permForm__perms"><legend class="field__label">Permissions (optional). A new account sees no service.</legend>"#);
@@ -599,7 +586,7 @@ fn add_form(out: &mut String, view: &UsersView) {
     }
     let _ = write!(
         out,
-        r#"</div><div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
+        r#"<div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
     );
 }
 
@@ -915,6 +902,10 @@ fn service_card(
             format!(", {} on resources", below.len())
         },
     );
+    let nodes = &service.document.resources;
+    if !nodes.is_empty() && !service.actions.is_empty() {
+        out.push_str(r#"<p class="perm__sub">On the whole service</p>"#);
+    }
     if !service.actions.is_empty() {
         out.push_str(r#"<ul class="perm__actions">"#);
         for (action, description) in &service.actions {
@@ -931,6 +922,47 @@ fn service_card(
         }
         out.push_str("</ul>");
     }
+    // The resources that the service names, each one apart, with the actions that apply on it
+    // only. A grant on such a resource is a box. Any other grant below the service is a sentence.
+    let mut boxed: Vec<Grant> = Vec::new();
+    for node in nodes {
+        let kind = node
+            .path
+            .last()
+            .map(|s| s.kind.as_str())
+            .unwrap_or_default();
+        let id = node.path.last().map(|s| s.id.as_str()).unwrap_or_default();
+        let _ = write!(
+            out,
+            r#"<div class="perm__node perm__node--d{}"><p class="perm__nodehead"><span class="path__type">{}</span> <strong>{}</strong>{}</p><ul class="perm__actions">"#,
+            node.path.len().min(4),
+            html_escape(kind),
+            html_escape(&node.label),
+            if node.label == id {
+                String::new()
+            } else {
+                format!(r#" <code class="svcRow__id">{}</code>"#, html_escape(id))
+            },
+        );
+        for action in service.document.actions_on(node) {
+            let Ok(grant) = Grant::on_path(&action.name, &service.id, node.path.clone()) else {
+                continue;
+            };
+            let held = grants.contains(&grant);
+            let fixed = !editable || configured.contains(&grant);
+            let _ = write!(
+                out,
+                r#"<li><label class="perm__action" title="{}">{}<code>{}</code><span class="perm__tip">{}</span></label></li>"#,
+                html_escape(&action.description),
+                resource_box(&grant, held, fixed, form),
+                html_escape(&action.name),
+                html_escape(first_sentence(&action.description)),
+            );
+            boxed.push(grant);
+        }
+        out.push_str("</ul></div>");
+    }
+    let below: Vec<&Grant> = below.into_iter().filter(|g| !boxed.contains(g)).collect();
     if let Some(holder) = holder {
         out.push_str(r#"<div class="perm__res">"#);
         if !below.is_empty() {
@@ -1171,6 +1203,26 @@ fn grant_box(
                     .unwrap_or_default(),
                 html_escape(service),
                 html_escape(action)
+            )
+        },
+        if checked { " checked" } else { "" },
+        if fixed { " disabled" } else { "" },
+    )
+}
+
+/// One check box of a grant on a resource that the service names. The name is `r.` and the
+/// grant in its text form.
+fn resource_box(grant: &Grant, checked: bool, fixed: bool, form: Option<&str>) -> String {
+    format!(
+        r#"<input type="checkbox"{}{}{}>"#,
+        if fixed {
+            String::new()
+        } else {
+            format!(
+                r#"{} name="r.{}" value="1""#,
+                form.map(|id| format!(r#" form="{id}""#))
+                    .unwrap_or_default(),
+                html_escape(&grant.to_string()),
             )
         },
         if checked { " checked" } else { "" },
@@ -2453,13 +2505,18 @@ mod tests {
         assert!(html.contains("/auth/assets/settings.js"));
         let add = &html[html.find(r#"action="/auth/users/add""#).unwrap()..];
         let add = &add[..add.find("</form>").unwrap()];
-        // The form has the identity at the left and one card for each service at the right, by
-        // group. A card has the box `access` and one box for each action. It copies an account.
-        assert!(add.contains(r#"<div class="permForm"><div class="permForm__side">"#));
+        // The login and the password are on the top row. The permissions are cards by group.
+        assert!(add.contains(r#"<div class="addUser__fields">"#));
+        assert!(
+            add.find("new-password").unwrap() < add.find(r#"<h3 class="perms__group">"#).unwrap()
+        );
+        assert!(
+            !add.contains("copy"),
+            "no copy of the access of another account"
+        );
         assert!(add.contains(r#"<h3 class="perms__group">Infra</h3>"#));
         assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1"><span class="perm__name">Grafana</span>"#));
         assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1"><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
-        assert!(add.contains(r#"<select name="copy" aria-describedby="copy-hint"><option value="" selected>Nobody</option><option value="alice">alice</option>"#));
         assert!(
             !add.contains(" open>") && !add.contains(" open "),
             "no card starts open"
@@ -2473,7 +2530,7 @@ mod tests {
         fixed.mode = Mode::Static;
         let html = users_page(&frame(), &fixed);
         assert!(
-            !html.contains(r#"name="g."#) && !html.contains(r#"name="copy""#),
+            !html.contains(r#"name="g."#),
             "no grant by the form in the static mode"
         );
         for refused in [
@@ -2546,6 +2603,47 @@ mod tests {
                 "<{tag}> is closed"
             );
         }
+    }
+
+    #[test]
+    fn a_service_that_names_its_hosts_shows_each_host_apart_with_its_own_actions() {
+        let cat = catalog();
+        let document = crate::actions::parse(
+            "infra-grafana",
+            br#"{"server":"infra-grafana","resource_types":[{"name":"host","parent":"service"}],"actions":[{"name":"dashboards.read","resource_types":["service","host"],"description":"See the dashboards."},{"name":"explorer.read","resource_types":["service","host"],"description":"Browse."}],"resources":[{"path":"host:prod","label":"Production"},{"path":"host:replica","label":"Replica","actions":["dashboards.read"]}]}"#,
+        )
+        .unwrap();
+        let mut view = user_view(&cat, card("alice", &["grafana"]));
+        view.services[0].actions = document
+            .actions
+            .iter()
+            .map(|a| (a.name.clone(), a.description.clone()))
+            .collect();
+        view.services[0].document = std::sync::Arc::new(document);
+        view.user
+            .grants
+            .push(sub("explorer.read on service:infra-grafana/host:prod"));
+        let html = user_page(&frame(), &view);
+        assert!(html.contains(r#"<p class="perm__sub">On the whole service</p>"#));
+        let prod = html
+            .find(r#"<span class="path__type">host</span> <strong>Production</strong>"#)
+            .unwrap();
+        let replica = html.find(r#"<strong>Replica</strong>"#).unwrap();
+        assert!(prod < replica);
+        let prod_block = &html[prod..replica];
+        let replica_block = &html[replica..replica + html[replica..].find("</details>").unwrap()];
+        // The box of a grant on a host: `r.` and the grant in its text form. A held grant is ticked.
+        assert!(prod_block.contains(r#"form="grants" name="r.explorer.read on service:infra-grafana/host:prod" value="1" checked>"#));
+        assert!(
+            prod_block.contains(r#"name="r.dashboards.read on service:infra-grafana/host:prod""#)
+        );
+        // `explorer.read` is offered on the first host only: the second host names its actions.
+        assert!(replica_block
+            .contains(r#"name="r.dashboards.read on service:infra-grafana/host:replica""#));
+        assert!(!replica_block.contains("explorer.read"));
+        // A grant that is a box is not listed again as a sentence.
+        assert!(!html.contains(r#"<ul class="grantRows""#));
+        assert!(html.contains(">Production</strong>"));
     }
 
     #[test]
@@ -3018,7 +3116,6 @@ mod tests {
         for code in [
             "user-added-access",
             "add-unknown-service",
-            "add-unknown-copy",
             "grant-added",
             "grant-deleted",
             "grant-bad-id",

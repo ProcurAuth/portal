@@ -2110,6 +2110,50 @@ fn audit(
     }));
 }
 
+/// One check box of the permission forms, read from its name. `g.<service>.<action>` is a grant on
+/// the whole service. `r.<grant>` is a grant on a resource that the service names, with the grant in
+/// its text form. `None`: the name is not a box.
+fn read_box(name: &str, value: &str) -> Option<Result<Grant, ()>> {
+    if let Some((service, action)) = name
+        .strip_prefix("g.")
+        .and_then(|rest| rest.split_once('.'))
+    {
+        return Some(if value == "1" {
+            Grant::new(action, service).map_err(|_| ())
+        } else {
+            Err(())
+        });
+    }
+    let text = name.strip_prefix("r.")?;
+    Some(match Grant::parse(text) {
+        Ok(grant) if value == "1" && !grant.path.is_empty() => Ok(grant),
+        _ => Err(()),
+    })
+}
+
+/// Every grant that the permission forms offer as a box: for each service, `access`, its actions
+/// on the whole service, and each action on each resource that its document names. `only` limits
+/// the list to one service.
+fn offered_boxes(state: &AppState, only: Option<&str>) -> Vec<Grant> {
+    let mut out = Vec::new();
+    for service in service_grants(state, &current_catalog(state)) {
+        if only.is_some_and(|id| id != service.id) {
+            continue;
+        }
+        let names = std::iter::once(grants::ACCESS.to_string())
+            .chain(service.actions.iter().map(|(name, _)| name.clone()));
+        out.extend(names.filter_map(|action| Grant::new(&action, &service.id).ok()));
+        for node in &service.document.resources {
+            for action in service.document.actions_on(node) {
+                if let Ok(grant) = Grant::on_path(&action.name, &service.id, node.path.clone()) {
+                    out.push(grant);
+                }
+            }
+        }
+    }
+    out
+}
+
 async fn handle_users_add(
     state: &Arc<AppState>,
     request: Request<Incoming>,
@@ -2126,22 +2170,12 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The form can give grants at once (`g.<service>.<action>`, as the page of an account) and
-    // copy the grants of an account (`copy`). A new user has no other grant.
-    let copy = form.remove("copy").unwrap_or_default();
-    let mut ticked: Vec<(String, String)> = Vec::new();
+    // The form can give grants at once, with the boxes of the page of an account. A new user has
+    // no other grant.
+    let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
-        match name
-            .strip_prefix("g.")
-            .and_then(|rest| rest.split_once('.'))
-        {
-            Some((service, action))
-                if value == "1"
-                    && grants::check_service_id(service).is_ok()
-                    && grants::check_action(action).is_ok() =>
-            {
-                ticked.push((service.to_string(), action.to_string()));
-            }
+        match read_box(&name, &value) {
+            Some(Ok(grant)) => ticked.push(grant),
             _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
         }
     }
@@ -2166,53 +2200,18 @@ async fn handle_users_add(
     if state.users.is_full() {
         return rejected("limit");
     }
-    let mut new_grants: Vec<Grant> = Vec::new();
-    if !ticked.is_empty() || !copy.is_empty() {
+    let mut new_grants: Vec<Grant> = ticked;
+    if !new_grants.is_empty() {
         if !state.policy.mode.editable() {
             return rejected("grants-static");
         }
-        let catalog = current_catalog(state);
-        let in_catalog = |id: &str| {
-            catalog
-                .groups()
-                .iter()
-                .flat_map(|group| group.services.iter())
-                .any(|s| s.id == id)
-        };
-        // A box is valid when the page offers it: the service is in the catalogue, and the action
-        // is `access` or an action that the service publishes.
-        for (service, action) in &ticked {
-            let offered = action == grants::ACCESS
-                || state
-                    .actions
-                    .action_names(service)
-                    .iter()
-                    .any(|name| name == action);
-            if !in_catalog(service) || !offered {
-                return rejected("add-unknown-service");
-            }
-            match Grant::new(action, service) {
-                Ok(grant) => new_grants.push(grant),
-                Err(_) => return rejected("add-unknown-service"),
-            }
-        }
-        if !copy.is_empty() {
-            let source = match normalize_login(&copy)
-                .ok()
-                .and_then(|source| state.users.get(&source).map(|record| (source, record)))
-            {
-                Some(found) => found,
-                None => return rejected("add-unknown-copy"),
-            };
-            // The copy takes every grant that applies to the other account, those of the
-            // configuration too. The new account keeps them as its own grants.
-            new_grants.extend(state.policy.effective(&source.0, &source.1.grants));
+        // A box is valid when the page offers it.
+        let offered = offered_boxes(state, None);
+        if new_grants.iter().any(|grant| !offered.contains(grant)) {
+            return rejected("add-unknown-service");
         }
         new_grants.sort();
         new_grants.dedup();
-        if new_grants.len() > grants::MAX_GRANTS_PER_USER {
-            return rejected("grant-limit");
-        }
     }
 
     // A hash calculation costs the same as a login check. It takes the same permit.
@@ -2370,17 +2369,11 @@ async fn handle_users_update(
     // The editor of one service names it with `only`. The request then changes the grants of that
     // service only, so a Save never touches the access to another service.
     let only = form.remove("only").filter(|id| !id.is_empty());
-    // The grant boxes are the remaining fields. Their names have the form `g.<service>.<action>`.
+    // The grant boxes are the remaining fields: `g.<service>.<action>` and `r.<grant>`.
     let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
-        match name
-            .strip_prefix("g.")
-            .and_then(|rest| rest.split_once('.'))
-        {
-            Some((service, action)) if value == "1" => match Grant::new(action, service) {
-                Ok(grant) => ticked.push(grant),
-                Err(_) => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
-            },
+        match read_box(&name, &value) {
+            Some(Ok(grant)) => ticked.push(grant),
             _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
         }
     }
@@ -2413,15 +2406,7 @@ async fn handle_users_update(
         }
         None
     } else if state.policy.mode.editable() {
-        let offered: Vec<Grant> = service_grants(state, &current_catalog(state))
-            .into_iter()
-            .filter(|service| only.as_deref().is_none_or(|id| id == service.id))
-            .flat_map(|service| {
-                std::iter::once(grants::ACCESS.to_string())
-                    .chain(service.actions.into_iter().map(|(name, _)| name))
-                    .filter_map(move |action| Grant::new(&action, &service.id).ok())
-            })
-            .collect();
+        let offered = offered_boxes(state, only.as_deref());
         if ticked.iter().any(|grant| !offered.contains(grant)) {
             return rejected("edit-unknown-grant");
         }

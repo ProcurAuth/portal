@@ -35,7 +35,9 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::catalog::Catalog;
-use crate::grants::{check_action, check_resource_type, Grant, ACCESS, MAX_DEPTH, SERVICE_TYPE};
+use crate::grants::{
+    check_action, check_resource_type, parse_path, Grant, Segment, ACCESS, MAX_DEPTH, SERVICE_TYPE,
+};
 
 /// The largest document that the server reads.
 const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
@@ -44,6 +46,8 @@ pub const MAX_ACTIONS: usize = 64;
 const MAX_DESCRIPTION_CHARS: usize = 300;
 /// The largest number of types in the list of one action, and in the top-level list.
 const MAX_RESOURCE_TYPES: usize = 16;
+/// The largest number of resources that a document names.
+pub const MAX_RESOURCES: usize = 256;
 const MAX_CONCURRENT_READS: usize = 8;
 /// How often the loop looks for a document that is due.
 const TICK: Duration = Duration::from_secs(5);
@@ -73,6 +77,22 @@ pub struct Document {
     /// The declared types, in the order of the document.
     pub types: Vec<ResourceType>,
     pub actions: Vec<Action>,
+    /// The resources that the service names, in the order of the document. The list is optional:
+    /// without it, portal knows no id, and the superadmin types the ids.
+    pub resources: Vec<Resource>,
+}
+
+/// One resource that the service names: a node of the tree, such as one host. The settings pages
+/// show each such resource with the actions that apply on it, so a grant on a resource needs no
+/// typed id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resource {
+    /// The path from the service to the node: one segment for each type of the chain.
+    pub path: Vec<Segment>,
+    /// The name to show. It is the last id when the document gives none.
+    pub label: String,
+    /// The actions that apply on the node. These actions list the type of the node.
+    pub actions: Vec<String>,
 }
 
 /// One level of the settings form: a declared type, the chain of types from the service to it,
@@ -105,6 +125,7 @@ impl Document {
                 })
                 .collect(),
             actions,
+            resources: Vec::new(),
         }
     }
 
@@ -176,6 +197,21 @@ impl Document {
             ));
         }
         Ok(())
+    }
+
+    /// The actions that apply on a resource that the document names: the actions that the
+    /// resource lists, or each action that lists its type.
+    pub fn actions_on<'a>(&'a self, resource: &'a Resource) -> Vec<&'a Action> {
+        let kind = resource
+            .path
+            .last()
+            .map(|s| s.kind.as_str())
+            .unwrap_or_default();
+        self.actions
+            .iter()
+            .filter(|a| a.sub_resource_types().any(|k| k == kind))
+            .filter(|a| resource.actions.is_empty() || resource.actions.contains(&a.name))
+            .collect()
     }
 
     /// The levels that a grant below the service can name: each declared type that an action
@@ -427,6 +463,20 @@ struct RawDocument {
     #[serde(default)]
     resource_types: Option<Vec<RawType>>,
     actions: Vec<RawAction>,
+    /// The resources of the service. The field is optional.
+    #[serde(default)]
+    resources: Vec<RawResource>,
+}
+
+#[derive(Deserialize)]
+struct RawResource {
+    /// The path in the text form of a grant, for example `host:prod/database:logs`.
+    path: String,
+    #[serde(default)]
+    label: String,
+    /// The actions that apply on the node. Empty: each action that lists the type of the node.
+    #[serde(default)]
+    actions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -497,7 +547,7 @@ fn check_types(raw: Vec<RawType>) -> Result<Vec<ResourceType>, String> {
     }
     let document = Document {
         types,
-        actions: Vec::new(),
+        ..Document::default()
     };
     for t in &document.types {
         if t.parent != SERVICE_TYPE && document.parent(&t.parent).is_none() {
@@ -531,6 +581,7 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
         return Err(format!("more than {MAX_ACTIONS} actions"));
     }
     let declared = document.resource_types.map(check_types).transpose()?;
+    let raw_resources = document.resources;
     let mut out: Vec<Action> = Vec::with_capacity(document.actions.len());
     for raw in document.actions {
         check_action(&raw.name)?;
@@ -580,13 +631,67 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
             description: raw.description,
         });
     }
-    Ok(match declared {
+    let mut document = match declared {
         Some(types) => Document {
             types,
             actions: out,
+            resources: Vec::new(),
         },
         None => Document::one_level(out),
-    })
+    };
+    document.resources = check_resources(&document, raw_resources)?;
+    Ok(document)
+}
+
+/// Check the optional `resources`: each path follows the declared types, each path is there one
+/// time, and each action of a resource exists and lists the type of the node.
+fn check_resources(document: &Document, raw: Vec<RawResource>) -> Result<Vec<Resource>, String> {
+    if raw.len() > MAX_RESOURCES {
+        return Err(format!("more than {MAX_RESOURCES} resources"));
+    }
+    let mut out: Vec<Resource> = Vec::with_capacity(raw.len());
+    for item in raw {
+        let path = parse_path(&item.path)?;
+        let Some(last) = path.last() else {
+            return Err("a resource has an empty path".into());
+        };
+        if !document.follows(path.iter().map(|s| s.kind.as_str())) {
+            return Err(format!(
+                "the path {:?} of a resource does not follow the resource types of the service",
+                item.path
+            ));
+        }
+        if out.iter().any(|known| known.path == path) {
+            return Err(format!(
+                "the resource {:?} is in the list two times",
+                item.path
+            ));
+        }
+        check_description(&item.label, &format!("the resource {:?}", item.path))?;
+        for name in &item.actions {
+            let listed = document
+                .actions
+                .iter()
+                .find(|a| a.name == *name)
+                .is_some_and(|a| a.sub_resource_types().any(|k| k == last.kind));
+            if !listed {
+                return Err(format!(
+                    "the resource {:?} names the action {name:?}, which does not list the type {:?}",
+                    item.path, last.kind
+                ));
+            }
+        }
+        out.push(Resource {
+            label: if item.label.is_empty() {
+                last.id.clone()
+            } else {
+                item.label
+            },
+            path,
+            actions: item.actions,
+        });
+    }
+    Ok(out)
 }
 
 /// Read the document of one service.
@@ -839,6 +944,75 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert!(parse("db", &tree(&many, actions)).is_err());
+    }
+
+    #[test]
+    fn the_resources_of_a_document_name_the_hosts_with_the_actions_that_apply_on_each() {
+        let body = |resources: &str| {
+            format!(
+                r#"{{"server":"db","resource_types":[{{"name":"host","parent":"service"}},{{"name":"database","parent":"host"}}],"actions":[{{"name":"query.run.read","resource_types":["service","host","database"]}},{{"name":"explorer.read","resource_types":["service","host"]}},{{"name":"mcp.keys.read","resource_types":["service"]}}],"resources":{resources}}}"#
+            )
+            .into_bytes()
+        };
+        let document = parse(
+            "db",
+            &body(
+                r#"[{"path":"host:prod","label":"Production","actions":["query.run.read","explorer.read"]},{"path":"host:replica"},{"path":"host:prod/database:logs"}]"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(document.resources.len(), 3);
+        assert_eq!(document.resources[0].label, "Production");
+        assert_eq!(
+            document.resources[1].label, "replica",
+            "the id when no label"
+        );
+        let names = |index: usize| -> Vec<&str> {
+            document
+                .actions_on(&document.resources[index])
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect()
+        };
+        assert_eq!(names(0), ["query.run.read", "explorer.read"]);
+        assert_eq!(
+            names(1),
+            ["query.run.read", "explorer.read"],
+            "no list: each action that lists the type"
+        );
+        assert_eq!(
+            names(2),
+            ["query.run.read"],
+            "a database has no explorer.read"
+        );
+        // A document without the field has no resource.
+        assert!(parse("db", &body("[]")).unwrap().resources.is_empty());
+        // Any bad resource makes the whole document bad.
+        for (bad, why) in [
+            (
+                r#"[{"path":"host:a","actions":["mcp.keys.read"]}]"#,
+                "an action that does not list the type",
+            ),
+            (
+                r#"[{"path":"host:a","actions":["nope"]}]"#,
+                "an unknown action",
+            ),
+            (
+                r#"[{"path":"database:a"}]"#,
+                "a path that does not follow the parents",
+            ),
+            (
+                r#"[{"path":"table:a"}]"#,
+                "a type that the service does not declare",
+            ),
+            (
+                r#"[{"path":"host:a"},{"path":"host:a"}]"#,
+                "the same path twice",
+            ),
+            (r#"[{"path":""}]"#, "an empty path"),
+        ] {
+            assert!(parse("db", &body(bad)).is_err(), "{why}");
+        }
     }
 
     #[test]

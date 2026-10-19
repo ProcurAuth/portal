@@ -716,10 +716,23 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
                 &root,
                 USERS_ADD_PATH,
                 USERS_TOKEN,
-                "login=bob&password=a-long-password-1&copy=nobody",
+                "login=bob&password=a-long-password-1&copy=alice",
+            )
+            .status,
+            400,
+            "the form has no copy of the access of another account"
+        );
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=bob&password=a-long-password-1&r.query.run.read+on+service%3Adb%2Fhost%3Alocal=1",
             )
             .location(),
-            Some("/auth/settings?s=add-unknown-copy")
+            Some("/auth/settings?s=add-unknown-service"),
+            "a resource that the document of db does not name"
         );
         assert!(
             node.state.users.get("bob").is_none(),
@@ -2387,42 +2400,31 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
         );
         assert!(grants_of("carol").is_empty());
 
-        // alice gets an action and a grant on a resource. A copy takes all of them, once.
-        publish_tree(&node);
-        post(
-            &node,
-            &root,
-            USERS_UPDATE_PATH,
-            USERS_TOKEN,
-            "grants=1&login=alice&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1",
-        );
-        post(
-            &node,
-            &root,
-            GRANT_ADD_PATH,
-            USERS_TOKEN,
-            "login=alice&service=db&action=query.run.write&type=database&id0=local&id1=analytics",
-        );
+        // The document of db names two hosts. A grant on one of them is a box named `r.<grant>`.
+        publish_hosts(&node);
+        let local_write = "r.query.run.write+on+service%3Adb%2Fhost%3Alocal=1";
         assert_eq!(
-            add("login=bob&copy=alice&g.db.access=1"),
+            add(&format!(
+                "login=bob&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1&{local_write}"
+            )),
             Some("/auth/settings/users/bob?s=user-added-access".into())
         );
         assert_eq!(
             grants_of("bob"),
-            grants_of("alice"),
-            "the same grants, once"
+            [
+                "access on service:db",
+                "access on service:other-grafana",
+                "query.run.read on service:db",
+                "query.run.write on service:db/host:local",
+            ]
+        );
+        // The replica offers `query.run.read` only: a write on it is not a box of the page.
+        assert_eq!(
+            add("login=dave&r.query.run.write+on+service%3Adb%2Fhost%3Areplica=1"),
+            Some("/auth/settings?s=add-unknown-service".into())
         );
         let bob = sign_in(&node, "bob", "a-long-password-1");
         assert_eq!(open(&node, &bob, "/db/").status, 204);
-        // The copy is not a link: a later change of alice does not follow.
-        post(
-            &node,
-            &root,
-            USERS_UPDATE_PATH,
-            USERS_TOKEN,
-            "grants=1&login=alice&only=db",
-        );
-        assert_eq!(grants_of("bob").len(), 4);
 
         // A Save of the editor names its service. It changes the boxes of that service only.
         let reply = post(
@@ -2441,9 +2443,8 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
             [
                 "access on service:other-grafana",
                 "query.run.write on service:db",
-                "query.run.write on service:db/host:local/database:analytics",
             ],
-            "access and read are gone, write is set, the grant on a resource and Grafana stay"
+            "access, read and the box of the host are gone, write is set, Grafana stays"
         );
         let reply = post(
             &node,
@@ -2493,20 +2494,29 @@ fn in_the_static_mode_the_add_form_cannot_give_access() {
     );
     publish_catalog(&node, &[]);
     let root = sign_in(&node, "root", PASSWORD);
-    for fields in ["g.db.access=1", "copy=root"] {
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                &format!("login=alice&password=a-long-password-1&{fields}"),
-            )
-            .location(),
-            Some("/auth/settings?s=grants-static")
-        );
-    }
+    assert_eq!(
+        post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-long-password-1&g.db.access=1",
+        )
+        .location(),
+        Some("/auth/settings?s=grants-static")
+    );
     assert!(node.state.users.get("alice").is_none());
+}
+
+/// The document of `db` with a tree, and with two hosts that it names: `local` takes the read and the
+/// write, `replica` takes the read only.
+fn publish_hosts(node: &Node) {
+    let document = crate::actions::parse(
+        "db",
+        br#"{"server":"db","resource_types":[{"name":"host","parent":"service"},{"name":"database","parent":"host"}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"]},{"name":"query.run.write","resource_types":["service","host","database"]},{"name":"system.read","resource_types":["service","host"]}],"resources":[{"path":"host:local","label":"Local","actions":["query.run.read","query.run.write"]},{"path":"host:replica","actions":["query.run.read"]}]}"#,
+    )
+    .unwrap();
+    node.state.actions.set_document("db", document);
 }
 
 /// The document of `db` with a tree: `host` below the service, `database` below `host`.
