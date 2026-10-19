@@ -65,7 +65,7 @@
 .contentTabs {
   display: flex;
   gap: 2px;
-  max-width: var(--page-width);
+  max-width: none;
   margin: 0 auto;
   padding: 0 24px;
   overflow-x: auto;
@@ -106,7 +106,7 @@
 .settings {
   display: grid;
   gap: 24px;
-  max-width: var(--page-width);
+  max-width: none;
   margin: 0 auto;
   padding: 16px 24px 48px;
   font-size: 13px;
@@ -501,6 +501,12 @@ details > summary::-webkit-details-marker {
   display: inline-flex;
 }
 
+.settings--wide .addUser {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
 .addUser {
   display: grid;
   gap: 6px;
@@ -608,78 +614,6 @@ details > summary::-webkit-details-marker {
   background: var(--selected-bg);
 }
 
-.perm__toggle {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--s-r-md);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.perm__toggle--none {
-  cursor: default;
-}
-
-.perm__toggle .icon {
-  width: 12px;
-  height: 12px;
-  transform: rotate(90deg);
-}
-
-.perm__toggle[aria-expanded="false"] .icon {
-  transform: none;
-}
-
-/* The toggle folds the resources of a service: it needs the script. */
-.perm__toggle:not(.perm__toggle--none) {
-  visibility: hidden;
-}
-
-.js .perm__toggle:not(.perm__toggle--none) {
-  visibility: visible;
-}
-
-.perm__children {
-  position: relative;
-  margin-left: 14px;
-  padding-left: 8px;
-}
-
-.perm__children::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 6px;
-  left: 0;
-  width: 1px;
-  background: var(--border);
-}
-
-.js .perm__children[data-fold] {
-  display: none;
-}
-
-.perm__row--node {
-  min-height: 28px;
-  padding-left: 6px;
-}
-
-.perm__row--d2 {
-  padding-left: 16px;
-}
-
-.perm__row--d3,
-.perm__row--d4 {
-  padding-left: 26px;
-}
-
 .perm__link,
 .settings a.perm__link {
   display: flex;
@@ -704,10 +638,6 @@ details > summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
-.perm__row--node .perm__name {
-  font-weight: 500;
-}
-
 .perm__link .svcRow__id {
   flex: 0 1 auto;
   min-width: 0;
@@ -720,19 +650,18 @@ details > summary::-webkit-details-marker {
   flex: none;
 }
 
+.perm__link:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
+  border-radius: var(--s-r-md);
+}
+
 .perm__count {
   margin-left: auto;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.perm__link:focus-visible,
-.perm__toggle:focus-visible {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 1px;
-  border-radius: var(--s-r-md);
 }
 
 /* The panel at the right: a title, marks, one line of facts, then the boxes and the tables. */
@@ -784,6 +713,17 @@ details > summary::-webkit-details-marker {
   color: var(--accent-text);
 }
 
+.perm__cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  align-items: start;
+  gap: 8px 28px;
+}
+
+.perm__col {
+  min-width: 0;
+}
+
 .perm__colhead {
   display: flex;
   align-items: baseline;
@@ -799,7 +739,7 @@ details > summary::-webkit-details-marker {
 
 .perm__actions {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px 20px;
   margin: 0;
   padding: 0;
@@ -832,10 +772,6 @@ details > summary::-webkit-details-marker {
   line-height: 1.3;
 }
 
-.perm__table th a {
-  color: var(--accent-text);
-}
-
 .perm__res {
   display: grid;
   gap: 4px;
@@ -844,6 +780,61 @@ details > summary::-webkit-details-marker {
 
 .perm__res .linkButton {
   width: fit-content;
+}
+
+/* The pages of the settings use the whole width of the window, as the Explorer does. */
+.appHeader {
+  max-width: none;
+}
+
+/* A page with a workspace (the permissions of an account): its parts keep the side margin, the
+   workspace goes to the two edges of the window. */
+.settings--wide {
+  padding-inline: 0;
+}
+
+.settings--wide > :not(.userTab),
+.userTab > :not(.workspace) {
+  margin-inline: 24px;
+}
+
+.userTab {
+  display: grid;
+  gap: 12px;
+}
+
+.userTabs {
+  margin-bottom: -12px;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.js .userTab:not(.is-selected) {
+  display: none;
+}
+
+/* The workspace is inside a part that has the side margin: it takes the margin back. */
+.settings--wide .workspace {
+  margin-inline: -24px;
+  border-top: 1px solid var(--border);
+}
+
+.workspace .perms {
+  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  min-height: calc(100vh - 300px);
+}
+
+.workspace .perms__side {
+  align-content: start;
+  padding: 10px 12px 12px 24px;
+  background: var(--panel);
+}
+
+.workspace .perms__panels {
+  min-width: 0;
+  padding: 12px 24px 24px 20px;
 }
 
 /* Tables: hairline box, 32px rows, 0 8px cells, a 12px semibold head ------------------------ */
@@ -1547,9 +1538,19 @@ details > summary::-webkit-details-marker {
     gap: 8px 0;
   }
 
-  .perms__side {
-    padding-right: 0;
+  .perms__side,
+  .workspace .perms__side {
+    padding-right: 24px;
     border-right: 0;
+  }
+
+  .workspace .perms__panels {
+    padding-left: 24px;
+  }
+
+  .workspace .perms {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
   }
 }
 

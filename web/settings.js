@@ -1,6 +1,8 @@
 /* Two small helpers of the Users settings pages. Loaded deferred, on those pages only.
 
-   1. The permissions are a list of services and one panel. A click on a line of the list shows the
+   1. The page of an account shows one view at a time: Access, Activity or Account.
+
+   2. The permissions are a list of services and one panel. A click on a line of the list shows the
       panel of that service at once, without a new page. The boxes follow the tree of a service. A box with data-action and
       data-path stands for one grant: the path is empty for the whole service, else `host:prod` and
       so on. Ticking a box ticks the same action on each node below it. Unticking a box unticks the
@@ -14,7 +16,7 @@
       unticked and disabled. A box without a name belongs to the configuration and stays as it is.
       The count of a service and of a host (ticked/total) follows the boxes.
 
-   2. "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
+   3. "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
    CSPRNG (rejection sampling, so every character is equally likely), shown in clear so it can be
    handed over. It never leaves the page until the form is submitted. Loaded deferred, on that page only. */
 (function () {
@@ -59,11 +61,11 @@
     var whole = document.querySelectorAll(sel + ' .perm__n[data-of=""]');
     var all = boxesOf(id);
     for (var i = 0; i < whole.length; i += 1) setCount(whole[i], all);
-    var panels = document.querySelectorAll(".perm__panel" + sel + "[data-node]");
-    for (var j = 0; j < panels.length; j += 1) {
-      var key = panels[j].getAttribute("data-node");
-      var spans = document.querySelectorAll(sel + ' .perm__n[data-of="' + escapeId(key) + '"]');
-      var boxes = panels[j].querySelectorAll('input[type="checkbox"]');
+    var cols = document.querySelectorAll(sel + " [data-node]");
+    for (var j = 0; j < cols.length; j += 1) {
+      var key = cols[j].getAttribute("data-node");
+      var spans = cols[j].querySelectorAll('.perm__n[data-of="' + escapeId(key) + '"]');
+      var boxes = cols[j].querySelectorAll('input[type="checkbox"]');
       for (var k = 0; k < spans.length; k += 1) setCount(spans[k], boxes);
     }
   }
@@ -138,37 +140,49 @@
     }
   }
 
-  function fold(item, folded) {
-    var children = item.querySelector(".perm__children");
-    var toggle = item.querySelector(".perm__toggle");
-    if (children) {
-      if (folded) children.setAttribute("data-fold", "");
-      else children.removeAttribute("data-fold");
-    }
-    if (toggle) toggle.setAttribute("aria-expanded", folded ? "false" : "true");
-  }
-
   document.addEventListener("click", function (event) {
     var target = event.target;
-    var toggle = target.closest && target.closest(".perm__toggle");
-    if (toggle) {
-      var item = toggle.closest(".perm__item");
-      if (item) fold(item, toggle.getAttribute("aria-expanded") === "true");
-      return;
-    }
     var link = target.closest && target.closest(".perm__row a.perm__link");
     if (!link) return;
     event.preventDefault();
     var panelId = link.getAttribute("href").slice(1);
     select(panelId);
-    var owner = link.closest(".perm__item");
-    if (owner) fold(owner, false);
     var panel = document.querySelector(".perm__panel.is-selected");
     // On a narrow window the panel is under the tree: bring it into view.
     if (panel && panel.getBoundingClientRect().top > window.innerHeight * 0.8) {
       panel.scrollIntoView({ block: "start" });
     }
   });
+
+  // The views of the page of an account (Access, Activity, Account), as the tabs of the Explorer.
+  // The view that the address names shows first.
+  function showTab(id) {
+    var links = document.querySelectorAll(".userTabs [data-tab]");
+    for (var i = 0; i < links.length; i += 1) {
+      var on = links[i].getAttribute("data-tab") === id;
+      links[i].classList.toggle("is-active", on);
+      if (on) links[i].setAttribute("aria-current", "true");
+      else links[i].removeAttribute("aria-current");
+    }
+    var tabs = document.querySelectorAll(".userTab");
+    for (var j = 0; j < tabs.length; j += 1) tabs[j].classList.toggle("is-selected", tabs[j].id === id);
+  }
+
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest && event.target.closest(".userTabs [data-tab]");
+    if (!link) return;
+    event.preventDefault();
+    var id = link.getAttribute("data-tab");
+    showTab(id);
+    try {
+      window.history.replaceState(null, "", "#" + id);
+    } catch (e) {}
+  });
+
+  if (window.location.hash && document.querySelector(".userTabs")) {
+    var wanted = window.location.hash.slice(1);
+    if (document.querySelector('.userTab[id="' + escapeId(wanted) + '"]')) showTab(wanted);
+  }
 
   // The search field of the tree: it keeps the services whose name, id or resources match, and
   // the group headings that still have a service.
