@@ -53,14 +53,18 @@
     if (node) node.textContent = ticked + "/" + boxes.length;
   }
 
+  // The counts (ticked/total): `data-of=""` is the whole service, `data-of="host:prod"` is one node.
   function recount(id) {
     var sel = '[data-svc="' + escapeId(id) + '"]';
+    var whole = document.querySelectorAll(sel + ' .perm__n[data-of=""]');
     var all = boxesOf(id);
-    var counts = document.querySelectorAll(sel + " > .perm__link .perm__n, " + sel + " > .perm__panelhead .perm__n");
-    for (var i = 0; i < counts.length; i += 1) setCount(counts[i], all);
-    var nodes = document.querySelectorAll(sel + " .perm__node");
-    for (var j = 0; j < nodes.length; j += 1) {
-      setCount(nodes[j].querySelector(".perm__n"), nodes[j].querySelectorAll('input[type="checkbox"]'));
+    for (var i = 0; i < whole.length; i += 1) setCount(whole[i], all);
+    var panels = document.querySelectorAll(".perm__panel" + sel + "[data-node]");
+    for (var j = 0; j < panels.length; j += 1) {
+      var key = panels[j].getAttribute("data-node");
+      var spans = document.querySelectorAll(sel + ' .perm__n[data-of="' + escapeId(key) + '"]');
+      var boxes = panels[j].querySelectorAll('input[type="checkbox"]');
+      for (var k = 0; k < spans.length; k += 1) setCount(spans[k], boxes);
     }
   }
 
@@ -116,35 +120,78 @@
     recount(id);
   });
 
-  // The list of services selects one panel. All the panels stay in the page, so a box that was
-  // ticked in one panel is still ticked when another panel shows. Without this script, every
-  // panel shows under the list, and the line of a service links to its panel.
-  function select(id) {
+  // The tree selects one panel. All the panels stay in the page, so a box that was ticked in one
+  // panel is still ticked when another panel shows. Without this script, every panel shows under
+  // the tree, and a line links to its panel.
+  function select(panelId) {
     var rows = document.querySelectorAll(".perm__row");
     for (var i = 0; i < rows.length; i += 1) {
-      var on = rows[i].getAttribute("data-svc") === id;
+      var link = rows[i].querySelector("a.perm__link");
+      var on = !!link && link.getAttribute("href") === "#" + panelId;
       rows[i].classList.toggle("is-selected", on);
-      var link = rows[i].querySelector(".perm__link");
       if (link && on) link.setAttribute("aria-current", "true");
       else if (link) link.removeAttribute("aria-current");
     }
     var panels = document.querySelectorAll(".perm__panel");
     for (var j = 0; j < panels.length; j += 1) {
-      panels[j].classList.toggle("is-selected", panels[j].getAttribute("data-svc") === id);
+      panels[j].classList.toggle("is-selected", panels[j].id === panelId);
     }
   }
 
+  function fold(item, folded) {
+    var children = item.querySelector(".perm__children");
+    var toggle = item.querySelector(".perm__toggle");
+    if (children) {
+      if (folded) children.setAttribute("data-fold", "");
+      else children.removeAttribute("data-fold");
+    }
+    if (toggle) toggle.setAttribute("aria-expanded", folded ? "false" : "true");
+  }
+
   document.addEventListener("click", function (event) {
-    var link = event.target.closest && event.target.closest(".perm__row a.perm__link");
+    var target = event.target;
+    var toggle = target.closest && target.closest(".perm__toggle");
+    if (toggle) {
+      var item = toggle.closest(".perm__item");
+      if (item) fold(item, toggle.getAttribute("aria-expanded") === "true");
+      return;
+    }
+    var link = target.closest && target.closest(".perm__row a.perm__link");
     if (!link) return;
     event.preventDefault();
-    var row = link.closest(".perm__row");
-    select(row.getAttribute("data-svc"));
+    var panelId = link.getAttribute("href").slice(1);
+    select(panelId);
+    var owner = link.closest(".perm__item");
+    if (owner) fold(owner, false);
     var panel = document.querySelector(".perm__panel.is-selected");
-    // On a narrow window the panel is under the list: bring it into view.
+    // On a narrow window the panel is under the tree: bring it into view.
     if (panel && panel.getBoundingClientRect().top > window.innerHeight * 0.8) {
       panel.scrollIntoView({ block: "start" });
     }
+  });
+
+  // The search field of the tree: it keeps the services whose name, id or resources match, and
+  // the group headings that still have a service.
+  document.addEventListener("input", function (event) {
+    var field = event.target;
+    if (!field.classList || !field.classList.contains("perms__search")) return;
+    var query = field.value.trim().toLowerCase();
+    var list = field.closest(".perms").querySelector(".perms__list");
+    var heading = null;
+    var shown = 0;
+    for (var i = 0; i < list.children.length; i += 1) {
+      var node = list.children[i];
+      if (node.classList.contains("perms__group")) {
+        if (heading) heading.hidden = shown === 0;
+        heading = node;
+        shown = 0;
+        continue;
+      }
+      var match = query === "" || (node.getAttribute("data-find") || "").indexOf(query) !== -1;
+      node.hidden = !match;
+      if (match) shown += 1;
+    }
+    if (heading) heading.hidden = shown === 0;
   });
 
   document.addEventListener("click", function (event) {

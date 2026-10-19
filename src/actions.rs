@@ -104,6 +104,13 @@ pub struct Level {
     pub actions: Vec<String>,
 }
 
+impl Resource {
+    /// The path in the text form of a grant, for example `host:prod`.
+    pub fn path_text(&self) -> String {
+        crate::grants::path_text(&self.path)
+    }
+}
+
 impl Document {
     /// A document of one level, as a document without the top-level `resource_types` gives.
     pub fn one_level(actions: Vec<Action>) -> Self {

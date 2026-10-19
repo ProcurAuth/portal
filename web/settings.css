@@ -451,6 +451,7 @@ details > summary::-webkit-details-marker {
 
 .settings input[type="text"],
 .settings input[type="password"],
+.settings input[type="search"],
 .settings select {
   width: 100%;
   height: var(--s-control);
@@ -466,6 +467,7 @@ details > summary::-webkit-details-marker {
 
 .settings input[type="text"]:focus-visible,
 .settings input[type="password"]:focus-visible,
+.settings input[type="search"]:focus-visible,
 .settings select:focus-visible {
   outline: 2px solid var(--accent-fill);
   outline-offset: 1px;
@@ -533,19 +535,44 @@ details > summary::-webkit-details-marker {
 
 .perms {
   display: grid;
-  grid-template-columns: minmax(15rem, 19rem) minmax(0, 1fr);
+  grid-template-columns: minmax(16rem, 20rem) minmax(0, 1fr);
   align-items: start;
-  gap: 0 12px;
+  gap: 0 16px;
+}
+
+/* The tree at the left, as in the Explorer of clickhouse-dash: a search field, a root line, then
+   the services by group. */
+.perms__side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+  padding-right: 12px;
+  border-right: 1px solid var(--border);
+}
+
+.perms__tools {
+  display: none;
+}
+
+.js .perms__tools {
+  display: block;
+}
+
+.perms__root {
+  padding: 2px 6px;
+  font-size: 13px;
 }
 
 .perms__list {
   display: grid;
-  gap: 2px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
   min-width: 0;
 }
 
 .perms__group {
-  margin: 8px 0 0;
+  margin: 8px 0 2px;
   padding-left: 6px;
   color: var(--muted);
   font-size: 12px;
@@ -556,13 +583,18 @@ details > summary::-webkit-details-marker {
   margin-top: 0;
 }
 
+.perms__group[hidden],
+.perm__item[hidden] {
+  display: none;
+}
+
 .perm__row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  min-height: var(--s-row);
-  padding: 0 8px;
+  min-height: 30px;
+  padding: 0 6px 0 2px;
   border: 1px solid transparent;
   border-radius: var(--s-r-md);
 }
@@ -571,40 +603,121 @@ details > summary::-webkit-details-marker {
   background: var(--row-hover);
 }
 
-.perm__row.has-grants {
-  border-color: color-mix(in srgb, var(--accent-fill) 35%, var(--border));
-}
-
 .perm__row.is-selected {
-  border-color: var(--accent-fill);
+  border-color: var(--selected-edge, var(--accent-fill));
   background: var(--selected-bg);
 }
 
-.perm__link {
+.perm__toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--s-r-md);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.perm__toggle--none {
+  cursor: default;
+}
+
+.perm__toggle .icon {
+  width: 12px;
+  height: 12px;
+  transform: rotate(90deg);
+}
+
+.perm__toggle[aria-expanded="false"] .icon {
+  transform: none;
+}
+
+/* The toggle folds the resources of a service: it needs the script. */
+.perm__toggle:not(.perm__toggle--none) {
+  visibility: hidden;
+}
+
+.js .perm__toggle:not(.perm__toggle--none) {
+  visibility: visible;
+}
+
+.perm__children {
+  position: relative;
+  margin-left: 14px;
+  padding-left: 8px;
+}
+
+.perm__children::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 6px;
+  left: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.js .perm__children[data-fold] {
+  display: none;
+}
+
+.perm__row--node {
+  min-height: 28px;
+  padding-left: 6px;
+}
+
+.perm__row--d2 {
+  padding-left: 16px;
+}
+
+.perm__row--d3,
+.perm__row--d4 {
+  padding-left: 26px;
+}
+
+.perm__link,
+.settings a.perm__link {
   display: flex;
   flex: 1;
   align-items: center;
   gap: 4px 8px;
   min-width: 0;
-  min-height: var(--s-row);
+  min-height: 28px;
+  overflow: hidden;
   color: var(--text);
   text-decoration: none;
   cursor: pointer;
 }
 
-.perm__link--flat {
-  cursor: pointer;
-}
-
 .perm__name {
+  flex: 0 0 auto;
+  max-width: 75%;
+  min-width: 0;
+  overflow: hidden;
   font-weight: 600;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.perm__row--node .perm__name {
+  font-weight: 500;
+}
+
 .perm__link .svcRow__id {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perm__link .badge {
+  flex: none;
 }
 
 .perm__count {
@@ -615,38 +728,19 @@ details > summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
-.perm__chevron {
-  flex: none;
-  width: 14px;
-  height: 14px;
-  color: var(--muted);
-}
-
-.perm__link:focus-visible {
+.perm__link:focus-visible,
+.perm__toggle:focus-visible {
   outline: 2px solid var(--accent-fill);
   outline-offset: 1px;
   border-radius: var(--s-r-md);
 }
 
+/* The panel at the right: a title, marks, one line of facts, then the boxes and the tables. */
 .perm__panel {
   min-width: 0;
-  padding: 8px 12px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-lg);
-  background: var(--panel);
 }
 
-.perm__panelhead {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  margin-bottom: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-/* With the script, one panel shows. Without it, every panel shows under the list. */
+/* With the script, one panel shows. Without it, every panel shows under the tree. */
 .js .perm__panel {
   display: none;
 }
@@ -655,36 +749,58 @@ details > summary::-webkit-details-marker {
   display: block;
 }
 
-.perm__cols {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  align-items: start;
-  gap: 8px 20px;
+.perm__panel + .perm__panel {
+  margin-top: 16px;
 }
 
-.perm__col {
-  min-width: 0;
+.js .perm__panel + .perm__panel {
+  margin-top: 0;
+}
+
+.perm__panelhead {
+  margin-bottom: 8px;
+}
+
+.perm__titlerow {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.perm__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.perm__facts {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.perm__facts a {
+  color: var(--accent-text);
 }
 
 .perm__colhead {
   display: flex;
   align-items: baseline;
   gap: 4px 8px;
-  margin: 0 0 4px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid var(--row-divider);
+  margin: 12px 0 6px;
   font-size: 13px;
-  font-weight: 400;
+  font-weight: 600;
 }
 
-.perm__colhead:first-child {
-  color: var(--muted);
+.perm__colhead:first-of-type {
+  margin-top: 4px;
 }
 
 .perm__actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 8px 20px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -716,14 +832,14 @@ details > summary::-webkit-details-marker {
   line-height: 1.3;
 }
 
-.perm__node--d2 {
-  padding-left: 8px;
+.perm__table th a {
+  color: var(--accent-text);
 }
 
 .perm__res {
   display: grid;
   gap: 4px;
-  margin-top: 8px;
+  margin-top: 12px;
 }
 
 .perm__res .linkButton {
@@ -1430,6 +1546,11 @@ details > summary::-webkit-details-marker {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px 0;
   }
+
+  .perms__side {
+    padding-right: 0;
+    border-right: 0;
+  }
 }
 
 /* Wide windows ---------------------------------------------------------------------------- */
@@ -1571,6 +1692,7 @@ details > summary::-webkit-details-marker {
 
   .settings input[type="text"],
   .settings input[type="password"],
+  .settings input[type="search"],
   .settings select {
     height: 44px;
   }
