@@ -246,7 +246,7 @@ fn page(tab: Tab, frame: &Frame, title: &str, content: &str, script: bool) -> St
         html_escape(title)
     );
     if script {
-        body.push_str(r#"<script src="/auth/assets/settings.js" defer></script>"#);
+        body.push_str(&script_tag());
     }
     let icons: Vec<&str> = ICONS
         .iter()
@@ -255,9 +255,39 @@ fn page(tab: Tab, frame: &Frame, title: &str, content: &str, script: bool) -> St
         .collect();
     document(
         &format!("Settings: {title}"),
-        r#"<link rel="stylesheet" href="/auth/settings.css">"#,
+        &format!(
+            r#"<link rel="stylesheet" href="/auth/settings.css?v={}">"#,
+            asset_version()
+        ),
         &icons,
         &body,
+    )
+}
+
+/// The version of the settings stylesheet and script: a hash of their content. The server lets a
+/// browser keep these files for an hour, so each address carries the version. A new release then
+/// loads at once, and a browser never runs an old script on a new page.
+fn asset_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        // FNV-1a over the two files.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in super::SETTINGS_CSS
+            .bytes()
+            .chain(super::SETTINGS_JS.bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")[..10].to_string()
+    })
+}
+
+/// The script of the settings pages, with its version.
+fn script_tag() -> String {
+    format!(
+        r#"<script src="/auth/assets/settings.js?v={}" defer></script>"#,
+        asset_version()
     )
 }
 
@@ -586,7 +616,8 @@ fn add_form(out: &mut String, view: &UsersView) {
     }
     let _ = write!(
         out,
-        r#"<div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
+        r#"<div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form>{}"#,
+        script_tag()
     );
 }
 
@@ -2431,7 +2462,10 @@ mod tests {
         ];
         for (tab, html) in &pages {
             assert!(html.starts_with("<!doctype html>"), "{tab:?}");
-            assert!(html.contains(r#"<link rel="stylesheet" href="/auth/settings.css">"#));
+            assert!(html.contains(&format!(
+                r#"<link rel="stylesheet" href="/auth/settings.css?v={}">"#,
+                asset_version()
+            )));
             assert!(html.contains(r##"<a class="skipLink" href="#main">Skip to content</a>"##));
             assert!(html.contains(r#"<main class="settings" id="main""#));
             assert!(html.contains(r##"<a class="backLink" href="/">"##));
@@ -2456,6 +2490,17 @@ mod tests {
         for (_, html) in &pages[2..] {
             assert!(!html.contains("settings.js"));
         }
+    }
+
+    #[test]
+    fn the_addresses_of_the_stylesheet_and_the_script_carry_their_version() {
+        let version = asset_version();
+        assert_eq!(version.len(), 10);
+        assert!(version.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(script_tag().contains(&format!("/auth/assets/settings.js?v={version}")));
+        let cat = catalog();
+        let html = user_page(&frame(), &user_view(&cat, card("alice", &["grafana"])));
+        assert!(html.contains(&format!("/auth/assets/settings.js?v={version}\" defer")));
     }
 
     #[test]
