@@ -372,21 +372,6 @@
   background: var(--danger-fill-hover);
 }
 
-/* A disclosure that reads as a link: "Add a grant on a resource of …". */
-.linkButton {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--s-control-sm);
-  color: var(--accent-text);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.linkButton:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
 .formActions {
   display: flex;
   flex-wrap: wrap;
@@ -511,13 +496,41 @@ details > summary::-webkit-details-marker {
 
 .addUser__fields {
   display: grid;
-  grid-template-columns: minmax(0, 14rem) minmax(0, 22rem) auto;
+  grid-template-columns: minmax(0, 14rem) minmax(0, 22rem);
   align-items: start;
   gap: 8px 12px;
 }
 
-.addUser .formActions {
-  padding-top: 20px;
+/* The access of a new account: the services by group, then the copy of another account. */
+.accessPick {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.accessPick legend {
+  padding: 0;
+}
+
+.accessPick__group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.accessPick__name {
+  flex: 0 0 6.5rem;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.accessPick__copy {
+  max-width: 16rem;
 }
 
 /* Tables: hairline box, 32px rows, 0 8px cells, a 12px semibold head ------------------------ */
@@ -716,11 +729,6 @@ details > summary::-webkit-details-marker {
 }
 
 /* The access of an account: one row for each service, then a row of its grants on resources. */
-.grantsTable .grantsTable__open {
-  width: 4.5rem;
-  text-align: center;
-}
-
 .svcRow__name {
   font-weight: 600;
 }
@@ -730,26 +738,6 @@ details > summary::-webkit-details-marker {
   white-space: nowrap;
   font-size: 11px;
   font-weight: 400;
-}
-
-.svcRow:not(.is-open) .svcRow__name {
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.grantsTable td[data-label="Actions"] {
-  white-space: normal;
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  min-height: 24px;
-  cursor: pointer;
 }
 
 .chips {
@@ -815,13 +803,6 @@ details > summary::-webkit-details-marker {
   height: auto;
   padding: 0 var(--s-pad-x) 6px 24px;
   white-space: normal;
-}
-
-.subRow__body {
-  display: grid;
-  gap: 4px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-strong);
 }
 
 .grantRows {
@@ -893,58 +874,6 @@ details > summary::-webkit-details-marker {
   color: var(--muted);
 }
 
-.addGrant__forms {
-  display: grid;
-  gap: 4px;
-  margin: 4px 0 2px;
-}
-
-/* One add form on one line: the path it gives, the action, one id for each level, Add. */
-.addGrant__form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 4px 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--raised);
-}
-
-.addGrant__level {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: 12px;
-}
-
-.addGrant__level code {
-  margin-left: 6px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-
-.addGrant__form .field {
-  flex: 0 1 12rem;
-}
-
-.addGrant__form .button {
-  flex: none;
-}
-
-/* The save button of the boxes stays in view while the access table scrolls past. */
-.saveBar {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 12px;
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
-  background: var(--bg);
-}
-
 /* Password and deletion of an account, side by side. */
 .accountRow {
   display: flex;
@@ -972,6 +901,124 @@ details > summary::-webkit-details-marker {
 .accountRow__delete {
   display: grid;
   gap: 4px;
+}
+
+/* One service of an account, or one account of a service: one line, then Edit. */
+.accessTable td[data-label="Access"] {
+  white-space: normal;
+}
+
+.accessTable .accessTable__end {
+  width: 1%;
+  text-align: right;
+}
+
+/* Choose one entry, then press Add or Next: one small line, no wide form. */
+.pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 6px 8px;
+}
+
+.pick .field {
+  flex: 0 1 18rem;
+}
+
+/* The editor of one (account, service) pair. A list of options: a box, its name, its meaning. */
+.editor,
+.step {
+  display: grid;
+  gap: 8px;
+}
+
+.options {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-md);
+  background: var(--panel);
+}
+
+.options > li + li {
+  border-top: 1px solid var(--row-divider);
+}
+
+.option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 6px var(--s-pad-x);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.option > input {
+  align-self: center;
+}
+
+.option__name {
+  flex: 0 0 15rem;
+  max-width: 100%;
+}
+
+.option__text {
+  flex: 1 1 16rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.option.is-on .option__name {
+  font-weight: 600;
+}
+
+.option:has(input:focus-visible) {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: -2px;
+}
+
+.option:has(input:disabled) {
+  cursor: default;
+}
+
+/* A grant on a resource, read as a sentence. */
+.sentence {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+}
+
+/* A new grant on a resource: a box with its own title, in two steps. */
+.step__box {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-md);
+  background: var(--raised);
+}
+
+.step__title {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.step__ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.step__ids .field {
+  flex: 0 1 14rem;
 }
 
 /* Graphs ---------------------------------------------------------------------------------- */
@@ -1207,13 +1254,13 @@ details > summary::-webkit-details-marker {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .addUser .formActions {
-    padding-top: 0;
+  .accessPick__name {
+    flex-basis: 100%;
   }
 
   .accounts thead,
   .stack thead,
-  .grantsTable thead {
+  .accessTable thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1225,14 +1272,14 @@ details > summary::-webkit-details-marker {
   .accounts tbody,
   .stack,
   .stack tbody,
-  .grantsTable,
-  .grantsTable tbody {
+  .accessTable,
+  .accessTable tbody {
     display: block;
   }
 
   .accounts tr,
   .stack tr,
-  .grantsTable tr {
+  .accessTable tr {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
@@ -1243,7 +1290,7 @@ details > summary::-webkit-details-marker {
 
   .table.accounts tbody tr > *,
   .table.stack tbody tr > *,
-  .table.grantsTable tbody tr > * {
+  .table.accessTable tbody tr > * {
     height: auto;
     padding: 0;
     border: 0;
@@ -1252,21 +1299,18 @@ details > summary::-webkit-details-marker {
 
   .accounts th,
   .stack th[scope="row"],
-  .grantsTable th[scope="row"],
+  .accessTable th[scope="row"],
   .stack .groupRow th,
-  .grantsTable .groupRow th,
   .accounts td[data-label="Access"],
+  .accessTable td[data-label="Access"],
   .stack td[data-label="Grant"],
   .stack td[data-label="Problem"],
-  .grantsTable td[data-label="Actions"],
   .stack td[data-label="Actions"],
-  .grantsTable .subRow > td,
   .stack .subRow > td {
     flex-basis: 100%;
   }
 
-  .stack .groupRow,
-  .grantsTable .groupRow {
+  .stack .groupRow {
     background: var(--raised);
   }
 
@@ -1282,38 +1326,17 @@ details > summary::-webkit-details-marker {
     content: none;
   }
 
-  .grantsTable .grantsTable__open {
+  .accessTable .accessTable__end {
     width: auto;
-    order: 1;
+    text-align: left;
   }
 
-  .grantsTable td[data-label="On resources"] {
-    order: 2;
-  }
-
-  .grantsTable td[data-label="Actions"] {
-    order: 3;
-  }
-
-  .grantsTable td[data-label="Open"]::before,
-  .grantsTable td[data-label="On resources"]::before {
-    content: attr(data-label) " ";
-    color: var(--muted);
-    font-size: 12px;
-  }
-
-  .grantsTable td[data-label="Open"] {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+  .option__name {
+    flex-basis: 100%;
   }
 
   .accountRow__password {
     flex-wrap: wrap;
-  }
-
-  .grantsTable .subRow {
-    padding-top: 0;
   }
 
   .table .num {
@@ -1356,19 +1379,18 @@ details > summary::-webkit-details-marker {
     height: 20px;
   }
 
-  .check,
   .chip,
-  .linkButton {
+  .option {
     min-height: 44px;
-  }
-
-  .check {
-    min-width: 44px;
   }
 
   .chip {
     height: auto;
     padding: 0 12px 0 10px;
+  }
+
+  .option {
+    align-items: center;
   }
 
   .chips {

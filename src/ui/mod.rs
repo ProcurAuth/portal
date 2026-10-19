@@ -20,8 +20,9 @@ use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Servic
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
-    logins_page, notice_for, services_page, user_page, users_page, Frame, LoginsView,
-    ServiceActions, ServicesView, UserCard, UserView, UsersView,
+    access_page, logins_page, notice_for, service_page, services_page, user_page, users_page,
+    AccessView, Frame, LoginsView, ServiceActions, ServiceView, ServicesView, UserCard, UserView,
+    UsersView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -723,6 +724,52 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 },
             )
         }
+        "access" => {
+            let mut users = demo_users(&catalog);
+            let services = std::mem::take(&mut users.services);
+            let service = services
+                .iter()
+                .find(|s| s.id == "data-clickhouse-dash")
+                .cloned()
+                .unwrap_or_else(|| services[0].clone());
+            let user = users.users.remove(0);
+            access_page(
+                &frame,
+                &AccessView {
+                    notice: None,
+                    mode: users.mode,
+                    known: user.grants.clone(),
+                    service,
+                    user,
+                    give: false,
+                    level: None,
+                    token: "demo",
+                },
+            )
+        }
+        "service" => {
+            let mut users = demo_users(&catalog);
+            let service = users
+                .services
+                .iter()
+                .find(|s| s.id == "data-clickhouse-dash")
+                .cloned()
+                .unwrap_or_else(|| users.services[0].clone());
+            let holders = users
+                .users
+                .iter()
+                .map(|u| (u.login.clone(), u.grants.clone()))
+                .collect();
+            users.services.clear();
+            service_page(
+                &frame,
+                &ServiceView {
+                    mode: users.mode,
+                    service,
+                    holders,
+                },
+            )
+        }
         "services" => {
             let users = demo_users(&catalog);
             let holders: Vec<(String, Vec<crate::grants::Grant>)> = users
@@ -890,7 +937,9 @@ mod tests {
 
     #[test]
     fn every_demo_page_renders_and_an_unknown_one_does_not() {
-        for name in ["launcher", "users", "user", "services", "logins"] {
+        for name in [
+            "launcher", "users", "user", "access", "services", "service", "logins",
+        ] {
             let page = demo_page(name, &Icons::empty()).unwrap();
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }

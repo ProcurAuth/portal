@@ -153,7 +153,7 @@ fn real_main() -> Result<(), String> {
             };
             let name = args.next().unwrap_or_else(|| "launcher".into());
             let page = ui::demo_page(&name, &icons).ok_or_else(|| {
-                format!("unknown page {name}: launcher, users, user, services or logins")
+                format!("unknown page {name}: launcher, users, user, access, services, service or logins")
             })?;
             print!("{page}");
             Ok(())
@@ -314,7 +314,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|access|services|service|logins] > page.html\n  portal version",
         release_version()
     );
 }

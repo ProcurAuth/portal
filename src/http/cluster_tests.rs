@@ -673,14 +673,46 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             add.location(),
             Some("/auth/settings/users/alice?s=user-added")
         );
-        let refused = post(
-            &node,
-            &root,
-            USERS_ADD_PATH,
-            USERS_TOKEN,
-            "login=bob&password=a-long-password-1&g.db.access=1",
+        // The add form can open a service. An action, an unknown field or a service id that is
+        // not valid is a bad request. A service that the catalogue lacks is a notice.
+        for bad in [
+            "login=bob&password=a-long-password-1&g.db.query.run.read=1",
+            "login=bob&password=a-long-password-1&g.db.access=2",
+            "login=bob&password=a-long-password-1&other=1",
+            "login=bob&password=a-long-password-1&g.DB.access=1",
+        ] {
+            assert_eq!(
+                post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, bad).status,
+                400,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=bob&password=a-long-password-1&g.chat.access=1",
+            )
+            .location(),
+            Some("/auth/settings?s=add-unknown-service")
         );
-        assert_eq!(refused.status, 400, "a new user is added without grants");
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=bob&password=a-long-password-1&copy=nobody",
+            )
+            .location(),
+            Some("/auth/settings?s=add-unknown-copy")
+        );
+        assert!(
+            node.state.users.get("bob").is_none(),
+            "a refused add makes no account"
+        );
 
         // A new user has no grant. The user has no service, and the refusal names none.
         let alice = sign_in(&node, "alice", "a-long-password-1");
@@ -2057,7 +2089,11 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
                 .location()
                 .map(str::to_string)
         };
-        let notice = |code: &str| Some(format!("/auth/settings/users/alice?s={code}"));
+        let notice = |code: &str| {
+            Some(format!(
+                "/auth/settings/access?user=alice&service=db&s={code}"
+            ))
+        };
         let fields = "login=alice&service=db&action=query.run.write&type=database&id0=analytics";
         // The service has not answered yet: no grant on a sub-resource.
         *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(
@@ -2117,6 +2153,9 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         ] {
             let expected = if code == "no-user" {
                 Some(format!("/auth/settings?s={code}"))
+            } else if bad.contains("service=chat") {
+                // The catalogue lacks the service: the answer goes to the page of the account.
+                Some(format!("/auth/settings/users/alice?s={code}"))
             } else {
                 notice(code)
             };
@@ -2134,10 +2173,28 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
             vec![Grant::parse("query.run.write on service:db/database:analytics").unwrap()];
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let page = page(&node, &root, "/auth/settings/users/alice");
+        let editor = "/auth/settings/access?user=alice&service=db";
+        let page = page(&node, &root, editor);
+        assert_eq!(page.status, 200);
         assert!(page.body.contains(
             r#"<span class="path__type">database</span> <code class="path__id">analytics</code>"#
         ));
+        // The page of the account lists the service with its grant: one line.
+        let account = self::page(&node, &root, "/auth/settings/users/alice");
+        assert!(account.body.contains("1 resource grant"));
+        // The editor of an unknown service or account does not exist.
+        for gone in [
+            "/auth/settings/access?user=alice&service=chat",
+            "/auth/settings/access?user=nobody&service=db",
+            "/auth/settings/access?user=alice",
+            "/auth/settings/services/chat",
+        ] {
+            assert_eq!(self::page(&node, &root, gone).status, 404, "{gone}");
+        }
+        assert_eq!(
+            self::page(&node, &root, "/auth/settings/services/db").status,
+            200
+        );
 
         // The edit form keeps the grant on the sub-resource: it shows only the grants on services.
         assert_eq!(
@@ -2180,7 +2237,7 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         };
         assert_eq!(
             delete("access on service:db"),
-            notice("no-grant"),
+            Some("/auth/settings/users/alice?s=no-grant".into()),
             "only a sub-resource"
         );
         assert_eq!(
@@ -2246,16 +2303,191 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         expected.sort();
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let tree_page = self::page(&node, &root, "/auth/settings/users/alice");
-        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code><span class="path__sep" aria-hidden="true">/</span><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
-        assert!(tree_page
-            .body
-            .contains("<code>service:db/host:&lt;id&gt;/database:&lt;id&gt;</code>"));
+        let tree_page = self::page(&node, &root, editor);
+        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code><span class="path__sep" aria-hidden="true">›</span><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
+        // Step 1 offers the levels of the tree. Step 2 asks for the ids of the chain.
+        assert!(tree_page.body.contains(r#"name="level" value="database""#));
+        let step_two = self::page(&node, &root, &format!("{editor}&level=database"));
+        assert!(step_two.body.contains(r#"name="id0""#) && step_two.body.contains(r#"name="id1""#));
+        assert!(
+            step_two
+                .body
+                .contains(r#"<datalist id="ids-0"><option value="local"></datalist>"#),
+            "the ids that the grants use are suggested"
+        );
         assert_eq!(
             delete("query.run.write on service:db/host:local/database:a%2Fb%20c"),
             notice("grant-deleted")
         );
     });
+}
+
+#[test]
+fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_service() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        publish_catalog(&node, &["query.run.read", "query.run.write"]);
+        let root = sign_in(&node, "root", PASSWORD);
+        let add = |fields: &str| {
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                &format!("password=a-long-password-1&{fields}"),
+            )
+            .location()
+            .map(str::to_string)
+        };
+        let grants_of = |login: &str| -> Vec<String> {
+            node.state
+                .users
+                .grants_of(login)
+                .unwrap()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        // One POST makes the account and its grants: the database holds both.
+        assert_eq!(
+            add("login=alice&g.db.access=1&g.other-grafana.access=1"),
+            Some("/auth/settings/users/alice?s=user-added-access".into())
+        );
+        assert_eq!(
+            grants_of("alice"),
+            ["access on service:db", "access on service:other-grafana"]
+        );
+        assert_eq!(
+            node.state.store.load_users().unwrap()[0].grants,
+            node.state.users.grants_of("alice").unwrap()
+        );
+        // An account without a box has no grant.
+        assert_eq!(
+            add("login=carol"),
+            Some("/auth/settings/users/carol?s=user-added".into())
+        );
+        assert!(grants_of("carol").is_empty());
+
+        // alice gets an action and a grant on a resource. A copy takes all of them, once.
+        publish_tree(&node);
+        post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=alice&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1",
+        );
+        post(
+            &node,
+            &root,
+            GRANT_ADD_PATH,
+            USERS_TOKEN,
+            "login=alice&service=db&action=query.run.write&type=database&id0=local&id1=analytics",
+        );
+        assert_eq!(
+            add("login=bob&copy=alice&g.db.access=1"),
+            Some("/auth/settings/users/bob?s=user-added-access".into())
+        );
+        assert_eq!(
+            grants_of("bob"),
+            grants_of("alice"),
+            "the same grants, once"
+        );
+        let bob = sign_in(&node, "bob", "a-long-password-1");
+        assert_eq!(open(&node, &bob, "/db/").status, 204);
+        // The copy is not a link: a later change of alice does not follow.
+        post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=alice&only=db",
+        );
+        assert_eq!(grants_of("bob").len(), 4);
+
+        // A Save of the editor names its service. It changes the boxes of that service only.
+        let reply = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&only=db&g.db.query.run.write=1",
+        );
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/access?user=bob&service=db&s=user-updated")
+        );
+        assert_eq!(
+            grants_of("bob"),
+            [
+                "access on service:other-grafana",
+                "query.run.write on service:db",
+                "query.run.write on service:db/host:local/database:analytics",
+            ],
+            "access and read are gone, write is set, the grant on a resource and Grafana stay"
+        );
+        let reply = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&only=db&g.other-grafana.access=1",
+        );
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/access?user=bob&service=db&s=edit-unknown-grant"),
+            "a box of another service is refused"
+        );
+        let reply = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&only=db&g.db.query.run.write=1",
+        );
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/access?user=bob&service=db&s=unchanged")
+        );
+        // Only the superadmin adds with access.
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert_eq!(
+            post(
+                &node,
+                &alice,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=eve&password=a-long-password-1&g.db.access=1"
+            )
+            .status,
+            403
+        );
+    });
+}
+
+#[test]
+fn in_the_static_mode_the_add_form_cannot_give_access() {
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        r#"access { grants_mode = "static" }"#,
+    );
+    publish_catalog(&node, &[]);
+    let root = sign_in(&node, "root", PASSWORD);
+    for fields in ["g.db.access=1", "copy=root"] {
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                &format!("login=alice&password=a-long-password-1&{fields}"),
+            )
+            .location(),
+            Some("/auth/settings?s=grants-static")
+        );
+    }
+    assert!(node.state.users.get("alice").is_none());
 }
 
 /// The document of `db` with a tree: `host` below the service, `database` below `host`.

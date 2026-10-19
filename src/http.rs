@@ -808,8 +808,12 @@ fn is_superadmin(viewer: &Viewer) -> bool {
 fn is_settings_path(path: &str) -> bool {
     matches!(
         path,
-        ui::settings::USERS_PATH | ui::settings::SERVICES_PATH | ui::settings::LOGINS_PATH
+        ui::settings::USERS_PATH
+            | ui::settings::SERVICES_PATH
+            | ui::settings::LOGINS_PATH
+            | ui::settings::ACCESS_PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
+        || path.starts_with(ui::settings::SERVICE_PATH_PREFIX)
 }
 
 /// One page of the settings. The route of the page is its tab. The portal checks the session itself.
@@ -888,6 +892,20 @@ async fn handle_settings(
             let (users, snapshot) = load_admin_data(state).await;
             let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
             ui::users_page(&frame, &view)
+        }
+        ui::settings::ACCESS_PATH => match access_view(state, &catalog, uri, &users_token) {
+            Some(view) => ui::access_page(&frame, &view),
+            None => return handle_not_found(state, &Method::GET, uri, headers, client),
+        },
+        _ if path.starts_with(ui::settings::SERVICE_PATH_PREFIX) => {
+            let asked = path
+                .strip_prefix(ui::settings::SERVICE_PATH_PREFIX)
+                .and_then(|id| percent_decode_form(id).ok())
+                .unwrap_or_default();
+            match service_view(state, &catalog, &asked) {
+                Some(view) => ui::service_page(&frame, &view),
+                None => return handle_not_found(state, &Method::GET, uri, headers, client),
+            }
         }
         _ => {
             // The page of one account: the login must be an account or the superadmin.
@@ -1125,6 +1143,68 @@ fn user_view<'a>(
         user: found?,
         first_day,
         token: users_token,
+    })
+}
+
+/// The data of the editor of one (account, service) pair. `None`: the query names no account of
+/// the directory, or no service of the catalogue. The superadmin has no grant to edit.
+fn access_view<'a>(
+    state: &AppState,
+    catalog: &Catalog,
+    uri: &str,
+    users_token: &'a str,
+) -> Option<ui::AccessView<'a>> {
+    let login = query_value(uri, "user")?;
+    let service_id = query_value_up_to(uri, "service", grants::MAX_SERVICE_CHARS * 4)?;
+    let record = state.users.get(&login)?;
+    let service = service_grants(state, catalog)
+        .into_iter()
+        .find(|s| s.id == service_id)?;
+    let grants = state.policy.effective(&login, &record.grants);
+    let known: Vec<Grant> = state
+        .users
+        .list()
+        .into_iter()
+        .flat_map(|(other, record)| state.policy.effective(&other, &record.grants))
+        .filter(|grant| grant.service == service_id)
+        .collect();
+    Some(ui::AccessView {
+        notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+        mode: state.policy.mode,
+        service,
+        user: ui::UserCard {
+            configured: state.policy.configured(&login).to_vec(),
+            grants,
+            created_at: Some(record.created_at),
+            superadmin: false,
+            activity: Default::default(),
+            login,
+        },
+        give: query_value(uri, "give").as_deref() == Some("1"),
+        level: query_value(uri, "level"),
+        known,
+        token: users_token,
+    })
+}
+
+/// The data of the page of one service: who has access. `None`: the catalogue has no such service.
+fn service_view(state: &AppState, catalog: &Catalog, asked: &str) -> Option<ui::ServiceView> {
+    let service = service_grants(state, catalog)
+        .into_iter()
+        .find(|s| s.id == asked)?;
+    let holders = state
+        .users
+        .list()
+        .into_iter()
+        .map(|(login, record)| {
+            let grants = state.policy.effective(&login, &record.grants);
+            (login, grants)
+        })
+        .collect();
+    Some(ui::ServiceView {
+        mode: state.policy.mode,
+        service,
+        holders,
     })
 }
 
@@ -2003,6 +2083,15 @@ fn user_redirect(login: &str, code: &str) -> HttpResponse {
     )
 }
 
+/// The response returns to the editor of the access of `login` to `service`, with the outcome of
+/// the action.
+fn access_redirect(login: &str, service: &str, code: &str) -> HttpResponse {
+    redirect_response(
+        StatusCode::SEE_OTHER,
+        &format!("{}&s={code}", ui::settings::access_path(login, service)),
+    )
+}
+
 fn audit(
     state: &AppState,
     kind: AuditKind,
@@ -2037,9 +2126,20 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // A new user has no grant. The form has no other field.
-    if !form.is_empty() {
-        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    // The form can open services at once (`g.<service>.access`) and copy the grants of an account
+    // (`copy`). A new user has no other grant.
+    let copy = form.remove("copy").unwrap_or_default();
+    let mut opened: Vec<String> = Vec::new();
+    for (name, value) in form.drain() {
+        match name
+            .strip_prefix("g.")
+            .and_then(|rest| rest.strip_suffix(".access"))
+        {
+            Some(service) if value == "1" && grants::check_service_id(service).is_ok() => {
+                opened.push(service.to_string());
+            }
+            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
+        }
     }
 
     let rejected = |code: &str| {
@@ -2062,6 +2162,46 @@ async fn handle_users_add(
     if state.users.is_full() {
         return rejected("limit");
     }
+    let mut new_grants: Vec<Grant> = Vec::new();
+    if !opened.is_empty() || !copy.is_empty() {
+        if !state.policy.mode.editable() {
+            return rejected("grants-static");
+        }
+        let catalog = current_catalog(state);
+        let in_catalog = |id: &str| {
+            catalog
+                .groups()
+                .iter()
+                .flat_map(|group| group.services.iter())
+                .any(|s| s.id == id)
+        };
+        for service in &opened {
+            if !in_catalog(service) {
+                return rejected("add-unknown-service");
+            }
+            match Grant::new(grants::ACCESS, service) {
+                Ok(grant) => new_grants.push(grant),
+                Err(_) => return rejected("add-unknown-service"),
+            }
+        }
+        if !copy.is_empty() {
+            let source = match normalize_login(&copy)
+                .ok()
+                .and_then(|source| state.users.get(&source).map(|record| (source, record)))
+            {
+                Some(found) => found,
+                None => return rejected("add-unknown-copy"),
+            };
+            // The copy takes every grant that applies to the other account, those of the
+            // configuration too. The new account keeps them as its own grants.
+            new_grants.extend(state.policy.effective(&source.0, &source.1.grants));
+        }
+        new_grants.sort();
+        new_grants.dedup();
+        if new_grants.len() > grants::MAX_GRANTS_PER_USER {
+            return rejected("grant-limit");
+        }
+    }
 
     // A hash calculation costs the same as a login check. It takes the same permit.
     let permit = match Arc::clone(&state.password_gate).acquire_owned().await {
@@ -2081,7 +2221,7 @@ async fn handle_users_add(
     let row = UserRow {
         login: login.clone(),
         password_hash: password_hash.clone(),
-        grants: Vec::new(),
+        grants: new_grants.clone(),
         created_at: unix_now(),
     };
     let store = Arc::clone(&state.store);
@@ -2105,20 +2245,37 @@ async fn handle_users_add(
         login.clone(),
         UserRecord {
             password_hash,
-            grants: Vec::new(),
+            grants: new_grants.clone(),
             created_at,
         },
     );
     audit(
         state,
         AuditKind::UserAdded,
-        Some(login),
+        Some(login.clone()),
         Some(state.superadmin_login.clone()),
         client,
         &headers,
     );
+    if !new_grants.is_empty() {
+        audit(
+            state,
+            AuditKind::UserUpdated,
+            Some(login),
+            Some(state.superadmin_login.clone()),
+            client,
+            &headers,
+        );
+    }
     state.metrics.user_admin("add", "ok");
-    user_redirect(&login_for_page, "user-added")
+    user_redirect(
+        &login_for_page,
+        if new_grants.is_empty() {
+            "user-added"
+        } else {
+            "user-added-access"
+        },
+    )
 }
 
 async fn handle_users_delete(
@@ -2198,6 +2355,9 @@ async fn handle_users_update(
     // The form of the boxes carries `grants`. Without it, the request changes no grant: the
     // password form of the same page sends no box.
     let edit_grants = form.remove("grants").as_deref() == Some("1");
+    // The editor of one service names it with `only`. The request then changes the grants of that
+    // service only, so a Save never touches the access to another service.
+    let only = form.remove("only").filter(|id| !id.is_empty());
     // The grant boxes are the remaining fields. Their names have the form `g.<service>.<action>`.
     let mut ticked: Vec<Grant> = Vec::new();
     for (name, value) in form.drain() {
@@ -2224,9 +2384,14 @@ async fn handle_users_update(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
+    // The answer returns to the editor that sent the form, or to the page of the account.
+    let back = |code: &str| match &only {
+        Some(service) => access_redirect(&login, service, code),
+        None => user_redirect(&login, code),
+    };
     let rejected = |code: &str| {
         state.metrics.user_admin("update", "rejected");
-        user_redirect(&login, code)
+        back(code)
     };
     // The page shows one box for each grant that it offers. A box that the page did not show keeps
     // its grant. An action that a service does not publish now is not lost.
@@ -2238,6 +2403,7 @@ async fn handle_users_update(
     } else if state.policy.mode.editable() {
         let offered: Vec<Grant> = service_grants(state, &current_catalog(state))
             .into_iter()
+            .filter(|service| only.as_deref().is_none_or(|id| id == service.id))
             .flat_map(|service| {
                 std::iter::once(grants::ACCESS.to_string())
                     .chain(service.actions.into_iter().map(|(name, _)| name))
@@ -2273,7 +2439,7 @@ async fn handle_users_update(
     let grants = grants.filter(|_| grants_changed);
     if !change_password && !grants_changed {
         state.metrics.user_admin("update", "ok");
-        return user_redirect(&login, "unchanged");
+        return back("unchanged");
     }
 
     let new_hash = if change_password {
@@ -2343,14 +2509,11 @@ async fn handle_users_update(
         );
     }
     state.metrics.user_admin("update", "ok");
-    user_redirect(
-        &login,
-        if change_password {
-            "password-reset"
-        } else {
-            "user-updated"
-        },
-    )
+    back(if change_password {
+        "password-reset"
+    } else {
+        "user-updated"
+    })
 }
 
 /// Gives a user a grant on a node below a service. The form names the user, the service, the
@@ -2403,18 +2566,26 @@ async fn handle_grant_add(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
-    let rejected = |code: &str| {
-        state.metrics.user_admin("grant_add", "rejected");
-        user_redirect(&login, code)
-    };
-    if ids.iter().any(|id| grants::check_resource_id(id).is_err()) {
-        return rejected("grant-bad-id");
-    }
     let in_catalog = current_catalog(state)
         .groups()
         .iter()
         .flat_map(|group| group.services.iter())
         .any(|s| s.id == service);
+    // The answer returns to the editor of the service, when the catalogue has the service.
+    let back = |code: &str| {
+        if in_catalog {
+            access_redirect(&login, &service, code)
+        } else {
+            user_redirect(&login, code)
+        }
+    };
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_add", "rejected");
+        back(code)
+    };
+    if ids.iter().any(|id| grants::check_resource_id(id).is_err()) {
+        return rejected("grant-bad-id");
+    }
     if !in_catalog {
         return rejected("grant-undeclared");
     }
@@ -2447,7 +2618,7 @@ async fn handle_grant_add(
         .contains(&grant)
     {
         state.metrics.user_admin("grant_add", "ok");
-        return user_redirect(&login, "unchanged");
+        return back("unchanged");
     }
     if current.grants.len() >= grants::MAX_GRANTS_PER_USER {
         return rejected("grant-limit");
@@ -2458,7 +2629,7 @@ async fn handle_grant_add(
     match store_grants(state, &login, next, client, &headers).await {
         Ok(()) => {
             state.metrics.user_admin("grant_add", "ok");
-            user_redirect(&login, "grant-added")
+            back("grant-added")
         }
         Err(code) => rejected(code),
     }
@@ -2506,6 +2677,23 @@ async fn handle_grant_delete(
         Ok(grant) if !grant.path.is_empty() => grant,
         _ => return rejected("no-grant"),
     };
+    // The answer returns to the editor of the service of the grant, when the catalogue has it.
+    let in_catalog = current_catalog(state)
+        .groups()
+        .iter()
+        .flat_map(|group| group.services.iter())
+        .any(|s| s.id == grant.service);
+    let back = |code: &str| {
+        if in_catalog {
+            access_redirect(&login, &grant.service, code)
+        } else {
+            user_redirect(&login, code)
+        }
+    };
+    let rejected = |code: &str| {
+        state.metrics.user_admin("grant_delete", "rejected");
+        back(code)
+    };
     if !current.grants.contains(&grant) {
         return rejected("no-grant");
     }
@@ -2518,7 +2706,7 @@ async fn handle_grant_delete(
     match store_grants(state, &login, next, client, &headers).await {
         Ok(()) => {
             state.metrics.user_admin("grant_delete", "ok");
-            user_redirect(&login, "grant-deleted")
+            back("grant-deleted")
         }
         Err(code) => rejected(code),
     }
