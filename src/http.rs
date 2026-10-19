@@ -2110,6 +2110,24 @@ fn audit(
     }));
 }
 
+/// Removes the grants that another grant of the list covers: the same action and service, on a
+/// node above. The boxes of a page show a grant on a host ticked when the whole service is ticked,
+/// so a form sends both. The account keeps the broad grant only.
+fn drop_covered(mut grants: Vec<Grant>) -> Vec<Grant> {
+    grants.sort();
+    grants.dedup();
+    let all = grants.clone();
+    grants.retain(|grant| {
+        !all.iter().any(|other| {
+            other != grant
+                && other.action == grant.action
+                && other.service == grant.service
+                && grant.path.starts_with(&other.path)
+        })
+    });
+    grants
+}
+
 /// One check box of the permission forms, read from its name. `g.<service>.<action>` is a grant on
 /// the whole service. `r.<grant>` is a grant on a resource that the service names, with the grant in
 /// its text form. `None`: the name is not a box.
@@ -2210,8 +2228,7 @@ async fn handle_users_add(
         if new_grants.iter().any(|grant| !offered.contains(grant)) {
             return rejected("add-unknown-service");
         }
-        new_grants.sort();
-        new_grants.dedup();
+        new_grants = drop_covered(new_grants);
     }
 
     // A hash calculation costs the same as a login check. It takes the same permit.
@@ -2415,7 +2432,7 @@ async fn handle_users_update(
             .iter()
             .filter(|grant| !offered.contains(grant))
             .cloned()
-            .chain(ticked)
+            .chain(drop_covered(ticked))
             .collect();
         next.sort();
         next.dedup();

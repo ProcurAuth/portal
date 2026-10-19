@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use super::{document, sign_out_form, theme_switch};
 use crate::actions::{Document, Level};
 use crate::catalog::{Catalog, Service};
-use crate::grants::{holds, Grant, Mode, ACCESS};
+use crate::grants::{covers, holds, Grant, Mode, ACCESS};
 use crate::store::{
     AccountActivity, AuditRow, DayStat, LoginPage, LoginRow, ServiceUse, SessionRow,
 };
@@ -932,10 +932,20 @@ fn service_card(
             .map(|s| s.kind.as_str())
             .unwrap_or_default();
         let id = node.path.last().map(|s| s.id.as_str()).unwrap_or_default();
+        let actions = service.document.actions_on(node);
+        let grants_here: Vec<Grant> = actions
+            .iter()
+            .filter_map(|a| Grant::on_path(&a.name, &service.id, node.path.clone()).ok())
+            .collect();
+        // A box shows ticked when the grant is held, or when a grant above it covers it: the
+        // action on the whole service, or on a resource above.
+        let ticked_here = grants_here.iter().filter(|g| covers_any(grants, g)).count();
+        let own = grants_here.iter().any(|g| grants.contains(g));
         let _ = write!(
             out,
-            r#"<div class="perm__node perm__node--d{}"><p class="perm__nodehead"><span class="path__type">{}</span> <strong>{}</strong>{}</p><ul class="perm__actions">"#,
+            r##"<details class="perm__node perm__node--d{}"{}><summary class="perm__nodehead"><span class="path__type">{}</span> <strong>{}</strong>{}<span class="perm__count">{}/{}</span><svg class="icon perm__chevron" aria-hidden="true"><use href="#i-chevron-right"/></svg></summary><ul class="perm__actions">"##,
             node.path.len().min(4),
+            if own { " open" } else { "" },
             html_escape(kind),
             html_escape(&node.label),
             if node.label == id {
@@ -943,24 +953,22 @@ fn service_card(
             } else {
                 format!(r#" <code class="svcRow__id">{}</code>"#, html_escape(id))
             },
+            ticked_here,
+            grants_here.len(),
         );
-        for action in service.document.actions_on(node) {
-            let Ok(grant) = Grant::on_path(&action.name, &service.id, node.path.clone()) else {
-                continue;
-            };
-            let held = grants.contains(&grant);
-            let fixed = !editable || configured.contains(&grant);
+        for (action, grant) in actions.iter().zip(&grants_here) {
+            let fixed = !editable || covers_any(configured, grant);
             let _ = write!(
                 out,
                 r#"<li><label class="perm__action" title="{}">{}<code>{}</code><span class="perm__tip">{}</span></label></li>"#,
                 html_escape(&action.description),
-                resource_box(&grant, held, fixed, form),
+                resource_box(grant, covers_any(grants, grant), fixed, form),
                 html_escape(&action.name),
                 html_escape(first_sentence(&action.description)),
             );
-            boxed.push(grant);
         }
-        out.push_str("</ul></div>");
+        boxed.extend(grants_here);
+        out.push_str("</ul></details>");
     }
     let below: Vec<&Grant> = below.into_iter().filter(|g| !boxed.contains(g)).collect();
     if let Some(holder) = holder {
@@ -1198,16 +1206,22 @@ fn grant_box(
             String::new()
         } else {
             format!(
-                r#"{} name="g.{}.{}" value="1""#,
+                r#"{} name="g.{}.{}" value="1" data-action="{}" data-path="""#,
                 form.map(|id| format!(r#" form="{id}""#))
                     .unwrap_or_default(),
                 html_escape(service),
-                html_escape(action)
+                html_escape(action),
+                html_escape(action),
             )
         },
         if checked { " checked" } else { "" },
         if fixed { " disabled" } else { "" },
     )
+}
+
+/// Whether one of `held` covers `grant`: the same action and service, on the node or above it.
+fn covers_any(held: &[Grant], grant: &Grant) -> bool {
+    covers(held, &grant.action, &grant.service, &grant.path)
 }
 
 /// One check box of a grant on a resource that the service names. The name is `r.` and the
@@ -1219,10 +1233,12 @@ fn resource_box(grant: &Grant, checked: bool, fixed: bool, form: Option<&str>) -
             String::new()
         } else {
             format!(
-                r#"{} name="r.{}" value="1""#,
+                r#"{} name="r.{}" value="1" data-action="{}" data-path="{}""#,
                 form.map(|id| format!(r#" form="{id}""#))
                     .unwrap_or_default(),
                 html_escape(&grant.to_string()),
+                html_escape(&grant.action),
+                html_escape(&grant.path_text()),
             )
         },
         if checked { " checked" } else { "" },
@@ -2515,8 +2531,8 @@ mod tests {
             "no copy of the access of another account"
         );
         assert!(add.contains(r#"<h3 class="perms__group">Infra</h3>"#));
-        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1"><span class="perm__name">Grafana</span>"#));
-        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1"><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
+        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1" data-action="access" data-path=""><span class="perm__name">Grafana</span>"#));
+        assert!(add.contains(r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1" data-action="dashboards.read" data-path=""><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
         assert!(
             !add.contains(" open>") && !add.contains(" open "),
             "no card starts open"
@@ -2563,12 +2579,12 @@ mod tests {
         assert!(html.contains("Opens 2 of 4"));
         assert!(html.contains(r#"<form id="grants" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="tok&lt;en"><input type="hidden" name="login" value="alice"><input type="hidden" name="grants" value="1"></form>"#));
         // A card with a grant starts open and says what it holds. The others stay closed.
-        assert!(html.contains(r#"<details class="perm has-grants" open><summary class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-grafana.access" value="1" checked><span class="perm__name">Grafana</span></label><code class="svcRow__id">infra-grafana</code>"#));
+        assert!(html.contains(r#"<details class="perm has-grants" open><summary class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-grafana.access" value="1" data-action="access" data-path="" checked><span class="perm__name">Grafana</span></label><code class="svcRow__id">infra-grafana</code>"#));
         assert!(html.contains(r#"<span class="perm__count">2/3, 1 on resources</span>"#));
         // A service with no action has one line and nothing to open.
-        assert!(html.contains(r#"<div class="perm"><div class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-notes.access" value="1">"#));
+        assert!(html.contains(r#"<div class="perm"><div class="perm__head"><label class="perm__open" title="Open the service. Without it, the account does not see the service."><input type="checkbox" form="grants" name="g.infra-notes.access" value="1" data-action="access" data-path="">"#));
         // Each action has its box and its first sentence in text.
-        assert!(html.contains(r#"<input type="checkbox" form="grants" name="g.infra-grafana.dashboards.read" value="1" checked><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
+        assert!(html.contains(r#"<input type="checkbox" form="grants" name="g.infra-grafana.dashboards.read" value="1" data-action="dashboards.read" data-path="" checked><code>dashboards.read</code><span class="perm__tip">See the dashboards.</span>"#));
         assert!(html.contains("Change the &lt;dashboards&gt;."), "escaped");
         // The grants on resources are in the card, with a way to add one.
         assert!(
@@ -2633,7 +2649,7 @@ mod tests {
         let prod_block = &html[prod..replica];
         let replica_block = &html[replica..replica + html[replica..].find("</details>").unwrap()];
         // The box of a grant on a host: `r.` and the grant in its text form. A held grant is ticked.
-        assert!(prod_block.contains(r#"form="grants" name="r.explorer.read on service:infra-grafana/host:prod" value="1" checked>"#));
+        assert!(prod_block.contains(r#"form="grants" name="r.explorer.read on service:infra-grafana/host:prod" value="1" data-action="explorer.read" data-path="host:prod" checked>"#));
         assert!(
             prod_block.contains(r#"name="r.dashboards.read on service:infra-grafana/host:prod""#)
         );
@@ -2644,6 +2660,58 @@ mod tests {
         // A grant that is a box is not listed again as a sentence.
         assert!(!html.contains(r#"<ul class="grantRows""#));
         assert!(html.contains(">Production</strong>"));
+    }
+
+    #[test]
+    fn a_grant_on_the_whole_service_shows_ticked_on_every_host_and_each_host_opens() {
+        let cat = catalog();
+        let document = crate::actions::parse(
+            "infra-grafana",
+            br#"{"server":"infra-grafana","resource_types":[{"name":"host","parent":"service"}],"actions":[{"name":"dashboards.read","resource_types":["service","host"]}],"resources":[{"path":"host:a"},{"path":"host:b"}]}"#,
+        )
+        .unwrap();
+        let mut view = user_view(&cat, card("alice", &["grafana"]));
+        view.services[0].actions = vec![("dashboards.read".into(), String::new())];
+        view.services[0].document = std::sync::Arc::new(document);
+        view.user
+            .grants
+            .push(grant("dashboards.read", "infra-grafana"));
+        let html = user_page(&frame(), &view);
+        // Both hosts show the action ticked, because the whole service covers them. Each host is
+        // a closed block with its count, and each box tells the script its place in the tree.
+        for host in ["a", "b"] {
+            assert!(
+                html.contains(&format!(r#"name="r.dashboards.read on service:infra-grafana/host:{host}" value="1" data-action="dashboards.read" data-path="host:{host}" checked>"#)),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            html.matches(r#"<details class="perm__node perm__node--d1">"#)
+                .count(),
+            2
+        );
+        assert_eq!(
+            html.matches(r#"<span class="perm__count">1/1</span>"#)
+                .count(),
+            2
+        );
+        // A grant of its own on one host opens that host only.
+        view.user.grants = access(&["grafana"]);
+        view.user
+            .grants
+            .push(sub("dashboards.read on service:infra-grafana/host:b"));
+        let html = user_page(&frame(), &view);
+        assert_eq!(
+            html.matches(r#"<details class="perm__node perm__node--d1" open>"#)
+                .count(),
+            1
+        );
+        assert_eq!(
+            html.matches(r#"data-path="host:a">"#).count(),
+            1,
+            "host a is not ticked"
+        );
+        assert!(html.contains(r#"data-path="host:b" checked>"#));
     }
 
     #[test]
@@ -2671,13 +2739,13 @@ mod tests {
         let html = access_page(&frame(), &access_view(alice, None));
         assert!(html.contains(r#"<form class="editor" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="tok&lt;en"><input type="hidden" name="login" value="alice"><input type="hidden" name="grants" value="1"><input type="hidden" name="only" value="infra-grafana">"#));
         assert!(html.contains(
-            r#"<input type="checkbox" name="g.infra-grafana.access" value="1" checked>"#
+            r#"<input type="checkbox" name="g.infra-grafana.access" value="1" data-action="access" data-path="" checked>"#
         ));
         assert!(html.contains(
-            r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1" checked>"#
+            r#"<input type="checkbox" name="g.infra-grafana.dashboards.read" value="1" data-action="dashboards.read" data-path="" checked>"#
         ));
         assert!(html.contains(
-            r#"<input type="checkbox" name="g.infra-grafana.dashboards.write" value="1">"#
+            r#"<input type="checkbox" name="g.infra-grafana.dashboards.write" value="1" data-action="dashboards.write" data-path="">"#
         ));
         assert!(
             html.contains("See the dashboards."),
@@ -2694,12 +2762,12 @@ mod tests {
         give.give = true;
         let html = access_page(&frame(), &give);
         assert!(html.contains(
-            r#"<input type="checkbox" name="g.infra-grafana.access" value="1" checked>"#
+            r#"<input type="checkbox" name="g.infra-grafana.access" value="1" data-action="access" data-path="" checked>"#
         ));
         assert!(html.contains("bob does not have this access yet. Save to give it."));
         let plain = access_page(&frame(), &access_view(card("bob", &[]), None));
         assert!(
-            plain.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1">"#)
+            plain.contains(r#"<input type="checkbox" name="g.infra-grafana.access" value="1" data-action="access" data-path="">"#)
         );
     }
 

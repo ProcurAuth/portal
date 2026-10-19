@@ -1,4 +1,14 @@
-/* "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
+/* Two small helpers of the Users settings pages. Loaded deferred, on those pages only.
+
+   1. The boxes of the permission cards follow the tree of a service. A box with data-action and
+      data-path stands for one grant: the path is empty for the whole service, else `host:prod` and
+      so on. Ticking a box ticks the same action on each node below it. Unticking a box unticks the
+      same action on each node below it and on each node above it. Thus a click on the action of
+      the whole service ticks it for every host, and a host that is unticked after that leaves the
+      whole service: the other hosts keep their own boxes. A box that is disabled does not change.
+      Without this script, the server applies the same rule when it saves.
+
+   2. "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
    CSPRNG (rejection sampling, so every character is equally likely), shown in clear so it can be
    handed over. It never leaves the page until the form is submitted. Loaded deferred, on that page only. */
 (function () {
@@ -17,6 +27,27 @@
     }
     return out;
   }
+
+  function below(path, other) {
+    return other.length > path.length && (path === "" || other.indexOf(path + "/") === 0);
+  }
+
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (!box || !box.hasAttribute || !box.hasAttribute("data-action")) return;
+    var card = box.closest(".perm");
+    if (!card) return;
+    var action = box.getAttribute("data-action");
+    var path = box.getAttribute("data-path") || "";
+    var boxes = card.querySelectorAll("input[data-action]");
+    for (var i = 0; i < boxes.length; i += 1) {
+      var other = boxes[i];
+      if (other === box || other.disabled || other.getAttribute("data-action") !== action) continue;
+      var there = other.getAttribute("data-path") || "";
+      if (below(path, there)) other.checked = box.checked;
+      else if (!box.checked && below(there, path)) other.checked = false;
+    }
+  });
 
   document.addEventListener("click", function (event) {
     var button = event.target.closest && event.target.closest("[data-generate-password]");

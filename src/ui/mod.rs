@@ -1,8 +1,8 @@
 //! Server-rendered pages: the launcher, the authentication cards and the settings pages.
 //!
 //! The browser receives finished HTML. Every page has one script only: the theme selector. The Users
-//! settings page adds the password generator. Everything else works without JavaScript. No page
-//! references anything outside this binary. The server serves the CSS and the scripts from `/auth/`.
+//! settings page adds the password generator and the rule that ties the boxes of a service to its
+//! tree. Everything else works without JavaScript. No page references anything outside this binary. The server serves the CSS and the scripts from `/auth/`.
 //! The server puts the icon sprite into the HTML, reduced to the symbols that the page draws.
 //!
 //! The cost of a page for the browser is a design input. A page carries only what it shows. The

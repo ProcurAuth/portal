@@ -2486,6 +2486,91 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
 }
 
 #[test]
+fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_service_box_goes() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        publish_catalog(&node, &["query.run.read", "query.run.write"]);
+        publish_hosts(&node);
+        let root = sign_in(&node, "root", PASSWORD);
+        let grants_of = |login: &str| -> Vec<String> {
+            node.state
+                .users
+                .grants_of(login)
+                .unwrap()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let local = "r.query.run.read+on+service%3Adb%2Fhost%3Alocal=1";
+        let replica = "r.query.run.read+on+service%3Adb%2Fhost%3Areplica=1";
+        // The page shows the hosts ticked when the whole service is ticked, so the form sends all
+        // three boxes. The account keeps the grant on the whole service only.
+        let reply = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            &format!(
+                "login=alice&password=a-long-password-1&g.db.query.run.read=1&{local}&{replica}"
+            ),
+        );
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/users/alice?s=user-added-access")
+        );
+        assert_eq!(grants_of("alice"), ["query.run.read on service:db"]);
+        let update = |fields: &str| {
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                &format!("grants=1&login=alice&{fields}"),
+            )
+            .location()
+            .map(str::to_string)
+        };
+        // The whole service is unticked and one host stays ticked: the grant is now on that host.
+        assert_eq!(
+            update(replica),
+            Some("/auth/settings/users/alice?s=user-updated".into())
+        );
+        assert_eq!(
+            grants_of("alice"),
+            ["query.run.read on service:db/host:replica"]
+        );
+        // The page shows the replica ticked as a grant of its own, and the local host not ticked.
+        let page = page(&node, &root, "/auth/settings/users/alice");
+        assert!(page.body.contains(r#"name="r.query.run.read on service:db/host:replica" value="1" data-action="query.run.read" data-path="host:replica" checked"#));
+        assert!(page.body.contains(r#"name="r.query.run.read on service:db/host:local" value="1" data-action="query.run.read" data-path="host:local">"#));
+        // Ticking the whole service on the page shows every host ticked, with no grant of its own.
+        assert_eq!(
+            update("g.db.query.run.read=1").as_deref(),
+            Some("/auth/settings/users/alice?s=user-updated")
+        );
+        assert_eq!(grants_of("alice"), ["query.run.read on service:db"]);
+        let page = self::page(&node, &root, "/auth/settings/users/alice");
+        assert_eq!(
+            page.body
+                .matches(r#"data-action="query.run.read" data-path="host:"#)
+                .count(),
+            2
+        );
+        assert_eq!(
+            page.body
+                .matches(r#"data-path="host:local" checked"#)
+                .count()
+                + page
+                    .body
+                    .matches(r#"data-path="host:replica" checked"#)
+                    .count(),
+            2,
+            "both hosts show ticked: the whole service covers them"
+        );
+    });
+}
+
+#[test]
 fn in_the_static_mode_the_add_form_cannot_give_access() {
     let node = start_with(
         Arc::new(Backend::Sqlite.fresh()),

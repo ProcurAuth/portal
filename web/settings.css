@@ -600,7 +600,8 @@ div.perm__head {
   color: var(--muted);
 }
 
-.perm[open] .perm__chevron {
+.perm[open] > .perm__head .perm__chevron,
+.perm__node[open] > .perm__nodehead .perm__chevron {
   transform: rotate(90deg);
 }
 
@@ -664,11 +665,9 @@ div.perm__head {
   font-weight: 600;
 }
 
-/* One resource that the service names, such as a host, with the actions that apply on it. */
+/* One resource that the service names, such as a host: it opens on the actions that apply on it. */
 .perm__node {
   display: grid;
-  gap: 4px;
-  padding: 6px 0 0 10px;
   border-top: 1px solid var(--row-divider);
 }
 
@@ -682,8 +681,21 @@ div.perm__head {
 }
 
 .perm__nodehead {
-  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: var(--s-row-compact);
   font-size: 13px;
+  cursor: pointer;
+}
+
+.perm__nodehead:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: -2px;
+}
+
+.perm__node .perm__actions {
+  padding: 2px 0 6px 18px;
 }
 
 .perm__res {
@@ -1544,6 +1556,7 @@ div.perm__head {
   .chip,
   .option,
   .perm__head,
+  .perm__nodehead,
   .perm__action,
   .linkButton {
     min-height: 44px;
