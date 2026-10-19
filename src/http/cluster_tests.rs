@@ -2511,14 +2511,17 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
             USERS_ADD_PATH,
             USERS_TOKEN,
             &format!(
-                "login=alice&password=a-long-password-1&g.db.query.run.read=1&{local}&{replica}"
+                "login=alice&password=a-long-password-1&g.db.access=1&g.db.query.run.read=1&{local}&{replica}"
             ),
         );
         assert_eq!(
             reply.location(),
             Some("/auth/settings/users/alice?s=user-added-access")
         );
-        assert_eq!(grants_of("alice"), ["query.run.read on service:db"]);
+        assert_eq!(
+            grants_of("alice"),
+            ["access on service:db", "query.run.read on service:db"]
+        );
         let update = |fields: &str| {
             post(
                 &node,
@@ -2532,12 +2535,15 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
         };
         // The whole service is unticked and one host stays ticked: the grant is now on that host.
         assert_eq!(
-            update(replica),
+            update(&format!("g.db.access=1&{replica}")),
             Some("/auth/settings/users/alice?s=user-updated".into())
         );
         assert_eq!(
             grants_of("alice"),
-            ["query.run.read on service:db/host:replica"]
+            [
+                "access on service:db",
+                "query.run.read on service:db/host:replica"
+            ]
         );
         // The page shows the replica ticked as a grant of its own, and the local host not ticked.
         let page = page(&node, &root, "/auth/settings/users/alice");
@@ -2545,10 +2551,13 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
         assert!(page.body.contains(r#"name="r.query.run.read on service:db/host:local" value="1" data-action="query.run.read" data-path="host:local">"#));
         // Ticking the whole service on the page shows every host ticked, with no grant of its own.
         assert_eq!(
-            update("g.db.query.run.read=1").as_deref(),
+            update("g.db.access=1&g.db.query.run.read=1").as_deref(),
             Some("/auth/settings/users/alice?s=user-updated")
         );
-        assert_eq!(grants_of("alice"), ["query.run.read on service:db"]);
+        assert_eq!(
+            grants_of("alice"),
+            ["access on service:db", "query.run.read on service:db"]
+        );
         let page = self::page(&node, &root, "/auth/settings/users/alice");
         assert_eq!(
             page.body

@@ -9,6 +9,9 @@
       other hosts keep their own boxes, and every host ticked one by one ticks the whole service.
       A box that is disabled does not change. Without this script, the server drops the grants
       that a broader grant covers when it saves.
+      The box `access` of a card locks the other boxes of the card: without it they are unticked
+      and disabled. A box without a name belongs to the configuration and stays as it is.
+      The count of a card and of a host (ticked/total) follows the boxes.
 
    2. "Generate" in the user forms of the Users settings page: a random password drawn from the browser's
    CSPRNG (rejection sampling, so every character is equally likely), shown in clear so it can be
@@ -34,12 +37,38 @@
     return other.length > path.length && (path === "" || other.indexOf(path + "/") === 0);
   }
 
+  function recount(scope) {
+    var head = scope.querySelector(":scope > summary .perm__n");
+    if (!head) return;
+    var all = scope.querySelectorAll('input[type="checkbox"]');
+    var ticked = 0;
+    for (var i = 0; i < all.length; i += 1) if (all[i].checked) ticked += 1;
+    head.textContent = ticked + "/" + all.length;
+  }
+
+  function recountCard(card) {
+    recount(card);
+    var nodes = card.querySelectorAll(".perm__node");
+    for (var i = 0; i < nodes.length; i += 1) recount(nodes[i]);
+  }
+
   document.addEventListener("change", function (event) {
     var box = event.target;
     if (!box || !box.hasAttribute || !box.hasAttribute("data-action")) return;
     var card = box.closest(".perm");
     if (!card) return;
     var action = box.getAttribute("data-action");
+    if (action === "access" && (box.getAttribute("data-path") || "") === "") {
+      // The box `access`: it locks and unlocks the other boxes of the card.
+      var rest = card.querySelectorAll('input[type="checkbox"][name]');
+      for (var r = 0; r < rest.length; r += 1) {
+        if (rest[r] === box) continue;
+        if (!box.checked) rest[r].checked = false;
+        rest[r].disabled = !box.checked;
+      }
+      recountCard(card);
+      return;
+    }
     var path = box.getAttribute("data-path") || "";
     var boxes = card.querySelectorAll("input[data-action]");
     for (var i = 0; i < boxes.length; i += 1) {
@@ -49,7 +78,10 @@
       if (below(path, there)) other.checked = box.checked;
       else if (!box.checked && below(there, path)) other.checked = false;
     }
-    if (!box.checked) return;
+    if (!box.checked) {
+      recountCard(card);
+      return;
+    }
     // The nodes above, from the nearest: each one ticks when every node below it is ticked.
     var above = [];
     for (var j = 0; j < boxes.length; j += 1) {
@@ -71,6 +103,7 @@
       if (!all) break;
       above[k].checked = true;
     }
+    recountCard(card);
   });
 
   document.addEventListener("click", function (event) {
