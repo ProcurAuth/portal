@@ -1,28 +1,40 @@
 /* portal: the rules only the settings pages use. The page loads portal.css first: the colour tokens,
    the header, the buttons and the theme selector come from there; the launcher and the login page never
    load this file.
-   The language follows clickhouse-dash: a row of underlined tab links under the header, then parts with a
-   sentence-case title and a muted count, hairline tables, pill badges for states, one blue accent.
-   Shape rule: parts 14px (the launcher rows), cards and service boxes 10px (the launcher tiles), fields,
-   buttons and rows 8px, badges and status pills fully round. Type steps: 20 / 16 / 14 / 13 / 12px. */
+   The density and the patterns follow clickhouse-dash: parts are flat regions with a 32px heading row,
+   data sits in hairline tables of 32px rows, chips and check boxes stay small, and descriptions live in a
+   title or a muted line. Scale: rows 32 (26 compact), controls 28 (24 small), cell padding 0 8px,
+   text 13 / 12 / 11px, titles 16px, radii 8 (side block), 6 (tables, fields, buttons), 4 (chips,
+   badges), round for status pills. Under a coarse pointer every control reaches 44px. */
 
 :root {
+  --s-row: 32px;
+  --s-row-compact: 26px;
+  --s-control: 28px;
+  --s-control-sm: 24px;
+  --s-pad-x: 8px;
+  --s-r-sm: 4px;
+  --s-r-md: 6px;
+  --s-r-lg: 8px;
   --selected-bg: rgba(53, 111, 230, 0.22);
   --danger-fill: #dc2626;
   --danger-fill-hover: #c21f1f;
   --row-hover: rgba(255, 255, 255, 0.03);
+  --row-divider: rgba(255, 255, 255, 0.06);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     --selected-bg: rgba(37, 88, 217, 0.12);
     --row-hover: rgba(15, 18, 25, 0.03);
+    --row-divider: rgba(15, 18, 25, 0.07);
   }
 }
 
 :root[data-theme="light"] {
   --selected-bg: rgba(37, 88, 217, 0.12);
   --row-hover: rgba(15, 18, 25, 0.03);
+  --row-divider: rgba(15, 18, 25, 0.07);
 }
 
 /* Skip link: the first stop of the Tab order, out of sight until it has the focus. */
@@ -31,8 +43,8 @@
   top: 8px;
   left: 8px;
   z-index: 10;
-  padding: 8px 12px;
-  border-radius: var(--radius-control);
+  padding: 6px 10px;
+  border-radius: var(--s-r-md);
   background: var(--accent-fill);
   color: var(--on-fill);
   font-weight: 600;
@@ -69,11 +81,12 @@
   display: inline-flex;
   flex: none;
   align-items: center;
-  height: 40px;
+  height: 36px;
   padding: 0 12px;
   margin-bottom: -1px;
   border-bottom: 2px solid transparent;
   color: var(--muted);
+  font-size: 13px;
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
@@ -92,10 +105,11 @@
 
 .settings {
   display: grid;
-  gap: 20px;
+  gap: 24px;
   max-width: var(--page-width);
   margin: 0 auto;
-  padding: 20px 24px 64px;
+  padding: 16px 24px 48px;
+  font-size: 13px;
 }
 
 .settings:focus {
@@ -109,7 +123,7 @@
 
 .settings code {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .settings var {
@@ -121,14 +135,17 @@
   color: var(--muted);
 }
 
-.hint {
-  font-size: 13px;
+.settings .hint {
+  margin: 0;
+  font-size: 12px;
 }
 
 .settings .notice {
   width: auto;
   margin: 0;
-  border-radius: var(--radius-tile);
+  padding: 6px 10px;
+  border-radius: var(--s-r-md);
+  font-size: 13px;
 }
 
 .notice--ok {
@@ -141,21 +158,19 @@
   color: var(--danger);
 }
 
-/* A part: a heading row (title, count, its own controls) over its body. */
+/* A part: a flat region. A heading row (title, count, its own controls), one muted line, then data. */
 .part {
+  display: grid;
+  gap: 8px;
   min-width: 0;
-  padding: 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
 }
 
 .part__head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
-  min-height: 34px;
+  gap: 4px 12px;
+  min-height: 32px;
 }
 
 .part__title {
@@ -167,7 +182,7 @@
 
 .part__count {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -179,112 +194,72 @@
 }
 
 .part__lede {
-  max-width: 78ch;
-  margin: 4px 0 16px;
+  max-width: 110ch;
+  margin: -4px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.part--warn {
+.part--warn .part__title {
+  color: color-mix(in srgb, var(--warning) 80%, var(--text));
+}
+
+.part--warn .tableBox {
   border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
 }
 
-.part--danger {
-  padding: 16px 20px;
-  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+.subTitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
+.empty {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--s-r-md);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* A one-line message above data: a refused count, a mode of the grants. */
+.alertLine {
+  margin: 0;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--s-r-md);
+  background: var(--danger-bg);
+  font-size: 12px;
+}
+
+.alertLine strong {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.alertLine--info {
+  border-color: var(--border);
+  background: var(--raised);
+  color: var(--muted);
+}
+
+/* The end of the Users page: a quiet row, not a card. */
 .dangerRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px 24px;
+  gap: 8px 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
-.dangerRow .hint {
-  margin: 4px 0 0;
-}
-
-.subTitle,
-.groupLabel {
-  margin: 0 0 8px;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.groupLabel {
-  margin-top: 20px;
-}
-
-.groupLabel:first-of-type {
-  margin-top: 4px;
-}
-
-.empty {
+.dangerRow__title {
   margin: 0;
-  padding: 16px;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-tile);
-  color: var(--muted);
   font-size: 13px;
-}
-
-.callout {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-tile);
-  background: var(--raised);
-  font-size: 13px;
-}
-
-.callout .icon {
-  width: 16px;
-  height: 16px;
-  margin-top: 1px;
-}
-
-.callout--danger {
-  display: block;
-  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
-  background: var(--danger-bg);
-}
-
-.callout--danger strong {
-  color: var(--danger);
-}
-
-.callout--warn {
-  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
-  background: var(--warning-bg);
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-}
-
-.box {
-  min-width: 0;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-tile);
-  background: var(--raised);
-}
-
-.box__title {
-  margin: 0 0 12px;
-  font-size: 14px;
   font-weight: 600;
-}
-
-.box--danger {
-  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
-}
-
-.box--danger .hint {
-  margin: 0 0 12px;
 }
 
 .split {
@@ -292,24 +267,25 @@
   gap: 16px;
 }
 
-/* Badges: a word for a state or a count. A state never shows by colour alone. */
-.badges {
-  display: inline-flex;
-  flex-wrap: wrap;
+.split__col {
+  display: grid;
+  align-content: start;
   gap: 6px;
+  min-width: 0;
 }
 
+/* Badges: a word for a count or a state. A state never shows by colour alone. */
 .badge {
   --badge-color: var(--muted);
   display: inline-flex;
   align-items: center;
-  height: 22px;
-  padding: 0 8px;
+  height: 18px;
+  padding: 0 6px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--s-r-sm);
   background: color-mix(in srgb, var(--muted) 8%, transparent);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -318,17 +294,13 @@
   vertical-align: middle;
 }
 
-.badge--accent,
 .badge--ok,
 .badge--warn,
 .badge--danger {
   border-color: color-mix(in srgb, var(--badge-color) 42%, transparent);
+  border-radius: 999px;
   background: color-mix(in srgb, var(--badge-color) 12%, transparent);
   color: var(--badge-color);
-}
-
-.badge--accent {
-  --badge-color: var(--accent-text);
 }
 
 .badge--ok {
@@ -345,27 +317,25 @@
   color: color-mix(in srgb, var(--warning) 80%, var(--text));
 }
 
-.settings .badge--link {
-  color: var(--text);
-}
-
-.settings .badge--link:hover,
 .settings a.badge--warn:hover {
-  border-color: var(--accent-text);
+  border-color: var(--warning);
 }
 
 /* Buttons --------------------------------------------------------------------------------- */
 
 .settings .button {
-  height: 34px;
-  padding: 0 14px;
+  height: var(--s-control);
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: var(--s-r-md);
   font-size: 13px;
+  font-weight: 500;
 }
 
 .settings .button--small {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12.5px;
+  height: var(--s-control-sm);
+  padding: 0 8px;
+  font-size: 12px;
 }
 
 .button--ghost {
@@ -402,9 +372,25 @@
   background: var(--danger-fill-hover);
 }
 
+/* A disclosure that reads as a link: "Add a grant on a resource of …". */
+.linkButton {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--s-control-sm);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.linkButton:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .formActions {
   display: flex;
   flex-wrap: wrap;
+  align-items: end;
   gap: 8px;
 }
 
@@ -422,19 +408,20 @@ details > summary::-webkit-details-marker {
 }
 
 .confirm__panel {
-  display: grid;
-  justify-items: start;
-  gap: 10px;
-  margin-top: 10px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--panel);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--s-r-md);
+  background: var(--danger-bg);
 }
 
 .confirm__panel p {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* Fields ---------------------------------------------------------------------------------- */
@@ -442,17 +429,15 @@ details > summary::-webkit-details-marker {
 .field {
   display: grid;
   align-content: start;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .field__label {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.field .hint {
   margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* An empty live region stays in the page (so it is announced when it fills) but takes no room. */
@@ -469,10 +454,10 @@ details > summary::-webkit-details-marker {
 .settings input[type="password"],
 .settings select {
   width: 100%;
-  height: 34px;
-  padding: 0 10px;
+  height: var(--s-control);
+  padding: 0 8px;
   border: 1px solid var(--input-border);
-  border-radius: var(--radius-control);
+  border-radius: var(--s-r-md);
   background: var(--inset);
   color: var(--text);
   caret-color: var(--accent-text);
@@ -488,15 +473,16 @@ details > summary::-webkit-details-marker {
 }
 
 .settings input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 2px 0 0;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
   accent-color: var(--accent-fill);
 }
 
 .passwordRow {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 
 .passwordRow input {
@@ -516,64 +502,74 @@ details > summary::-webkit-details-marker {
 
 .addUser {
   display: grid;
-  gap: 12px;
-  margin: 0 0 16px;
-  border-color: color-mix(in srgb, var(--accent-fill) 40%, var(--border));
-}
-
-.addUser .box__title {
-  margin: 0;
-}
-
-.addUser .hint {
-  margin: 0;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-fill) 40%, var(--border));
+  border-radius: var(--s-r-lg);
+  background: var(--panel);
 }
 
 .addUser__fields {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: minmax(0, 14rem) minmax(0, 22rem) auto;
   align-items: start;
-  gap: 12px;
+  gap: 8px 12px;
 }
 
-/* Tables ---------------------------------------------------------------------------------- */
+.addUser .formActions {
+  padding-top: 20px;
+}
+
+/* Tables: hairline box, 32px rows, 0 8px cells, a 12px semibold head ------------------------ */
 
 .tableBox {
+  max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius-tile);
+  border-radius: var(--s-r-md);
+  background: var(--panel);
 }
 
 .table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
 .table th,
 .table td {
-  padding: 10px 12px;
+  height: var(--s-row);
+  padding: 0 var(--s-pad-x);
+  border-bottom: 1px solid var(--row-divider);
   text-align: left;
   vertical-align: middle;
-}
-
-.table thead th {
-  border-bottom: 1px solid var(--border);
-  background: var(--raised);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
   white-space: nowrap;
 }
 
-.table tbody tr + tr > * {
-  border-top: 1px solid var(--border);
+.table thead th {
+  border-bottom-color: var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.table tbody:last-child tr:last-child > * {
+  border-bottom-color: transparent;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .table tbody tr:hover > * {
     background: var(--row-hover);
+  }
+
+  .table tbody tr.groupRow:hover > * {
+    background: var(--raised);
+  }
+
+  .table tbody tr.subRow:hover > * {
+    background: transparent;
   }
 }
 
@@ -585,41 +581,84 @@ details > summary::-webkit-details-marker {
   text-align: right;
 }
 
+/* A table whose cells may wrap (long grants, problems). */
+.table.wrap td,
+.servicesTable td,
+.servicesTable tbody th {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  white-space: normal;
+}
+
 .num--danger {
   color: var(--danger);
   font-weight: 600;
 }
 
-.accountLink {
+.settings .accountLink {
+  color: var(--text);
   font-weight: 600;
 }
 
-.settings .accountLink {
-  color: var(--text);
-}
-
-.accountLink:hover {
+.settings .accountLink:hover {
   color: var(--accent-text);
 }
 
-/* What a visitor typed is shown as the data it is: monospace, wrapped, never reordered. */
+.access strong {
+  font-weight: 600;
+}
+
+/* A group of services inside a table: a quiet heading row. */
+.table .groupRow th {
+  height: var(--s-row-compact);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* What a visitor typed is shown as the data it is: monospace, never reordered. */
 .typed {
   unicode-bidi: isolate;
-  overflow-wrap: anywhere;
 }
 
 .grantText {
   overflow-wrap: anywhere;
 }
 
+.table.events {
+  font-size: 12px;
+}
+
+.events__what {
+  font-weight: 500;
+}
+
+.events__row--danger .events__what {
+  color: var(--danger);
+}
+
 /* Account page ---------------------------------------------------------------------------- */
 
-.crumbs {
+.userHead {
+  display: grid;
+  gap: 4px;
+}
+
+.userHead__main {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 32px;
+}
+
+.crumbs {
+  display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 13px;
   color: var(--muted);
+  font-size: 16px;
 }
 
 .crumbs .icon {
@@ -627,61 +666,47 @@ details > summary::-webkit-details-marker {
   height: 14px;
 }
 
-.crumbs [aria-current] {
-  color: var(--text);
-  font-weight: 600;
+.settings .crumbs a {
+  color: var(--muted);
+  text-decoration: none;
 }
 
-.userHead {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px 16px;
-  padding: 4px 4px 0;
-}
-
-.userHead__id {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
+.settings .crumbs a:hover {
+  color: var(--accent-text);
+  text-decoration: underline;
 }
 
 .userHead__name {
-  margin: 0;
-  font-size: 20px;
+  margin: 0 0 0 -6px;
+  font-size: 16px;
   font-weight: 600;
-  letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
 .userHead__action {
-  margin: 0;
+  margin: 0 0 0 auto;
 }
 
+/* The facts of an account: one muted line of label and value pairs. */
 .facts {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
   margin: 0;
+  font-size: 12px;
 }
 
 .facts div {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--panel);
+  display: flex;
+  gap: 6px;
 }
 
 .facts dt {
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
 }
 
 .facts dd {
-  margin: 2px 0 0;
+  margin: 0;
   font-variant-numeric: tabular-nums;
 }
 
@@ -690,228 +715,177 @@ details > summary::-webkit-details-marker {
   font-weight: 600;
 }
 
-/* One service of an account: a box that opens on what the account holds. A service the account holds
-   nothing of is dashed, like an empty slot. */
-.svcList {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-  gap: 8px;
+/* The access of an account: one row for each service, then a row of its grants on resources. */
+.grantsTable .grantsTable__open {
+  width: 4.5rem;
+  text-align: center;
 }
 
-.svc {
-  min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-tile);
-  background: var(--raised);
-}
-
-.svc:not([open]):not(:has(.badge--accent)) {
-  border-style: dashed;
-  background: transparent;
-}
-
-.svc__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  min-height: 44px;
-  padding: 8px 12px;
-}
-
-.svc__chevron {
-  width: 16px;
-  height: 16px;
-  color: var(--muted);
-  transition: transform 0.16s var(--ease);
-}
-
-.svc[open] > .svc__head .svc__chevron {
-  transform: rotate(90deg);
-}
-
-.svc__name {
+.svcRow__name {
   font-weight: 600;
 }
 
-.svc__state {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  margin-left: auto;
-  font-size: 13px;
-}
-
-.svc__count {
+.settings .svcRow__id {
   color: var(--muted);
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.svc__body {
-  display: grid;
-}
-
-.node {
-  min-width: 0;
-  margin: 0;
-  padding: 12px 14px 14px;
-  border: 0;
-  border-top: 1px solid var(--border);
-}
-
-.node__title {
-  float: left;
-  width: 100%;
-  margin: 0 0 10px;
-  padding: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.node__title + * {
-  clear: both;
-}
-
-.node__title code {
-  margin-left: 6px;
+  white-space: nowrap;
+  font-size: 11px;
   font-weight: 400;
 }
 
-.checks {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
-  gap: 4px 12px;
+.svcRow:not(.is-open) .svcRow__name {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.grantsTable td[data-label="Actions"] {
+  white-space: normal;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .check {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: var(--radius-control);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   cursor: pointer;
 }
 
-.check:hover {
-  background: var(--row-hover);
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  vertical-align: middle;
 }
 
-.check:has(input:checked) {
+/* An action of a service: a small chip with its box. The description is the title of the chip. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 7px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-sm);
+  background: var(--inset);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  border-color: var(--border-strong);
+}
+
+.chip:has(input:checked) {
+  border-color: var(--accent-fill);
   background: var(--selected-bg);
 }
 
-.check:has(input:disabled) {
+.chip:has(input:disabled) {
   cursor: default;
 }
 
-.check__text {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
+.chip:has(input:focus-visible) {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 1px;
 }
 
-.settings .check__name {
-  font-size: 13px;
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-
-.check__desc {
-  color: var(--muted);
+.settings .chip code {
   font-size: 12px;
 }
 
-.check input:disabled + .check__text .check__name {
+.chip input:disabled + code {
   color: var(--muted);
 }
 
-/* The grants of an account on the resource tree: one row each, written as its path. */
-.tree {
+/* A tag: an action name on the Services page, read-only. */
+.settings .tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-sm);
+  background: var(--inset);
+  font-size: 12px;
+}
+
+.table .subRow > td {
+  height: auto;
+  padding: 0 var(--s-pad-x) 6px 24px;
+  white-space: normal;
+}
+
+.subRow__body {
   display: grid;
-  gap: 6px;
-  margin: 0 0 10px;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-strong);
+}
+
+.grantRows {
+  display: grid;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.tree__row {
+/* One grant on a resource: one dense row. */
+.grantRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 8px;
-  padding: 6px 6px 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  font-size: 13px;
+  gap: 2px 8px;
+  min-height: var(--s-row-compact);
+  font-size: 12px;
 }
 
-.tree__row--warn {
-  border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
+.grantRow + .grantRow {
+  border-top: 1px solid var(--row-divider);
 }
 
-.settings .tree__action {
-  font-size: 13px;
-  font-weight: 500;
+.settings .grantRow__action {
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.tree__on,
-.tree__below {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.tree__end {
+.grantRow__end {
   margin: 0 0 0 auto;
 }
 
-.tree__problem {
-  display: flex;
-  flex-basis: 100%;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 2px 0 2px;
+.grantRow__problem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: color-mix(in srgb, var(--warning) 80%, var(--text));
-  font-size: 12.5px;
 }
 
-.tree__problem .icon {
-  width: 15px;
-  height: 15px;
-  margin-top: 1px;
+.grantRow__problem .icon,
+.cellWarn .icon {
+  width: 14px;
+  height: 14px;
   flex: none;
+}
+
+.grantRow--warn .grantRow__action {
+  color: color-mix(in srgb, var(--warning) 80%, var(--text));
 }
 
 .path {
   display: inline-flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-}
-
-.path__seg {
-  display: inline-flex;
   align-items: baseline;
   gap: 4px;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--raised);
 }
 
 .path__type {
   color: var(--muted);
-  font-size: 12px;
 }
 
 .settings .path__id {
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -919,28 +893,28 @@ details > summary::-webkit-details-marker {
   color: var(--muted);
 }
 
-.addGrant > summary {
-  width: fit-content;
-}
-
 .addGrant__forms {
   display: grid;
-  gap: 10px;
-  margin-top: 10px;
+  gap: 4px;
+  margin: 4px 0 2px;
 }
 
+/* One add form on one line: the path it gives, the action, one id for each level, Add. */
 .addGrant__form {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 4px 8px;
+  padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--panel);
+  border-radius: var(--s-r-md);
+  background: var(--raised);
 }
 
 .addGrant__level {
+  flex-basis: 100%;
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .addGrant__level code {
@@ -949,22 +923,15 @@ details > summary::-webkit-details-marker {
   overflow-wrap: anywhere;
 }
 
-.addGrant__fields {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 8px 12px;
+.addGrant__form .field {
+  flex: 0 1 12rem;
 }
 
-.addGrant__fields .field {
-  flex: 1 1 160px;
-}
-
-.addGrant__fields .button {
+.addGrant__form .button {
   flex: none;
 }
 
-/* The save button of the boxes stays in view while the access part scrolls past. */
+/* The save button of the boxes stays in view while the access table scrolls past. */
 .saveBar {
   position: sticky;
   bottom: 0;
@@ -972,41 +939,47 @@ details > summary::-webkit-details-marker {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
-  margin: 16px -20px -20px;
-  padding: 12px 20px;
+  gap: 4px 12px;
+  padding: 6px 0;
   border-top: 1px solid var(--border);
-  border-radius: 0 0 var(--radius-panel) var(--radius-panel);
-  background: var(--panel);
+  background: var(--bg);
 }
 
-.saveBar .hint {
-  margin: 0;
+/* Password and deletion of an account, side by side. */
+.accountRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 12px 32px;
+}
+
+.accountRow__password {
+  display: flex;
+  flex: 0 1 34rem;
+  flex-wrap: nowrap;
+  align-items: start;
+  gap: 8px;
+}
+
+.accountRow__password .field {
+  width: min(100%, 24rem);
+}
+
+.accountRow__password > .button {
+  margin-top: 20px;
+}
+
+.accountRow__delete {
+  display: grid;
+  gap: 4px;
 }
 
 /* Graphs ---------------------------------------------------------------------------------- */
 
-.chart {
-  display: grid;
-  gap: 10px;
-  margin: 0 0 16px;
-}
-
-.chart__text {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.chart__text strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
 .spark {
   display: block;
   width: 100%;
-  height: 48px;
+  height: 32px;
 }
 
 .spark__bar {
@@ -1026,117 +999,37 @@ details > summary::-webkit-details-marker {
 
 /* Services -------------------------------------------------------------------------------- */
 
-.model {
-  display: grid;
-  gap: 8px;
-  margin: 0;
+.servicesTable td,
+.servicesTable tbody th {
+  vertical-align: top;
 }
 
-.model__row {
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--raised);
+.servicesTable tbody th[scope="row"] {
+  width: 24%;
+  min-width: 12rem;
 }
 
-.model dt {
-  font-weight: 600;
+.servicesTable td[data-label="Opened by"] {
+  min-width: 8rem;
 }
 
-.settings .model dt code {
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.model dd {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.svcGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
-  align-items: start;
-  gap: 10px;
-}
-
-.svcCard {
-  display: grid;
-  gap: 10px;
-}
-
-.svcCard__head {
+.cellWarn {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
-}
-
-.svcCard__name {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.svcCard__id {
-  color: var(--muted);
-}
-
-.svcCard__path {
-  margin: -6px 0 0;
-  color: var(--muted);
-}
-
-.svcCard .callout {
-  margin: 0;
-}
-
-.kv {
-  display: grid;
-  gap: 10px;
-  margin: 0;
-}
-
-.kv > div {
-  display: grid;
+  max-width: 110ch;
+  align-items: flex-start;
   gap: 4px;
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--warning) 80%, var(--text));
+  font-size: 12px;
+  font-weight: 400;
+  white-space: normal;
 }
 
-.kv dt {
+.cellNote {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
-  font-weight: 600;
-}
-
-.kv dd {
-  min-width: 0;
-  margin: 0;
-  font-size: 13px;
-}
-
-.actionList {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.actionList li {
-  display: grid;
-  gap: 1px;
-}
-
-.actionList li > span {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.settings .actionList code {
-  font-weight: 500;
 }
 
 .typeTree,
@@ -1147,45 +1040,84 @@ details > summary::-webkit-details-marker {
 }
 
 .typeTree ul {
-  margin: 4px 0 0 6px;
-  padding-left: 12px;
+  margin: 2px 0 0 4px;
+  padding-left: 10px;
   border-left: 1px solid var(--border-strong);
 }
 
 .typeTree li + li {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
-.rule {
-  display: block;
+/* A side block of a page (How a grant reads), as the side column of clickhouse-dash. */
+.side {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-lg);
+  background: var(--panel);
+}
+
+.side .part__title {
+  font-size: 14px;
+}
+
+.side .part__head {
+  min-height: 24px;
+}
+
+.model {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.model dt {
+  margin-top: 6px;
+  font-weight: 600;
+}
+
+.settings .model dt code {
   overflow-wrap: anywhere;
+}
+
+.model dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* Activity -------------------------------------------------------------------------------- */
 
+/* The figures of the page: one hairline strip, not a row of tiles. */
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--s-r-md);
+  background: var(--panel);
 }
 
 .stat {
   display: grid;
-  gap: 4px;
-  padding: 12px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-tile);
-  background: var(--panel);
+  gap: 2px;
+  padding: 6px 12px;
+}
+
+.stat + .stat {
+  border-left: 1px solid var(--border);
 }
 
 .stat__label {
   color: var(--muted);
   font-size: 12px;
-  font-weight: 600;
 }
 
 .stat__value {
-  font-size: 20px;
+  margin: 0;
+  font-size: 16px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -1196,7 +1128,7 @@ details > summary::-webkit-details-marker {
 
 .layout {
   display: grid;
-  gap: 20px;
+  gap: 24px;
   min-width: 0;
 }
 
@@ -1204,40 +1136,8 @@ details > summary::-webkit-details-marker {
 .layout__side {
   display: grid;
   align-content: start;
-  gap: 20px;
+  gap: 24px;
   min-width: 0;
-}
-
-.events {
-  display: grid;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.events__row {
-  display: grid;
-  gap: 2px;
-  padding: 8px 0;
-}
-
-.events__row + .events__row {
-  border-top: 1px solid var(--border);
-}
-
-.events__what {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.events__row--danger .events__what {
-  color: var(--danger);
-}
-
-.events__meta {
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* Two links that behave as one control: the current one sits on the selected fill with an accent edge. */
@@ -1246,19 +1146,19 @@ details > summary::-webkit-details-marker {
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-control);
+  border-radius: var(--s-r-md);
   background: var(--inset);
 }
 
 .settings .segmented__option {
   display: inline-flex;
   align-items: center;
-  height: 28px;
-  padding: 0 12px;
+  height: 22px;
+  padding: 0 8px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--s-r-sm);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   text-decoration: none;
 }
@@ -1278,37 +1178,24 @@ details > summary::-webkit-details-marker {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  margin-top: 12px;
-}
-
-.inbox .hint {
-  margin: 0;
 }
 
 /* Wide windows ---------------------------------------------------------------------------- */
 
 @media (min-width: 1101px) {
-  .svcList {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .split {
     grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-  }
-
-  .model {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1280px) {
   .layout {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 26rem);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 27rem);
     align-items: start;
   }
 }
 
-/* Phones: a table of records becomes one card for each row; each cell carries its column name. */
+/* Phones: a table of records becomes one block for each row; each cell carries its column name. */
 @media (max-width: 760px) {
   .contentTabs,
   .settings {
@@ -1316,21 +1203,17 @@ details > summary::-webkit-details-marker {
     padding-right: 16px;
   }
 
-  .part {
-    padding: 16px;
-  }
-
-  .saveBar {
-    margin: 16px -16px -16px;
-    padding: 12px 16px;
-  }
-
-  .userHead {
+  .addUser__fields {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .addUser .formActions {
+    padding-top: 0;
+  }
+
   .accounts thead,
-  .stack thead {
+  .stack thead,
+  .grantsTable thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1340,71 +1223,105 @@ details > summary::-webkit-details-marker {
 
   .accounts,
   .accounts tbody,
-  .accounts tr,
   .stack,
   .stack tbody,
-  .stack tr {
+  .grantsTable,
+  .grantsTable tbody {
     display: block;
   }
 
   .accounts tr,
-  .stack tr {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 8px 12px;
-    padding: 12px;
-  }
-
-  .accounts tr + tr,
-  .stack tr + tr {
-    border-top: 1px solid var(--border);
-  }
-
-  .table.accounts tbody tr + tr > *,
-  .table.stack tbody tr + tr > * {
-    border-top: 0;
-  }
-
-  .accounts td,
-  .stack th,
-  .stack td {
-    display: grid;
-    justify-items: start;
-    gap: 2px;
-    padding: 0;
-    text-align: left;
-  }
-
-  .accounts tbody th {
+  .stack tr,
+  .grantsTable tr {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
+    align-items: baseline;
+    gap: 2px 12px;
+    padding: 8px var(--s-pad-x);
+    border-bottom: 1px solid var(--row-divider);
+  }
+
+  .table.accounts tbody tr > *,
+  .table.stack tbody tr > *,
+  .table.grantsTable tbody tr > * {
+    height: auto;
     padding: 0;
+    border: 0;
+    white-space: normal;
   }
 
   .accounts th,
+  .stack th[scope="row"],
+  .grantsTable th[scope="row"],
+  .stack .groupRow th,
+  .grantsTable .groupRow th,
   .accounts td[data-label="Access"],
   .stack td[data-label="Grant"],
   .stack td[data-label="Problem"],
-  .stack td[data-label="Browser"] {
-    grid-column: 1 / -1;
+  .grantsTable td[data-label="Actions"],
+  .stack td[data-label="Actions"],
+  .grantsTable .subRow > td,
+  .stack .subRow > td {
+    flex-basis: 100%;
+  }
+
+  .stack .groupRow,
+  .grantsTable .groupRow {
+    background: var(--raised);
   }
 
   .accounts td::before,
   .stack td::before {
-    content: attr(data-label);
+    content: attr(data-label) " ";
     color: var(--muted);
     font-size: 12px;
-    font-weight: 600;
   }
 
-  .accounts td[data-label="Access"]::before {
+  .accounts td[data-label="Access"]::before,
+  .stack td[data-label="Actions"]::before {
     content: none;
   }
 
-  .table.accounts .num {
+  .grantsTable .grantsTable__open {
+    width: auto;
+    order: 1;
+  }
+
+  .grantsTable td[data-label="On resources"] {
+    order: 2;
+  }
+
+  .grantsTable td[data-label="Actions"] {
+    order: 3;
+  }
+
+  .grantsTable td[data-label="Open"]::before,
+  .grantsTable td[data-label="On resources"]::before {
+    content: attr(data-label) " ";
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .grantsTable td[data-label="Open"] {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .accountRow__password {
+    flex-wrap: wrap;
+  }
+
+  .grantsTable .subRow {
+    padding-top: 0;
+  }
+
+  .table .num {
     text-align: left;
+  }
+
+  .stat + .stat {
+    border-left: 0;
   }
 }
 
@@ -1434,44 +1351,39 @@ details > summary::-webkit-details-marker {
     height: 44px;
   }
 
-  .check {
-    min-height: 44px;
-    align-items: center;
-  }
-
   .settings input[type="checkbox"] {
     width: 20px;
     height: 20px;
-    margin: 0;
+  }
+
+  .check,
+  .chip,
+  .linkButton {
+    min-height: 44px;
   }
 
   .check {
-    grid-template-columns: 20px minmax(0, 1fr);
+    min-width: 44px;
+  }
+
+  .chip {
+    height: auto;
+    padding: 0 12px 0 10px;
+  }
+
+  .chips {
+    gap: 6px;
   }
 
   .crumbs a,
-  .settings .badge--link,
+  .settings .accountLink,
   .settings a.badge--warn {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
   }
 
-  .settings .badge--link,
   .settings a.badge--warn {
     height: auto;
-    min-height: 32px;
-  }
-
-  .accountLink {
-    display: inline-flex;
-    align-items: center;
-    min-height: 44px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .svc__chevron {
-    transition: none;
   }
 }

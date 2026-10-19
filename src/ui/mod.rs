@@ -901,12 +901,11 @@ mod tests {
         );
         let services = demo_page("services", &Icons::empty()).unwrap();
         assert!(
-            services.contains(r#"class="callout callout--warn""#),
+            services.contains(r#"class="cellWarn""#),
             "a demo service has a problem"
         );
         assert!(
-            services.contains("query.run.write")
-                && services.contains("only: opening the service is the full permission")
+            services.contains("query.run.write") && services.contains("<code>access</code> only")
         );
         let logins = demo_page("logins", &Icons::empty()).unwrap();
         assert!(

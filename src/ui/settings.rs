@@ -383,7 +383,7 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
         &format!("{} of {}", view.users.len(), view.max_users),
         &controls,
     );
-    out.push_str(r#"<p class="part__lede">Each account has its own grants. A new account has no grant and sees no service. Open an account to see and change what it can use.</p>"#);
+    out.push_str(r#"<p class="part__lede">Each account has its own grants. A new account has no grant and sees no service. Open an account to change its access.</p>"#);
     if add_open {
         add_form(&mut out, view);
     }
@@ -405,11 +405,11 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
         };
         let _ = write!(
             out,
-            r#"<p class="callout callout--danger"><strong>{} in the last 30 days</strong>{unknown}. <a href="{LOGINS_PATH}?r=failed">See the refused attempts</a></p>"#,
+            r#"<p class="alertLine"><strong>{} in the last 30 days</strong>{unknown}. <a href="{LOGINS_PATH}?r=failed">See the refused attempts</a></p>"#,
             plural(failed as usize, "refused sign-in", "refused sign-ins"),
         );
     }
-    out.push_str(r#"<div class="tableBox"><table class="table accounts"><thead><tr><th scope="col">Account</th><th scope="col">Access</th><th scope="col">Last sign-in (UTC)</th><th scope="col" class="num">Sessions, 30 days</th><th scope="col" class="num">Refused, 30 days</th></tr></thead><tbody>"#);
+    out.push_str(r#"<div class="tableBox"><table class="table accounts"><thead><tr><th scope="col">Account</th><th scope="col">Access</th><th scope="col">Last sign-in (UTC)</th><th scope="col" class="num">Sessions, 30 d</th><th scope="col" class="num">Refused, 30 d</th></tr></thead><tbody>"#);
     account_row(&mut out, view, &view.superadmin);
     for user in &view.users {
         account_row(&mut out, view, user);
@@ -417,6 +417,30 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
     out.push_str("</tbody></table></div></section>");
     incident_part(&mut out, view.token);
     page(Tab::Users, frame, "Users", &out, false)
+}
+
+/// The access of an account in one line of muted text: what it opens, its actions on whole
+/// services and its grants on resources.
+fn summary_text(user: &UserCard, s: &Summary) -> String {
+    let actions = user
+        .grants
+        .iter()
+        .filter(|g| g.action != ACCESS && g.path.is_empty())
+        .count();
+    let mut parts = vec![format!(
+        "<strong>{}</strong>",
+        plural(s.services, "service", "services")
+    )];
+    if actions > 0 {
+        parts.push(plural(actions, "action", "actions"));
+    }
+    if s.below > 0 {
+        parts.push(format!(
+            "{} on resources",
+            plural(s.below, "grant", "grants")
+        ));
+    }
+    parts.join(", ")
 }
 
 fn account_row(out: &mut String, view: &UsersView, user: &UserCard) {
@@ -434,42 +458,21 @@ fn account_row(out: &mut String, view: &UsersView, user: &UserCard) {
         out.push_str(r#"<span class="muted">Every service and every action</span>"#);
     } else {
         let s = summary(view.catalog, &view.services, user);
-        if s.services == 0 && s.below == 0 && user.grants.is_empty() {
+        if user.grants.is_empty() {
             out.push_str(r#"<span class="muted">No access</span>"#);
         } else {
-            out.push_str(r#"<span class="badges">"#);
             let _ = write!(
                 out,
-                r#"<span class="badge badge--accent">Opens {}</span>"#,
-                plural(s.services, "service", "services")
+                r#"<span class="access">{}</span>"#,
+                summary_text(user, &s)
             );
-            let actions = user
-                .grants
-                .iter()
-                .filter(|g| g.action != ACCESS && g.path.is_empty())
-                .count();
-            if actions > 0 {
-                let _ = write!(
-                    out,
-                    r#"<span class="badge">{}</span>"#,
-                    plural(actions, "action", "actions")
-                );
-            }
-            if s.below > 0 {
-                let _ = write!(
-                    out,
-                    r#"<span class="badge">{} on resources</span>"#,
-                    plural(s.below, "grant", "grants")
-                );
-            }
             if s.to_check > 0 {
                 let _ = write!(
                     out,
-                    r#"<span class="badge badge--warn">{} to check</span>"#,
+                    r#" <span class="badge badge--warn">{} to check</span>"#,
                     s.to_check
                 );
             }
-            out.push_str("</span>");
         }
     }
     let last = match user.activity.last_login {
@@ -479,7 +482,7 @@ fn account_row(out: &mut String, view: &UsersView, user: &UserCard) {
     let failed = user.activity.failed_30d;
     let _ = write!(
         out,
-        r#"</td><td data-label="Last sign-in (UTC)">{last}</td><td class="num" data-label="Sessions, 30 days">{}</td><td class="num{}" data-label="Refused, 30 days">{failed}</td></tr>"#,
+        r#"</td><td data-label="Last sign-in (UTC)">{last}</td><td class="num" data-label="Sessions, 30 d">{}</td><td class="num{}" data-label="Refused, 30 d">{failed}</td></tr>"#,
         user.activity.sessions_30d,
         if failed > 0 { " num--danger" } else { "" },
     );
@@ -490,7 +493,7 @@ fn account_row(out: &mut String, view: &UsersView, user: &UserCard) {
 fn incident_part(out: &mut String, token: &str) {
     let _ = write!(
         out,
-        r#"<section class="part part--danger" aria-labelledby="incident-title"><div class="dangerRow"><div><h2 class="part__title" id="incident-title">End all sessions</h2><p class="hint">For an incident. Every account must sign in again, yours included. Accounts, grants and history stay.</p></div><details class="confirm"><summary class="button button--danger">End all sessions</summary><form class="confirm__panel" method="post" action="/auth/users/end-sessions"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="confirm" value="end-all-sessions"><p>You will be signed out too.</p><button class="button button--dangerFill" type="submit">Confirm: end all sessions</button></form></details></div></section>"#,
+        r#"<section class="dangerRow" aria-labelledby="incident-title"><div><h2 class="dangerRow__title" id="incident-title">End all sessions</h2><p class="hint">For an incident. Every account must sign in again, yours included. Accounts, grants and history stay.</p></div><details class="confirm"><summary class="button button--danger">End all sessions</summary><form class="confirm__panel" method="post" action="/auth/users/end-sessions"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="confirm" value="end-all-sessions"><p>You will be signed out too.</p><button class="button button--dangerFill" type="submit">Confirm: end all sessions</button></form></details></section>"#,
         html_escape(token)
     );
 }
@@ -512,7 +515,7 @@ fn add_form(out: &mut String, view: &UsersView) {
     // refused attempt. The script of the generator loads with the form only.
     let _ = write!(
         out,
-        r#"<form class="box addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="box__title">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="addUser__fields"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
+        r#"<form class="addUser" id="add-user" method="post" action="/auth/users/add"><h3 class="subTitle">Add a user</h3><input type="hidden" name="csrf" value="{}"><div class="addUser__fields"><div class="field"><label class="field__label" for="new-login">Login</label><input id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="new-login-hint"><p class="hint" id="new-login-hint">1 to 32 characters: letters, digits, dot, dash, underscore.</p></div>"#,
         html_escape(view.token)
     );
     password_field(
@@ -524,7 +527,7 @@ fn add_form(out: &mut String, view: &UsersView) {
     );
     let _ = write!(
         out,
-        r#"</div><p class="hint">The account starts with no grant. The next page gives it access.</p><div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></form><script src="/auth/assets/settings.js" defer></script>"#
+        r#"<div class="formActions"><button class="button button--primary" type="submit">Add user</button><a class="button button--ghost" href="{USERS_PATH}">Cancel</a></div></div><p class="hint">The account starts with no grant. The next page gives it access.</p></form><script src="/auth/assets/settings.js" defer></script>"#
     );
 }
 
@@ -547,14 +550,9 @@ pub struct UserView<'a> {
 
 pub fn user_page(frame: &Frame, view: &UserView) -> String {
     let user = &view.user;
-    let login = html_escape(&user.login);
     let mut out = String::new();
-    let _ = write!(
-        out,
-        r##"<nav class="crumbs" aria-label="Breadcrumb"><a href="{USERS_PATH}">Users</a><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg><span aria-current="page">{login}</span></nav>"##
-    );
-    notice_html(&mut out, view.notice);
     user_head(&mut out, view);
+    notice_html(&mut out, view.notice);
     if user.superadmin {
         out.push_str(r#"<section class="part" aria-labelledby="access-title">"#);
         part_head(&mut out, "access-title", "Access", "", "");
@@ -569,27 +567,20 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
     page(Tab::Users, frame, &user.login, &out, !user.superadmin)
 }
 
+/// The head of the page of an account: the way back to the list, the login, its badges, one line
+/// of facts and "Log in as".
 fn user_head(out: &mut String, view: &UserView) {
     let user = &view.user;
     let activity = &user.activity;
+    let login = html_escape(&user.login);
     let _ = write!(
         out,
-        r#"<header class="userHead"><div class="userHead__id"><h2 class="userHead__name">{}</h2>"#,
-        html_escape(&user.login)
+        r##"<header class="userHead"><div class="userHead__main"><nav class="crumbs" aria-label="Breadcrumb"><a href="{USERS_PATH}">Users</a><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg></nav><h2 class="userHead__name" aria-current="page">{login}</h2>"##
     );
     if user.superadmin {
         out.push_str(r#"<span class="badge">Superadmin</span>"#);
     } else {
         let s = summary(view.catalog, &view.services, user);
-        if s.services == 0 {
-            out.push_str(r#"<span class="badge">No service</span>"#);
-        } else {
-            let _ = write!(
-                out,
-                r#"<span class="badge badge--accent">Opens {}</span>"#,
-                plural(s.services, "service", "services")
-            );
-        }
         if s.to_check > 0 {
             let _ = write!(
                 out,
@@ -598,27 +589,24 @@ fn user_head(out: &mut String, view: &UserView) {
             );
         }
     }
-    out.push_str("</div>");
     if !user.superadmin {
         let _ = write!(
             out,
-            r#"<form class="userHead__action" method="post" action="/auth/users/impersonate"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><button class="button" type="submit">Log in as {}</button></form>"#,
+            r#"<form class="userHead__action" method="post" action="/auth/users/impersonate"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{login}"><button class="button" type="submit">Log in as {login}</button></form>"#,
             html_escape(view.token),
-            html_escape(&user.login),
-            html_escape(&user.login)
         );
     }
     let last = activity
         .last_login
         .map(format_utc)
-        .unwrap_or_else(|| "Never".to_string());
+        .unwrap_or_else(|| "never".to_string());
     let created = user
         .created_at
         .map(format_utc)
-        .unwrap_or_else(|| "In the configuration".to_string());
+        .unwrap_or_else(|| "in the configuration".to_string());
     let _ = write!(
         out,
-        r#"<dl class="facts"><div><dt>Created (UTC)</dt><dd>{created}</dd></div><div><dt>Last sign-in (UTC)</dt><dd>{last}</dd></div><div><dt>Sessions, 30 days</dt><dd>{}</dd></div><div><dt>Refused, 30 days</dt><dd{}>{}</dd></div></dl></header>"#,
+        r#"</div><dl class="facts"><div><dt>Created</dt><dd>{created}</dd></div><div><dt>Last sign-in</dt><dd>{last}</dd></div><div><dt>Sessions, 30 d</dt><dd>{}</dd></div><div><dt>Refused, 30 d</dt><dd{}>{}</dd></div><div><dt>Times</dt><dd>UTC</dd></div></dl></header>"#,
         activity.sessions_30d,
         if activity.failed_30d > 0 {
             r#" class="danger""#
@@ -638,9 +626,12 @@ fn group_of<'a>(catalog: &'a Catalog, id: &str) -> Option<&'a str> {
         .map(|g| g.name.as_str())
 }
 
-/// The access of one account, by service. The boxes of all the services belong to one form, the
-/// form `grants`: a box names it with its `form` attribute. Thus each service can also hold its
-/// own small forms for the grants below the service, and the page needs no script.
+/// The access of one account: one table, one row for each service, grouped by group. A row has the
+/// box `access`, then one chip for each action on the whole service. The description of an action
+/// is the title of its chip. Under a row, a second row lists the grants on resources of the service
+/// and the forms that add one. The boxes of all the services belong to one form, the form
+/// `grants`: a box names it with its `form` attribute. Thus a row can also hold the small forms of
+/// the grants on resources, and the page needs no script.
 fn access_part(out: &mut String, view: &UserView) {
     let user = &view.user;
     let editable = view.mode.editable();
@@ -648,17 +639,22 @@ fn access_part(out: &mut String, view: &UserView) {
     let login = html_escape(&user.login);
     let opened = summary(view.catalog, &view.services, user).services;
     out.push_str(r#"<section class="part" aria-labelledby="access-title">"#);
+    let controls = if editable && !view.services.is_empty() {
+        r#"<button class="button button--primary" type="submit" form="grants">Save access</button>"#
+    } else {
+        ""
+    };
     part_head(
         out,
         "access-title",
         "Access",
         &format!("Opens {opened} of {}", view.services.len()),
-        "",
+        controls,
     );
-    out.push_str(r#"<p class="part__lede"><code>access</code> opens a service. Each other box gives one action on the whole service. A grant on a resource gives the action on that resource and on everything below it.</p>"#);
+    out.push_str(r#"<p class="part__lede"><code>access</code> opens a service. Each other action applies to the whole service. A grant on a resource applies to that resource and everything below it. Point at an action to read what it does.</p>"#);
     match view.mode {
-        Mode::Static => out.push_str(r#"<p class="callout">The grants come from the configuration (<code>user</code> blocks, <code>access.grants_mode = "static"</code>). This page shows them and cannot change them.</p>"#),
-        Mode::Hybrid if !user.configured.is_empty() => out.push_str(r#"<p class="callout">Some grants come from the configuration (<code>user</code> block). They show the mark <em>configuration</em> and cannot change here.</p>"#),
+        Mode::Static => out.push_str(r#"<p class="alertLine alertLine--info">The grants come from the configuration (<code>user</code> blocks, <code>access.grants_mode = "static"</code>). This page shows them and cannot change them.</p>"#),
+        Mode::Hybrid if !user.configured.is_empty() => out.push_str(r#"<p class="alertLine alertLine--info">Some grants come from the configuration (<code>user</code> block). They show the mark <em>configuration</em> and cannot change here.</p>"#),
         _ => {}
     }
     if editable {
@@ -669,43 +665,46 @@ fn access_part(out: &mut String, view: &UserView) {
     }
     if view.services.is_empty() {
         out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
-    }
-    // The services of the catalogue by group, then the services that left the catalogue but
-    // still have grants of this account.
-    let mut groups: Vec<(&str, Vec<&ServiceActions>)> = Vec::new();
-    for service in &view.services {
-        let group = group_of(view.catalog, &service.id).unwrap_or("Other");
-        match groups.iter_mut().find(|(name, _)| *name == group) {
-            Some((_, list)) => list.push(service),
-            None => groups.push((group, vec![service])),
+    } else {
+        // The services of the catalogue by group.
+        let mut groups: Vec<(&str, Vec<&ServiceActions>)> = Vec::new();
+        for service in &view.services {
+            let group = group_of(view.catalog, &service.id).unwrap_or("Other");
+            match groups.iter_mut().find(|(name, _)| *name == group) {
+                Some((_, list)) => list.push(service),
+                None => groups.push((group, vec![service])),
+            }
         }
-    }
-    for (group, services) in &groups {
-        let _ = write!(
-            out,
-            r#"<h3 class="groupLabel">{}</h3><div class="svcList">"#,
-            html_escape(group)
-        );
-        for service in services {
-            service_access(out, view, service);
+        out.push_str(r#"<div class="tableBox"><table class="table grantsTable"><thead><tr><th scope="col">Service</th><th scope="col" class="grantsTable__open">Open</th><th scope="col">Actions on the whole service</th><th scope="col" class="num">On resources</th></tr></thead>"#);
+        for (group, services) in &groups {
+            let _ = write!(
+                out,
+                r#"<tbody><tr class="groupRow"><th scope="rowgroup" colspan="4">{}</th></tr>"#,
+                html_escape(group)
+            );
+            for service in services {
+                service_rows(out, view, service);
+            }
+            out.push_str("</tbody>");
         }
-        out.push_str("</div>");
+        out.push_str("</table></div>");
     }
+    // The services that left the catalogue but still have grants of this account.
     let gone: Vec<&Grant> = user
         .grants
         .iter()
         .filter(|g| !view.services.iter().any(|s| s.id == g.service))
         .collect();
     if !gone.is_empty() {
-        out.push_str(r#"<h3 class="groupLabel">Not in the catalogue</h3><div class="box"><p class="hint">These services are not in the catalogue now. Their grants stay and apply when the service comes back.</p><ul class="tree">"#);
+        out.push_str(r#"<h3 class="subTitle">Not in the catalogue</h3><p class="hint">These services are not in the catalogue now. Their grants stay and apply when the service comes back.</p><ul class="grantRows">"#);
         for grant in gone {
             let _ = write!(
                 out,
-                r#"<li class="tree__row"><code>{}</code></li>"#,
+                r#"<li class="grantRow"><code>{}</code></li>"#,
                 html_escape(&grant.to_string())
             );
         }
-        out.push_str("</ul></div>");
+        out.push_str("</ul>");
     }
     if editable && !view.services.is_empty() {
         out.push_str(r#"<div class="saveBar"><button class="button button--primary" type="submit" form="grants">Save access</button><p class="hint">Saves the boxes of every service. A grant on a resource saves at once with its own button.</p></div>"#);
@@ -713,129 +712,105 @@ fn access_part(out: &mut String, view: &UserView) {
     out.push_str("</section>");
 }
 
-/// One service on the page of an account: the boxes for the whole service, then the grants on
-/// its resource tree.
-fn service_access(out: &mut String, view: &UserView, service: &ServiceActions) {
+/// One check box of the form `grants`. A fixed box (configuration, or the mode `static`) has no
+/// name, so the form does not send it.
+fn grant_box(service: &str, action: &str, checked: bool, fixed: bool) -> String {
+    format!(
+        r#"<input type="checkbox"{}{}{}>"#,
+        if fixed {
+            String::new()
+        } else {
+            format!(
+                r#" form="grants" name="g.{}.{}" value="1""#,
+                html_escape(service),
+                html_escape(action)
+            )
+        },
+        if checked { " checked" } else { "" },
+        if fixed { " disabled" } else { "" },
+    )
+}
+
+/// The row of one service on the page of an account, then the row of its grants on resources when
+/// there is something to show.
+fn service_rows(out: &mut String, view: &UserView, service: &ServiceActions) {
     let user = &view.user;
     let editable = view.mode.editable();
     let id = html_escape(&service.id);
-    let opens = holds(&user.grants, ACCESS, &service.id);
-    let whole: Vec<&(String, String)> = service
-        .actions
-        .iter()
-        .filter(|(name, _)| holds(&user.grants, name, &service.id))
-        .collect();
+    let name = html_escape(&service.name);
     let below: Vec<&Grant> = user
         .grants
         .iter()
         .filter(|g| g.service == service.id && !g.path.is_empty())
         .collect();
-    let held = opens || !whole.is_empty() || !below.is_empty();
-    let to_check = below.iter().filter(|g| service.undeclared(g)).count();
-    let _ = write!(
-        out,
-        r##"<details class="svc"{}><summary class="svc__head"><svg class="icon svc__chevron" aria-hidden="true"><use href="#i-chevron-right"/></svg><span class="svc__name">{}</span><span class="svc__state">"##,
-        if held { " open" } else { "" },
-        html_escape(&service.name),
-    );
-    if opens {
-        out.push_str(r#"<span class="badge badge--accent">Opens</span>"#);
-    } else if held {
-        out.push_str(r#"<span class="badge badge--warn">No access box</span>"#);
-    } else {
-        out.push_str(r#"<span class="muted">No access</span>"#);
-    }
-    if !service.actions.is_empty() {
-        let _ = write!(
-            out,
-            r#"<span class="svc__count">{} of {} actions</span>"#,
-            whole.len(),
-            service.actions.len()
-        );
-    }
-    if !below.is_empty() {
-        let _ = write!(
-            out,
-            r#"<span class="svc__count">{}</span>"#,
-            plural(below.len(), "resource grant", "resource grants")
-        );
-    }
-    if to_check > 0 {
-        let _ = write!(
-            out,
-            r#"<span class="badge badge--warn">{to_check} to check</span>"#
-        );
-    }
-    out.push_str(r#"</span></summary><div class="svc__body">"#);
-
-    // The whole service.
-    let _ = write!(
-        out,
-        r#"<fieldset class="node"><legend class="node__title">Whole service <code>service:{id}</code></legend><div class="checks">"#
-    );
-    let actions = std::iter::once((
-        ACCESS,
-        "Open the service. Without it, the account does not see the service.",
-    ))
-    .chain(
-        service
-            .actions
-            .iter()
-            .map(|(n, d)| (n.as_str(), d.as_str())),
-    );
-    for (action, description) in actions {
-        let checked = holds(&user.grants, action, &service.id);
-        let configured = holds(&user.configured, action, &service.id);
-        let fixed = !editable || configured;
-        let _ = write!(
-            out,
-            r#"<label class="check{}"><input type="checkbox"{}{}{}><span class="check__text"><code class="check__name">{}</code>"#,
-            if action == ACCESS {
-                " check--access"
-            } else {
-                ""
-            },
-            if fixed {
-                String::new()
-            } else {
-                format!(
-                    r#" form="grants" name="g.{id}.{}" value="1""#,
-                    html_escape(action)
-                )
-            },
-            if checked { " checked" } else { "" },
-            if fixed { " disabled" } else { "" },
-            html_escape(action),
-        );
-        if configured && editable {
-            out.push_str(r#" <span class="badge">configuration</span>"#);
-        }
-        if !description.is_empty() {
-            let _ = write!(
-                out,
-                r#"<span class="check__desc">{}</span>"#,
-                html_escape(description)
-            );
-        }
-        out.push_str("</span></label>");
-    }
-    out.push_str("</div></fieldset>");
-
-    // The resource tree.
     let levels = if editable {
         service.levels()
     } else {
         Vec::new()
     };
+    let opens = holds(&user.grants, ACCESS, &service.id);
+    let access_fixed = !editable || holds(&user.configured, ACCESS, &service.id);
+    let _ = write!(
+        out,
+        r#"<tr class="svcRow{}"><th scope="row" data-label="Service"><span class="svcRow__name">{name}</span> <code class="svcRow__id">{id}</code></th><td class="grantsTable__open" data-label="Open"><label class="check" title="Open the service. Without it, the account does not see the service.">{}<span class="visually-hidden">access to {name}</span></label>"#,
+        if opens { " is-open" } else { "" },
+        grant_box(&service.id, ACCESS, opens, access_fixed),
+    );
+    if access_fixed && editable && opens {
+        out.push_str(r#" <span class="badge">configuration</span>"#);
+    }
+    out.push_str(r#"</td><td data-label="Actions">"#);
+    if service.actions.is_empty() {
+        out.push_str(r#"<span class="muted"><code>access</code> only</span>"#);
+    } else {
+        out.push_str(r#"<span class="chips">"#);
+        for (action, description) in &service.actions {
+            let checked = holds(&user.grants, action, &service.id);
+            let configured = holds(&user.configured, action, &service.id);
+            let fixed = !editable || configured;
+            let title = if configured && editable {
+                format!("{description} From the configuration: it cannot change here.")
+            } else {
+                description.clone()
+            };
+            let _ = write!(
+                out,
+                r#"<label class="chip"{}>{}<code>{}</code></label>"#,
+                if title.is_empty() {
+                    String::new()
+                } else {
+                    format!(r#" title="{}""#, html_escape(&title))
+                },
+                grant_box(&service.id, action, checked, fixed),
+                html_escape(action),
+            );
+        }
+        out.push_str("</span>");
+    }
+    let to_check = below.iter().filter(|g| service.undeclared(g)).count();
+    let _ = write!(
+        out,
+        r#"</td><td class="num" data-label="On resources">{}{}</td></tr>"#,
+        if below.is_empty() {
+            r#"<span class="muted">none</span>"#.to_string()
+        } else {
+            below.len().to_string()
+        },
+        if to_check > 0 {
+            format!(r#" <span class="badge badge--warn">{to_check} to check</span>"#)
+        } else {
+            String::new()
+        },
+    );
     if below.is_empty() && levels.is_empty() {
-        out.push_str("</div></details>");
         return;
     }
-    out.push_str(r#"<div class="node"><p class="node__title">On resources</p>"#);
-    if below.is_empty() {
-        out.push_str(r#"<p class="hint">No grant on a resource of this service.</p>"#);
-    } else {
-        out.push_str(r#"<ul class="tree">"#);
+    out.push_str(r#"<tr class="subRow"><td colspan="4"><div class="subRow__body">"#);
+    if !below.is_empty() {
+        let _ = write!(
+            out,
+            r#"<ul class="grantRows" aria-label="Grants on resources of {name}">"#
+        );
         for grant in below {
             resource_grant(out, view, service, grant);
         }
@@ -844,7 +819,7 @@ fn service_access(out: &mut String, view: &UserView, service: &ServiceActions) {
     if !levels.is_empty() {
         add_grant(out, view, service, &levels);
     }
-    out.push_str("</div></div></details>");
+    out.push_str("</div></td></tr>");
 }
 
 /// The path of a grant for a human: each segment as its type and its decoded id, with `/`
@@ -857,7 +832,7 @@ fn path_html(grant: &Grant) -> String {
         }
         let _ = write!(
             out,
-            r#"<span class="path__seg"><span class="path__type">{}</span> <code class="path__id">{}</code></span>"#,
+            r#"<span class="path__type">{}</span> <code class="path__id">{}</code>"#,
             html_escape(&segment.kind),
             html_escape(&segment.id)
         );
@@ -866,28 +841,36 @@ fn path_html(grant: &Grant) -> String {
     out
 }
 
-/// One grant below a service: the action, the path, then the mark of the configuration or the
-/// Remove button, and the problem when the service does not declare it.
+/// One grant below a service, as one dense row: the action, the path and "and below", then the
+/// mark of the configuration or the Remove button, and the problem when the service does not
+/// declare it.
 fn resource_grant(out: &mut String, view: &UserView, service: &ServiceActions, grant: &Grant) {
     let user = &view.user;
     let problem = service.problem(grant);
     let _ = write!(
         out,
-        r#"<li class="tree__row{}"><code class="tree__action">{}</code><span class="tree__on">on</span>{}<span class="tree__below">and below</span>"#,
+        r#"<li class="grantRow{}"><code class="grantRow__action">{}</code><span class="muted">on</span>{}<span class="muted">and below</span>"#,
         if problem.is_some() {
-            " tree__row--warn"
+            " grantRow--warn"
         } else {
             ""
         },
         html_escape(&grant.action),
         path_html(grant),
     );
+    if let Some(problem) = &problem {
+        let _ = write!(
+            out,
+            r##"<span class="grantRow__problem"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg><span><strong>To check:</strong> {}. The PDP does not apply this grant.</span></span>"##,
+            html_escape(problem)
+        );
+    }
     if user.configured.contains(grant) {
-        out.push_str(r#"<span class="badge tree__end">configuration</span>"#);
+        out.push_str(r#"<span class="badge grantRow__end">configuration</span>"#);
     } else if view.mode.editable() {
         let _ = write!(
             out,
-            r#"<form class="tree__end" method="post" action="/auth/users/grant-delete"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><input type="hidden" name="grant" value="{}"><button class="button button--small" type="submit" aria-label="Remove {} on {}">Remove</button></form>"#,
+            r#"<form class="grantRow__end" method="post" action="/auth/users/grant-delete"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><input type="hidden" name="grant" value="{}"><button class="button button--small" type="submit" aria-label="Remove {} on {}">Remove</button></form>"#,
             html_escape(view.token),
             html_escape(&user.login),
             html_escape(&grant.to_string()),
@@ -895,26 +878,20 @@ fn resource_grant(out: &mut String, view: &UserView, service: &ServiceActions, g
             html_escape(&grant.path_text()),
         );
     }
-    if let Some(problem) = problem {
-        let _ = write!(
-            out,
-            r##"<p class="tree__problem"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg><span><strong>To check:</strong> {}. The PDP does not apply this grant.</span></p>"##,
-            html_escape(&problem)
-        );
-    }
     out.push_str("</li>");
 }
 
 /// The forms that add a grant on a resource: one form for each declared level, behind one
-/// disclosure. Each form shows the path that it gives, with one id field for each type of the
-/// chain. The server does not list the resources: the superadmin types the ids.
+/// disclosure. Each form is one line: the path that it gives, the action, one id field for each
+/// type of the chain, and Add. The server does not list the resources: the superadmin types the
+/// ids.
 fn add_grant(out: &mut String, view: &UserView, service: &ServiceActions, levels: &[Level]) {
     let token = html_escape(view.token);
     let login = html_escape(&view.user.login);
     let id = html_escape(&service.id);
     let _ = write!(
         out,
-        r#"<details class="addGrant"><summary class="button button--small">Add a grant on a resource of {}</summary><div class="addGrant__forms">"#,
+        r#"<details class="addGrant"><summary class="linkButton">Add a grant on a resource of {}</summary><div class="addGrant__forms">"#,
         html_escape(&service.name)
     );
     for level in levels {
@@ -930,7 +907,7 @@ fn add_grant(out: &mut String, view: &UserView, service: &ServiceActions, levels
             .join("/");
         let _ = write!(
             out,
-            r#"<form class="addGrant__form" method="post" action="/auth/users/grant-add"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="service" value="{id}"><input type="hidden" name="type" value="{kind}"><p class="addGrant__level">On one <strong>{kind}</strong> <code>service:{id}/{pattern}</code></p><div class="addGrant__fields"><label class="field"><span class="field__label">Action</span><select name="action" required>"#
+            r#"<form class="addGrant__form" method="post" action="/auth/users/grant-add"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><input type="hidden" name="service" value="{id}"><input type="hidden" name="type" value="{kind}"><p class="addGrant__level">One <strong>{kind}</strong> <code>service:{id}/{pattern}</code></p><label class="field"><span class="field__label">Action</span><select name="action" required>"#
         );
         for action in &level.actions {
             let _ = write!(out, "<option>{}</option>", html_escape(action));
@@ -945,7 +922,7 @@ fn add_grant(out: &mut String, view: &UserView, service: &ServiceActions, levels
         }
         let _ = write!(
             out,
-            r#"<button class="button" type="submit" aria-label="Add the grant on one {kind}">Add</button></div></form>"#
+            r#"<button class="button" type="submit" aria-label="Add the grant on one {kind}">Add</button></form>"#
         );
     }
     out.push_str("</div></details>");
@@ -955,21 +932,20 @@ fn add_grant(out: &mut String, view: &UserView, service: &ServiceActions, levels
 fn activity_part(out: &mut String, view: &UserView) {
     let activity = &view.user.activity;
     out.push_str(r#"<section class="part" aria-labelledby="activity-title">"#);
+    let total: u32 = activity.days.iter().map(|d| d.sessions).sum();
     part_head(
         out,
         "activity-title",
         "Activity",
-        &format!("Last {} days", activity.days.len()),
+        &format!(
+            "{} in {} days.{}",
+            plural(total as usize, "connection", "connections"),
+            activity.days.len(),
+            peak_text(&activity.days, view.first_day)
+        ),
         "",
     );
-    let total: u32 = activity.days.iter().map(|d| d.sessions).sum();
-    let _ = write!(
-        out,
-        r#"<div class="chart"><p class="chart__text"><strong>{}</strong>{}</p>{}</div>"#,
-        plural(total as usize, "connection", "connections"),
-        peak_text(&activity.days, view.first_day),
-        spark(&activity.days, true),
-    );
+    out.push_str(&spark(&activity.days, true));
     out.push_str(
         r#"<div class="split"><div class="split__col"><h3 class="subTitle">Latest sessions</h3>"#,
     );
@@ -999,7 +975,7 @@ fn activity_part(out: &mut String, view: &UserView) {
     out.push_str("</div></div></section>");
 }
 
-/// The password and the deletion of the account.
+/// The password and the deletion of the account, on one row.
 fn account_part(out: &mut String, view: &UserView) {
     let token = html_escape(view.token);
     let login = html_escape(&view.user.login);
@@ -1007,7 +983,7 @@ fn account_part(out: &mut String, view: &UserView) {
     part_head(out, "account-title", "Account", "", "");
     let _ = write!(
         out,
-        r#"<div class="split"><form class="box split__col" method="post" action="/auth/users/update"><h3 class="box__title">Password</h3><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
+        r#"<div class="accountRow"><form class="accountRow__password" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
     );
     password_field(
         out,
@@ -1018,7 +994,7 @@ fn account_part(out: &mut String, view: &UserView) {
     );
     let _ = write!(
         out,
-        r#"<div class="formActions"><button class="button" type="submit">Change password</button></div></form><div class="box box--danger split__col"><h3 class="box__title">Delete the account</h3><p class="hint">Its sessions end at once. Its history stays until it expires.</p><details class="confirm"><summary class="button button--danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>This cannot be undone.</p><button class="button button--dangerFill" type="submit">Confirm: delete {login}</button></form></details></div></div></section>"#
+        r#"<button class="button" type="submit">Change password</button></form><div class="accountRow__delete"><p class="field__label">Delete the account</p><details class="confirm"><summary class="button button--danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>Its sessions end at once. Its history stays until it expires. This cannot be undone.</p><button class="button button--dangerFill" type="submit">Confirm: delete {login}</button></form></details></div></div></section>"#
     );
 }
 
@@ -1182,10 +1158,8 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         .iter()
         .filter(|s| !s.actions.is_empty())
         .count();
-    out.push_str(r#"<section class="part" aria-labelledby="model-title">"#);
-    part_head(&mut out, "model-title", "How a grant reads", "", "");
-    out.push_str(r#"<p class="part__lede">A grant gives one account one action on one node of a service. A grant on a node covers every node below it. Accounts get grants on their own page.</p><dl class="model"><div class="model__row"><dt><code>access on service:<var>id</var></code></dt><dd>Opens the service. Without it, the account does not see the service and the gate refuses it.</dd></div><div class="model__row"><dt><code><var>action</var> on service:<var>id</var></code></dt><dd>The action on the whole service and on every resource in it.</dd></div><div class="model__row"><dt><code><var>action</var> on service:<var>id</var>/<var>type</var>:<var>id</var></code></dt><dd>The action on that resource and on everything below it, for example a database and its tables. A path has 1 to 4 levels and follows the resource types that the service declares.</dd></div><div class="model__row"><dt>Subtree match</dt><dd>When a service asks with <code>context.match = "subtree"</code>, the answer is yes also for a node above a grant. The service can then list that node, so the account can reach what is below it.</dd></div></dl></section>"#);
     undeclared_grants(&mut out, view);
+    out.push_str(r#"<div class="layout"><div class="layout__main">"#);
     out.push_str(r#"<section class="part" aria-labelledby="services-title">"#);
     part_head(
         &mut out,
@@ -1197,146 +1171,153 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         ),
         "",
     );
-    out.push_str(r#"<p class="part__lede">Each service publishes its actions and its resource types at <code>/.well-known/access-actions</code>. A service without them has only <code>access</code>, and <code>access</code> is then the full permission.</p>"#);
+    out.push_str(r#"<p class="part__lede">Each service publishes its actions and its resource types at <code>/.well-known/access-actions</code>. A service without them has only <code>access</code>, and <code>access</code> is then the full permission. Point at an action to read what it does.</p>"#);
     if count == 0 {
         out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
-    }
-    for group in view.catalog.groups() {
-        let _ = write!(
-            out,
-            r#"<h3 class="groupLabel">{}</h3><div class="svcGrid">"#,
-            html_escape(&group.name)
-        );
-        for service in &group.services {
-            service_card(&mut out, view, service);
+    } else {
+        out.push_str(r#"<div class="tableBox"><table class="table stack servicesTable"><thead><tr><th scope="col">Service</th><th scope="col">Path</th><th scope="col">Opened by</th><th scope="col">Actions</th><th scope="col">Resource types</th></tr></thead>"#);
+        for group in view.catalog.groups() {
+            let _ = write!(
+                out,
+                r#"<tbody><tr class="groupRow"><th scope="rowgroup" colspan="5">{}</th></tr>"#,
+                html_escape(&group.name)
+            );
+            for service in &group.services {
+                service_row(&mut out, view, service);
+            }
+            out.push_str("</tbody>");
         }
-        out.push_str("</div>");
+        out.push_str("</table></div>");
     }
-    out.push_str("</section>");
+    out.push_str(r#"</section></div><div class="layout__side">"#);
+    out.push_str(r#"<aside class="side" aria-labelledby="model-title">"#);
+    part_head(&mut out, "model-title", "How a grant reads", "", "");
+    out.push_str(r#"<p class="part__lede">A grant gives one account one action on one node of a service, and on every node below it. Accounts get grants on their own page.</p><dl class="model"><dt><code>access on service:<var>id</var></code></dt><dd>Opens the service. Without it, the account does not see the service and the gate refuses it.</dd><dt><code><var>action</var> on service:<var>id</var></code></dt><dd>The action on the whole service and on every resource in it.</dd><dt><code><var>action</var> on service:<var>id</var>/<var>type</var>:<var>id</var></code></dt><dd>The action on that resource and everything below it, for example a database and its tables. 1 to 4 levels, along the types that the service declares.</dd><dt>Subtree match</dt><dd>A service that asks with <code>context.match = "subtree"</code> gets yes also for a node above a grant, so it can list that node and the account reaches what is below.</dd></dl></aside>"#);
+    out.push_str("</div></div>");
     page(Tab::Services, frame, "Services", &out, false)
 }
 
-fn service_card(out: &mut String, view: &ServicesView, service: &Service) {
+/// One service of the Services page, on one table row.
+fn service_row(out: &mut String, view: &ServicesView, service: &Service) {
     let problem = view.problems.iter().find(|(id, _)| *id == service.id);
     let actions = view.services.iter().find(|s| s.id == service.id);
     let _ = write!(
         out,
-        r#"<article class="box svcCard" aria-labelledby="svc-{0}"><div class="svcCard__head"><h4 class="svcCard__name" id="svc-{0}">{1}</h4><code class="svcCard__id">{0}</code></div><p class="svcCard__path"><code>{2}</code></p>"#,
-        html_escape(&service.id),
+        r#"<tr><th scope="row" data-label="Service"><span class="svcRow__name">{}</span> <code class="svcRow__id">{}</code>"#,
         html_escape(&service.name),
-        html_escape(&service.href),
+        html_escape(&service.id),
     );
-    if let Some((_, text)) = problem {
-        let _ = write!(
-            out,
-            r##"<p class="callout callout--warn"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg><span>The actions cannot be read: {}. The page keeps the last good list.</span></p>"##,
-            html_escape(text)
-        );
+    if problem.is_some() {
+        out.push_str(r#" <span class="badge badge--warn">actions unreadable</span>"#);
     }
-    out.push_str(r#"<dl class="kv">"#);
-    // Who opens the service.
+    let _ = write!(
+        out,
+        r#"</th><td data-label="Path"><code>{}</code>"#,
+        html_escape(&service.href)
+    );
+    if !service.exclude.is_empty() {
+        out.push_str(r#"<span class="cellNote">Open without sign-in:"#);
+        for rule in &service.exclude {
+            let _ = write!(out, r#" <code>{}</code>"#, html_escape(rule.text()));
+        }
+        out.push_str("</span>");
+    }
+    out.push_str(r#"</td><td data-label="Opened by">"#);
     let users: Vec<&String> = view
         .holders
         .iter()
         .filter(|(_, grants)| holds(grants, ACCESS, &service.id))
         .map(|(login, _)| login)
         .collect();
-    out.push_str("<div><dt>Opened by</dt><dd>");
     if users.is_empty() {
-        out.push_str(r#"<span class="muted">The superadmin only</span>"#);
+        out.push_str(r#"<span class="muted">Superadmin only</span>"#);
     } else {
-        out.push_str(r#"<span class="badges">"#);
-        for login in users {
-            let _ = write!(
-                out,
-                r#"<a class="badge badge--link" href="{}">{}</a>"#,
-                html_escape(&user_path(login)),
-                html_escape(login)
-            );
-        }
-        out.push_str("</span>");
+        let links: Vec<String> = users
+            .iter()
+            .map(|login| {
+                format!(
+                    r#"<a href="{}">{}</a>"#,
+                    html_escape(&user_path(login)),
+                    html_escape(login)
+                )
+            })
+            .collect();
+        out.push_str(&links.join(", "));
     }
-    out.push_str("</dd></div>");
-    // The actions.
-    out.push_str("<div><dt>Actions</dt><dd>");
+    out.push_str(r#"</td><td data-label="Actions">"#);
     match actions {
         Some(found) if !found.actions.is_empty() => {
-            out.push_str(r#"<ul class="actionList"><li><code>access</code><span>Open the service.</span></li>"#);
+            out.push_str(
+                r#"<span class="chips"><code class="tag" title="Open the service.">access</code>"#,
+            );
             for (name, description) in &found.actions {
                 let levels = found
                     .document
                     .actions
                     .iter()
                     .find(|a| &a.name == name)
-                    .map(|a| {
-                        a.resource_types
-                            .iter()
-                            .map(|t| html_escape(t))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
+                    .map(|a| a.resource_types.join(", "))
                     .unwrap_or_default();
+                let title = if levels.is_empty() {
+                    description.clone()
+                } else {
+                    format!("{description} On: {levels}.")
+                };
                 let _ = write!(
                     out,
-                    r#"<li><code>{}</code><span>{}{}</span></li>"#,
-                    html_escape(name),
-                    html_escape(description),
-                    if levels.is_empty() {
-                        String::new()
-                    } else {
-                        format!(r#" <span class="muted">On: {levels}.</span>"#)
-                    }
+                    r#"<code class="tag" title="{}">{}</code>"#,
+                    html_escape(&title),
+                    html_escape(name)
                 );
             }
+            out.push_str("</span>");
+        }
+        _ => out.push_str(r#"<span class="muted"><code>access</code> only</span>"#),
+    }
+    out.push_str(r#"</td><td data-label="Resource types">"#);
+    match actions.filter(|f| !f.document.types.is_empty()) {
+        Some(found) => {
+            out.push_str(r#"<ul class="typeTree">"#);
+            type_children(out, &found.document, "service", 0);
             out.push_str("</ul>");
         }
-        _ => out.push_str(r#"<span class="muted"><code>access</code> only: opening the service is the full permission.</span>"#),
+        None => out.push_str(r#"<span class="muted">none</span>"#),
     }
-    out.push_str("</dd></div>");
-    // The tree of resource types.
-    if let Some(found) = actions.filter(|f| !f.document.types.is_empty()) {
-        out.push_str(r#"<div><dt>Resources</dt><dd><ul class="typeTree"><li><code>service</code>"#);
-        type_children(out, &found.document, "service", 0);
-        out.push_str("</li></ul></dd></div>");
+    out.push_str("</td></tr>");
+    if let Some((_, text)) = problem {
+        let _ = write!(
+            out,
+            r##"<tr class="subRow"><td colspan="5"><span class="cellWarn"><svg class="icon" aria-hidden="true"><use href="#i-alert-triangle"/></svg>The actions of {} cannot be read: {}. The page keeps the last good list.</span></td></tr>"##,
+            html_escape(&service.name),
+            html_escape(text)
+        );
     }
-    if !service.exclude.is_empty() {
-        out.push_str(r#"<div><dt>Open without sign-in</dt><dd>"#);
-        for rule in &service.exclude {
-            let _ = write!(
-                out,
-                r#"<code class="rule">{}</code>"#,
-                html_escape(rule.text())
-            );
-        }
-        out.push_str("</dd></div>");
-    }
-    out.push_str("</dl></article>");
 }
 
-/// The children of `parent` in the tree of types, as a nested list with their descriptions.
+/// The children of `parent` in the tree of types, as a nested list. The description of a type is
+/// its title.
 fn type_children(out: &mut String, document: &Document, parent: &str, depth: usize) {
-    let children: Vec<_> = document
-        .types
-        .iter()
-        .filter(|t| t.parent == parent)
-        .collect();
-    if children.is_empty() || depth > crate::grants::MAX_DEPTH {
+    if depth > crate::grants::MAX_DEPTH {
         return;
     }
-    out.push_str("<ul>");
-    for child in children {
-        let _ = write!(out, "<li><code>{}</code>", html_escape(&child.name));
-        if !child.description.is_empty() {
-            let _ = write!(
-                out,
-                r#" <span class="muted">{}</span>"#,
-                html_escape(&child.description)
-            );
+    for child in document.types.iter().filter(|t| t.parent == parent) {
+        let _ = write!(
+            out,
+            r#"<li><code{}>{}</code>"#,
+            if child.description.is_empty() {
+                String::new()
+            } else {
+                format!(r#" title="{}""#, html_escape(&child.description))
+            },
+            html_escape(&child.name)
+        );
+        if document.types.iter().any(|t| t.parent == child.name) {
+            out.push_str("<ul>");
+            type_children(out, document, &child.name, depth + 1);
+            out.push_str("</ul>");
         }
-        type_children(out, document, &child.name, depth + 1);
         out.push_str("</li>");
     }
-    out.push_str("</ul>");
 }
 
 /// The grants below a service that do not follow its document: the action does not list the
@@ -1382,7 +1363,7 @@ fn undeclared_grants(out: &mut String, view: &ServicesView) {
     );
     let _ = write!(
         out,
-        r#"<p class="part__lede">The service does not declare the resource of these grants for the action. The PDP does not apply them. Correct the grant on the page of the account, or the document of the service.</p><div class="tableBox"><table class="table stack"><thead><tr><th scope="col">Account</th><th scope="col">Grant</th><th scope="col">Problem</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
+        r#"<p class="part__lede">The service does not declare the resource of these grants for the action. The PDP does not apply them. Correct the grant on the page of the account, or the document of the service.</p><div class="tableBox"><table class="table stack wrap"><thead><tr><th scope="col">Account</th><th scope="col">Grant</th><th scope="col">Problem</th></tr></thead><tbody>{rows}</tbody></table></div></section>"#
     );
 }
 
@@ -1421,7 +1402,7 @@ pub fn logins_page(frame: &Frame, view: &LoginsView) -> String {
     let connections: u32 = view.days.iter().map(|d| d.sessions).sum();
     let _ = write!(
         out,
-        r#"<div class="stats"><div class="stat"><span class="stat__label">Sign-in attempts, 24 hours</span><span class="stat__value">{}</span></div><div class="stat"><span class="stat__label">Refused, 24 hours</span><span class="stat__value{}">{}</span></div><div class="stat"><span class="stat__label">Addresses refused, 24 hours</span><span class="stat__value">{}</span></div><div class="stat"><span class="stat__label">Connections, {} days</span><span class="stat__value">{connections}</span></div></div>"#,
+        r#"<dl class="stats"><div class="stat"><dt class="stat__label">Sign-in attempts, 24 h</dt><dd class="stat__value">{}</dd></div><div class="stat"><dt class="stat__label">Refused, 24 h</dt><dd class="stat__value{}">{}</dd></div><div class="stat"><dt class="stat__label">Addresses refused, 24 h</dt><dd class="stat__value">{}</dd></div><div class="stat"><dt class="stat__label">Connections, {} d</dt><dd class="stat__value">{connections}</dd></div></dl>"#,
         data.attempts_24h,
         if data.failed_24h > 0 {
             " stat__value--danger"
@@ -1511,23 +1492,22 @@ pub fn logins_page(frame: &Frame, view: &LoginsView) -> String {
         &mut out,
         "connections-title",
         "Connections",
-        "All accounts",
+        &format!(
+            "{}, all accounts, {} days.{}",
+            plural(connections as usize, "connection", "connections"),
+            view.days.len(),
+            peak_text(view.days, view.first_day)
+        ),
         "",
     );
-    let _ = write!(
-        out,
-        r#"<div class="chart"><p class="chart__text"><strong>{}</strong> in the last {} days.{}</p>{}</div></section>"#,
-        plural(connections as usize, "connection", "connections"),
-        view.days.len(),
-        peak_text(view.days, view.first_day),
-        spark(view.days, true),
-    );
+    out.push_str(&spark(view.days, true));
+    out.push_str("</section>");
     out.push_str(r#"<section class="part" aria-labelledby="events-title">"#);
     part_head(&mut out, "events-title", "Recent changes", "", "");
     if view.recent_events.is_empty() {
         out.push_str(r#"<p class="empty">No change recorded yet.</p>"#);
     } else {
-        out.push_str(r#"<ol class="events">"#);
+        out.push_str(r#"<div class="tableBox"><table class="table events"><thead><tr><th scope="col">When (UTC)</th><th scope="col">Change</th><th scope="col">By, address</th></tr></thead><tbody>"#);
         for event in view.recent_events {
             let account = match &event.login {
                 Some(login) if !login.is_empty() => format!(
@@ -1538,23 +1518,23 @@ pub fn logins_page(frame: &Frame, view: &LoginsView) -> String {
                 _ => String::new(),
             };
             let by = match &event.actor {
-                Some(actor) if !actor.is_empty() => format!(" by {}", html_escape(actor)),
+                Some(actor) if !actor.is_empty() => format!("{}, ", html_escape(actor)),
                 _ => String::new(),
             };
             let _ = write!(
                 out,
-                r#"<li class="events__row{}"><span class="events__what">{}{account}</span><span class="events__meta">{}{by}, from {}</span></li>"#,
+                r#"<tr{}><td>{}</td><td class="events__what">{}{account}</td><td class="muted">{by}{}</td></tr>"#,
                 if event.kind == "login_failed" {
-                    " events__row--danger"
+                    r#" class="events__row--danger""#
                 } else {
                     ""
                 },
-                audit_label(&event.kind),
                 format_utc_secs(event.ts),
+                audit_label(&event.kind),
                 opt(&event.ip),
             );
         }
-        out.push_str("</ol>");
+        out.push_str("</tbody></table></div>");
     }
     out.push_str("</section></div></div>");
     page(Tab::Logins, frame, "Activity", &out, false)
@@ -1834,8 +1814,10 @@ mod tests {
         }
         assert!(html.contains("Superadmin</span>"));
         assert!(html.contains("Every service and every action"));
-        assert!(html.contains(r#"<span class="badge badge--accent">Opens 2 services</span>"#));
-        assert!(html.contains(r#"<span class="badge badge--accent">Opens 1 service</span>"#));
+        assert!(html.contains(r#"<span class="access"><strong>2 services</strong></span>"#));
+        assert!(html.contains(
+            r#"<span class="access"><strong>1 service</strong>, 1 grant on resources</span>"#
+        ));
         assert!(
             html.contains(r#"<span class="muted">No access</span>"#),
             "carol"
@@ -1844,9 +1826,7 @@ mod tests {
             html.contains(r#"<span class="badge badge--warn">1 to check</span>"#),
             "bob holds a grant that Grafana does not declare"
         );
-        assert!(
-            html.contains(r#"<td class="num num--danger" data-label="Refused, 30 days">2</td>"#)
-        );
+        assert!(html.contains(r#"<td class="num num--danger" data-label="Refused, 30 d">2</td>"#));
         assert!(html.contains("2 refused sign-ins in the last 30 days"));
         assert!(html.contains(r#"href="/auth/settings/logins?r=failed""#));
         assert!(html.contains("3 of 64"));
@@ -1913,8 +1893,9 @@ mod tests {
         assert!(html.contains(r#"action="/auth/users/impersonate""#));
         assert!(html.contains("Confirm: delete alice"));
         // A service with a grant opens; a service without one stays closed.
-        assert!(html.contains(r#"<details class="svc" open><summary class="svc__head">"#));
-        assert!(html.contains(r#"<span class="muted">No access</span>"#));
+        assert!(html.contains(r#"<tr class="svcRow is-open"><th scope="row" data-label="Service"><span class="svcRow__name">Grafana</span>"#));
+        assert!(html.contains(r#"<tr class="svcRow"><th scope="row" data-label="Service"><span class="svcRow__name">Notes</span>"#));
+        assert!(html.contains(r#"<label class="chip" title="See the dashboards."><input type="checkbox" form="grants" name="g.infra-grafana.dashboards.read" value="1"><code>dashboards.read</code></label>"#), "a chip, its description as a title");
     }
 
     #[test]
@@ -1929,7 +1910,7 @@ mod tests {
             .push(sub("dashboards.read on service:infra-grafana/team:%3Cx%3E"));
         alice.grants.push(sub("x.read on service:gone/thing:a"));
         let html = user_page(&frame(), &user_view(&cat, alice));
-        assert!(html.contains(r#"<code class="tree__action">dashboards.write</code><span class="tree__on">on</span><span class="path"><span class="path__seg"><span class="path__type">folder</span> <code class="path__id">ops</code></span><span class="path__sep" aria-hidden="true">/</span><span class="path__seg"><span class="path__type">dashboard</span> <code class="path__id">a/b</code></span></span><span class="tree__below">and below</span>"#), "decoded ids");
+        assert!(html.contains(r#"<code class="grantRow__action">dashboards.write</code><span class="muted">on</span><span class="path"><span class="path__type">folder</span> <code class="path__id">ops</code><span class="path__sep" aria-hidden="true">/</span><span class="path__type">dashboard</span> <code class="path__id">a/b</code></span><span class="muted">and below</span>"#), "decoded ids");
         assert!(html.contains(r#"name="grant" value="dashboards.write on service:infra-grafana/folder:ops/dashboard:a%2Fb""#));
         assert!(
             html.contains(r#"aria-label="Remove dashboards.write on folder:ops/dashboard:a%2Fb""#)
@@ -1939,7 +1920,7 @@ mod tests {
             "escaped"
         );
         assert_eq!(
-            html.matches("tree__row--warn").count(),
+            html.matches("grantRow--warn").count(),
             1,
             "team is not declared"
         );
@@ -1975,9 +1956,9 @@ mod tests {
         let mut v = user_view(&cat, bob);
         v.mode = Mode::Hybrid;
         let html = user_page(&frame(), &v);
-        assert!(html.contains(r#"<input type="checkbox" checked disabled><span class="check__text"><code class="check__name">access</code> <span class="badge">configuration</span>"#));
+        assert!(html.contains(r#"<input type="checkbox" checked disabled><span class="visually-hidden">access to Notes</span></label> <span class="badge">configuration</span>"#));
         assert!(!html.contains("g.infra-notes.access"));
-        assert!(html.contains(r#"<span class="badge tree__end">configuration</span>"#));
+        assert!(html.contains(r#"<span class="badge grantRow__end">configuration</span>"#));
         assert!(!html.contains("grant-delete"));
         v.mode = Mode::Static;
         let html = user_page(&frame(), &v);
@@ -2043,29 +2024,23 @@ mod tests {
         let html = services_page(&frame(), &v);
         assert!(html.contains("How a grant reads"));
         assert!(html.contains("Subtree match"));
-        assert!(html.contains(r#"<li><code>dashboards.read</code><span>See the dashboards. <span class="muted">On: service, folder.</span></span></li>"#));
-        assert!(html.contains(r#"<ul class="typeTree"><li><code>service</code><ul><li><code>folder</code> <span class="muted">A folder.</span><ul><li><code>dashboard</code></li></ul></li></ul></li></ul>"#));
+        assert!(html.contains(r#"<code class="tag" title="See the dashboards. On: service, folder.">dashboards.read</code>"#));
+        assert!(html.contains(r#"<ul class="typeTree"><li><code title="A folder.">folder</code><ul><li><code>dashboard</code></li></ul></li></ul>"#));
         assert_eq!(
-            html.matches("only: opening the service is the full permission")
+            html.matches(r#"<span class="muted"><code>access</code> only</span>"#)
                 .count(),
             3
         );
         assert_eq!(
-            html.matches(
-                r#"<a class="badge badge--link" href="/auth/settings/users/alice">alice</a>"#
-            )
-            .count(),
+            html.matches(r#"<a href="/auth/settings/users/alice">alice</a>"#)
+                .count(),
             2
         );
         assert!(
             !html.contains(">bob</a>"),
             "an action without access does not open the service"
         );
-        assert_eq!(
-            html.matches("The superadmin only").count(),
-            2,
-            "Notes and Typo"
-        );
+        assert_eq!(html.matches("Superadmin only").count(), 2, "Notes and Typo");
         assert!(html.contains("gave the status &lt;500&gt;"));
         assert!(!html.contains("accounts-title"));
     }
@@ -2146,11 +2121,11 @@ mod tests {
             2
         );
         assert!(html.contains(r#"<span class="muted">(empty)</span>"#));
-        assert!(html.contains(r#"<span class="stat__value stat__value--danger">2</span>"#));
+        assert!(html.contains(r#"<dd class="stat__value stat__value--danger">2</dd>"#));
         assert!(html.contains("The password is never recorded"));
         assert!(html.contains("3 attempts"));
         assert!(!html.contains(r#"class="inbox""#));
-        assert!(html.contains(r#"<li class="events__row events__row--danger"><span class="events__what">Refused sign-in <a href="/auth/settings/users/alice">alice</a></span>"#));
+        assert!(html.contains(r#"<tr class="events__row--danger"><td>2026-10-10 09:11:42</td><td class="events__what">Refused sign-in <a href="/auth/settings/users/alice">alice</a></td>"#));
         assert!(html.contains("Recent changes") && html.contains("Connections"));
     }
 

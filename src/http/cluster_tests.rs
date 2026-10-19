@@ -2247,7 +2247,7 @@ fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
         assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
         assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
         let tree_page = self::page(&node, &root, "/auth/settings/users/alice");
-        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code></span><span class="path__sep" aria-hidden="true">/</span><span class="path__seg"><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
+        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code><span class="path__sep" aria-hidden="true">/</span><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
         assert!(tree_page
             .body
             .contains("<code>service:db/host:&lt;id&gt;/database:&lt;id&gt;</code>"));
