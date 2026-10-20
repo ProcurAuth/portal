@@ -32,7 +32,8 @@
 //!
 //! Three denials have a reason in the answer. A `context.match` that is not `"node"` or
 //! `"subtree"` gives `invalid_request`. When the subject is a `user` that does not exist, the
-//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. When the resource is
+//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. An id with a colon
+//! names a machine principal: nothing makes one yet, so it also gives `unknown_subject`. When the resource is
 //! not a correct node of the server, the reason is `invalid_resource`. No other denial has a
 //! reason, so that an answer never shows the grants of a user.
 //!
@@ -50,6 +51,7 @@ use crate::grants::{
     check_action, check_resource_id, check_resource_type, covers, encode_id, Grant, Segment,
     ACCESS, MAX_DEPTH, SERVICE_TYPE,
 };
+use crate::subject_id::SubjectId;
 
 const EVALUATION_PATH: &str = "/access/v1/evaluation";
 const EVALUATIONS_PATH: &str = "/access/v1/evaluations";
@@ -581,13 +583,18 @@ fn decide(
             return (false, "the document of the service is not known", None)
         }
     };
-    if constant_time_eq(subject.id.as_bytes(), state.superadmin_login.as_bytes()) {
-        return (true, "superadmin", None);
-    }
-    let Some(stored) = stored_grants_of(state, &subject.id) else {
+    // Only a person can be the superadmin. Nothing makes an access yet: an id with a colon is an
+    // unknown subject, as it was before.
+    let SubjectId::User(login) = SubjectId::parse(&subject.id) else {
         return (false, NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
     };
-    let grants = state.policy.effective(&subject.id, &stored);
+    if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
+        return (true, "superadmin", None);
+    }
+    let Some(stored) = stored_grants_of(state, login) else {
+        return (false, NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
+    };
+    let grants = state.policy.effective(login, &stored);
     // A grant below the service applies only when the last known document of the service
     // declares its chain and lists its type for its action. Without a known document, it does
     // not apply. A grant on the whole service needs no declaration.

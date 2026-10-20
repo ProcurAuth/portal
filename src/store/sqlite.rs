@@ -13,7 +13,7 @@ use super::*;
 use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
@@ -116,6 +116,41 @@ CREATE TABLE user_grants_v5 (
   resource_path TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path)
 );
+";
+
+/// Schema version 6: the accesses of the users, their grants and their keys. No code uses these
+/// tables yet. A file at version 6 opens with the programs that understand version 6. An `access`
+/// belongs to one user. A key belongs to one access. Deleting a user deletes the accesses of the
+/// user, and deleting an access deletes its grants and its keys. The `id` columns hold text that
+/// the program makes at random. The key table holds the SHA-256 digest of a key, never the key.
+const ACCESS_SCHEMA: &str = "
+CREATE TABLE accesses (
+  id TEXT PRIMARY KEY,
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+CREATE INDEX accesses_owner ON accesses (owner_id);
+CREATE TABLE access_grants (
+  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_path TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (access_id, action, resource_type, resource_id, resource_path)
+);
+CREATE TABLE access_keys (
+  id TEXT PRIMARY KEY,
+  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+  digest BLOB NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  last_used_at INTEGER
+);
+CREATE INDEX access_keys_access ON access_keys (access_id);
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -289,6 +324,14 @@ impl Sqlite {
                 let tx = conn.transaction().map_err(db)?;
                 tx.execute_batch(&missing).map_err(db)?;
                 migrate_to_resource_path(&tx)?;
+                tx.execute_batch(ACCESS_SCHEMA).map_err(db)?;
+                tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+                    .map_err(db)?;
+                tx.commit().map_err(db)?;
+            }
+            5 => {
+                let tx = conn.transaction().map_err(db)?;
+                tx.execute_batch(ACCESS_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -960,6 +1003,111 @@ mod tests {
             [Grant::new("access", "ops").unwrap()]
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Adds an access with a grant and a key for the user. The tables are those of version 6.
+    fn insert_access(store: &Sqlite, user_login: &str) {
+        let conn = store.conn();
+        conn.execute(
+            "INSERT INTO accesses (id, owner_id, name, created_at)
+             SELECT 'acc1', id, 'agent', 1 FROM users WHERE login = ?1",
+            [user_login],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO access_grants (access_id, action, resource_type, resource_id)
+             VALUES ('acc1', 'access', 'service', 'db')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
+             VALUES ('key1', 'acc1', x'00ff', 'mcp_ab12', 1, 2)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn count(store: &Sqlite, table: &str) -> i64 {
+        store
+            .conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_new_database_has_the_tables_of_the_accesses() {
+        let store = Sqlite::open_in_memory();
+        assert_eq!(version(&store), 6);
+        for table in ["accesses", "access_grants", "access_keys"] {
+            assert!(has_table(&store, table), "{table}");
+        }
+    }
+
+    #[test]
+    fn a_database_at_version_five_gains_the_tables_of_the_accesses_and_keeps_its_rows() {
+        let dir = std::env::temp_dir().join(format!("portal-v5-access-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        store.insert_user(&user("alice", &["db"])).unwrap();
+        drop(store);
+        // This is the file of the portal before version 6: the three tables did not exist.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Sqlite::open(&path).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        for table in ["accesses", "access_grants", "access_keys"] {
+            assert!(has_table(&store, table), "{table}");
+        }
+        assert_eq!(
+            store.load_users().unwrap(),
+            [user("alice", &["db"])],
+            "what was there stays"
+        );
+        // A second start finds nothing to do.
+        drop(store);
+        assert!(Sqlite::open(&path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_user_deletes_the_accesses_their_grants_and_their_keys() {
+        let store = Sqlite::open_in_memory();
+        store.insert_user(&user("alice", &[])).unwrap();
+        store.insert_user(&user("bob", &[])).unwrap();
+        insert_access(&store, "alice");
+        assert_eq!(count(&store, "access_keys"), 1);
+        assert!(store.remove_user("bob").unwrap());
+        assert_eq!(count(&store, "accesses"), 1, "the access of alice stays");
+        assert!(store.remove_user("alice").unwrap());
+        for table in ["accesses", "access_grants", "access_keys"] {
+            assert_eq!(count(&store, table), 0, "{table}");
+        }
+    }
+
+    #[test]
+    fn a_key_digest_is_unique_and_an_access_needs_an_owner() {
+        let store = Sqlite::open_in_memory();
+        store.insert_user(&user("alice", &[])).unwrap();
+        insert_access(&store, "alice");
+        let conn = store.conn();
+        let twice = conn.execute(
+            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
+             VALUES ('key2', 'acc1', x'00ff', 'mcp_cd34', 1, 2)",
+            [],
+        );
+        assert!(twice.is_err(), "the same digest cannot name two keys");
+        let orphan = conn.execute(
+            "INSERT INTO accesses (id, owner_id, name, created_at) VALUES ('acc2', 999, 'x', 1)",
+            [],
+        );
+        assert!(orphan.is_err(), "an access needs an existing owner");
     }
 
     #[test]

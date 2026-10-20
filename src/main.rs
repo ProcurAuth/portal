@@ -14,6 +14,7 @@ mod metrics;
 mod rate_limit;
 mod session;
 mod store;
+mod subject_id;
 mod sync;
 mod tracking;
 mod transport;

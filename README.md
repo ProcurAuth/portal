@@ -179,7 +179,7 @@ Rules:
 - In a batch, the `context` of an item replaces the `context` at the top of the request (AuthZEN 1.0). An item without `context` uses the top-level one. The action search reads `context.match` too.
 - A grant below the service applies only when the last known document of the service follows it (see "Grants"). The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that changes the tree removes the effect of the grants that do not follow it, at once. The reason in the log is `the grant does not follow the document of the service`. A grant on the whole service is not affected.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
-- If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant.
+- If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant. An id with a colon names a machine principal, not a person. No login has a colon. The portal makes no machine principal yet: such an id also gives `unknown_subject`.
 - The reasons `invalid_resource` and `invalid_request` tell that the request of the service is not correct. They do not show the grants of a user.
 - No other denial has a reason. The answer is `{"decision": false}`, so that it does not show the grants of a user. A subject type that is not `user` is one of these denials.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
@@ -256,6 +256,8 @@ The resource tree (portal 4.2.0) needs one more change. SQLite goes to schema ve
 - The migration does not add a level. A grant `database:analytics` stays at depth 1. When the document of the service puts `database` below `host`, this grant does not follow the tree. The PDP does not apply it. The Services page lists it under **Grants to check**, and the log has a warning `grant_to_check` for it. Give the grant again on the new tree, for example `host:local/database:analytics`, then remove the old grant.
 - A row that does not fit the new rules stops the migration. Examples: a type that does not start with `a-z`, an id of more than 256 bytes. The transaction rolls back. The database stays at the earlier version, and the new portal does not start. The error names `resource_path`.
 - An earlier portal refuses version 5: it does not start on it. During a rolling update, an instance of portal 4.1.0 that still operates cannot read or write the grants after the migration. It keeps the grants that it has in memory until it stops.
+
+The accesses (portal 4.3.0) need one more change. SQLite goes to schema version 6. PostgreSQL goes to version 6. The migration adds three tables: `accesses`, `access_grants` and `access_keys`. An access belongs to one user. A key belongs to one access. The key table holds the SHA-256 digest of a key and a short hint, never the key. When a user is deleted, the database deletes the accesses of the user, and with them their grants and their keys. No code uses these tables yet. The migration keeps all other data. An earlier portal refuses the new schema: it does not start on it. Therefore, a return to an earlier portal needs a restore of the database from before the migration.
 
 ### Paths open without a session (`portal.exclude`)
 
@@ -442,7 +444,7 @@ This is what the instances share, and how:
 - **History** is written by every instance. The writes are batched every 15 s, as with SQLite. A session that ends by logout, revocation, expiry or idleness is recorded once. The instance whose call ended the session records it. The database gives each ended session to exactly one caller. The start or the stop of an instance never closes the sessions of the other instances.
 - **Each instance has its own rate limits.** The failed-login limiters (per IP and global) are in memory. With two instances, an attacker gets up to twice the budget. A lockout on one instance does not lock the other instance. `session.max_active_sessions` is checked against the database. Two instances that race at the limit can each overshoot it by one.
 
-Liveness and readiness are unchanged. `/healthz` does not touch the database. `/metrics` adds `portal_shared_store_errors_total{use="sessions|directory"}`.
+Liveness and readiness are unchanged. `/healthz` does not touch the database. `/metrics` adds `portal_shared_store_errors_total{use="sessions|directory"}` and `portal_directory_age_seconds`. The second value is the time since the database last answered a read of the accounts. It grows when the refresh fails.
 
 The instance that adds an account checks `users.max_users` against its own copy. Two instances that add accounts at the same moment can exceed the limit by one.
 
@@ -649,7 +651,7 @@ The superadmin: the one account that is not in the database.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
+| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of machine principals. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
 | `superadmin_password` | secret: give `superadmin_password_env` (a variable name) or `superadmin_password_file` (an absolute path), not both | required | The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions. |
 
 #### Block `users`

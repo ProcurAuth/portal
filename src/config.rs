@@ -633,6 +633,12 @@ fn check_login(bytes: &[u8]) -> Result<String, String> {
     if text.chars().any(char::is_control) {
         return Err("the login must not have a control character".into());
     }
+    if text.contains(crate::subject_id::SEPARATOR) {
+        return Err(format!(
+            "the login must not have the character {:?}: the program keeps it for the ids of machine principals",
+            crate::subject_id::SEPARATOR
+        ));
+    }
     Ok(text.to_string())
 }
 

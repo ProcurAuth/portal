@@ -442,6 +442,26 @@ fn the_session_secret_modes() {
     assert!(!message.contains("abc"), "{message}");
 }
 
+// The colon is the separator in the id of a machine principal: no login can have it.
+
+#[test]
+fn a_superadmin_login_with_a_colon_is_refused() {
+    for bad in ["access:x", "admin:", "xx:yy", "a:b"] {
+        let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", bad), ("PORTAL_PASSWORD", "p")])
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must be refused"));
+        assert!(
+            message.contains("authentication.superadmin_login"),
+            "{message}"
+        );
+        assert!(message.contains("machine principals"), "{message}");
+        assert!(
+            !message.contains(bad),
+            "the login stays out of the error: {message}"
+        );
+    }
+}
+
 // PTL-CFG-3: the login is refused, not changed.
 
 #[test]

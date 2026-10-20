@@ -672,7 +672,12 @@ impl Metrics {
 
 impl Metrics {
     /// Series that exist only with a shared database.
-    pub fn render_shared(&self, session_errors: u64, directory_errors: u64) -> String {
+    pub fn render_shared(
+        &self,
+        session_errors: u64,
+        directory_errors: u64,
+        directory_age: Duration,
+    ) -> String {
         let mut out = String::new();
         out.push_str("# HELP portal_shared_store_errors_total Calls to the shared database that failed, by what they were for.\n");
         out.push_str("# TYPE portal_shared_store_errors_total counter\n");
@@ -681,6 +686,12 @@ impl Metrics {
         ));
         out.push_str(&format!(
             "portal_shared_store_errors_total{{use=\"directory\"}} {directory_errors}\n"
+        ));
+        out.push_str("# HELP portal_directory_age_seconds Seconds since the database last answered a read of the accounts.\n");
+        out.push_str("# TYPE portal_directory_age_seconds gauge\n");
+        out.push_str(&format!(
+            "portal_directory_age_seconds {:.3}\n",
+            directory_age.as_secs_f64()
         ));
         out
     }
@@ -762,9 +773,10 @@ mod tests {
         metrics.user_admin("add", "ok");
         metrics.user_admin("add", "ok");
         metrics.user_admin("delete", "forbidden");
-        let shared = metrics.render_shared(4, 5);
+        let shared = metrics.render_shared(4, 5, Duration::from_millis(12_500));
         assert!(shared.contains("portal_shared_store_errors_total{use=\"sessions\"} 4"));
         assert!(shared.contains("portal_shared_store_errors_total{use=\"directory\"} 5"));
+        assert!(shared.contains("portal_directory_age_seconds 12.500"));
         let rendered = metrics.render_accounts(3, 2, 1);
         assert!(rendered.contains("portal_users 3"));
         assert!(rendered.contains("portal_user_admin_total{action=\"add\",result=\"ok\"} 2"));

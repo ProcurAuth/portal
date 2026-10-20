@@ -558,11 +558,11 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
         state.tracker.flush_errors(),
     ));
     if state.store.is_shared() {
-        body.push_str(
-            &state
-                .metrics
-                .render_shared(state.sessions.shared_errors(), state.users.refresh_errors()),
-        );
+        body.push_str(&state.metrics.render_shared(
+            state.sessions.shared_errors(),
+            state.users.refresh_errors(),
+            state.users.age(),
+        ));
     }
     metrics_response(StatusCode::OK, body)
 }

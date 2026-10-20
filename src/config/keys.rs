@@ -301,7 +301,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 256 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space and no control character. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
+        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of machine principals. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "authentication",

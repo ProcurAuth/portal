@@ -35,6 +35,9 @@ pub struct Directory {
     changes: AtomicU64,
     /// Unix milliseconds when the last refresh started.
     refreshed_at: AtomicU64,
+    /// Unix milliseconds when the database last answered a read of the accounts. A directory
+    /// that a failed refresh leaves as it was grows older. The value starts at the creation.
+    last_success: AtomicU64,
     refresh_errors: AtomicU64,
 }
 
@@ -45,6 +48,7 @@ impl Directory {
             max_users,
             changes: AtomicU64::new(0),
             refreshed_at: AtomicU64::new(0),
+            last_success: AtomicU64::new(now_millis()),
             refresh_errors: AtomicU64::new(0),
         }
     }
@@ -57,6 +61,7 @@ impl Directory {
         let rows = store.load_users().inspect_err(|_| {
             self.refresh_errors.fetch_add(1, Ordering::Relaxed);
         })?;
+        self.last_success.store(now_millis(), Ordering::Relaxed);
         Ok(self.replace_unless_changed(seen, rows))
     }
 
@@ -80,6 +85,18 @@ impl Directory {
 
     pub fn refresh_errors(&self) -> u64 {
         self.refresh_errors.load(Ordering::Relaxed)
+    }
+
+    /// The time since the database last answered a read of the accounts. With a shared store,
+    /// the value is the age of the data that this instance uses.
+    pub fn age(&self) -> Duration {
+        let last = self.last_success.load(Ordering::Relaxed);
+        Duration::from_millis(now_millis().saturating_sub(last))
+    }
+
+    #[cfg(test)]
+    fn set_last_success(&self, millis: u64) {
+        self.last_success.store(millis, Ordering::Relaxed);
     }
 
     /// `seen` is the change counter. It has the value from before the database read the `rows`.
@@ -226,6 +243,19 @@ mod tests {
             .iter()
             .map(|s| Grant::new("access", s).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn the_age_of_the_directory_grows_until_a_read_of_the_database_succeeds() {
+        let dir = Directory::new(vec![row("alice", &[])], 3);
+        assert!(dir.age() < Duration::from_secs(5), "it starts fresh");
+        // A directory that the database did not answer for a minute.
+        dir.set_last_success(now_millis() - 60_000);
+        assert!(dir.age() >= Duration::from_secs(60));
+        // A refresh that works makes it fresh again.
+        let store = Store::open_in_memory();
+        dir.refresh(&store).unwrap();
+        assert!(dir.age() < Duration::from_secs(5));
     }
 
     #[test]

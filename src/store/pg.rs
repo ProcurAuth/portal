@@ -172,6 +172,39 @@ ALTER TABLE user_grants DROP COLUMN sub_resource_type, DROP COLUMN sub_resource_
 ALTER TABLE user_grants
   ADD PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path);
 "#,
+    "
+-- Version 6: the accesses of the users, their grants and their keys. No code uses these tables yet.
+-- An access belongs to one user. A key belongs to one access. Deleting a user deletes the accesses
+-- of the user, and deleting an access deletes its grants and its keys. The id columns hold text
+-- that the program makes at random. The key table holds the SHA-256 digest of a key, never the key.
+CREATE TABLE accesses (
+  id TEXT PRIMARY KEY,
+  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  revoked_at BIGINT
+);
+CREATE INDEX accesses_owner ON accesses (owner_id);
+CREATE TABLE access_grants (
+  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_path TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (access_id, action, resource_type, resource_id, resource_path)
+);
+CREATE TABLE access_keys (
+  id TEXT PRIMARY KEY,
+  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+  digest BYTEA NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  expires_at BIGINT NOT NULL,
+  revoked_at BIGINT,
+  last_used_at BIGINT
+);
+CREATE INDEX access_keys_access ON access_keys (access_id);
+",
 ];
 
 /// The grants of the rows of `user_grants`: action, resource type, resource id, resource path.
@@ -1341,6 +1374,61 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_to_version_six_adds_the_tables_of_the_accesses_and_keeps_the_rows() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        assert_eq!(SCHEMA.len(), 6);
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // This database was made by the portal before version 6: the three tables did not exist.
+        admin
+            .batch_execute(
+                "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                 DELETE FROM schema_migrations WHERE version > 5;
+                 INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        assert_eq!(migrated.load_users().unwrap().len(), 1, "the account stays");
+        admin
+            .batch_execute(
+                "INSERT INTO accesses (id, owner_id, name, created_at) VALUES ('acc1', 1, 'agent', 1);
+                 INSERT INTO access_grants (access_id, action, resource_type, resource_id)
+                   VALUES ('acc1', 'access', 'service', 'db');
+                 INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
+                   VALUES ('key1', 'acc1', '\\x00ff', 'mcp_ab12', 1, 2);",
+            )
+            .unwrap();
+        let twice = admin.batch_execute(
+            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
+             VALUES ('key2', 'acc1', '\\x00ff', 'mcp_cd34', 1, 2)",
+        );
+        assert!(twice.is_err(), "the same digest cannot name two keys");
+        // Deleting the user deletes the access, its grants and its keys.
+        assert!(migrated.remove_user("alice").unwrap());
+        for table in ["accesses", "access_grants", "access_keys"] {
+            let rows: i64 = admin
+                .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
+                .unwrap()
+                .get(0);
+            assert_eq!(rows, 0, "{table}");
+        }
+        // A second start finds nothing to do.
+        assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
     fn the_migration_to_version_two_drops_the_old_access_data_and_adds_the_grants() {
         use crate::store::testing::{postgres, Backend};
         let Some(Backend::Postgres(url)) = postgres() else {
@@ -1356,6 +1444,7 @@ mod tests {
             .batch_execute(
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
+                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1409,6 +1498,7 @@ mod tests {
             .batch_execute(
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
+                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1463,6 +1553,7 @@ mod tests {
         admin
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
+                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -1504,7 +1595,8 @@ mod tests {
     fn version_four(admin: &mut Client, rows: &str) {
         admin
             .batch_execute(&format!(
-                "DELETE FROM schema_migrations WHERE version > 4;
+                "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                 DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

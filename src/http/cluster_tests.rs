@@ -1405,6 +1405,14 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         unknown,
         "also on a sub-resource"
     );
+    // An id with a colon names a machine principal. Nothing makes one yet: it is an unknown subject.
+    for id in ["access:acc1", "access:", "key:k1", "carol:x"] {
+        assert_eq!(
+            single("user", id, "access", "service", "db"),
+            unknown,
+            "{id}"
+        );
+    }
     // The other denials have no reason: the answer does not show the grants.
     assert_eq!(
         single("user", "carol", "query.run.write", "service", "db"),
