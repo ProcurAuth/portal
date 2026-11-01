@@ -1272,14 +1272,29 @@ portal hash-password < password.txt
 portal version
 ```
 
-## Release
+## Build and release
 
-Start the GitHub `Release` workflow by hand from the GitHub Actions UI. Its version input is independent of the version in `Cargo.toml`. For example, `2.0.0` builds binaries that report `portal 2.0.0`. It publishes the `v2.0.0` assets.
+The product has one version. It is the field `version` of the root `[package]` in `Cargo.toml`. The crates of the phone have the same version in `[workspace.package]`. `tools/version.sh` prints it and stops if the two differ. The binary, the Android app and the release tag use this version.
 
-Supported release targets:
+Everything is built in Docker. The host needs Docker with BuildKit, POSIX `sh` and `python3`. No command pushes an image or a file to a registry.
 
-```text
-linux/amd64  -> x86_64-unknown-linux-musl
-linux/arm64  -> aarch64-unknown-linux-musl
-linux/arm/v7 -> armv7-unknown-linux-musleabihf
-```
+| Command | Result |
+|---|---|
+| `tools/build.sh server` | `dist/portal_<version>_linux_<arch>`: a static musl binary, checked for dynamic links. |
+| `tools/build.sh image` | The local images `portal:<version>` and `portal:local`. |
+| `tools/build.sh apk` | `dist/inbox-<version>.apk`, signed. See `tools/android/build-apk.sh` for the signing variables. |
+| `tools/build.sh dist` | `dist/portal_<version>_linux_<arch>.tar.gz` and `dist/SHA256SUMS`. The archives are reproducible. |
+| `tools/build.sh all` | The four commands above. |
+
+The image is `docker/Dockerfile`. It builds on `rust:1.98-alpine3.24`, so the binary is static. The runtime stage is `scratch`, with the user `10001`, and it works with a read-only root file system. Its `HEALTHCHECK` is `portal healthcheck`. For the other architecture, use `docker buildx build --platform linux/arm64`. The build runs natively on that architecture. There is no cross compilation.
+
+`docker compose up` at the root of the repository starts the portal, PostgreSQL and the inbox. `deploy/README.md` describes the Compose stack and the K3s manifests.
+
+| Check | Command |
+|---|---|
+| Format and clippy | `tools/dev/lint.sh` |
+| Tests of the workspace | `tools/dev/test.sh --workspace --no-fail-fast` |
+| Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
+| Compose stack | `tools/dev/smoke.sh` |
+
+The GitHub workflow `ci.yml` runs these checks and the build of the app. It also fails when a workflow mentions a container registry. The workflow `release.yml` starts on a tag `vX.Y.Z`. The tag must be equal to the version in `Cargo.toml`. The release holds the binaries for amd64 and arm64, the signed APK and `SHA256SUMS`. It holds no image. `tools/release/local-release.sh` builds the same files on this machine when GitHub Actions is not available.

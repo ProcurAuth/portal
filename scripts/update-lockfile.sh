@@ -7,7 +7,7 @@ set -euo pipefail
 docker run --rm \
   --volume "$PWD:/work" \
   --workdir /work \
-  rust:1.88-bookworm \
+  rust:1.98 \
   bash -euxo pipefail -c '
     cargo generate-lockfile
     cargo metadata --locked --no-deps --format-version 1 >/dev/null

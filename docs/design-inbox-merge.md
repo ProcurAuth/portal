@@ -27,7 +27,7 @@ The portal and Inbox become one binary, `portal` (version 5.0.0). One account gi
 - `crates/inbox-core` holds the protocol and the cryptography of the phones, with no I/O. The server and the app share it.
 - `crates/inbox-android` is the JNI bridge. `android/` is the app.
 - `crates/inbox-server` is gone. Step 3 moved its code to `src/inbox/`.
-- `deploy/` holds the Compose files and the K3s manifests of both parts.
+- `docker/Dockerfile` builds the one image. `deploy/` holds the Compose files and the K3s manifests of the merged product.
 - The history of Inbox is in the git log of the repository.
 
 ## Network
@@ -133,3 +133,19 @@ This section lists what step 6 does, and the choices that the owner left open. D
 - **Metrics.** `portal_alerts_sent_total{kind}` counts the alerts that the inbox accepted. A duplicate that another instance already stored counts as sent, and the log event `portal_alert_sent` has the field `duplicate`.
 - **Start.** The task starts after the portal has a complete catalogue, in the same list as the listeners, and it ends with them.
 - **Test.** The end-to-end tests use a fake Docker socket for the unhealthy service. The smallest `unhealthy_after` is `10s`, so these tests take about one minute each. The test with two instances needs PostgreSQL (`INBOX_TEST_PG`).
+
+## Build and release
+This section lists what step 7a does, and the choices that the owner left open. The commands are in the section "Build and release" of the README. The files are in `deploy/README.md`.
+
+- **One version.** The root package and the workspace packages have the version 5.0.0. `tools/version.sh` reads the root package and stops when the workspace version differs. `tools/build.sh`, `tools/android/build-apk.sh`, `tools/release/local-release.sh` and the release workflow call it. The Gradle `versionName` is this version. The `versionCode` is `major * 10000 + minor * 100 + patch`, so 5.0.0 gives 50000. It is larger than every code that the old app used.
+- **One image.** `docker/Dockerfile` builds on `rust:1.98-alpine3.24`. Alpine is musl, so the build needs no target and no cross compiler. The packages `musl-dev gcc make perl binutils` are enough for SQLite and for `aws-lc-sys`. CMake is not needed. There is no `rust-toolchain.toml`. The Dockerfile builds natively for each architecture. A `buildx` build for another architecture runs the compiler under QEMU or on a native builder.
+- **Layers.** A layer holds the dependencies only. It uses the manifests and stub sources. A change of the sources rebuilds the crates of the repository, not the dependencies. `RUSTFLAGS` has only `--remap-path-prefix`. An explicit `crt-static` would break the proc macros on a musl host.
+- **Runtime.** The image has `/tmp` (mode 1777) and `/var/lib/portal` (owner 10001). The process writes nowhere else. The image has no icon library. The pages show initials when `ui.icons_dir` is missing. A deployment that wants the icons mounts the library at `/icons`.
+- **Inbox image removed.** `docker/Dockerfile.inbox` and its ignore file are gone. A root `.dockerignore` limits the context to `src`, `crates`, `web` and the manifests.
+- **Compose.** `docker-compose.yml` at the root has the portal and PostgreSQL. It builds the image when it is missing. The secrets are files in a directory that `deploy/compose/init-secrets.sh` makes (`PORTAL_SECRETS_DIR` changes the directory). The script uses the image for `portal inbox keygen` and `portal inbox token`. There is no shared device password and no credential file. The file `.env.example` is gone, because the stack has no environment secrets.
+- **Two instances.** `deploy/compose/docker-compose.ha.yml` adds a second instance and Traefik. It is a test aid. It needs no new image.
+- **K3s.** `deploy/k3s/` has one Deployment with two replicas in the namespace `edge`, where the portal runs in the homelab. The inbox has no namespace of its own any more. The Services are `portal`, `portal-pdp`, `portal-devices` and `portal-peers`. The relay `inbox-edge` keeps its name and host port 8087, and it runs in `edge`. The probes use `/readyz` of the devices listener, because the portal has no `/readyz`. The tile of the launcher is an IngressRoute with `portal.*` annotations. Its `href` is `/auth/inbox/`, the path of the inbox pages today.
+- **Database.** The K3s configuration uses the database `portal`. The inbox has no database of its own. A database `inbox` that exists can stay unused.
+- **CI.** `ci.yml` has four jobs: the policy, the Rust checks, the image with the configuration files and the Compose smoke test, and the Android compile check. `release.yml` replaces both release workflows. It builds each architecture on a native runner. It has no step that touches a registry.
+- **Version of the release.** A tag `vX.Y.Z` starts the release. The old manual start with an independent version is gone.
+- **Not done.** The SQLite variant of the K3s manifests is a comment only. The tests of the manifests are a render with kustomize and `check-config`. No cluster was used.
