@@ -1,11 +1,8 @@
 # Configuration of the portal for the local demo, with the inbox. The secrets come from files that up.sh writes.
 server {
   listen_address  = "0.0.0.0:4181"
-  # The Traefik container of the demo network, and no other address. The portal reads X-Forwarded-For and
-  # X-Forwarded-Proto from this peer only. Traefik ends TLS: a request that it announces as https is secure.
-  # The portal itself does not know TLS. It never trusts the gateway of the network: a request from the host
-  # to the published port 8091 is plain HTTP and not secure.
-  trusted_proxies = ["172.30.0.2/32"]
+  # The Traefik container of the demo network. The portal then reads the client address from X-Forwarded-For.
+  trusted_proxies = ["172.30.0.0/24"]
 }
 
 authentication {
@@ -34,7 +31,7 @@ discovery {
 }
 
 identity {
-  issuer          = "https://localhost:8088"
+  issuer          = "http://localhost:8088"
   signing_key_file = "/run/secrets/identity_key"
   token_ttl       = "5m"
 }
@@ -57,17 +54,15 @@ metrics {
   path    = "/metrics"
 }
 
-# The inbox of the portal. The pages and the producers use Traefik on 8088 (HTTPS). The phones use the plain
-# entrypoint 8090 in this demo, because the emulator does not trust the self-signed certificate.
+# The inbox of the portal. The pages, the producers and the phones use the same port (Traefik, 8088).
 inbox {
   name            = "Inbox demo"
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    # The public base URL of the portal as the phones reach it: the plain entrypoint `web-phones`. The phone routes
-    # carry no password and need no secure transport (Noise protocol). The Android emulator reaches the host
-    # at 172.17.0.1. A real deployment uses the HTTPS address of the pages here.
-    public_address        = "http://172.17.0.1:8090"
+    # The public base URL of the portal as the phones reach it. The Android emulator reaches the host
+    # at 172.17.0.1. The host reaches this address too.
+    public_address        = "http://172.17.0.1:8088"
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

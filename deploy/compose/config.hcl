@@ -25,11 +25,6 @@ access {
 session {
   secret_mode = "provided"
   secret_file = "/run/secrets/session_secret"
-  # LOCAL TEST ONLY. This stack has no TLS and no proxy that ends it: the portal is reached on plain HTTP from the
-  # gateway of the Docker network, and that is not a secure request. Without this line the portal refuses the
-  # sign-in, the passwords, the keys and the producer tokens. Anyone on the network can read the passwords, the
-  # keys and the session cookies. Never publish this stack on a network. For HTTPS, use demo/ or deploy/k3s/.
-  allow_insecure_http = true
 }
 
 storage {

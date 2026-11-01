@@ -20,14 +20,12 @@ origin=(-H "Origin: $base")
 
 # add_user <login>: makes the account when it does not exist (a file account exists already).
 add_user() {
-  local page csrf pwfile
+  local page csrf
   if [ "$(status -b "$admin" "$base/auth/settings/users/$1")" = 200 ]; then return; fi
   page=$(curl -s -b "$admin" "$base/auth/settings?add=1")
   csrf=$(form_csrf "$page" /auth/users/add)
-  pwfile=$(password_file "$1")
   curl -s -o /dev/null -b "$admin" "${origin[@]}" --data-urlencode "csrf=$csrf" \
-    --data-urlencode "login=$1" --data-urlencode "password@$pwfile" "$base/auth/users/add"
-  rm -f "$pwfile"
+    --data-urlencode "login=$1" --data-urlencode "password=$(pw "$1")" "$base/auth/users/add"
   echo "seed: account $1 made"
 }
 

@@ -4,10 +4,6 @@
 #   docker compose up -d --build
 #   docker compose down -v                # stops the stack and deletes the database
 #
-# LOCAL TEST ONLY. This stack has no TLS: deploy/compose/config.hcl sets session.allow_insecure_http = true, so the
-# portal handles passwords, keys and producer tokens on plain HTTP. Anyone on the network can read them. Keep the
-# default PORTAL_BIND. For HTTPS, see demo/ (Traefik with a self-signed certificate) and deploy/k3s/.
-#
 # The portal: http://127.0.0.1:4181/ (the sign-in is /auth/login). One port serves the pages, the API of the
 # inbox for the producers and the webhooks (/api/v1/*), and the phones (/v1/enroll and /v1/session). No proxy is
 # in front of this stack, so no ForwardAuth applies. The admin pages of the inbox are in the portal, in the tab
