@@ -43,36 +43,6 @@ spec:
   tls:
     secretName: traefik-tls
 ---
-# The tile "Inbox" of the launcher. The annotations portal.* declare it. The route sends the pages of the inbox to the
-# portal. The health comes from the devices listener. The href is the path of the pages of the inbox in the portal:
-# change it when the pages move.
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: inbox
-  namespace: edge
-  annotations:
-    portal.enabled: "true"
-    portal.group: Infra
-    portal.name: Inbox
-    portal.icon: inbox
-    portal.href: /auth/inbox/
-    portal.description: Alerts on phones
-    portal.health: http://portal-devices.edge.svc.cluster.local:8080/readyz
-spec:
-  entryPoints: [websecure]
-  routes:
-    - kind: Rule
-      match: PathPrefix(`/auth/inbox/`)
-      priority: 50001
-      services:
-        - name: portal
-          port: 4181
-      middlewares:
-        - name: secure-headers
-  tls:
-    secretName: traefik-tls
----
 # Whatever no other route claims (a mistyped path): ForwardAuth first, so a visitor without a session lands on the
 # login page whether or not the path exists. Past the gate the path is replaced by one that the portal does not serve,
 # so the answer is a 404 and the endpoints of the portal (/metrics, /healthz) are not exposed on arbitrary paths.

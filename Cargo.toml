@@ -28,7 +28,7 @@ version = "5.0.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Minimal stateful ForwardAuth service for Traefik"
+description = "Launcher, accounts, keys with limits, AuthZEN decision point and inbox for a homelab"
 repository = "https://github.com/ProcurAuth/portal"
 publish = false
 
