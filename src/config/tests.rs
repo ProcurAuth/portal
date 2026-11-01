@@ -868,21 +868,6 @@ fn parses_idle_timeout_and_binding_and_refuses_bad_ones() {
 }
 
 #[test]
-fn allow_insecure_http_is_false_by_default_and_a_bool_without_quotes() {
-    let (cfg, _) = ok(MINIMAL);
-    assert!(!cfg.session.allow_insecure_http);
-    assert_eq!(line(&cfg, "session.allow_insecure_http").value, "false");
-    let (cfg, _) = ok(&with("session { allow_insecure_http = true }"));
-    assert!(cfg.session.allow_insecure_http);
-    assert_eq!(line(&cfg, "session.allow_insecure_http").value, "true");
-    for bad in [r#""true""#, "1", "yes"] {
-        let message = err(&with(&format!("session {{ allow_insecure_http = {bad} }}")));
-        assert!(message.contains("session.allow_insecure_http"), "{message}");
-        assert!(message.contains("true or false"), "{message}");
-    }
-}
-
-#[test]
 fn parses_users_and_storage() {
     let (cfg, _) = ok(&with(
         r#"users { max_users = 5 } storage { database = "/data/p.db" retention_days = 30 }"#,

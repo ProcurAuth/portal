@@ -735,14 +735,6 @@ pub static KEYS: &[Key] = &[
         doc: "The largest number of open sessions. A login above this number gets the status 503.",
     },
     Key {
-        block: "session",
-        name: "allow_insecure_http",
-        kind: Kind::Bool,
-        presence: Presence::Default("false"),
-        when: When::Always,
-        doc: "Set it to `true` to let the portal handle passwords, keys, codes and producer tokens on a connection that is not encrypted. Anyone on the network can read the passwords, the keys and the session cookies. Use it for a local test only. With `false`, the portal refuses these requests unless the request is secure: it came from a proxy in `server.trusted_proxies` that announces `https`, or it came from a loopback address. With `true`, the start log has a warning.",
-    },
-    Key {
         block: "security",
         name: "max_password_bytes",
         kind: Kind::Int { min: 8, max: 16 * 1024 },

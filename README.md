@@ -1067,7 +1067,6 @@ The sessions and the signing key.
 | `secret_mode` | `ephemeral`, `provided` | `"ephemeral"` | `ephemeral`: the server makes a new random signing key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key. |
 | `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The signing key of the login forms, of the return links and of the anti-CSRF tokens. It has at least 32 bytes. The server refuses the example value of `.env.example`. A new value ends the sessions of the superadmin and the impersonated sessions. Applies only when `session.secret_mode` is `provided`. |
 | `max_active_sessions` | number, 1 to 1000000 | `4096` | The largest number of open sessions. A login above this number gets the status 503. |
-| `allow_insecure_http` | `true` or `false` | `false` | Set it to `true` to let the portal handle passwords, keys, codes and producer tokens on a connection that is not encrypted. Anyone on the network can read the passwords, the keys and the session cookies. Use it for a local test only. With `false`, the portal refuses these requests unless the request is secure: it came from a proxy in `server.trusted_proxies` that announces `https`, or it came from a loopback address. With `true`, the start log has a warning. |
 
 #### Block `security`
 
