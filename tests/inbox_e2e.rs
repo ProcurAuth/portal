@@ -1,8 +1,9 @@
 //! Black-box end-to-end test of the inbox: it runs the real `portal` binary with a combined
 //! configuration and drives it with the real protocol 4 of the phones. A phone enrolls as the app
-//! does: an account of the portal makes a code (`POST /auth/inbox/api/enrollment-codes`), and the
-//! phone uses it on `/v1/enroll` (Noise IK, no OPAQUE). Then it opens Noise sessions. The admin
-//! calls use the session of the superadmin.
+//! does: an account of the portal makes a code on the page "My phones" of the tab Inbox
+//! (`POST /auth/settings/inbox/code`), and the phone uses it on `/v1/enroll` (Noise IK, no OPAQUE).
+//! Then it opens Noise sessions. The admin checks read the pages of the tab Inbox with the session
+//! of the superadmin. The rows of these pages carry `data-*` attributes for the tests.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -165,10 +166,9 @@ impl PgAdmin {
 const SUPERADMIN: &str = "root";
 const SUPERADMIN_PASSWORD: &str = "a password for the end to end tests";
 
-/// The session of the superadmin: the cookie and the token of the admin calls that change data.
+/// The session of an account: the cookie. The token of the forms comes from a page of the inbox.
 struct AdminSession {
     cookie: String,
-    csrf: String,
 }
 
 struct Server {
@@ -448,13 +448,18 @@ inbox {{
     /// The session of an account: the superadmin, or a database account that the superadmin makes
     /// on the first call.
     fn account(&self, login: &str) -> std::sync::Arc<AdminSession> {
+        self.account_with(login, &DEFAULT_GRANTS)
+    }
+
+    /// The same, with the permissions that the test chooses for a new account.
+    fn account_with(&self, login: &str, grants: &[&str]) -> std::sync::Arc<AdminSession> {
         if login == SUPERADMIN {
             return self.session();
         }
         if let Some(session) = self.accounts.lock().unwrap().get(login) {
             return session.clone();
         }
-        add_account(self, login);
+        add_account_with(self, login, grants);
         let session = std::sync::Arc::new(sign_in_as(self.admin_port, login, ACCOUNT_PASSWORD));
         self.accounts
             .lock()
@@ -486,8 +491,7 @@ fn sign_in(port: u16) -> AdminSession {
     sign_in_as(port, SUPERADMIN, SUPERADMIN_PASSWORD)
 }
 
-/// Signs in on the listener of the portal, and asks for the anti-CSRF token of the calls of the
-/// inbox.
+/// Signs in on the listener of the portal.
 fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
     let host = format!("127.0.0.1:{port}");
     let (st, head, page) = http_full(port, &host, "GET", "/auth/login", &[], "");
@@ -534,27 +538,7 @@ fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
         })
         .find(|c| c.starts_with("portal="))
         .expect("the session cookie");
-    let (st, _, body) = http_full(
-        port,
-        &host,
-        "GET",
-        "/auth/inbox/api/csrf",
-        &[("Cookie", cookie.clone())],
-        "",
-    );
-    // Without the block `inbox` the call does not exist: the session has no token for it.
-    if st == 404 {
-        return AdminSession {
-            cookie,
-            csrf: String::new(),
-        };
-    }
-    assert_eq!(st, 200, "{body}");
-    let csrf = serde_json::from_str::<Value>(&body).unwrap()["csrf"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    AdminSession { cookie, csrf }
+    AdminSession { cookie }
 }
 
 /// Minimal HTTP/1.1 client: returns (status, body).
@@ -731,13 +715,62 @@ fn users_form(s: &Server, path: &str, fields: &str) -> String {
         .to_string()
 }
 
-/// The superadmin makes a database account. An account that exists already is not an error.
+/// The permissions that a test account has when the test does not choose: it may subscribe to the
+/// two groups of the test servers.
+const DEFAULT_GRANTS: [&str; 2] = [
+    "group.subscribe on service:inbox/group:infra",
+    "group.subscribe on service:inbox/group:other",
+];
+
+/// Encodes a value of a form.
+fn form_value(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "+".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The superadmin makes a database account, with the default permissions of the tests. An account
+/// that exists already is not an error.
 fn add_account(s: &Server, login: &str) {
+    add_account_with(s, login, &DEFAULT_GRANTS);
+}
+
+/// The same, with the permissions that the test chooses.
+fn add_account_with(s: &Server, login: &str, grants: &[&str]) {
     users_form(
         s,
         "/auth/users/add",
         &format!("login={login}&password={ACCOUNT_PASSWORD}"),
     );
+    set_grants(s, login, grants);
+}
+
+/// The superadmin sets the permissions of a database account. The form replaces the permissions of
+/// the account, but those of the service `portal`.
+fn set_grants(s: &Server, login: &str, grants: &[&str]) {
+    let mut fields = format!("login={login}&grants=1");
+    for (n, grant) in grants.iter().enumerate() {
+        fields.push_str(&format!("&grant{n}={}", form_value(grant)));
+    }
+    // An account that another instance made shows up here after a round of the directory.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let location = users_form(s, "/auth/users/update", &fields);
+        if location.contains("s=user-updated") || location.contains("s=unchanged") {
+            return;
+        }
+        assert!(
+            location.contains("s=no-user") && Instant::now() < deadline,
+            "{location}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// The superadmin deletes a database account.
@@ -747,31 +780,156 @@ fn delete_account(s: &Server, login: &str) {
     s.accounts.lock().unwrap().remove(login);
 }
 
-/// An account makes an enrollment code through the portal, as its owner does before he types it on
-/// the phone. The answer is the status and the JSON body.
-fn make_code(s: &Server, login: &str) -> (u16, Value) {
-    let session = s.account(login);
+/// The token of the forms of the inbox, from a page of the tab. The overview has the form that sends
+/// an alert, and the page "My phones" has the form that makes a code.
+fn inbox_csrf(port: u16, cookie: &str) -> String {
+    let host = format!("127.0.0.1:{port}");
+    for path in [
+        "/auth/settings/inbox",
+        "/auth/settings/inbox/phones",
+        "/auth/settings/inbox/devices",
+    ] {
+        let (st, _, page) = http_full(
+            port,
+            &host,
+            "GET",
+            path,
+            &[("Cookie", cookie.to_string())],
+            "",
+        );
+        if st != 200 {
+            continue;
+        }
+        // The header of the page has the sign-out form with its own token: take the token of a form of the inbox.
+        let Some(form) = page.find("action=\"/auth/settings/inbox/") else {
+            continue;
+        };
+        let marker = "name=\"csrf\" value=\"";
+        if let Some(start) = page[form..].find(marker) {
+            let start = form + start + marker.len();
+            return page[start..].split('"').next().unwrap().to_string();
+        }
+    }
+    String::new()
+}
+
+/// The text of an HTML attribute value, without the escapes of the portal.
+fn unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// The value of the attribute `name` in the tag text.
+fn attr(tag: &str, name: &str) -> Option<String> {
+    let marker = format!(" {name}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    Some(unescape(tag[start..].split('"').next()?))
+}
+
+/// The opening tags `<tr ...>` of a page that carry the attribute `key`.
+fn rows(page: &str, key: &str) -> Vec<String> {
+    let marker = format!(" {key}=\"");
+    page.match_indices("<tr ")
+        .filter_map(|(at, _)| {
+            let end = at + page[at..].find('>')?;
+            let tag = &page[at..end];
+            tag.contains(&marker).then(|| tag.to_string())
+        })
+        .collect()
+}
+
+/// A page of the tab Inbox with the session of the superadmin.
+fn inbox_page(s: &Server, path: &str) -> (u16, String) {
+    inbox_page_as(s, &s.session().cookie, path)
+}
+
+fn inbox_page_as(s: &Server, cookie: &str, path: &str) -> (u16, String) {
     let host = format!("127.0.0.1:{}", s.admin_port);
-    let (st, text) = http_host(
+    let (st, _, page) = http_full(
+        s.admin_port,
+        &host,
+        "GET",
+        path,
+        &[("Cookie", cookie.to_string())],
+        "",
+    );
+    (st, page)
+}
+
+/// A form of the inbox, sent with the session of an account. The answer is the status, the head and
+/// the body.
+fn inbox_form(s: &Server, cookie: &str, path: &str, fields: &str) -> (u16, String, String) {
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let csrf = inbox_csrf(s.admin_port, cookie);
+    let body = if fields.is_empty() {
+        format!("csrf={csrf}")
+    } else {
+        format!("csrf={csrf}&{fields}")
+    };
+    http_full(
         s.admin_port,
         &host,
         "POST",
-        "/auth/inbox/api/enrollment-codes",
+        path,
         &[
-            ("Cookie", session.cookie.clone()),
-            ("Content-Type", "application/json".into()),
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
             ("Origin", format!("http://{host}")),
-            ("X-CSRF-Token", session.csrf.clone()),
+            ("Cookie", cookie.to_string()),
         ],
-        "{}",
-    );
-    (st, serde_json::from_str(&text).unwrap_or(Value::Null))
+        &body,
+    )
+}
+
+/// The `Location` header of an answer.
+fn location(head: &str) -> String {
+    head.lines()
+        .find_map(|l| {
+            l.strip_prefix("location: ")
+                .or(l.strip_prefix("Location: "))
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// An account makes an enrollment code on the page "My phones", as its owner does before he types it on
+/// the phone. The answer is the status and a JSON object of the page: `code`, `fingerprint` and
+/// `expires_at_ms` for a code (status 200), or `notice` for the refusal that the redirect names
+/// (status 303).
+fn make_code(s: &Server, login: &str) -> (u16, Value) {
+    let session = s.account(login);
+    let (st, head, page) = inbox_form(s, &session.cookie, "/auth/settings/inbox/code", "");
+    if st != 200 {
+        let loc = location(&head);
+        let notice = loc.split("s=").nth(1).unwrap_or_default().to_string();
+        return (st, json!({ "notice": notice, "body": page }));
+    }
+    let field = page
+        .find("id=\"enroll-code\"")
+        .expect("the code page has the field of the code");
+    let tag_start = page[..field].rfind('<').unwrap();
+    let tag = &page[tag_start..field + page[field..].find('>').unwrap()];
+    let fingerprint = page
+        .split("fingerprint <code>")
+        .nth(1)
+        .and_then(|t| t.split("</code>").next())
+        .unwrap_or_default();
+    (
+        st,
+        json!({
+            "code": attr(tag, "value").unwrap(),
+            "fingerprint": fingerprint,
+            "expires_at_ms": attr(tag, "data-expires-ms").and_then(|v| v.parse::<i64>().ok()),
+        }),
+    )
 }
 
 /// The text of a new code of an account.
 fn code_for(s: &Server, login: &str) -> String {
     let (st, v) = make_code(s, login);
-    assert_eq!(st, 201, "{v}");
+    assert_eq!(st, 200, "{v}");
     v["code"].as_str().unwrap().to_string()
 }
 
@@ -972,19 +1130,150 @@ impl Conn {
     }
 }
 
-/// An admin call of the inbox, with the session of the superadmin. A POST carries the
-/// anti-CSRF token, the origin and the JSON content type.
+/// A read or a change of the inbox with the session of the superadmin, in the manner of the pages of
+/// the tab Inbox. `path` names the kind of call as the first tests did. The answer has the shape of
+/// the old JSON of the tests, built from the rows of the pages:
+/// - `GET /auth/inbox/api/overview`: `stats` (enrolled, online, unreachable) and `devices`.
+/// - `GET /auth/inbox/api/alerts`: `alerts`, newest first (the 20 of the overview).
+/// - `GET /auth/inbox/api/connections?user=<login>`: `connections`.
+/// - `POST /auth/inbox/api/alerts` with `{group, title, idempotency_key}`: sends an alert. The status
+///   is 201, or 200 for a duplicate. The body has `alert_id`.
+/// - `POST /auth/inbox/api/devices/<id>/revoke`: the status is 200 and the body has `revoked`.
 fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
     let session = s.session();
-    let host = format!("127.0.0.1:{}", s.admin_port);
-    let mut headers: Vec<(&str, String)> = vec![("Cookie", session.cookie.clone())];
-    if method == "POST" {
-        headers.push(("Content-Type", "application/json".into()));
-        headers.push(("Origin", format!("http://{host}")));
-        headers.push(("X-CSRF-Token", session.csrf.clone()));
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    match (method, route) {
+        ("GET", "/auth/inbox/api/overview") => {
+            let (st, page) = inbox_page(s, "/auth/settings/inbox/devices");
+            if st != 200 {
+                return (st, Value::Null);
+            }
+            let devices: Vec<Value> = rows(&page, "data-device")
+                .iter()
+                .map(|tag| {
+                    let state = attr(tag, "data-state").unwrap();
+                    let groups: Vec<Value> = attr(tag, "data-groups")
+                        .unwrap()
+                        .split(',')
+                        .filter(|g| !g.is_empty())
+                        .map(|g| json!(g))
+                        .collect();
+                    json!({
+                        "device": {
+                            "id": attr(tag, "data-device").unwrap(),
+                            "name": attr(tag, "data-name").unwrap(),
+                            "user_name": attr(tag, "data-login").unwrap(),
+                            "pending": attr(tag, "data-pending").unwrap().parse::<i64>().unwrap(),
+                            "subscriptions": groups,
+                        },
+                        "status": state,
+                    })
+                })
+                .collect();
+            let count = |f: &dyn Fn(&Value) -> bool| devices.iter().filter(|d| f(d)).count();
+            let stats = json!({
+                "enrolled": count(&|d| d["status"] != "revoked"),
+                "online": count(&|d| d["status"] == "online"),
+                "unreachable": count(&|d| d["status"] == "unreachable"),
+            });
+            (st, json!({ "stats": stats, "devices": devices }))
+        }
+        ("GET", "/auth/inbox/api/alerts") => {
+            let (st, page) = inbox_page(s, "/auth/settings/inbox");
+            if st != 200 {
+                return (st, Value::Null);
+            }
+            let alerts: Vec<Value> = rows(&page, "data-alert")
+                .iter()
+                .map(|tag| {
+                    let number = |name: &str| attr(tag, name).unwrap().parse::<i64>().unwrap();
+                    json!({
+                        "id": attr(tag, "data-alert").unwrap(),
+                        "group": attr(tag, "data-group").unwrap(),
+                        "received": number("data-received"),
+                        "targets": number("data-targets"),
+                        "expired": number("data-expired"),
+                        "created_at": number("data-created"),
+                    })
+                })
+                .collect();
+            let limit = query
+                .split('&')
+                .find_map(|p| p.strip_prefix("limit="))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            let alerts: Vec<Value> = alerts.into_iter().take(limit).collect();
+            (st, json!({ "alerts": alerts }))
+        }
+        ("GET", "/auth/inbox/api/connections") => {
+            let login = query
+                .split('&')
+                .find_map(|p| p.strip_prefix("user="))
+                .unwrap_or_default();
+            let (st, page) = inbox_page(
+                s,
+                &format!("/auth/settings/inbox/connections?login={login}"),
+            );
+            if st != 200 {
+                return (st, Value::Null);
+            }
+            let connections: Vec<Value> = rows(&page, "data-reason")
+                .iter()
+                .map(|tag| {
+                    json!({
+                        "user_name": attr(tag, "data-login").unwrap(),
+                        "device_id": attr(tag, "data-device").unwrap(),
+                        "close_reason": attr(tag, "data-reason").unwrap(),
+                    })
+                })
+                .collect();
+            (st, json!({ "connections": connections }))
+        }
+        ("POST", "/auth/inbox/api/alerts") => {
+            let v: Value = serde_json::from_str(body).unwrap();
+            let fields = format!(
+                "group={}&title={}&key={}",
+                form_value(v["group"].as_str().unwrap()),
+                form_value(v["title"].as_str().unwrap()),
+                form_value(v["idempotency_key"].as_str().unwrap()),
+            );
+            let (st, head, text) =
+                inbox_form(s, &session.cookie, "/auth/settings/inbox/send", &fields);
+            let loc = location(&head);
+            if st != 303 {
+                return (st, json!({ "body": text }));
+            }
+            let id = loc
+                .strip_prefix("/auth/settings/inbox/alerts/")
+                .and_then(|r| r.split('?').next())
+                .unwrap_or_default();
+            let status = if loc.contains("s=sent") {
+                201
+            } else if loc.contains("s=duplicate") {
+                200
+            } else {
+                400
+            };
+            (status, json!({ "alert_id": id, "location": loc }))
+        }
+        ("POST", route) if route.starts_with("/auth/inbox/api/devices/") => {
+            let id = route
+                .trim_start_matches("/auth/inbox/api/devices/")
+                .trim_end_matches("/revoke");
+            let (st, head, text) = inbox_form(
+                s,
+                &session.cookie,
+                "/auth/settings/inbox/revoke",
+                &format!("id={id}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices"),
+            );
+            if st != 303 {
+                return (st, json!({ "body": text }));
+            }
+            let revoked = location(&head).contains("s=revoked");
+            (200, json!({ "revoked": revoked }))
+        }
+        _ => (404, Value::Null),
     }
-    let (st, text) = http_host(s.admin_port, &host, method, path, &headers, body);
-    (st, serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
 #[test]
@@ -1407,12 +1696,17 @@ async fn delivery_guarantees_end_to_end() {
     );
     ca.no_alert(Duration::from_millis(2000)).await;
 
-    // Admin: the session of the superadmin, the origin, the content type and the anti-CSRF token; revocation.
+    // Admin: the pages of the tab Inbox need a session, the forms need the origin, the form type and
+    // the anti-CSRF token. The JSON admin API of the first versions is gone.
     let ap = s.admin_port;
     let host = format!("127.0.0.1:{ap}");
-    let (st, body) = http_host(ap, &host, "GET", "/auth/inbox/api/overview", &[], "");
-    assert_eq!(st, 401, "no session, no admin call: {body}");
-    assert!(body.contains("unauthorized"), "{body}");
+    for path in ["/auth/settings/inbox", "/auth/settings/inbox/devices"] {
+        let (st, head, _) = http_full(ap, &host, "GET", path, &[], "");
+        assert_eq!(st, 303, "no session, no page");
+        assert!(location(&head).starts_with("/auth/login"), "{head}");
+    }
+    let (st, _) = inbox_page(&s, "/auth/inbox/api/overview");
+    assert_eq!(st, 404, "the JSON admin API is gone");
     let (st, v) = admin(&s, "GET", "/auth/inbox/api/overview", "");
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["stats"]["enrolled"], 2);
@@ -1423,7 +1717,6 @@ async fn delivery_guarantees_end_to_end() {
         .find(|d| d["device"]["name"] == "phone-a")
         .unwrap();
     assert_eq!(a_row["status"], "online");
-    assert_eq!(a_row["live"]["ip"], "127.0.0.1");
     assert_eq!(a_row["device"]["user_name"], "alice");
     let b_row = devices
         .iter()
@@ -1431,49 +1724,100 @@ async fn delivery_guarantees_end_to_end() {
         .unwrap();
     assert_eq!(b_row["device"]["user_name"], "bob");
     let session = s.session();
-    let send = json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string();
-    let post = |extra: &[(&str, String)]| {
+    let csrf = inbox_csrf(ap, &session.cookie);
+    let send = format!("csrf={csrf}&group=other&title=manual&key=m1");
+    let post = |extra: &[(&str, String)], body: &str| {
         let mut headers = vec![("Cookie", session.cookie.clone())];
         headers.extend_from_slice(extra);
-        http_host(ap, &host, "POST", "/auth/inbox/api/alerts", &headers, &send)
+        http_host(
+            ap,
+            &host,
+            "POST",
+            "/auth/settings/inbox/send",
+            &headers,
+            body,
+        )
+        .0
     };
     let origin = ("Origin", format!("http://{host}"));
-    let json_type = ("Content-Type", "application/json".to_string());
-    let token = ("X-CSRF-Token", session.csrf.clone());
-    let (st, _) = post(&[json_type.clone(), token.clone()]);
-    assert_eq!(st, 403, "POST without Origin");
-    let (st, _) = post(&[
-        json_type.clone(),
-        token.clone(),
-        ("Origin", "http://evil.example".into()),
-    ]);
-    assert_eq!(st, 403, "POST from another origin");
-    let (st, _) = post(&[json_type.clone(), origin.clone()]);
-    assert_eq!(st, 403, "POST without the anti-CSRF token");
-    let (st, _) = post(&[
-        json_type.clone(),
-        origin.clone(),
-        ("X-CSRF-Token", "x".repeat(43)),
-    ]);
-    assert_eq!(st, 403, "POST with a wrong anti-CSRF token");
-    let (st, _) = post(&[
-        ("Content-Type", "text/plain".into()),
-        origin.clone(),
-        token.clone(),
-    ]);
-    assert_eq!(st, 415, "POST without JSON content type");
-    let (st, _) = http_host(
+    let form_type = (
+        "Content-Type",
+        "application/x-www-form-urlencoded".to_string(),
+    );
+    assert_eq!(
+        post(std::slice::from_ref(&form_type), &send),
+        403,
+        "POST without Origin"
+    );
+    assert_eq!(
+        post(
+            &[form_type.clone(), ("Origin", "http://evil.example".into())],
+            &send
+        ),
+        403,
+        "POST from another origin"
+    );
+    assert_eq!(
+        post(
+            &[form_type.clone(), origin.clone()],
+            "group=other&title=manual&key=m1"
+        ),
+        403,
+        "POST without the anti-CSRF token"
+    );
+    assert_eq!(
+        post(
+            &[form_type.clone(), origin.clone()],
+            &format!("csrf={}&group=other&title=manual&key=m1", "x".repeat(43))
+        ),
+        403,
+        "POST with a wrong anti-CSRF token"
+    );
+    assert_eq!(
+        post(
+            &[("Content-Type", "text/plain".into()), origin.clone()],
+            &send
+        ),
+        415,
+        "POST without the form type"
+    );
+    let (st, head, _) = http_full(
         ap,
         &host,
         "POST",
-        "/auth/inbox/api/alerts",
-        &[json_type.clone(), origin.clone(), token.clone()],
+        "/auth/settings/inbox/send",
+        &[form_type.clone(), origin.clone()],
         &send,
     );
-    assert_eq!(st, 401, "POST without session");
-    let (st, v) = admin(&s, "POST", "/auth/inbox/api/alerts", &send);
+    assert_eq!(st, 303, "POST without session");
+    assert!(location(&head).starts_with("/auth/login"), "{head}");
+    let (st, v) = admin(
+        &s,
+        "POST",
+        "/auth/inbox/api/alerts",
+        &json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string(),
+    );
     assert_eq!(st, 201, "{v}");
-    assert_eq!(v["targets"], 0);
+    let (st, page) = inbox_page(
+        &s,
+        &format!(
+            "/auth/settings/inbox/alerts/{}",
+            v["alert_id"].as_str().unwrap()
+        ),
+    );
+    assert_eq!(st, 200);
+    assert!(
+        page.contains("0 phones"),
+        "no phone subscribes to the group: {page}"
+    );
+    // The same key sends nothing a second time.
+    let (st, _) = admin(
+        &s,
+        "POST",
+        "/auth/inbox/api/alerts",
+        &json!({"group": "other", "title": "manual", "idempotency_key": "m1"}).to_string(),
+    );
+    assert_eq!(st, 200, "the second send is a duplicate");
     let (st, v) = admin(
         &s,
         "POST",
@@ -1514,28 +1858,18 @@ async fn delivery_guarantees_end_to_end() {
     let (_, v) = admin(&s, "GET", "/auth/inbox/api/alerts?limit=2", "");
     assert_eq!(v["alerts"].as_array().unwrap().len(), 2);
     assert_eq!(v["alerts"][0]["id"], all[0]["id"], "newest first");
-    let newest = all[0]["created_at"].as_i64().unwrap();
-    let (_, v) = admin(
+    // The page of one alert shows its deliveries.
+    let (st, page) = inbox_page(
         &s,
-        "GET",
-        &format!("/auth/inbox/api/alerts?since_ms={}", newest + 1),
-        "",
+        &format!(
+            "/auth/settings/inbox/alerts/{}",
+            all[0]["id"].as_str().unwrap()
+        ),
     );
-    assert!(
-        v["alerts"].as_array().unwrap().is_empty(),
-        "since_ms filters older alerts"
-    );
-    let (_, v) = admin(
-        &s,
-        "GET",
-        &format!("/auth/inbox/api/alerts?since_ms={newest}"),
-        "",
-    );
-    assert!(!v["alerts"].as_array().unwrap().is_empty());
+    assert_eq!(st, 200, "{page}");
+    assert!(page.contains("Received"), "{page}");
     let (st, _) = admin(&s, "POST", "/auth/inbox/api/login/start", "{}");
     assert_eq!(st, 404, "no login endpoint any more");
-    let (st, _) = admin(&s, "GET", "/auth/inbox/api/devices", "");
-    assert_eq!(st, 404);
     // The HTML front is gone: the listener of the phones serves no page.
     let (st, _) = http(s.port, "GET", "/", &[], "");
     assert_eq!(st, 404);
@@ -1775,33 +2109,34 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 200);
 
-    // The admin calls are not on the listener of the phones, and the portal needs a session for them.
-    let (st, _) = http(port, "GET", "/auth/inbox/api/overview", &[], "");
+    // The pages of the inbox are not on the listener of the phones, and the portal needs a session for them.
+    let (st, _) = http(port, "GET", "/auth/settings/inbox", &[], "");
     assert_eq!(st, 404);
-    let (st, _) = http_host(
+    let (st, head, _) = http_full(
         s.admin_port,
         &format!("127.0.0.1:{}", s.admin_port),
         "GET",
-        "/auth/inbox/api/overview",
+        "/auth/settings/inbox",
         &[],
         "",
     );
-    assert_eq!(st, 401);
-    // The producer token does not open the admin calls.
-    let (st, _) = http_host(
+    assert_eq!(st, 303);
+    assert!(location(&head).starts_with("/auth/login"), "{head}");
+    // The producer token does not open the pages.
+    let (st, _, _) = http_full(
         s.admin_port,
         &format!("127.0.0.1:{}", s.admin_port),
         "GET",
-        "/auth/inbox/api/overview",
+        "/auth/settings/inbox",
         std::slice::from_ref(&auth),
         "",
     );
-    assert_eq!(st, 401);
+    assert_eq!(st, 303);
     // The alert of the call without a key is still waiting for its receipt.
     let got = c.alert().await;
     assert_eq!(got.title, "nokey");
     c.ack(&got.alert_id, AckStage::Received).await;
-    // A call of the superadmin sends an alert to the group.
+    // The form of the superadmin sends an alert to the group.
     let send = json!({"group": "infra", "title": "via admin", "idempotency_key": "p1"}).to_string();
     let (st, body) = admin(&s, "POST", "/auth/inbox/api/alerts", &send);
     assert_eq!(st, 201, "{body}");
@@ -2838,47 +3173,43 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     s.start();
     let (admin_port, host) = (s.admin_port, format!("127.0.0.1:{}", s.admin_port));
 
-    // The rules of the call: a session, a POST with the origin, JSON and the token, an empty object.
+    // The rules of the form: a session, a POST with the origin, the form type and the token, no other field.
     let session = s.session();
     let origin = ("Origin", format!("http://{host}"));
-    let json_type = ("Content-Type", "application/json".to_string());
+    let form_type = (
+        "Content-Type",
+        "application/x-www-form-urlencoded".to_string(),
+    );
+    let csrf = inbox_csrf(admin_port, &session.cookie);
     let call = |method: &str, headers: &[(&str, String)], body: &str| {
         http_host(
             admin_port,
             &host,
             method,
-            "/auth/inbox/api/enrollment-codes",
+            "/auth/settings/inbox/code",
             headers,
             body,
         )
         .0
     };
     let cookie = ("Cookie", session.cookie.clone());
-    let token = ("X-CSRF-Token", session.csrf.clone());
+    let token_body = format!("csrf={csrf}");
     assert_eq!(
-        call(
-            "POST",
-            &[json_type.clone(), origin.clone(), token.clone()],
-            "{}"
-        ),
-        401,
-        "no session"
+        call("POST", &[form_type.clone(), origin.clone()], &token_body),
+        303,
+        "no session: the page goes to the sign-in"
     );
     assert_eq!(call("GET", std::slice::from_ref(&cookie), ""), 405);
     assert_eq!(
-        call(
-            "POST",
-            &[cookie.clone(), json_type.clone(), token.clone()],
-            "{}"
-        ),
+        call("POST", &[cookie.clone(), form_type.clone()], &token_body),
         403,
         "no origin"
     );
     assert_eq!(
         call(
             "POST",
-            &[cookie.clone(), json_type.clone(), origin.clone()],
-            "{}"
+            &[cookie.clone(), form_type.clone(), origin.clone()],
+            ""
         ),
         403,
         "no token"
@@ -2886,13 +3217,8 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     assert_eq!(
         call(
             "POST",
-            &[
-                cookie.clone(),
-                json_type.clone(),
-                origin.clone(),
-                ("X-CSRF-Token", "x".repeat(43))
-            ],
-            "{}"
+            &[cookie.clone(), form_type.clone(), origin.clone()],
+            &format!("csrf={}", "x".repeat(43))
         ),
         403,
         "wrong token"
@@ -2903,25 +3229,21 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
             &[
                 cookie.clone(),
                 ("Content-Type", "text/plain".into()),
-                origin.clone(),
-                token.clone()
+                origin.clone()
             ],
-            "{}"
+            &token_body
         ),
         415
     );
-    let full = [
-        cookie.clone(),
-        json_type.clone(),
-        origin.clone(),
-        token.clone(),
-    ];
     assert_eq!(
-        call("POST", &full, r#"{"login":"bob"}"#),
+        call(
+            "POST",
+            &[cookie.clone(), form_type.clone(), origin.clone()],
+            &format!("{token_body}&login=bob")
+        ),
         400,
         "a code is for the login of the session only"
     );
-    assert_eq!(call("POST", &full, "not json"), 400);
 
     // The answer: the text of the code, its end and the fingerprint of the key.
     let before = std::time::SystemTime::now()
@@ -2929,7 +3251,7 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
         .unwrap()
         .as_millis() as i64;
     let (st, v) = make_code(&s, SUPERADMIN);
-    assert_eq!(st, 201, "{v}");
+    assert_eq!(st, 200, "{v}");
     let text = v["code"].as_str().unwrap().to_string();
     let parsed = EnrollCode::parse(&text).unwrap();
     assert_eq!(parsed.address, format!("127.0.0.1:{}", s.port));
@@ -2993,17 +3315,17 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
         .map(|d| d["device"]["user_name"].as_str().unwrap())
         .collect();
     assert_eq!(users, ["bob", "root"]);
-    // The inbox has no admin call of its own for a plain account, but the code and the token of the call.
+    // A plain account with a right to subscribe has the page of its phones and no admin page.
     let bob_session = s.account("bob");
-    let (st, _, _) = http_full(
-        admin_port,
-        &host,
-        "GET",
-        "/auth/inbox/api/overview",
-        &[("Cookie", bob_session.cookie.clone())],
-        "",
-    );
-    assert_eq!(st, 403, "the admin calls are for the superadmin");
+    let (st, _) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox/phones");
+    assert_eq!(st, 200);
+    for path in [
+        "/auth/settings/inbox/devices",
+        "/auth/settings/inbox/connections",
+    ] {
+        let (st, _) = inbox_page_as(&s, &bob_session.cookie, path);
+        assert_eq!(st, 403, "{path}");
+    }
 
     // The secret is not in the log. The database keeps its SHA-256 digest only.
     let secret = inbox_core::b64::encode_url(&parsed.secret);
@@ -3088,16 +3410,16 @@ async fn an_account_has_a_limited_number_of_active_codes() {
         codes.push(code_for(&s, "dave"));
     }
     let (st, v) = make_code(&s, "dave");
-    assert_eq!(st, 429, "{v}");
-    assert_eq!(v["error"]["code"], "too_many_codes", "{v}");
+    assert_eq!(st, 303, "{v}");
+    assert_eq!(v["notice"], "too_many_codes", "{v}");
     // Another account has its own count.
-    assert_eq!(make_code(&s, SUPERADMIN).0, 201);
+    assert_eq!(make_code(&s, SUPERADMIN).0, 200);
     // A used code frees a place. An expired code does too.
     enroll_code(&codes[0], "phone-dave").await.unwrap();
-    assert_eq!(make_code(&s, "dave").0, 201);
-    assert_eq!(make_code(&s, "dave").0, 429);
+    assert_eq!(make_code(&s, "dave").0, 200);
+    assert_eq!(make_code(&s, "dave").0, 303);
     expire_codes(&s);
-    assert_eq!(make_code(&s, "dave").0, 201);
+    assert_eq!(make_code(&s, "dave").0, 200);
     s.stop();
 }
 
@@ -3160,9 +3482,9 @@ async fn a_deleted_account_loses_its_phones_and_its_codes() {
     s.stop();
 }
 
-/// Without the block `inbox` the call does not exist, and an account can be deleted as before.
+/// Without the block `inbox` the pages do not exist, and an account can be deleted as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn without_the_inbox_block_the_call_is_absent() {
+async fn without_the_inbox_block_the_pages_are_absent() {
     let mut s = Server::setup();
     let text = std::fs::read_to_string(s.config()).unwrap();
     // The block `inbox` goes. The block `postgres`, if any, stays.
@@ -3170,23 +3492,928 @@ async fn without_the_inbox_block_the_call_is_absent() {
     let end = text.find("\npostgres {").unwrap_or(text.len());
     std::fs::write(s.config(), format!("{}{}", &text[..cut], &text[end..])).unwrap();
     s.start();
-    let host = format!("127.0.0.1:{}", s.admin_port);
     let session = s.session();
-    let (st, _, body) = http_full(
+    for path in [
+        "/auth/settings/inbox",
+        "/auth/settings/inbox/phones",
+        "/auth/settings/inbox/doc",
+    ] {
+        let (st, _) = inbox_page_as(&s, &session.cookie, path);
+        assert_eq!(st, 404, "{path}");
+    }
+    let (st, page) = inbox_page_as(&s, &session.cookie, "/auth/settings");
+    assert_eq!(st, 200);
+    assert!(
+        !page.contains("/auth/settings/inbox"),
+        "no tab Inbox without the block"
+    );
+    let (st, home) = inbox_page_as(&s, &session.cookie, "/");
+    assert_eq!(st, 200);
+    assert!(!home.contains("Inbox"), "no tile Inbox without the block");
+    users_form(
+        &s,
+        "/auth/users/add",
+        &format!("login=erin&password={ACCOUNT_PASSWORD}"),
+    );
+    delete_account(&s, "erin");
+    s.stop();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rights: keys of the portal as producers, subscriptions that follow the permissions.
+
+/// The text of a key of the portal: `mcp_`, 43 characters and the checksum. The tests use fixed text.
+fn key_text(seed: u8) -> String {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let random: Vec<u8> = (0..43)
+        .map(|i| ALPHABET[(usize::from(seed) * 7 + i * 5) % 62])
+        .collect();
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in &random {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    let mut value = !crc;
+    let mut check = [b'0'; 6];
+    for digit in check.iter_mut().rev() {
+        *digit = ALPHABET[(value % 62) as usize];
+        value /= 62;
+    }
+    format!(
+        "mcp_{}{}",
+        String::from_utf8(random).unwrap(),
+        String::from_utf8(check.to_vec()).unwrap()
+    )
+}
+
+fn key_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The configuration of the keys: the blocks `access`, `keys` and `identity`, and the accounts of
+/// the file in `users`.
+fn enable_keys(s: &Server, users: &str) {
+    std::fs::write(
+        s.dir.join("identity.pem"),
+        "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let mut text = std::fs::read_to_string(s.config()).unwrap();
+    let pdp = free_port();
+    text.push_str(&format!(
+        "\naccess {{\n  grants_mode = \"hybrid\"\n}}\nkeys {{\n}}\nidentity {{\n  issuer = \"https://portal.e2e\"\n  signing_key_file = \"{}\"\n}}\npdp {{\n  listen_address = \"127.0.0.1:{pdp}\"\n  url = \"http://127.0.0.1:{pdp}\"\n  plain_http = true\n}}\n{users}\n",
+        s.dir.join("identity.pem").display()
+    ));
+    std::fs::write(s.config(), text).unwrap();
+}
+
+/// A request of a producer with the text of a key or a token. The answer is the status, the head and
+/// the JSON body.
+fn producer_call(
+    s: &Server,
+    method: &str,
+    path: &str,
+    token: &str,
+    idempotency_key: &str,
+    body: &str,
+) -> (u16, String, Value) {
+    let host = format!("localhost:{}", s.port);
+    let (status, head, text) = http_full(
+        s.port,
+        &host,
+        method,
+        path,
+        &[
+            ("Authorization", format!("Bearer {token}")),
+            ("Idempotency-Key", idempotency_key.to_string()),
+        ],
+        body,
+    );
+    (
+        status,
+        head,
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+    )
+}
+
+fn send_with(s: &Server, token: &str, key: &str, group: &str, title: &str) -> (u16, String, Value) {
+    producer_call(
+        s,
+        "POST",
+        "/api/v1/alerts",
+        token,
+        key,
+        &json!({ "group": group, "title": title }).to_string(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_of_the_portal_sends_alerts_with_the_permissions_and_the_limit_of_its_owner() {
+    let mut s = Server::setup();
+    s.add_to_inbox("  group \"crit\" {\n    name = \"Critical\"\n    critical = true\n  }");
+    let (ci, narrow, ghost) = (key_text(1), key_text(2), key_text(3));
+    std::fs::write(s.dir.join("ci.sha256"), key_digest(&ci)).unwrap();
+    std::fs::write(s.dir.join("narrow.sha256"), key_digest(&narrow)).unwrap();
+    let users = format!(
+        r#"
+user "svc" {{
+  grants = [
+    "keys.own.use on service:portal",
+    {{ grant = "access on service:inbox", limits = {{ alerts = [ {{ amount = 3, window = "minute" }} ] }} }},
+    "alert.send on service:inbox/group:infra",
+    "alert.send on service:inbox/group:crit",
+    "alert.read on service:inbox/group:infra",
+  ]
+  key "ci" {{
+    key_sha256_file = "{}"
+    grants = [
+      "alert.send on service:inbox/group:infra",
+      "alert.send on service:inbox/group:crit",
+      "alert.read on service:inbox/group:infra",
+    ]
+  }}
+}}
+user "partial" {{
+  grants = [
+    "keys.own.use on service:portal",
+    "alert.send on service:inbox/group:infra",
+  ]
+  key "narrow" {{
+    key_sha256_file = "{}"
+    grants = [
+      "alert.send on service:inbox/group:infra",
+      "alert.send on service:inbox/group:other",
+    ]
+  }}
+}}
+"#,
+        s.dir.join("ci.sha256").display(),
+        s.dir.join("narrow.sha256").display()
+    );
+    enable_keys(&s, &users);
+    s.start();
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+    conn.subscribe("crit").await;
+
+    // An allowed group: the alert is made and the phone gets it exactly one time.
+    let (st, _, v) = send_with(&s, &ci, "k1", "infra", "from a key");
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 1);
+    let first = conn.alert().await;
+    assert_eq!(first.title, "from a key");
+    conn.ack(&first.alert_id, AckStage::Received).await;
+    conn.no_alert(Duration::from_millis(2500)).await;
+    // The same Idempotency-Key makes no second alert. The repeated request is a use of the limit.
+    let (st, _, v) = send_with(&s, &ci, "k1", "infra", "from a key");
+    assert_eq!(st, 200, "{v}");
+    conn.no_alert(Duration::from_millis(1500)).await;
+
+    // A group without the permission: 403, and nothing is made. The reason is in the answer.
+    let (st, _, v) = send_with(&s, &ci, "k2", "other", "no");
+    assert_eq!(st, 403, "{v}");
+    assert_eq!(v["error"]["code"], "forbidden_group", "{v}");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("other"),
+        "{v}"
+    );
+    // The key has the permission, its owner has not: the decision is no.
+    let (st, _, _) = send_with(&s, &narrow, "n1", "other", "no");
+    assert_eq!(st, 403);
+    let (st, _, _) = send_with(&s, &narrow, "n2", "infra", "ok");
+    assert_eq!(st, 201);
+    assert_eq!(take(&mut conn).await.title, "ok");
+
+    // The limit of the owner: 3 each minute. Two units are used (the first send and its repeat). This send takes the last.
+    let (st, _, v) = send_with(&s, &ci, "k3", "infra", "second");
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(take(&mut conn).await.title, "second");
+    // The third send hits the limit: 429 with Retry-After, and nothing is made.
+    let (st, head, v) = send_with(&s, &ci, "k4", "infra", "third");
+    assert_eq!(st, 429, "{v}");
+    assert_eq!(v["error"]["code"], "rate_limited", "{v}");
+    let retry: u64 = head
+        .lines()
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("retry-after: ")
+                .map(str::to_string)
+        })
+        .expect("the answer 429 has Retry-After")
+        .trim()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry), "{retry}");
+    // The webhook and the generic endpoint count as the same use.
+    let (st, _, _) = producer_call(&s, "POST", "/api/v1/notify/infra", &ci, "k5", "text");
+    assert_eq!(st, 429);
+    let (st, _, _) = producer_call(
+        &s,
+        "POST",
+        "/api/v1/webhooks/alertmanager/infra",
+        &ci,
+        "k6",
+        r#"{"alerts":[{"status":"firing","labels":{"alertname":"X"}}]}"#,
+    );
+    assert_eq!(st, 429);
+
+    // A critical group never has a limit: more sends than the limit all work.
+    for n in 0..5 {
+        let (st, _, v) = send_with(&s, &ci, &format!("c{n}"), "crit", &format!("critical {n}"));
+        assert_eq!(st, 201, "critical send {n}: {v}");
+    }
+    for n in 0..5 {
+        assert_eq!(take(&mut conn).await.title, format!("critical {n}"));
+    }
+    let (st, _, _) = producer_call(
+        &s,
+        "POST",
+        "/api/v1/notify/crit",
+        &ci,
+        "c9",
+        "a critical notification",
+    );
+    assert_eq!(st, 201);
+    assert_eq!(take(&mut conn).await.title, "a critical notification");
+    let (st, _, _) = producer_call(
+        &s,
+        "POST",
+        "/api/v1/webhooks/alertmanager/crit",
+        &ci,
+        "c10",
+        r#"{"alerts":[{"status":"firing","labels":{"alertname":"Disk"},"fingerprint":"f1"}]}"#,
+    );
+    assert_eq!(st, 200);
+    assert!(take(&mut conn).await.title.starts_with("[FIRING] Disk"));
+
+    // The token of the file still works as before, and the key in the query works too.
+    let (st, v) = post_alert(
+        &s,
+        "hcl1",
+        json!({"group": "infra", "title": "from the file"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(take(&mut conn).await.title, "from the file");
+    let (st, _) = http(
+        s.port,
+        "POST",
+        &format!("/api/v1/notify/crit?token={ci}&title=query"),
+        &[],
+        "",
+    );
+    assert_eq!(st, 201);
+    assert_eq!(take(&mut conn).await.title, "query");
+
+    // The key of the owner can read the delivery status of an alert of a group that it may read.
+    let id = first.alert_id.clone();
+    let (st, _, v) = producer_call(&s, "GET", &format!("/api/v1/alerts/{id}"), &ci, "", "");
+    assert_eq!(st, 200, "{v}");
+    let (st, _, v) = send_with(&s, &ci, "crit-status", "crit", "status");
+    assert_eq!(st, 201, "{v}");
+    let crit_id = v["alert_id"].as_str().unwrap().to_string();
+    let (st, _, _) = producer_call(&s, "GET", &format!("/api/v1/alerts/{crit_id}"), &ci, "", "");
+    assert_eq!(st, 404, "the key has no alert.read on the group crit");
+    let _ = take(&mut conn).await;
+
+    // A text that is not a key, and a key that nobody has: 401.
+    for token in ["not a key at all", ghost.as_str(), "mcp_short"] {
+        let (st, _, _) = send_with(&s, token, "g1", "infra", "no");
+        assert_eq!(st, 401, "{token}");
+    }
+    s.stop();
+}
+
+/// The next alert of the connection, confirmed.
+async fn take(conn: &mut Conn) -> AlertMsg {
+    let alert = conn.alert().await;
+    conn.ack(&alert.alert_id, AckStage::Received).await;
+    alert
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_follows_the_permission_to_subscribe() {
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    // The account has the permission for the group other only.
+    s.account("nina");
+    set_grants(
+        &s,
+        "nina",
+        &["group.subscribe on service:inbox/group:other"],
+    );
+    let nina = enroll_as(&s, "phone-nina", "nina").await.unwrap();
+    let (mut conn, welcome) = Conn::open(port, &nina).await.unwrap();
+    let ServerMsg::Welcome { groups, .. } = welcome else {
+        panic!("expected welcome")
+    };
+    let ids: Vec<&str> = groups.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["other"], "the welcome lists the allowed groups only");
+    // A subscription to a group without the permission is refused with its own error.
+    conn.send(&ClientMsg::Subscribe {
+        group: "infra".into(),
+    })
+    .await;
+    loop {
+        match conn.recv(Duration::from_secs(5)).await {
+            Recv::Msg(ServerMsg::Error { code, message }) => {
+                assert_eq!(
+                    (code.as_str(), message.as_str()),
+                    ("forbidden_group", "infra")
+                );
+                break;
+            }
+            Recv::Msg(_) => continue,
+            other => panic!("expected the error, got {}", describe(&other)),
+        }
+    }
+    // A group that does not exist keeps its own error.
+    conn.send(&ClientMsg::Subscribe {
+        group: "nothing".into(),
+    })
+    .await;
+    loop {
+        match conn.recv(Duration::from_secs(5)).await {
+            Recv::Msg(ServerMsg::Error { code, .. }) => {
+                assert_eq!(code, "unknown_group");
+                break;
+            }
+            Recv::Msg(_) => continue,
+            other => panic!("expected the error, got {}", describe(&other)),
+        }
+    }
+    conn.subscribe("other").await;
+    // The group infra makes no alert for this phone.
+    let (st, v) = post_alert(
+        &s,
+        "no-nina",
+        json!({"group": "infra", "title": "not for nina"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 0);
+    conn.no_alert(Duration::from_millis(1500)).await;
+    s.stop();
+}
+
+fn describe(recv: &Recv) -> String {
+    match recv {
+        Recv::Msg(m) => format!("{m:?}"),
+        Recv::Closed(c) => format!("closed {c:?}"),
+        Recv::Timeout => "timeout".into(),
+    }
+}
+
+/// The overview names the groups of a phone.
+fn groups_of(s: &Server, device_id: &str) -> Vec<String> {
+    let (_, v) = admin(s, "GET", "/auth/inbox/api/overview", "");
+    v["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device"]["id"] == device_id)
+        .map(|d| {
+            d["device"]["subscriptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g.as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_that_loses_the_permission_loses_the_subscription_and_keeps_its_pending_alerts()
+{
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    s.account("omar");
+    let omar = enroll_as(&s, "phone-omar", "omar").await.unwrap();
+    let stay = enroll_as(&s, "phone-stay", "alice").await.unwrap();
+    {
+        let (mut c, _) = Conn::open(port, &omar).await.unwrap();
+        c.subscribe("infra").await;
+        c.subscribe("other").await;
+        let (mut c2, _) = Conn::open(port, &stay).await.unwrap();
+        c2.subscribe("infra").await;
+    }
+    // The phone of omar is offline. An alert waits for it.
+    let (st, v) = post_alert(&s, "p1", json!({"group": "infra", "title": "pending"}));
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 2);
+    // Omar loses the permission for infra.
+    set_grants(
+        &s,
+        "omar",
+        &["group.subscribe on service:inbox/group:other"],
+    );
+    wait_for(
+        "the removal of the subscription",
+        Duration::from_secs(20),
+        || groups_of(&s, &omar.device_id) == ["other"],
+    );
+    assert_eq!(
+        groups_of(&s, &stay.device_id),
+        ["infra"],
+        "another account is not touched"
+    );
+    // The pending alert stays deliverable. The welcome shows no subscription to infra.
+    let (mut c, welcome) = Conn::open(port, &omar).await.unwrap();
+    let ServerMsg::Welcome {
+        subscriptions,
+        groups,
+        ..
+    } = welcome
+    else {
+        panic!("expected welcome")
+    };
+    assert_eq!(subscriptions, ["other"]);
+    assert_eq!(groups.len(), 1);
+    let got = c.alert().await;
+    assert_eq!(got.title, "pending");
+    c.ack(&got.alert_id, AckStage::Received).await;
+    // The next alerts of the group are not made for this phone.
+    let (st, v) = post_alert(&s, "p2", json!({"group": "infra", "title": "after"}));
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 1);
+    c.no_alert(Duration::from_millis(1500)).await;
+    // A phone that is online is told with the message `subscriptions`.
+    set_grants(
+        &s,
+        "omar",
+        &[
+            "group.subscribe on service:inbox/group:other",
+            "group.subscribe on service:inbox/group:infra",
+        ],
+    );
+    c.subscribe("infra").await;
+    set_grants(
+        &s,
+        "omar",
+        &["group.subscribe on service:inbox/group:infra"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match c.recv(Duration::from_secs(1)).await {
+            Recv::Msg(ServerMsg::Subscriptions { subscriptions }) if subscriptions == ["infra"] => {
+                break
+            }
+            Recv::Closed(code) => panic!("closed: {code:?}"),
+            _ => assert!(Instant::now() < deadline, "the phone was never told"),
+        }
+    }
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_superadmin_and_the_accounts_of_the_file_follow_their_permissions() {
+    let mut s = Server::setup();
+    let hash = portal(&["hash-password"], Some(ACCOUNT_PASSWORD));
+    assert!(hash.status.success());
+    std::fs::write(
+        s.dir.join("fred.hash"),
+        String::from_utf8(hash.stdout).unwrap().trim(),
+    )
+    .unwrap();
+    let users = format!(
+        r#"
+user "fred" {{
+  password_hash_file = "{}"
+  grants = [ "group.subscribe on service:inbox/group:infra" ]
+}}
+"#,
+        s.dir.join("fred.hash").display()
+    );
+    enable_keys(&s, &users);
+    s.start();
+    // The superadmin has every permission: it subscribes to each group.
+    let root = enroll_as(&s, "phone-root", SUPERADMIN).await.unwrap();
+    let (mut c, welcome) = Conn::open(s.port, &root).await.unwrap();
+    let ServerMsg::Welcome { groups, .. } = welcome else {
+        panic!("expected welcome")
+    };
+    assert_eq!(groups.len(), 2);
+    c.subscribe("infra").await;
+    c.subscribe("other").await;
+    // An account of the file has its permissions from the file: it opens the page of its phones,
+    // makes a code, and its phone sees the group of its permission only.
+    let fred = sign_in_as(s.admin_port, "fred", ACCOUNT_PASSWORD);
+    let (st, page) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/phones");
+    assert_eq!(st, 200, "{page}");
+    let (st, _) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/devices");
+    assert_eq!(st, 403);
+    let (st, _, page) = inbox_form(&s, &fred.cookie, "/auth/settings/inbox/code", "");
+    assert_eq!(st, 200, "{page}");
+    let marker = "id=\"enroll-code\" type=\"text\" readonly value=\"";
+    let start = page.find(marker).unwrap() + marker.len();
+    let code = unescape(page[start..].split('"').next().unwrap());
+    let phone = enroll_code(&code, "phone-fred").await.unwrap();
+    assert_eq!(phone.user_name, "fred");
+    let (mut cf, welcome) = Conn::open(s.port, &phone).await.unwrap();
+    let ServerMsg::Welcome { groups, .. } = welcome else {
+        panic!("expected welcome")
+    };
+    assert_eq!(
+        groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["infra"]
+    );
+    cf.subscribe("infra").await;
+    cf.send(&ClientMsg::Subscribe {
+        group: "other".into(),
+    })
+    .await;
+    loop {
+        match cf.recv(Duration::from_secs(5)).await {
+            Recv::Msg(ServerMsg::Error { code, .. }) => {
+                assert_eq!(code, "forbidden_group");
+                break;
+            }
+            Recv::Msg(_) => continue,
+            other => panic!("expected the error, got {}", describe(&other)),
+        }
+    }
+    s.stop();
+}
+
+/// Whether a page has the text.
+fn has(page: &str, text: &str) -> bool {
+    page.contains(text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    // A sender: it sends to the group infra and reads its alerts. It has no phone.
+    let pia = s.account_with(
+        "pia",
+        &[
+            "alert.send on service:inbox/group:infra",
+            "alert.read on service:inbox/group:infra",
+        ],
+    );
+    let (st, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200, "{page}");
+    assert!(has(&page, "Send an alert"));
+    assert!(has(&page, r#"<option value="infra">Infra</option>"#));
+    assert!(
+        !has(&page, r#"<option value="other">"#),
+        "only the groups that the account may send to"
+    );
+    assert!(has(&page, "Last alerts"));
+    assert!(has(
+        &page,
+        r#"class="contentTabs__tab is-active" aria-current="page" href="/auth/settings/inbox">Inbox"#
+    ));
+    assert!(
+        !has(&page, "/auth/settings/services"),
+        "a plain account has not the tabs of the superadmin"
+    );
+    for path in [
+        "/auth/settings/inbox/devices",
+        "/auth/settings/inbox/connections",
+        "/auth/settings/inbox/phones",
+    ] {
+        let (st, _) = inbox_page_as(&s, &pia.cookie, path);
+        assert_eq!(st, 403, "{path}");
+    }
+    let (st, doc) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox/doc");
+    assert_eq!(st, 200);
+    assert!(
+        has(&doc, &format!("https://127.0.0.1:{port}/api/v1/alerts")),
+        "{doc}"
+    );
+    // The form refuses a group that the account may not send to, and sends to the others.
+    let (st, head, _) = inbox_form(
+        &s,
+        &pia.cookie,
+        "/auth/settings/inbox/send",
+        "group=other&title=no&key=pia1",
+    );
+    assert_eq!(st, 303);
+    assert!(location(&head).contains("s=bad_group"), "{head}");
+    let (st, head, _) = inbox_form(
+        &s,
+        &pia.cookie,
+        "/auth/settings/inbox/send",
+        "group=infra&title=+&key=pia2",
+    );
+    assert_eq!(st, 303);
+    assert!(location(&head).contains("s=no_title"), "{head}");
+    let long = "x".repeat(200);
+    let (_, head, _) = inbox_form(
+        &s,
+        &pia.cookie,
+        "/auth/settings/inbox/send",
+        &format!("group=infra&title={long}&key=pia3"),
+    );
+    assert!(location(&head).contains("s=bad_title"), "{head}");
+    let (st, head, _) = inbox_form(
+        &s,
+        &pia.cookie,
+        "/auth/settings/inbox/send",
+        "group=infra&title=Disk+full&key=pia4",
+    );
+    assert_eq!(st, 303);
+    let sent = location(&head);
+    assert!(
+        sent.starts_with("/auth/settings/inbox/alerts/") && sent.contains("s=sent"),
+        "{sent}"
+    );
+    let (st, page) = inbox_page_as(&s, &pia.cookie, &sent);
+    assert_eq!(st, 200, "{page}");
+    assert!(has(&page, "Disk full") && has(&page, "The alert is sent."));
+    // The alert of a group that the account may not read is not there for it.
+    let (st, _) = admin(
+        &s,
+        "POST",
+        "/auth/inbox/api/alerts",
+        &json!({"group": "other", "title": "secret", "idempotency_key": "o1"}).to_string(),
+    );
+    assert_eq!(st, 201);
+    let (_, all) = admin(&s, "GET", "/auth/inbox/api/alerts", "");
+    let other_id = all["alerts"][0]["id"].as_str().unwrap().to_string();
+    let (st, _) = inbox_page_as(
+        &s,
+        &pia.cookie,
+        &format!("/auth/settings/inbox/alerts/{other_id}"),
+    );
+    assert_eq!(st, 404);
+    let (_, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
+    assert!(
+        !has(&page, "secret"),
+        "the list shows the alerts of the readable groups only"
+    );
+
+    // An operator: it reads the phones and the connections and revokes a phone.
+    let owen = s.account_with(
+        "owen",
+        &[
+            "device.read on service:inbox",
+            "device.revoke on service:inbox",
+            "connection.read on service:inbox",
+        ],
+    );
+    let alice = enroll_as(&s, "phone-alice", "alice").await.unwrap();
+    let (mut ca, _) = Conn::open(port, &alice).await.unwrap();
+    ca.subscribe("infra").await;
+    let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200, "{page}");
+    assert!(!has(&page, "Send an alert"));
+    assert!(
+        !has(&page, "Last alerts"),
+        "no alert.read: no list of alerts"
+    );
+    assert!(
+        has(&page, "Alerts waiting"),
+        "device.read gives the figures"
+    );
+    let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox/devices");
+    assert_eq!(st, 200);
+    assert!(has(&page, "phone-alice") && has(&page, "Confirm: revoke phone-alice"));
+    assert!(has(&page, r#"data-state="online""#));
+    let (st, page) = inbox_page_as(
+        &s,
+        &owen.cookie,
+        "/auth/settings/inbox/connections?login=alice",
+    );
+    assert_eq!(st, 200);
+    assert!(has(&page, r#"data-login="alice""#) && has(&page, r#"value="alice""#));
+    let (st, page) = inbox_page_as(
+        &s,
+        &owen.cookie,
+        "/auth/settings/inbox/connections?login=nobody",
+    );
+    assert_eq!(st, 200);
+    assert!(has(&page, "No connection in the log."));
+    // The operator revokes the phone of another account.
+    let (st, head, text) = inbox_form(
+        &s,
+        &owen.cookie,
+        "/auth/settings/inbox/revoke",
+        &format!(
+            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices",
+            alice.device_id
+        ),
+    );
+    assert_eq!(st, 303, "{text}");
+    assert!(location(&head).contains("s=revoked"), "{head}");
+    assert_eq!(
+        ca.closed_code().await,
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    // A reader without device.revoke sees no button, and a forced request changes nothing.
+    let rita = s.account_with("rita", &["device.read on service:inbox"]);
+    let bob = enroll_as(&s, "phone-bob", "bob").await.unwrap();
+    let (_, page) = inbox_page_as(&s, &rita.cookie, "/auth/settings/inbox/devices");
+    assert!(has(&page, "phone-bob") && !has(&page, "Confirm: revoke"));
+    // The page has no form, so the account has no token: the request fails on the token.
+    let (st, _, _) = inbox_form(
+        &s,
+        &rita.cookie,
+        "/auth/settings/inbox/revoke",
+        &format!(
+            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices",
+            bob.device_id
+        ),
+    );
+    assert_eq!(st, 403);
+    assert!(
+        Conn::open(port, &bob).await.is_ok(),
+        "the phone is not revoked"
+    );
+
+    // My phones: an account revokes its own phone and no other.
+    let bob_session = s.account("bob");
+    let (st, page) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox/phones");
+    assert_eq!(st, 200);
+    assert!(has(&page, "phone-bob") && !has(&page, "phone-alice"));
+    assert!(has(&page, "Confirm: revoke phone-bob") && has(&page, "Make a code"));
+    let carol = enroll_as(&s, "phone-carol", "carol").await.unwrap();
+    let (_, head, _) = inbox_form(
+        &s,
+        &bob_session.cookie,
+        "/auth/settings/inbox/revoke",
+        &format!(
+            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fphones",
+            carol.device_id
+        ),
+    );
+    assert!(location(&head).contains("s=unknown_device"), "{head}");
+    assert!(Conn::open(port, &carol).await.is_ok());
+    let (_, head, _) = inbox_form(
+        &s,
+        &bob_session.cookie,
+        "/auth/settings/inbox/revoke",
+        &format!(
+            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fphones",
+            bob.device_id
+        ),
+    );
+    assert!(location(&head).contains("s=revoked"), "{head}");
+    assert_eq!(
+        Conn::open(port, &bob).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    // The code page is shown one time, and no store keeps it.
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let csrf = inbox_csrf(s.admin_port, &bob_session.cookie);
+    let (st, head, page) = http_full(
         s.admin_port,
         &host,
         "POST",
-        "/auth/inbox/api/enrollment-codes",
+        "/auth/settings/inbox/code",
         &[
-            ("Cookie", session.cookie.clone()),
-            ("Content-Type", "application/json".into()),
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
             ("Origin", format!("http://{host}")),
-            ("X-CSRF-Token", session.csrf.clone()),
+            ("Cookie", bob_session.cookie.clone()),
         ],
+        &format!("csrf={csrf}"),
+    );
+    assert_eq!(st, 200);
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("cache-control: no-store"),
+        "{head}"
+    );
+    assert!(has(&page, "inbox://enroll?s=") && has(&page, "data-copy=\"enroll-code\""));
+
+    // An account with no permission of the inbox has no tab and no tile. The tile and the tab appear
+    // for the accounts that have one.
+    let none = s.account_with("nora", &[]);
+    let (_, home) = inbox_page_as(&s, &none.cookie, "/");
+    assert!(!has(&home, "/auth/settings/inbox"));
+    let (st, _) = inbox_page_as(&s, &none.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 403);
+    let (_, home) = inbox_page_as(&s, &pia.cookie, "/");
+    assert!(
+        has(&home, r#"href="/auth/settings/inbox""#) && has(&home, "Inbox"),
+        "{home}"
+    );
+    let (_, home) = inbox_page_as(&s, &s.session().cookie, "/");
+    assert!(has(&home, r#"href="/auth/settings/inbox""#));
+    // The superadmin sees the five tabs at most and the permission editor shows the groups by name.
+    let (_, page) = inbox_page(&s, "/auth/settings/inbox");
+    for tab in ["Users", "Services", "Activity", "Inbox"] {
+        assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
+    }
+    assert!(!has(&page, ">Keys</a>"), "no block keys, no tab Keys");
+    let (st, services) = inbox_page(&s, "/auth/settings/services");
+    assert_eq!(st, 200);
+    assert!(
+        has(&services, "Inbox") && has(&services, "alert.send"),
+        "{services}"
+    );
+    let (st, editor) = inbox_page(&s, "/auth/settings/users/pia?service=inbox");
+    assert_eq!(st, 200);
+    assert!(
+        has(&editor, "group:infra") && has(&editor, "Infra") && has(&editor, "device.revoke"),
+        "{editor}"
+    );
+    s.stop();
+}
+
+/// Starts a server with accounts, phones and alerts, and waits until the file `stop` appears in the
+/// directory that `INBOX_DEMO_OUT` names. The test is for a look at the pages with a browser. It
+/// writes `demo.json` with the address of the portal. Run it with
+/// `cargo test --test inbox_e2e demo_for_the_eyes -- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "starts a server for a look at the pages"]
+async fn demo_for_the_eyes() {
+    let out = PathBuf::from(std::env::var("INBOX_DEMO_OUT").expect("INBOX_DEMO_OUT"));
+    let mut s = Server::setup();
+    s.add_to_inbox(
+        "  group \"crit\" {\n    name = \"Critical outages of the production cluster\"\n    description = \"Pages the on-call team\"\n    critical = true\n  }",
+    );
+    s.start();
+    s.account_with(
+        "pia",
+        &[
+            "alert.send on service:inbox/group:infra",
+            "alert.read on service:inbox/group:infra",
+        ],
+    );
+    s.account_with(
+        "owen",
+        &[
+            "device.read on service:inbox",
+            "device.revoke on service:inbox",
+            "connection.read on service:inbox",
+            "alert.read on service:inbox/group:infra",
+            "alert.read on service:inbox/group:other",
+            "alert.read on service:inbox/group:crit",
+            "alert.send on service:inbox/group:infra",
+        ],
+    );
+    s.account_with(
+        "alice",
+        &[
+            "group.subscribe on service:inbox/group:infra",
+            "group.subscribe on service:inbox/group:other",
+        ],
+    );
+    let alice = enroll_as(&s, "Pixel 8 of Alice", "alice").await.unwrap();
+    let (mut live, _) = Conn::open(s.port, &alice).await.unwrap();
+    live.subscribe("infra").await;
+    live.subscribe("other").await;
+    let alice2 = enroll_as(&s, "Old phone with a long name of the owner", "alice")
+        .await
+        .unwrap();
+    {
+        let (mut c, _) = Conn::open(s.port, &alice2).await.unwrap();
+        c.subscribe("infra").await;
+    }
+    let root = enroll_as(&s, "Galaxy of root", SUPERADMIN).await.unwrap();
+    {
+        let (mut c, _) = Conn::open(s.port, &root).await.unwrap();
+        c.subscribe("crit").await;
+    }
+    let gone = enroll_as(&s, "Lost phone", "alice").await.unwrap();
+    admin(
+        &s,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", gone.device_id),
         "{}",
     );
-    assert_eq!(st, 404, "{body}");
-    add_account(&s, "erin");
-    delete_account(&s, "erin");
+    for (n, title) in [
+        "Disk full on db-1",
+        "Backup done",
+        "A very long title of an alert that goes on and on to see how the table handles it in the cell",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (st, _) = post_alert(&s, &format!("d{n}"), json!({"group": "infra", "title": title}));
+        assert_eq!(st, 201);
+        let got = take(&mut live).await;
+        assert_eq!(&got.title, title);
+    }
+    let (st, _) = post_alert(
+        &s,
+        "pending",
+        json!({"group": "infra", "title": "Waits for the old phone"}),
+    );
+    assert_eq!(st, 201);
+    let _ = take(&mut live).await;
+    std::fs::write(
+        out.join("demo.json"),
+        json!({"port": s.admin_port, "password": ACCOUNT_PASSWORD, "root": SUPERADMIN, "root_password": SUPERADMIN_PASSWORD}).to_string(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1800);
+    while !out.join("stop").exists() && Instant::now() < deadline {
+        // The live phone answers the heartbeat of the server.
+        let _ = live.recv(Duration::from_millis(500)).await;
+    }
     s.stop();
 }
