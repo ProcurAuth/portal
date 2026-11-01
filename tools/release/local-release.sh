@@ -2,13 +2,14 @@
 # Builds the release payload on this machine, the same files the `release` workflow publishes, for when GitHub Actions is
 # not available (no credit left, outage). Needs Docker with BuildKit, QEMU binfmt for arm64 (docker buildx ls shows
 # linux/arm64), python3, git, and `gh` logged in for --publish. The APK is signed with secrets/android-release.env.
+# No container image is built or pushed: a release holds binaries, the APK and SHA256SUMS only.
 #
 #   tools/release/local-release.sh [--publish] [--skip-apk] [--arch amd64|arm64 ...]
 #
 # Without --publish nothing leaves the machine: the files are left in dist/release-<version>/. The checks are those of the
-# workflow: the tag must be vX.Y.Z[-suffix], equal to the workspace version, and point at HEAD; the tree must be clean.
+# workflow: the tag must be vX.Y.Z[-suffix], equal to the product version (Cargo.toml), and point at HEAD; the tree must be clean.
 # With --publish the tag must also be on origin, and the release is created from it (`gh release create --verify-tag`).
-# Tests are not run here: run tools/dev/cargo.sh test first, as CI would.
+# Tests are not run here: run tools/dev/test.sh --workspace first, as CI would.
 set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -22,7 +23,7 @@ while [ $# -gt 0 ]; do
     --publish) publish=1 ;;
     --skip-apk) apk=0 ;;
     --arch) shift; archs="$archs ${1:?--arch needs amd64 or arm64}" ;;
-    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -32,8 +33,7 @@ for a in $archs; do
   case "$a" in amd64 | arm64) ;; *) echo "unsupported arch $a" >&2; exit 2 ;; esac
 done
 
-version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
-[ -n "$version" ] || { echo "cannot read workspace version from Cargo.toml" >&2; exit 1; }
+version=$(tools/version.sh)
 tag="v$version"
 printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "invalid tag $tag" >&2; exit 1; }
 
@@ -55,14 +55,16 @@ mkdir -p "$out"
 for arch in $archs; do
   echo "== server $arch"
   art="$out/.artifact-$arch"
-  docker buildx build --platform "linux/$arch" --target artifact --build-arg INBOX_GIT_SHA="$head_sha" \
+  docker buildx build -f docker/Dockerfile --platform "linux/$arch" --target artifact \
+    --build-arg PORTAL_VERSION="$version" --build-arg PORTAL_GIT_SHA="$head_sha" \
     --output "type=local,dest=$art" .
-  python3 tools/release/check-static.py "$art/inbox"
-  "$art/inbox" version
+  python3 tools/release/check-static.py "$art/portal"
+  # An arm64 binary runs only on an arm64 host or with QEMU: the check is skipped when it fails to start.
+  "$art/portal" version || echo "(binary not run on this host)"
   stage=$(mktemp -d)
-  install -m 0755 "$art/inbox" "$stage/inbox"
-  tar -C "$stage" --owner=0 --group=0 --numeric-owner --mtime="@$epoch" -cf - inbox \
-    | gzip -9n > "$out/inbox_${version}_linux_${arch}.tar.gz"
+  install -m 0755 "$art/portal" "$stage/portal"
+  tar -C "$stage" --owner=0 --group=0 --numeric-owner --mtime="@$epoch" -cf - portal \
+    | gzip -9n > "$out/portal_${version}_linux_${arch}.tar.gz"
   rm -rf "$stage" "$art"
 done
 
@@ -80,7 +82,7 @@ if [ "$publish" = 1 ]; then
   set -- "$out"/*.tar.gz "$out"/SHA256SUMS
   [ "$apk" = 1 ] && set -- "$@" "$out/inbox-$version.apk"
   # shellcheck disable=SC2086
-  gh release create "$tag" --verify-tag --title "Inbox $tag" --generate-notes $pre "$@"
+  gh release create "$tag" --verify-tag --title "portal $tag" --generate-notes $pre "$@"
 else
   echo "Built in $out (dry run: nothing published, add --publish to create the release)."
 fi

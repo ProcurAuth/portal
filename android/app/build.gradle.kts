@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Version comes from the Cargo workspace, passed by tools/android/build-apk.sh.
+// The version is the product version of Cargo.toml (tools/version.sh), passed by tools/android/build-apk.sh.
 val inboxVersion: String = (findProperty("inboxVersion") as String?)
     ?: error("-PinboxVersion=<x.y.z> is required (use tools/android/build-apk.sh)")
 val versionParts = inboxVersion.split(".").map { it.takeWhile(Char::isDigit).toInt() }

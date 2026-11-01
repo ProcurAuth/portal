@@ -9,8 +9,9 @@
 #
 # Requires /dev/kvm. The emulator reaches the host through the Docker bridge
 # gateway (printed by `start`, usually 172.17.0.1): in the app, add the server
-# <gateway>:8080 to reach a Inbox published on the host's port 8080 (for
-# example `docker compose up` in deploy/). The host network is not used: the
+# <gateway>:8080 to reach a inbox published on the host's port 8080 (for
+# example `docker compose up` at the root of the repository, with
+# PORTAL_DEVICES_BIND=0.0.0.0). The host network is not used: the
 # emulator's virtual display would clash with the desktop's X server.
 set -eu
 

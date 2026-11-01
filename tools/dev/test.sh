@@ -2,7 +2,8 @@
 # Run the tests of the workspace in Docker, with a throwaway PostgreSQL.
 # Usage: tools/dev/test.sh [cargo test arguments]
 # PORTAL_SLOT: suffix of the Docker volume of the build output, so two worktrees do not share it.
-# PROCURAUTH_CONFORMANCE: directory of the conformance data (default: ../procurauth/conformance).
+# PROCURAUTH_CONFORMANCE: directory of the conformance data (default: ../procurauth/conformance). Without it, the series D and E skip.
+# INBOX_E2E_BACKEND=postgres: run tests/inbox_e2e.rs on PostgreSQL instead of SQLite.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 conf=${PROCURAUTH_CONFORMANCE:-$(cd "$root/../procurauth/conformance" 2>/dev/null && pwd || true)}
@@ -25,4 +26,5 @@ exec docker run --rm --ulimit nofile=1048576:1048576 --network portal-net $confm
   -e CARGO_TARGET_DIR=/target \
   -e PORTAL_TEST_POSTGRES=postgres://postgres:testonly@portal-pg/portal_test \
   -e INBOX_TEST_PG=$pgip:5432:postgres:testonly \
+  ${INBOX_E2E_BACKEND:+-e INBOX_E2E_BACKEND=$INBOX_E2E_BACKEND} \
   -w /src "$image" cargo test --locked "$@"

@@ -23,8 +23,7 @@ for v in INBOX_KEYSTORE INBOX_KEYSTORE_PASSWORD INBOX_KEY_ALIAS INBOX_KEY_PASSWO
 done
 [ -f "$INBOX_KEYSTORE" ] || { echo "error: keystore $INBOX_KEYSTORE not found" >&2; exit 1; }
 
-version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\([^"]*\)".*/\1/p' "$root/Cargo.toml")
-[ -n "$version" ] || { echo "error: cannot read workspace version from Cargo.toml" >&2; exit 1; }
+version=$("$root/tools/version.sh")
 
 if [ "${INBOX_IN_CONTAINER:-}" != 1 ]; then
   docker image inspect inbox-android >/dev/null 2>&1 || docker build -t inbox-android "$root/tools/android"
