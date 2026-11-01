@@ -19,7 +19,7 @@ The security model of the portal is in the root `SECURITY.md`. This page gives t
 
 ## Limits of the model
 
-- The portal has no TLS. A proxy ends it. Noise protects the phones. The portal refuses a producer token, and a one-time code page, on a request that is not secure (`403 insecure_transport`), unless `session.allow_insecure_http` is `true`. The routes of the phones stay open on plain HTTP, because Noise protects them.
+- The port of the portal has no TLS. Noise protects the phones. The bearer token of a producer travels in clear text on plain HTTP. Put a TLS proxy in front for the producer routes, or use a private network.
 - A code is a bearer secret until its first use. Whoever reads it can enroll a phone for the account. Show it only to its owner.
 - A key file of the server that leaks lets an attacker act as the server. Replace it and enroll every phone again.
 - The sessions that the superadmin opens as another account can read the phones and make a code for that account.

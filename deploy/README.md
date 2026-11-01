@@ -22,8 +22,6 @@ The stack has the portal, PostgreSQL and the inbox. It is for development and te
 4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the login and the password in the files `superadmin_login` and `superadmin_password`.
 5. Stop the stack and delete the database: `docker compose down -v`.
 
-**This stack has no TLS. Use it for tests only.** The portal does not know TLS, and no proxy ends it here. The request that Docker gives to the portal comes from the gateway of the Docker network. This is not a loopback address and not a trusted proxy, so the portal would refuse the sign-in, the keys and the producer tokens. The file `compose/config.hcl` therefore sets `session.allow_insecure_http = true`. Anyone on the network can read the passwords, the keys and the session cookies. Keep the default `PORTAL_BIND`. The start log has the event `insecure_http_allowed`. The two-instance variant uses the same file and the same override. For HTTPS, use the setup of `demo/` (Traefik with a certificate) or the K3s manifests.
-
 The portal is on port 4181. This one port serves the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The inbox is a feature of the portal, so it has no port of its own. The admin pages of the inbox are in the portal. No proxy is in front of this stack, so no ForwardAuth applies.
 
 A producer sends an alert with the token in `deploy/compose/secrets/inbox_producer_token`:
@@ -123,49 +121,6 @@ The pages of the inbox are under `/auth/settings/inbox` in the portal. ForwardAu
 ### Variant with SQLite
 
 This variant is not in the manifests. Use it only when no PostgreSQL cluster exists. It has one active instance and standby instances. Replace the blocks `postgres` and `inbox.cluster` with a block `storage`. Add `inbox.replica` and a volume that all instances share. See the sections "Inbox" and "Storage" of the README.
-
-## HTTPS and the secure transport
-
-The portal does not know TLS. It has no certificate and no key. Traefik ends TLS, and the portal reads the scheme of the original request. It refuses the sign-in, the passwords, the keys, the producer tokens and the one-time codes on a request that is not secure. The rule and the list of the refused routes are in the section "Secure transport" of the README of the repository.
-
-A request is secure when its TCP peer is in `server.trusted_proxies` and the request has exactly one `X-Forwarded-Proto: https`, or when its peer is a loopback address. The portal ignores `X-Forwarded-Proto` from every other peer.
-
-### Traefik ends TLS
-
-This is the K3s setup and the demo. Traefik has an entrypoint with TLS (`websecure`). Traefik sets `X-Forwarded-Proto: https` for the requests that it forwards and for the ForwardAuth requests, and it replaces any value that a client sent. Set `server.trusted_proxies` to the network of the Traefik pods, or to the address of the Traefik container, and to nothing else. Do not add the gateway of a Docker network: a request from the host would then count as a proxy.
-
-The routes of the phones need no HTTPS (see below), but the pages, the keys and the producers do. Do not publish the pages or the producer routes on an entrypoint without TLS. The portal refuses them there, and the sign-in does not work.
-
-### Another proxy ends TLS in front of Traefik
-
-A load balancer or a proxy can end TLS and send plain HTTP to Traefik. Traefik then sees a request with no TLS. By default it replaces the incoming `X-Forwarded-Proto: https` with `http`, and the portal refuses the sign-in. Make these three settings:
-
-1. In the static configuration of Traefik, list the outer proxy on the entrypoint. Traefik then keeps the incoming `X-Forwarded-*` headers from it:
-
-   ```yaml
-   entryPoints:
-     web:
-       address: ":80"
-       forwardedHeaders:
-         trustedIPs:
-           - "203.0.113.10/32"   # the address of the proxy that ends TLS
-   ```
-
-   Never use `forwardedHeaders.insecure: true`. A client could then choose the scheme.
-
-2. In each ForwardAuth middleware, set `trustForwardHeader: true`. With `false`, Traefik tells the portal the scheme of its own connection, which is plain HTTP. Do this only with the `trustedIPs` of point 1: Traefik removes the forwarded headers of any other client before the middleware reads them.
-
-3. In `server.trusted_proxies`, list every proxy that appears in `X-Forwarded-For`: the Traefik pods and the outer proxy. The portal reads `X-Forwarded-For` from the right and skips the trusted hops. If the outer proxy is not in the list, the portal takes its address as the client address. The portal trusts `X-Forwarded-Proto` from its direct peer, which is Traefik. It does not look further.
-
-The outer proxy must send exactly one `X-Forwarded-Proto: https`. Two values, or a list such as `https, http`, make the request not secure.
-
-### The phones
-
-The routes `/v1/enroll` and `/v1/session` carry no password. The Noise protocol encrypts and authenticates them with the key of the server that the phone pinned. The portal serves them on plain HTTP too. A real deployment still publishes `/v1/` on the same HTTPS host as the pages. The Android app accepts `https://` addresses. Use a certificate that the phone trusts: from a public CA, or from a private CA that you installed on the phone. A self-signed certificate that the phone does not trust breaks the app. The demo avoids this with a plain entrypoint for the phones: see `demo/README.md`.
-
-### No HSTS
-
-The portal sends no `Strict-Transport-Security` header. A homelab often uses a self-signed or private certificate, and HSTS can lock a browser out of it. Add the header in Traefik if your certificate is public.
 
 ## Check the files
 
