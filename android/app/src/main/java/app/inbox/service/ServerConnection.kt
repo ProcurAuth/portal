@@ -49,6 +49,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         private const val TAG = "Inbox.Connection"
         private const val HANDSHAKE_TIMEOUT_MS = 15_000L
         private const val MAX_BACKOFF_MS = 30_000L
+        private const val SUBSCRIBE_SETTLE_MS = 3_000L
 
         const val CLOSE_UNKNOWN_DEVICE = 4401
         const val CLOSE_REVOKED = 4403
@@ -67,6 +68,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private var failures = 0
     private var nonce = 0L
     private val pingSentAt = sortedMapOf<Long, Long>()
+
+    /** When this session last asked the server to subscribe to each group. */
+    private val subscribeSentAt = HashMap<String, Long>()
     private val thread = Thread({ loop() }, "inbox-server-$serverId")
 
     fun start() = thread.start()
@@ -246,7 +250,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 ping()
                             }
                             "alert" -> onAlert(msg)
-                            "subscriptions" -> Registry.changed()
+                            "subscriptions" -> onSubscriptions(msg)
                             "pong" -> onPong(msg.getLong("nonce"))
                             "error" -> Log.w(TAG, "server error ${msg.optString("code")}: ${msg.optString("message")}")
                             else -> Log.w(TAG, "unknown message ${msg.getString("t")}")
@@ -348,6 +352,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
 
     private fun send(msg: JSONObject) {
         val ws = socket ?: throw SessionEnd(backoff(), "Connection lost")
+        if (msg.optString("t") == "subscribe") subscribeSentAt[msg.optString("group")] = System.currentTimeMillis()
         val frame = Native.sessionEncrypt(session, msg.toString().toByteArray())
         if (!ws.send(frame.toByteString())) throw SessionEnd(backoff(), "Connection lost")
     }
@@ -382,6 +387,24 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             msg.getLong("heartbeat_interval_ms"),
             msg.getLong("offline_warning_after_ms"),
         )
+    }
+
+    /**
+     * The server sends its subscriptions after each change, also when the account lost the
+     * permission for a group. A group that the server no longer has is turned off here, so the
+     * screen tells the truth. A group that this session asked for a moment ago is left alone: the
+     * message can be older than the request.
+     */
+    private fun onSubscriptions(msg: JSONObject) {
+        val server = parseSubscriptions(msg.getJSONArray("subscriptions"))
+        val now = System.currentTimeMillis()
+        for ((group, level) in store.levels(serverId)) {
+            if (level == Store.LEVEL_OFF || group in server) continue
+            val asked = subscribeSentAt[group]
+            if (asked != null && now - asked < SUBSCRIBE_SETTLE_MS) continue
+            store.setLevel(serverId, group, null)
+        }
+        Registry.changed()
     }
 
     private fun onAlert(msg: JSONObject) {
