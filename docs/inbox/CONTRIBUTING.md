@@ -16,8 +16,8 @@ Everything runs in containers (Docker only on the host):
 
 ```sh
 tools/dev/cargo.sh fmt --all -- --check
-tools/dev/cargo.sh clippy --locked -p inbox-core -p inbox-server -p inbox-android --all-targets -- -D warnings
-tools/dev/cargo.sh test --locked -p inbox-core -p inbox-server -p inbox-android
+tools/dev/cargo.sh clippy --locked -p inbox-core -p portal -p inbox-android --all-targets -- -D warnings
+tools/dev/cargo.sh test --locked -p inbox-core -p portal -p inbox-android
 tools/build.sh image
 ```
 
