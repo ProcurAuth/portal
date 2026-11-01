@@ -1,0 +1,91 @@
+# Network policies of the portal. The namespace edge denies all ingress by default, and the policies add up. The first
+# two policies are in the cluster files already (same names, same content): applying them twice changes nothing.
+
+# The pages and ForwardAuth: port 4181 only, from the Traefik pods and the Prometheus pod. The portal trusts
+# X-Forwarded-For from the pod network, so no other pod may reach this port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-portal-http, namespace: edge}
+spec:
+  podSelector: {matchLabels: {app: portal}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: edge}}
+          podSelector: {matchLabels: {app: traefik}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+          podSelector: {matchLabels: {app: prometheus}}
+      ports:
+        - {protocol: TCP, port: 4181}
+---
+# The PDP: port 4182 only, from the pods that carry the label portal-pdp-client.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-portal-pdp, namespace: edge}
+spec:
+  podSelector: {matchLabels: {app: portal}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - {key: kubernetes.io/metadata.name, operator: In, values: [apps, observability, edge]}
+          podSelector: {matchLabels: {portal-pdp-client: "true"}}
+      ports:
+        - {protocol: TCP, port: 4182}
+---
+# The devices listener (8080) from the relay pods, and from the portal pods (the health probe of the launcher).
+# The peers listener (8082) from the portal pods only: each request carries an HMAC of the server key.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-portal-devices, namespace: edge}
+spec:
+  podSelector: {matchLabels: {app: portal}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: inbox-edge}}
+        - podSelector: {matchLabels: {app: portal}}
+      ports:
+        - {protocol: TCP, port: 8080}
+    - from:
+        - podSelector: {matchLabels: {app: portal}}
+      ports:
+        - {protocol: TCP, port: 8082}
+---
+# Phones and webhooks come from the LAN through the host port, which is not a pod source. The relay port needs its own rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: inbox-edge, namespace: edge}
+spec:
+  podSelector:
+    matchLabels:
+      app: inbox-edge
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - ipBlock: {cidr: 0.0.0.0/0}
+    ports:
+    - {protocol: TCP, port: 8087}
+---
+# The database (namespace data) denies ingress by default. This admits the portal pods, and nothing else of the namespace edge.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-portal-postgresql
+  namespace: data
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: postgresql
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: edge
+      podSelector:
+        matchLabels:
+          app: portal
+    ports:
+    - {port: 5432, protocol: TCP}

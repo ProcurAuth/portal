@@ -1,0 +1,107 @@
+# Routes of the portal. The middlewares forward-auth and secure-headers belong to the Traefik of the cluster
+# (namespace edge). forward-auth calls http://portal.edge.svc.cluster.local:4181/auth/verify and copies the header
+# X-Identity-Token to the request.
+#
+# The devices listener of the inbox has no route here. ForwardAuth would block phones and webhooks. The relay
+# inbox-edge (edge.yaml) serves it on host port 8087. The admin pages of the inbox are pages of the portal.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: auth
+  namespace: edge
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: PathPrefix(`/auth/`)
+      priority: 50000
+      services:
+        - name: portal
+          port: 4181
+      middlewares:
+        - name: secure-headers
+  tls:
+    secretName: traefik-tls
+---
+# The launcher. The portal checks the session itself, so there is no forward-auth middleware here.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: portal-home
+  namespace: edge
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: Path(`/`)
+      priority: 1
+      services:
+        - name: portal
+          port: 4181
+      middlewares:
+        - name: secure-headers
+  tls:
+    secretName: traefik-tls
+---
+# The tile "Inbox" of the launcher. The annotations portal.* declare it. The route sends the pages of the inbox to the
+# portal. The health comes from the devices listener. The href is the path of the pages of the inbox in the portal:
+# change it when the pages move.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: inbox
+  namespace: edge
+  annotations:
+    portal.enabled: "true"
+    portal.group: Infra
+    portal.name: Inbox
+    portal.icon: inbox
+    portal.href: /auth/inbox/
+    portal.description: Alerts on phones
+    portal.health: http://portal-devices.edge.svc.cluster.local:8080/readyz
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: PathPrefix(`/auth/inbox/`)
+      priority: 50001
+      services:
+        - name: portal
+          port: 4181
+      middlewares:
+        - name: secure-headers
+  tls:
+    secretName: traefik-tls
+---
+# Whatever no other route claims (a mistyped path): ForwardAuth first, so a visitor without a session lands on the
+# login page whether or not the path exists. Past the gate the path is replaced by one that the portal does not serve,
+# so the answer is a 404 and the endpoints of the portal (/metrics, /healthz) are not exposed on arbitrary paths.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: portal-fallback-404
+  namespace: edge
+spec:
+  replacePath:
+    path: /__portal-fallback-404
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: portal-fallback
+  namespace: edge
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: PathPrefix(`/`)
+      priority: -1
+      services:
+        - name: portal
+          port: 4181
+      middlewares:
+        - name: forward-auth
+        - name: portal-fallback-404
+        - name: secure-headers
+  tls:
+    secretName: traefik-tls

@@ -1,0 +1,236 @@
+# The portal with the inbox, for K3s. Two active instances on two servers share one PostgreSQL database
+# (the CloudNativePG cluster, Service postgresql-rw in the namespace data). The pods store nothing locally.
+# The sessions, the accounts, the alerts and the phones are in the database. A sign-in on one instance is valid on the
+# other. A phone connects to either instance. An alert that one instance accepts wakes the phone on the other one.
+#
+# The portal reads the IngressRoute annotations (the service catalogue) and the readiness of pods. It has read
+# access to pods and IngressRoutes. It has no access to secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal
+  namespace: edge
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-readonly
+rules:
+- apiGroups: ['']
+  resources: [pods]
+  verbs: [get, list]
+- apiGroups: [traefik.io]
+  resources: [ingressroutes]
+  verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-readonly
+subjects:
+- kind: ServiceAccount
+  name: portal
+  namespace: edge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-readonly
+---
+# The pages and ForwardAuth (/auth/verify). Traefik routes to this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: edge
+spec:
+  selector:
+    app: portal
+  ports:
+  - name: http
+    port: 4181
+    targetPort: http
+---
+# The AuthZEN PDP of the services. No IngressRoute names this Service, so Traefik never routes to it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal-pdp
+  namespace: edge
+spec:
+  selector:
+    app: portal
+  ports:
+  - name: pdp
+    port: 4182
+    targetPort: pdp
+---
+# The devices listener of the inbox: phones, producers, webhooks, /healthz and /readyz. The relay inbox-edge
+# (edge.yaml) calls this Service. The launcher probes it. No session protects this listener.
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal-devices
+  namespace: edge
+spec:
+  selector:
+    app: portal
+  ports:
+  - name: devices
+    port: 8080
+    targetPort: devices
+---
+# The instances list each other through this Service (inbox.cluster.peers). It has no virtual IP. It has one address for
+# each pod, published before the pod is ready, so two instances that start together find each other.
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal-peers
+  namespace: edge
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: portal
+  ports:
+  - name: peers
+    port: 8082
+    targetPort: peers
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: edge
+spec:
+  replicas: 2
+  # The update never takes the last ready instance down.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: portal
+  template:
+    metadata:
+      labels:
+        app: portal
+      annotations:
+        # The metrics of the portal and the metrics inbox_* of the inbox are on the same path.
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '4181'
+        prometheus.io/path: /metrics
+    spec:
+      # On SIGTERM the portal and the inbox serve 5 s more. Then they close the listeners and wait at most 10 s for the
+      # requests and the sessions. Then the inbox writes what its memory holds to the database. 30 s cover this.
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: portal
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: portal
+        image: portal:5.0.0
+        imagePullPolicy: IfNotPresent
+        args: ["run", "--config", "/etc/portal/config.hcl"]
+        ports:
+        - {name: http, containerPort: 4181}
+        - {name: pdp, containerPort: 4182}
+        - {name: devices, containerPort: 8080}
+        - {name: peers, containerPort: 8082}
+        # The portal opens its ports only when the directory is loaded, the counter rows exist, the catalogue is complete
+        # and the first reads of the action documents ended. This probe waits up to 5 minutes for it. It MUST wait longer
+        # than the sum of these times. The other probes start after it succeeds.
+        startupProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 2
+          failureThreshold: 150
+        # The instance is ready when the devices listener says so. /readyz answers 503 at SIGTERM, so the Services
+        # stop to send requests before the listeners close. PostgreSQL without a writable primary is still ready.
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: devices
+          periodSeconds: 5
+        # /healthz of the portal never reads the database.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 15
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: config
+          mountPath: /etc/portal/config.hcl
+          subPath: config.hcl
+          readOnly: true
+        - name: secrets
+          mountPath: /run/secrets
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: config
+        configMap:
+          name: portal-config
+      - name: secrets
+        secret:
+          secretName: portal-secret
+          defaultMode: 0440
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+      # Servers only, one instance for each node: the loss of a node never takes both instances.
+      nodeSelector:
+        home.server: 'true'
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app: portal
+      tolerations:
+      - key: home.server
+        operator: Equal
+        value: 'true'
+        effect: NoSchedule
+      # Kubernetes waits 5 minutes before it evicts a pod from a lost node. The gate of every page must not wait so long.
+      - {key: node.kubernetes.io/unreachable, operator: Exists, effect: NoExecute, tolerationSeconds: 30}
+      - {key: node.kubernetes.io/not-ready, operator: Exists, effect: NoExecute, tolerationSeconds: 30}
+---
+# A voluntary disruption (a drain, a node upgrade) never takes both instances at once.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: portal
+  namespace: edge
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: portal
+
+# Variant with SQLite (one active instance and standby instances), not made here. Replace the block `postgres` and
+# the block `inbox.cluster` of the configuration with a block `storage` that names a file on a volume, and add the
+# block `inbox.replica` with a ReadWriteMany volume that the instances share. Use a StatefulSet with one replica
+# for the owner of the lease. See the sections "Inbox" and "Storage" of README.md.

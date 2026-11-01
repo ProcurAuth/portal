@@ -1,0 +1,77 @@
+# The relay of the devices listener. Phones and producers must reach the inbox on every K3s server, but the portal pods
+# can run on any server. inbox-edge is a DaemonSet of small relays with host port 8087. The relay speaks plain HTTP and
+# has no ForwardAuth, because ForwardAuth would block phones and webhooks. It exists only while the product is deployed.
+# It uses its own Traefik instance, not the shared one, because entrypoints are static configuration.
+# The relay discards the X-Forwarded-For header that a client sends and sets the real peer address. The inbox trusts it
+# through inbox.devices.trusted_proxies (the pod network), for its limits of each client.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: inbox-edge
+  namespace: edge
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: inbox-edge
+  template:
+    metadata:
+      labels:
+        app: inbox-edge
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        home.server: 'true'
+      tolerations:
+      - key: home.server
+        operator: Equal
+        value: 'true'
+        effect: NoSchedule
+      containers:
+      - name: traefik
+        image: traefik:v3.7.10
+        imagePullPolicy: IfNotPresent
+        command: [/traefik]
+        args:
+        - --global.checknewversion=false
+        - --global.sendanonymoususage=false
+        - --entrypoints.inbox.address=:8087
+        - --providers.file.filename=/etc/inbox-edge/dynamic.yaml
+        - --log.level=INFO
+        - --log.format=json
+        - --accesslog=true
+        - --accesslog.format=json
+        ports:
+        - {name: devices, containerPort: 8087, hostPort: 8087, protocol: TCP}
+        readinessProbe:
+          tcpSocket: {port: devices}
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket: {port: devices}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 25m, memory: 48Mi}
+          limits: {cpu: 250m, memory: 128Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: config
+          mountPath: /etc/inbox-edge
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: inbox-edge-config

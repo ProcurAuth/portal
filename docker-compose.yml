@@ -1,120 +1,100 @@
+# Local stack: the portal with the inbox, and PostgreSQL. For development and tests, not for production.
+#
+#   deploy/compose/init-secrets.sh        # once: makes the secret files in deploy/compose/secrets/
+#   docker compose up -d --build
+#   docker compose down -v                # stops the stack and deletes the database
+#
+# The pages of the portal: http://127.0.0.1:4181/ (the sign-in is /auth/login).
+# The devices listener of the inbox (phones, producers, webhooks): port 8080. The admin pages of the inbox
+# are in the portal, in the tab "Inbox". No admin port exists.
+#
+# Environment (all optional):
+#   PORTAL_PORT          host port of the pages of the portal (default 4181)
+#   PORTAL_DEVICES_PORT  host port of the devices listener (default 8080)
+#   PORTAL_DEVICES_BIND  host address of the devices listener (default 127.0.0.1). Use 0.0.0.0 for a phone or an
+#                        emulator on another host, and set inbox.devices.public_address in deploy/compose/config.hcl.
+#   PORTAL_VERSION       version of the build (default: the version of Cargo.toml)
+#   PORTAL_SECRETS_DIR   directory of the secret files (default: deploy/compose/secrets)
+name: portal
+
 services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: portal
+      POSTGRES_USER: portal
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portal -d portal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   portal:
-    image: "${PORTAL_IMAGE:-local/portal}:${PORTAL_VERSION:-dev}"
+    image: "portal:${PORTAL_IMAGE_TAG:-local}"
     pull_policy: build
     build:
       context: .
       dockerfile: docker/Dockerfile
+      target: runtime
       args:
-        RUST_VERSION: "${RUST_VERSION:-1.88}"
-        PORTAL_VERSION: "${PORTAL_VERSION:-dev}"
-
-    container_name: portal-dev
-
+        PORTAL_VERSION: "${PORTAL_VERSION:-}"
+        PORTAL_GIT_SHA: "${PORTAL_GIT_SHA:-unknown}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${PORTAL_PORT:-4181}:4181"
-
+      - "${PORTAL_DEVICES_BIND:-127.0.0.1}:${PORTAL_DEVICES_PORT:-8080}:8080"
     configs:
       - source: portal_config
         target: /etc/portal/config.hcl
-        mode: 0444
-
-    volumes:
-      - portal_data:/var/lib/portal
-
     secrets:
-      - source: portal_superadmin_login
-        target: portal_superadmin_login
-        mode: 0400
-      - source: portal_superadmin_password
-        target: portal_superadmin_password
-        mode: 0400
-
-    # Deliberately not read_only in the local Compose profile. Compose needs to
-    # materialize configs.content and secrets.environment before mounting them.
-    # The runtime image itself remains FROM scratch and has no shell/package manager.
-    cap_drop:
-      - ALL
+      - superadmin_login
+      - superadmin_password
+      - session_secret
+      - db_password
+      - inbox_server_key
+      - inbox_producer_token
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    restart: "no"
+    stop_grace_period: 20s
+    mem_limit: 256m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 configs:
   portal_config:
-    content: |
-      server {
-        listen_address = "0.0.0.0:4181"
-        workers             = 4
-        max_body_bytes      = "32KiB"
-        max_connections     = 1024
-        max_headers         = 64
-        max_header_bytes    = "32KiB"
-        header_read_timeout = "10s"
-        body_read_timeout   = "10s"
-        # No proxy in front of this local test: the client address is the TCP peer.
-        trusted_proxies     = []
-      }
+    file: ./deploy/compose/config.hcl
 
-      authentication {
-        superadmin_login_file    = "/run/secrets/portal_superadmin_login"
-        superadmin_password_file = "/run/secrets/portal_superadmin_password"
-      }
-      # A new user has no grant: give the grants in the settings pages.
-      access {
-        grants_mode = "dynamic"
-      }
-      storage {
-        database = "/var/lib/portal/portal.db"
-      }
-
-      session {
-        # "ephemeral": random signing key generated at process startup.
-        # "provided": read the signing key from session.secret_file (or session.secret_env).
-        # Opaque sessions themselves are always kept only in RAM and therefore
-        # disappear on every process restart in both modes.
-        secret_mode = "ephemeral"
-        # secret_file = "/run/secrets/portal_session_secret"
-
-        cookie_name         = "__Host-portal"
-        ttl                 = "8h"
-        same_site           = "Strict"
-        max_active_sessions = 4096
-      }
-
-      security {
-        max_password_bytes             = 1024
-        max_forwarded_uri_bytes        = 4096
-        max_cookie_header_bytes        = 8192
-        login_rate_limit_enabled       = true
-        login_attempts_per_ip              = 5
-        login_window                       = "1m"
-        login_lockout                      = "5m"
-
-        # Distributed/botnet protection. Counts failed passwords globally and
-        # is intentionally NOT cleared by a successful login.
-        global_login_rate_limit_enabled   = true
-        global_login_attempts              = 100
-        global_login_window                = "1m"
-        global_login_lockout               = "30s"
-
-        max_rate_limit_entries             = 4096
-        max_concurrent_password_checks     = 1
-      }
-
-      metrics {
-        enabled = true
-        path    = "/metrics"
-      }
-
-      logging {
-        level = "info"
-      }
-
+# The files are bind mounts. init-secrets.sh makes them readable (0444) in a directory that only the owner reaches.
 secrets:
-  portal_superadmin_login:
-    environment: PORTAL_SUPERADMIN_LOGIN
-  portal_superadmin_password:
-    environment: PORTAL_SUPERADMIN_PASSWORD
+  superadmin_login:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/superadmin_login
+  superadmin_password:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/superadmin_password
+  session_secret:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/session_secret
+  db_password:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/db_password
+  inbox_server_key:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/inbox_server_key
+  inbox_producer_token:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/inbox_producer_token
 
 volumes:
-  portal_data:
+  postgres_data: {}

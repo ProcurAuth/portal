@@ -16,3 +16,4 @@
 *.swp
 /target*/
 /target/
+deploy/compose/secrets/
