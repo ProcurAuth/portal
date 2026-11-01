@@ -59,7 +59,7 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 - A logout, a deleted account, or a changed password ends the session in the database at once.
 - The other instances end their copy of the session within 5 seconds.
 - Over HTTPS, the cookies are host-only (`__Host-`), `Secure`, `HttpOnly`, and `Path=/`. Their SameSite value is Strict or Lax.
-- Over plain HTTP, the cookies use the same name without the prefix. They have no `Secure` attribute (see "Plain HTTP").
+- Over plain HTTP, the cookies use the same name without the prefix. They have no `Secure` attribute (see "Secure transport").
 - A session works only from the client address and User-Agent that logged in (`session.bind`).
 - The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. For any other peer, the client address is the address of the peer.
 - A session ends after `session.idle_timeout` without use.
@@ -169,13 +169,29 @@ A row also holds the credential generation of the superadmin: HMAC-SHA-256 under
 
 The superadmin can end every session from the page **Users**. The command `portal end-sessions --config FILE` does the same on a PostgreSQL database. Both end the sessions of the superadmin too. The route `POST /auth/users/end-sessions` has the checks of the account routes: the `Origin` check, the anti-CSRF token and the superadmin in its own right. It also needs the field `confirm=end-all-sessions`. Each use writes the audit event `sessions_ended`. With a shared database, an instance can accept a cached session for up to 5 seconds after the end. The command does not work with SQLite, because the sessions are in the memory of the process: restart the portal.
 
-## Plain HTTP
+## Secure transport
 
-Traefik can serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
+The portal does not know TLS. A proxy, normally Traefik, ends it. The portal reads the scheme of the original request from `X-Forwarded-Proto`, and it refuses to handle a secret when the request was plain HTTP.
 
-Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `portal-csrf`). They have no `Secure` attribute.
+A request is secure when its TCP peer is in `server.trusted_proxies` and the request has exactly one `X-Forwarded-Proto` header with the value `https` (any case, nothing else), or when its peer is a loopback address. The function `transport::is_secure` holds this rule. The portal reads `X-Forwarded-Proto` from a trusted proxy only. A client on the network cannot make a request secure with a header, and the header of such a peer does not set the cookie names or the `Secure` attribute either.
 
-Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie. The binding uses the client address and User-Agent, relayed by `authRequestHeaders: [Cookie, User-Agent]`. The idle timeout also limits the value of a stolen cookie. Only HTTPS removes the exposure. Use HTTPS on every network that is not trusted.
+When a request is not secure and `session.allow_insecure_http` is `false` (the default):
+
+- `GET` and `POST /auth/login` answer `403`. The page has a notice and no form. The portal reads no body, runs no Argon2 check and sets no cookie.
+- `POST /auth/users/add`, and `POST /auth/users/update` with a password, answer `403`. The pages of the accounts have no password field and no generator.
+- The creation of a key and the creation of an enrollment code answer `403`. These pages show a secret one time.
+- A request of `/api/v1/*` with an `Authorization` header or a `token` parameter answers `403 insecure_transport` before the portal reads the credential. The portal does not compare, count or log it.
+- A request of `/auth/verify-key` with an `Authorization` header answers `403 insecure_transport`. The edge reads the original scheme in the `X-Forwarded-Proto` header that Traefik sends with the ForwardAuth request.
+
+These routes stay open: the routes of the phones (`/v1/enroll`, `/v1/session`: the Noise protocol encrypts and authenticates them), `/auth/verify` (a session cookie, no password), the PDP listener, `/healthz`, `/readyz` and `/metrics`.
+
+The key `session.allow_insecure_http = true` removes these refusals. Anyone on the network can then read the passwords, the keys and the session cookies. Use it for a local test only. The start log has a warning. The portal sends no HSTS header: a lock-out of a homelab with a self-signed certificate is a worse risk. Set HSTS in the proxy for a public certificate.
+
+When several proxies are in front, the portal trusts the value of its direct peer. List every proxy of `X-Forwarded-For` in `server.trusted_proxies`. The proxy next to the portal must keep the `X-Forwarded-Proto: https` of the proxy that ends TLS. `deploy/README.md` gives the Traefik settings.
+
+Over plain HTTP with the override, an attacker on the network can read the password and the session cookie. The cookies have no prefix and no `Secure` attribute, because browsers refuse them there. The binding of the session to the client address and the User-Agent limits the value of a stolen cookie. The idle timeout also limits it.
+
+Other controls on the secrets: each page of the portal has `Cache-Control: no-store` and `Pragma: no-cache`. The pages send `Referrer-Policy: same-origin` (`no-referrer` makes a browser send `Origin: null` on a form, which the origin check refuses). A secret is never in a URL, a log line, the audit trail or a metric. The debug text of an account hides its password hash. The buffers of a password are erased when they are dropped. One Argon2 check runs for each sign-in, for any login. A known gap: the sign-in history keeps the login as the person typed it. A person can type the password in the login field by mistake, and the portal then records it. See the open points of `docs/design-inbox-merge.md`.
 
 ## Discovery and the launcher
 
@@ -312,4 +328,4 @@ The inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives it
 - A producer sends an alert with a bearer token. The server compares the tokens of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
 - The pages of the inbox need a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
 - The key file of the inbox server and the producer tokens use only `_env` or `_file`. A secret in clear text stops the start.
-- The portal listener has no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.
+- The portal listener has no TLS. A proxy ends it. The portal refuses a producer token on a request that is not secure (see "Secure transport"). The routes of the phones stay open on plain HTTP because Noise protects them.

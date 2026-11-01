@@ -57,7 +57,7 @@ Docker is the only tool that you need.
 1. Build the image: `tools/build.sh image`.
 2. Make the secrets: `deploy/compose/init-secrets.sh`.
 3. Start the stack: `docker compose up -d`.
-4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`.
+4. Open `http://127.0.0.1:4181/auth/login`. This stack has no TLS: its file sets `session.allow_insecure_http = true`, for tests only. Sign in with the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`.
 5. Stop the stack and delete its database: `docker compose down -v`.
 
 The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181 serves the pages, the API of the producers and the phones. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
@@ -66,12 +66,66 @@ The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181
 
 - **One identity.** An account has one login and one set of permissions for the launcher, the keys and the inbox.
 - **Passwords.** The database keeps only Argon2id hashes. Each sign-in costs one Argon2 check, also for an unknown login. The failure message is always the same.
+- **Secure transport.** The portal does not know TLS. A proxy ends it. The portal refuses a password, a key, a producer token or a one-time code on a connection that is not secure. See [Secure transport](#secure-transport).
 - **Sessions.** A session is an opaque random token. The server keeps only its SHA-256 digest. The session is bound to the client address and the browser.
 - **Gate.** A new user has no permission. The gate checks the forwarded path in every way that a proxy can interpret it. It lets a request pass only if every interpretation is allowed.
 - **Keys.** A key never gets more than its owner. The portal keeps only the digest of the key text.
 - **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A producer proves itself with a bearer token. The permissions of the service `inbox` decide who sends, reads and revokes.
 - **Configuration.** The file is the only source. A secret comes only from `_env` or `_file`. An unknown key stops the program at start.
 - **Code.** The project code has no `unsafe` Rust. The binary is static.
+
+## Secure transport
+
+The portal does not know TLS. It has no certificate, no key and no TLS library for its own listener. A proxy in front of it, for example Traefik, ends TLS. The portal reads the scheme of the original request from the proxy. It refuses to handle a secret when the request was plain HTTP.
+
+### The rule
+
+A request is **secure** when one of these is true:
+
+1. Its TCP peer is in `server.trusted_proxies`, and the request has exactly one `X-Forwarded-Proto` header with the value `https`. The portal ignores the case of the value. It accepts nothing else: not `http`, not a list, not two headers.
+2. Its TCP peer is a loopback address. This covers local tests and an SSH tunnel.
+
+The portal reads `X-Forwarded-Proto` from a trusted proxy only. A client on the network can send any header. The portal ignores the header of every other peer, also for the cookie names and the `Secure` attribute. The rule is one function: `transport::is_secure`.
+
+A request that is not secure is **plain**. The third way is the explicit override `session.allow_insecure_http = true`: then the portal handles secrets on plain requests too. Anyone on the network can read the passwords, the keys and the session cookies. Use the override for a local test only. With the override, the start log has the event `insecure_http_allowed` at the level `warn`.
+
+### What the portal refuses on a plain request
+
+| Route | Answer |
+|---|---|
+| `GET` and `POST /auth/login` | `403`. The page shows "This connection is not encrypted. Sign-in is disabled. Use https." It has no form and no password field. The portal sets no cookie, reads no body and runs no Argon2. |
+| `POST /auth/users/add`, and `POST /auth/users/update` with a password | `403`. The pages of the accounts show a notice in place of each password form and of the "Generate" button. A change of grants stays possible: it carries no secret. |
+| `GET /auth/keys/new`, `POST /auth/keys/create` | `403`. The page of a new key shows the key one time. |
+| `POST /auth/settings/inbox/code` | `403`. The page of a new code shows the enrollment code one time. |
+| `/api/v1/*` with an `Authorization` header or a `token` parameter | `403` with the error code `insecure_transport`. The portal refuses before it reads the credential. It does not compare, count or log it. The tokens of the file and the keys of the portal follow the same rule. A request with no credential gets the normal `401`. |
+| `/auth/verify-key` with an `Authorization` header | `403` with `insecure_transport`. Traefik sends the scheme of the original request in `X-Forwarded-Proto` with the ForwardAuth request. The portal applies the rule to it. |
+
+### What the portal does not refuse
+
+- `/v1/enroll` and `/v1/session`, the routes of the phones. The Noise protocol encrypts and authenticates them with the key of the server that the phone pinned. The one-time code never travels in clear text. A phone can therefore use plain HTTP.
+- `/auth/verify`. It checks a session cookie. It carries no password. Its behaviour does not change.
+- The PDP listener, `/healthz`, `/readyz` and `/metrics`.
+- The pages that show no secret.
+
+### Where HTTPS comes from
+
+- **K3s.** Traefik ends TLS on `websecure`. The portal trusts the pod network. Traefik sets `X-Forwarded-Proto: https`. See [`deploy/README.md`](deploy/README.md).
+- **Demo.** Traefik ends TLS on port 8088 with a self-signed certificate. See [`demo/README.md`](demo/README.md).
+- **Local Compose stack.** It has no TLS. Its file sets `session.allow_insecure_http = true`. Use it for tests only.
+- **Several proxies.** The portal trusts the value of its direct peer. List every proxy that appears in `X-Forwarded-For` in `server.trusted_proxies`. Configure Traefik to keep the incoming `X-Forwarded-Proto`. See [`deploy/README.md`](deploy/README.md).
+
+### No HSTS
+
+The portal does not send `Strict-Transport-Security`. A homelab often uses a self-signed or private certificate. HSTS makes a browser refuse such a certificate with no way to continue. A lock-out is worse than the risk that HSTS removes here, because the portal already refuses to handle a secret on plain HTTP. Set HSTS in the proxy if the certificate is public.
+
+### Other leak controls
+
+- Each page with a password field or a shown secret has `Cache-Control: no-store, max-age=0` and `Pragma: no-cache`. This applies to all pages of the portal.
+- The pages send `Referrer-Policy: same-origin`, so a browser sends no referrer to another origin. The value `no-referrer` is not used: a browser then sends `Origin: null` on a form, and the check of the origin refuses it.
+- The sign-in form has `autocomplete="username"` and `autocomplete="current-password"`. The forms that set a password have `autocomplete="new-password"`. The pages that show a key or a code have `autocomplete="off"`.
+- A secret never goes in a URL. The request log has the path and no query. The log, the audit trail and the metrics hold no password and no hash. The debug text of an account hides its hash.
+- The buffers of the password of a sign-in, of a new user and of a new password are erased from memory when the portal drops them. The parser of forms also erases the values of a form that it refuses.
+- Each sign-in costs exactly one Argon2 check, for any login. This did not change.
 
 The file [`SECURITY.md`](SECURITY.md) gives the invariants. The page [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md) gives the model of the inbox.
 
@@ -1300,7 +1354,7 @@ portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict  
 
 After **Log in as** or **Back to superadmin**, `Max-Age` is the time left: the new session ends when the session of the password sign-in would have ended. A switch never gives a fresh `session.ttl`.
 
-The program reads the scheme for each request from `X-Forwarded-Proto`. A session is bound to the client address and the User-Agent of the login. The client address follows the rule of `server.trusted_proxies` (see "Anti-bruteforce"). The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`.
+The program reads the scheme for each request from `X-Forwarded-Proto`, from a trusted proxy only (see [Secure transport](#secure-transport)). A session is bound to the client address and the User-Agent of the login. The client address follows the rule of `server.trusted_proxies` (see "Anti-bruteforce"). The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`.
 
 The token contains no identity, no expiration timestamp, no claims and no signed application data. The server stores only a SHA-256 digest of each token. It also stores the expiration time. With SQLite, this data is in memory. With PostgreSQL, this data is in the shared database.
 
@@ -1469,7 +1523,7 @@ Roll the instances one at a time. A new instance opens its ports only when its c
 ## Limitations
 
 - The inbox is Android only. iOS cannot keep a connection in the background without the push service of Apple.
-- The inbox has no TLS. Noise protects the phones. A producer token travels in clear text on plain HTTP. Put a TLS proxy in front of the portal for the producers.
+- The portal has no TLS. A proxy ends it. Noise protects the phones. The portal refuses a producer token on a request that is not secure, unless `session.allow_insecure_http` is `true`. See [Secure transport](#secure-transport).
 - With SQLite, only one instance is active. A standby needs the block `inbox.replica`.
 - An alert that the inbox accepts while the database has no writable primary exists only in memory until the database returns. If every instance that holds it stops, the inbox loses it.
 - Each instance has its own rate limits and its own counter of refused sign-ins.

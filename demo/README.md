@@ -5,7 +5,7 @@ This demo runs the portal and the inbox with Traefik and example services on one
 ## Start and stop
 
 1. Run `./demo/up.sh`. It builds the portal image from `docker/Dockerfile`, makes the secrets, starts the stack and runs the seed.
-2. Open `http://localhost:8088/`.
+2. Open `https://localhost:8088/`. The certificate is self-signed, so the browser shows a warning. See "HTTPS and the certificate".
 3. Read the logins and the passwords in `demo/.secrets/credentials.txt`. The password of `admin` is `test`. This is for a demo on one machine only.
 4. To stop the demo and delete its data, run `docker compose -f demo/docker-compose.yml down -v`. Then delete `demo/.secrets/alice_key`.
 
@@ -13,7 +13,7 @@ The stack has these parts:
 
 | Part | Role |
 |---|---|
-| `traefik` | The edge. The port 8088 is open on loopback and on the Docker bridge (`172.17.0.1`, for the emulator). |
+| `traefik` | The edge. It ends TLS on the port 8088 with a self-signed certificate. The ports 8088 and 8090 are open on loopback and on the Docker bridge (`172.17.0.1`, for the emulator). It has the fixed address `172.30.0.2` in the demo network. |
 | `portal` | The portal: sessions, the PDP on port 4182, the edge for keys, and the inbox. |
 | `notes` | A service with a front. It asks the PDP for each operation. |
 | `files`, `wiki` | Two example services. They show the request headers. |
@@ -23,10 +23,27 @@ The demo publishes these ports:
 
 | Port | Use |
 |---|---|
-| `127.0.0.1:8088` and `172.17.0.1:8088` | The portal, through Traefik: the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`, `/api/version`), and the phones (`/v1/enroll`, `/v1/session`). The address `172.17.0.1` is the host as the Android emulator sees it. It is the `inbox.devices.public_address` of `portal.hcl`. |
-| `127.0.0.1:8091` | The listener of the portal without Traefik. Use it for `/metrics` and `/healthz`. |
+| `127.0.0.1:8088` and `172.17.0.1:8088` | The portal, through Traefik, over HTTPS: the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`, `/api/version`), the key edge, and also `/v1/` for a client that trusts the certificate. |
+| `127.0.0.1:8090` and `172.17.0.1:8090` | The phones, over plain HTTP. This entrypoint (`web-phones`) routes `/v1/` only, with no ForwardAuth and with the retry middleware. It is the `inbox.devices.public_address` of `portal.hcl` (`http://172.17.0.1:8090`). The address `172.17.0.1` is the host as the Android emulator sees it. |
+| `127.0.0.1:8091` | The listener of the portal without Traefik. Use it for `/metrics` and `/healthz`. A sign-in or a token on this port is plain HTTP and the portal refuses it. |
 
-The inbox is a feature of the portal, with one port. Traefik sends `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth, because phones and producers have no session. They prove themselves. The two routes of the phones are WebSocket upgrades. Traefik carries them with path routing. The middleware `inbox-retry` (4 attempts, 100 ms) sends a request again only when the portal does not answer at all.
+Traefik sends `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth, because phones and producers have no session. They prove themselves. The two routes of the phones are WebSocket upgrades. Traefik carries them with path routing. The middleware `inbox-retry` (4 attempts, 100 ms) sends a request again only when the portal does not answer at all.
+
+## HTTPS and the certificate
+
+The portal does not know TLS. Traefik ends it. `up.sh` makes a self-signed certificate with `openssl` in `demo/.secrets/` (`tls.crt` and `tls.key`, not in git). Its subject alternative names are `localhost`, `127.0.0.1` and `172.17.0.1`. It is valid for 825 days. Delete the two files and run `up.sh` again to make a new one.
+
+The portal trusts one proxy: the Traefik container, `172.30.0.2`. Traefik sends `X-Forwarded-Proto: https`, so the portal treats the request as secure. A request from the host to the port 8091 comes from the gateway of the Docker network. This is not a trusted proxy. The portal treats it as plain HTTP and refuses the sign-in, the keys and the producer tokens, also with a forged `X-Forwarded-Proto` header.
+
+To use the demo:
+
+- **Browser.** Open `https://localhost:8088/`. The browser warns that the certificate is not trusted. Choose "Advanced", then "Proceed to localhost". A private window works the same way.
+- **curl.** Add `-k`: `curl -k https://localhost:8088/auth/login`. The scripts of this directory do this for you.
+- **Playwright.** Open the context with `ignoreHTTPSErrors: true`.
+
+### The phones use plain HTTP in the demo
+
+The phone routes need no secure transport: the Noise protocol encrypts and authenticates them. The emulator does not trust the self-signed certificate of the demo, and the Android app would refuse it. The demo therefore gives the phones a second entrypoint, `web-phones`, on the plain port 8090. It routes `/v1/` only. This is a demo convenience. A real deployment publishes `/v1/` on the same HTTPS host as the pages, and the phone trusts the certificate: it comes from a public CA, or from a private CA that you installed on the phone. The app accepts `https://` addresses.
 
 To check the main points from a terminal, run `./demo/smoke.sh`. It signs in, tests the gate, a ceiling, a budget, a key and the inbox. Read the rate budgets at the top of the script. The budget of `alice` is 5 uses each minute, so wait one minute before a second run.
 
@@ -65,13 +82,15 @@ The inbox has these groups and producers:
 Use the token of the file:
 
 ```sh
-curl -i -X POST http://localhost:8088/api/v1/alerts \
+curl -ik -X POST https://localhost:8088/api/v1/alerts \
   -H "Authorization: Bearer $(cat demo/.secrets/inbox_producer_token)" \
   -H "Idempotency-Key: demo-1" -H "Content-Type: application/json" \
   -d '{"group":"infra","title":"Test"}'
 ```
 
 Use the key of `alice` in the same way: replace the token with `$(cat demo/.secrets/alice_key)`. The key may send to `infra`. For `critical` the answer is `403`.
+
+The portal refuses the token on plain HTTP. A request to `http://127.0.0.1:8091/api/v1/alerts` gets `403` with the error code `insecure_transport`. Use the HTTPS address. The command line of `curl` is visible to other users of the machine in `ps`: for a real token, read the header from a file with `-H @file`.
 
 ## A phone in the emulator
 
@@ -103,7 +122,7 @@ Tests to do with the phone:
 5. **PDP playground.** Ask `notes.read` on `notebook:work/note:1`. Ask `notes.read` on `notebook:work` with `subtree`. Ask a resource that the tree does not have, for example `folder:x`: the answer is `invalid_resource`.
 6. **Users page.** As `admin`, open the settings, then Users. Add a user and give permissions with limits. Sign in as this user in a private window and look at the effect.
 7. **Keys.** As `admin`, open `/auth/keys` and click **New key** and make a key with the grants `access on service:notes` and `notes.read on service:notes`. The new key is a page of its own. Copy the text. Paste it in "Use a key" in Notes. The key acts for its owner, and it never gets more than its owner.
-8. **Key from a terminal.** Run `curl -i -H "Authorization: Bearer mcp_..." http://localhost:8088/notes/api/notebooks`. A bad key gives 401 with an empty body and the header `WWW-Authenticate`.
+8. **Key from a terminal.** Run `curl -ik -H "Authorization: Bearer mcp_..." https://localhost:8088/notes/api/notebooks`. A bad key gives 401 with an empty body and the header `WWW-Authenticate`.
 9. **Revoke.** Revoke the key on the page. The next call gives 401 within seconds.
 10. **Limits on a key.** Make a key with a budget on `access on service:notes`. The counters of the key and of its owner both count each use.
 11. **Services page.** As `admin`, open the page Services. It shows the document of notes with its tree, its actions and its limits.
@@ -113,9 +132,9 @@ Tests to do with the phone:
 
 - `docker-compose.yml`: the stack.
 - `portal.hcl`: the configuration of the portal. It has the block `keys {}`, the PDP and the block `inbox`.
-- `traefik-dynamic.yml`: the middlewares for persons and for keys.
+- `traefik-dynamic.yml`: the middlewares for persons and for keys, and the certificate of Traefik.
 - The portal image is `docker/Dockerfile` of the repository. `up.sh` builds it as `local/portal:demo`.
-- `up.sh`: builds the image, makes the secrets, starts the stack and runs the seed.
+- `up.sh`: builds the image, makes the secrets and the self-signed certificate, starts the stack and runs the seed.
 - `seed.sh`: makes the accounts, the grants and the key of `alice` through the pages of the portal.
 - `smoke.sh`: the checks from a terminal. `lib.sh` has the functions that `seed.sh` and `smoke.sh` share.
 - `notes/`: the service Notes (`app.py`, `index.html`).

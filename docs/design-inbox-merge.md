@@ -27,6 +27,7 @@ The third column gives the answers and the changes that the work made later.
 | D11 | The binary has a listener `devices`. The DaemonSet `inbox-edge` relays it. | Changed on 2026-11-01 by the owner, in two steps. First the API of the producers moved to the port of the pages. Then everything of the inbox moved to the port of the portal: no phone listener and no relay exist. See section 4 and section 15. |
 | D12 | The portal sends an alert when a service is unhealthy and when sign-ins fail in a burst. | Step 6. Section 10. |
 | D13 | Tests use the emulator. No physical phone. | `tools/android/emulator.sh`. |
+| D14 | The portal does not know TLS. It refuses to handle a secret on a connection that is not secure. A proxy ends TLS. | Section 16. |
 
 ## 3. Layout of the repository
 
@@ -230,6 +231,7 @@ The first plan had one chain of migrations, one admin front without a password, 
 - **Physical phone.** The tests use the emulator only. The owner chose no physical phone.
 - **Archive of Inbox.** D8 says that the repository Inbox is archived at the end. This is not done.
 - **Old comments.** The comments of the moved code are not rewritten in Simplified Technical English.
+- **Typed login in the history.** The sign-in history and the log keep the login as the person typed it. A person can type the password in the login field by mistake, and the portal then records it. The smallest change: record the typed text only when it names an account. This changes a documented feature, so it waits for the owner (section 16).
 
 ## 15. One port for the inbox (2026-11-01)
 
@@ -252,3 +254,35 @@ What changed:
 - **Proxy rule.** The proxy must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. The portal owns the prefix `/v1/`: a service that the proxy publishes on the same host must not use a path that starts with `/v1/`.
 
 Behaviours that are lost: the separate phone port and its separate exposure (a firewall rule on a port), the relay `inbox-edge` with its quick retry (Traefik carries the retry now), the host port 8087, and the independent list of trusted proxies of the inbox. The phones and the pages now share the host and the TLS certificate. The operator restricts the phones with a rule on the routes of the proxy.
+
+## 16. Secure transport (2026-11-01)
+
+The owner gave two instructions: "The portal must avoid at all costs that the passwords of the users leak." and "The portal must NOT know TLS: Traefik handles http/https." These instructions are decision D14. A proof of the password in the JavaScript of the browser is not wanted. The record is `owner-decision-2026-11-01-secure-transport.md` in the repository of the specification.
+
+**The rule.** One function, `transport::is_secure`, decides. A request is secure when its TCP peer is in `server.trusted_proxies` and it has exactly one `X-Forwarded-Proto` header with the value `https`, or when its peer is a loopback address. The value is compared without case and without a trim. A list, two headers, `http` and any other value are not secure.
+
+**A hole that this change closed.** Before this step, `transport::is_https` read `X-Forwarded-Proto` from any peer. A client on the network could claim `https` and get the `__Host-` cookie names and the `Secure` attribute. The comment of the module said that Traefik sets the header, but the portal did not check the peer. The function `forwarded_https` now reads the header from a trusted proxy only. The scheme also sets the cookie names, so the spoof has no effect.
+
+**The key.** `session.allow_insecure_http`: `true` or `false`, default `false`. With `true`, nothing is refused, and the start log has the event `insecure_http_allowed` at the level `warn`. The key exists for the local Compose stack and for tests.
+
+**What a plain request cannot do.** Sign in. Set a password (new user, new password, the generator). Make a key or an enrollment code, because their pages show a secret one time. Present a credential to `/api/v1/*` or to `/auth/verify-key`. Each refusal is a `403`, and it comes before the portal reads a body or a credential. The sign-in refusal does not run Argon2 and sets no cookie.
+
+**What stays open.** The routes of the phones: the Noise protocol encrypts and authenticates them with the key that the phone pinned, and the one-time code never travels in clear text. `/auth/verify` (a session cookie, no password), the PDP listener, `/healthz`, `/readyz` and `/metrics`. A change of the grants stays possible, because it carries no secret.
+
+**The key edge.** Traefik sends `X-Forwarded-Proto` with the ForwardAuth request, with the scheme of the original request. The portal can therefore apply the rule to `/auth/verify-key`. With `trustForwardHeader: false` Traefik gives the scheme of its own connection to the auth server. A proxy that ends TLS in front of Traefik needs `trustForwardHeader: true` with `forwardedHeaders.trustedIPs` on the entrypoint (`deploy/README.md`).
+
+**Several proxies.** The portal trusts the value that its direct peer sends. `server.trusted_proxies` lists every proxy of `X-Forwarded-For`, because the walk of the client address skips the trusted hops from the right.
+
+**Choices of the author.**
+
+- `Referrer-Policy: same-origin` stays. The value `no-referrer` makes a browser send `Origin: null` on a form, and the check of the origin refuses `null`. `same-origin` sends no referrer to another origin.
+- No HSTS. A homelab uses a self-signed or private certificate. HSTS can lock a browser out of it. The proxy can add it for a public certificate.
+- The refusal of the producer credentials goes beyond the passwords. The author added it on his own initiative. It is a change of the delivery path of the alerts for a client on plain HTTP: this client gets `403 insecure_transport` and not `201`. The phone routes and the delivery do not change.
+- The demo serves HTTPS on 8088 with a self-signed certificate that `up.sh` makes. The portal trusts one address, the Traefik container (`172.30.0.2`). The gateway of the Docker network is not trusted. The phones use a plain entrypoint on 8090 for `/v1/`, because the emulator does not trust the certificate. A real deployment publishes `/v1/` on the HTTPS host of the pages.
+- The root Compose stack stays plain with `session.allow_insecure_http = true` and a comment "local test only". This is the lighter choice: it keeps `tools/dev/smoke.sh`, which calls the portal from the gateway of the Docker network. The two-instance variant uses the same file and the same override.
+- The K3s manifests need no change: Traefik ends TLS on `websecure` and the pod network is trusted.
+- `UserRecord` and `UserRow` print `<hidden>` for the hash in their debug text. The parser of forms erases the values of a form that it refuses.
+
+**Behaviours that are lost or changed.** No sign-in over plain HTTP. No producer credential over plain HTTP. No key and no code made on a plain request. `X-Forwarded-Proto` counts from a trusted proxy only. The demo moves to HTTPS, with a plain entrypoint for the phones.
+
+**Tests.** The unit tests of `transport::is_secure` give the truth table. The tests `secure_transport` in `src/http/cluster_tests.rs` listen on every address and connect to the address of the host, so the peer is not loopback. They check each refusal with the real handlers. The test `a_connection_that_is_not_secure_gets_no_secret_but_the_phones_and_the_alerts_work` of `tests/inbox_e2e.rs` runs the real binary: the producer API, the sign-in, the code, then a phone that enrolls, opens a session and gets an alert on a plain connection.

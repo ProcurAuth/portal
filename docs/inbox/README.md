@@ -72,6 +72,8 @@ A producer sends a request to the portal, on the same host and port as the pages
 
 Send the token in the header `Authorization: Bearer <token>`. A tool that cannot set a header can use the query `?token=<token>`. A proxy can write an address with a query in its log, so use the header when you can.
 
+The portal refuses a request of the producer API that presents a token (header or query) on a connection that is not secure. The answer is `403` with the error code `insecure_transport`. The portal refuses before it reads the token. Send the request over HTTPS. A request is secure when a trusted proxy announces `https`, or when it comes from a loopback address. See "Secure transport" in the README of the repository. The key `session.allow_insecure_http` lifts this rule for a local test.
+
 Two kinds of token work at the same time.
 
 - **A token of the file.** It is the value of a block `producer`. The block lists the groups of the token. This token does not depend on the portal. It works when the portal is not ready.
