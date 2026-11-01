@@ -24,7 +24,7 @@ use crate::grants::{Grant, Mode};
 #[allow(unused_imports)] // some of these types serve only the module `inbox`
 pub use inbox::{
     ClusterConfig, DevicesConfig, GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig,
-    ProducerConfig, ReplicaConfig, MIN_TOKEN_LEN,
+    PortalAlertsConfig, ProducerConfig, ReplicaConfig, MIN_TOKEN_LEN,
 };
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};

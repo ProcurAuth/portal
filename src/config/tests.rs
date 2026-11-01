@@ -2320,3 +2320,200 @@ fn the_pool_size_of_the_inbox_applies_only_with_postgres() {
     let (config, _) = inbox_ok(&with_postgres);
     assert_eq!(config.inbox.as_ref().unwrap().storage.pool_size, 4);
 }
+
+/// The inbox with a block `portal_alerts` that holds `keys`.
+fn with_portal_alerts(keys: &str) -> String {
+    with_inbox(&INBOX.replace(
+        r#"  group "infra""#,
+        &format!("  portal_alerts {{\n{keys}\n  }}\n  group \"infra\""),
+    ))
+}
+
+#[test]
+fn the_inbox_sends_no_alert_about_the_portal_without_the_block() {
+    let (config, _) = inbox_ok(&with_inbox(INBOX));
+    assert!(config.inbox.as_ref().unwrap().portal_alerts.is_none());
+    assert!(config
+        .effective
+        .iter()
+        .all(|l| !l.key.starts_with("inbox.portal_alerts.")));
+}
+
+#[test]
+fn the_block_portal_alerts_has_documented_defaults() {
+    let (config, _) = inbox_ok(&with_portal_alerts("group = \"infra\""));
+    let a = config
+        .inbox
+        .as_ref()
+        .unwrap()
+        .portal_alerts
+        .as_ref()
+        .unwrap();
+    assert_eq!(a.group, "infra");
+    assert!(a.service_unhealthy && a.sign_in_burst && a.recovered);
+    assert_eq!(a.unhealthy_after, Duration::from_secs(120));
+    assert_eq!(a.sign_in_failures, 10);
+    assert_eq!(a.sign_in_window, Duration::from_secs(300));
+    assert_eq!(a.repeat_after, Duration::from_secs(3600));
+    assert_eq!(line(&config, "inbox.portal_alerts.group").source, "file");
+    for (key, value) in [
+        ("service_unhealthy", "true"),
+        ("unhealthy_after", "\"2m\""),
+        ("sign_in_burst", "true"),
+        ("sign_in_failures", "10"),
+        ("sign_in_window", "\"5m\""),
+        ("repeat_after", "\"1h\""),
+        ("recovered", "true"),
+    ] {
+        let l = line(&config, &format!("inbox.portal_alerts.{key}"));
+        assert_eq!(
+            (l.value.as_str(), l.source.as_str()),
+            (value, "default"),
+            "{key}"
+        );
+    }
+    assert!(config
+        .render_effective()
+        .contains("inbox.portal_alerts.repeat_after = \"1h\"  # default"));
+}
+
+#[test]
+fn the_block_portal_alerts_takes_the_values_of_the_file() {
+    let (config, _) = inbox_ok(&with_portal_alerts(
+        r#"group = "oncall"
+    service_unhealthy = false
+    unhealthy_after = "10s"
+    sign_in_failures = 2
+    sign_in_window = "24h"
+    repeat_after = "7d"
+    recovered = false"#,
+    ));
+    let a = config
+        .inbox
+        .as_ref()
+        .unwrap()
+        .portal_alerts
+        .as_ref()
+        .unwrap();
+    assert_eq!(a.group, "oncall");
+    assert!(!a.service_unhealthy && !a.recovered && a.sign_in_burst);
+    assert_eq!(a.unhealthy_after, Duration::from_secs(10));
+    assert_eq!(a.sign_in_failures, 2);
+    assert_eq!(a.sign_in_window, Duration::from_secs(86_400));
+    assert_eq!(a.repeat_after, Duration::from_secs(7 * 86_400));
+    assert_eq!(
+        line(&config, "inbox.portal_alerts.repeat_after").source,
+        "file"
+    );
+}
+
+#[test]
+fn the_block_portal_alerts_stops_the_start_on_a_bad_value() {
+    for (keys, key, value) in [
+        (
+            "unhealthy_after = \"9s\"",
+            "inbox.portal_alerts.unhealthy_after",
+            "9s",
+        ),
+        (
+            "unhealthy_after = \"25h\"",
+            "inbox.portal_alerts.unhealthy_after",
+            "25h",
+        ),
+        (
+            "sign_in_failures = 1",
+            "inbox.portal_alerts.sign_in_failures",
+            "1",
+        ),
+        (
+            "sign_in_failures = 10001",
+            "inbox.portal_alerts.sign_in_failures",
+            "10001",
+        ),
+        (
+            "sign_in_failures = \"10\"",
+            "inbox.portal_alerts.sign_in_failures",
+            "10",
+        ),
+        (
+            "sign_in_window = \"9s\"",
+            "inbox.portal_alerts.sign_in_window",
+            "9s",
+        ),
+        (
+            "sign_in_window = \"25h\"",
+            "inbox.portal_alerts.sign_in_window",
+            "25h",
+        ),
+        (
+            "repeat_after = \"59s\"",
+            "inbox.portal_alerts.repeat_after",
+            "59s",
+        ),
+        (
+            "repeat_after = \"8d\"",
+            "inbox.portal_alerts.repeat_after",
+            "8d",
+        ),
+        (
+            "recovered = \"yes\"",
+            "inbox.portal_alerts.recovered",
+            "yes",
+        ),
+        (
+            "service_unhealthy = 1",
+            "inbox.portal_alerts.service_unhealthy",
+            "1",
+        ),
+        (
+            "sign_in_burst = \"true\"",
+            "inbox.portal_alerts.sign_in_burst",
+            "true",
+        ),
+    ] {
+        let message = inbox_err(&with_portal_alerts(&format!("group = \"infra\"\n{keys}")));
+        assert!(message.contains(key), "{message}");
+        assert!(message.contains(value), "{message}");
+    }
+    // An unknown key and a bad id.
+    let message = inbox_err(&with_portal_alerts("group = \"infra\"\nwebhook = \"x\""));
+    assert!(message.contains("inbox.portal_alerts.webhook"), "{message}");
+    let message = inbox_err(&with_portal_alerts("group = \"Infra Prod\""));
+    assert!(message.contains("inbox.portal_alerts.group"), "{message}");
+}
+
+#[test]
+fn the_block_portal_alerts_needs_an_existing_group() {
+    let message = inbox_err(&with_portal_alerts("sign_in_burst = true"));
+    assert!(
+        message.contains("inbox.portal_alerts.group"),
+        "the group is mandatory: {message}"
+    );
+    let message = inbox_err(&with_portal_alerts("group = \"missing\""));
+    assert!(
+        message.contains("inbox.portal_alerts.group")
+            && message.contains("infra, oncall")
+            && message.contains("\"missing\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_block_portal_alerts_with_both_alerts_off_is_a_contradiction() {
+    let message = inbox_err(&with_portal_alerts(
+        "group = \"infra\"\nservice_unhealthy = false\nsign_in_burst = false",
+    ));
+    assert!(
+        message.contains("inbox.portal_alerts.service_unhealthy")
+            && message.contains("inbox.portal_alerts.sign_in_burst"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_block_portal_alerts_is_not_allowed_without_the_inbox() {
+    let message = err(&with("portal_alerts { group = \"infra\" }"));
+    assert!(message.contains("portal_alerts"), "{message}");
+    let message = err(&with("inbox_portal_alerts { group = \"infra\" }"));
+    assert!(message.contains("inbox_portal_alerts"), "{message}");
+}

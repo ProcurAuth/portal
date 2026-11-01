@@ -615,6 +615,43 @@ A POST follows the rules of the other forms of the portal. The request has the `
 
 The metrics of the inbox are in the Prometheus text of the portal, at `metrics.path`. They have the names `inbox_*`. The gauges `inbox_devices_unreachable`, `inbox_oldest_pending_delivery_seconds`, `inbox_replica_last_snapshot_age_seconds` and `inbox_storage_degraded` are the ones to alert on. The inbox has no OTLP export. The log of the inbox is in the JSON lines of the portal, with the field `event`.
 
+### Alerts of the portal
+
+The portal can send an alert about itself. This is optional. It needs the block `inbox.portal_alerts`. Without this block, the portal sends no alert about itself.
+
+```hcl
+inbox {
+  # ...
+  portal_alerts {
+    group             = "infra"   # required: the id of a block group
+    service_unhealthy = true      # default
+    unhealthy_after   = "2m"      # default
+    sign_in_burst     = true      # default
+    sign_in_failures  = 10        # default
+    sign_in_window    = "5m"      # default
+    repeat_after      = "1h"      # default
+    recovered         = true      # default
+  }
+}
+```
+
+The portal sends two kinds of alert.
+
+- **A service is unhealthy.** The portal reads the state of each service from the launcher. A service is unhealthy when its tile shows `down` or `unhealthy`. The portal sends the alert when the service stays unhealthy for `unhealthy_after`. The title is `Service Notes is unhealthy for 2 minutes`. A service that is healthy or starting in this time does not raise the alert. A service with no health check is never unhealthy. The portal alerts only for the services that the launcher already probes.
+- **Sign-ins fail in a burst.** The portal counts the refused sign-ins: a wrong password, an unknown login and a sign-in that a limiter blocks. It sends the alert when `sign_in_failures` sign-ins are refused in `sign_in_window`. The window slides. The title is `10 refused sign-ins in 5 minutes`. The title has no login, no address and no password. The log of sign-ins has these details.
+
+The title shows the values of the configuration, not the measured time. The reason is that each instance must build the same title for the same event.
+
+`repeat_after` is the shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. A burst that stops raises no new alert. With `recovered = true`, the portal sends `Service Notes is healthy again` when a service is healthy again after an unhealthy alert. A service that only starts again does not count as healthy.
+
+The portal gives the alert to the inbox inside the process. There is no HTTP request and no token. The inbox gives it the same guarantees as an alert of the API. The alert and one delivery for each subscribed phone are in one transaction. The idempotency key holds, and the replica copies the alert. The source of the alert is `portal`. If the database has no writable primary, the spool of the degraded mode takes the alert.
+
+With several instances, each instance detects the same event. The idempotency key has only shared facts: `portal:unhealthy:<service id>:<bucket>`, `portal:recovered:<service id>:<bucket>` and `portal:burst:<bucket>`. The bucket is the Unix time divided by `repeat_after`. The inbox accepts one alert for one key, so the phones get one alert. Two instances can read one event on two sides of a bucket limit. The phones then get a second alert. Each instance counts only the refused sign-ins that it sees.
+
+The detectors run in a background task. They never block the sign-in or the launcher. The sign-in path only adds to a counter that already exists. If the inbox refuses an alert, the portal logs the event `portal_alert_failed`. It tries again after 10 seconds. If the portal restarts, it forgets what it sent. The key stops a second alert in the same bucket. The portal does not send `healthy again` for an alert that an earlier process sent.
+
+The metrics `portal_alerts_sent_total{kind}` and `portal_alerts_failed_total{kind}` count the alerts, with the kinds `service_unhealthy`, `service_recovered` and `sign_in_burst`. A key that comes near its budget does not raise an alert in this version.
+
 ### Stop
 
 On SIGTERM, the inbox tells each phone to reconnect with the close code 1012. It still serves for 5 seconds. Then it closes its listeners and waits for the sessions at most 10 seconds. It writes what the memory holds to the database. With the block `inbox.replica`, it takes a last copy and gives the lease back, so a standby instance takes over at once.
@@ -980,7 +1017,7 @@ The log.
 
 #### Block `inbox`
 
-This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica` and `inbox.cluster` are optional. The blocks `group "<id>"` and `producer "<name>"` are inside this block.
+This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.portal_alerts` are optional. The blocks `group "<id>"` and `producer "<name>"` are inside this block.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -1047,6 +1084,21 @@ This block is optional and is inside the block `inbox`. If it is present, the in
 |---|---|---|---|
 | `listen` | text: an IP address and a port, such as 0.0.0.0:8082 | required | The address and the port where this instance receives the requests of the other instances. Only the pods of the service can reach this port. |
 | `peers` | list of at most 16 quoted strings: names with a port such as "inbox-peers.apps.svc.cluster.local:8082" | required | The names that list the instances, for example a headless Service, with the port of `inbox.cluster.listen`. The inbox asks each address that the names resolve to who it is. It skips its own address. The list has at least one name. |
+
+#### Block `inbox.portal_alerts`
+
+This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group: when a service of the launcher is unhealthy, and when sign-ins fail in a burst. Without this block, the portal sends no alert about itself.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `group` | text: the id of a block `group` of the block `inbox` | required | The group that receives the alerts of the portal. It must be the label of a block `group` of the block `inbox`. |
+| `service_unhealthy` | `true` or `false` | `true` | `true`: the portal sends an alert when a service of the launcher stays unhealthy for `inbox.portal_alerts.unhealthy_after`. A service is unhealthy when its tile shows `down` or `unhealthy`. A service with no health check is never unhealthy. |
+| `unhealthy_after` | duration, 10s to 1d | `"2m"` | How long a service stays unhealthy before the alert. A service that is healthy or starting in this time does not raise the alert. |
+| `sign_in_burst` | `true` or `false` | `true` | `true`: the portal sends an alert when `inbox.portal_alerts.sign_in_failures` sign-ins are refused in the window `inbox.portal_alerts.sign_in_window`. A wrong password, an unknown login and a sign-in that a limiter blocks count. Each instance counts the refusals that it sees. |
+| `sign_in_failures` | number, 2 to 10000 | `10` | The number of refused sign-ins in the window that raises the alert. |
+| `sign_in_window` | duration, 10s to 1d | `"5m"` | The window of `inbox.portal_alerts.sign_in_failures`. It slides: the portal counts the refusals of the last window. |
+| `repeat_after` | duration, 1m to 7d | `"1h"` | The shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. The alerts of this time have one shared identity, so two instances send one alert. |
+| `recovered` | `true` or `false` | `true` | `true`: the portal sends a short alert when a service is healthy again after the portal sent an alert about it. |
 
 #### Block `user "<login>"`
 
