@@ -546,10 +546,8 @@ fn refuse_sign_ins(port: u16, login: &str, count: usize) {
     }
 }
 
-/// Signs in on the listener of the portal, and asks for the anti-CSRF token of the calls of the
-/// inbox.
+/// Signs in on the listener of the portal.
 fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
-    let host = format!("127.0.0.1:{port}");
     let (st, head, body) = sign_in_request(port, login, password);
     assert_eq!(st, 303, "{body}");
     let cookie = head
@@ -1227,6 +1225,8 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                     json!({
                         "id": attr(tag, "data-alert").unwrap(),
                         "group": attr(tag, "data-group").unwrap(),
+                        "source": attr(tag, "data-source").unwrap(),
+                        "title": attr(tag, "data-title").unwrap(),
                         "received": number("data-received"),
                         "targets": number("data-targets"),
                         "expired": number("data-expired"),
@@ -3682,7 +3682,6 @@ async fn a_burst_of_refused_sign_ins_makes_one_alert() {
     }
     s.stop();
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // Rights: keys of the portal as producers, subscriptions that follow the permissions.

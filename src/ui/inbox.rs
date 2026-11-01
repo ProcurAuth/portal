@@ -319,9 +319,10 @@ pub fn overview_page(frame: &Frame, rights: &Rights, view: &OverviewView<'_>) ->
 fn alert_row(out: &mut String, groups: &[GroupLine], alert: &AlertSummary) {
     let _ = write!(
         out,
-        r#"<tr data-alert="{id}" data-group="{group}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num{danger}" data-label="Expired">{expired}</td></tr>"#,
+        r#"<tr data-alert="{id}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num{danger}" data-label="Expired">{expired}</td></tr>"#,
         id = html_escape(&alert.id),
         group = html_escape(&alert.group),
+        source = html_escape(&alert.source),
         when = when(alert.created_at),
         name = html_escape(name_of(groups, &alert.group)),
         title = html_escape(&alert.title),
