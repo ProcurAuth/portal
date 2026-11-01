@@ -100,6 +100,39 @@ impl LabeledValues {
         }
     }
 
+    /// The value of a key `Kind::Text` or `Kind::Enum`.
+    pub fn text(&self, name: &str) -> Result<String, String> {
+        match self.values.get(name) {
+            Some(Val::Text(value)) => Ok(value.clone()),
+            _ => Err(format!(
+                "internal error: {}.{}.{name} is not a text",
+                self.kind, self.label
+            )),
+        }
+    }
+
+    /// The value of a key `Kind::Bool`.
+    pub fn bool(&self, name: &str) -> Result<bool, String> {
+        match self.values.get(name) {
+            Some(Val::Bool(value)) => Ok(*value),
+            _ => Err(format!(
+                "internal error: {}.{}.{name} is not a boolean",
+                self.kind, self.label
+            )),
+        }
+    }
+
+    /// The value of a key `Kind::List`.
+    pub fn list(&self, name: &str) -> Result<Vec<String>, String> {
+        match self.values.get(name) {
+            Some(Val::List(items)) => Ok(items.clone()),
+            _ => Err(format!(
+                "internal error: {}.{}.{name} is not a list",
+                self.kind, self.label
+            )),
+        }
+    }
+
     /// The bytes of a secret of the block, for a check at start. `None`: the file did not give it.
     pub fn secret_bytes(&self, name: &str) -> Option<&[u8]> {
         self.secrets.get(name).map(Secret::as_bytes)
@@ -220,6 +253,7 @@ impl Resolved {
             When::Always => true,
             When::PostgresBlock => self.has_block("postgres"),
             When::NoPostgres => !self.has_block("postgres"),
+            When::WithPostgres => self.has_block("postgres"),
             When::KubernetesOn => self.bool("discovery", "kubernetes").unwrap_or(false),
             When::LoginLimiterOn => flag("login_rate_limit_enabled"),
             When::GlobalLimiterOn => flag("global_login_rate_limit_enabled"),
@@ -259,7 +293,7 @@ pub fn resolve(document: &Document, env: Env<'_>) -> Result<Resolved, String> {
         ..Resolved::default()
     };
     for key in KEYS {
-        if keys::is_optional_block(key.block) && !resolved.has_block(key.block) {
+        if keys::gate(key.block).is_some_and(|gate| !resolved.has_block(gate)) {
             continue;
         }
         let applies = resolved.applies(key.when);
@@ -301,7 +335,16 @@ pub fn resolve(document: &Document, env: Env<'_>) -> Result<Resolved, String> {
         resolved.values.insert((key.block, key.name), value);
     }
     for block in &document.labeled {
-        let values = resolve_labeled(block, "", env, &mut resolved.effective)?;
+        // The blocks `group` and `producer` are inside the block `inbox`.
+        let parent = if keys::NESTED_BLOCKS
+            .iter()
+            .any(|(parent, child)| *parent == "inbox" && *child == block.kind)
+        {
+            "inbox."
+        } else {
+            ""
+        };
+        let values = resolve_labeled(block, parent, env, &mut resolved.effective)?;
         resolved.labeled.push(values);
     }
     Ok(resolved)

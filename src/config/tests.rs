@@ -1809,3 +1809,415 @@ fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() 
         message.len()
     );
 }
+
+// The block `inbox`.
+
+const INBOX_VARS: &[(&str, &str)] = &[
+    ("INBOX_KEY", "the text of a server key"),
+    ("INBOX_CRED", "the text of a credential record"),
+    (
+        "INBOX_TOKEN",
+        "a token of the producer grafana of 32 bytes or more",
+    ),
+    (
+        "INBOX_TOKEN_2",
+        "another token of the producer ci of 32 bytes or more",
+    ),
+];
+
+fn inbox_parse(raw: &str) -> Result<(Config, Secrets), String> {
+    let vars: Vec<(&str, &str)> = VARS.iter().chain(INBOX_VARS).copied().collect();
+    parse_with(raw, &vars)
+}
+
+fn inbox_ok(raw: &str) -> (Config, Secrets) {
+    inbox_parse(raw).unwrap_or_else(|e| panic!("{e}\n{raw}"))
+}
+
+fn inbox_err(raw: &str) -> String {
+    match inbox_parse(raw) {
+        Ok(_) => panic!("must be rejected:\n{raw}"),
+        Err(e) => e,
+    }
+}
+
+const INBOX: &str = r#"inbox {
+  server_key_env = "INBOX_KEY"
+  devices {
+    listen = "0.0.0.0:8080"
+    credential_env = "INBOX_CRED"
+    trusted_proxies = []
+    heartbeat_interval = "20s"
+    session_timeout = "60s"
+    resend_after = "15s"
+    max_inflight = 32
+    unreachable_after = "2m"
+    offline_warning_after = "3m"
+  }
+  storage {
+    delivery_ttl = "7d"
+    alert_retention = "30d"
+    connection_log_retention = "90d"
+  }
+  group "infra" { name = "Infra prod" description = "Production outages" }
+  group "oncall" { name = "On call" }
+  producer "grafana" { token_env = "INBOX_TOKEN" groups = ["infra"] }
+}"#;
+
+fn with_inbox(inbox: &str) -> String {
+    format!("{MINIMAL}\n{inbox}")
+}
+
+#[test]
+fn the_inbox_is_off_without_its_block() {
+    let (config, secrets) = ok(MINIMAL);
+    assert!(config.inbox.is_none());
+    assert!(secrets.inbox.is_none());
+    assert!(config
+        .effective
+        .iter()
+        .all(|l| !l.key.starts_with("inbox.")));
+}
+
+#[test]
+fn the_inbox_block_gives_typed_values_with_documented_defaults() {
+    let (config, secrets) = inbox_ok(&with_inbox(INBOX));
+    let inbox = config.inbox.as_ref().unwrap();
+    assert_eq!(inbox.name, "Inbox");
+    assert_eq!(inbox.devices.listen, "0.0.0.0:8080".parse().unwrap());
+    assert_eq!(inbox.devices.max_devices, 1000);
+    assert_eq!(inbox.devices.max_auth_failures, 5);
+    assert_eq!(inbox.devices.auth_failure_window, Duration::from_secs(600));
+    assert_eq!(inbox.devices.max_request_bytes, 64 * 1024);
+    assert_eq!(inbox.devices.heartbeat_interval, Duration::from_secs(20));
+    assert_eq!(inbox.devices.max_inflight, 32);
+    assert_eq!(inbox.storage.delivery_ttl, Duration::from_secs(7 * 86_400));
+    assert_eq!(inbox.storage.pool_size, 8);
+    assert!(inbox.replica.is_none() && inbox.cluster.is_none());
+    assert_eq!(inbox.groups.len(), 2);
+    assert_eq!(inbox.groups["oncall"].description, "");
+    assert_eq!(inbox.producers["grafana"].groups, ["infra"]);
+    assert!(!inbox.producers["grafana"].webhook_send_resolved);
+    let secrets = secrets.inbox.unwrap();
+    assert_eq!(secrets.server_key.as_bytes(), b"the text of a server key");
+    assert_eq!(
+        secrets.credential.as_bytes(),
+        b"the text of a credential record"
+    );
+    assert_eq!(secrets.producers.len(), 1);
+    // The effective configuration shows the source and hides the secrets.
+    assert_eq!(line(&config, "inbox.name").source, "default");
+    assert_eq!(line(&config, "inbox.devices.listen").source, "file");
+    assert_eq!(line(&config, "inbox.server_key").value, "<hidden>");
+    assert_eq!(line(&config, "inbox.server_key").source, "env:INBOX_KEY");
+    assert_eq!(line(&config, "inbox.devices.credential").value, "<hidden>");
+    assert_eq!(
+        line(&config, "inbox.producer.grafana.token").value,
+        "<hidden>"
+    );
+    assert_eq!(
+        line(&config, "inbox.group.infra.name").value,
+        "\"Infra prod\""
+    );
+    assert_eq!(
+        line(&config, "inbox.group.oncall.description").source,
+        "default"
+    );
+    assert!(config
+        .effective
+        .iter()
+        .all(|l| !l.value.contains("server key")));
+    assert!(config
+        .render_effective()
+        .contains("inbox.devices.resend_after = \"15s\"  # file"));
+}
+
+#[test]
+fn the_delivery_values_have_no_default() {
+    for key in [
+        "heartbeat_interval",
+        "session_timeout",
+        "resend_after",
+        "max_inflight",
+        "unreachable_after",
+        "offline_warning_after",
+        "delivery_ttl",
+        "alert_retention",
+        "connection_log_retention",
+    ] {
+        let without: String = INBOX
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(&format!("{key} ")))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let message = inbox_err(&with_inbox(&without));
+        assert!(
+            message.contains("missing required configuration key") && message.contains(key),
+            "{key}: {message}"
+        );
+    }
+}
+
+#[test]
+fn the_inbox_block_needs_its_inner_blocks_and_one_group() {
+    let without_devices = INBOX.replacen("devices {", "devicez {", 1);
+    let message = inbox_err(&with_inbox(&without_devices));
+    assert!(message.contains("devicez"), "{message}");
+    let no_group = INBOX
+        .replace(
+            r#"group "infra" { name = "Infra prod" description = "Production outages" }"#,
+            "",
+        )
+        .replace(r#"group "oncall" { name = "On call" }"#, "")
+        .replace(
+            r#"producer "grafana" { token_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+            "",
+        );
+    let message = inbox_err(&with_inbox(&no_group));
+    assert!(message.contains("at least one block group"), "{message}");
+    // An inner block of the inbox is not a block of the top of the file.
+    let message = inbox_err(&format!(
+        "{MINIMAL}\ndevices {{ listen = \"0.0.0.0:1\" }}\n{INBOX}"
+    ));
+    assert!(
+        message.contains("unknown configuration block: devices"),
+        "{message}"
+    );
+    let message = inbox_err(&format!(
+        "{MINIMAL}\ngroup \"x\" {{ name = \"X\" }}\n{INBOX}"
+    ));
+    assert!(
+        message.contains("unknown configuration block: group"),
+        "{message}"
+    );
+    let twice = INBOX.replacen("  storage {", "  storage { }\n  storage {", 1);
+    let message = inbox_err(&with_inbox(&twice));
+    assert!(
+        message.contains("duplicate configuration block: inbox.storage"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_inbox_schema_is_closed_and_strict() {
+    for (from, to, expected) in [
+        (
+            "max_inflight = 32",
+            "max_inflight = 32 admin_listen = \"127.0.0.1:1\"",
+            "unknown configuration key: inbox.devices.admin_listen",
+        ),
+        (
+            "max_inflight = 32",
+            "max_inflight = \"32\"",
+            "inbox.devices.max_inflight",
+        ),
+        ("max_inflight = 32", "max_inflight = 2000", "out of range"),
+        (
+            "resend_after = \"15s\"",
+            "resend_after = \"15\"",
+            "inbox.devices.resend_after",
+        ),
+        (
+            "name = \"On call\"",
+            "name = \"On call\" colour = \"red\"",
+            "unknown configuration key: inbox.group.oncall.colour",
+        ),
+        (
+            "groups = [\"infra\"]",
+            "groups = [\"infra\", \"infra\"]",
+            "written two times",
+        ),
+        ("groups = [\"infra\"]", "groups = [\"missing\"]", "missing"),
+        ("groups = [\"infra\"]", "groups = []", "at least one group"),
+        (
+            "groups = [\"infra\"]",
+            "groups = [\"Infra\"]",
+            "inbox.producer.grafana.groups",
+        ),
+        (
+            "server_key_env = \"INBOX_KEY\"",
+            "server_key = \"abc\"",
+            "must not be written in the file",
+        ),
+        (
+            "server_key_env = \"INBOX_KEY\"",
+            "server_key_env = \"INBOX_KEY\" server_key_file = \"/x/y\"",
+            "exactly one",
+        ),
+        (
+            "credential_env = \"INBOX_CRED\"",
+            "credential_env = \"NOT_SET\"",
+            "NOT_SET",
+        ),
+        (
+            "token_env = \"INBOX_TOKEN\"",
+            "token_env = \"NOT_SET\"",
+            "NOT_SET",
+        ),
+        (
+            "server_key_env = \"INBOX_KEY\"",
+            "name = \"\" server_key_env = \"INBOX_KEY\"",
+            "inbox.name",
+        ),
+        (
+            "listen = \"0.0.0.0:8080\"",
+            "listen = \"0.0.0.0:8080\" trusted_proxies2 = []",
+            "trusted_proxies2",
+        ),
+    ] {
+        assert!(INBOX.contains(from), "{from}");
+        let message = inbox_err(&with_inbox(&INBOX.replacen(from, to, 1)));
+        assert!(message.contains(expected), "{to}: {message}");
+    }
+}
+
+#[test]
+fn the_inbox_values_that_contradict_each_other_stop_the_start() {
+    for (from, to, expected) in [
+        (
+            "session_timeout = \"60s\"",
+            "session_timeout = \"30s\"",
+            "inbox.devices.session_timeout must be at least two times",
+        ),
+        (
+            "unreachable_after = \"2m\"",
+            "unreachable_after = \"30s\"",
+            "inbox.devices.unreachable_after must be at least",
+        ),
+        (
+            "offline_warning_after = \"3m\"",
+            "offline_warning_after = \"30s\"",
+            "inbox.devices.offline_warning_after must be at least two times",
+        ),
+        (
+            "alert_retention = \"30d\"",
+            "alert_retention = \"1d\"",
+            "inbox.storage.alert_retention must be at least",
+        ),
+    ] {
+        let message = inbox_err(&with_inbox(&INBOX.replacen(from, to, 1)));
+        assert!(message.contains(expected), "{to}: {message}");
+        assert!(
+            message.contains("is "),
+            "the error holds the values: {message}"
+        );
+    }
+    // The listener of the phones is not the listener of the portal.
+    let message = inbox_err(&with_inbox(
+        &INBOX.replace("0.0.0.0:8080", "127.0.0.1:4181"),
+    ));
+    assert!(
+        message.contains("inbox.devices.listen must not use the port of server.listen_address"),
+        "{message}"
+    );
+}
+
+#[test]
+fn two_producers_have_their_own_tokens_and_options() {
+    let two = INBOX.replace(
+        r#"producer "grafana""#,
+        r#"producer "ci" { token_env = "INBOX_TOKEN_2" groups = ["oncall"] webhook_send_resolved = true }
+  producer "grafana""#,
+    );
+    let (config, secrets) = inbox_ok(&with_inbox(&two));
+    assert!(config.inbox.as_ref().unwrap().producers["ci"].webhook_send_resolved);
+    assert_eq!(secrets.inbox.unwrap().producers.len(), 2);
+}
+
+#[test]
+fn the_replica_block_is_for_sqlite_and_the_cluster_block_is_for_postgres() {
+    let replica = INBOX.replace(
+        r#"  group "infra""#,
+        "  replica { dir = \"/replica\" }\n  group \"infra\"",
+    );
+    let (config, _) = inbox_ok(&with_inbox(&replica));
+    let r = config.inbox.as_ref().unwrap().replica.as_ref().unwrap();
+    assert_eq!(r.dir, std::path::PathBuf::from("/replica"));
+    assert_eq!(r.snapshot_interval, Duration::from_secs(10));
+    assert_eq!(r.lease_ttl, Duration::from_secs(30));
+    assert_eq!(r.sync_timeout, Duration::from_secs(5));
+    assert!(r.sync_alerts, "the safe value is the default");
+    assert_eq!(line(&config, "inbox.replica.sync_alerts").source, "default");
+    // Not with PostgreSQL.
+    let message = inbox_err(&format!(
+        "{}\n{POSTGRES_BLOCK}",
+        with_inbox(&replica).replace(MINIMAL, &shared())
+    ));
+    assert!(
+        message.contains("inbox.replica is for the SQLite file"),
+        "{message}"
+    );
+    // Not in the directory of the SQLite file.
+    let same = format!(
+        "{}\nstorage {{ database = \"/replica/portal.db\" }}",
+        with_inbox(&replica)
+    );
+    let message = inbox_err(&same);
+    assert!(
+        message.contains("must not be the directory of storage.database"),
+        "{message}"
+    );
+    for bad in [
+        "dir = \"replica\"",
+        "dir = \"/replica\" lease_ttl = \"1s\"",
+        "dir = \"/replica\" sync_timeout = \"0s\"",
+        "dir = \"/replica\" sync_alerts = \"true\"",
+    ] {
+        let broken = replica.replace("dir = \"/replica\"", bad);
+        inbox_err(&with_inbox(&broken));
+    }
+    inbox_err(&with_inbox(&replica.replace("dir = \"/replica\"", "")));
+
+    let cluster = INBOX.replace(
+        r#"  group "infra""#,
+        "  cluster { listen = \"0.0.0.0:8082\" peers = [\"inbox-peers.apps.svc.cluster.local:8082\"] }\n  group \"infra\"",
+    );
+    // PostgreSQL needs the shared signing key.
+    let with_postgres = format!(
+        "{}\n{POSTGRES_BLOCK}",
+        with_inbox(&cluster).replace(MINIMAL, &shared())
+    );
+    let (config, _) = inbox_ok(&with_postgres);
+    let c = config.inbox.as_ref().unwrap().cluster.as_ref().unwrap();
+    assert_eq!(c.peers, ["inbox-peers.apps.svc.cluster.local:8082"]);
+    assert_eq!(config.inbox.as_ref().unwrap().storage.pool_size, 8);
+    let message = inbox_err(&with_inbox(&cluster));
+    assert!(
+        message.contains("inbox.cluster needs the block postgres"),
+        "{message}"
+    );
+    for (from, to) in [
+        ("0.0.0.0:8082", "0.0.0.0:8080"),
+        ("0.0.0.0:8082", "0.0.0.0:4181"),
+        (
+            "inbox-peers.apps.svc.cluster.local:8082",
+            "inbox-peers.apps.svc.cluster.local",
+        ),
+        ("inbox-peers.apps.svc.cluster.local:8082", "inbox-peers:0"),
+        (
+            "peers = [\"inbox-peers.apps.svc.cluster.local:8082\"]",
+            "peers = []",
+        ),
+    ] {
+        inbox_err(&with_postgres.replacen(from, to, 1));
+    }
+}
+
+#[test]
+fn the_pool_size_of_the_inbox_applies_only_with_postgres() {
+    let sized = INBOX.replace(
+        "connection_log_retention = \"90d\"",
+        "connection_log_retention = \"90d\" pool_size = 4",
+    );
+    let message = inbox_err(&with_inbox(&sized));
+    assert!(
+        message.contains("inbox.storage.pool_size must not be set"),
+        "{message}"
+    );
+    let with_postgres = format!(
+        "{}\n{POSTGRES_BLOCK}",
+        with_inbox(&sized).replace(MINIMAL, &shared())
+    );
+    let (config, _) = inbox_ok(&with_postgres);
+    assert_eq!(config.inbox.as_ref().unwrap().storage.pool_size, 4);
+}

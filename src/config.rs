@@ -10,6 +10,7 @@
 mod accounts;
 mod hcl;
 pub mod keys;
+mod inbox;
 mod resolve;
 
 use std::collections::BTreeMap;
@@ -20,6 +21,11 @@ use std::time::Duration;
 
 use crate::grants::{Grant, Mode};
 
+#[allow(unused_imports)] // some of these types serve only the module `inbox`
+pub use inbox::{
+    ClusterConfig, DevicesConfig, GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig,
+    ProducerConfig, ReplicaConfig, MIN_TOKEN_LEN,
+};
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};
 
@@ -43,6 +49,8 @@ pub struct Config {
     pub storage: StorageConfig,
     pub ui: UiConfig,
     pub logging: LoggingConfig,
+    /// `None` when the file has no `inbox` block: the inbox is off.
+    pub inbox: Option<InboxConfig>,
     /// The value of each key that applies, with its source. Secrets are hidden.
     pub effective: Vec<Effective>,
 }
@@ -61,6 +69,8 @@ pub struct Secrets {
     pub identity_key: Option<Secret>,
     /// The bearer token of each `pdp_client` block, in the order of the file.
     pub pdp_tokens: Vec<(String, Secret)>,
+    /// The secrets of the block `inbox`. `None` without the block.
+    pub inbox: Option<InboxSecrets>,
 }
 
 /// The grants of the users and the actions of the services.
@@ -314,6 +324,7 @@ impl Config {
             &keys::block_names(),
             &keys::labeled_block_names(),
             keys::NESTED_BLOCKS,
+            keys::NESTED_PLAIN_BLOCKS,
         )?;
         let mut resolved = resolve::resolve(&document, env)?;
         build(&mut resolved, env)
@@ -429,6 +440,8 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         StorageBackend::Sqlite(PathBuf::from(r.text("storage", "database")?))
     };
 
+    let inbox_built = inbox::build(r)?;
+
     let kubernetes = if r.bool("discovery", "kubernetes")? {
         Some(kubernetes_api(r, env)?)
     } else {
@@ -521,8 +534,15 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         logging: LoggingConfig {
             level: LogLevel::parse(&r.text("logging", "level")?)?,
         },
+        inbox: None,
         effective: std::mem::take(&mut r.effective),
     };
+    let mut config = config;
+    if let Some((inbox, inbox_secrets)) = inbox_built {
+        inbox::check_against(&config, &inbox, postgres)?;
+        config.inbox = Some(inbox);
+        secrets.inbox = Some(inbox_secrets);
+    }
     if let Some(pdp) = &config.pdp {
         // The two values must agree: an `http` URL needs `plain_http`, and `plain_http` needs an
         // `http` URL (portal 10.2b).
@@ -647,6 +667,7 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
         postgres_password,
         identity_key,
         pdp_tokens: Vec::new(),
+        inbox: None,
     })
 }
 

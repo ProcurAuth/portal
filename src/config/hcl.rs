@@ -97,11 +97,14 @@ const MAX_VALUE_DEPTH: usize = 6;
 /// Parse the file. `allowed_blocks` is the closed list of block names without a label.
 /// `labeled_blocks` is the closed list of block names that take a label. `nested_blocks` lists
 /// the pairs `(parent, child)`: a block `parent` can hold blocks `child` with a label.
+/// `nested_plain` lists the pairs `(parent, child)`: a block `parent` can hold a block `child`
+/// without a label. The keys of such a block are in the block `parent.child` of the document.
 pub fn parse(
     raw: &str,
     allowed_blocks: &[&str],
     labeled_blocks: &[&str],
     nested_blocks: &[(&str, &str)],
+    nested_plain: &[(&str, &str)],
 ) -> Result<Document, String> {
     let tokens = tokenize(raw)?;
     let mut document = Document::default();
@@ -159,10 +162,19 @@ pub fn parse(
         }
         let nested: Vec<&str> = nested_blocks
             .iter()
-            .filter(|(parent, _)| *parent == block && label.is_some())
+            .filter(|(parent, _)| *parent == block)
             .map(|(_, child)| *child)
             .collect();
-        let (values, children) = body(&tokens, &mut i, &path, &nested)?;
+        let plain: Vec<&str> = nested_plain
+            .iter()
+            .filter(|(parent, _)| *parent == block)
+            .map(|(_, child)| *child)
+            .collect();
+        let Body {
+            values,
+            children,
+            plain: plain_children,
+        } = body(&tokens, &mut i, &path, &nested, &plain)?;
         match label {
             Some(label) => document.labeled.push(Labeled {
                 kind: block,
@@ -174,31 +186,70 @@ pub fn parse(
                 for (key, value) in values {
                     document.values.insert((block.clone(), key), value);
                 }
+                for (child, child_values) in plain_children {
+                    let name = format!("{block}.{child}");
+                    document.blocks.insert(name.clone());
+                    for (key, value) in child_values {
+                        document.values.insert((name.clone(), key), value);
+                    }
+                }
+                // A block with a label inside a block without a label stands at the top of the
+                // list, with its own kind.
+                document.labeled.extend(children);
             }
         }
     }
     Ok(document)
 }
 
-/// The body of a block, after its `{` and up to its `}`: the `key = value` lines, and the blocks
-/// with a label that the block can hold (`nested`).
+/// What a block holds.
+struct Body {
+    values: HashMap<String, Lit>,
+    /// The blocks with a label, in the order of the file.
+    children: Vec<Labeled>,
+    /// The blocks without a label, with their keys, in the order of the file.
+    plain: Vec<(String, HashMap<String, Lit>)>,
+}
+
+/// The body of a block, after its `{` and up to its `}`: the `key = value` lines, the blocks
+/// with a label that the block can hold (`nested`) and the blocks without a label that it can
+/// hold (`nested_plain`).
 fn body(
     tokens: &[Token],
     i: &mut usize,
     path: &str,
     nested: &[&str],
-) -> Result<(HashMap<String, Lit>, Vec<Labeled>), String> {
+    nested_plain: &[&str],
+) -> Result<Body, String> {
     let mut values: HashMap<String, Lit> = HashMap::new();
     let mut children: Vec<Labeled> = Vec::new();
+    let mut plain: Vec<(String, HashMap<String, Lit>)> = Vec::new();
     loop {
         match tokens.get(*i) {
             Some(Token::RBrace) => {
                 *i += 1;
-                return Ok((values, children));
+                return Ok(Body {
+                    values,
+                    children,
+                    plain,
+                });
             }
             Some(Token::Ident(key)) => {
                 let key = key.clone();
                 *i += 1;
+                if matches!(tokens.get(*i), Some(Token::LBrace))
+                    && nested_plain.contains(&key.as_str())
+                {
+                    // A block without a label inside the block.
+                    if plain.iter().any(|(name, _)| *name == key) {
+                        return Err(format!("duplicate configuration block: {path}.{key}"));
+                    }
+                    *i += 1;
+                    let child_path = format!("{path}.{key}");
+                    let inner = body(tokens, i, &child_path, &[], &[])?;
+                    plain.push((key, inner.values));
+                    continue;
+                }
                 if let Some(Token::String(label)) = tokens.get(*i) {
                     // A block with a label inside the block.
                     if !nested.contains(&key.as_str()) {
@@ -220,12 +271,12 @@ fn body(
                             ))
                         }
                     }
-                    let (child_values, grandchildren) = body(tokens, i, &child_path, &[])?;
-                    debug_assert!(grandchildren.is_empty());
+                    let inner = body(tokens, i, &child_path, &[], &[])?;
+                    debug_assert!(inner.children.is_empty() && inner.plain.is_empty());
                     children.push(Labeled {
                         kind: key,
                         label,
-                        values: child_values,
+                        values: inner.values,
                         children: Vec::new(),
                     });
                     continue;
@@ -511,7 +562,7 @@ mod tests {
     const LABELED: &[&str] = &["user"];
 
     fn parse(raw: &str, blocks: &[&str]) -> Result<Document, String> {
-        super::parse(raw, blocks, LABELED, NESTED)
+        super::parse(raw, blocks, LABELED, NESTED, &[])
     }
 
     const NESTED: &[(&str, &str)] = &[("user", "key")];
