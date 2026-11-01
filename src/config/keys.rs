@@ -58,6 +58,8 @@ pub enum When {
     PostgresBlock,
     /// The block `postgres` is absent.
     NoPostgres,
+    /// The block `postgres` is present. The key is in another block.
+    WithPostgres,
     /// `discovery.kubernetes` is `true`.
     KubernetesOn,
     /// `security.login_rate_limit_enabled` is `true`.
@@ -91,6 +93,7 @@ impl When {
             | When::KeysBlock
             | When::LabeledBlock => "the key always applies",
             When::NoPostgres => "the postgres block is present",
+            When::WithPostgres => "the postgres block is absent",
             When::KubernetesOn => "discovery.kubernetes is false",
             When::LoginLimiterOn => "security.login_rate_limit_enabled is false",
             When::GlobalLimiterOn => "security.global_login_rate_limit_enabled is false",
@@ -110,6 +113,7 @@ impl When {
             | When::KeysBlock
             | When::LabeledBlock => "",
             When::NoPostgres => "Applies only without the `postgres` block.",
+            When::WithPostgres => "Applies only with the `postgres` block.",
             When::KubernetesOn => "Applies only when `discovery.kubernetes` is `true`.",
             When::LoginLimiterOn => {
                 "Applies only when `security.login_rate_limit_enabled` is `true`."
@@ -223,6 +227,26 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ("discovery", "The sources of the service catalogue."),
     ("ui", "The pages."),
     ("logging", "The log."),
+    (
+        "inbox",
+        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica` and `inbox.cluster` are optional. The blocks `group \"<id>\"` and `producer \"<name>\"` are inside this block.",
+    ),
+    (
+        "inbox.devices",
+        "This block is inside the block `inbox`. It sets the listener for phones and producers, and the delivery values. This listener has no session: phones and producers prove themselves.",
+    ),
+    (
+        "inbox.storage",
+        "This block is inside the block `inbox`. It sets the lifetime of alerts and of the connection log. The inbox keeps its tables in the database of the portal: the SQLite file of the block `storage`, or the database of the block `postgres`.",
+    ),
+    (
+        "inbox.replica",
+        "This block is optional and is inside the block `inbox`. If it is present, the inbox copies the SQLite file to a directory that the standby instances share. A standby instance takes over when the owner is lost. The block needs the SQLite file: it must not be present with the block `postgres`. The copy covers the whole file, with the tables of the portal.",
+    ),
+    (
+        "inbox.cluster",
+        "This block is optional and is inside the block `inbox`. If it is present, the instances copy to each other the alerts that they accept while PostgreSQL has no writable primary. The block needs the block `postgres`.",
+    ),
 ];
 
 /// Every key. The order is the order of resolution: a key comes after the keys that its
@@ -901,6 +925,234 @@ pub static KEYS: &[Key] = &[
         when: When::Always,
         doc: "The lowest level that the server logs.",
     },
+    Key {
+        block: "inbox",
+        name: "name",
+        kind: Kind::Text {
+            expected: "1 to 64 bytes, not blank",
+            check: check_inbox_name,
+        },
+        presence: Presence::Default("Inbox"),
+        when: When::Always,
+        doc: "The name that the phones show for this server.",
+    },
+    Key {
+        block: "inbox",
+        name: "server_key",
+        kind: Kind::Secret { max_bytes: 4096 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone invalid. Back it up.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "listen",
+        kind: Kind::Text {
+            expected: "an IP address and a port, such as 0.0.0.0:8080",
+            check: check_socket_address,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The address and the port of the listener for phones, producers and webhooks. The listener serves `/v1/enroll`, `/v1/session`, `/api/v1/*`, `/healthz`, `/readyz` and `/api/version`. It must not use the port of `server.listen_address`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "credential",
+        kind: Kind::Secret { max_bytes: 4096 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The OPAQUE record of the shared password of the phones. Make it with `portal inbox credential`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "trusted_proxies",
+        kind: Kind::List {
+            expected: "IP networks such as \"10.42.0.0/16\" or \"127.0.0.1/32\"; the address is the first address of the network",
+            check: check_cidr,
+            max_items: 64,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the password attempts.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_devices",
+        kind: Kind::Int { min: 1, max: 100_000 },
+        presence: Presence::Default("1000"),
+        when: When::Always,
+        doc: "The largest number of enrolled phones that are not revoked.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "heartbeat_interval",
+        kind: Kind::Duration { min: secs(5), max: secs(HOUR) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The app sends a ping at this interval.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "session_timeout",
+        kind: Kind::Duration { min: secs(10), max: secs(DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "A session without a frame for this time ends. The value is at least two times `inbox.devices.heartbeat_interval`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "resend_after",
+        kind: Kind::Duration { min: secs(1), max: secs(DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The inbox sends an alert again to a phone that did not confirm the receipt after this time.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_inflight",
+        kind: Kind::Int { min: 1, max: 1024 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The largest number of alerts that the inbox sends to one session before the phone confirms them.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "unreachable_after",
+        kind: Kind::Duration { min: secs(10), max: secs(30 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The inbox reports a subscribed phone as unreachable when it did not see the phone for this time. The value is at least `inbox.devices.session_timeout`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "offline_warning_after",
+        kind: Kind::Duration { min: secs(10), max: secs(30 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The app warns its user after it was disconnected for this time. The value is at least two times `inbox.devices.heartbeat_interval`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_auth_failures",
+        kind: Kind::Int { min: 1, max: 1000 },
+        presence: Presence::Default("5"),
+        when: When::Always,
+        doc: "The number of password attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started attempt counts until it succeeds.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "auth_failure_window",
+        kind: Kind::Duration { min: secs(1), max: secs(DAY) },
+        presence: Presence::Default("10m"),
+        when: When::Always,
+        doc: "The window of `inbox.devices.max_auth_failures`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_request_bytes",
+        kind: Kind::Size { min: 4096, max: 1024 * 1024 },
+        presence: Presence::Default("64KiB"),
+        when: When::Always,
+        doc: "The largest request body that the listener reads.",
+    },
+    Key {
+        block: "inbox.storage",
+        name: "delivery_ttl",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The inbox does not send an alert again to a phone that did not receive it within this time.",
+    },
+    Key {
+        block: "inbox.storage",
+        name: "alert_retention",
+        kind: Kind::Duration { min: secs(HOUR), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The inbox deletes the alerts, delivered or expired, that are older than this. The value is at least `inbox.storage.delivery_ttl`.",
+    },
+    Key {
+        block: "inbox.storage",
+        name: "connection_log_retention",
+        kind: Kind::Duration { min: secs(HOUR), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The inbox deletes the connection records that are older than this.",
+    },
+    Key {
+        block: "inbox.storage",
+        name: "pool_size",
+        kind: Kind::Int { min: 2, max: 64 },
+        presence: Presence::Default("8"),
+        when: When::WithPostgres,
+        doc: "The number of connections that the inbox uses for requests and sessions. The inbox keeps one more connection for the notifications of the other instances.",
+    },
+    Key {
+        block: "inbox.replica",
+        name: "dir",
+        kind: Kind::Text {
+            expected: "an absolute path without '..'",
+            check: check_absolute_path,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The directory that every instance that can run the inbox shares. It is a volume of plain files. It must not be the directory of `storage.database`.",
+    },
+    Key {
+        block: "inbox.replica",
+        name: "snapshot_interval",
+        kind: Kind::Duration { min: secs(1), max: secs(DAY) },
+        presence: Presence::Default("10s"),
+        when: When::Always,
+        doc: "The inbox copies a changed database at most this often. An accepted alert, an enrollment and a revocation do not wait for this time.",
+    },
+    Key {
+        block: "inbox.replica",
+        name: "lease_ttl",
+        kind: Kind::Duration { min: secs(5), max: secs(HOUR) },
+        presence: Presence::Default("30s"),
+        when: When::Always,
+        doc: "The other instances consider an instance lost when its lease did not change for this time. They then take over.",
+    },
+    Key {
+        block: "inbox.replica",
+        name: "sync_timeout",
+        kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
+        presence: Presence::Default("5s"),
+        when: When::Always,
+        doc: "The time that an accepted alert waits for the copy that holds it.",
+    },
+    Key {
+        block: "inbox.replica",
+        name: "sync_alerts",
+        kind: Kind::Bool,
+        presence: Presence::Default("true"),
+        when: When::Always,
+        doc: "`true`: the inbox confirms an alert only after the copy holds it. If the copy fails, the inbox answers `503` and the producer sends the alert again. `false`: the inbox confirms an alert after the local commit and copies it as soon as possible.",
+    },
+    Key {
+        block: "inbox.cluster",
+        name: "listen",
+        kind: Kind::Text {
+            expected: "an IP address and a port, such as 0.0.0.0:8082",
+            check: check_socket_address,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The address and the port where this instance receives the requests of the other instances. Only the pods of the service can reach this port.",
+    },
+    Key {
+        block: "inbox.cluster",
+        name: "peers",
+        kind: Kind::List {
+            expected: "names with a port such as \"inbox-peers.apps.svc.cluster.local:8082\"",
+            check: check_peer_address,
+            max_items: 16,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The names that list the instances, for example a headless Service, with the port of `inbox.cluster.listen`. The inbox asks each address that the names resolve to who it is. It skips its own address. The list has at least one name.",
+    },
 ];
 
 /// The blocks with a label, in the order of the reference. The label names a user or a server.
@@ -914,6 +1166,16 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
         "key",
         "<name>",
         "One key of a user of the file. The block is inside a block `user`. The label is the name of the key: 1 to 64 characters, with no control character. Two keys of one user have two names. The subject id of the key is `key:` and the first 16 hexadecimal characters of the SHA-256 digest of the login, a zero byte and the name. A key of the file has no expiry date. To stop it, remove the block and restart each instance. The block needs the block `keys`.",
+    ),
+    (
+        "group",
+        "<id>",
+        "One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A producer sends an alert to a group.",
+    ),
+    (
+        "producer",
+        "<name>",
+        "One producer of alerts that has a token: a monitoring tool, a script or a webhook. The block is inside the block `inbox`. The label is the name of the producer: 1 to 64 characters of a-z, 0-9, '-' and '_'.",
     ),
     (
         "pdp_client",
@@ -971,6 +1233,56 @@ pub static LABELED_KEYS: &[Key] = &[
         doc: "The SHA-256 digest of the text of the key: 64 hexadecimal characters, in upper or lower case. A digest that the database or another block also holds stops the server. The digest must be the digest of a text of the form `mcp_`, 43 characters and 6 characters of checksum: the server cannot check this at start.",
     },
     Key {
+        block: "group",
+        name: "name",
+        kind: Kind::Text {
+            expected: "1 to 128 bytes, not blank",
+            check: check_group_name,
+        },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The name of the group that the phones show.",
+    },
+    Key {
+        block: "group",
+        name: "description",
+        kind: Kind::Text {
+            expected: "at most 512 bytes",
+            check: check_group_description,
+        },
+        presence: Presence::Default(""),
+        when: When::LabeledBlock,
+        doc: "The description of the group.",
+    },
+    Key {
+        block: "producer",
+        name: "token",
+        kind: Kind::Secret { max_bytes: 1024 },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The bearer token of the producer. It has at least 32 printable characters. Make it with `portal inbox token`. Two producers must not have the same token.",
+    },
+    Key {
+        block: "producer",
+        name: "groups",
+        kind: Kind::List {
+            expected: "ids of groups that the block `inbox` defines",
+            check: check_inbox_id,
+            max_items: 64,
+        },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The groups that the producer can send alerts to. The list has at least one group. Each group must exist.",
+    },
+    Key {
+        block: "producer",
+        name: "webhook_send_resolved",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::LabeledBlock,
+        doc: "`true`: the notifications \"resolved\" of Alertmanager and Grafana become alerts. `false`: the inbox ignores them.",
+    },
+    Key {
         block: "pdp_client",
         name: "token",
         kind: Kind::Secret { max_bytes: 1024 },
@@ -990,13 +1302,33 @@ pub fn find_labeled(block: &str, name: &str) -> Option<&'static Key> {
         .find(|k| k.block == block && k.name == name)
 }
 
-/// The name of each block, for the closed list of the parser.
+/// The name of each block at the top of the file, for the closed list of the parser.
 pub fn block_names() -> Vec<&'static str> {
+    BLOCKS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !name.contains('.'))
+        .collect()
+}
+
+/// The name of each block of the table, with the blocks that other blocks hold.
+#[cfg(test)]
+pub fn all_block_names() -> Vec<&'static str> {
     BLOCKS.iter().map(|(name, _)| *name).collect()
 }
 
 /// The blocks with a label that a block with a label holds: `(parent, child)`.
-pub const NESTED_BLOCKS: &[(&str, &str)] = &[("user", "key")];
+pub const NESTED_BLOCKS: &[(&str, &str)] =
+    &[("user", "key"), ("inbox", "group"), ("inbox", "producer")];
+
+/// The blocks without a label that a block without a label holds: `(parent, child)`. The keys of
+/// the child are in the block `parent.child` of the table.
+pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
+    ("inbox", "devices"),
+    ("inbox", "storage"),
+    ("inbox", "replica"),
+    ("inbox", "cluster"),
+];
 
 /// The name of each block with a label at the top of the file, for the closed list of the parser.
 pub fn labeled_block_names() -> Vec<&'static str> {
@@ -1013,9 +1345,20 @@ pub fn all_labeled_block_names() -> Vec<&'static str> {
     LABELED_BLOCKS.iter().map(|(name, _, _)| *name).collect()
 }
 
-/// The blocks that the file may omit. Their keys apply only when the block is present.
-pub fn is_optional_block(block: &str) -> bool {
-    matches!(block, "postgres" | "identity" | "pdp" | "keys")
+/// The block that must be in the file for the keys of `block` to apply. `None`: the keys of the
+/// block always apply. When the gate block is absent, the keys do not apply and the file must
+/// not have them.
+pub fn gate(block: &str) -> Option<&'static str> {
+    match block {
+        "postgres" => Some("postgres"),
+        "identity" => Some("identity"),
+        "pdp" => Some("pdp"),
+        "keys" => Some("keys"),
+        "inbox" | "inbox.devices" | "inbox.storage" => Some("inbox"),
+        "inbox.replica" => Some("inbox.replica"),
+        "inbox.cluster" => Some("inbox.cluster"),
+        _ => None,
+    }
 }
 
 // Checks of the text keys. Each returns the reason when the value is bad.
@@ -1098,6 +1441,54 @@ fn check_host(value: &str) -> Result<(), String> {
         return Err("not a host name or an address".into());
     }
     Ok(())
+}
+
+fn check_inbox_name(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.len() > 64 || value.chars().any(char::is_control) {
+        return Err("not 1 to 64 bytes, or blank, or with a control character".into());
+    }
+    Ok(())
+}
+
+fn check_group_name(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("not 1 to 128 bytes, or blank, or with a control character".into());
+    }
+    Ok(())
+}
+
+fn check_group_description(value: &str) -> Result<(), String> {
+    if value.len() > 512 || value.chars().any(char::is_control) {
+        return Err("more than 512 bytes, or with a control character".into());
+    }
+    Ok(())
+}
+
+/// The id of a group and the name of a producer: 1 to 64 characters of a-z, 0-9, '-' and '_'.
+pub fn check_inbox_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err("not 1 to 64 characters of a-z, 0-9, '-' and '_'".into());
+    }
+    Ok(())
+}
+
+fn check_peer_address(value: &str) -> Result<(), String> {
+    match value.rsplit_once(':') {
+        Some((host, port))
+            if !host.is_empty()
+                && host.len() <= 253
+                && port.parse::<u16>().is_ok_and(|n| n != 0)
+                && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Ok(())
+        }
+        _ => Err("expected a host name or an address, ':' and a port from 1 to 65535".into()),
+    }
 }
 
 fn check_postgres_name(value: &str) -> Result<(), String> {
@@ -1342,7 +1733,7 @@ mod tests {
 
     #[test]
     fn the_table_has_no_duplicate_key_and_only_known_blocks() {
-        let blocks = block_names();
+        let blocks = all_block_names();
         for (i, key) in KEYS.iter().enumerate() {
             assert!(blocks.contains(&key.block), "{}", key.path());
             assert!(

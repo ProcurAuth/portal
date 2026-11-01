@@ -7,13 +7,14 @@
 use std::error::Error;
 use std::future::{poll_fn, Future};
 use std::pin::pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
 use hyper::body::{Body, Incoming};
 use hyper::rt::{Read, Write};
-use hyper::server::conn::http1::Connection;
+use hyper::server::conn::http1::{Connection, UpgradeableConnection};
 use hyper::service::HttpService;
 use tokio::sync::watch;
 
@@ -96,6 +97,36 @@ impl Stop {
         .await
     }
 
+    /// Like [`Stop::drive`], for a connection that can upgrade to a WebSocket. The future ends
+    /// when the upgrade hands the connection to its new owner.
+    pub async fn drive_upgradable<I, S, B>(
+        &self,
+        connection: UpgradeableConnection<I, S>,
+    ) -> Result<(), hyper::Error>
+    where
+        S: HttpService<Incoming, ResBody = B>,
+        S::Error: Into<Box<dyn Error + Send + Sync>>,
+        I: Read + Write + Unpin + Send + 'static,
+        B: Body + 'static,
+        B::Error: Into<Box<dyn Error + Send + Sync>>,
+    {
+        let mut stop = self.receiver();
+        let mut connection = pin!(connection);
+        let mut closing = *stop.borrow_and_update();
+        if closing {
+            connection.as_mut().graceful_shutdown();
+        }
+        let mut changed = pin!(stop.changed());
+        poll_fn(|cx| {
+            if !closing && changed.as_mut().poll(cx).is_ready() {
+                closing = true;
+                connection.as_mut().graceful_shutdown();
+            }
+            connection.as_mut().poll(cx)
+        })
+        .await
+    }
+
     /// Waits until no connection is live, at most `limit`. Gives the number that stay live.
     pub async fn drain(&self, limit: Duration) -> usize {
         let end = tokio::time::Instant::now() + limit;
@@ -104,4 +135,38 @@ impl Stop {
         }
         self.live()
     }
+}
+
+/// A flag that becomes true at SIGTERM or SIGINT. It serves the code that waits before the
+/// runtime of the server exists: an instance that waits for the lease of the replica. A thread
+/// with its own small runtime watches the signals.
+pub fn terminated_flag() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&flag);
+    // If the thread cannot start, the flag stays false: the instance then stops only by a kill.
+    let _ = std::thread::Builder::new()
+        .name("portal-signals".into())
+        .spawn(move || {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async move {
+                let (Ok(mut term), Ok(mut int)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                ) else {
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+                seen.store(true, Ordering::SeqCst);
+            });
+        });
+    flag
 }

@@ -161,6 +161,8 @@ pub struct AppState {
     pub undeclared_values: std::sync::atomic::AtomicU64,
     /// The stop on SIGTERM: the live connections and the signal that closes them (portal 7.3a).
     pub stop: crate::shutdown::Stop,
+    /// The inbox. It runs without a session of the portal.
+    pub inbox: crate::inbox::Slot,
     pub ensured_counters: std::sync::Mutex<
         std::collections::HashSet<(crate::decision::CounterOwner, crate::grants::CounterId)>,
     >,
@@ -266,6 +268,7 @@ impl AppState {
             counting: crate::counting::Counting::default(),
             undeclared_values: std::sync::atomic::AtomicU64::new(0),
             stop: crate::shutdown::Stop::default(),
+            inbox: crate::inbox::Slot::default(),
             ensured_counters: std::sync::Mutex::new(ensured),
             sessions,
             users,
@@ -287,14 +290,24 @@ impl Drop for AppState {
     }
 }
 
-pub fn serve(state: Arc<AppState>) -> Result<(), String> {
+/// Serves until SIGTERM or SIGINT, or until `also_stop` ends. The inbox uses `also_stop`: an
+/// instance that loses its replica lease stops the whole process.
+pub fn serve(
+    state: Arc<AppState>,
+    also_stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(state.config.server.workers)
         .enable_io()
         .enable_time()
         .build()
         .map_err(|e| format!("cannot create Tokio runtime: {e}"))?;
-    runtime.block_on(serve_until(state, termination()))
+    runtime.block_on(serve_until(state, async move {
+        tokio::select! {
+            _ = termination() => {}
+            _ = also_stop => {}
+        }
+    }))
 }
 
 /// Like [`serve`], with a stop that the caller gives in place of the signals. A test uses it.
@@ -412,6 +425,9 @@ async fn serve_until(
         });
     }
 
+    // The inbox starts first. It does not wait for the catalogue: an alert must not wait for it.
+    state.inbox.start().await?;
+
     let catalog_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let publisher = Arc::clone(&state);
     let complete = Arc::clone(&catalog_complete);
@@ -438,6 +454,8 @@ async fn serve_until(
         state.config.access.actions_refresh,
     ));
     if !wait_ready(&state, &catalog_complete, &stopped).await {
+        state.inbox.begin_drain();
+        state.inbox.finish(crate::shutdown::DRAIN_LIMIT).await;
         return Ok(());
     }
 
@@ -504,6 +522,7 @@ async fn serve_until(
     accepting.push(tokio::spawn(accept_loop(Arc::clone(&state), listener)));
 
     stopped.notified().await;
+    state.inbox.begin_drain();
     log(
         &state,
         LogLevel::Info,
@@ -518,7 +537,10 @@ async fn serve_until(
         task.abort();
     }
     state.stop.close_connections();
-    let left = state.stop.drain(crate::shutdown::DRAIN_LIMIT).await;
+    let (left, ()) = tokio::join!(
+        state.stop.drain(crate::shutdown::DRAIN_LIMIT),
+        state.inbox.finish(crate::shutdown::DRAIN_LIMIT)
+    );
     log(
         &state,
         LogLevel::Info,
@@ -630,6 +652,8 @@ async fn handle_request(
         edge::handle_verify_key(&state, request.headers(), &client)
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
+    } else if path.starts_with(inbox_admin::PREFIX) {
+        inbox_admin::handle(&state, request, &client).await
     } else if method == Method::GET && path == ui::keys::PATH {
         keys_page::handle_keys(
             &state,
@@ -781,6 +805,7 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
         state.sessions.capacity(),
     );
     body.push_str(&state.discovery.render());
+    body.push_str(&state.inbox.render_metrics());
     if state.config.pdp.is_some() {
         body.push_str(&state.pdp_stats.render());
     }
@@ -3563,6 +3588,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         USERS_UPDATE_PATH => "users_update",
         IMPERSONATE_PATH => "impersonate",
         IMPERSONATE_END_PATH => "impersonate_end",
+        _ if path.starts_with(inbox_admin::PREFIX) => "inbox_admin",
         _ => "not_found",
     }
 }
@@ -3605,6 +3631,7 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
 mod edge;
 mod keys_page;
 mod options_page;
+mod inbox_admin;
 mod pdp;
 
 #[cfg(test)]
