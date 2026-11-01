@@ -1418,7 +1418,7 @@ Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in b
 | **`inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |
 | **`inbox_storage_degraded`** | 1 while the database has no writable primary and the inbox holds alerts in memory. |
 | **`inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
-| `inbox_alerts_accepted_total{source}` | Alerts accepted, by source: `producer`, `webhook`, `admin`, `portal`. |
+| `inbox_alerts_accepted_total{source}` | Alerts accepted, by source: `producer`, `webhook`, `notify`, `admin`, `portal`. |
 | `inbox_alerts_duplicate_total{source}` | Submissions that the idempotency key merged. |
 | `inbox_deliveries_created_total`, `inbox_deliveries_sent_total`, `inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
 | `inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
