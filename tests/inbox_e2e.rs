@@ -1,6 +1,8 @@
 //! Black-box end-to-end test of the inbox: it runs the real `portal` binary with a combined
-//! configuration and drives it with the real protocol of the phones (OPAQUE enrollment, Noise
-//! sessions). The admin calls use the session of the superadmin.
+//! configuration and drives it with the real protocol 4 of the phones. A phone enrolls as the app
+//! does: an account of the portal makes a code (`POST /auth/inbox/api/enrollment-codes`), and the
+//! phone uses it on `/v1/enroll` (Noise IK, no OPAQUE). Then it opens Noise sessions. The admin
+//! calls use the session of the superadmin.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -9,15 +11,13 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use inbox_core::enroll::{ClientStep, EnrollClient, EnrolledDevice};
+use inbox_core::enroll::{EnrollCode, EnrollInitiator};
 use inbox_core::noise::{Initiator, Session};
 use inbox_core::proto::{AckStage, AlertMsg, ClientMsg, ServerMsg, SessionHello};
-use inbox_core::rng::Rng;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 const BIN: &str = env!("CARGO_BIN_EXE_portal");
-const DEVICE_PW: &str = "device-password";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -185,6 +185,8 @@ struct Server {
     pg: Option<(PgAdmin, String)>,
     /// The session of the superadmin. A start of the server clears it.
     session: std::sync::Mutex<Option<std::sync::Arc<AdminSession>>>,
+    /// The sessions of the other accounts, by login. A start of the server clears them.
+    accounts: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<AdminSession>>>,
 }
 
 impl Server {
@@ -209,23 +211,6 @@ impl Server {
                 .success()
         );
         let key = p("server_key");
-        let out = portal(
-            &[
-                "inbox",
-                "credential",
-                "--server-key",
-                &key,
-                "--out",
-                &p("device_cred"),
-                "--password-stdin",
-            ],
-            Some(&format!("{DEVICE_PW}\n")),
-        );
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
         assert!(portal(&["inbox", "token", "--out", &p("token")], None)
             .status
             .success());
@@ -306,7 +291,7 @@ inbox {{
   server_key_file = "{key}"
   devices {{
     listen = "127.0.0.1:{port}"
-    credential_file = "{dc}"
+    public_address = "127.0.0.1:{port}"
     trusted_proxies = []
     heartbeat_interval = "5s"
     session_timeout = "10s"
@@ -343,7 +328,6 @@ inbox {{
             login = p("superadmin_login"),
             password = p("superadmin_password"),
             secret = p("session_secret"),
-            dc = p("device_cred"),
             tok = p("token"),
         );
         std::fs::write(dir.join("config.hcl"), config).unwrap();
@@ -357,6 +341,7 @@ inbox {{
             token,
             pg,
             session: Default::default(),
+            accounts: Default::default(),
         }
     }
 
@@ -389,6 +374,7 @@ inbox {{
             token: self.token.clone(),
             pg: None,
             session: Default::default(),
+            accounts: Default::default(),
         }
     }
 
@@ -403,6 +389,7 @@ inbox {{
 
     fn start(&mut self) {
         *self.session.lock().unwrap() = None;
+        self.accounts.lock().unwrap().clear();
         let log = std::fs::File::create(self.dir.join(format!("{}.log", self.name))).unwrap();
         let child = Command::new(BIN)
             .args(["run", "--config", &self.config()])
@@ -457,6 +444,24 @@ inbox {{
         *slot = Some(session.clone());
         session
     }
+
+    /// The session of an account: the superadmin, or a database account that the superadmin makes
+    /// on the first call.
+    fn account(&self, login: &str) -> std::sync::Arc<AdminSession> {
+        if login == SUPERADMIN {
+            return self.session();
+        }
+        if let Some(session) = self.accounts.lock().unwrap().get(login) {
+            return session.clone();
+        }
+        add_account(self, login);
+        let session = std::sync::Arc::new(sign_in_as(self.admin_port, login, ACCOUNT_PASSWORD));
+        self.accounts
+            .lock()
+            .unwrap()
+            .insert(login.to_string(), session.clone());
+        session
+    }
 }
 
 impl Drop for Server {
@@ -474,9 +479,16 @@ impl Drop for Server {
     }
 }
 
-/// Signs in as the superadmin on the listener of the portal, and asks for the anti-CSRF token of
-/// the admin calls of the inbox.
+/// The password of the accounts that the tests make.
+const ACCOUNT_PASSWORD: &str = "e2e-account-password-0123";
+
 fn sign_in(port: u16) -> AdminSession {
+    sign_in_as(port, SUPERADMIN, SUPERADMIN_PASSWORD)
+}
+
+/// Signs in on the listener of the portal, and asks for the anti-CSRF token of the calls of the
+/// inbox.
+fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
     let host = format!("127.0.0.1:{port}");
     let (st, head, page) = http_full(port, &host, "GET", "/auth/login", &[], "");
     assert_eq!(st, 200, "{page}");
@@ -494,8 +506,8 @@ fn sign_in(port: u16) -> AdminSession {
         page[start..].split('"').next().unwrap().to_string()
     };
     let form = format!(
-        "login={SUPERADMIN}&password={}&csrf={}&rd={}&sig={}",
-        SUPERADMIN_PASSWORD.replace(' ', "+"),
+        "login={login}&password={}&csrf={}&rd={}&sig={}",
+        password.replace(' ', "+"),
         field("csrf"),
         field("rd"),
         field("sig")
@@ -530,6 +542,13 @@ fn sign_in(port: u16) -> AdminSession {
         &[("Cookie", cookie.clone())],
         "",
     );
+    // Without the block `inbox` the call does not exist: the session has no token for it.
+    if st == 404 {
+        return AdminSession {
+            cookie,
+            csrf: String::new(),
+        };
+    }
     assert_eq!(st, 200, "{body}");
     let csrf = serde_json::from_str::<Value>(&body).unwrap()["csrf"]
         .as_str()
@@ -643,33 +662,187 @@ fn post_alert(s: &Server, key: &str, body: Value) -> (u16, Value) {
     (status, serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
-async fn enroll(
-    port: u16,
-    password: &str,
-    name: &str,
-) -> Result<EnrolledDevice, inbox_core::Error> {
-    enroll_as(port, password, name, "tester").await
+/// A phone that enrolled: what the app stores.
+#[derive(Debug)]
+struct Phone {
+    device_id: String,
+    device_private_key: Vec<u8>,
+    server_public_key: Vec<u8>,
+    server_name: String,
+    user_name: String,
 }
 
-async fn enroll_as(
-    port: u16,
-    password: &str,
-    name: &str,
-    user: &str,
-) -> Result<EnrolledDevice, inbox_core::Error> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/enroll"))
-        .await
-        .unwrap();
-    let (mut client, first) = EnrollClient::start(password.as_bytes(), name, user, Rng::os())?;
-    ws.send(Message::Text(first.into())).await.unwrap();
+/// Why an enrollment did not end with message 2.
+#[derive(Debug)]
+enum EnrollFail {
+    /// The server closed the WebSocket without message 2. The value is the close code.
+    Closed(Option<u16>),
+    /// The device side refused: the state machine of the core returned an error.
+    #[allow(dead_code)] // the value shows in the failure message of a test
+    Local(inbox_core::Error),
+}
+
+/// The users page gives the anti-CSRF token of the forms that manage the accounts.
+fn users_csrf(s: &Server) -> String {
+    let admin = s.session();
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let (st, _, page) = http_full(
+        s.admin_port,
+        &host,
+        "GET",
+        "/auth/settings?add=1",
+        &[("Cookie", admin.cookie.clone())],
+        "",
+    );
+    assert_eq!(st, 200, "{page}");
+    // The token of the form that adds an account. The page has other forms with other tokens.
+    let form = page
+        .find("id=\"add-user\"")
+        .expect("the users page has the add form");
+    let marker = "name=\"csrf\" value=\"";
+    let start = form + page[form..].find(marker).expect("the form has a token") + marker.len();
+    page[start..].split('"').next().unwrap().to_string()
+}
+
+/// A form of the users pages, sent by the superadmin. The answer is a redirect with the outcome.
+fn users_form(s: &Server, path: &str, fields: &str) -> String {
+    let admin = s.session();
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let body = format!("csrf={}&{fields}", users_csrf(s));
+    let (st, head, text) = http_full(
+        s.admin_port,
+        &host,
+        "POST",
+        path,
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Origin", format!("http://{host}")),
+            ("Cookie", admin.cookie.clone()),
+        ],
+        &body,
+    );
+    assert_eq!(st, 303, "{text}");
+    head.lines()
+        .find_map(|l| {
+            l.strip_prefix("location: ")
+                .or(l.strip_prefix("Location: "))
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The superadmin makes a database account. An account that exists already is not an error.
+fn add_account(s: &Server, login: &str) {
+    users_form(
+        s,
+        "/auth/users/add",
+        &format!("login={login}&password={ACCOUNT_PASSWORD}"),
+    );
+}
+
+/// The superadmin deletes a database account.
+fn delete_account(s: &Server, login: &str) {
+    let location = users_form(s, "/auth/users/delete", &format!("login={login}"));
+    assert!(location.contains("s=user-deleted"), "{location}");
+    s.accounts.lock().unwrap().remove(login);
+}
+
+/// An account makes an enrollment code through the portal, as its owner does before he types it on
+/// the phone. The answer is the status and the JSON body.
+fn make_code(s: &Server, login: &str) -> (u16, Value) {
+    let session = s.account(login);
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let (st, text) = http_host(
+        s.admin_port,
+        &host,
+        "POST",
+        "/auth/inbox/api/enrollment-codes",
+        &[
+            ("Cookie", session.cookie.clone()),
+            ("Content-Type", "application/json".into()),
+            ("Origin", format!("http://{host}")),
+            ("X-CSRF-Token", session.csrf.clone()),
+        ],
+        "{}",
+    );
+    (st, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// The text of a new code of an account.
+fn code_for(s: &Server, login: &str) -> String {
+    let (st, v) = make_code(s, login);
+    assert_eq!(st, 201, "{v}");
+    v["code"].as_str().unwrap().to_string()
+}
+
+async fn next_frame(ws: &mut Ws) -> Option<Message> {
     loop {
-        let msg = ws.next().await.expect("enroll stream").unwrap();
-        let Message::Text(text) = msg else { continue };
-        match client.on_message(&text)? {
-            ClientStep::Send(reply) => ws.send(Message::Text(reply.into())).await.unwrap(),
-            ClientStep::Done(device) => return Ok(device),
+        match ws.next().await {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(message)) => return Some(message),
+            Some(Err(_)) | None => return None,
         }
     }
+}
+
+/// The close code of a connection that the server closes, or `None` when it ends without one.
+async fn close_code(ws: &mut Ws) -> Option<u16> {
+    match next_frame(ws).await {
+        Some(Message::Close(frame)) => frame.map(|f| f.code.into()),
+        Some(other) => panic!("expected a close frame, got {other:?}"),
+        None => None,
+    }
+}
+
+/// Enrolls a phone with a code, as the app does. The address of the code gives the server.
+async fn enroll_code(code_text: &str, name: &str) -> Result<Phone, EnrollFail> {
+    enroll_code_at(None, code_text, name).await
+}
+
+/// Like [`enroll_code`], on another port than the address of the code (the code of one instance
+/// used on another instance).
+async fn enroll_code_at(
+    port: Option<u16>,
+    code_text: &str,
+    name: &str,
+) -> Result<Phone, EnrollFail> {
+    let code = EnrollCode::parse(code_text).unwrap();
+    let keys = inbox_core::noise::generate_keypair().unwrap();
+    let (initiator, first) =
+        EnrollInitiator::start(&keys.private, &code, name, "e2e").map_err(EnrollFail::Local)?;
+    let url = match port {
+        Some(port) => format!("ws://127.0.0.1:{port}/v1/enroll"),
+        None => format!("ws://{}/v1/enroll", code.address),
+    };
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws.send(Message::Binary(first.into())).await.unwrap();
+    match next_frame(&mut ws).await {
+        Some(Message::Binary(reply)) => {
+            let accept = initiator.finish(&reply).map_err(EnrollFail::Local)?;
+            Ok(Phone {
+                device_id: accept.device_id,
+                device_private_key: keys.private.to_vec(),
+                server_public_key: code.server_public_key.to_vec(),
+                server_name: accept.server_name,
+                user_name: accept.user_name,
+            })
+        }
+        Some(Message::Close(frame)) => Err(EnrollFail::Closed(frame.map(|f| f.code.into()))),
+        Some(other) => panic!("unexpected frame {other:?}"),
+        None => Err(EnrollFail::Closed(None)),
+    }
+}
+
+/// A phone of `login` enrolls on the instance `s`.
+async fn enroll_as(s: &Server, name: &str, login: &str) -> Result<Phone, EnrollFail> {
+    enroll_code(&code_for(s, login), name).await
+}
+
+/// A code that has the right server key and address but a secret that no account made.
+fn unknown_code(s: &Server) -> String {
+    let mut code = EnrollCode::parse(&code_for(s, SUPERADMIN)).unwrap();
+    code.secret = [0x5a; 16];
+    code.encode()
 }
 
 struct Conn {
@@ -684,7 +857,7 @@ enum Recv {
 }
 
 impl Conn {
-    async fn open(port: u16, dev: &EnrolledDevice) -> Result<(Conn, ServerMsg), u16> {
+    async fn open(port: u16, dev: &Phone) -> Result<(Conn, ServerMsg), u16> {
         let (mut ws, _) =
             tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/session"))
                 .await
@@ -718,6 +891,12 @@ impl Conn {
             .session
             .encrypt(&serde_json::to_vec(msg).unwrap())
             .unwrap();
+        self.ws.send(Message::Binary(frame.into())).await.unwrap();
+    }
+
+    /// Sends a text as one encrypted frame, even if the protocol has no such message.
+    async fn send_raw(&mut self, json: &str) {
+        let frame = self.session.encrypt(json.as_bytes()).unwrap();
         self.ws.send(Message::Binary(frame.into())).await.unwrap();
     }
 
@@ -908,6 +1087,104 @@ fn config_validation_is_strict() {
         let error = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(error.contains(expected), "{to}: {error}");
     }
+    // The address of the listener, as the phones see it, is mandatory and checked.
+    let public = format!("    public_address = \"127.0.0.1:{}\"\n", s.port);
+    assert!(text.contains(&public), "{text}");
+    std::fs::write(&broken, text.replacen(&public, "", 1)).unwrap();
+    let out = portal(
+        &["check-config", "--config", broken.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        error.contains("missing required configuration key")
+            && error.contains("inbox.devices.public_address"),
+        "{error}"
+    );
+    for bad in [
+        "",
+        "ftp://inbox.example.org",
+        "inbox example",
+        "inbox.example.org:0",
+    ] {
+        std::fs::write(
+            &broken,
+            text.replacen(&public, &format!("    public_address = \"{bad}\"\n"), 1),
+        )
+        .unwrap();
+        let out = portal(
+            &["check-config", "--config", broken.to_str().unwrap()],
+            None,
+        );
+        assert_eq!(out.status.code(), Some(1), "{bad:?}");
+        let error = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            error.contains("inbox.devices.public_address"),
+            "{bad:?}: {error}"
+        );
+    }
+    // The shared password of protocol 3 does not exist any more, and its command either.
+    std::fs::write(
+        &broken,
+        text.replacen(
+            &public,
+            &format!("{public}    credential_file = \"/x\"\n"),
+            1,
+        ),
+    )
+    .unwrap();
+    let out = portal(
+        &["check-config", "--config", broken.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("inbox.devices.credential"));
+    let out = portal(&["inbox", "credential", "--out", "/nonexistent/x"], None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown inbox command"));
+    // The enrollment block has documented defaults, and its values have ranges.
+    let shown = String::from_utf8_lossy(&ok.stdout).to_string();
+    assert!(
+        shown.contains("inbox.enrollment.code_ttl = \"10m\"  # default"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("inbox.enrollment.max_active_per_account = 5  # default"),
+        "{shown}"
+    );
+    for (block, expected) in [
+        (
+            "enrollment { code_ttl = \"30s\" }",
+            "inbox.enrollment.code_ttl",
+        ),
+        (
+            "enrollment { max_active_per_account = 0 }",
+            "inbox.enrollment.max_active_per_account",
+        ),
+        (
+            "enrollment { max_active_per_account = 5 colour = 1 }",
+            "inbox.enrollment.colour",
+        ),
+    ] {
+        std::fs::write(
+            &broken,
+            text.replacen(
+                "  # inbox-extra\n",
+                &format!("  {block}\n  # inbox-extra\n"),
+                1,
+            ),
+        )
+        .unwrap();
+        let out = portal(
+            &["check-config", "--config", broken.to_str().unwrap()],
+            None,
+        );
+        assert_eq!(out.status.code(), Some(1), "{block}");
+        let error = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(error.contains(expected), "{block}: {error}");
+    }
+
     // The listener of the phones must not use the port of the portal.
     let same = text.replacen(
         &format!("listen = \"127.0.0.1:{}\"", s.port),
@@ -929,30 +1206,35 @@ async fn delivery_guarantees_end_to_end() {
     s.start();
     let port = s.port;
 
-    // Wrong password is rejected; the right one enrolls.
-    // OPAQUE detects a wrong password on the client side.
-    assert_eq!(
-        enroll(port, "not-the-password", "intruder").await.err(),
-        Some(inbox_core::Error::AuthenticationFailed)
-    );
-    let a = enroll_as(port, DEVICE_PW, "phone-a", "alice")
-        .await
-        .unwrap();
-    let b = enroll_as(port, DEVICE_PW, "phone-b", "bob-old")
-        .await
-        .unwrap();
+    // An unknown code is refused with the close code 4410 and without message 2. The accounts
+    // enroll their phones with codes that they make themselves.
+    assert!(matches!(
+        enroll_code(&unknown_code(&s), "intruder").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    let a = enroll_as(&s, "phone-a", "alice").await.unwrap();
+    let b = enroll_as(&s, "phone-b", "bob").await.unwrap();
     assert_eq!(a.server_name, "E2E");
+    assert_eq!(
+        (a.user_name.as_str(), b.user_name.as_str()),
+        ("alice", "bob")
+    );
 
     let (mut ca, welcome) = Conn::open(port, &a).await.unwrap();
     let ServerMsg::Welcome {
         groups,
         subscriptions,
         heartbeat_interval_ms,
+        user_name,
         ..
     } = welcome
     else {
         unreachable!()
     };
+    assert_eq!(
+        user_name, "alice",
+        "the welcome carries the login of the account"
+    );
     assert_eq!(groups.len(), 2);
     assert!(subscriptions.is_empty());
     assert_eq!(heartbeat_interval_ms, 5000);
@@ -960,19 +1242,13 @@ async fn delivery_guarantees_end_to_end() {
     {
         let (mut cb, _) = Conn::open(port, &b).await.unwrap();
         cb.subscribe("infra").await;
-        // The pseudonym can be changed per server at any time.
-        cb.send(&ClientMsg::SetUserName {
-            user_name: " bob ".into(),
-        })
-        .await;
-        loop {
-            if let Recv::Msg(ServerMsg::UserName { user_name }) =
-                cb.recv(Duration::from_secs(5)).await
-            {
-                assert_eq!(user_name, "bob");
-                break;
-            }
-        }
+        // The login is read-only: the message that changed it does not exist in protocol 4.
+        cb.send_raw(r#"{"t":"set_user_name","user_name":"x"}"#)
+            .await;
+        assert_eq!(
+            cb.closed_code().await,
+            Some(inbox_core::proto::close::PROTOCOL)
+        );
     } // b goes offline
 
     // Producer API checks.
@@ -1309,20 +1585,28 @@ async fn delivery_guarantees_end_to_end() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn password_guessing_is_rate_limited() {
+async fn enrollment_attempts_are_rate_limited() {
     let mut s = Server::setup();
     s.start();
-    // max_auth_failures = 10: each started OPAQUE attempt counts until it succeeds.
+    let unknown = unknown_code(&s);
+    // max_auth_failures = 10: each started enrollment counts until it succeeds.
     for _ in 0..10 {
-        assert_eq!(
-            enroll(s.port, "guess-guess", "x").await.err(),
-            Some(inbox_core::Error::AuthenticationFailed)
-        );
+        assert!(matches!(
+            enroll_code(&unknown, "x").await,
+            Err(EnrollFail::Closed(Some(4410)))
+        ));
     }
-    match enroll(s.port, DEVICE_PW, "x").await {
-        Err(inbox_core::Error::Rejected { code, .. }) => assert_eq!(code, "rate_limited"),
-        other => panic!("expected rate_limited, got {:?}", other.err()),
-    }
+    // The next one is refused with 4429, also with a good code, and without message 2.
+    let good = code_for(&s, SUPERADMIN);
+    assert!(matches!(
+        enroll_code(&good, "x").await,
+        Err(EnrollFail::Closed(Some(4429)))
+    ));
+    assert!(
+        s.log().contains("\"reason\":\"rate_limited\""),
+        "the refusal is logged with its reason: {}",
+        s.log()
+    );
     s.stop();
 }
 
@@ -1341,7 +1625,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     .unwrap();
     s.start();
     let port = s.port;
-    let dev = enroll_as(port, DEVICE_PW, "phone", "ops").await.unwrap();
+    let dev = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
     let (mut c, _) = Conn::open(port, &dev).await.unwrap();
     c.subscribe("infra").await;
 
@@ -1548,9 +1832,10 @@ async fn a_second_instance_takes_over_a_lost_node() {
     let port = s.port;
 
     // Everything below is acknowledged, hence already in the shared directory.
-    let phone = enroll_as(port, DEVICE_PW, "phone-a", "alice")
-        .await
-        .unwrap();
+    let used_code = code_for(&s, SUPERADMIN);
+    let phone = enroll_code(&used_code, "phone-a").await.unwrap();
+    // A code that nobody used yet: it is acknowledged too, so the standby must know it.
+    let spare_code = code_for(&s, SUPERADMIN);
     let (st, accepted) = post_alert(
         &s,
         "failover-1",
@@ -1599,6 +1884,17 @@ async fn a_second_instance_takes_over_a_lost_node() {
         alerts.to_string().contains(&alert_id),
         "the acknowledged alert survived: {alerts}"
     );
+    // The code that the lost node saw used stays used. The code that it never saw used still works, once.
+    assert!(matches!(
+        enroll_code(&used_code, "phone-again").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    let second = enroll_code(&spare_code, "phone-b").await.unwrap();
+    assert!(matches!(
+        enroll_code(&spare_code, "phone-c").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    assert_ne!(second.device_id, phone.device_id);
     // The producer retries the alert it never got an answer for: deduplicated, not created twice.
     let (st, again) = post_alert(
         &s,
@@ -1625,12 +1921,23 @@ async fn a_second_instance_takes_over_a_lost_node() {
         began.elapsed()
     );
     let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
-    assert_eq!(overview["stats"]["enrolled"], 1);
+    assert_eq!(
+        overview["stats"]["enrolled"], 2,
+        "the phone that enrolled on the standby survived a clean restart: {overview}"
+    );
+    assert!(matches!(
+        enroll_code(&spare_code, "phone-d").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
 }
 
 /// Without a `replica` block nothing changes: no shared directory is needed or touched.
 #[test]
 fn check_config_reports_the_replica_block() {
+    // The block `replica` is for SQLite: with PostgreSQL the same file is an error.
+    if postgres_backend() {
+        return;
+    }
     let s = Server::setup();
     let out = portal(&["check-config", "--config", &s.config()], None);
     let shown = String::from_utf8_lossy(&out.stdout).to_string();
@@ -1709,9 +2016,7 @@ async fn two_active_instances_share_phones_alerts_and_sessions() {
     b.start();
 
     // A phone enrolled through A opens its session on B.
-    let phone = enroll_as(a.port, DEVICE_PW, "phone-a", "alice")
-        .await
-        .unwrap();
+    let phone = enroll_as(&a, "phone-a", SUPERADMIN).await.unwrap();
     let (mut on_b, _) = Conn::open(b.port, &phone).await.unwrap();
     on_b.subscribe("infra").await;
 
@@ -1804,13 +2109,44 @@ async fn two_active_instances_share_phones_alerts_and_sessions() {
         "one alert id for one idempotency key: {results:?}"
     );
 
+    // A code made on A works one time, on either instance.
+    let code = code_for(&a, SUPERADMIN);
+    enroll_code_at(Some(b.port), &code, "phone-c")
+        .await
+        .unwrap();
+    assert!(matches!(
+        enroll_code_at(Some(a.port), &code, "phone-d").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    // Two instances get the same code at the same moment: exactly one phone enrolls.
+    let code = code_for(&b, SUPERADMIN);
+    let (first, second) = tokio::join!(
+        enroll_code_at(Some(a.port), &code, "race-a"),
+        enroll_code_at(Some(b.port), &code, "race-b")
+    );
+    assert_eq!(
+        [&first, &second].iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{first:?} {second:?}"
+    );
+    // The account of a phone goes away on A: the session that B holds closes, and no phone of the account comes back.
+    let carol = enroll_as(&a, "phone-carol", "carol").await.unwrap();
+    let spare = code_for(&b, "carol");
+    let (mut carol_on_b, _) = Conn::open(b.port, &carol).await.unwrap();
+    delete_account(&a, "carol");
+    assert_eq!(carol_on_b.closed_code().await, Some(close::REVOKED));
+    assert_eq!(Conn::open(a.port, &carol).await.err(), Some(close::REVOKED));
+    assert_eq!(Conn::open(b.port, &carol).await.err(), Some(close::REVOKED));
+    assert!(matches!(
+        enroll_code_at(Some(b.port), &spare, "phone-carol-2").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+
     // The node of A is lost: B keeps accepting everything.
     let mut lost = a.child.take().unwrap();
     lost.kill().unwrap();
     lost.wait().unwrap();
-    let other = enroll_as(b.port, DEVICE_PW, "phone-b", "bob")
-        .await
-        .unwrap();
+    let other = enroll_as(&b, "phone-b", SUPERADMIN).await.unwrap();
     let (mut other_conn, _) = Conn::open(b.port, &other).await.unwrap();
     other_conn.subscribe("infra").await;
     let (st, second) = post_alert(
@@ -1841,9 +2177,7 @@ async fn the_sessions_of_a_lost_instance_are_closed_by_the_others() {
     let mut b = a.sibling("instance-b");
     a.start();
     b.start();
-    let phone = enroll_as(a.port, DEVICE_PW, "phone-a", "alice")
-        .await
-        .unwrap();
+    let phone = enroll_as(&a, "phone-a", SUPERADMIN).await.unwrap();
     let (_conn, _) = Conn::open(a.port, &phone).await.unwrap();
     let (_, overview) = admin(&b, "GET", "/auth/inbox/api/overview", "");
     assert_eq!(overview["stats"]["online"], 1, "{overview}");
@@ -1889,9 +2223,10 @@ async fn a_sqlite_installation_moves_to_postgres() {
     };
     let mut s = Server::setup_with(None);
     s.start();
-    let phone = enroll_as(s.port, DEVICE_PW, "phone-a", "alice")
-        .await
-        .unwrap();
+    let used_code = code_for(&s, SUPERADMIN);
+    let phone = enroll_code(&used_code, "phone-a").await.unwrap();
+    // A code that nobody used yet moves with the data.
+    let spare_code = code_for(&s, SUPERADMIN);
     {
         let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
         conn.subscribe("infra").await;
@@ -1949,7 +2284,9 @@ async fn a_sqlite_installation_moves_to_postgres() {
     );
     let report = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
-        report.contains("1 devices") && report.contains("2 alerts"),
+        report.contains("1 devices")
+            && report.contains("2 alerts")
+            && report.contains("2 enrollment codes"),
         "{report}"
     );
     // Importing twice would duplicate everything: refused.
@@ -1969,6 +2306,7 @@ async fn a_sqlite_installation_moves_to_postgres() {
         token: s.token.clone(),
         pg: Some((admin_pg, database)),
         session: Default::default(),
+        accounts: Default::default(),
     };
     moved.start();
     let (_, overview) = admin(&moved, "GET", "/auth/inbox/api/overview", "");
@@ -1979,6 +2317,16 @@ async fn a_sqlite_installation_moves_to_postgres() {
     );
     let (_, alerts) = admin(&moved, "GET", "/auth/inbox/api/alerts", "");
     assert_eq!(alerts["alerts"].as_array().unwrap().len(), 2, "{alerts}");
+    // The used code stays used. The other code works one time.
+    assert!(matches!(
+        enroll_code(&used_code, "phone-again").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    enroll_code(&spare_code, "phone-b").await.unwrap();
+    assert!(matches!(
+        enroll_code(&spare_code, "phone-c").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
     // The phone did not enroll again: the same keys open a session, and the alert it never received arrives.
     let (mut conn, _) = Conn::open(moved.port, &phone).await.unwrap();
     let waiting = conn.alert().await;
@@ -2151,9 +2499,7 @@ async fn alerts_are_accepted_and_delivered_while_postgresql_is_away() {
     through(&a, &admin_pg, proxy.port);
     quiet_phones(&a);
     a.start();
-    let phone = enroll_as(a.port, DEVICE_PW, "phone", "alice")
-        .await
-        .unwrap();
+    let phone = enroll_as(&a, "phone", SUPERADMIN).await.unwrap();
     let (mut conn, _) = Conn::open(a.port, &phone).await.unwrap();
     conn.subscribe("infra").await;
     let (st, ready) = http(a.port, "GET", "/readyz", &[], "");
@@ -2299,9 +2645,7 @@ async fn instances_copy_alerts_to_each_other_while_postgresql_is_away() {
     );
 
     // The phone is enrolled through A and holds its session on B; A learns of it from the database, every 5 s.
-    let phone = enroll_as(a.port, DEVICE_PW, "phone", "alice")
-        .await
-        .unwrap();
+    let phone = enroll_as(&a, "phone", SUPERADMIN).await.unwrap();
     let (mut on_b, _) = Conn::open(b.port, &phone).await.unwrap();
     on_b.subscribe("infra").await;
     tokio::time::sleep(Duration::from_secs(6)).await;
@@ -2441,4 +2785,408 @@ fn the_peer_port_refuses_requests_that_are_not_signed() {
     assert!(body.contains("\"instance\""), "{body}");
     // The device port does not serve the peer API.
     assert_eq!(http(a.port, "GET", hello, &[], "").0, 404);
+}
+
+// ---------------------------------------------------------------- protocol 4: enrollment codes
+
+/// Sets the end of every code that is not used to the past: the time travel of the tests. The
+/// SQLite file is the file of the server. With PostgreSQL the call goes through the admin connection.
+fn expire_codes(s: &Server) {
+    let sql = "UPDATE enrollment_codes SET expires_at_ms = 1 WHERE used_at_ms IS NULL";
+    match &s.pg {
+        Some((admin, database)) => admin.exec(database, sql.to_string()),
+        None => {
+            let conn = rusqlite::Connection::open(s.dir.join("portal.db")).unwrap();
+            conn.busy_timeout(Duration::from_secs(10)).unwrap();
+            conn.execute(sql, []).unwrap();
+        }
+    }
+}
+
+/// The first message of an enrollment with a chosen protocol number and a fresh device key.
+fn enroll_message(code: &EnrollCode, protocol: u32) -> Vec<u8> {
+    let keys = inbox_core::noise::generate_keypair().unwrap();
+    let hello = serde_json::to_vec(&inbox_core::proto::EnrollHello {
+        protocol,
+        secret: code.secret.to_vec(),
+        device_name: "e2e".into(),
+        app_version: "e2e".into(),
+    })
+    .unwrap();
+    Initiator::start_with_prologue(
+        inbox_core::noise::ENROLL_PROLOGUE,
+        &keys.private,
+        &code.server_public_key,
+        &hello,
+    )
+    .unwrap()
+    .1
+}
+
+/// Opens `/v1/enroll`, sends one frame and returns the close code. The server sends no message 2.
+async fn enroll_with_frame(port: u16, frame: Message) -> Option<u16> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/enroll"))
+        .await
+        .unwrap();
+    ws.send(frame).await.unwrap();
+    close_code(&mut ws).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
+    let mut s = Server::setup();
+    s.start();
+    let (admin_port, host) = (s.admin_port, format!("127.0.0.1:{}", s.admin_port));
+
+    // The rules of the call: a session, a POST with the origin, JSON and the token, an empty object.
+    let session = s.session();
+    let origin = ("Origin", format!("http://{host}"));
+    let json_type = ("Content-Type", "application/json".to_string());
+    let call = |method: &str, headers: &[(&str, String)], body: &str| {
+        http_host(
+            admin_port,
+            &host,
+            method,
+            "/auth/inbox/api/enrollment-codes",
+            headers,
+            body,
+        )
+        .0
+    };
+    let cookie = ("Cookie", session.cookie.clone());
+    let token = ("X-CSRF-Token", session.csrf.clone());
+    assert_eq!(
+        call(
+            "POST",
+            &[json_type.clone(), origin.clone(), token.clone()],
+            "{}"
+        ),
+        401,
+        "no session"
+    );
+    assert_eq!(call("GET", std::slice::from_ref(&cookie), ""), 405);
+    assert_eq!(
+        call(
+            "POST",
+            &[cookie.clone(), json_type.clone(), token.clone()],
+            "{}"
+        ),
+        403,
+        "no origin"
+    );
+    assert_eq!(
+        call(
+            "POST",
+            &[cookie.clone(), json_type.clone(), origin.clone()],
+            "{}"
+        ),
+        403,
+        "no token"
+    );
+    assert_eq!(
+        call(
+            "POST",
+            &[
+                cookie.clone(),
+                json_type.clone(),
+                origin.clone(),
+                ("X-CSRF-Token", "x".repeat(43))
+            ],
+            "{}"
+        ),
+        403,
+        "wrong token"
+    );
+    assert_eq!(
+        call(
+            "POST",
+            &[
+                cookie.clone(),
+                ("Content-Type", "text/plain".into()),
+                origin.clone(),
+                token.clone()
+            ],
+            "{}"
+        ),
+        415
+    );
+    let full = [
+        cookie.clone(),
+        json_type.clone(),
+        origin.clone(),
+        token.clone(),
+    ];
+    assert_eq!(
+        call("POST", &full, r#"{"login":"bob"}"#),
+        400,
+        "a code is for the login of the session only"
+    );
+    assert_eq!(call("POST", &full, "not json"), 400);
+
+    // The answer: the text of the code, its end and the fingerprint of the key.
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let (st, v) = make_code(&s, SUPERADMIN);
+    assert_eq!(st, 201, "{v}");
+    let text = v["code"].as_str().unwrap().to_string();
+    let parsed = EnrollCode::parse(&text).unwrap();
+    assert_eq!(parsed.address, format!("127.0.0.1:{}", s.port));
+    assert_eq!(v["fingerprint"].as_str().unwrap(), parsed.fingerprint());
+    assert_eq!(v["fingerprint"].as_str().unwrap().len(), 8);
+    let ends = v["expires_at_ms"].as_i64().unwrap();
+    assert!(
+        ends >= before + 9 * 60_000 && ends <= before + 11 * 60_000,
+        "the code lives 10 minutes: {v}"
+    );
+
+    // Wrong protocol: 4426, and the code is not used. A text frame: 4426 as well.
+    assert_eq!(
+        enroll_with_frame(s.port, Message::Binary(enroll_message(&parsed, 3).into())).await,
+        Some(4426)
+    );
+    assert_eq!(
+        enroll_with_frame(s.port, Message::Text("hello".into())).await,
+        Some(4426)
+    );
+    // Junk that is not a Noise message: 4410.
+    assert_eq!(
+        enroll_with_frame(s.port, Message::Binary(vec![7u8; 100].into())).await,
+        Some(4410)
+    );
+    // A pinned key that is not the key of the server: the server cannot read message 1, 4410.
+    let mut wrong = EnrollCode::parse(&text).unwrap();
+    wrong.server_public_key = inbox_core::noise::generate_keypair()
+        .unwrap()
+        .public
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        enroll_code(&wrong.encode(), "pinned").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+
+    // The code still works: the refusals above did not use it. It works one time.
+    let phone = enroll_code(&text, "phone-root").await.unwrap();
+    assert_eq!(phone.user_name, SUPERADMIN);
+    assert_eq!(phone.server_name, "E2E");
+    assert_eq!(phone.server_public_key, parsed.server_public_key);
+    assert_eq!(phone.device_id.len(), 32);
+    let (_, welcome) = Conn::open(s.port, &phone).await.unwrap();
+    assert!(matches!(welcome, ServerMsg::Welcome { ref user_name, .. } if user_name == SUPERADMIN));
+    assert!(matches!(
+        enroll_code(&text, "phone-twice").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+
+    // A code is for the account that made it: the login is the user name of the device.
+    let bob = enroll_as(&s, "phone-bob", "bob").await.unwrap();
+    assert_eq!(bob.user_name, "bob");
+    let (_, welcome) = Conn::open(s.port, &bob).await.unwrap();
+    assert!(matches!(welcome, ServerMsg::Welcome { ref user_name, .. } if user_name == "bob"));
+    let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
+    let users: Vec<&str> = overview["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["device"]["user_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["bob", "root"]);
+    // The inbox has no admin call of its own for a plain account, but the code and the token of the call.
+    let bob_session = s.account("bob");
+    let (st, _, _) = http_full(
+        admin_port,
+        &host,
+        "GET",
+        "/auth/inbox/api/overview",
+        &[("Cookie", bob_session.cookie.clone())],
+        "",
+    );
+    assert_eq!(st, 403, "the admin calls are for the superadmin");
+
+    // The secret is not in the log. The database keeps its SHA-256 digest only.
+    let secret = inbox_core::b64::encode_url(&parsed.secret);
+    assert!(!s.log().contains(&secret), "the secret is in the log");
+    assert!(
+        s.log().contains("\"event\":\"enroll_refused\""),
+        "{}",
+        s.log()
+    );
+    assert!(s.log().contains("\"reason\":\"used_code\""), "{}", s.log());
+    assert!(
+        s.log().contains("\"reason\":\"unsupported_protocol\""),
+        "{}",
+        s.log()
+    );
+    // The unit tests of the PostgreSQL store look at the digest there.
+    if s.pg.is_none() {
+        let conn = rusqlite::Connection::open(s.dir.join("portal.db")).unwrap();
+        let digests: Vec<Vec<u8>> = conn
+            .prepare("SELECT digest FROM enrollment_codes WHERE used_at_ms IS NOT NULL")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(digests.len(), 2, "two codes were used");
+        assert!(digests
+            .iter()
+            .all(|d| d.len() == 32 && d.as_slice() != parsed.secret.as_slice()));
+    }
+    s.stop();
+}
+
+/// The server closes an enrollment connection that sends no message 1 within 10 seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_enrollment_connection_is_closed_after_ten_seconds() {
+    let mut s = Server::setup();
+    s.start();
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/v1/enroll", s.port))
+            .await
+            .unwrap();
+    let began = Instant::now();
+    assert_eq!(close_code(&mut ws).await, Some(4410));
+    let waited = began.elapsed();
+    assert!(
+        waited >= Duration::from_secs(9) && waited < Duration::from_secs(14),
+        "{waited:?}"
+    );
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_code_is_refused() {
+    let mut s = Server::setup();
+    s.start();
+    let expired = code_for(&s, SUPERADMIN);
+    expire_codes(&s);
+    assert!(matches!(
+        enroll_code(&expired, "late").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    assert!(
+        s.log().contains("\"reason\":\"expired_code\""),
+        "{}",
+        s.log()
+    );
+    // The refusal changed nothing: no phone, and a new code works.
+    let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
+    assert_eq!(overview["stats"]["enrolled"], 0, "{overview}");
+    enroll_as(&s, "on time", SUPERADMIN).await.unwrap();
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_has_a_limited_number_of_active_codes() {
+    let mut s = Server::setup();
+    s.start();
+    // inbox.enrollment.max_active_per_account has its default: 5.
+    let mut codes = Vec::new();
+    for _ in 0..5 {
+        codes.push(code_for(&s, "dave"));
+    }
+    let (st, v) = make_code(&s, "dave");
+    assert_eq!(st, 429, "{v}");
+    assert_eq!(v["error"]["code"], "too_many_codes", "{v}");
+    // Another account has its own count.
+    assert_eq!(make_code(&s, SUPERADMIN).0, 201);
+    // A used code frees a place. An expired code does too.
+    enroll_code(&codes[0], "phone-dave").await.unwrap();
+    assert_eq!(make_code(&s, "dave").0, 201);
+    assert_eq!(make_code(&s, "dave").0, 429);
+    expire_codes(&s);
+    assert_eq!(make_code(&s, "dave").0, 201);
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_account_loses_its_phones_and_its_codes() {
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    let carol = enroll_as(&s, "phone-carol", "carol").await.unwrap();
+    let dave = enroll_as(&s, "phone-dave", "dave").await.unwrap();
+    let spare = code_for(&s, "carol");
+    let (mut on_carol, _) = Conn::open(port, &carol).await.unwrap();
+    on_carol.subscribe("infra").await;
+    let (mut on_dave, _) = Conn::open(port, &dave).await.unwrap();
+    on_dave.subscribe("infra").await;
+
+    delete_account(&s, "carol");
+    assert_eq!(
+        on_carol.closed_code().await,
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    assert_eq!(
+        Conn::open(port, &carol).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    // The unused code of the account is gone too.
+    assert!(matches!(
+        enroll_code(&spare, "phone-carol-2").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    // The overview shows the revoked phone. The phone of another account is not touched.
+    let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
+    let status = |name: &str| {
+        overview["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["device"]["name"] == name)
+            .map(|d| d["status"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    assert_eq!(status("phone-carol"), "revoked");
+    assert_eq!(status("phone-dave"), "online");
+    let (_, v) = admin(&s, "GET", "/auth/inbox/api/connections?user=carol", "");
+    assert!(!v["connections"].as_array().unwrap().is_empty(), "{v}");
+    // The alerts go to the phone that remains.
+    let (st, _) = post_alert(
+        &s,
+        "after-delete",
+        json!({"group": "infra", "title": "still here"}),
+    );
+    assert_eq!(st, 201);
+    assert_eq!(on_dave.alert().await.title, "still here");
+    // An account that has the same login again does not bring the phone back.
+    add_account(&s, "carol");
+    assert_eq!(
+        Conn::open(port, &carol).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    s.stop();
+}
+
+/// Without the block `inbox` the call does not exist, and an account can be deleted as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_the_inbox_block_the_call_is_absent() {
+    let mut s = Server::setup();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    // The block `inbox` goes. The block `postgres`, if any, stays.
+    let cut = text.find("inbox {").unwrap();
+    let end = text.find("\npostgres {").unwrap_or(text.len());
+    std::fs::write(s.config(), format!("{}{}", &text[..cut], &text[end..])).unwrap();
+    s.start();
+    let host = format!("127.0.0.1:{}", s.admin_port);
+    let session = s.session();
+    let (st, _, body) = http_full(
+        s.admin_port,
+        &host,
+        "POST",
+        "/auth/inbox/api/enrollment-codes",
+        &[
+            ("Cookie", session.cookie.clone()),
+            ("Content-Type", "application/json".into()),
+            ("Origin", format!("http://{host}")),
+            ("X-CSRF-Token", session.csrf.clone()),
+        ],
+        "{}",
+    );
+    assert_eq!(st, 404, "{body}");
+    add_account(&s, "erin");
+    delete_account(&s, "erin");
+    s.stop();
 }
