@@ -8,7 +8,7 @@ import app.inbox.service.LinkState
 import app.inbox.service.InboxService
 import app.inbox.service.Registry
 
-/** One server: status, pseudo, and what each group does on this phone. */
+/** One server: status, account login, and what each group does on this phone. */
 class ServerActivity : BaseActivity() {
     companion object {
         const val EXTRA_SERVER = "server_id"
@@ -109,16 +109,11 @@ class ServerActivity : BaseActivity() {
 
         renderGroups(store)
 
-        // Username on this server
-        body.addView(sectionTitle(getString(R.string.server_pseudo)))
+        // Login of the account: assigned by the server, read-only.
+        body.addView(sectionTitle(getString(R.string.server_account)))
         val p = panel(padH = 14, padV = 12)
-        p.addView(label(getString(R.string.server_pseudo_help), SP_S, color(R.color.text_muted)))
-        p.addView(pseudoEditor(server.userName) { v ->
-            store.setUserName(serverId, v)
-            Registry.connections[serverId]?.setUserName(v)
-            render()
-            snackbar(getString(R.string.saved))
-        }, lp().margins(this, t = 10))
+        p.addView(mono("@${server.userName}", SP_L, color(R.color.text_strong), bold = true))
+        p.addView(label(getString(R.string.server_account_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 4))
         body.addView(p)
 
         // Connection details, collapsed by default: live link values and identity.

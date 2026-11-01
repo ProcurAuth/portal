@@ -8,8 +8,6 @@
     <string name="nav_alerts">Alerts</string>
     <string name="nav_servers">Servers</string>
     <string name="nav_settings">Settings</string>
-    <string name="drawer_identity">Username</string>
-    <string name="drawer_no_pseudo">no username</string>
     <string name="drawer_servers_none">No server</string>
     <string name="drawer_servers_all_up">All connected</string>
     <plurals name="servers_connected">
@@ -67,15 +65,15 @@
     <string name="server_connected_since">Connected since</string>
     <string name="server_never">never</string>
     <string name="server_ago">%1$s ago</string>
-    <string name="server_pseudo">Username on this server</string>
-    <string name="server_pseudo_help">Sent to the server when connecting; the administrator sees your sessions under this name.</string>
+    <string name="server_account">Account</string>
+    <string name="server_account_help">The server assigns this login. It cannot be changed here.</string>
     <string name="server_groups">Groups</string>
     <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the phone\'s sound mode, Ring sounds even in silent mode, Alarm opens full screen until you stop it.</string>
     <string name="server_groups_subscribed">Followed: %1$d/%2$d</string>
     <string name="server_groups_none">Groups appear after the first connection.</string>
     <string name="server_remove">Delete server</string>
     <string name="server_remove_title">Delete %1$s?</string>
-    <string name="server_remove_body">This phone will stop receiving its alerts. The password is needed to add it again.</string>
+    <string name="server_remove_body">This phone will stop receiving its alerts. A new enrollment code is needed to add it again.</string>
     <string name="server_remove_confirm">Delete</string>
     <string name="server_removed">Server deleted</string>
     <string name="cancel">Cancel</string>
@@ -83,16 +81,18 @@
 
     <!-- Add server -->
     <string name="add_title">Add a server</string>
-    <string name="add_address">Server address</string>
-    <string name="add_address_hint">192.168.1.10:8080 or https://inbox.example.com</string>
-    <string name="add_password">Device password</string>
-    <string name="add_pseudo">Username</string>
+    <string name="add_code">Enrollment code</string>
+    <string name="add_code_hint">inbox://enroll?s=…&amp;k=…&amp;c=…</string>
+    <string name="add_code_help">Paste the code or the link that your account shows in the tab Inbox.</string>
+    <string name="add_code_missing">Enter the enrollment code.</string>
+    <string name="add_check_title">Check the server</string>
+    <string name="add_check_help">Compare the address and the fingerprint with the values that your administrator gave you.</string>
+    <string name="add_check_fingerprint">Key fingerprint</string>
     <string name="add_device_name">Name of this device</string>
     <string name="add_device_name_help">Visible to the administrator in the web interface.</string>
-    <string name="add_security_note">The password never leaves the phone (OPAQUE protocol), even over unencrypted http.</string>
+    <string name="add_security_note">The code pins the key of the server. The phone trusts no other key for this server, even over unencrypted http. The secret of the code works one time.</string>
     <string name="add_connect">Connect</string>
     <string name="add_connecting">Connecting…</string>
-    <string name="add_invalid_address">Invalid address</string>
     <string name="add_error">Error: %1$s</string>
 
     <!-- Settings -->
@@ -100,10 +100,6 @@
     <string name="settings_limit">Alerts shown</string>
     <string name="settings_window">Maximum age</string>
     <string name="settings_theme">Theme</string>
-    <string name="settings_pseudo">Default username</string>
-    <string name="settings_pseudo_help">Identifies you to servers. Used for every new server, then editable server by server.</string>
-    <string name="pseudo_hint">e.g. alice</string>
-    <string name="pseudo_invalid">Invalid username (1 to 64 characters, no control characters)</string>
     <string name="saved">Saved</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>
@@ -157,12 +153,15 @@
     <string name="err_closed">The server closed the connection (%1$d)</string>
     <string name="err_lost">Connection lost: %1$s</string>
     <string name="err_no_answer">The server does not answer</string>
-    <string name="err_bad_password">Wrong password</string>
-    <string name="err_rate_limited">Too many attempts, try again later</string>
-    <string name="err_too_many_devices">Maximum number of devices reached on this server</string>
+    <string name="err_rate_limited">Too many attempts. Try again later.</string>
     <string name="err_protocol">Incompatible version with this server: %1$s</string>
     <string name="err_internal">Internal server error</string>
-    <string name="err_malformed">Invalid username or device name</string>
+    <string name="err_code_invalid">This is not a valid enrollment code.</string>
+    <string name="err_code_refused">The code is not valid. Ask for a new one.</string>
+    <string name="err_update_app">This server needs a newer version of the app. Update the app.</string>
+    <string name="err_server_key">The answer does not come from the server of the code. Nothing was stored.</string>
+    <string name="err_device_name">Invalid device name (1 to 64 characters, no control characters)</string>
+    <string name="enroll_again_notice">The servers of the previous version were removed. Enroll again with a code.</string>
     <string name="err_unknown">Unknown error</string>
 
     <!-- 0.9.0 -->
@@ -181,12 +180,7 @@
     <string name="settings_limit_less">Show fewer alerts</string>
     <string name="settings_limit_more">Show more alerts</string>
     <string name="status_reconnecting">Reconnecting…</string>
-    <string name="add_pseudo_first">Also becomes your default username.</string>
-    <string name="add_link_invalid">This link has no valid http or https address.</string>
-    <string name="add_password_missing">Enter the device password.</string>
     <string name="add_device_name_missing">Enter a name for this device.</string>
-    <string name="add_password_show">Show password</string>
-    <string name="add_password_hide">Hide password</string>
     <string name="alarm_sent">sent</string>
     <string name="alarm_received">received</string>
     <string name="alarm_more">More ↓</string>

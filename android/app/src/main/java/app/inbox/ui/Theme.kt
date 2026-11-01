@@ -39,16 +39,12 @@ object Prefs {
 
     fun setTheme(c: Context, v: ThemeMode) = prefs(c).edit().putString("theme", v.name).apply()
 
-    /** Pseudo used for new servers. Required before adding a server. */
-    fun defaultUserName(c: Context): String? = prefs(c).getString("default_user_name", null)?.takeIf { it.isNotBlank() }
-    fun setDefaultUserName(c: Context, v: String) = prefs(c).edit().putString("default_user_name", v).apply()
-}
-
-/** Same rule as the server: 1..64 bytes once trimmed, no control characters. */
-fun cleanUserName(text: String): String? {
-    val t = text.trim()
-    if (t.isEmpty() || t.toByteArray(Charsets.UTF_8).size > 64 || t.any { it.isISOControl() }) return null
-    return t
+    /** True once after an update removed servers of an older protocol (see `Store.onUpgrade`). */
+    fun takeEnrollAgain(c: Context): Boolean {
+        val set = prefs(c).getBoolean(app.inbox.data.Store.PREF_ENROLL_AGAIN, false)
+        if (set) prefs(c).edit().remove(app.inbox.data.Store.PREF_ENROLL_AGAIN).apply()
+        return set
+    }
 }
 
 /**

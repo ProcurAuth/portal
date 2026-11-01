@@ -9,8 +9,8 @@ monitoring and makes subscribed Android phones ring, even when they are on silen
   database. OpenTelemetry export is optional and never blocks delivery.
 - **Delivery guarantee.** Every subscribed device gets every alert exactly once,
   including alerts sent while it was off, in airplane mode or disconnected.
-- **Secure on plain HTTP.** The password is used only inside OPAQUE, and device
-  sessions are Noise IK. A network capture yields neither the password nor any
+- **Secure on plain HTTP.** Enrollment and device sessions are Noise IK to a pinned
+  server key. A network capture yields neither the enrollment secret nor any
   material for an offline attack.
 - **Receive-only Android app.** For each group, the user chooses *alarm* (loud and
   full-screen until stopped on the phone, overriding silent, vibrate and do-not-disturb),
@@ -117,16 +117,15 @@ Reusing a key with different content returns `409`.
 
 ## Security model
 
-- **Enrollment** uses OPAQUE (ristretto255, Argon2id) with the shared device
-  password.
-  - The password never leaves the phone.
-  - An attacker without the server's credential record can neither impersonate
-    the server nor enroll a device.
-  - Credential records are created offline (`inbox credential`), so the running
-    server never sees a password.
+- **Enrollment** uses a one-time code of an account (protocol 4, see
+  [`docs/protocol.md`](docs/protocol.md)).
+  - The code holds the server address, the public key of the server and a secret of 128 bits.
+  - The phone pins the key of the code and runs Noise IK to it. It sends the secret in message 1.
+  - Only the holder of the server key can read the secret or answer the phone.
+  - The secret works one time. The server keeps only a digest of it.
 - **Sessions** use Noise IK between a key generated on the phone and the server
   key the phone pinned at enrollment. This gives mutual authentication,
-  encryption and forward secrecy. The phone does not store the password, and
+  encryption and forward secrecy. The phone does not store the secret of the code, and
   each device is revocable from the front.
 - **Admin front: no password, by design.** Anyone who can reach
   `server.admin_listen` can send alerts and revoke devices, so access control is

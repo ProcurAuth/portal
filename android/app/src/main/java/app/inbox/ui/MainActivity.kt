@@ -117,6 +117,12 @@ class MainActivity : BaseActivity() {
 
     /** A notification was tapped: show that alert (which marks it read). */
     private fun handleOpen(intent: Intent?) {
+        // An update removed servers of protocol 3: tell the person once. Opening the
+        // database runs the migration that sets the flag.
+        Store.get(this).servers()
+        if (Prefs.takeEnrollAgain(this)) {
+            root.post { root.snackbar(getString(R.string.enroll_again_notice), durationMs = 20_000) }
+        }
         intent?.getStringExtra(EXTRA_NOTICE)?.let { text ->
             intent.removeExtra(EXTRA_NOTICE)
             root.post { root.snackbar(text) }
@@ -265,10 +271,6 @@ class MainActivity : BaseActivity() {
     private fun renderDrawer(servers: List<Server>, o: Overall) {
         drawerContent.removeAllViews()
         val head = lin(padH = 16, padV = 16)
-        val who = Prefs.defaultUserName(this)
-        head.addView(label(getString(R.string.drawer_identity), SP_S, color(R.color.text_muted)))
-        head.addView(if (who != null) mono("@$who", SP_L, color(R.color.text_strong), bold = true)
-            else label(getString(R.string.drawer_no_pseudo), SP_L, color(R.color.text_muted), MEDIUM), lp().margins(this, t = 4))
         val st = lin(vertical = false)
         st.addView(statusIndicator(o))
         val stText = when {
@@ -588,7 +590,7 @@ class MainActivity : BaseActivity() {
                 row.addView(statusDot(fg, 8), lp(dp(8), dp(8)).margins(this, r = 10))
                 val col = lin()
                 col.addView(label(s.serverName, SP_M, color(R.color.text_strong), MEDIUM, lines = 1))
-                col.addView(label("${s.userName?.let { "@$it" } ?: "—"} · ${s.deviceName}", SP_S, color(R.color.text_muted), lines = 1),
+                col.addView(label("@${s.userName} · ${s.deviceName}", SP_S, color(R.color.text_muted), lines = 1),
                     lp().margins(this, t = 2))
                 col.addView(mono(s.address.removePrefix("http://").removePrefix("https://"), SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 2))
                 row.addView(col, lp(0, WRAP, 1f))
@@ -615,18 +617,6 @@ class MainActivity : BaseActivity() {
 
     private fun renderSettings() {
         body.addView(sectionTitle(getString(R.string.settings_title)))
-
-        // Default username
-        val id = panel(padH = 14, padV = 12)
-        id.addView(label(getString(R.string.settings_pseudo), SP_M, color(R.color.text), MEDIUM))
-        id.addView(label(getString(R.string.settings_pseudo_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 2))
-        val current = Prefs.defaultUserName(this)
-        id.addView(pseudoEditor(current) { v ->
-            Prefs.setDefaultUserName(this, v)
-            render()
-            root.snackbar(getString(R.string.saved))
-        }, lp().margins(this, t = 10))
-        body.addView(id)
 
         // Alert list
         val d = panel()
@@ -702,7 +692,7 @@ class MainActivity : BaseActivity() {
 }
 
 /** Compact single-line input on a field background (monospace for data such as addresses). */
-fun android.content.Context.textField(value: String, hint: String, password: Boolean = false, mono: Boolean = false): EditText = EditText(this).apply {
+fun android.content.Context.textField(value: String, hint: String, mono: Boolean = false): EditText = EditText(this).apply {
     setText(value)
     this.hint = hint
     isSingleLine = true
@@ -713,84 +703,6 @@ fun android.content.Context.textField(value: String, hint: String, password: Boo
     setHintTextColor(color(R.color.text_subtle))
     background = rounded(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke), dp(1))
     setPadding(dp(12), dp(8), dp(12), dp(8))
-    inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-    else InputType.TYPE_CLASS_TEXT
+    inputType = InputType.TYPE_CLASS_TEXT
     imeOptions = EditorInfo.IME_ACTION_DONE
-}
-
-/**
- * Pseudo shown read-only with an "Edit" action. Editing focuses the field and
- * shows Cancel / OK; OK is enabled only once the trimmed value is valid and
- * differs from the current one. Cancel restores the current value.
- */
-fun android.content.Context.pseudoEditor(current: String?, onSave: (String) -> Unit): LinearLayout {
-    val ctx = this
-    val input = textField(current ?: "", getString(R.string.pseudo_hint), mono = true)
-    val actions = lin(vertical = false)
-    val box = lin(vertical = false).apply {
-        addView(input, lp(0, WRAP, 1f))
-        addView(actions, lp(WRAP, WRAP).margins(ctx, l = 8))
-    }
-    fun small(text: String, primary: Boolean, onClick: () -> Unit) =
-        label(text, SP_M, color(if (primary) R.color.on_primary else R.color.text), MEDIUM).apply {
-            gravity = Gravity.CENTER
-            minHeight = dp(48)
-            minWidth = dp(48)
-            setPadding(dp(14), 0, dp(14), 0)
-            isFocusable = true
-            background = if (primary) pressable(color(R.color.primary), dpf(CONTROL_RADIUS))
-            else pressable(color(R.color.field), dpf(CONTROL_RADIUS), color(R.color.glass_stroke))
-            isClickable = true
-            setOnClickListener { if (isEnabled) onClick() }
-        }
-    val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-    var showReadOnly: () -> Unit = {}
-    lateinit var ok: android.widget.TextView
-    val refreshOk = {
-        val v = cleanUserName(input.text.toString())
-        val enabled = v != null && v != current
-        ok.isEnabled = enabled
-        ok.alpha = if (enabled) 1f else 0.4f
-    }
-    val showEditing = {
-        input.isEnabled = true
-        input.isFocusableInTouchMode = true
-        input.requestFocus()
-        input.setSelection(input.text.length)
-        imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
-        // Once the keyboard is up, bring the field into view.
-        input.postDelayed({ input.requestRectangleOnScreen(android.graphics.Rect(0, 0, input.width, input.height + dp(64))) }, 350)
-        actions.removeAllViews()
-        actions.addView(small(getString(R.string.cancel), primary = false) {
-            input.setText(current ?: "")
-            input.error = null
-            showReadOnly()
-        })
-        ok = small(getString(R.string.save_short), primary = true) {
-            val v = cleanUserName(input.text.toString())
-            if (v != null && v != current) {
-                imm.hideSoftInputFromWindow(input.windowToken, 0)
-                onSave(v)
-            }
-        }
-        actions.addView(ok, lp(WRAP, WRAP).margins(ctx, l = 6))
-        refreshOk()
-    }
-    showReadOnly = {
-        imm.hideSoftInputFromWindow(input.windowToken, 0)
-        input.clearFocus()
-        input.isEnabled = false
-        actions.removeAllViews()
-        actions.addView(small(getString(R.string.edit), primary = false) { showEditing() })
-    }
-    input.addTextChangedListener(object : android.text.TextWatcher {
-        override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-        override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-        override fun afterTextChanged(s: android.text.Editable?) { if (actions.childCount == 2) refreshOk() }
-    })
-    input.setOnEditorActionListener { _, action, _ ->
-        if (action == EditorInfo.IME_ACTION_DONE && actions.childCount == 2 && ok.isEnabled) { ok.performClick(); true } else false
-    }
-    if (current == null) showEditing() else showReadOnly()
-    return box
 }

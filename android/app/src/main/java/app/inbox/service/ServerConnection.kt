@@ -83,11 +83,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
 
     fun isConnected() = connected
 
-    /** Asks the server to track this phone under `userName`; sent again after each Welcome if needed. */
-    fun setUserName(userName: String) {
-        if (connected) events.offer(Event.Command(JSONObject().put("t", "set_user_name").put("user_name", userName)))
-    }
-
     /**
      * Sets this phone's level for a group (null = off). The level stays on the phone:
      * the server only learns whether the group is subscribed. Offline changes are
@@ -246,7 +241,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 connected = true
                                 failures = 0
                                 Registry.setStatus(serverId, LinkState.CONNECTED, msg.optString("server_name"))
-                                syncUserName(msg.optNullableString("user_name"))
                                 for (g in reconcile.subscribe) send(JSONObject().put("t", "subscribe").put("group", g))
                                 for (g in reconcile.unsubscribe) send(JSONObject().put("t", "unsubscribe").put("group", g))
                                 ping()
@@ -254,7 +248,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                             "alert" -> onAlert(msg)
                             "subscriptions" -> Registry.changed()
                             "pong" -> onPong(msg.getLong("nonce"))
-                            "user_name" -> Registry.changed()
                             "error" -> Log.w(TAG, "server error ${msg.optString("code")}: ${msg.optString("message")}")
                             else -> Log.w(TAG, "unknown message ${msg.getString("t")}")
                         }
@@ -374,12 +367,6 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         for (i in 0 until arr.length()) add(arr.getString(i))
     }
 
-    /** The username set on this phone for this server wins over what the server recorded. */
-    private fun syncUserName(recorded: String?) {
-        val local = store.server(serverId)?.userName ?: return
-        if (local != recorded) send(JSONObject().put("t", "set_user_name").put("user_name", local))
-    }
-
     private fun onWelcome(msg: JSONObject): Store.Reconcile {
         val groups = msg.getJSONArray("groups")
         val list = (0 until groups.length()).map {
@@ -389,6 +376,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         return store.saveWelcome(
             serverId,
             msg.getString("server_name"),
+            msg.optNullableString("user_name"),
             list,
             parseSubscriptions(msg.getJSONArray("subscriptions")),
             msg.getLong("heartbeat_interval_ms"),

@@ -41,7 +41,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- inbox://add?url=<encoded http(s) base>: opens the form with the address filled in. -->
+        <!-- inbox://enroll?s=<address>&k=<server key>&c=<secret>: opens the form with the enrollment code filled in. -->
         <activity
             android:name=".ui.AddServerActivity"
             android:exported="true"
@@ -51,7 +51,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="inbox" android:host="add" />
+                <data android:scheme="inbox" android:host="enroll" />
             </intent-filter>
         </activity>
         <activity

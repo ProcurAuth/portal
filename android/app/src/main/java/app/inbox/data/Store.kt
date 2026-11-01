@@ -16,8 +16,8 @@ data class Server(
     val reenrollReason: String?,
     val heartbeatMs: Long,
     val offlineWarningMs: Long,
-    /** Pseudo under which this phone is tracked on that server (null: none). */
-    val userName: String?,
+    /** Login of the account on that server. The server assigns it: it is read-only here. */
+    val userName: String,
 )
 
 data class Group(val id: String, val name: String, val description: String)
@@ -53,25 +53,24 @@ data class Alert(
  * or off). The server only knows which groups this phone subscribes to, never the
  * level.
  */
-class Store private constructor(context: Context, private val defaultUserName: String?) :
-    SQLiteOpenHelper(context, "inbox.db", null, 5) {
+class Store private constructor(private val appContext: Context) :
+    SQLiteOpenHelper(appContext, "inbox.db", null, 6) {
 
     companion object {
         @Volatile private var instance: Store? = null
 
         fun get(context: Context): Store =
             instance ?: synchronized(this) {
-                instance ?: Store(
-                    context.applicationContext,
-                    // Only needed by the v4 migration (servers enrolled without a username).
-                    context.getSharedPreferences("inbox_ui", Context.MODE_PRIVATE).getString("default_user_name", null),
-                ).also { instance = it }
+                instance ?: Store(context.applicationContext).also { instance = it }
             }
 
         const val LEVEL_OFF = "off"
         const val LEVEL_NOTIFY = "notify"
         const val DEFAULT_HEARTBEAT_MS = 20_000L
         const val DEFAULT_OFFLINE_WARNING_MS = 180_000L
+
+        /** Preference key (file `inbox_ui`) set when an update removed servers of an older protocol. */
+        const val PREF_ENROLL_AGAIN = "enroll_again"
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -80,21 +79,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL(
-            """CREATE TABLE servers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                address TEXT NOT NULL,
-                server_name TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                device_name TEXT NOT NULL,
-                device_key BLOB NOT NULL,
-                server_public_key BLOB NOT NULL,
-                reenroll_reason TEXT,
-                heartbeat_ms INTEGER NOT NULL,
-                offline_warning_ms INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                user_name TEXT)"""
-        )
+        createServers(db)
         db.execSQL(
             """CREATE TABLE groups (
                 server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -108,6 +93,24 @@ class Store private constructor(context: Context, private val defaultUserName: S
                 PRIMARY KEY (server_id, group_id))"""
         )
         createAlerts(db)
+    }
+
+    private fun createServers(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                device_name TEXT NOT NULL,
+                device_key BLOB NOT NULL,
+                server_public_key BLOB NOT NULL,
+                reenroll_reason TEXT,
+                heartbeat_ms INTEGER NOT NULL,
+                offline_warning_ms INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                user_name TEXT NOT NULL)"""
+        )
     }
 
     private fun createAlerts(db: SQLiteDatabase) {
@@ -131,25 +134,20 @@ class Store private constructor(context: Context, private val defaultUserName: S
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v2: pseudo per server. Existing servers keep working without one.
-        if (oldVersion < 2) db.execSQL("ALTER TABLE servers ADD COLUMN user_name TEXT")
-        // v3: local read state. Alerts received before the upgrade count as read.
-        if (oldVersion < 3) {
-            db.execSQL("ALTER TABLE alerts ADD COLUMN read_at_ms INTEGER")
-            db.execSQL("UPDATE alerts SET read_at_ms = received_at_ms")
-        }
-        // v4: the receipt is sent right after storing (the server retransmits until
-        // it gets one), so the ack outbox is gone; servers enrolled without a
-        // username take the default one.
-        if (oldVersion < 4) {
-            db.execSQL("DROP TABLE IF EXISTS outbox")
-            defaultUserName?.takeIf { it.isNotBlank() }
-                ?.let { db.execSQL("UPDATE servers SET user_name = ? WHERE user_name IS NULL", arrayOf(it)) }
-        }
-        // v5: an alert is a group and a title; the earlier alert history is dropped.
-        if (oldVersion < 5) {
-            db.execSQL("DROP TABLE IF EXISTS alerts")
-            createAlerts(db)
+        // v6: protocol 4. Every stored server was enrolled with protocol 3 (a shared password,
+        // a pseudonym of the person) and cannot connect any more. Its groups, levels and
+        // alerts go with it. The person gets a one-time notice and enrolls again with a code.
+        if (oldVersion < 6) {
+            val removed = db.rawQuery("SELECT COUNT(*) FROM servers", null)
+                .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+            for (table in listOf("alerts", "outbox", "subscriptions", "groups", "servers")) {
+                db.execSQL("DROP TABLE IF EXISTS $table")
+            }
+            onCreate(db)
+            if (removed > 0) {
+                appContext.getSharedPreferences("inbox_ui", Context.MODE_PRIVATE)
+                    .edit().putBoolean(PREF_ENROLL_AGAIN, true).apply()
+            }
         }
     }
 
@@ -157,10 +155,10 @@ class Store private constructor(context: Context, private val defaultUserName: S
 
     fun addServer(
         address: String, serverName: String, deviceId: String, deviceName: String,
-        deviceKeySealed: ByteArray, serverPublicKey: ByteArray, userName: String?,
+        deviceKeySealed: ByteArray, serverPublicKey: ByteArray, userName: String,
     ): Long {
         val v = ContentValues().apply {
-            if (userName == null) putNull("user_name") else put("user_name", userName)
+            put("user_name", userName)
             put("address", address)
             put("server_name", serverName)
             put("device_id", deviceId)
@@ -188,7 +186,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
                     Server(
                         c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4),
                         c.getBlob(5), c.getBlob(6), if (c.isNull(7)) null else c.getString(7),
-                        c.getLong(8), c.getLong(9), if (c.isNull(10)) null else c.getString(10),
+                        c.getLong(8), c.getLong(9), c.getString(10),
                     )
                 )
             }
@@ -196,11 +194,6 @@ class Store private constructor(context: Context, private val defaultUserName: S
     }
 
     fun server(id: Long): Server? = servers().firstOrNull { it.id == id }
-
-    fun setUserName(id: Long, userName: String?) {
-        val v = ContentValues().apply { if (userName == null) putNull("user_name") else put("user_name", userName) }
-        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
-    }
 
     fun setReenroll(id: Long, reason: String?) {
         val v = ContentValues().apply { if (reason == null) putNull("reenroll_reason") else put("reenroll_reason", reason) }
@@ -217,7 +210,7 @@ class Store private constructor(context: Context, private val defaultUserName: S
      * turned off while offline is unsubscribed.
      */
     fun saveWelcome(
-        id: Long, serverName: String, groups: List<Group>, serverSubscriptions: Set<String>,
+        id: Long, serverName: String, userName: String?, groups: List<Group>, serverSubscriptions: Set<String>,
         heartbeatMs: Long, offlineWarningMs: Long,
     ): Reconcile {
         val db = writableDatabase
@@ -225,6 +218,8 @@ class Store private constructor(context: Context, private val defaultUserName: S
         try {
             db.update("servers", ContentValues().apply {
                 put("server_name", serverName)
+                // The login is assigned by the server: the Welcome keeps it current.
+                if (!userName.isNullOrEmpty()) put("user_name", userName)
                 put("heartbeat_ms", heartbeatMs)
                 put("offline_warning_ms", offlineWarningMs)
             }, "id = ?", arrayOf(id.toString()))

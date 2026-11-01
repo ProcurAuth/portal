@@ -2,7 +2,6 @@ package app.inbox.ui
 
 import android.content.Intent
 import android.content.res.ColorStateList
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -10,7 +9,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -20,19 +18,18 @@ import app.inbox.data.Store
 import app.inbox.net.EnrollField
 import app.inbox.net.Enroller
 import app.inbox.net.EnrollmentError
-import app.inbox.net.ServerAddress
 import app.inbox.service.InboxService
 
 /**
- * Enrolls this phone on a server with the shared device password and the user's
- * username. Also opened by `inbox://add?url=<encoded http(s) base>`, which only
- * prefills the address: the password is still typed here.
+ * Enrolls this phone with a one-time enrollment code made by an account of the portal.
+ * The code is typed or pasted here. A tapped `inbox://enroll?...` link opens this
+ * screen with the code filled in. The screen shows the server address and a short
+ * fingerprint of the server key that the code pins, so the person can check them.
  */
 class AddServerActivity : BaseActivity() {
-    private lateinit var address: EditText
-    private lateinit var password: EditText
-    private lateinit var pseudo: EditText
+    private lateinit var code: EditText
     private lateinit var name: EditText
+    private lateinit var check: LinearLayout
     private val errors = mutableMapOf<EditText, TextView>()
     private lateinit var connect: LinearLayout
     private lateinit var connectLabel: TextView
@@ -50,16 +47,19 @@ class AddServerActivity : BaseActivity() {
 
         body.addView(sectionTitle(getString(R.string.add_title)))
         val form = panel(padH = 14, padV = 12)
-        address = textField("", getString(R.string.add_address_hint), mono = true).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        code = textField("", getString(R.string.add_code_hint), mono = true).apply {
+            isSingleLine = false
+            minLines = 2
+            maxLines = 5
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_VARIATION_URI
             imeOptions = EditorInfo.IME_ACTION_NEXT
+            textSize = SP_S
         }
-        field(form, R.string.add_address, address)
-        password = textField("", "", password = true).apply { imeOptions = EditorInfo.IME_ACTION_NEXT }
-        field(form, R.string.add_password, passwordBox(password), password)
-        val default = Prefs.defaultUserName(this)
-        pseudo = textField(default ?: "", getString(R.string.pseudo_hint), mono = true).apply { imeOptions = EditorInfo.IME_ACTION_NEXT }
-        field(form, R.string.add_pseudo, pseudo, help = if (default == null) getString(R.string.add_pseudo_first) else null)
+        field(form, R.string.add_code, code, help = getString(R.string.add_code_help))
+        check = lin().apply { visibility = View.GONE }
+        form.addView(check, lp().margins(this, t = 14))
         name = textField(Build.MODEL, "")
         field(form, R.string.add_device_name, name, help = getString(R.string.add_device_name_help))
         body.addView(form)
@@ -79,6 +79,11 @@ class AddServerActivity : BaseActivity() {
         body.addView(status)
         setScreen(root)
 
+        code.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { refreshCheck() }
+        })
         name.setOnEditorActionListener { _, action, _ ->
             if (action == EditorInfo.IME_ACTION_DONE) { submit(); true } else false
         }
@@ -91,20 +96,41 @@ class AddServerActivity : BaseActivity() {
         prefill(intent)
     }
 
-    /** `inbox://add?url=…`: prefills the address when it is a plain http(s) base. */
+    /** `inbox://enroll?...`: fills the code. The person still checks the server and taps Connect. */
     private fun prefill(intent: Intent?) {
         val data = intent?.data ?: return
-        if (data.scheme != "inbox" || data.host != "add") return
-        val raw = data.getQueryParameter("url")?.trim().orEmpty()
-        val scheme = Uri.parse(raw).scheme?.lowercase()
-        val addr = if (scheme == "http" || scheme == "https") ServerAddress.parse(raw) else null
-        if (addr == null) {
-            showError(address, getString(R.string.add_link_invalid))
-            return
-        }
-        address.setText(addr.http)
+        if (data.scheme != "inbox" || data.host != "enroll") return
+        code.setText(data.toString())
         clearErrors()
-        password.requestFocus()
+        if (refreshCheck()) {
+            name.requestFocus()
+            name.setSelection(name.text.length)
+        } else {
+            showError(code, getString(R.string.err_code_invalid))
+        }
+    }
+
+    /** Shows the server address and the key fingerprint of the code, when the code is valid. */
+    private fun refreshCheck(): Boolean {
+        check.removeAllViews()
+        val text = code.text.toString()
+        val info = if (text.isBlank()) null else try { Enroller.parse(this, text) } catch (e: EnrollmentError) { null }
+        if (info == null) {
+            check.visibility = View.GONE
+            return false
+        }
+        check.addView(label(getString(R.string.add_check_title), SP_S, color(R.color.text), MEDIUM))
+        check.addView(label(getString(R.string.add_check_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 2))
+        val rows = listOf(
+            kv(getString(R.string.meta_address), info.address.http.removePrefix("http://").removePrefix("https://"), color(R.color.text), 2, true),
+            kv(getString(R.string.add_check_fingerprint), info.fingerprint, color(R.color.text), 1, true),
+        )
+        for (row in rows) {
+            row.setPadding(0, dp(5), 0, dp(5))
+            check.addView(row, if (row === rows[0]) lp().margins(this, t = 6) else lp())
+        }
+        check.visibility = View.VISIBLE
+        return true
     }
 
     /** Field label, the input (or a box holding it), and an error line shown under it when needed. */
@@ -125,35 +151,6 @@ class AddServerActivity : BaseActivity() {
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) { if (!busy) hideError(input) }
         })
-    }
-
-    /** Password input with a show / hide toggle at its end. */
-    private fun passwordBox(input: EditText): FrameLayout {
-        val box = FrameLayout(this)
-        input.setPadding(input.paddingLeft, input.paddingTop, dp(48), input.paddingBottom)
-        box.addView(input, FrameLayout.LayoutParams(MATCH, WRAP))
-        var shown = false
-        lateinit var toggle: FrameLayout
-        fun refresh() {
-            val pos = input.selectionEnd
-            input.inputType = InputType.TYPE_CLASS_TEXT or
-                if (shown) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else InputType.TYPE_TEXT_VARIATION_PASSWORD
-            input.typeface = REGULAR
-            // Changing the input type resets the line count, which shares its field with minHeight.
-            input.minHeight = dp(48)
-            if (pos >= 0) input.setSelection(pos.coerceAtMost(input.text.length))
-            toggle.removeAllViews()
-            toggle.addView(icon(if (shown) R.drawable.ic_eye_off else R.drawable.ic_eye, color(R.color.text_muted), 20),
-                FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
-            toggle.contentDescription = getString(if (shown) R.string.add_password_hide else R.string.add_password_show)
-        }
-        toggle = iconButton(R.drawable.ic_eye, getString(R.string.add_password_show), color(R.color.text_muted)) {
-            shown = !shown
-            refresh()
-        }
-        box.addView(toggle, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL))
-        refresh()
-        return box
     }
 
     /** Primary button whose progress spinner sits inside it while connecting. */
@@ -181,7 +178,7 @@ class AddServerActivity : BaseActivity() {
         progress.visibility = if (on) View.VISIBLE else View.GONE
         connectLabel.text = getString(if (on) R.string.add_connecting else R.string.add_connect)
         connect.contentDescription = connectLabel.text
-        for (f in listOf(address, password, pseudo, name)) f.isEnabled = !on
+        for (f in listOf(code, name)) f.isEnabled = !on
     }
 
     private fun showError(field: EditText, text: String) {
@@ -208,21 +205,21 @@ class AddServerActivity : BaseActivity() {
     private fun submit() {
         if (busy) return
         clearErrors()
-        val addr = ServerAddress.parse(address.text.toString())
-        if (addr == null) return showError(address, getString(R.string.add_invalid_address))
-        if (password.text.isEmpty()) return showError(password, getString(R.string.add_password_missing))
-        val user = cleanUserName(pseudo.text.toString()) ?: return showError(pseudo, getString(R.string.pseudo_invalid))
+        val text = code.text.toString().trim()
+        if (text.isEmpty()) return showError(code, getString(R.string.add_code_missing))
+        val info = try { Enroller.parse(this, text) } catch (e: EnrollmentError) { return showError(code, e.message ?: "") }
         val deviceName = name.text.toString().trim()
         if (deviceName.isEmpty()) return showError(name, getString(R.string.add_device_name_missing))
-        val pw = password.text.toString().toByteArray(Charsets.UTF_8)
         setBusy(true)
         Thread {
             var serverId = -1L
             val error: EnrollmentError? = try {
-                val e = Enroller.enroll(this, addr, pw, deviceName, user)
+                val e = Enroller.enroll(this, text, deviceName)
+                // The key of the code is the pin: the stored key is the one of the code.
+                if (!e.serverPublicKey.contentEquals(info.serverPublicKey)) throw EnrollmentError(getString(R.string.err_server_key))
                 val sealed = KeyVault.seal(e.devicePrivateKey)
                 e.devicePrivateKey.fill(0)
-                serverId = Store.get(this).addServer(addr.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, user)
+                serverId = Store.get(this).addServer(e.address.http, e.serverName, e.deviceId, deviceName, sealed, e.serverPublicKey, e.userName)
                 null
             } catch (e: EnrollmentError) {
                 e
@@ -232,7 +229,7 @@ class AddServerActivity : BaseActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 setBusy(false)
-                if (error == null) done(serverId, user) else fail(error)
+                if (error == null) done(serverId) else fail(error)
             }
         }.start()
     }
@@ -240,12 +237,8 @@ class AddServerActivity : BaseActivity() {
     private fun fail(e: EnrollmentError) {
         val text = e.message ?: getString(R.string.err_unknown)
         when (e.field) {
-            EnrollField.ADDRESS -> showError(address, text)
-            EnrollField.PASSWORD -> {
-                password.text.clear()
-                showError(password, text)
-            }
-            EnrollField.USERNAME -> showError(pseudo, text)
+            EnrollField.CODE -> showError(code, text)
+            EnrollField.DEVICE_NAME -> showError(name, text)
             EnrollField.NONE -> status.apply {
                 this.text = text
                 visibility = View.VISIBLE
@@ -253,10 +246,9 @@ class AddServerActivity : BaseActivity() {
         }
     }
 
-    /** Enrolled: the first username becomes the default, then straight to the server's groups. */
-    private fun done(serverId: Long, user: String) {
-        password.text.clear()
-        if (Prefs.defaultUserName(this) == null) Prefs.setDefaultUserName(this, user)
+    /** Enrolled: straight to the groups of the server. The code has no use any more. */
+    private fun done(serverId: Long) {
+        code.text.clear()
         InboxService.start(this)
         startActivities(arrayOf(
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),

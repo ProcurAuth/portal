@@ -6,10 +6,9 @@ not in public issues. Include affected version, impact and reproduction steps.
 
 ## Scope and design
 
-- The shared device password is only used inside OPAQUE (`opaque-ke`, pinned
-  exactly because credential records embed its serialization). The credential
-  record is created offline with `inbox credential`. Started password attempts
-  are rate-limited per client address.
+- Enrollment uses a one-time code of an account. The phone pins the server key of the code
+  and sends the secret inside a Noise IK message to that key. The secret works one time.
+  Failed attempts are rate-limited per client address.
 - Device sessions are Noise IK (`snow`), keys pinned at enrollment; devices are
   revocable individually.
 - The admin front has no password, by design: whoever reaches
