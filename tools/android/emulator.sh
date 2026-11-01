@@ -8,10 +8,10 @@
 #   tools/android/emulator.sh stop          remove the emulator
 #
 # Requires /dev/kvm. The emulator reaches the host through the Docker bridge
-# gateway (printed by `start`, usually 172.17.0.1): in the app, add the server
-# <gateway>:8080 to reach a inbox published on the host's port 8080 (for
-# example `docker compose up` at the root of the repository, with
-# PORTAL_DEVICES_BIND=0.0.0.0). The host network is not used: the
+# gateway (printed by `start`, usually 172.17.0.1): set `inbox.devices.public_address`
+# to <gateway>:<port> of a inbox published on the host, make an enrollment code on the
+# page "My phones", and open the link `inbox://enroll?...` on the phone (for example
+# `adb shell am start -a android.intent.action.VIEW -d '<link>'`). The host network is not used: the
 # emulator's virtual display would clash with the desktop's X server.
 set -eu
 
@@ -69,7 +69,7 @@ case "${1:-}" in
     echo
     echo "Emulator screen: http://localhost:$WEB_PORT"
     gateway=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
-    echo "In the app, add the server $gateway:8080 (the host, through the Docker bridge)."
+    echo "The host is $gateway for the phone. Make an enrollment code on the page \"My phones\", then open its link on the phone."
     ;;
   install)
     apk_path "${2:-}"

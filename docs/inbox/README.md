@@ -183,8 +183,8 @@ No physical phone is needed for the tests of the app. `tools/android/emulator.sh
 1. Build the app: `tools/build.sh apk`. The script `tools/android/build-apk.sh` lists the variables for the key of the APK.
 2. Start the emulator: `tools/android/emulator.sh start`. The script installs `dist/inbox-<version>.apk`, grants the permissions and prints the address of the screen. Open <http://localhost:6080> in a browser.
 3. Start the stack (see `deploy/README.md`). Publish the devices listener to the network: `PORTAL_DEVICES_BIND=0.0.0.0`.
-4. Set `inbox.devices.public_address` to `172.17.0.1:8080`. This address is the host as the emulator sees it through the Docker bridge.
-5. Make a code in the pages of the portal. Type it in the app.
+4. Set `inbox.devices.public_address` to `172.17.0.1:<port>`. This address is the host as the emulator sees it through the Docker bridge.
+5. Make a code on the page "My phones". Open its link on the phone: `adb shell am start -a android.intent.action.VIEW -d '<link>'`.
 
 `emulator.sh logs` shows the logs of the app. `emulator.sh install` installs a new build. `emulator.sh stop` removes the emulator. Sound, vibration and the battery savers of vendors can be judged only on a real phone. If the noVNC page shows a JavaScript error from a `chrome-extension://` script, open the page in a private window.
 

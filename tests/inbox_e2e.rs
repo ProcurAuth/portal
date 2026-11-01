@@ -4408,7 +4408,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let (st, doc) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox/doc");
     assert_eq!(st, 200);
     assert!(
-        has(&doc, &format!("https://127.0.0.1:{port}/api/v1/alerts")),
+        has(&doc, &format!("http://127.0.0.1:{port}/api/v1/alerts")),
         "{doc}"
     );
     // The form refuses a group that the account may not send to, and sends to the others.

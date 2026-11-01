@@ -398,7 +398,7 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
             let base = if address.starts_with("http://") || address.starts_with("https://") {
                 address.to_string()
             } else {
-                format!("https://{address}")
+                format!("http://{address}")
             };
             ui_inbox::doc_page(
                 &frame,
