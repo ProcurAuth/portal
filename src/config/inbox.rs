@@ -36,8 +36,7 @@ pub struct InboxConfig {
 /// The block `inbox.devices`.
 #[derive(Clone, Debug)]
 pub struct DevicesConfig {
-    pub listen: SocketAddr,
-    /// The address that phones use to reach the listener. It is the `s` of an enrollment code.
+    /// The public base URL of the portal as the phones reach it. It is the `s` of an enrollment code.
     pub public_address: String,
     pub max_devices: u32,
     pub heartbeat_interval: Duration,
@@ -145,7 +144,6 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         return Ok(None);
     }
     let devices = DevicesConfig {
-        listen: socket(r, "inbox.devices", "listen")?,
         public_address: r.text("inbox.devices", "public_address")?,
         max_devices: small(r, "inbox.devices", "max_devices")?,
         heartbeat_interval: r.duration("inbox.devices", "heartbeat_interval")?,
@@ -344,19 +342,10 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
     if let Some(pdp) = &config.pdp {
         taken.push(("pdp.listen_address", pdp.listen_address));
     }
-    for (key, addr) in &taken {
-        if overlap(inbox.devices.listen, *addr) {
-            return Err(format!(
-                "inbox.devices.listen must not use the port of {key}: {key} is {addr}, inbox.devices.listen is {}",
-                inbox.devices.listen
-            ));
-        }
-    }
     if let Some(cluster) = &inbox.cluster {
         if !postgres {
             return Err("the block inbox.cluster needs the block postgres: it copies what PostgreSQL cannot take".into());
         }
-        taken.push(("inbox.devices.listen", inbox.devices.listen));
         for (key, addr) in &taken {
             if overlap(cluster.listen, *addr) {
                 return Err(format!(

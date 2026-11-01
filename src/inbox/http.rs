@@ -1,25 +1,24 @@
 //! The HTTP routes of the inbox.
 //!
-//! The listener of the phones (`inbox.devices.listen`) is a listener of the inbox. It has no
-//! session. It serves `/v1/enroll`, `/v1/session` (WebSocket), `/healthz` and `/readyz`. A phone
-//! on a mobile network reaches this port, and the pages of the portal stay private.
+//! The inbox has no listener for its own pages, its producers or its phones. The listener of the
+//! portal (`server.listen_address`) serves all of them. The function [`serve`] answers the paths
+//! that [`owns`] names: `/v1/enroll` and `/v1/session` for the phones (WebSocket), `/api/v1/*`
+//! for the producers and the webhooks, `/api/version` and `/readyz`. None of them needs a
+//! session of the portal. A producer proves itself with a token or a key. A phone proves itself
+//! with the Noise handshake inside the WebSocket.
 //!
-//! The producers and the webhooks use the listener of the portal, on the port of the pages. The
-//! function [`serve_api`] answers the paths that [`owns_api`] names: `/api/v1/*`, `/api/version`
-//! and `/readyz`. They need no session. Producers prove themselves with a token or a key.
-//!
-//! The listener of the cluster (`inbox.cluster.listen`) is a third listener, for the copies of
-//! alerts between the instances. It is not public. All of them use hyper.
+//! The listener of the cluster (`inbox.cluster.listen`) is the only other listener. It carries the
+//! copies of alerts between the instances. It is not public. Both listeners use hyper.
 
 use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{HeaderValue, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{HeaderValue, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -35,15 +34,6 @@ use super::{device, peer};
 
 pub type Resp = Response<Full<Bytes>>;
 
-/// What a listener serves.
-#[derive(Clone, Copy)]
-pub enum Kind {
-    /// Phones and the health routes.
-    Devices,
-    /// The requests of the other instances.
-    Cluster,
-}
-
 pub fn text(status: StatusCode, body: &'static str) -> Resp {
     let mut response = Response::new(Full::new(Bytes::from_static(body.as_bytes())));
     *response.status_mut() = status;
@@ -57,6 +47,17 @@ pub fn text(status: StatusCode, body: &'static str) -> Resp {
 pub fn empty(status: StatusCode) -> Resp {
     let mut response = Response::new(Full::new(Bytes::new()));
     *response.status_mut() = status;
+    response
+}
+
+/// The answer to a phone when the budget of sessions is full: `503` before the upgrade. No
+/// WebSocket exists, so the refusal costs no session. The phone connects again later. A proxy
+/// does not retry it, because the server did answer.
+pub fn busy() -> Resp {
+    let mut response = text(StatusCode::SERVICE_UNAVAILABLE, "no free session\n");
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static("5"));
     response
 }
 
@@ -114,8 +115,8 @@ pub async fn read_body(
     }
 }
 
-/// Accepts the connections of one listener until the task is aborted.
-pub async fn accept_loop(app: Arc<App>, listener: TcpListener, kind: Kind) {
+/// Accepts the connections of the cluster listener until the task is aborted.
+pub async fn accept_cluster(app: Arc<App>, listener: TcpListener) {
     let gate = Arc::new(Semaphore::new(app.http.max_connections));
     loop {
         let (stream, peer_addr) = match listener.accept().await {
@@ -139,12 +140,7 @@ pub async fn accept_loop(app: Arc<App>, listener: TcpListener, kind: Kind) {
             let service_app = Arc::clone(&app);
             let service = service_fn(move |request| {
                 let app = Arc::clone(&service_app);
-                async move {
-                    Ok::<_, Infallible>(match kind {
-                        Kind::Devices => route_devices(app, peer_addr, request).await,
-                        Kind::Cluster => peer::route(app, request).await,
-                    })
-                }
+                async move { Ok::<_, Infallible>(peer::route(app, request).await) }
             });
             let mut builder = http1::Builder::new();
             builder
@@ -154,11 +150,7 @@ pub async fn accept_loop(app: Arc<App>, listener: TcpListener, kind: Kind) {
                 .max_buf_size(app.http.max_header_bytes)
                 .half_close(false)
                 .keep_alive(true);
-            if let Err(error) = app
-                .stop
-                .drive_upgradable(builder.serve_connection(io, service).with_upgrades())
-                .await
-            {
+            if let Err(error) = app.stop.drive(builder.serve_connection(io, service)).await {
                 log::debug!(
                     event = "connection_closed_with_error",
                     remote_addr = %peer_addr,
@@ -175,46 +167,30 @@ fn segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .filter(|rest| !rest.is_empty() && !rest.contains('/'))
 }
 
-/// The client address of a phone: the portal rule (`server.trusted_proxies`).
-fn phone_ip(app: &App, peer: SocketAddr, request: &Request<Incoming>) -> IpAddr {
-    crate::transport::client_ip(request.headers(), peer.ip(), &app.http.trusted_proxies)
+/// Tells whether the inbox owns the path on the listener of the portal: the routes of the
+/// phones (`/v1/`), the API of the producers (`/api/v1/`), the version and the readiness. The
+/// portal gives these paths to the inbox and to no other handler. The inbox answers a path under
+/// these prefixes that it does not know with `404`: no route of the portal can shadow it.
+pub fn owns(path: &str) -> bool {
+    path.starts_with("/v1/")
+        || path.starts_with("/api/v1/")
+        || matches!(path, "/readyz" | "/api/version")
 }
 
-/// The routes of the listener of the phones.
-async fn route_devices(app: Arc<App>, peer: SocketAddr, request: Request<Incoming>) -> Resp {
-    let get = request.method() == Method::GET;
-    let path = request.uri().path().to_string();
-    match path.as_str() {
-        "/v1/enroll" | "/v1/session" if !get => empty(StatusCode::METHOD_NOT_ALLOWED),
-        "/v1/enroll" => {
-            let ip = phone_ip(&app, peer, &request);
-            device::enroll_ws(app, ip, request)
-        }
-        "/v1/session" => {
-            let ip = phone_ip(&app, peer, &request);
-            device::session_ws(app, ip, request)
-        }
-        "/healthz" if get => text(StatusCode::OK, "ok"),
-        "/readyz" if get => readyz(&app).await,
-        "/healthz" | "/readyz" => empty(StatusCode::METHOD_NOT_ALLOWED),
-        _ => empty(StatusCode::NOT_FOUND),
-    }
-}
-
-/// Tells whether the inbox owns the path on the listener of the portal: the API of the
-/// producers, the version and the readiness. The portal gives these paths to the inbox and to no
-/// other handler. The paths of the phones (`/v1/`) are not here: they are on the listener of the
-/// phones.
-pub fn owns_api(path: &str) -> bool {
-    path.starts_with("/api/v1/") || matches!(path, "/readyz" | "/api/version")
-}
-
-/// Answers one request that [`owns_api`] names, on the listener of the portal.
-pub async fn serve_api(app: Arc<App>, request: Request<Incoming>) -> Resp {
+/// Answers one request that [`owns`] names, on the listener of the portal. `ip` is the client
+/// address that the portal found with `server.trusted_proxies`. The limiter of the enrollment
+/// attempts uses it.
+pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let get = method == Method::GET;
     let post = method == Method::POST;
+    match path.as_str() {
+        "/v1/enroll" | "/v1/session" if !get => return empty(StatusCode::METHOD_NOT_ALLOWED),
+        "/v1/enroll" => return device::enroll_ws(app, ip, request),
+        "/v1/session" => return device::session_ws(app, ip, request),
+        _ => {}
+    }
     if path == "/api/v1/alerts" {
         return if post {
             api::post_alert(&app, request).await

@@ -456,10 +456,9 @@ fn healthcheck(path: &Path) -> Result<(), String> {
     if !(prefix.starts_with(b"HTTP/1.1 200 ") || prefix.starts_with(b"HTTP/1.0 200 ")) {
         return Err("healthcheck returned a non-200 response".into());
     }
-    // With a inbox, the listener of the phones must be ready too.
-    if let Some(inbox) = &config.inbox {
-        inbox::cli::healthcheck(inbox.devices.listen)
-            .map_err(|e| format!("inbox healthcheck failed: {e}"))?;
+    // With a inbox, the inbox must be ready too: `/readyz` of the same port.
+    if config.inbox.is_some() {
+        inbox::cli::healthcheck(listen).map_err(|e| format!("inbox healthcheck failed: {e}"))?;
     }
     Ok(())
 }

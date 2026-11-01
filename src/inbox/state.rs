@@ -84,10 +84,11 @@ pub struct HttpLimits {
     pub body_read_timeout: Duration,
     pub max_headers: usize,
     pub max_header_bytes: usize,
-    /// The largest number of connections that one listener of the inbox holds.
+    /// The largest number of connections that the listener of the cluster holds.
     pub max_connections: usize,
-    /// The proxies that give the client address: `server.trusted_proxies`. The inbox has no list of its own.
-    pub trusted_proxies: Vec<crate::transport::Cidr>,
+    /// The largest number of open phone sessions: the budget that is separate from the pages. It is
+    /// `server.max_connections` plus two times `inbox.devices.max_devices`.
+    pub max_sessions: usize,
 }
 
 pub struct App {
@@ -114,6 +115,9 @@ pub struct App {
     pub stop: crate::shutdown::Stop,
     /// The WebSockets that are open, also those that did not finish their handshake.
     pub sockets: AtomicUsize,
+    /// The budget of phone sessions. A phone takes one permit before the upgrade and keeps it until
+    /// the WebSocket ends. The pages and the API use the budget `server.max_connections`.
+    pub session_budget: SessionBudget,
     /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.
     pub authorizer: std::sync::OnceLock<std::sync::Arc<dyn super::rights::Authorizer>>,
 }
@@ -165,20 +169,50 @@ impl App {
     }
 }
 
-/// The guard of one open WebSocket. The count goes down when the guard is dropped.
-pub struct SocketGuard(std::sync::Arc<App>);
+/// The budget of phone sessions, separate from the budget of the connections of the pages.
+pub struct SessionBudget(std::sync::Arc<tokio::sync::Semaphore>);
+
+impl SessionBudget {
+    pub fn new(size: usize) -> SessionBudget {
+        SessionBudget(std::sync::Arc::new(tokio::sync::Semaphore::new(size)))
+    }
+
+    /// Takes one permit, or `None` when the budget is full. The permit goes back when it drops.
+    pub fn take(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        std::sync::Arc::clone(&self.0).try_acquire_owned().ok()
+    }
+
+    /// The permits that nobody holds.
+    #[cfg(test)]
+    pub fn available(&self) -> usize {
+        self.0.available_permits()
+    }
+}
+
+/// The guard of one open WebSocket. The count goes down and the permit of the session budget goes
+/// back when the guard is dropped.
+pub struct SocketGuard {
+    app: std::sync::Arc<App>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
 
 impl SocketGuard {
-    pub fn new(app: &std::sync::Arc<App>) -> SocketGuard {
+    /// Counts one more WebSocket and takes a permit of the session budget. The result is `None`
+    /// when the budget is full.
+    pub fn new(app: &std::sync::Arc<App>) -> Option<SocketGuard> {
+        let permit = app.session_budget.take()?;
         app.sockets
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        SocketGuard(std::sync::Arc::clone(app))
+        Some(SocketGuard {
+            app: std::sync::Arc::clone(app),
+            _permit: permit,
+        })
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        self.0
+        self.app
             .sockets
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
@@ -200,7 +234,7 @@ mod tests {
             inbox {
               server_key_env = "K"
               devices {
-                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080"
+                public_address = "inbox.example.org:8080"
                 heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
                 max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
               }
@@ -249,5 +283,20 @@ mod tests {
         ))
         .contains("printable"));
         assert!(error(load([TOKEN_A, TOKEN_B], Some("not a key"))).contains("inbox.server_key"));
+    }
+
+    #[test]
+    fn the_session_budget_gives_its_permits_one_by_one_and_takes_them_back() {
+        let budget = SessionBudget::new(2);
+        let first = budget.take().expect("first permit");
+        let second = budget.take().expect("second permit");
+        assert!(budget.take().is_none(), "the budget is full");
+        assert_eq!(budget.available(), 0);
+        drop(first);
+        assert_eq!(budget.available(), 1);
+        let third = budget.take().expect("a freed permit is given again");
+        assert!(budget.take().is_none());
+        drop((second, third));
+        assert_eq!(budget.available(), 2);
     }
 }

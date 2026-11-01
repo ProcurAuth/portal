@@ -233,7 +233,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "inbox.devices",
-        "This block is inside the block `inbox`. It sets the phone port, the address that phones use, and the delivery values. The phone port has no session: phones prove themselves. The producers use the listener of the portal.",
+        "This block is inside the block `inbox`. It sets the public address that phones use, the limits of the phones, and the delivery values. The phones use the listener of the portal, as the producers do. The routes of the phones have no session: phones prove themselves.",
     ),
     (
         "inbox.enrollment",
@@ -293,7 +293,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 100_000 },
         presence: Presence::Default("1024"),
         when: When::Always,
-        doc: "The largest number of open TCP connections.",
+        doc: "The largest number of open TCP connections of the pages and the API. A connection that upgrades to a phone session gives its permit back and takes a permit of the session budget: `server.max_connections` plus two times `inbox.devices.max_devices`. This budget exists only with the block `inbox`.",
     },
     Key {
         block: "server",
@@ -345,7 +345,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding, the login limiter and, for the phones, the limiter of the enrollment attempts (`inbox.devices.listen` uses this list too).",
+        doc: "The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding, the login limiter and, for the phones, the limiter of the enrollment attempts (the routes of the phones use this list too).",
     },
     Key {
         block: "authentication",
@@ -850,7 +850,7 @@ pub static KEYS: &[Key] = &[
         block: "metrics",
         name: "path",
         kind: Kind::Text {
-            expected: "an absolute URL path of at most 128 bytes, not /healthz, /readyz or /api/version, and not under /auth/ or /api/v1/",
+            expected: "an absolute URL path of at most 128 bytes, not /healthz, /readyz or /api/version, and not under /auth/, /v1/ or /api/v1/",
             check: check_metrics_path,
         },
         presence: Presence::Default("/metrics"),
@@ -954,25 +954,14 @@ pub static KEYS: &[Key] = &[
     },
     Key {
         block: "inbox.devices",
-        name: "listen",
-        kind: Kind::Text {
-            expected: "an IP address and a port, such as 0.0.0.0:8080",
-            check: check_socket_address,
-        },
-        presence: Presence::Required,
-        when: When::Always,
-        doc: "The address and the port of the listener of the phones, the phone port. The listener serves `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`. A phone on a mobile network reaches this port, and the pages of the portal stay private. The producers and the webhooks do not use it: they use `server.listen_address`. It must not use the port of `server.listen_address`. The client address of a phone comes from `server.trusted_proxies`.",
-    },
-    Key {
-        block: "inbox.devices",
         name: "public_address",
         kind: Kind::Text {
-            expected: "the address that phones use to reach the phone port `inbox.devices.listen`: `host:port`, a domain, or an http(s) URL; 1 to 512 bytes, no white space, no control character",
+            expected: "the public base URL of the portal as the phones reach it: `host:port`, a domain, or an http(s) URL with an optional path prefix; 1 to 512 bytes, no white space, no control character",
             check: check_public_address,
         },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The address that phones use to reach the phone port `inbox.devices.listen`, as the phones see it from outside: `host:port`, a domain, or an http(s) URL, for example `http://172.17.0.1:8089`. It is the `s` of the enrollment code. The inbox does not open a connection to it.",
+        doc: "The public base URL of the portal, as the phones reach it from outside: `host:port`, a domain, or an http(s) URL `http(s)://host[:port][/prefix]`, for example `http://172.17.0.1:8088`. The phones add `/v1/enroll` and `/v1/session` to it. The portal serves these routes on `server.listen_address`, with the pages. A proxy that publishes the portal under a prefix must remove the prefix before it sends the request: the portal has no base path. It is the `s` of the enrollment code. The inbox does not open a connection to it.",
     },
     Key {
         block: "inbox.devices",
@@ -1536,7 +1525,7 @@ fn check_host(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The address of the listener of the phones, as the phones write it: `host:port`, a domain or an
+/// The public base URL of the portal, as the phones write it: `host:port`, a domain or an
 /// http(s) URL with an optional path prefix. The rules are the rules of the app.
 fn check_public_address(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 512 {
@@ -1701,9 +1690,13 @@ fn check_metrics_path(path: &str) -> Result<(), String> {
     if path.contains('?') || path.contains('#') || path.bytes().any(|b| b <= 0x20 || b == 0x7f) {
         return Err("the path holds a query, a fragment, a space or a control character".into());
     }
-    let reserved = ["/healthz", "/readyz", "/api/version", "/api/v1"];
-    if path.starts_with("/auth/") || path.starts_with("/api/v1/") || reserved.contains(&path) {
-        return Err("the path overlaps /healthz, /readyz, /api/version, /api/v1 or the reserved /auth/ namespace".into());
+    let reserved = ["/healthz", "/readyz", "/api/version", "/api/v1", "/v1"];
+    if path.starts_with("/auth/")
+        || path.starts_with("/api/v1/")
+        || path.starts_with("/v1/")
+        || reserved.contains(&path)
+    {
+        return Err("the path overlaps /healthz, /readyz, /api/version, /v1, /api/v1 or the reserved /auth/ namespace".into());
     }
     Ok(())
 }

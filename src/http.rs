@@ -653,9 +653,11 @@ async fn accept_loop(state: Arc<AppState>, listener: TcpListener) {
                 .half_close(false)
                 .keep_alive(true);
 
+            // A phone upgrades its connection to a WebSocket. The connection then leaves this
+            // task, and the permit of the pages goes back: the session has its own budget.
             if let Err(error) = state_for_connection
                 .stop
-                .drive(builder.serve_connection(io, service))
+                .drive_upgradable(builder.serve_connection(io, service).with_upgrades())
                 .await
             {
                 log(
@@ -689,16 +691,17 @@ async fn handle_request(
         .to_string();
     let path = request.uri().path().to_string();
     let route_metric = route_metric_label(&state, &path);
-    let client_ip = Some(transport::client_ip(
+    let found_ip = transport::client_ip(
         request.headers(),
         remote_addr.ip(),
         &state.config.server.trusted_proxies,
-    ));
+    );
+    let client_ip = Some(found_ip);
     let client = Client::new(&state, request.headers(), client_ip);
-    // The inbox owns `/api/v1/`, `/readyz` and `/api/version` on this listener: the API of the
-    // producers and the webhooks. No session and no other handler apply to them. Without the block
-    // `inbox`, these paths are not found. The phones use their own listener (`inbox.devices.listen`).
-    let inbox_app = if crate::inbox::owns_api(&path) {
+    // The inbox owns `/v1/`, `/api/v1/`, `/readyz` and `/api/version` on this listener: the phones
+    // (WebSocket), the API of the producers and the webhooks. No session and no other handler apply
+    // to them. Without the block `inbox`, these paths are not found.
+    let inbox_app = if crate::inbox::owns(&path) {
         state.inbox.app()
     } else {
         None
@@ -722,7 +725,7 @@ async fn handle_request(
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
     } else if let Some(app) = inbox_app {
-        crate::inbox::serve_api(app, request).await
+        crate::inbox::serve(app, found_ip, request).await
     } else if method == Method::GET && path == READY_PATH && state.config.inbox.is_none() {
         // Without the block `inbox`, the instance is ready whenever it runs.
         text_response(StatusCode::OK, "ready\n")
@@ -3686,7 +3689,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         VERIFY_KEY_PATH => "verify_key",
         HEALTH_PATH => "health",
         READY_PATH => "ready",
-        _ if crate::inbox::owns_api(path) => "inbox_api",
+        _ if crate::inbox::owns(path) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
@@ -3753,11 +3756,14 @@ mod cluster_tests;
 mod tests {
     use super::*;
 
-    /// The paths of the inbox and the paths of the portal never overlap: `/api/v1/`,
+    /// The paths of the inbox and the paths of the portal never overlap: `/v1/`, `/api/v1/`,
     /// `/readyz` and `/api/version` are the inbox's, and no route of the portal is one of them.
     #[test]
     fn the_paths_of_the_inbox_are_not_shadowed_by_a_route_of_the_portal() {
         for inbox in [
+            "/v1/enroll",
+            "/v1/session",
+            "/v1/other",
             "/api/v1/alerts",
             "/api/v1/alerts/0123abcd",
             "/api/v1/notify/infra",
@@ -3765,7 +3771,7 @@ mod tests {
             "/readyz",
             "/api/version",
         ] {
-            assert!(crate::inbox::owns_api(inbox), "{inbox}");
+            assert!(crate::inbox::owns(inbox), "{inbox}");
         }
         let portal = [
             HOME_PATH,
@@ -3801,19 +3807,19 @@ mod tests {
             "/metrics",
         ];
         for path in portal {
-            assert!(!crate::inbox::owns_api(path), "{path}");
+            assert!(!crate::inbox::owns(path), "{path}");
         }
         // The prefix needs the slash: a path that only starts with the same letters is the portal's.
-        // The paths of the phones are on their own listener: the portal does not own them.
         for path in [
             "/api/v1",
-            "/v1/enroll",
-            "/v1/session",
+            "/v1",
+            "/v10/session",
+            "/x/v1/session",
             "/api/versions",
             "/readyz/x",
             "/api/v2/x",
         ] {
-            assert!(!crate::inbox::owns_api(path), "{path}");
+            assert!(!crate::inbox::owns(path), "{path}");
         }
     }
 

@@ -1843,7 +1843,6 @@ fn inbox_err(raw: &str) -> String {
 const INBOX: &str = r#"inbox {
   server_key_env = "INBOX_KEY"
   devices {
-    listen = "0.0.0.0:8080"
     public_address = "inbox.example.org:8080"
     heartbeat_interval = "20s"
     session_timeout = "60s"
@@ -1882,7 +1881,6 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     let (config, secrets) = inbox_ok(&with_inbox(INBOX));
     let inbox = config.inbox.as_ref().unwrap();
     assert_eq!(inbox.name, "Inbox");
-    assert_eq!(inbox.devices.listen, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(inbox.devices.max_devices, 1000);
     assert_eq!(inbox.devices.max_auth_failures, 5);
     assert_eq!(inbox.devices.auth_failure_window, Duration::from_secs(600));
@@ -1906,7 +1904,10 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     assert_eq!(secrets.producers.len(), 1);
     // The effective configuration shows the source and hides the secrets.
     assert_eq!(line(&config, "inbox.name").source, "default");
-    assert_eq!(line(&config, "inbox.devices.listen").source, "file");
+    assert!(config
+        .effective
+        .iter()
+        .all(|l| l.key != "inbox.devices.listen"));
     assert_eq!(line(&config, "inbox.server_key").value, "<hidden>");
     assert_eq!(line(&config, "inbox.server_key").source, "env:INBOX_KEY");
     assert_eq!(
@@ -2183,9 +2184,16 @@ fn the_inbox_schema_is_closed_and_strict() {
             "inbox.name",
         ),
         (
-            "listen = \"0.0.0.0:8080\"",
-            "listen = \"0.0.0.0:8080\" trusted_proxies2 = []",
+            "public_address = \"inbox.example.org:8080\"",
+            "public_address = \"inbox.example.org:8080\" trusted_proxies2 = []",
             "trusted_proxies2",
+        ),
+        // The phones use the listener of the portal: the key of the old phone port does not exist,
+        // and it has no alias.
+        (
+            "public_address = \"inbox.example.org:8080\"",
+            "listen = \"0.0.0.0:8080\" public_address = \"inbox.example.org:8080\"",
+            "unknown configuration key: inbox.devices.listen",
         ),
     ] {
         assert!(INBOX.contains(from), "{from}");
@@ -2196,7 +2204,7 @@ fn the_inbox_schema_is_closed_and_strict() {
 
 #[test]
 fn the_inbox_has_no_list_of_trusted_proxies_of_its_own() {
-    // The phone port uses `server.trusted_proxies`. The old key is unknown, with no alias.
+    // The phones use `server.trusted_proxies`. The old key is unknown, with no alias.
     let raw = INBOX.replacen(
         "public_address",
         "trusted_proxies = [\"10.0.0.0/8\"] public_address",
@@ -2216,6 +2224,8 @@ fn the_metrics_path_cannot_hide_a_route_of_the_inbox() {
         "/api/version",
         "/api/v1",
         "/api/v1/alerts",
+        "/v1",
+        "/v1/session",
         "/healthz",
         "/auth/x",
     ] {
@@ -2224,8 +2234,8 @@ fn the_metrics_path_cannot_hide_a_route_of_the_inbox() {
         )));
         assert!(message.contains("metrics.path"), "{path}: {message}");
     }
-    // A path that only starts with the same letters is free. The phone paths are on the phone port.
-    ok(&with(r#"metrics { enabled = true path = "/v1/x" }"#));
+    // A path that only starts with the same letters is free.
+    ok(&with(r#"metrics { enabled = true path = "/v10/x" }"#));
     ok(&with(r#"metrics { enabled = true path = "/api/v10" }"#));
 }
 
@@ -2260,14 +2270,6 @@ fn the_inbox_values_that_contradict_each_other_stop_the_start() {
             "the error holds the values: {message}"
         );
     }
-    // The listener of the phones is not the listener of the portal.
-    let message = inbox_err(&with_inbox(
-        &INBOX.replace("0.0.0.0:8080", "127.0.0.1:4181"),
-    ));
-    assert!(
-        message.contains("inbox.devices.listen must not use the port of server.listen_address"),
-        "{message}"
-    );
 }
 
 #[test]
@@ -2345,7 +2347,6 @@ fn the_replica_block_is_for_sqlite_and_the_cluster_block_is_for_postgres() {
         "{message}"
     );
     for (from, to) in [
-        ("0.0.0.0:8082", "0.0.0.0:8080"),
         ("0.0.0.0:8082", "0.0.0.0:4181"),
         (
             "inbox-peers.apps.svc.cluster.local:8082",

@@ -43,7 +43,9 @@ const ENROLL_MAX_MESSAGE: usize = 8 * 1024;
 
 /// `GET /v1/enroll`: the upgrade to a WebSocket, then the enrollment.
 pub fn enroll_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
-    let guard = SocketGuard::new(&app);
+    let Some(guard) = SocketGuard::new(&app) else {
+        return refuse_busy(&ip);
+    };
     let answer = ws::upgrade(request, ENROLL_MAX_MESSAGE, move |socket| async move {
         let _guard = guard;
         run_enroll(app, socket, ip).await
@@ -53,12 +55,20 @@ pub fn enroll_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp 
 
 /// `GET /v1/session`: the upgrade to a WebSocket, then the session of a phone.
 pub fn session_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
-    let guard = SocketGuard::new(&app);
+    let Some(guard) = SocketGuard::new(&app) else {
+        return refuse_busy(&ip);
+    };
     let answer = ws::upgrade(request, noise::MAX_MESSAGE, move |socket| async move {
         let _guard = guard;
         run_session(app, socket, ip).await
     });
     answer.unwrap_or_else(|refusal| refusal)
+}
+
+/// The budget of sessions is full: the phone gets `503` and no WebSocket exists.
+fn refuse_busy(ip: &IpAddr) -> Resp {
+    log::warn!(event = "session_budget_full", client.address = %ip);
+    super::http::busy()
 }
 
 async fn close_with(socket: &mut Socket, code: u16, reason: &str) {

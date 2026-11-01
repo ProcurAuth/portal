@@ -5952,7 +5952,6 @@ mod inbox_rights_tests {
 
     fn inbox_node(backend: &Backend) -> (Node, std::sync::Arc<dyn Authorizer>) {
         let pdp_port = free_port();
-        let devices = free_port();
         let server_key = inbox_core::server_key::ServerKey::generate()
             .unwrap()
             .encode()
@@ -5971,8 +5970,7 @@ mod inbox_rights_tests {
                 inbox {{
                   server_key_env = "INBOX_TEST_KEY"
                   devices {{
-                    listen = "127.0.0.1:{devices}"
-                    public_address = "127.0.0.1:{devices}"
+                    public_address = "127.0.0.1:4181"
                     heartbeat_interval = "20s"
                     session_timeout = "60s"
                     resend_after = "15s"

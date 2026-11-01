@@ -175,10 +175,8 @@ struct Server {
     dir: PathBuf,
     /// Name of this instance: its configuration and log files.
     name: String,
-    /// The phone port (`inbox.devices.listen`): phones only.
+    /// The listener of the portal: the pages, the producers and the phones use this one port.
     port: u16,
-    /// The listener of the portal: the sign-in and the admin calls of the inbox.
-    admin_port: u16,
     child: Option<Child>,
     token: String,
     /// The database to drop with the server that created it.
@@ -231,7 +229,6 @@ impl Server {
         .unwrap();
 
         let port = free_port();
-        let admin_port = free_port();
         let database = format!("inbox_e2e_{}", free_port());
         let (storage_block, postgres_block) = match &pg {
             None => (
@@ -271,7 +268,7 @@ postgres {{
         let config = format!(
             r#"
 server {{
-  listen_address = "127.0.0.1:{admin_port}"
+  listen_address = "127.0.0.1:{port}"
   trusted_proxies = []
 }}
 authentication {{
@@ -290,7 +287,6 @@ inbox {{
   name = "E2E"
   server_key_file = "{key}"
   devices {{
-    listen = "127.0.0.1:{port}"
     public_address = "127.0.0.1:{port}"
     heartbeat_interval = "5s"
     session_timeout = "10s"
@@ -335,7 +331,6 @@ inbox {{
             dir,
             name: "server".into(),
             port,
-            admin_port,
             child: None,
             token,
             pg,
@@ -364,17 +359,15 @@ inbox {{
 
     /// Another instance of the same service: same database, same secrets, its own ports, configuration and log.
     fn sibling(&self, name: &str) -> Server {
-        let (port, admin_port) = (free_port(), free_port());
+        let port = free_port();
         let text = std::fs::read_to_string(self.config())
             .unwrap()
-            .replace(&self.port.to_string(), &port.to_string())
-            .replace(&self.admin_port.to_string(), &admin_port.to_string());
+            .replace(&self.port.to_string(), &port.to_string());
         std::fs::write(self.dir.join(format!("{name}.hcl")), text).unwrap();
         Server {
             dir: self.dir.clone(),
             name: name.into(),
             port,
-            admin_port,
             child: None,
             token: self.token.clone(),
             pg: None,
@@ -445,7 +438,7 @@ inbox {{
         if let Some(session) = slot.as_ref() {
             return session.clone();
         }
-        let session = std::sync::Arc::new(sign_in(self.admin_port));
+        let session = std::sync::Arc::new(sign_in(self.port));
         *slot = Some(session.clone());
         session
     }
@@ -465,7 +458,7 @@ inbox {{
             return session.clone();
         }
         add_account_with(self, login, grants);
-        let session = std::sync::Arc::new(sign_in_as(self.admin_port, login, ACCOUNT_PASSWORD));
+        let session = std::sync::Arc::new(sign_in_as(self.port, login, ACCOUNT_PASSWORD));
         self.accounts
             .lock()
             .unwrap()
@@ -654,7 +647,7 @@ fn dechunk(mut body: &str) -> String {
 
 fn post_alert(s: &Server, key: &str, body: Value) -> (u16, Value) {
     let (status, text) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         &[
@@ -689,9 +682,9 @@ enum EnrollFail {
 /// The users page gives the anti-CSRF token of the forms that manage the accounts.
 fn users_csrf(s: &Server) -> String {
     let admin = s.session();
-    let host = format!("127.0.0.1:{}", s.admin_port);
+    let host = format!("127.0.0.1:{}", s.port);
     let (st, _, page) = http_full(
-        s.admin_port,
+        s.port,
         &host,
         "GET",
         "/auth/settings?add=1",
@@ -711,10 +704,10 @@ fn users_csrf(s: &Server) -> String {
 /// A form of the users pages, sent by the superadmin. The answer is a redirect with the outcome.
 fn users_form(s: &Server, path: &str, fields: &str) -> String {
     let admin = s.session();
-    let host = format!("127.0.0.1:{}", s.admin_port);
+    let host = format!("127.0.0.1:{}", s.port);
     let body = format!("csrf={}&{fields}", users_csrf(s));
     let (st, head, text) = http_full(
-        s.admin_port,
+        s.port,
         &host,
         "POST",
         path,
@@ -867,9 +860,9 @@ fn inbox_page(s: &Server, path: &str) -> (u16, String) {
 }
 
 fn inbox_page_as(s: &Server, cookie: &str, path: &str) -> (u16, String) {
-    let host = format!("127.0.0.1:{}", s.admin_port);
+    let host = format!("127.0.0.1:{}", s.port);
     let (st, _, page) = http_full(
-        s.admin_port,
+        s.port,
         &host,
         "GET",
         path,
@@ -882,15 +875,15 @@ fn inbox_page_as(s: &Server, cookie: &str, path: &str) -> (u16, String) {
 /// A form of the inbox, sent with the session of an account. The answer is the status, the head and
 /// the body.
 fn inbox_form(s: &Server, cookie: &str, path: &str, fields: &str) -> (u16, String, String) {
-    let host = format!("127.0.0.1:{}", s.admin_port);
-    let csrf = inbox_csrf(s.admin_port, cookie);
+    let host = format!("127.0.0.1:{}", s.port);
+    let csrf = inbox_csrf(s.port, cookie);
     let body = if fields.is_empty() {
         format!("csrf={csrf}")
     } else {
         format!("csrf={csrf}&{fields}")
     };
     http_full(
-        s.admin_port,
+        s.port,
         &host,
         "POST",
         path,
@@ -1380,11 +1373,17 @@ fn config_validation_is_strict() {
             "    max_devices = 10\n    admin_listen = \"127.0.0.1:1\"",
             "inbox.devices.admin_listen",
         ),
-        // The phone port has no list of proxies of its own: it uses `server.trusted_proxies`.
+        // The phones have no list of proxies of their own: they use `server.trusted_proxies`.
         (
             "    max_devices = 10",
             "    max_devices = 10\n    trusted_proxies = []",
             "unknown configuration key: inbox.devices.trusted_proxies",
+        ),
+        // The phones use the listener of the portal: the key of the old phone port is gone, with no alias.
+        (
+            "    max_devices = 10",
+            "    max_devices = 10\n    listen = \"127.0.0.1:1\"",
+            "unknown configuration key: inbox.devices.listen",
         ),
         (
             "resend_after = \"1s\"",
@@ -1418,7 +1417,7 @@ fn config_validation_is_strict() {
         let error = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(error.contains(expected), "{to}: {error}");
     }
-    // The address of the listener, as the phones see it, is mandatory and checked.
+    // The public address of the portal, as the phones see it, is mandatory and checked.
     let public = format!("    public_address = \"127.0.0.1:{}\"\n", s.port);
     assert!(text.contains(&public), "{text}");
     std::fs::write(&broken, text.replacen(&public, "", 1)).unwrap();
@@ -1515,29 +1514,16 @@ fn config_validation_is_strict() {
         let error = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(error.contains(expected), "{block}: {error}");
     }
-
-    // The listener of the phones must not use the port of the portal.
-    let same = text.replacen(
-        &format!("listen = \"127.0.0.1:{}\"", s.port),
-        &format!("listen = \"127.0.0.1:{}\"", s.admin_port),
-        1,
-    );
-    std::fs::write(&broken, same).unwrap();
-    let out = portal(
-        &["check-config", "--config", broken.to_str().unwrap()],
-        None,
-    );
-    assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("inbox.devices.listen"));
 }
 
-/// The API of the producers is on the port of the pages. The phones have their own port, which has no
-/// API and no page. The routes of the inbox need no session of the portal and set no cookie.
+/// One port serves the pages, the API of the producers and the phones. A phone enrolls and gets an
+/// alert on the same port as `/auth/login`. The routes of the inbox need no session of the portal and
+/// set no cookie.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn producers_use_the_port_of_the_pages_and_phones_use_their_own() {
+async fn one_port_serves_the_pages_the_producers_and_the_phones() {
     let mut s = Server::setup();
     s.start();
-    let (pages, phones) = (s.admin_port, s.port);
+    let (pages, phones) = (s.port, s.port);
     let host = format!("127.0.0.1:{pages}");
 
     // The sign-in page and the API of the producers are on the same port.
@@ -1605,33 +1591,44 @@ async fn producers_use_the_port_of_the_pages_and_phones_use_their_own() {
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("\"protocol\""), "{body}");
 
-    // The routes of the phones are not on the port of the pages. The portal does not know them.
-    let (st, body) = http(pages, "GET", "/v1/session", &[], "");
-    assert_ne!(st, 400, "the pages port is not the phone port: {body}");
-    assert!(!body.contains("WebSocket"), "{body}");
-
-    // The phone port has the routes of the phones and the health routes only.
+    // The routes of the phones are on the port of the pages. A plain GET is not an upgrade.
     let (st, body) = http(phones, "GET", "/v1/session", &[], "");
+    assert_eq!(st, 400, "a plain GET is not an upgrade: {body}");
+    let (st, body) = http(phones, "GET", "/v1/enroll", &[], "");
     assert_eq!(st, 400, "a plain GET is not an upgrade: {body}");
     let (st, _) = http(phones, "POST", "/v1/session", &[], "");
     assert_eq!(st, 405);
-    let (st, _) = http(phones, "GET", "/healthz", &[], "");
-    assert_eq!(st, 200);
-    let (st, _) = http(phones, "GET", "/readyz", &[], "");
-    assert_eq!(st, 200);
-    for path in ["/api/v1/alerts", "/api/version", "/auth/login", "/"] {
+    let (st, _) = http(phones, "POST", "/v1/enroll", &[], "");
+    assert_eq!(st, 405);
+    // The inbox owns the prefix `/v1/`: an unknown route is 404 and never a page of the portal.
+    for path in ["/v1/", "/v1/nothing", "/v1/session/x"] {
         let (st, _) = http(phones, "GET", path, &[], "");
-        assert_eq!(st, 404, "{path} is not on the phone port");
+        assert_eq!(st, 404, "{path}");
     }
-    let (st, _) = http(
-        phones,
-        "POST",
-        "/api/v1/alerts",
-        std::slice::from_ref(&auth),
-        "{}",
+    // The upgrade sets no cookie and needs no session. The answer is a plain 101.
+    let (mut ws, response) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{phones}/v1/session"))
+            .await
+            .expect("the upgrade works on the port of the pages");
+    assert_eq!(response.status(), 101);
+    assert!(
+        response.headers().get("set-cookie").is_none(),
+        "a route of the phones sets no cookie: {:?}",
+        response.headers()
     );
-    assert_eq!(st, 404, "the API of the producers is not on the phone port");
-
+    // A bad first frame ends the session: the server closes the connection.
+    let _ = ws.send(Message::Binary(vec![1u8; 10].into())).await;
+    let mut closed = false;
+    while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+        if frame.is_err() || matches!(frame, Ok(Message::Close(_))) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "the inbox closes a session that starts with a bad frame"
+    );
     // The pages work on their port. The launcher has no tile for the inbox: it is a feature of the portal.
     let (st, page) = inbox_page(&s, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
@@ -1648,11 +1645,92 @@ async fn producers_use_the_port_of_the_pages_and_phones_use_their_own() {
     s.stop();
 }
 
+/// The phone sessions have their own budget on the one listener: `server.max_connections` plus two times
+/// `inbox.devices.max_devices`. A connection that upgrades gives its permit of the pages back. With
+/// `max_connections = 3` and `max_devices = 1` the budget is 5 sessions: the sixth gets 503 before the
+/// upgrade, the pages still answer, and a closed session gives its permit back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn phone_sessions_have_a_budget_that_the_pages_do_not_share() {
+    let mut s = Server::setup();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    assert!(text.contains("  trusted_proxies = []\n"));
+    assert!(text.contains("    max_devices = 10\n"));
+    std::fs::write(
+        s.config(),
+        text.replacen(
+            "  trusted_proxies = []\n",
+            "  trusted_proxies = []\n  max_connections = 3\n  max_login_body_reads = 2\n",
+            1,
+        )
+        .replacen("    max_devices = 10\n", "    max_devices = 1\n", 1),
+    )
+    .unwrap();
+    s.start();
+    let port = s.port;
+    let open = |path: &'static str| async move {
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}")).await
+    };
+    // Five sessions fill the budget. Two of them use the enrollment route.
+    let mut held = Vec::new();
+    for path in [
+        "/v1/session",
+        "/v1/session",
+        "/v1/session",
+        "/v1/enroll",
+        "/v1/enroll",
+    ] {
+        let (ws, response) = open(path).await.expect("a free permit");
+        assert_eq!(response.status(), 101);
+        held.push(ws);
+    }
+    // The sixth attempt gets 503 before the upgrade, on both routes. No WebSocket exists for it.
+    for path in ["/v1/session", "/v1/enroll"] {
+        match open(path).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), 503, "{path}");
+                assert!(response.headers().get("retry-after").is_some());
+            }
+            other => panic!("{path}: the budget is full, got {:?}", other.map(|_| ())),
+        }
+    }
+    let (st, body) = http(port, "GET", "/v1/session", &[], "");
+    assert_eq!((st, body.trim()), (503, "no free session"));
+    // The pages and the API keep their own budget: the sessions hold none of it.
+    for _ in 0..3 {
+        let (st, body) = http(port, "GET", "/auth/login", &[], "");
+        assert_eq!(st, 200, "{body}");
+    }
+    let (st, body) = http(port, "GET", "/readyz", &[], "");
+    assert_eq!(st, 200, "{body}");
+    let auth = ("Authorization", format!("Bearer {}", s.token));
+    let (st, body) = http(
+        port,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"while the session budget is full"}"#,
+    );
+    assert_eq!(st, 201, "{body}");
+    // A session that ends gives its permit back.
+    let mut first = held.remove(0);
+    let _ = first.close(None).await;
+    drop(first);
+    wait_for("a free session permit", Duration::from_secs(10), || {
+        let (st, _) = http(port, "GET", "/v1/session", &[], "");
+        st == 400
+    });
+    let (again, response) = open("/v1/session").await.expect("the permit came back");
+    assert_eq!(response.status(), 101);
+    drop((again, held));
+    s.stop();
+}
+
 /// With the block `inbox`, the listener of the portal opens before the catalogue is complete and serves
-/// the API of the inbox only. The phone port is open too. An alert and a phone never wait for the
-/// catalogue. Every other route of the portal fails closed with 503. A stop in this time ends the process.
-#[test]
-fn the_inbox_answers_before_the_catalogue_is_complete() {
+/// the routes of the inbox only: the API of the producers and the routes of the phones. An alert and a
+/// phone never wait for the catalogue. Every other route of the portal fails closed with 503. A stop in
+/// this time ends the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_inbox_answers_before_the_catalogue_is_complete() {
     let mut s = Server::setup();
     // A source that never answers: the catalogue is never complete.
     s.add_block("discovery {\n  docker_socket = \"/nonexistent/docker.sock\"\n}");
@@ -1665,7 +1743,7 @@ fn the_inbox_answers_before_the_catalogue_is_complete() {
             .spawn()
             .unwrap(),
     );
-    let (pages, phones) = (s.admin_port, s.port);
+    let (pages, phones) = (s.port, s.port);
     let deadline = Instant::now() + Duration::from_secs(30);
     while TcpStream::connect(("127.0.0.1", pages)).is_err() {
         assert!(Instant::now() < deadline, "no port: {}", s.log());
@@ -1682,8 +1760,17 @@ fn the_inbox_answers_before_the_catalogue_is_complete() {
         r#"{"group":"infra","title":"before the catalogue"}"#,
     );
     assert_eq!(st, 201, "{body}");
-    let (st, _) = http(phones, "GET", "/v1/session", &[], "");
-    assert_eq!(st, 400, "the phones reach the inbox");
+    // The phones reach the inbox at once on the same port: a plain GET is not an upgrade.
+    for path in ["/v1/session", "/v1/enroll"] {
+        let (st, body) = http(phones, "GET", path, &[], "");
+        assert_eq!(st, 400, "{path}: the phones reach the inbox: {body}");
+    }
+    let (mut ws, response) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{phones}/v1/session"))
+            .await
+            .expect("a phone connects before the catalogue is complete");
+    assert_eq!(response.status(), 101);
+    let _ = ws.close(None).await;
     for path in ["/auth/login", "/healthz", "/auth/verify", "/"] {
         let (st, body) = http(pages, "GET", path, &[], "");
         assert_eq!((st, body.trim()), (503, "starting"), "{path}");
@@ -1747,7 +1834,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Producer API checks.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         &[("Idempotency-Key", "x".into())],
@@ -1840,7 +1927,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Delivery status for producers.
     let (st, body) = http(
-        s.admin_port,
+        s.port,
         "GET",
         &format!("/api/v1/alerts/{k1}"),
         &[("Authorization", format!("Bearer {}", s.token))],
@@ -1873,7 +1960,7 @@ async fn delivery_guarantees_end_to_end() {
     .to_string();
     let auth = [("Authorization", format!("Bearer {}", s.token))];
     let (st, body) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/webhooks/alertmanager/infra",
         &auth,
@@ -1889,7 +1976,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(got.title, "[FIRING] HighLatency: p99 > 2s");
     ca.ack(&got.alert_id, AckStage::Received).await;
     let (_, body) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/webhooks/alertmanager/infra",
         &auth,
@@ -1903,7 +1990,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Admin: the pages of the tab Inbox need a session, the forms need the origin, the form type and
     // the anti-CSRF token. The JSON admin API of the first versions is gone.
-    let ap = s.admin_port;
+    let ap = s.port;
     let host = format!("127.0.0.1:{ap}");
     for path in ["/auth/settings/inbox", "/auth/settings/inbox/devices"] {
         let (st, head, _) = http_full(ap, &host, "GET", path, &[], "");
@@ -2075,14 +2162,11 @@ async fn delivery_guarantees_end_to_end() {
     assert!(page.contains("Received"), "{page}");
     let (st, _) = admin(&s, "POST", "/auth/inbox/api/login/start", "{}");
     assert_eq!(st, 404, "no login endpoint any more");
-    // The HTML front is gone: the listener of the phones serves no page.
-    let (st, _) = http(s.port, "GET", "/", &[], "");
-    assert_eq!(st, 404);
 
     // The metrics of the inbox are in the Prometheus text of the portal, with their old names.
     let (st, metrics) = http_host(
-        s.admin_port,
-        &format!("127.0.0.1:{}", s.admin_port),
+        s.port,
+        &format!("127.0.0.1:{}", s.port),
         "GET",
         "/metrics",
         &[],
@@ -2152,7 +2236,7 @@ async fn enrollment_attempts_are_rate_limited() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrations_and_reverse_proxy_prefixes() {
     let mut s = Server::setup();
-    // The proxy that sets the address of the client is a trusted proxy of the portal. The phone port uses the same list.
+    // The proxy that sets the address of the client is a trusted proxy of the portal. The phones use the same list.
     let cfg = std::fs::read_to_string(s.config()).unwrap();
     std::fs::write(
         s.config(),
@@ -2171,7 +2255,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     // Generic notify: plain text body, token in the query string, no Idempotency-Key.
     let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
     let (st, body) = http(
-        s.admin_port,
+        s.port,
         "POST",
         &url,
         &[("Content-Type", "text/plain".into())],
@@ -2183,7 +2267,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // The same request retried within the minute is deduplicated.
     let (st, body) = http(
-        s.admin_port,
+        s.port,
         "POST",
         &url,
         &[("Content-Type", "text/plain".into())],
@@ -2195,7 +2279,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     // Without a title anywhere, the plain text body is the title, on one line.
     let auth = ("Authorization", format!("Bearer {}", s.token));
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2207,7 +2291,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // An empty request has no title: refused.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2217,7 +2301,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // JSON with a title, bearer header.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2229,7 +2313,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // Any other JSON is the title as compact text; X-Title overrides it.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         &[auth.clone(), ("X-Title", "Uptime".into())],
@@ -2240,7 +2324,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(got.title, "Uptime");
     c.ack(&got.alert_id, AckStage::Received).await;
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2251,16 +2335,10 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(got.title, r#"{"monitor":{"name":"web"},"status":0}"#);
     c.ack(&got.alert_id, AckStage::Received).await;
     // Wrong token in the query string is refused; forbidden group too.
-    let (st, _) = http(
-        s.admin_port,
-        "POST",
-        "/api/v1/notify/infra?token=nope",
-        &[],
-        "x",
-    );
+    let (st, _) = http(s.port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
     assert_eq!(st, 401);
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         &format!("/api/v1/notify/other?token={}", s.token),
         &[],
@@ -2273,7 +2351,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let long = "x".repeat(129);
     let body = json!({"group": "infra", "title": long}).to_string();
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2281,7 +2359,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 413);
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2294,7 +2372,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // Only the current field names are accepted.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2304,7 +2382,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // JSON API without Idempotency-Key: created, then deduplicated.
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2312,7 +2390,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 201);
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2320,12 +2398,10 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 200);
 
-    // The pages of the inbox are not on the listener of the phones, and the portal needs a session for them.
-    let (st, _) = http(port, "GET", "/auth/settings/inbox", &[], "");
-    assert_eq!(st, 404);
+    // The portal needs a session for the pages of the inbox.
     let (st, head, _) = http_full(
-        s.admin_port,
-        &format!("127.0.0.1:{}", s.admin_port),
+        s.port,
+        &format!("127.0.0.1:{}", s.port),
         "GET",
         "/auth/settings/inbox",
         &[],
@@ -2335,8 +2411,8 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert!(location(&head).starts_with("/auth/login"), "{head}");
     // The producer token does not open the pages.
     let (st, _, _) = http_full(
-        s.admin_port,
-        &format!("127.0.0.1:{}", s.admin_port),
+        s.port,
+        &format!("127.0.0.1:{}", s.port),
         "GET",
         "/auth/settings/inbox",
         std::slice::from_ref(&auth),
@@ -2492,7 +2568,8 @@ fn check_config_reports_the_replica_block() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(shown.contains("inbox.devices.listen"), "{shown}");
+    assert!(shown.contains("inbox.devices.public_address"), "{shown}");
+    assert!(!shown.contains("inbox.devices.listen"), "{shown}");
     assert!(
         shown.contains("inbox.producer.ci.token = <hidden>  # file:"),
         "{shown}"
@@ -2847,7 +2924,6 @@ async fn a_sqlite_installation_moves_to_postgres() {
         dir: s.dir.clone(),
         name: "postgres".into(),
         port: s.port,
-        admin_port: s.admin_port,
         child: None,
         token: s.token.clone(),
         pg: Some((admin_pg, database)),
@@ -3329,8 +3405,8 @@ fn the_peer_port_refuses_requests_that_are_not_signed() {
     let (st, body) = call(now, sign(now, hello, ""));
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("\"instance\""), "{body}");
-    // The device port does not serve the peer API.
-    assert_eq!(http(a.port, "GET", hello, &[], "").0, 404);
+    // The port of the portal does not serve the peer API: the portal sends a visitor without a session to the login.
+    assert_eq!(http(a.port, "GET", hello, &[], "").0, 302);
 }
 
 // ---------------------------------------------------------------- protocol 4: enrollment codes
@@ -3382,7 +3458,7 @@ async fn enroll_with_frame(port: u16, frame: Message) -> Option<u16> {
 async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     let mut s = Server::setup();
     s.start();
-    let (admin_port, host) = (s.admin_port, format!("127.0.0.1:{}", s.admin_port));
+    let (port, host) = (s.port, format!("127.0.0.1:{}", s.port));
 
     // The rules of the form: a session, a POST with the origin, the form type and the token, no other field.
     let session = s.session();
@@ -3391,10 +3467,10 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
         "Content-Type",
         "application/x-www-form-urlencoded".to_string(),
     );
-    let csrf = inbox_csrf(admin_port, &session.cookie);
+    let csrf = inbox_csrf(port, &session.cookie);
     let call = |method: &str, headers: &[(&str, String)], body: &str| {
         http_host(
-            admin_port,
+            port,
             &host,
             method,
             "/auth/settings/inbox/code",
@@ -3721,6 +3797,11 @@ async fn without_the_inbox_block_the_pages_are_absent() {
     let (st, home) = inbox_page_as(&s, &session.cookie, "/");
     assert_eq!(st, 200);
     assert!(!home.contains("Inbox"), "no tile Inbox without the block");
+    // The routes of the inbox are not found without the block.
+    for path in ["/v1/session", "/v1/enroll", "/api/version"] {
+        let (st, _) = inbox_page_as(&s, &session.cookie, path);
+        assert_eq!(st, 404, "{path}");
+    }
     users_form(
         &s,
         "/auth/users/add",
@@ -3806,8 +3887,8 @@ fn portal_alert_list(s: &Server) -> Vec<Value> {
 
 fn metrics_of(s: &Server) -> String {
     http_host(
-        s.admin_port,
-        &format!("127.0.0.1:{}", s.admin_port),
+        s.port,
+        &format!("127.0.0.1:{}", s.port),
         "GET",
         "/metrics",
         &[],
@@ -3830,10 +3911,10 @@ async fn a_burst_of_refused_sign_ins_makes_one_alert() {
     conn.subscribe("infra").await;
 
     // Five refused sign-ins are fewer than the threshold: nothing.
-    refuse_sign_ins(s.admin_port, "mallory", 5);
+    refuse_sign_ins(s.port, "mallory", 5);
     conn.no_alert(Duration::from_secs(3)).await;
     // Four more reach the threshold of 6.
-    refuse_sign_ins(s.admin_port, "mallory", 4);
+    refuse_sign_ins(s.port, "mallory", 4);
     let alert = conn.alert_within(Duration::from_secs(10)).await;
     assert_eq!(alert.title, "6 refused sign-ins in 1 minute");
     assert!(!alert.title.contains("mallory") && !alert.title.contains("127.0.0.1"));
@@ -3841,7 +3922,7 @@ async fn a_burst_of_refused_sign_ins_makes_one_alert() {
     conn.ack(&alert.alert_id, AckStage::Received).await;
 
     // A second burst inside `repeat_after` makes no second alert, and the burst goes on.
-    refuse_sign_ins(s.admin_port, "mallory", 8);
+    refuse_sign_ins(s.port, "mallory", 8);
     conn.no_alert(Duration::from_secs(4)).await;
     let alerts = portal_alert_list(&s);
     assert_eq!(alerts.len(), 1, "{alerts:?}");
@@ -3922,9 +4003,9 @@ fn producer_call(
     idempotency_key: &str,
     body: &str,
 ) -> (u16, String, Value) {
-    let host = format!("localhost:{}", s.admin_port);
+    let host = format!("localhost:{}", s.port);
     let (status, head, text) = http_full(
-        s.admin_port,
+        s.port,
         &host,
         method,
         path,
@@ -4101,7 +4182,7 @@ user "partial" {{
     assert_eq!(st, 201, "{v}");
     assert_eq!(take(&mut conn).await.title, "from the file");
     let (st, _) = http(
-        s.admin_port,
+        s.port,
         "POST",
         &format!("/api/v1/notify/crit?token={ci}&title=query"),
         &[],
@@ -4204,8 +4285,8 @@ async fn two_instances_send_one_alert_for_one_event() {
     assert_eq!(alert.title, "Service Notes is unhealthy for 10 seconds");
     conn.ack(&alert.alert_id, AckStage::Received).await;
     // Both instances see a burst of refusals.
-    refuse_sign_ins(a.admin_port, "mallory", 7);
-    refuse_sign_ins(b.admin_port, "mallory", 7);
+    refuse_sign_ins(a.port, "mallory", 7);
+    refuse_sign_ins(b.port, "mallory", 7);
     let burst = conn.alert_within(Duration::from_secs(10)).await;
     assert_eq!(burst.title, "6 refused sign-ins in 1 minute");
     conn.ack(&burst.alert_id, AckStage::Received).await;
@@ -4498,7 +4579,7 @@ user "fred" {{
     c.subscribe("other").await;
     // An account of the file has its permissions from the file: it opens the page of its phones,
     // makes a code, and its phone sees the group of its permission only.
-    let fred = sign_in_as(s.admin_port, "fred", ACCOUNT_PASSWORD);
+    let fred = sign_in_as(s.port, "fred", ACCOUNT_PASSWORD);
     let (st, page) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/phones");
     assert_eq!(st, 200, "{page}");
     let (st, _) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/devices");
@@ -4582,10 +4663,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let (st, doc) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox/doc");
     assert_eq!(st, 200);
     assert!(
-        has(
-            &doc,
-            &format!("http://127.0.0.1:{}/api/v1/alerts", s.admin_port)
-        ),
+        has(&doc, &format!("http://127.0.0.1:{}/api/v1/alerts", s.port)),
         "{doc}"
     );
     // The form refuses a group that the account may not send to, and sends to the others.
@@ -4761,10 +4839,10 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         Some(inbox_core::proto::close::REVOKED)
     );
     // The code page is shown one time, and no store keeps it.
-    let host = format!("127.0.0.1:{}", s.admin_port);
-    let csrf = inbox_csrf(s.admin_port, &bob_session.cookie);
+    let host = format!("127.0.0.1:{}", s.port);
+    let csrf = inbox_csrf(s.port, &bob_session.cookie);
     let (st, head, page) = http_full(
-        s.admin_port,
+        s.port,
         &host,
         "POST",
         "/auth/settings/inbox/code",
@@ -4920,7 +4998,7 @@ async fn demo_for_the_eyes() {
     let _ = take(&mut live).await;
     std::fs::write(
         out.join("demo.json"),
-        json!({"port": s.admin_port, "password": ACCOUNT_PASSWORD, "root": SUPERADMIN, "root_password": SUPERADMIN_PASSWORD}).to_string(),
+        json!({"port": s.port, "password": ACCOUNT_PASSWORD, "root": SUPERADMIN, "root_password": SUPERADMIN_PASSWORD}).to_string(),
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(1800);

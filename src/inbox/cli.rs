@@ -5,7 +5,7 @@
 //! - `token --out FILE`: makes the token of a producer.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
-//! - `healthcheck --config FILE`: asks `/readyz` of the listener of the phones.
+//! - `healthcheck --config FILE`: asks `/readyz` of the listener of the portal.
 
 use std::io::{BufRead, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -92,11 +92,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "healthcheck" => {
             let f = Flags::parse(rest, &["--config"])?;
             let (config, _secrets) = Config::load(&PathBuf::from(f.required("--config")?))?;
-            let inbox = config
-                .inbox
-                .as_ref()
-                .ok_or("the configuration has no inbox block")?;
-            healthcheck(inbox.devices.listen)
+            if config.inbox.is_none() {
+                return Err("the configuration has no inbox block".into());
+            }
+            healthcheck(config.server.listen_address)
         }
         other => Err(format!("unknown inbox command {other:?}\n{USAGE}")),
     }
@@ -165,7 +164,7 @@ fn write_new_secret(path: &std::path::Path, contents: &str) -> Result<(), String
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// `GET /readyz` on the listener of the phones, for the health checks of a container (the image
+/// `GET /readyz` on the listener of the portal, for the health checks of a container (the image
 /// has no shell and no `curl`).
 pub fn healthcheck(listen: SocketAddr) -> Result<(), String> {
     let target = if listen.ip().is_unspecified() {

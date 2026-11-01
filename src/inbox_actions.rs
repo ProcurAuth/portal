@@ -173,7 +173,7 @@ mod tests {
             inbox {
               server_key_env = "K"
               devices {
-                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080"
+                public_address = "inbox.example.org:8080"
                 heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
                 max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
               }

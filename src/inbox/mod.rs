@@ -11,8 +11,8 @@
 //! - `db`, `pg`, `store`: SQLite and PostgreSQL. The inbox uses the database of the portal.
 //! - `spool`, `peer`: the degraded mode, when PostgreSQL has no writable primary.
 //! - `replica`: the standby copy of the SQLite file.
-//! - `http`, `ws`: the listener of the phones, the API of the producers (the portal serves it on
-//!   its own listener), the listener of the cluster, and the WebSocket.
+//! - `http`, `ws`: the routes of the phones and of the producers (the portal serves them on its own
+//!   listener), the listener of the cluster, and the WebSocket.
 //! - `metrics`, `log`: the Prometheus text and the JSON log.
 
 pub mod admin;
@@ -51,7 +51,7 @@ use zeroize::Zeroizing;
 use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBackend};
 pub use api::ApiError;
 use db::Db;
-pub use http::{owns_api, serve_api};
+pub use http::{owns, serve};
 use hub::Hub;
 use peer::Cluster;
 use pg::{PgSettings, PgStore};
@@ -201,8 +201,8 @@ impl Booted {
             body_read_timeout: config.server.body_read_timeout,
             max_headers: config.server.max_headers,
             max_header_bytes: config.server.max_header_bytes,
-            max_connections: config.server.max_connections + 2 * inbox.devices.max_devices as usize,
-            trusted_proxies: config.server.trusted_proxies.clone(),
+            max_connections: config.server.max_connections,
+            max_sessions: config.server.max_connections + 2 * inbox.devices.max_devices as usize,
         };
         let init = Init {
             config: inbox,
@@ -367,14 +367,6 @@ impl Slot {
             })?),
             None => None,
         };
-        let devices_listener = TcpListener::bind(config.devices.listen)
-            .await
-            .map_err(|e| {
-                format!(
-                    "cannot listen on {} (inbox.devices.listen): {e}",
-                    config.devices.listen
-                )
-            })?;
         let groups: Vec<GroupInfo> = config
             .groups
             .iter()
@@ -389,6 +381,7 @@ impl Slot {
             .iter()
             .map(|(id, g)| (id.clone(), g.name.clone()))
             .collect();
+        let session_budget = state::SessionBudget::new(http.max_sessions);
         let app = Arc::new(App {
             limiter: AuthLimiter::new(
                 config.devices.max_auth_failures,
@@ -409,27 +402,22 @@ impl Slot {
             http,
             stop: crate::shutdown::Stop::default(),
             sockets: Default::default(),
+            session_budget,
             authorizer: std::sync::OnceLock::new(),
             config,
         });
         tasks::spawn_background(Arc::clone(&app));
         tokio::spawn(rights::run(Arc::clone(&app)));
-        let mut handles = vec![tokio::spawn(http::accept_loop(
-            Arc::clone(&app),
-            devices_listener,
-            http::Kind::Devices,
-        ))];
+        let mut handles = Vec::new();
         if let Some(listener) = cluster_listener {
-            handles.push(tokio::spawn(http::accept_loop(
+            handles.push(tokio::spawn(http::accept_cluster(
                 Arc::clone(&app),
                 listener,
-                http::Kind::Cluster,
             )));
         }
         *self.tasks.lock().unwrap_or_else(|p| p.into_inner()) = handles;
         log::info!(
             event = "inbox_started",
-            devices_listen = %app.config.devices.listen,
             public_address = %app.config.devices.public_address,
             groups = app.groups.len(),
             producers = app.secrets.producers.len(),
