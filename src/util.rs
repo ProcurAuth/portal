@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use zeroize::Zeroize;
 
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -139,16 +140,34 @@ pub fn parse_form(body: &[u8]) -> Result<HashMap<String, String>, String> {
     }
     for pair in raw.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = percent_decode_form(key)?;
-        let value = percent_decode_form(value)?;
+        let decoded = percent_decode_form(key)
+            .and_then(|key| percent_decode_form(value).map(|value| (key, value)));
+        let (key, mut value) = match decoded {
+            Ok(pair) => pair,
+            Err(error) => {
+                wipe(out);
+                return Err(error);
+            }
+        };
         if key.is_empty() {
+            value.zeroize();
+            wipe(out);
             return Err("empty form field name".into());
         }
-        if out.insert(key.clone(), value).is_some() {
+        if let Some(mut old) = out.insert(key.clone(), value) {
+            old.zeroize();
+            wipe(out);
             return Err(format!("duplicate form field: {key}"));
         }
     }
     Ok(out)
+}
+
+/// Erases the values of a form that the parser drops. A value can be a password.
+fn wipe(form: HashMap<String, String>) {
+    for (_, mut value) in form {
+        value.zeroize();
+    }
 }
 
 /// Tells whether `uri` is a safe return target: a local path and query.
@@ -463,6 +482,16 @@ mod tests {
     #[test]
     fn form_parsing_rejects_duplicates() {
         assert!(parse_form(b"a=1&a=2").is_err());
+    }
+
+    #[test]
+    fn form_parsing_still_refuses_a_bad_form_after_a_password_and_erases_nothing_it_returns() {
+        // The parser erases the values it drops on an error. A good form keeps its values.
+        assert!(parse_form(b"password=secret-one&=x").is_err());
+        assert!(parse_form(b"password=secret-one&x=%zz").is_err());
+        assert!(parse_form(b"password=secret-one&password=secret-two").is_err());
+        let form = parse_form(b"login=a&password=secret-one").unwrap();
+        assert_eq!(form["password"], "secret-one");
     }
 
     #[test]

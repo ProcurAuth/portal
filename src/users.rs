@@ -18,13 +18,24 @@ use crate::store::{DirectorySnapshot, KeyRow, Store, UserRow};
 pub const MIN_PASSWORD_BYTES: usize = 10;
 const MAX_LOGIN_CHARS: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UserRecord {
     pub password_hash: String,
     /// The grants that the settings pages gave. The database keeps these grants. The grants of the
     /// configuration are not here. See [`crate::grants::Policy`].
     pub grants: Vec<Grant>,
     pub created_at: i64,
+}
+
+/// The debug text never shows the password hash.
+impl std::fmt::Debug for UserRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRecord")
+            .field("password_hash", &"<hidden>")
+            .field("grants", &self.grants)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// Whose key it is.
@@ -876,5 +887,38 @@ mod tests {
         assert!(check_new_password("0123456789", 1024).is_ok());
         assert!(check_new_password("short", 1024).is_err());
         assert!(check_new_password(&"x".repeat(1025), 1024).is_err());
+    }
+}
+
+#[cfg(test)]
+mod secrecy_tests {
+    use super::*;
+
+    #[test]
+    fn the_debug_text_of_an_account_never_shows_the_password_hash() {
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo";
+        let record = UserRecord {
+            password_hash: hash.into(),
+            grants: Vec::new(),
+            created_at: 7,
+        };
+        let text = format!("{record:?}");
+        assert!(
+            !text.contains("argon2id") && !text.contains("aGFzaGhh"),
+            "{text}"
+        );
+        assert!(text.contains("<hidden>"), "{text}");
+        let row = crate::store::UserRow {
+            login: "alice".into(),
+            password_hash: hash.into(),
+            grants: Vec::new(),
+            created_at: 7,
+        };
+        let text = format!("{row:?}");
+        assert!(
+            !text.contains("argon2id") && !text.contains("aGFzaGhh"),
+            "{text}"
+        );
+        assert!(text.contains("alice"), "{text}");
     }
 }

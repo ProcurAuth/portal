@@ -77,13 +77,25 @@ fn migrated_path(kind: &str, id: &str) -> Result<String, String> {
         })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct UserRow {
     pub login: String,
     pub password_hash: String,
     /// The grants that the settings pages gave, sorted.
     pub grants: Vec<Grant>,
     pub created_at: i64,
+}
+
+/// The debug text never shows the password hash.
+impl std::fmt::Debug for UserRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserRow")
+            .field("login", &self.login)
+            .field("password_hash", &"<hidden>")
+            .field("grants", &self.grants)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// A key of the database, with its grants (portal 4, 5). The database keeps the SHA-256 digest of
