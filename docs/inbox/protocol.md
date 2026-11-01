@@ -1,7 +1,7 @@
 # Device protocol (version 4)
 
-The code is the reference: [`crates/inbox-core/src/proto.rs`](../../../crates/inbox-core/src/proto.rs),
-[`enroll.rs`](../../../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../../../crates/inbox-core/src/noise.rs).
+The code is the reference: [`crates/inbox-core/src/proto.rs`](../../crates/inbox-core/src/proto.rs),
+[`enroll.rs`](../../crates/inbox-core/src/enroll.rs) and [`noise.rs`](../../crates/inbox-core/src/noise.rs).
 The same crate runs on the server and in the Android app (JNI). The cryptography exists only once.
 
 All messages are JSON. Binary fields are standard base64 with padding.

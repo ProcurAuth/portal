@@ -1,10 +1,10 @@
 # Contributing
 
-- Code, comments and documentation are in English (`docs/SPEC.md` is the French
+- Code, comments and documentation are in English (`SPEC.md` is the French
   specification).
 - Keep patches minimal and focused; no unrelated reformatting.
 - Update tests and docs with every behaviour change. Protocol changes update
-  `docs/protocol.md` and bump `PROTOCOL_VERSION` when incompatible.
+  `protocol.md` and bump `PROTOCOL_VERSION` when incompatible.
 - Delivery guarantees are not negotiable: a change must never allow an accepted
   alert to be dropped or shown twice.
 - New dependencies need a reason; prefer the standard library and the platform.

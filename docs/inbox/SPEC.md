@@ -200,4 +200,4 @@ Les contact points de Grafana sont intégrés au code de Grafana : il n'existe p
 d'API de plugin pour en ajouter. L'intégration passe donc par le contact point
 « Webhook » de Grafana (format compatible Alertmanager) vers
 `POST /api/v1/webhooks/alertmanager/<groupe>` avec un token d'émetteur. Exemple
-de provisioning : [`docs/grafana/contact-point.yaml`](grafana/contact-point.yaml).
+de provisioning : [`grafana/contact-point.yaml`](grafana/contact-point.yaml).

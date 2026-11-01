@@ -24,8 +24,8 @@ inbox check-config --config /etc/inbox/config.hcl
 ```
 
 Durations are strings with a unit suffix: `ms`, `s`, `m`, `h`, `d` (`"500ms"`,
-`"20s"`, `"30d"`). The annotated example is [`config.example.hcl`](../config.example.hcl);
-the Compose variant is [`deploy/config.hcl`](../deploy/config.hcl).
+`"20s"`, `"30d"`). The annotated example is [`config.example.hcl`](../../deploy/config.example.hcl);
+the Compose variant is [`deploy/compose/config.hcl`](../../deploy/compose/config.hcl).
 
 ## `server`
 

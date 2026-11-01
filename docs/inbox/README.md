@@ -16,7 +16,7 @@ monitoring and makes subscribed Android phones ring, even when they are on silen
   full-screen until stopped on the phone, overriding silent, vibrate and do-not-disturb),
   *ring* (one sound, even on silent) or *notify*.
 
-French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
+French summary: [SPEC.md](SPEC.md) (cahier des charges).
 
 ## Architecture
 
@@ -37,7 +37,7 @@ French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
 | `crates/inbox-android`, `android/` | JNI bridge and the Android app. |
 | `web/` | Admin front (plain HTML, CSS and JavaScript, embedded in the binary). |
 | `deploy/` | Docker Compose and k3s. |
-| `docs/` | Specification, configuration, protocol, integrations. |
+| `docs/inbox/` | Specification, configuration, protocol, integrations. |
 
 ## Quick start (Docker Compose)
 
@@ -118,7 +118,7 @@ Reusing a key with different content returns `409`.
 ## Security model
 
 - **Enrollment** uses a one-time code of an account (protocol 4, see
-  [`docs/protocol.md`](docs/protocol.md)).
+  [`protocol.md`](protocol.md)).
   - The code holds the server address, the public key of the server and a secret of 128 bits.
   - The phone pins the key of the code and runs Noise IK to it. It sends the secret in message 1.
   - Only the holder of the server key can read the secret or answer the phone.
@@ -152,7 +152,7 @@ Reusing a key with different content returns `409`.
     and drops all capabilities.
 - TLS is the reverse proxy's job. The app accepts `https://` addresses.
 
-Details: [docs/protocol.md](docs/protocol.md), [SECURITY.md](SECURITY.md).
+Details: [protocol.md](protocol.md), [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
@@ -161,8 +161,8 @@ rejected and secrets are only referenced as files. Nothing starts if anything is
 missing or invalid. To check a file and the secrets it references, run
 `inbox check-config --config <file>`.
 
-- [config.example.hcl](config.example.hcl) is annotated.
-- [docs/configuration.md](docs/configuration.md) is the complete reference.
+- [config.example.hcl](../../deploy/config.example.hcl) is annotated.
+- [configuration.md](configuration.md) is the complete reference.
 
 ## HTTP API (port 8080)
 
@@ -200,9 +200,9 @@ Inbox speaks the format Grafana already sends instead.
   - URL `http(s)://<inbox>/api/v1/webhooks/alertmanager/<group>`;
   - *Authorization header* scheme `Bearer` and credentials = the producer token.
   
-  The provisioning example is [docs/grafana/contact-point.yaml](docs/grafana/contact-point.yaml).
+  The provisioning example is [grafana/contact-point.yaml](grafana/contact-point.yaml).
 - **Alertmanager:** use a `webhook_configs` receiver with a bearer token. The
-  example is [docs/alertmanager.yml](docs/alertmanager.yml).
+  example is [alertmanager.yml](alertmanager.yml).
 
 Resolved notifications are ignored unless `webhook_send_resolved = true`.
 Alertmanager's repeat notifications of the same firing are deduplicated.
@@ -402,7 +402,7 @@ delivering them**, and the phones keep their sessions; the pods stay in the serv
 
 ## Kubernetes (k3s)
 
-[deploy/k3s](deploy/k3s) holds a single-replica StatefulSet on a `local-path`
+[deploy/k3s](../../deploy/k3s) holds a single-replica StatefulSet on a `local-path`
 volume, a ConfigMap, a Secret mounted at `/run/secrets`, probes on `/healthz` and
 `/readyz`, and Traefik IngressRoutes. It follows the conventions of the Home
 infrastructure repository. To export telemetry to the cluster collector, first
