@@ -631,6 +631,7 @@ pub(super) async fn handle_keys(
     let frame = ui::Frame {
         logout_token: &logout_token,
         keys: true,
+        inbox: inbox_page::tab_visible(state, &viewer),
         superadmin: is_superadmin(&viewer),
     };
     let html = if form_page {
@@ -865,6 +866,7 @@ pub(super) async fn handle_keys_create(
     let frame = ui::Frame {
         logout_token: &logout_token,
         keys: true,
+        inbox: inbox_page::tab_visible(state, &viewer),
         superadmin: is_superadmin(&viewer),
     };
     let page = ui_keys::new_key_page(

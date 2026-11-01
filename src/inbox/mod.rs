@@ -50,7 +50,6 @@ use zeroize::Zeroizing;
 use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBackend};
 pub use api::ApiError;
 use db::Db;
-pub use http::json as json_response;
 use hub::Hub;
 use peer::Cluster;
 use pg::{PgSettings, PgStore};
@@ -268,6 +267,7 @@ impl Slot {
     pub fn app(&self) -> Option<Arc<App>> {
         self.app.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
+
     /// Gives the inbox what it needs for the rights. The portal calls it once, after the start.
     /// Before this call the inbox makes no decision with keys and removes no subscription.
     pub fn set_authorizer(&self, authorizer: Arc<dyn rights::Authorizer>) {
@@ -275,7 +275,6 @@ impl Slot {
             let _ = app.authorizer.set(authorizer);
         }
     }
-
 
     /// Makes an enrollment code for `login`. `None` without the block `inbox` or before the start.
     pub async fn create_enrollment_code(
@@ -392,12 +391,12 @@ impl Slot {
             next_session_id: AtomicU64::new(1),
             http,
             stop: crate::shutdown::Stop::default(),
-            authorizer: std::sync::OnceLock::new(),
             sockets: Default::default(),
+            authorizer: std::sync::OnceLock::new(),
             config,
         });
-        tokio::spawn(rights::run(Arc::clone(&app)));
         tasks::spawn_background(Arc::clone(&app));
+        tokio::spawn(rights::run(Arc::clone(&app)));
         let mut handles = vec![tokio::spawn(http::accept_loop(
             Arc::clone(&app),
             devices_listener,

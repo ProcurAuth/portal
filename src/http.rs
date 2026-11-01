@@ -444,16 +444,16 @@ async fn serve_until(
         Arc::clone(&state.discovery),
         move |catalog| {
             let is_complete = catalog.is_complete();
-            *publisher.catalog.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(catalog);
-            if is_complete {
-                complete.store(true, std::sync::atomic::Ordering::SeqCst);
-                // The first reads need no wait for the end of a tick.
             // The service `inbox` is a service of the portal itself: it is not in a workload label.
             let catalog = if publisher.config.inbox.is_some() {
                 catalog.with_internal(crate::inbox_actions::service())
             } else {
                 catalog
             };
+            *publisher.catalog.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(catalog);
+            if is_complete {
+                complete.store(true, std::sync::atomic::Ordering::SeqCst);
+                // The first reads need no wait for the end of a tick.
                 publisher.actions.wake_loop();
             }
         },
@@ -666,8 +666,8 @@ async fn handle_request(
         edge::handle_verify_key(&state, request.headers(), &client)
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
-    } else if path.starts_with(inbox_admin::PREFIX) {
-        inbox_admin::handle(&state, request, &client).await
+    } else if inbox_page::is_inbox_path(&path) {
+        inbox_page::handle(&state, request, &client).await
     } else if method == Method::GET && path == ui::keys::PATH {
         keys_page::handle_keys(
             &state,
@@ -1051,8 +1051,19 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
     // The discovery problems name workloads, so only the superadmin sees them.
     let catalog = current_catalog(state);
     let superadmin = is_superadmin(&viewer);
+    // The tile of the inbox is for an account with a right of the inbox, not for `access`.
+    let inbox_tile = inbox_page::tab_visible(state, &viewer);
     let shown = match &viewer.grants {
-        Some(grants) => Arc::new(catalog.filtered(|s| may_open(Some(grants), &s.id), superadmin)),
+        Some(grants) => Arc::new(catalog.filtered(
+            |s| {
+                if s.id == crate::inbox_actions::SERVICE {
+                    inbox_tile
+                } else {
+                    may_open(Some(grants), &s.id)
+                }
+            },
+            superadmin,
+        )),
         None if superadmin => Arc::clone(&catalog),
         None => Arc::new(catalog.filtered(|_| true, false)),
     };
@@ -1116,6 +1127,7 @@ async fn handle_settings(
     let frame = ui::Frame {
         logout_token: &logout_token,
         keys: state.config.keys.is_some(),
+        inbox: state.config.inbox.is_some(),
         superadmin: true,
     };
     let catalog = current_catalog(state);
@@ -3615,7 +3627,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         USERS_UPDATE_PATH => "users_update",
         IMPERSONATE_PATH => "impersonate",
         IMPERSONATE_END_PATH => "impersonate_end",
-        _ if path.starts_with(inbox_admin::PREFIX) => "inbox_admin",
+        _ if inbox_page::is_inbox_path(path) => "inbox_page",
         _ => "not_found",
     }
 }
@@ -3658,7 +3670,7 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
 mod edge;
 mod keys_page;
 mod options_page;
-mod inbox_admin;
+mod inbox_page;
 mod inbox_rights;
 mod pdp;
 
