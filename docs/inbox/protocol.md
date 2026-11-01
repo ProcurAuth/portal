@@ -76,13 +76,15 @@ device                                           server
 
 | Close code | Cause | Text in the app |
 |---|---|---|
-| 4410 `ENROLL_REFUSED` | The code is unknown, already used or expired. The account is revoked. Message 1 cannot be read or is not valid. | "The code is not valid. Ask for a new one." |
+| 4410 `ENROLL_REFUSED` | The code is unknown, already used or expired. Message 1 cannot be read or is not valid. The limit `inbox.devices.max_devices` is reached. | "The code is not valid. Ask for a new one." |
 | 4426 `PROTOCOL` | Message 1 is valid but `protocol` is not 4. The first frame is a text frame. | "Update the app." |
 | 4429 `RATE_LIMITED` | Too many attempts from this address. | "Too many attempts." |
 
 The server uses the same code 4410 for all causes of refusal. Then an observer cannot tell
-a used code from an unknown code. An HTTP answer 429 to the upgrade request has the
-same meaning as 4429.
+a used code from an unknown code. The log of the server has the real reason (event `enroll_refused`).
+The server closes with 4429 after the upgrade. It does not answer the HTTP status 429 to the upgrade request.
+A storage error closes with 1011, and the code stays unused. The server SHOULD close a connection
+that sends no message within 10 seconds.
 
 Security properties:
 - Only the holder of the server key can read message 1. The secret is safe from a passive observer.
@@ -194,20 +196,8 @@ These choices fill the gaps of the specification. Change them only with a new pr
 12. **One attempt.** An enrollment connection carries one handshake. The server closes it
     after message 2 or after a refusal. The phone closes it with code 1000.
 
-## Admin API (`server.admin_listen`)
+## Other interfaces
 
-The admin front and its API have **no password**, by design: network placement,
-or an authenticating reverse proxy, is the access control. The server still
-protects a front bound to localhost or a private network against hostile web
-pages opened in the operator's browser:
-
-| Check | Refused with | Protects against |
-|---|---|---|
-| `Host` must be one of `admin.allowed_hosts` (exact match) | 403 | DNS rebinding |
-| `POST` requires `Content-Type: application/json` and `X-Inbox-Request: 1` | 403 | Cross-site request forgery: a cross-origin page cannot set these without a CORS preflight, which Inbox never grants |
-| `Sec-Fetch-Site: cross-site` | 403 | Cross-site requests from browsers that send fetch metadata |
-
-Endpoints: `GET /api/admin/overview`, `GET /api/admin/alerts?limit=`,
-`GET /api/admin/alerts/{id}`, `GET /api/admin/connections?limit=&user=<login>`,
-`POST /api/admin/alerts` (`{group, title, idempotency_key}`) and
-`POST /api/admin/devices/{id}/revoke` (`{}`).
+The admin pages of the inbox are pages of the portal, under `/auth/settings/inbox`. They need a session of the portal.
+The producers send alerts to the same listener as the phones. The routes are in [README.md](README.md).
+The protocol of the phones has no admin call.

@@ -1,203 +1,156 @@
-# Inbox — cahier des charges
+# Inbox specification
 
-Document de référence des décisions prises au lancement du projet (octobre 2026).
-Le code fait foi pour les détails ; ce document fixe le *quoi* et le *pourquoi*.
+This document states what the inbox does and why. The inbox is a module of the portal. The code is the reference for details. The design of the merge is in [`../design-inbox-merge.md`](../design-inbox-merge.md).
 
-## 1. Objet
+The words MUST, MUST NOT, SHOULD and MAY have the meaning of RFC 2119 and RFC 8174.
 
-Inbox est un système d'alerte (inbox) auto-hébergé. Un serveur unique reçoit des
-alertes et les fait sonner sur des téléphones Android abonnés. Une alerte peut
-être vitale : **chaque appareil abonné doit la recevoir, et une seule fois**,
-y compris s'il était éteint, en mode avion ou si l'app était coupée au moment de
-l'émission.
+## 1. Purpose
 
-## 2. Périmètre
+1.1 The inbox sends alerts to Android phones. An alert can be vital. Each subscribed phone MUST get each alert, and MUST show it one time.
 
-| Inclus | Exclu (v1) |
+1.2 This holds when the phone was off, in airplane mode or disconnected when the alert came. It also holds when the app was stopped.
+
+1.3 The inbox is part of the portal. One account of the portal gives one identity and one set of permissions for the launcher, the keys and the inbox.
+
+## 2. Scope
+
+| In scope | Out of scope |
 |---|---|
-| Binaire serveur Rust unique, front admin embarqué | iOS (impossible sans APNs, donc sans dépendance à Apple) |
-| App Android (réception uniquement) | Émission d'alerte depuis l'app |
-| Image conteneur, docker compose, manifestes k3s | Haute disponibilité / multi-nœuds |
-| API d'émission + webhook Alertmanager / Grafana | Escalade automatique entre personnes |
-| Télémétrie OpenTelemetry (traces, métriques, logs) | Plugin Grafana (les contact points ne sont pas extensibles) |
+| The module `inbox` of the binary `portal`. | A standalone inbox binary. |
+| The Android app. It only receives alerts. | iOS. It cannot keep a connection in the background without the push service of Apple. |
+| The producer API, the webhooks for Alertmanager and Grafana, and the pages of the tab Inbox. | A push service of a third party (Firebase or Apple). |
+| Alerts of the portal about itself. | An acknowledgement of an alert by a person. An escalation between persons. |
+| Docker Compose and K3s files. | A Grafana plugin. Grafana contact points cannot be extended. |
+| One database with SQLite or PostgreSQL. A standby replica for SQLite. | An OpenTelemetry export. The metrics are in the Prometheus text of the portal. |
 
-## 3. Exigences fonctionnelles
+## 3. Functional requirements
 
-### 3.1 Connexion d'un téléphone
-- L'utilisateur saisit l'adresse du serveur (IP:port, nom de domaine, URL
-  `http(s)://`), le **mot de passe serveur partagé** et un **nom d'appareil**.
-- Une fois connecté, l'app affiche les groupes déclarés sur le serveur.
-- Pour chaque groupe, l'utilisateur choisit une **action** (ou ne s'abonne pas). Ce
-  choix est **local à chaque appareil** (décision du 2026-10-02, protocole v2) : le
-  serveur sait seulement quels groupes un appareil suit, jamais son niveau ; un même
-  pseudo peut avoir plusieurs appareils réglés différemment :
+### 3.1 Groups and alerts
 
-| Action | Comportement Android |
-|---|---|
-| `alarm` | Sonnerie d'alarme en boucle, volume alarme au maximum, sort du silencieux / vibreur, passe le « Ne pas déranger », écran plein écran ; un gros bouton central (à glisser hors du cercle, comme les alarmes Samsung) coupe le son sur le téléphone |
-| `ring` | Un son de notification **même en silencieux ou vibreur** |
-| `notify` | Notification standard, respecte le mode du téléphone |
+3.1.1 The configuration file MUST define the groups. A group has an id, a name and an optional description. A group MAY be `critical`.
 
-- Les alertes ne portent pas de sévérité : c'est l'abonné qui décide de la
-  réaction, groupe par groupe.
-- L'app ne peut **pas** émettre d'alerte : le serveur n'expose aucune route
-  d'émission à une identité d'appareil.
-- Les alertes sont **à sens unique** (décision du 2026-10-02) : pas d'acquittement,
-  le téléphone ne renvoie rien à l'humain ni à l'émetteur. Seul un accusé de
-  réception technique et automatique part du téléphone une fois l'alerte stockée :
-  sans lui le serveur ne pourrait ni retransmettre ni rattraper un téléphone
-  éteint, et la garantie de livraison tomberait.
-- L'écran d'accueil affiche les dernières alertes reçues : par défaut les 5 plus
-  récentes de moins de 24 h, les deux réglables. Menu burger vers les serveurs
-  et les réglages ; thème clair / sombre du téléphone par défaut.
-- Plusieurs serveurs Inbox peuvent être ajoutés et gérés dans l'app (une
-  connexion et des abonnements par serveur).
-- L'utilisateur s'identifie par un **pseudo** (décision du 2026-10-02) : un pseudo
-  par défaut dans les réglages de l'app, modifiable serveur par serveur à tout
-  moment. Le serveur l'enregistre avec l'appareil et dans chaque connexion, ce qui
-  permet de suivre les sessions par identifiant dans le front admin.
+3.1.2 An alert has one group and one title. The title MUST have one line and 128 characters at most. An alert MUST NOT have a body or a severity.
 
-### 3.2 Alerte
-- Une alerte se compose d'un **groupe** et d'un **titre** (une ligne, 128 caractères
-  max), tous deux obligatoires : ni description ni détails.
-- Sources : API HTTP avec token d'émetteur (déclaré en HCL, limité à des groupes),
-  formulaire du front admin, webhook compatible Alertmanager (utilisé aussi par le
-  contact point « Webhook » de Grafana).
-- Clé d'idempotence recommandée (en-tête `Idempotency-Key`) ; sans elle, une requête
-  identique reçue dans la même minute est dédupliquée. Un émetteur qui réessaie ne
-  crée donc pas de doublon.
-- Intégration avec n'importe quel outil d'alerting (décision du 2026-10-02) :
-  endpoint générique `/api/v1/notify/<groupe>` (texte ou JSON quelconque), token
-  possible dans l'URL (`?token=`) pour les outils sans en-têtes ; la page `/doc` du
-  front donne les recettes (Grafana, Alertmanager et outils courants).
-- Le front admin fonctionne derrière un ou plusieurs reverse proxys, à la racine
-  ou sous n'importe quel sous-chemin, sans configuration supplémentaire.
+3.1.3 The producer decides the group. The subscriber decides the reaction of the phone, group by group.
 
-### 3.3 Front admin (supervision)
-- Appareils : nom, statut (en ligne / hors ligne / injoignable / révoqué), IP
-  réelle (derrière proxys de confiance), version de l'app, connecté depuis,
-  dernier signe de vie, abonnements, alertes en attente.
-- Historique des connexions et des alertes, détail de livraison par appareil
-  (envoyée, reçue, nombre d'envois).
-- Accueil : les dernières alertes (5 de moins de 24 h par défaut, réglable),
-  menu burger, thème du système par défaut, charte graphique de S3-Browser.
-- Révocation d'un appareil, envoi manuel d'une alerte.
-- Aucune configuration modifiable : la configuration est déclarative (HCL).
-- **Pas de mot de passe** (décision du 2026-10-01) : l'accès au front admin est
-  contrôlé par l'endroit où il écoute (localhost, réseau privé) ou par un reverse
-  proxy authentifiant placé devant.
+3.1.4 An alert has no human acknowledgement. The phone sends only an automatic receipt after it stores the alert. Without the receipt, the server cannot send the alert again, and the guarantee of delivery fails.
 
-## 4. Garantie de livraison
+### 3.2 Phones
 
-Principe : transport « au moins une fois », déduplication sur le téléphone,
-donc **affichage exactement une fois**.
+3.2.1 A phone MUST enroll with a one-time code that an account of the portal makes. The login of the account is the user name of the phone. The phone MUST NOT change it.
 
-1. L'API ne répond « acceptée » qu'une fois l'alerte **et** une ligne de livraison
-   par appareil abonné écrites sur disque (SQLite WAL, `synchronous = FULL`), dans
-   une seule transaction.
-2. Les appareils ciblés sont ceux abonnés à l'instant de l'acceptation, qu'ils
-   soient en ligne ou non.
-3. Le serveur renvoie toute livraison non confirmée « reçue » : en continu
-   pendant la session (`resend_after`) et à chaque reconnexion.
-4. Le téléphone enregistre l'alerte durablement **avant** de confirmer la
-   réception, déduplique sur l'identifiant d'alerte (128 bits aléatoires), et
-   réaffiche au redémarrage ce qui a été reçu mais pas affiché.
-5. Une alerte non reçue par un téléphone reste en mémoire et est renvoyée pendant
-   `storage.delivery_ttl` (7 jours, décision du 2026-10-02), puis expire pour ce
-   téléphone et apparaît « expirée » dans le front admin. L'historique est purgé
-   après `storage.alert_retention`, qui doit être ≥ `delivery_ttl`.
-6. Visibilité des trous de couverture : appareil abonné injoignable signalé dans
-   le front et par la métrique `inbox_devices_unreachable` ; côté téléphone,
-   notification permanente de connexion et avertissement après
-   `offline_warning_after`.
-7. Reconnexion immédiate sur retour réseau, au boot, et après un redémarrage du
-   serveur (code 1012).
+3.2.2 The account MUST have the permission `group.subscribe` on at least one group to make a code.
 
-Limites assumées : nœud unique (rien n'est perdu si le serveur tombe, mais rien
-n'est livré tant qu'il ne redémarre pas) ; « Forcer l'arrêt » et certains
-gestionnaires de batterie constructeurs coupent l'app (l'app guide vers
-l'exemption batterie, le serveur signale l'appareil injoignable).
+3.2.3 A phone MUST subscribe only to a group for which its account has `group.subscribe`. When the account loses the permission, the inbox MUST remove the subscription and tell the phone.
 
-### 4.1 Reprise sur perte de nœud (optionnel)
+3.2.4 For each group, the user chooses an action on the phone: `alarm`, `ring` or `notify`. The server MUST NOT know this choice.
 
-Avec un bloc `replica`, une copie cohérente de la base est publiée dans un répertoire partagé avant qu'une alerte, un
-enrôlement ou une révocation soit acquitté (`sync_alerts = true`). Un verrou (`lease`) à époque croissante désigne
-l'instance active ; une instance perdue qui revient ne peut pas écraser son successeur (elle s'arrête d'elle-même).
-Une alerte acquittée n'est donc jamais perdue par la perte du nœud, et la relance d'un producteur resté sans réponse est
-dédupliquée. Un accusé de réception perdu peut provoquer un renvoi : l'application déduplique sur `alert_id`.
+3.2.5 The app MUST NOT send an alert. The server has no send route for the identity of a phone.
 
-### 4.2 Plusieurs instances actives (optionnel)
+3.2.6 One app MAY enroll in several servers. It keeps one connection and its own subscriptions for each server.
 
-Avec un bloc `postgres`, l'état est dans PostgreSQL et plusieurs instances servent en même temps. Une alerte et ses
-lignes de livraison forment une transaction ; la clé d'idempotence est un index unique, donc une relance par une autre
-instance est dédupliquée. Les instances se préviennent par `LISTEN`/`NOTIFY` (réveil d'un téléphone connecté ailleurs,
-révocation, session remplacée) et par un battement dans la table `instances` : les sessions d'une instance silencieuse
-depuis 30 s sont fermées par les autres.
+3.2.7 A person MUST be able to revoke a phone. An account revokes its own phones. An account with `device.revoke` and `device.read` revokes any phone.
 
-## 5. Sécurité
+### 3.3 Producers
 
-Objectif : sur HTTP en clair, le mot de passe ne transite jamais et une capture
-réseau ne permet aucune attaque hors ligne.
+3.3.1 A producer MUST send an alert with a bearer token. Two kinds of token work at the same time: a token of the file (a block `producer`), and a key of the portal.
 
-- **Enrôlement** : OPAQUE (PAKE). Le mot de passe ne quitte pas le téléphone ;
-  sans l'enregistrement OPAQUE du serveur, un attaquant actif ne peut ni se faire
-  passer pour le serveur ni enrôler un appareil.
-- **Sessions** : Noise IK entre la clé générée par le téléphone et la clé serveur
-  épinglée à l'enrôlement — authentification mutuelle, chiffrement, confidentialité
-  persistante. Le mot de passe n'est pas stocké sur le téléphone ; chaque appareil
-  est révocable.
-- **Front admin** : **sans mot de passe** (décision du 2026-10-01). Quiconque
-  atteint `server.admin_listen` peut envoyer des alertes et révoquer des
-  appareils : il doit donc écouter sur localhost / un réseau privé, ou être
-  derrière un reverse proxy authentifiant (ex. Traefik forward-auth). Protections
-  conservées contre les pages web hostiles ouvertes dans le navigateur de
-  l'opérateur :
-  - `Host` limité à `admin.allowed_hosts` (anti DNS rebinding) ;
-  - tout `POST` exige `Content-Type: application/json` et `X-Inbox-Request: 1`
-    (anti-CSRF : impossible depuis une autre origine sans pré-requête CORS, que
-    Inbox n'accorde jamais) ;
-  - requêtes `Sec-Fetch-Site: cross-site` refusées.
-- Limitation des tentatives de mot de passe appareil par adresse (chaque tentative
-  démarrée compte, car OPAQUE détecte le mauvais mot de passe côté téléphone),
-  tokens d'émetteur comparés en temps constant, en-têtes de sécurité (CSP
-  stricte), image `scratch` non-root.
-- TLS est assuré par un reverse proxy (Traefik…) ; l'app accepte `https://`.
+3.3.2 A token of the file MUST NOT depend on the state of the portal. It works when the portal is not ready.
 
-## 6. Exigences techniques
+3.3.3 A key of the portal MUST have `alert.send` on the group, and its owner MUST have it too. The inbox asks the PDP of the portal in process.
 
-- **Rust**, un binaire statique (musl) unique ; front embarqué dans le binaire.
-- **Standalone** : aucune dépendance à un autre serveur (pas de FCM, pas d'APNs,
-  pas de base externe). La télémétrie est optionnelle et ne bloque jamais le service.
-- **Configuration HCL déclarative et stricte** : tout paramètre est obligatoire,
-  attribut inconnu refusé, contrôles sémantiques au démarrage, secrets uniquement
-  via fichiers (`*_file`), aucune variable d'environnement. Rien ne démarre s'il
-  manque un paramètre.
-- **Stockage** SQLite (un seul thread écrivain, migrations embarquées et versionnées).
-- **OpenTelemetry** : traces, métriques (`inbox_*`) et logs en OTLP/HTTP.
-- **Peu de dépendances** : crates éprouvées pour la crypto (opaque-ke, snow), app
-  Android sur les API de la plateforme + OkHttp, cœur Rust partagé via JNI écrit
-  à la main, front en JavaScript natif sans npm.
-- **Livraison** : un seul dépôt GitHub (`SCcagg5/Inbox`, privé) ; une release
-  GitHub publie les binaires Linux amd64/arm64, l'APK signé et `SHA256SUMS` ;
-  image conteneur `FROM scratch` construite localement, **jamais publiée sur un
-  registre** (GHCR ou autre) ; `docker compose` prêt à l'emploi ; manifestes k3s
-  inspirés du dépôt Home.
+3.3.4 The inbox MUST offer these routes: a JSON alert, a generic webhook, and a webhook with the payload of Alertmanager and Grafana. A producer MAY read the delivery status of an alert.
 
-## 7. Architecture
+3.3.5 A producer SHOULD send an `Idempotency-Key`. Two requests with the same key MUST make one alert. A key that belongs to a different alert MUST get `409`.
 
-```
-crates/inbox-core     protocole + crypto sans I/O (OPAQUE, Noise, messages)
-crates/inbox-server   binaire `inbox` (axum, SQLite, OTel, front embarqué)
-crates/inbox-android  pont JNI vers inbox-core
-web/                   front admin (HTML/CSS/JS natif, sans mot de passe)
-android/               app Android (Kotlin, Views, SQLite plateforme, OkHttp)
-deploy/                docker compose, k3s
-```
+3.3.6 The action `alert.send` MAY have a budget (`alerts`). A critical group MUST NOT have a limit.
 
-## 8. Intégration Grafana
+### 3.4 Pages
 
-Les contact points de Grafana sont intégrés au code de Grafana : il n'existe pas
-d'API de plugin pour en ajouter. L'intégration passe donc par le contact point
-« Webhook » de Grafana (format compatible Alertmanager) vers
-`POST /api/v1/webhooks/alertmanager/<groupe>` avec un token d'émetteur. Exemple
-de provisioning : [`grafana/contact-point.yaml`](grafana/contact-point.yaml).
+3.4.1 The pages of the inbox are in the tab Inbox of the settings of the portal. They need a session of the portal and the permissions of the service `inbox`.
+
+3.4.2 The pages MUST work without script. The script only gives a Copy button.
+
+3.4.3 The pages show the phones, their state, the alerts and their delivery, and the connection log. They let an account send an alert and revoke a phone.
+
+3.4.4 A session that the superadmin opens as another account MUST NOT send an alert and MUST NOT revoke a phone.
+
+### 3.5 Alerts of the portal
+
+3.5.1 The portal MAY send an alert when a service is unhealthy, when it is healthy again, and when refused sign-ins come in a burst. The block `inbox.portal_alerts` turns this on.
+
+3.5.2 These alerts MUST use the same path as an alert of the API: one transaction, the idempotency key and the copy to the replica.
+
+## 4. Delivery guarantee
+
+The transport is at least once. The phone ignores a repeat. The result is that the user sees each alert exactly once.
+
+4.1 The inbox MUST answer `201` for an alert only after the alert and one delivery for each phone that is subscribed at that moment are on disk. This is one transaction.
+
+4.2 The phones that an alert targets are the phones that are subscribed when the inbox accepts it. They can be online or offline.
+
+4.3 The inbox MUST send again each delivery that the phone did not confirm. It does this during the session and at each reconnection.
+
+4.4 The phone MUST store the alert durably before it confirms it. It MUST ignore an alert id that it already has. At restart, it MUST show what it stored and did not show.
+
+4.5 The inbox keeps an alert for a phone for `inbox.storage.delivery_ttl`. After this time, the delivery expires, and the pages show it as expired. The inbox deletes the history after `inbox.storage.alert_retention`. This value MUST be at least `delivery_ttl`.
+
+4.6 A gap in coverage MUST be visible. A subscribed phone that the inbox does not see for `inbox.devices.unreachable_after` is reported as unreachable. The app shows its connection state and warns after `inbox.devices.offline_warning_after`.
+
+4.7 A phone MUST reconnect at once when the network returns, at boot and after a restart of the server (close code 1012).
+
+4.8 These limits are known. "Force stop" and some battery managers of vendors stop the app. The app guides the user to the battery exemption. The inbox reports the phone as unreachable.
+
+### 4.9 Several instances
+
+4.9.1 With PostgreSQL, any number of instances MAY be active. An alert and its deliveries are one transaction. The idempotency key is a unique index.
+
+4.9.2 When PostgreSQL has no writable primary, the instances MUST go on. They keep alerts in a spool in memory and send them to the connected phones. They write the spool when the primary returns. The section "Storage and failure modes" of [`README.md`](README.md) gives the limits.
+
+### 4.10 Standby with SQLite
+
+4.10.1 With the block `inbox.replica`, the inbox copies the whole database to a shared directory. With `sync_alerts = true`, it confirms an alert, an enrollment and a revocation only after the copy holds them.
+
+4.10.2 A lease with a growing epoch names the active instance. An instance that loses its lease MUST stop the whole process.
+
+## 5. Security
+
+5.1 Enrollment MUST be safe on plain HTTP. The code holds the address, the public key of the server and a secret of 128 bits. The phone pins the key. It runs a Noise IK handshake to this key and sends the secret inside it.
+
+5.2 The secret MUST work one time and MUST expire. The server MUST keep only its digest.
+
+5.3 A session MUST use Noise IK between the key of the phone and the pinned key of the server. This gives mutual authentication, encryption and forward secrecy.
+
+5.4 The server MUST limit the enrollment attempts for each client address. It MUST compare tokens in constant time.
+
+5.5 The pages MUST need a session of the portal. A form MUST carry an anti-CSRF token and the same-origin check.
+
+5.6 The key file of the server is a secret. A new key file makes every phone and every code invalid. The operator MUST back it up.
+
+5.7 The listener of the phones and producers has no session. It MUST NOT serve any page of the portal.
+
+5.8 A secret MUST NOT be in clear text in the configuration. It comes from `_env` or `_file`.
+
+The details are in [`SECURITY.md`](SECURITY.md) and [`protocol.md`](protocol.md).
+
+## 6. Technical requirements
+
+6.1 The inbox is a module of the one Rust binary `portal`. It uses Hyper for HTTP. It has no embedded front.
+
+6.2 The configuration follows the rules of the portal: one HCL file, a closed schema, a stop at start on an error, no coercion, `_env` and `_file` for secrets, and `portal check-config`. The delivery values (`heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention`, `connection_log_retention`) MUST have no default. A wrong default could hide an alert.
+
+6.3 The inbox uses the database of the portal. It has its own chain of migrations. Each chain MUST refuse a schema that is newer than the binary.
+
+6.4 The protocol and the cryptography of the phones are in the crate `inbox-core`, with no I/O. The server and the app share it. The cryptography exists once.
+
+6.5 The metrics of the inbox have the prefix `inbox_`. They are in the Prometheus text of the portal. The log is the JSON log of the portal.
+
+6.6 The build uses Docker only. There is one static musl image. No command publishes an image to a registry. A release holds binaries, the signed APK and `SHA256SUMS`.
+
+6.7 The tests use the emulator and the end-to-end tests of the binary. No physical phone is needed.
+
+## 7. Integration
+
+7.1 Grafana: a contact point of the type Webhook sends to `POST /api/v1/webhooks/alertmanager/<group>` with a bearer token. [`grafana/contact-point.yaml`](grafana/contact-point.yaml) is an example.
+
+7.2 Alertmanager: a `webhook_configs` receiver does the same. [`alertmanager.yml`](alertmanager.yml) is an example.

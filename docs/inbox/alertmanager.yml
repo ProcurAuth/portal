@@ -1,7 +1,10 @@
-# Prometheus Alertmanager receiver paging through Inbox.
-# Each alert in a notification becomes one Inbox alert. Inbox deduplicates them
+# Prometheus Alertmanager receiver for the inbox of the portal.
+# Each alert in a notification becomes one alert of the inbox. The inbox deduplicates them
 # on fingerprint + status + startsAt, so Alertmanager retries and repeat_interval
 # re-sends never page twice for the same firing.
+# The URL is the address of inbox.devices.listen. The last path element is the group.
+# The token is the value of a block `producer` of the file, or a key of the portal (mcp_...)
+# that has the permission alert.send on the group. Use HTTPS when the token crosses a network.
 route:
   receiver: inbox-oncall
   group_by: ["alertname"]
@@ -12,7 +15,7 @@ route:
 receivers:
   - name: inbox-oncall
     webhook_configs:
-      - url: http://inbox:8080/api/v1/webhooks/alertmanager/oncall
+      - url: http://portal:8080/api/v1/webhooks/alertmanager/infra
         send_resolved: false
         max_alerts: 50
         http_config:
