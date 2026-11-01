@@ -357,6 +357,12 @@ inbox {{
         .unwrap();
     }
 
+    /// Adds a block at the top of the configuration, after the block `inbox`.
+    fn add_block(&self, block: &str) {
+        let text = std::fs::read_to_string(self.config()).unwrap();
+        std::fs::write(self.config(), format!("{text}\n{block}\n")).unwrap();
+    }
+
     /// Another instance of the same service: same database, same secrets, its own ports, configuration and log.
     fn sibling(&self, name: &str) -> Server {
         let (port, admin_port) = (free_port(), free_port());
@@ -486,9 +492,9 @@ fn sign_in(port: u16) -> AdminSession {
     sign_in_as(port, SUPERADMIN, SUPERADMIN_PASSWORD)
 }
 
-/// Signs in on the listener of the portal, and asks for the anti-CSRF token of the calls of the
-/// inbox.
-fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
+/// One sign-in on the listener of the portal, with a fresh sign-in page and its tokens. The
+/// answer is the status, the head and the body.
+fn sign_in_request(port: u16, login: &str, password: &str) -> (u16, String, String) {
     let host = format!("127.0.0.1:{port}");
     let (st, head, page) = http_full(port, &host, "GET", "/auth/login", &[], "");
     assert_eq!(st, 200, "{page}");
@@ -512,7 +518,7 @@ fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
         field("rd"),
         field("sig")
     );
-    let (st, head, body) = http_full(
+    http_full(
         port,
         &host,
         "POST",
@@ -523,7 +529,23 @@ fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
             ("Cookie", csrf_cookie),
         ],
         &form,
-    );
+    )
+}
+
+/// `count` sign-ins with a wrong password. The portal refuses each of them, or blocks it with a
+/// limiter. Make the sessions that the test needs before: the limiter locks the address out.
+fn refuse_sign_ins(port: u16, login: &str, count: usize) {
+    for _ in 0..count {
+        let (st, _, body) = sign_in_request(port, login, "a wrong password for the test");
+        assert!(st == 401 || st == 429, "{st}: {body}");
+    }
+}
+
+/// Signs in on the listener of the portal, and asks for the anti-CSRF token of the calls of the
+/// inbox.
+fn sign_in_as(port: u16, login: &str, password: &str) -> AdminSession {
+    let host = format!("127.0.0.1:{port}");
+    let (st, head, body) = sign_in_request(port, login, password);
     assert_eq!(st, 303, "{body}");
     let cookie = head
         .lines()
@@ -923,6 +945,20 @@ impl Conn {
                 Recv::Msg(other) => panic!("expected alert, got {other:?}"),
                 Recv::Closed(c) => panic!("closed while waiting for alert: {c:?}"),
                 Recv::Timeout => panic!("no alert within 5s"),
+            }
+        }
+    }
+
+    /// Like [`Conn::alert`], with a longer wait. The portal makes its alerts after a delay.
+    async fn alert_within(&mut self, wait: Duration) -> AlertMsg {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.recv(left).await {
+                Recv::Msg(ServerMsg::Alert(a)) => return a,
+                Recv::Msg(_) => continue,
+                Recv::Closed(c) => panic!("closed while waiting for alert: {c:?}"),
+                Recv::Timeout => panic!("no alert within {wait:?}"),
             }
         }
     }
@@ -3189,4 +3225,285 @@ async fn without_the_inbox_block_the_call_is_absent() {
     add_account(&s, "erin");
     delete_account(&s, "erin");
     s.stop();
+}
+
+// The alerts of the portal about itself.
+
+/// A fake Docker socket. It lists one container with the labels of a service of the launcher. The
+/// test sets the result of its `HEALTHCHECK`.
+struct FakeDocker {
+    path: PathBuf,
+    health: std::sync::Arc<std::sync::Mutex<&'static str>>,
+}
+
+impl FakeDocker {
+    fn start(dir: &std::path::Path, health: &'static str) -> FakeDocker {
+        let path = dir.join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let health = std::sync::Arc::new(std::sync::Mutex::new(health));
+        let shared = health.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut seen = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let status = *shared.lock().unwrap();
+                let body = format!(
+                    r#"[{{"Id":"a","Names":["/notes"],"State":"running","Status":"Up 1 hour","Labels":{{"portal.name":"Notes","portal.id":"notes","portal.href":"/notes/"}},"Health":{{"Status":"{status}"}}}}]"#
+                );
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        FakeDocker { path, health }
+    }
+
+    fn set(&self, health: &'static str) {
+        *self.health.lock().unwrap() = health;
+    }
+}
+
+/// The block `portal_alerts` that the tests use. The values are the smallest that the ranges allow.
+fn portal_alerts_block(extra: &str) -> String {
+    format!(
+        "  portal_alerts {{\n    group = \"infra\"\n    unhealthy_after = \"10s\"\n    sign_in_failures = 6\n    sign_in_window = \"1m\"\n    repeat_after = \"7d\"\n{extra}\n  }}"
+    )
+}
+
+/// The service `notes` comes from the fake Docker socket, which a probe of 2 s reads again.
+fn with_notes(s: &Server, health: &'static str) -> FakeDocker {
+    let docker = FakeDocker::start(&s.dir, health);
+    s.add_block(&format!(
+        "discovery {{\n  interval = \"2s\"\n  docker_socket = \"{}\"\n}}",
+        docker.path.display()
+    ));
+    docker
+}
+
+fn portal_alert_list(s: &Server) -> Vec<Value> {
+    let (st, list) = admin(s, "GET", "/auth/inbox/api/alerts", "");
+    assert_eq!(st, 200, "{list}");
+    list["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["source"] == "portal")
+        .cloned()
+        .collect()
+}
+
+fn metrics_of(s: &Server) -> String {
+    http_host(
+        s.admin_port,
+        &format!("127.0.0.1:{}", s.admin_port),
+        "GET",
+        "/metrics",
+        &[],
+        "",
+    )
+    .1
+}
+
+/// A burst of refused sign-ins makes one alert for the phone. A second burst inside `repeat_after` makes none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_refused_sign_ins_makes_one_alert() {
+    let mut s = Server::setup();
+    quiet_phones(&s);
+    s.add_to_inbox(&portal_alerts_block("    service_unhealthy = false"));
+    s.start();
+    // The sessions come before the burst: the limiter locks the address out afterwards.
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let _ = s.session();
+    let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+
+    // Five refused sign-ins are fewer than the threshold: nothing.
+    refuse_sign_ins(s.admin_port, "mallory", 5);
+    conn.no_alert(Duration::from_secs(3)).await;
+    // Four more reach the threshold of 6.
+    refuse_sign_ins(s.admin_port, "mallory", 4);
+    let alert = conn.alert_within(Duration::from_secs(10)).await;
+    assert_eq!(alert.title, "6 refused sign-ins in 1 minute");
+    assert!(!alert.title.contains("mallory") && !alert.title.contains("127.0.0.1"));
+    assert_eq!(alert.group, "infra");
+    conn.ack(&alert.alert_id, AckStage::Received).await;
+
+    // A second burst inside `repeat_after` makes no second alert, and the burst goes on.
+    refuse_sign_ins(s.admin_port, "mallory", 8);
+    conn.no_alert(Duration::from_secs(4)).await;
+    let alerts = portal_alert_list(&s);
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0]["title"], alert.title);
+    let metrics = metrics_of(&s);
+    for expected in [
+        "portal_alerts_sent_total{kind=\"sign_in_burst\"} 1",
+        "portal_alerts_sent_total{kind=\"service_unhealthy\"} 0",
+        "portal_alerts_failed_total{kind=\"sign_in_burst\"} 0",
+    ] {
+        assert!(metrics.contains(expected), "{expected}\n{metrics}");
+    }
+    s.stop();
+}
+
+/// A service that goes unhealthy makes one alert after `unhealthy_after`. When it is healthy again, the
+/// phone gets one short alert. A service that stays healthy makes no alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unhealthy_service_makes_one_alert_and_its_recovery_one_more() {
+    let mut s = Server::setup();
+    quiet_phones(&s);
+    s.add_to_inbox(&portal_alerts_block("    sign_in_burst = false"));
+    let docker = with_notes(&s, "healthy");
+    s.start();
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+
+    // Healthy and starting give nothing, however long.
+    conn.no_alert(Duration::from_secs(3)).await;
+    docker.set("starting");
+    conn.no_alert(Duration::from_secs(12)).await;
+
+    docker.set("unhealthy");
+    let alert = conn.alert_within(Duration::from_secs(25)).await;
+    assert_eq!(alert.title, "Service Notes is unhealthy for 10 seconds");
+    conn.ack(&alert.alert_id, AckStage::Received).await;
+    // One alert, not one for each reading.
+    conn.no_alert(Duration::from_secs(5)).await;
+
+    docker.set("healthy");
+    let back = conn.alert_within(Duration::from_secs(15)).await;
+    assert_eq!(back.title, "Service Notes is healthy again");
+    conn.ack(&back.alert_id, AckStage::Received).await;
+    conn.no_alert(Duration::from_secs(4)).await;
+
+    // The unhealthy alert is not repeated inside `repeat_after`, whatever the service does.
+    docker.set("unhealthy");
+    conn.no_alert(Duration::from_secs(13)).await;
+    let titles: Vec<_> = portal_alert_list(&s)
+        .iter()
+        .map(|a| a["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles.len(), 2, "{titles:?}");
+    let metrics = metrics_of(&s);
+    for expected in [
+        "portal_alerts_sent_total{kind=\"service_unhealthy\"} 1",
+        "portal_alerts_sent_total{kind=\"service_recovered\"} 1",
+        "portal_alerts_sent_total{kind=\"sign_in_burst\"} 0",
+    ] {
+        assert!(metrics.contains(expected), "{expected}\n{metrics}");
+    }
+    s.stop();
+}
+
+/// Two active instances detect the same events. The shared key makes the inbox accept one alert for each event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_instances_send_one_alert_for_one_event() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    quiet_phones(&a);
+    a.add_to_inbox(&portal_alerts_block(""));
+    let docker = with_notes(&a, "healthy");
+    let mut b = a.sibling("instance-b");
+    a.start();
+    b.start();
+    let phone = enroll_as(&a, "phone", SUPERADMIN).await.unwrap();
+    let _ = (a.session(), b.session());
+    let (mut conn, _) = Conn::open(b.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+
+    // Both instances see the service go down.
+    docker.set("unhealthy");
+    let alert = conn.alert_within(Duration::from_secs(25)).await;
+    assert_eq!(alert.title, "Service Notes is unhealthy for 10 seconds");
+    conn.ack(&alert.alert_id, AckStage::Received).await;
+    // Both instances see a burst of refusals.
+    refuse_sign_ins(a.admin_port, "mallory", 7);
+    refuse_sign_ins(b.admin_port, "mallory", 7);
+    let burst = conn.alert_within(Duration::from_secs(10)).await;
+    assert_eq!(burst.title, "6 refused sign-ins in 1 minute");
+    conn.ack(&burst.alert_id, AckStage::Received).await;
+    conn.no_alert(Duration::from_secs(5)).await;
+
+    // The database holds two alerts, and both come from the portal.
+    let stored = stored_alerts(&a);
+    assert_eq!(stored.len(), 2, "one alert for each event: {stored:?}");
+    assert_eq!(portal_alert_list(&a).len(), 2);
+    assert_eq!(portal_alert_list(&b).len(), 2);
+    // The two instances both tried: one of them found the key already in use.
+    wait_for(
+        "an instance that finds the key in use",
+        Duration::from_secs(10),
+        || format!("{}{}", a.log(), b.log()).contains("\"duplicate\":\"true\""),
+    );
+    let logs = format!("{}{}", a.log(), b.log());
+    assert!(!logs.contains("portal_alert_failed"), "{logs}");
+    b.stop();
+    a.stop();
+}
+
+#[test]
+fn check_config_reports_the_block_portal_alerts() {
+    let s = Server::setup();
+    let out = portal(&["check-config", "--config", &s.config()], None);
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success());
+    assert!(
+        !shown.contains("inbox.portal_alerts."),
+        "nothing without the block: {shown}"
+    );
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let good = s.dir.join("alerts-ok.hcl");
+    std::fs::write(
+        &good,
+        text.replace(
+            "  # inbox-extra\n",
+            "  portal_alerts {\n    group = \"other\"\n    sign_in_failures = 3\n  }\n  # inbox-extra\n",
+        ),
+    )
+    .unwrap();
+    let out = portal(&["check-config", "--config", good.to_str().unwrap()], None);
+    let shown = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for expected in [
+        "inbox.portal_alerts.group = \"other\"  # file",
+        "inbox.portal_alerts.sign_in_failures = 3  # file",
+        "inbox.portal_alerts.unhealthy_after = \"2m\"  # default",
+        "inbox.portal_alerts.repeat_after = \"1h\"  # default",
+        "inbox.portal_alerts.recovered = true  # default",
+    ] {
+        assert!(shown.contains(expected), "{expected}\n{shown}");
+    }
+    // A group that does not exist stops the start, and the message names the key and the value.
+    let bad = s.dir.join("alerts-bad.hcl");
+    std::fs::write(
+        &bad,
+        text.replace(
+            "  # inbox-extra\n",
+            "  portal_alerts {\n    group = \"nowhere\"\n  }\n  # inbox-extra\n",
+        ),
+    )
+    .unwrap();
+    let out = portal(&["check-config", "--config", bad.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("inbox.portal_alerts.group") && error.contains("\"nowhere\""),
+        "{error}"
+    );
 }
