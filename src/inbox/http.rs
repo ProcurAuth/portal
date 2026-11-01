@@ -1,11 +1,18 @@
-//! The HTTP listeners of the inbox: the listener of the phones and the producers, and the
-//! listener of the cluster. Both use hyper, as the listeners of the portal.
+//! The HTTP routes of the inbox.
 //!
-//! The listener of the phones has no session. It serves:
-//! `/v1/enroll`, `/v1/session` (WebSocket), `/api/v1/*`, `/healthz`, `/readyz` and `/api/version`.
+//! The listener of the phones (`inbox.devices.listen`) is a listener of the inbox. It has no
+//! session. It serves `/v1/enroll`, `/v1/session` (WebSocket), `/healthz` and `/readyz`. A phone
+//! on a mobile network reaches this port, and the pages of the portal stay private.
+//!
+//! The producers and the webhooks use the listener of the portal, on the port of the pages. The
+//! function [`serve_api`] answers the paths that [`owns_api`] names: `/api/v1/*`, `/api/version`
+//! and `/readyz`. They need no session. Producers prove themselves with a token or a key.
+//!
+//! The listener of the cluster (`inbox.cluster.listen`) is a third listener, for the copies of
+//! alerts between the instances. It is not public. All of them use hyper.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +38,7 @@ pub type Resp = Response<Full<Bytes>>;
 /// What a listener serves.
 #[derive(Clone, Copy)]
 pub enum Kind {
-    /// Phones, producers, webhooks and the health routes.
+    /// Phones and the health routes.
     Devices,
     /// The requests of the other instances.
     Cluster,
@@ -168,25 +175,46 @@ fn segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
         .filter(|rest| !rest.is_empty() && !rest.contains('/'))
 }
 
+/// The client address of a phone: the portal rule (`server.trusted_proxies`).
+fn phone_ip(app: &App, peer: SocketAddr, request: &Request<Incoming>) -> IpAddr {
+    crate::transport::client_ip(request.headers(), peer.ip(), &app.http.trusted_proxies)
+}
+
+/// The routes of the listener of the phones.
 async fn route_devices(app: Arc<App>, peer: SocketAddr, request: Request<Incoming>) -> Resp {
+    let get = request.method() == Method::GET;
+    let path = request.uri().path().to_string();
+    match path.as_str() {
+        "/v1/enroll" | "/v1/session" if !get => empty(StatusCode::METHOD_NOT_ALLOWED),
+        "/v1/enroll" => {
+            let ip = phone_ip(&app, peer, &request);
+            device::enroll_ws(app, ip, request)
+        }
+        "/v1/session" => {
+            let ip = phone_ip(&app, peer, &request);
+            device::session_ws(app, ip, request)
+        }
+        "/healthz" if get => text(StatusCode::OK, "ok"),
+        "/readyz" if get => readyz(&app).await,
+        "/healthz" | "/readyz" => empty(StatusCode::METHOD_NOT_ALLOWED),
+        _ => empty(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Tells whether the inbox owns the path on the listener of the portal: the API of the
+/// producers, the version and the readiness. The portal gives these paths to the inbox and to no
+/// other handler. The paths of the phones (`/v1/`) are not here: they are on the listener of the
+/// phones.
+pub fn owns_api(path: &str) -> bool {
+    path.starts_with("/api/v1/") || matches!(path, "/readyz" | "/api/version")
+}
+
+/// Answers one request that [`owns_api`] names, on the listener of the portal.
+pub async fn serve_api(app: Arc<App>, request: Request<Incoming>) -> Resp {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let get = method == Method::GET;
     let post = method == Method::POST;
-    if path == "/v1/enroll" {
-        return if get {
-            device::enroll_ws(app, peer, request)
-        } else {
-            empty(StatusCode::METHOD_NOT_ALLOWED)
-        };
-    }
-    if path == "/v1/session" {
-        return if get {
-            device::session_ws(app, peer, request)
-        } else {
-            empty(StatusCode::METHOD_NOT_ALLOWED)
-        };
-    }
     if path == "/api/v1/alerts" {
         return if post {
             api::post_alert(&app, request).await
@@ -216,10 +244,9 @@ async fn route_devices(app: Arc<App>, peer: SocketAddr, request: Request<Incomin
         };
     }
     match (get, path.as_str()) {
-        (true, "/healthz") => text(StatusCode::OK, "ok"),
         (true, "/readyz") => readyz(&app).await,
         (true, "/api/version") => version(),
-        (false, "/healthz" | "/readyz" | "/api/version") => empty(StatusCode::METHOD_NOT_ALLOWED),
+        (false, "/readyz" | "/api/version") => empty(StatusCode::METHOD_NOT_ALLOWED),
         _ => empty(StatusCode::NOT_FOUND),
     }
 }

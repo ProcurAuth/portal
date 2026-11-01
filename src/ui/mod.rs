@@ -51,8 +51,10 @@ pub struct HomeContext<'a> {
     pub users_token: &'a str,
     /// The services that the viewer cannot open. The page does not show these services.
     pub hidden_services: usize,
-    /// The gear that opens the settings. The page shows the gear only to the superadmin.
-    pub settings: bool,
+    /// The target of the gear. `None`: no gear. The superadmin gets the settings. Another account
+    /// that holds a permission of the inbox gets the tab Inbox: the inbox is a feature of the
+    /// portal, and the launcher has no tile for it.
+    pub settings: Option<&'a str>,
 }
 
 /// The launcher. It has one full-width row for each group and one tile for each service.
@@ -86,7 +88,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         body.push_str("</main>");
     }
     let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
-    if ctx.settings {
+    if ctx.settings.is_some() {
         icons.push("i-settings");
     }
     document("Portal", "", &icons, &body)
@@ -195,9 +197,11 @@ fn sign_out_form(token: &str) -> String {
 fn header(ctx: &HomeContext) -> String {
     let mut out = String::new();
     out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
-    if ctx.settings {
-        out.push_str(
-            r##"<a class="button button--icon" href="/auth/settings" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></a>"##,
+    if let Some(target) = ctx.settings {
+        let _ = write!(
+            out,
+            r##"<a class="button button--icon" href="{}" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></a>"##,
+            html_escape(target)
         );
     }
     out.push_str(&theme_switch());
@@ -718,7 +722,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 logout_token: "demo",
                 users_token: "demo",
                 hidden_services: 0,
-                settings: true,
+                settings: Some("/auth/settings"),
             },
         ),
         "users" => users_page(&frame, &demo_users(&catalog)),
@@ -809,7 +813,7 @@ mod tests {
             logout_token: "t",
             users_token: "u",
             hidden_services: 0,
-            settings: false,
+            settings: None,
         }
     }
 
@@ -864,7 +868,7 @@ mod tests {
             &demo_catalog(),
             &Icons::empty(),
             &HomeContext {
-                settings: true,
+                settings: Some("/auth/settings"),
                 ..ctx()
             },
         );
@@ -880,7 +884,7 @@ mod tests {
             &demo_catalog(),
             &Icons::empty(),
             &HomeContext {
-                settings: true,
+                settings: Some("/auth/settings"),
                 ..ctx()
             },
         );

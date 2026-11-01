@@ -151,6 +151,8 @@ struct Context<'a> {
     logout_token: String,
     inbox_token: String,
     uri: &'a str,
+    /// The address of the portal as the browser sees it (scheme, host, port). The producers use it.
+    base: String,
 }
 
 impl Context<'_> {
@@ -201,7 +203,26 @@ fn open<'a>(
         logout_token,
         inbox_token,
         uri,
+        base: portal_base(headers),
     })
+}
+
+/// The address of the portal as the request shows it: `X-Forwarded-Proto` and `X-Forwarded-Host`
+/// from the proxy, or the header `Host` over `http`. The producers send their requests to the
+/// same host and port as the pages. The address of the phones (`inbox.devices.public_address`)
+/// is another one.
+fn portal_base(headers: &HeaderMap) -> String {
+    match expected_origin(headers) {
+        Some(origin) => {
+            let default = if origin.scheme == "https" { 443 } else { 80 };
+            if origin.port == default {
+                format!("{}://{}", origin.scheme, origin.host)
+            } else {
+                format!("{}://{}:{}", origin.scheme, origin.host, origin.port)
+            }
+        }
+        None => "http://<address of the portal>".to_string(),
+    }
 }
 
 /// A random text of 32 hexadecimal characters: the key of a form that sends an alert.
@@ -394,12 +415,7 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
                 Ok(overview) => overview,
                 Err(_) => return unavailable(),
             };
-            let address = ctx.app.config.devices.public_address.trim_end_matches('/');
-            let base = if address.starts_with("http://") || address.starts_with("https://") {
-                address.to_string()
-            } else {
-                format!("http://{address}")
-            };
+            let base = ctx.base.clone();
             ui_inbox::doc_page(
                 &frame,
                 rights,

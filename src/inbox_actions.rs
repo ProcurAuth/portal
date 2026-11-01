@@ -83,17 +83,19 @@ pub fn document(config: &InboxConfig) -> Arc<Document> {
     Arc::new(document)
 }
 
-/// The page of the inbox in the settings. The tile of the launcher links to it.
+/// The page of the inbox in the settings. The gear of the launcher links to it for an account
+/// that is not the superadmin.
 pub const PAGE: &str = "/auth/settings/inbox";
 
 /// The service of the inbox as the catalogue lists it. It owns no path: the portal gives the
-/// pages itself. The launcher, the services page and the editors of permissions show it.
+/// pages itself. The inbox is a feature of the portal, as the keys are. Only the editors of
+/// permissions show it, as "Inbox (portal)". The launcher and the services page leave it out.
 pub fn service() -> crate::catalog::Service {
     crate::catalog::Service {
         id: SERVICE.to_string(),
         group: "Portal".to_string(),
-        name: "Inbox".to_string(),
-        description: "Send alerts, see the phones.".to_string(),
+        name: "Inbox (portal)".to_string(),
+        description: "Alerts to phones. A feature of the portal.".to_string(),
         icon: Some("tb:bell".to_string()),
         href: PAGE.to_string(),
         new_tab: false,
@@ -171,7 +173,7 @@ mod tests {
             inbox {
               server_key_env = "K"
               devices {
-                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080" trusted_proxies = []
+                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080"
                 heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
                 max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
               }

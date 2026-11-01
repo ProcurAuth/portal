@@ -175,7 +175,7 @@ struct Server {
     dir: PathBuf,
     /// Name of this instance: its configuration and log files.
     name: String,
-    /// The listener of the phones and the producers.
+    /// The phone port (`inbox.devices.listen`): phones only.
     port: u16,
     /// The listener of the portal: the sign-in and the admin calls of the inbox.
     admin_port: u16,
@@ -292,7 +292,6 @@ inbox {{
   devices {{
     listen = "127.0.0.1:{port}"
     public_address = "127.0.0.1:{port}"
-    trusted_proxies = []
     heartbeat_interval = "5s"
     session_timeout = "10s"
     resend_after = "1s"
@@ -655,7 +654,7 @@ fn dechunk(mut body: &str) -> String {
 
 fn post_alert(s: &Server, key: &str, body: Value) -> (u16, Value) {
     let (status, text) = http(
-        s.port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         &[
@@ -1381,6 +1380,12 @@ fn config_validation_is_strict() {
             "    max_devices = 10\n    admin_listen = \"127.0.0.1:1\"",
             "inbox.devices.admin_listen",
         ),
+        // The phone port has no list of proxies of its own: it uses `server.trusted_proxies`.
+        (
+            "    max_devices = 10",
+            "    max_devices = 10\n    trusted_proxies = []",
+            "unknown configuration key: inbox.devices.trusted_proxies",
+        ),
         (
             "resend_after = \"1s\"",
             "resend_after = 1",
@@ -1526,6 +1531,169 @@ fn config_validation_is_strict() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("inbox.devices.listen"));
 }
 
+/// The API of the producers is on the port of the pages. The phones have their own port, which has no
+/// API and no page. The routes of the inbox need no session of the portal and set no cookie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producers_use_the_port_of_the_pages_and_phones_use_their_own() {
+    let mut s = Server::setup();
+    s.start();
+    let (pages, phones) = (s.admin_port, s.port);
+    let host = format!("127.0.0.1:{pages}");
+
+    // The sign-in page and the API of the producers are on the same port.
+    let (st, _, page) = http_full(pages, &host, "GET", "/auth/login", &[], "");
+    assert_eq!(st, 200, "{page}");
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let (mut c, _) = Conn::open(phones, &phone).await.unwrap();
+    c.subscribe("infra").await;
+    let auth = ("Authorization", format!("Bearer {}", s.token));
+    let (st, head, body) = http_full(
+        pages,
+        &host,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"on the port of the pages"}"#,
+    );
+    assert_eq!(st, 201, "{body}");
+    assert!(
+        !head.to_ascii_lowercase().contains("set-cookie"),
+        "a route of the inbox sets no cookie: {head}"
+    );
+    let got = c.alert().await;
+    assert_eq!(got.title, "on the port of the pages");
+    c.ack(&got.alert_id, AckStage::Received).await;
+
+    // The refusals are those of the inbox. A cookie of the portal changes nothing.
+    let (st, body) = http(
+        pages,
+        "POST",
+        "/api/v1/alerts",
+        &[],
+        r#"{"group":"infra","title":"x"}"#,
+    );
+    assert_eq!(st, 401, "{body}");
+    let cookie = ("Cookie", s.session().cookie.clone());
+    let (st, _) = http(
+        pages,
+        "POST",
+        "/api/v1/alerts",
+        &[cookie],
+        r#"{"group":"infra","title":"x"}"#,
+    );
+    assert_eq!(st, 401);
+    let (st, _) = http(
+        pages,
+        "GET",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        "",
+    );
+    assert_eq!(st, 405);
+    let (st, _) = http(pages, "GET", "/api/v1/nothing", &[], "");
+    assert_eq!(st, 404);
+
+    // Readiness and version are on the port of the pages.
+    let (st, body) = http(pages, "GET", "/healthz", &[], "");
+    assert_eq!((st, body.trim()), (200, "ok"));
+    let (st, body) = http(pages, "GET", "/readyz", &[], "");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("ready"), "{body}");
+    let (st, _) = http(pages, "POST", "/readyz", &[], "");
+    assert_eq!(st, 405);
+    let (st, body) = http(pages, "GET", "/api/version", &[], "");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"protocol\""), "{body}");
+
+    // The routes of the phones are not on the port of the pages. The portal does not know them.
+    let (st, body) = http(pages, "GET", "/v1/session", &[], "");
+    assert_ne!(st, 400, "the pages port is not the phone port: {body}");
+    assert!(!body.contains("WebSocket"), "{body}");
+
+    // The phone port has the routes of the phones and the health routes only.
+    let (st, body) = http(phones, "GET", "/v1/session", &[], "");
+    assert_eq!(st, 400, "a plain GET is not an upgrade: {body}");
+    let (st, _) = http(phones, "POST", "/v1/session", &[], "");
+    assert_eq!(st, 405);
+    let (st, _) = http(phones, "GET", "/healthz", &[], "");
+    assert_eq!(st, 200);
+    let (st, _) = http(phones, "GET", "/readyz", &[], "");
+    assert_eq!(st, 200);
+    for path in ["/api/v1/alerts", "/api/version", "/auth/login", "/"] {
+        let (st, _) = http(phones, "GET", path, &[], "");
+        assert_eq!(st, 404, "{path} is not on the phone port");
+    }
+    let (st, _) = http(
+        phones,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        "{}",
+    );
+    assert_eq!(st, 404, "the API of the producers is not on the phone port");
+
+    // The pages work on their port. The launcher has no tile for the inbox: it is a feature of the portal.
+    let (st, page) = inbox_page(&s, "/auth/settings/inbox");
+    assert_eq!(st, 200, "{page}");
+    let (st, _, home) = http_full(
+        pages,
+        &host,
+        "GET",
+        "/",
+        &[("Cookie", s.session().cookie.clone())],
+        "",
+    );
+    assert_eq!(st, 200);
+    assert!(!home.contains("/auth/settings/inbox\""), "no tile: {home}");
+    s.stop();
+}
+
+/// With the block `inbox`, the listener of the portal opens before the catalogue is complete and serves
+/// the API of the inbox only. The phone port is open too. An alert and a phone never wait for the
+/// catalogue. Every other route of the portal fails closed with 503. A stop in this time ends the process.
+#[test]
+fn the_inbox_answers_before_the_catalogue_is_complete() {
+    let mut s = Server::setup();
+    // A source that never answers: the catalogue is never complete.
+    s.add_block("discovery {\n  docker_socket = \"/nonexistent/docker.sock\"\n}");
+    let log = std::fs::File::create(s.dir.join("server.log")).unwrap();
+    s.child = Some(
+        Command::new(BIN)
+            .args(["run", "--config", &s.config()])
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    let (pages, phones) = (s.admin_port, s.port);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while TcpStream::connect(("127.0.0.1", pages)).is_err() {
+        assert!(Instant::now() < deadline, "no port: {}", s.log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (st, body) = http(pages, "GET", "/readyz", &[], "");
+    assert_eq!(st, 200, "{body}");
+    let auth = ("Authorization", format!("Bearer {}", s.token));
+    let (st, body) = http(
+        pages,
+        "POST",
+        "/api/v1/alerts",
+        std::slice::from_ref(&auth),
+        r#"{"group":"infra","title":"before the catalogue"}"#,
+    );
+    assert_eq!(st, 201, "{body}");
+    let (st, _) = http(phones, "GET", "/v1/session", &[], "");
+    assert_eq!(st, 400, "the phones reach the inbox");
+    for path in ["/auth/login", "/healthz", "/auth/verify", "/"] {
+        let (st, body) = http(pages, "GET", path, &[], "");
+        assert_eq!((st, body.trim()), (503, "starting"), "{path}");
+    }
+    assert!(!portal(&["healthcheck", "--config", &s.config()], None)
+        .status
+        .success());
+    s.stop();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_guarantees_end_to_end() {
     let mut s = Server::setup();
@@ -1579,7 +1747,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Producer API checks.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         &[("Idempotency-Key", "x".into())],
@@ -1672,7 +1840,7 @@ async fn delivery_guarantees_end_to_end() {
 
     // Delivery status for producers.
     let (st, body) = http(
-        port,
+        s.admin_port,
         "GET",
         &format!("/api/v1/alerts/{k1}"),
         &[("Authorization", format!("Bearer {}", s.token))],
@@ -1705,7 +1873,7 @@ async fn delivery_guarantees_end_to_end() {
     .to_string();
     let auth = [("Authorization", format!("Bearer {}", s.token))];
     let (st, body) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/webhooks/alertmanager/infra",
         &auth,
@@ -1721,7 +1889,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(got.title, "[FIRING] HighLatency: p99 > 2s");
     ca.ack(&got.alert_id, AckStage::Received).await;
     let (_, body) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/webhooks/alertmanager/infra",
         &auth,
@@ -1984,13 +2152,13 @@ async fn enrollment_attempts_are_rate_limited() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn integrations_and_reverse_proxy_prefixes() {
     let mut s = Server::setup();
-    // The proxy that sets the address of the client is a trusted proxy of the listener of the phones.
+    // The proxy that sets the address of the client is a trusted proxy of the portal. The phone port uses the same list.
     let cfg = std::fs::read_to_string(s.config()).unwrap();
     std::fs::write(
         s.config(),
         cfg.replace(
-            "    trusted_proxies = []",
-            "    trusted_proxies = [\"127.0.0.1/32\"]",
+            "  trusted_proxies = []",
+            "  trusted_proxies = [\"127.0.0.1/32\"]",
         ),
     )
     .unwrap();
@@ -2003,7 +2171,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     // Generic notify: plain text body, token in the query string, no Idempotency-Key.
     let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
     let (st, body) = http(
-        port,
+        s.admin_port,
         "POST",
         &url,
         &[("Content-Type", "text/plain".into())],
@@ -2015,7 +2183,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // The same request retried within the minute is deduplicated.
     let (st, body) = http(
-        port,
+        s.admin_port,
         "POST",
         &url,
         &[("Content-Type", "text/plain".into())],
@@ -2027,7 +2195,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     // Without a title anywhere, the plain text body is the title, on one line.
     let auth = ("Authorization", format!("Bearer {}", s.token));
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2039,7 +2207,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // An empty request has no title: refused.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2049,7 +2217,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // JSON with a title, bearer header.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2061,7 +2229,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     c.ack(&got.alert_id, AckStage::Received).await;
     // Any other JSON is the title as compact text; X-Title overrides it.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         &[auth.clone(), ("X-Title", "Uptime".into())],
@@ -2072,7 +2240,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(got.title, "Uptime");
     c.ack(&got.alert_id, AckStage::Received).await;
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2083,10 +2251,16 @@ async fn integrations_and_reverse_proxy_prefixes() {
     assert_eq!(got.title, r#"{"monitor":{"name":"web"},"status":0}"#);
     c.ack(&got.alert_id, AckStage::Received).await;
     // Wrong token in the query string is refused; forbidden group too.
-    let (st, _) = http(port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
+    let (st, _) = http(
+        s.admin_port,
+        "POST",
+        "/api/v1/notify/infra?token=nope",
+        &[],
+        "x",
+    );
     assert_eq!(st, 401);
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         &format!("/api/v1/notify/other?token={}", s.token),
         &[],
@@ -2099,7 +2273,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let long = "x".repeat(129);
     let body = json!({"group": "infra", "title": long}).to_string();
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2107,7 +2281,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 413);
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/notify/infra",
         std::slice::from_ref(&auth),
@@ -2120,7 +2294,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // Only the current field names are accepted.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2130,7 +2304,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
 
     // JSON API without Idempotency-Key: created, then deduplicated.
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -2138,7 +2312,7 @@ async fn integrations_and_reverse_proxy_prefixes() {
     );
     assert_eq!(st, 201);
     let (st, _) = http(
-        port,
+        s.admin_port,
         "POST",
         "/api/v1/alerts",
         std::slice::from_ref(&auth),
@@ -3748,9 +3922,9 @@ fn producer_call(
     idempotency_key: &str,
     body: &str,
 ) -> (u16, String, Value) {
-    let host = format!("localhost:{}", s.port);
+    let host = format!("localhost:{}", s.admin_port);
     let (status, head, text) = http_full(
-        s.port,
+        s.admin_port,
         &host,
         method,
         path,
@@ -3927,7 +4101,7 @@ user "partial" {{
     assert_eq!(st, 201, "{v}");
     assert_eq!(take(&mut conn).await.title, "from the file");
     let (st, _) = http(
-        s.port,
+        s.admin_port,
         "POST",
         &format!("/api/v1/notify/crit?token={ci}&title=query"),
         &[],
@@ -4408,7 +4582,10 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let (st, doc) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox/doc");
     assert_eq!(st, 200);
     assert!(
-        has(&doc, &format!("http://127.0.0.1:{port}/api/v1/alerts")),
+        has(
+            &doc,
+            &format!("http://127.0.0.1:{}/api/v1/alerts", s.admin_port)
+        ),
         "{doc}"
     );
     // The form refuses a group that the account may not send to, and sends to the others.
@@ -4606,36 +4783,54 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     );
     assert!(has(&page, "inbox://enroll?s=") && has(&page, "data-copy=\"enroll-code\""));
 
-    // An account with no permission of the inbox has no tab and no tile. The tile and the tab appear
-    // for the accounts that have one.
+    // The inbox is a feature of the portal: the launcher has no tile for it. An account with no permission of
+    // the inbox has no gear and no tab. An account that has one gets the gear, which opens the tab.
     let none = s.account_with("nora", &[]);
     let (_, home) = inbox_page_as(&s, &none.cookie, "/");
-    assert!(!has(&home, "/auth/settings/inbox"));
+    assert!(!has(&home, "/auth/settings/inbox") && !has(&home, "Settings"));
     let (st, _) = inbox_page_as(&s, &none.cookie, "/auth/settings/inbox");
     assert_eq!(st, 403);
     let (_, home) = inbox_page_as(&s, &pia.cookie, "/");
     assert!(
-        has(&home, r#"href="/auth/settings/inbox""#) && has(&home, "Inbox"),
+        has(
+            &home,
+            r#"href="/auth/settings/inbox" aria-label="Settings""#
+        ),
         "{home}"
     );
+    assert!(
+        !has(&home, "inbox-tile") && !has(&home, "<h2"),
+        "no tile of the inbox: {home}"
+    );
     let (_, home) = inbox_page_as(&s, &s.session().cookie, "/");
-    assert!(has(&home, r#"href="/auth/settings/inbox""#));
+    assert!(has(&home, r#"href="/auth/settings" aria-label="Settings""#));
+    assert!(
+        !has(&home, r#"href="/auth/settings/inbox""#),
+        "no tile of the inbox"
+    );
     // The superadmin sees the five tabs at most and the permission editor shows the groups by name.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
     for tab in ["Users", "Services", "Activity", "Inbox"] {
         assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
     }
     assert!(!has(&page, ">Keys</a>"), "no block keys, no tab Keys");
+    // The inbox is a feature of the portal, as the keys are: the Services page does not list it, and
+    // it has no page of a service. The editor of permissions keeps it as "Inbox (portal)".
     let (st, services) = inbox_page(&s, "/auth/settings/services");
     assert_eq!(st, 200);
     assert!(
-        has(&services, "Inbox") && has(&services, "alert.send"),
+        !has(&services, "Inbox (portal)") && !has(&services, "alert.send"),
         "{services}"
     );
+    let (st, _) = inbox_page(&s, "/auth/settings/services/inbox");
+    assert_eq!(st, 404);
     let (st, editor) = inbox_page(&s, "/auth/settings/users/pia?service=inbox");
     assert_eq!(st, 200);
     assert!(
-        has(&editor, "group:infra") && has(&editor, "Infra") && has(&editor, "device.revoke"),
+        has(&editor, "Inbox (portal)")
+            && has(&editor, "group:infra")
+            && has(&editor, "Infra")
+            && has(&editor, "device.revoke"),
         "{editor}"
     );
     s.stop();

@@ -681,7 +681,7 @@ pub fn connections_page(frame: &Frame, rights: &Rights, view: &ConnectionsView<'
 // Documentation -------------------------------------------------------------------------------
 
 pub struct DocView {
-    /// The address of the listener of the producers, with the scheme.
+    /// The address of the portal, with the scheme. The producers use the port of the pages.
     pub base: String,
     pub groups: Vec<GroupLine>,
     /// The portal accepts keys: a key can be a producer.
@@ -706,7 +706,7 @@ pub fn doc_page(frame: &Frame, rights: &Rights, view: &DocView) -> String {
         out,
         r#"<div class="docs"><p class="part__lede">A producer is a program that sends alerts: a script, Grafana, Alertmanager or any tool that sends an HTTP request. The inbox takes each alert, keeps it, and sends it to each phone that subscribes to the group. A phone shows the alert one time.</p>
 <h3 class="subTitle">Address</h3>
-<p>The producers send their requests to this address. Use <code>http</code> in place of <code>https</code> when the listener has no TLS.</p>
+<p>The producers send their requests to the portal, at this address. It is the address of the pages. The phones use another port, which has no API of the producers.</p>
 <p><code>{base}</code></p>
 <h3 class="subTitle">Who can send</h3>
 <p>A request has the header <code>Authorization: Bearer &lt;token&gt;</code>. A tool that cannot set a header can use the query <code>?token=&lt;token&gt;</code>. A token in an address can reach a log of a proxy: use the header when you can. Two kinds of token work at the same time.</p>

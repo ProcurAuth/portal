@@ -12,7 +12,6 @@ use std::time::Duration;
 use super::keys::show_duration;
 use super::resolve::{Resolved, Secret};
 use super::{Config, StorageBackend};
-use crate::transport::Cidr;
 
 /// The values of the block `inbox`.
 #[derive(Clone, Debug)]
@@ -40,7 +39,6 @@ pub struct DevicesConfig {
     pub listen: SocketAddr,
     /// The address that phones use to reach the listener. It is the `s` of an enrollment code.
     pub public_address: String,
-    pub trusted_proxies: Vec<Cidr>,
     pub max_devices: u32,
     pub heartbeat_interval: Duration,
     pub session_timeout: Duration,
@@ -149,12 +147,6 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
     let devices = DevicesConfig {
         listen: socket(r, "inbox.devices", "listen")?,
         public_address: r.text("inbox.devices", "public_address")?,
-        trusted_proxies: r
-            .list("inbox.devices", "trusted_proxies")?
-            .iter()
-            .map(|net| Cidr::parse(net))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("internal error: inbox.devices.trusted_proxies: {e}"))?,
         max_devices: small(r, "inbox.devices", "max_devices")?,
         heartbeat_interval: r.duration("inbox.devices", "heartbeat_interval")?,
         session_timeout: r.duration("inbox.devices", "session_timeout")?,

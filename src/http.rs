@@ -52,6 +52,8 @@ const VERIFY_PATH: &str = "/auth/verify";
 const VERIFY_KEY_PATH: &str = "/auth/verify-key";
 const PORTAL_RIGHTS_PATH: &str = "/auth/users/portal-rights";
 const HEALTH_PATH: &str = "/healthz";
+/// The readiness of the instance. With the block `inbox`, the inbox answers (see `crate::inbox`).
+const READY_PATH: &str = "/readyz";
 const SUCCESS_PATH: &str = "/auth/success";
 const DENIED_PATH: &str = "/auth/denied";
 const USERS_ADD_PATH: &str = "/auth/users/add";
@@ -163,6 +165,10 @@ pub struct AppState {
     pub stop: crate::shutdown::Stop,
     /// The inbox. It runs without a session of the portal.
     pub inbox: crate::inbox::Slot,
+    /// True when the portal serves its own routes: the catalogue is complete (portal 7.3b). With the
+    /// block `inbox`, the listener opens before that moment and serves the API of the inbox only,
+    /// so that an alert never waits for the catalogue. Every other route answers 503 until then.
+    pub serving: std::sync::atomic::AtomicBool,
     /// The counters of the alerts that the portal sends about itself.
     pub alerts: crate::portal_alerts::Stats,
     pub ensured_counters: std::sync::Mutex<
@@ -275,6 +281,7 @@ impl AppState {
             undeclared_values: std::sync::atomic::AtomicU64::new(0),
             stop: crate::shutdown::Stop::default(),
             inbox: crate::inbox::Slot::default(),
+            serving: std::sync::atomic::AtomicBool::new(false),
             alerts: crate::portal_alerts::Stats::default(),
             ensured_counters: std::sync::Mutex::new(ensured),
             sessions,
@@ -439,6 +446,18 @@ async fn serve_until(
         .inbox
         .set_authorizer(Arc::new(inbox_rights::PortalAuthorizer::new(&state)));
 
+    // With the block `inbox`, the listener opens now and serves the API of the inbox only. The
+    // inbox must take alerts while the catalogue is not complete. Without the block, the
+    // ports open when the catalogue is complete (portal 7.3b).
+    let mut accepting = Vec::new();
+    let mut listener = None;
+    if state.config.inbox.is_some() {
+        accepting.push(tokio::spawn(accept_loop(
+            Arc::clone(&state),
+            bind_main(&state).await?,
+        )));
+    }
+
     let catalog_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let publisher = Arc::clone(&state);
     let complete = Arc::clone(&catalog_complete);
@@ -471,19 +490,24 @@ async fn serve_until(
         state.config.access.actions_refresh,
     ));
     if !wait_ready(&state, &catalog_complete, &stopped).await {
+        for task in &accepting {
+            task.abort();
+        }
+        state.stop.close_connections();
         state.inbox.begin_drain();
-        state.inbox.finish(crate::shutdown::DRAIN_LIMIT).await;
+        tokio::join!(
+            state.stop.drain(crate::shutdown::DRAIN_LIMIT),
+            state.inbox.finish(crate::shutdown::DRAIN_LIMIT)
+        );
         return Ok(());
     }
-
-    let listener = TcpListener::bind(state.config.server.listen_address)
-        .await
-        .map_err(|e| {
-            format!(
-                "cannot listen on {}: {e}",
-                state.config.server.listen_address
-            )
-        })?;
+    // From here the portal serves its own routes (see `AppState::serving`).
+    state
+        .serving
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if accepting.is_empty() {
+        listener = Some(bind_main(&state).await?);
+    }
     let pdp_listener = match &state.config.pdp {
         Some(pdp) => Some(TcpListener::bind(pdp.listen_address).await.map_err(|e| {
             format!(
@@ -493,7 +517,6 @@ async fn serve_until(
         })?),
         None => None,
     };
-    let mut accepting = Vec::new();
     // The alerts of the portal about itself. The task ends at once without the block.
     accepting.push(tokio::spawn(crate::portal_alerts::run(Arc::clone(&state))));
     if let Some(listener) = pdp_listener {
@@ -538,8 +561,9 @@ async fn serve_until(
         ],
     );
 
-    accepting.push(tokio::spawn(accept_loop(Arc::clone(&state), listener)));
-
+    if let Some(listener) = listener {
+        accepting.push(tokio::spawn(accept_loop(Arc::clone(&state), listener)));
+    }
     stopped.notified().await;
     state.inbox.begin_drain();
     log(
@@ -567,6 +591,18 @@ async fn serve_until(
         &[("connections_left", left.to_string())],
     );
     Ok(())
+}
+
+/// Opens the main listener (`server.listen_address`).
+async fn bind_main(state: &AppState) -> Result<TcpListener, String> {
+    TcpListener::bind(state.config.server.listen_address)
+        .await
+        .map_err(|e| {
+            format!(
+                "cannot listen on {}: {e}",
+                state.config.server.listen_address
+            )
+        })
 }
 
 /// Accepts the connections of the main listener. It never ends on its own.
@@ -659,8 +695,22 @@ async fn handle_request(
         &state.config.server.trusted_proxies,
     ));
     let client = Client::new(&state, request.headers(), client_ip);
+    // The inbox owns `/api/v1/`, `/readyz` and `/api/version` on this listener: the API of the
+    // producers and the webhooks. No session and no other handler apply to them. Without the block
+    // `inbox`, these paths are not found. The phones use their own listener (`inbox.devices.listen`).
+    let inbox_app = if crate::inbox::owns_api(&path) {
+        state.inbox.app()
+    } else {
+        None
+    };
 
-    let response = if state.config.metrics.enabled
+    // The listener is open for the inbox before the catalogue is complete (see `AppState::serving`).
+    // Any other route fails closed: the gate must not decide with an incomplete catalogue.
+    let starting = inbox_app.is_none() && !state.serving.load(std::sync::atomic::Ordering::SeqCst);
+
+    let response = if starting {
+        text_response(StatusCode::SERVICE_UNAVAILABLE, "starting\n")
+    } else if state.config.metrics.enabled
         && method == Method::GET
         && path == state.config.metrics.path
     {
@@ -671,6 +721,11 @@ async fn handle_request(
         edge::handle_verify_key(&state, request.headers(), &client)
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
+    } else if let Some(app) = inbox_app {
+        crate::inbox::serve_api(app, request).await
+    } else if method == Method::GET && path == READY_PATH && state.config.inbox.is_none() {
+        // Without the block `inbox`, the instance is ready whenever it runs.
+        text_response(StatusCode::OK, "ready\n")
     } else if inbox_page::is_inbox_path(&path) {
         inbox_page::handle(&state, request, &client).await
     } else if method == Method::GET && path == ui::keys::PATH {
@@ -758,7 +813,7 @@ async fn handle_request(
         .metrics
         .observe_http_request(method_metric, route_metric, status, started.elapsed());
 
-    let request_log_level = if route_metric == "metrics" || route_metric == "health" {
+    let request_log_level = if matches!(route_metric, "metrics" | "health" | "ready") {
         LogLevel::Debug
     } else {
         LogLevel::Info
@@ -1063,23 +1118,21 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
 
     // The list has only the services that the viewer can open.
     // The discovery problems name workloads, so only the superadmin sees them.
-    let catalog = current_catalog(state);
+    // The inbox is a feature of the portal, as the keys are: it has no tile. The gear opens its pages.
+    let catalog =
+        Arc::new(current_catalog(state).filtered(|s| s.id != crate::inbox_actions::SERVICE, true));
     let superadmin = is_superadmin(&viewer);
-    // The tile of the inbox is for an account with a right of the inbox, not for `access`.
-    let inbox_tile = inbox_page::tab_visible(state, &viewer);
     let shown = match &viewer.grants {
-        Some(grants) => Arc::new(catalog.filtered(
-            |s| {
-                if s.id == crate::inbox_actions::SERVICE {
-                    inbox_tile
-                } else {
-                    may_open(Some(grants), &s.id)
-                }
-            },
-            superadmin,
-        )),
+        Some(grants) => Arc::new(catalog.filtered(|s| may_open(Some(grants), &s.id), superadmin)),
         None if superadmin => Arc::clone(&catalog),
         None => Arc::new(catalog.filtered(|_| true, false)),
+    };
+    let gear = if superadmin {
+        Some(ui::settings::USERS_PATH)
+    } else if inbox_page::tab_visible(state, &viewer) {
+        Some(ui::settings::INBOX_PATH)
+    } else {
+        None
     };
 
     let page = ui::home_page(
@@ -1091,7 +1144,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
             logout_token: &logout_token,
             users_token: &users_token,
             hidden_services: catalog.service_count() - shown.service_count(),
-            settings: superadmin,
+            settings: gear,
         },
     );
     html_response(StatusCode::OK, page)
@@ -1145,9 +1198,12 @@ async fn handle_settings(
         superadmin: true,
     };
     let catalog = current_catalog(state);
+    // The inbox is a feature of the portal: the pages of the services list the workloads only. The
+    // editors of permissions keep the inbox, with the name "Inbox (portal)".
+    let workloads = catalog.filtered(|s| s.id != crate::inbox_actions::SERVICE, true);
     let page = match path {
         ui::settings::SERVICES_PATH => {
-            let services = service_grants(state, &catalog);
+            let services = service_grants(state, &workloads);
             let holders: Vec<(String, Vec<Grant>)> = state
                 .users
                 .list()
@@ -1160,7 +1216,7 @@ async fn handle_settings(
             ui::services_page(
                 &frame,
                 &ui::ServicesView {
-                    catalog: &catalog,
+                    catalog: &workloads,
                     services: &services,
                     holders: &holders,
                     problems: state.actions.problems(),
@@ -1213,7 +1269,7 @@ async fn handle_settings(
                 .strip_prefix(ui::settings::SERVICE_PATH_PREFIX)
                 .and_then(|id| percent_decode_form(id).ok())
                 .unwrap_or_default();
-            match service_view(state, &catalog, &asked) {
+            match service_view(state, &workloads, &asked) {
                 Some(view) => ui::service_page(&frame, &view),
                 None => return handle_not_found(state, &Method::GET, uri, headers, client),
             }
@@ -3629,6 +3685,8 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         VERIFY_PATH => "verify",
         VERIFY_KEY_PATH => "verify_key",
         HEALTH_PATH => "health",
+        READY_PATH => "ready",
+        _ if crate::inbox::owns_api(path) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
@@ -3694,6 +3752,70 @@ mod cluster_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The paths of the inbox and the paths of the portal never overlap: `/api/v1/`,
+    /// `/readyz` and `/api/version` are the inbox's, and no route of the portal is one of them.
+    #[test]
+    fn the_paths_of_the_inbox_are_not_shadowed_by_a_route_of_the_portal() {
+        for inbox in [
+            "/api/v1/alerts",
+            "/api/v1/alerts/0123abcd",
+            "/api/v1/notify/infra",
+            "/api/v1/webhooks/alertmanager/infra",
+            "/readyz",
+            "/api/version",
+        ] {
+            assert!(crate::inbox::owns_api(inbox), "{inbox}");
+        }
+        let portal = [
+            HOME_PATH,
+            LOGIN_PATH,
+            LOGOUT_PATH,
+            VERIFY_PATH,
+            VERIFY_KEY_PATH,
+            PORTAL_RIGHTS_PATH,
+            HEALTH_PATH,
+            SUCCESS_PATH,
+            DENIED_PATH,
+            USERS_ADD_PATH,
+            USERS_DELETE_PATH,
+            USERS_UPDATE_PATH,
+            IMPERSONATE_PATH,
+            IMPERSONATE_END_PATH,
+            END_SESSIONS_PATH,
+            STYLE_PATH,
+            SETTINGS_STYLE_PATH,
+            THEME_JS_PATH,
+            SETTINGS_JS_PATH,
+            ICONS_PREFIX,
+            ui::keys::PATH,
+            ui::keys::NEW_PATH,
+            ui::keys::CREATE_PATH,
+            ui::keys::EDIT_PATH,
+            ui::keys::REVOKE_PATH,
+            options_page::PATH,
+            ui::settings::USERS_PATH,
+            ui::settings::SERVICES_PATH,
+            ui::settings::LOGINS_PATH,
+            ui::settings::INBOX_PATH,
+            "/metrics",
+        ];
+        for path in portal {
+            assert!(!crate::inbox::owns_api(path), "{path}");
+        }
+        // The prefix needs the slash: a path that only starts with the same letters is the portal's.
+        // The paths of the phones are on their own listener: the portal does not own them.
+        for path in [
+            "/api/v1",
+            "/v1/enroll",
+            "/v1/session",
+            "/api/versions",
+            "/readyz/x",
+            "/api/v2/x",
+        ] {
+            assert!(!crate::inbox::owns_api(path), "{path}");
+        }
+    }
 
     fn headers(entries: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut out = HeaderMap::new();

@@ -11,7 +11,8 @@
 //! - `db`, `pg`, `store`: SQLite and PostgreSQL. The inbox uses the database of the portal.
 //! - `spool`, `peer`: the degraded mode, when PostgreSQL has no writable primary.
 //! - `replica`: the standby copy of the SQLite file.
-//! - `http`, `ws`: the listeners, on hyper.
+//! - `http`, `ws`: the listener of the phones, the API of the producers (the portal serves it on
+//!   its own listener), the listener of the cluster, and the WebSocket.
 //! - `metrics`, `log`: the Prometheus text and the JSON log.
 
 pub mod admin;
@@ -25,7 +26,6 @@ mod hub;
 mod internal;
 pub mod log;
 pub mod metrics;
-mod net;
 mod peer;
 mod pg;
 mod ratelimit;
@@ -51,6 +51,7 @@ use zeroize::Zeroizing;
 use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBackend};
 pub use api::ApiError;
 use db::Db;
+pub use http::{owns_api, serve_api};
 use hub::Hub;
 use peer::Cluster;
 use pg::{PgSettings, PgStore};
@@ -201,6 +202,7 @@ impl Booted {
             max_headers: config.server.max_headers,
             max_header_bytes: config.server.max_header_bytes,
             max_connections: config.server.max_connections + 2 * inbox.devices.max_devices as usize,
+            trusted_proxies: config.server.trusted_proxies.clone(),
         };
         let init = Init {
             config: inbox,
@@ -428,6 +430,7 @@ impl Slot {
         log::info!(
             event = "inbox_started",
             devices_listen = %app.config.devices.listen,
+            public_address = %app.config.devices.public_address,
             groups = app.groups.len(),
             producers = app.secrets.producers.len(),
             replica = app.config.replica.is_some(),

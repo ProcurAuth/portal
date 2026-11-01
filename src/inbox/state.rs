@@ -78,14 +78,16 @@ fn text(bytes: &[u8], label: &str) -> Result<Zeroizing<String>, String> {
 }
 
 /// The limits of the HTTP listeners of the inbox. They come from the block `server` of the portal.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct HttpLimits {
     pub header_read_timeout: Duration,
     pub body_read_timeout: Duration,
     pub max_headers: usize,
     pub max_header_bytes: usize,
-    /// The largest number of connections that one listener holds.
+    /// The largest number of connections that one listener of the inbox holds.
     pub max_connections: usize,
+    /// The proxies that give the client address: `server.trusted_proxies`. The inbox has no list of its own.
+    pub trusted_proxies: Vec<crate::transport::Cidr>,
 }
 
 pub struct App {
@@ -198,7 +200,7 @@ mod tests {
             inbox {
               server_key_env = "K"
               devices {
-                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080" trusted_proxies = []
+                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080"
                 heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
                 max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
               }

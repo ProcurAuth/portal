@@ -9,7 +9,7 @@
 //! - The inbox never drops an alert. A phone that is offline gets its backlog when it connects.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +31,6 @@ use super::db::{DbError, DeviceKey, Redeem};
 use super::http::Resp;
 use super::hub::Live;
 use super::log;
-use super::net::client_ip;
 use super::rights;
 use super::state::{App, SocketGuard};
 use super::util::{is_hex_id, now_ms};
@@ -43,8 +42,7 @@ const ENROLL_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const ENROLL_MAX_MESSAGE: usize = 8 * 1024;
 
 /// `GET /v1/enroll`: the upgrade to a WebSocket, then the enrollment.
-pub fn enroll_ws(app: Arc<App>, peer: SocketAddr, request: Request<Incoming>) -> Resp {
-    let ip = client_ip(peer, request.headers(), &app.config.devices.trusted_proxies);
+pub fn enroll_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
     let guard = SocketGuard::new(&app);
     let answer = ws::upgrade(request, ENROLL_MAX_MESSAGE, move |socket| async move {
         let _guard = guard;
@@ -54,8 +52,7 @@ pub fn enroll_ws(app: Arc<App>, peer: SocketAddr, request: Request<Incoming>) ->
 }
 
 /// `GET /v1/session`: the upgrade to a WebSocket, then the session of a phone.
-pub fn session_ws(app: Arc<App>, peer: SocketAddr, request: Request<Incoming>) -> Resp {
-    let ip = client_ip(peer, request.headers(), &app.config.devices.trusted_proxies);
+pub fn session_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
     let guard = SocketGuard::new(&app);
     let answer = ws::upgrade(request, noise::MAX_MESSAGE, move |socket| async move {
         let _guard = guard;

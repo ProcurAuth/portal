@@ -1845,7 +1845,6 @@ const INBOX: &str = r#"inbox {
   devices {
     listen = "0.0.0.0:8080"
     public_address = "inbox.example.org:8080"
-    trusted_proxies = []
     heartbeat_interval = "20s"
     session_timeout = "60s"
     resend_after = "15s"
@@ -2193,6 +2192,41 @@ fn the_inbox_schema_is_closed_and_strict() {
         let message = inbox_err(&with_inbox(&INBOX.replacen(from, to, 1)));
         assert!(message.contains(expected), "{to}: {message}");
     }
+}
+
+#[test]
+fn the_inbox_has_no_list_of_trusted_proxies_of_its_own() {
+    // The phone port uses `server.trusted_proxies`. The old key is unknown, with no alias.
+    let raw = INBOX.replacen(
+        "public_address",
+        "trusted_proxies = [\"10.0.0.0/8\"] public_address",
+        1,
+    );
+    let message = inbox_err(&with_inbox(&raw));
+    assert!(
+        message.contains("unknown configuration key: inbox.devices.trusted_proxies"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_metrics_path_cannot_hide_a_route_of_the_inbox() {
+    for path in [
+        "/readyz",
+        "/api/version",
+        "/api/v1",
+        "/api/v1/alerts",
+        "/healthz",
+        "/auth/x",
+    ] {
+        let message = err(&with(&format!(
+            r#"metrics {{ enabled = true path = "{path}" }}"#
+        )));
+        assert!(message.contains("metrics.path"), "{path}: {message}");
+    }
+    // A path that only starts with the same letters is free. The phone paths are on the phone port.
+    ok(&with(r#"metrics { enabled = true path = "/v1/x" }"#));
+    ok(&with(r#"metrics { enabled = true path = "/api/v10" }"#));
 }
 
 #[test]

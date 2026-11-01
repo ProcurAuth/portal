@@ -5973,7 +5973,6 @@ mod inbox_rights_tests {
                   devices {{
                     listen = "127.0.0.1:{devices}"
                     public_address = "127.0.0.1:{devices}"
-                    trusted_proxies = []
                     heartbeat_interval = "20s"
                     session_timeout = "60s"
                     resend_after = "15s"
