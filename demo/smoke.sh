@@ -68,14 +68,19 @@ check "key: cannot write (no grant)" 403 "$(status -H "$auth" -H 'Content-Type: 
 check "a key opens no route of persons (files has no key route)" 302 "$(status -H "$auth" "$base/files/")"
 
 # ---- the inbox
-# The listener of the phones and the producers has no session. A producer proves itself with a bearer token.
-check "inbox: devices /healthz" 200 "$(status "$devices/healthz")"
-check "inbox: devices /readyz" 200 "$(status "$devices/readyz")"
+# The phone port has no session: it serves the routes of the phones and the health routes only. The API of
+# the producers is on the port of the pages, through Traefik without ForwardAuth. A producer proves itself
+# with a bearer token or a key.
+check "inbox: phone port /healthz" 200 "$(status "$devices/healthz")"
+check "inbox: phone port /readyz" 200 "$(status "$devices/readyz")"
+check "inbox: the API of the producers is not on the phone port" 404 "$(status "$devices/api/version")"
+check "inbox: /readyz on the port of the pages" 200 "$(status "$base/readyz")"
+check "inbox: /api/version on the port of the pages, no ForwardAuth" 200 "$(status "$base/api/version")"
 token=$(cat .secrets/inbox_producer_token)
 akey=$(cat .secrets/alice_key)
 run=$(date +%s)
 send() { # <token> <idempotency key> <group>: prints the HTTP status
-  status -X POST "$devices/api/v1/alerts" -H "Authorization: Bearer $1" -H "Idempotency-Key: $2" \
+  status -X POST "$base/api/v1/alerts" -H "Authorization: Bearer $1" -H "Idempotency-Key: $2" \
     -H 'Content-Type: application/json' -d "{\"group\":\"$3\",\"title\":\"Smoke test $run\"}"
 }
 check "inbox: alert with the token of the file (infra)" 201 "$(send "$token" "smoke-$run-a" infra)"

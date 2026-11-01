@@ -19,13 +19,15 @@ The stack has these parts:
 | `files`, `wiki` | Two example services. They show the request headers. |
 | `bigdb`, `chdash` | Two services with large action documents. |
 
-The portal publishes three ports:
+The demo publishes these ports:
 
 | Port | Use |
 |---|---|
-| `127.0.0.1:8088` | The pages of the portal, through Traefik. |
-| `127.0.0.1:8089` and `172.17.0.1:8089` | The devices listener of the inbox: phones, producers and webhooks. The address `172.17.0.1` is the host as the Android emulator sees it. It is the `inbox.devices.public_address` of `portal.hcl`. |
-| `127.0.0.1:8091` | The pages listener without Traefik. Use it for `/metrics` and `/healthz`. |
+| `127.0.0.1:8088` | The portal, through Traefik: the pages, and the API of the inbox for the producers and the webhooks (`/api/v1/*`, `/api/version`). |
+| `127.0.0.1:8089` and `172.17.0.1:8089` | The phone port of the inbox: `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`. The address `172.17.0.1` is the host as the Android emulator sees it. It is the `inbox.devices.public_address` of `portal.hcl`. |
+| `127.0.0.1:8091` | The listener of the portal without Traefik. Use it for `/metrics` and `/healthz`. |
+
+The inbox is a feature of the portal. The producers use the port of the pages. Traefik sends `/api/v1/` to the portal without ForwardAuth, because producers have no session. They prove themselves. The phones have their own port, so that a phone on a mobile network can reach the server while the pages stay private.
 
 To check the main points from a terminal, run `./demo/smoke.sh`. It signs in, tests the gate, a ceiling, a budget, a key and the inbox. Read the rate budgets at the top of the script. The budget of `alice` is 5 uses each minute, so wait one minute before a second run.
 
@@ -64,7 +66,7 @@ The inbox has these groups and producers:
 Use the token of the file:
 
 ```sh
-curl -i -X POST http://127.0.0.1:8089/api/v1/alerts \
+curl -i -X POST http://localhost:8088/api/v1/alerts \
   -H "Authorization: Bearer $(cat demo/.secrets/inbox_producer_token)" \
   -H "Idempotency-Key: demo-1" -H "Content-Type: application/json" \
   -d '{"group":"infra","title":"Test"}'

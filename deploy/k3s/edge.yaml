@@ -1,9 +1,10 @@
-# The relay of the devices listener. Phones and producers must reach the inbox on every K3s server, but the portal pods
-# can run on any server. inbox-edge is a DaemonSet of small relays with host port 8087. The relay speaks plain HTTP and
-# has no ForwardAuth, because ForwardAuth would block phones and webhooks. It exists only while the product is deployed.
+# The relay of the phone port. Phones must reach the inbox on every K3s server, but the portal pods can run on any
+# server. inbox-edge is a DaemonSet of small relays with host port 8087. The relay speaks plain HTTP and has no
+# ForwardAuth, because ForwardAuth would block phones. It relays the phones only: the producers use the domain of the
+# portal through Traefik (IngressRoute portal-inbox). It exists only while the product is deployed.
 # It uses its own Traefik instance, not the shared one, because entrypoints are static configuration.
 # The relay discards the X-Forwarded-For header that a client sends and sets the real peer address. The inbox trusts it
-# through inbox.devices.trusted_proxies (the pod network), for its limits of each client.
+# through server.trusted_proxies (the pod network), for its limits of each client.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

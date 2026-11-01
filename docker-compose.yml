@@ -4,14 +4,15 @@
 #   docker compose up -d --build
 #   docker compose down -v                # stops the stack and deletes the database
 #
-# The pages of the portal: http://127.0.0.1:4181/ (the sign-in is /auth/login).
-# The devices listener of the inbox (phones, producers, webhooks): port 8080. The admin pages of the inbox
-# are in the portal, in the tab "Inbox". No admin port exists.
+# The portal: http://127.0.0.1:4181/ (the sign-in is /auth/login). The pages and the API of the inbox for the
+# producers and the webhooks (/api/v1/*) use this port. No proxy is in front of this stack, so no ForwardAuth applies.
+# The phone port of the inbox (phones only): port 8080. The admin pages of the inbox are in the portal, in the
+# tab "Inbox". No admin port exists.
 #
 # Environment (all optional):
 #   PORTAL_PORT          host port of the pages of the portal (default 4181)
-#   PORTAL_DEVICES_PORT  host port of the devices listener (default 8080)
-#   PORTAL_DEVICES_BIND  host address of the devices listener (default 127.0.0.1). Use 0.0.0.0 for a phone or an
+#   PORTAL_DEVICES_PORT  host port of the phone port (default 8080)
+#   PORTAL_DEVICES_BIND  host address of the phone port (default 127.0.0.1). Use 0.0.0.0 for a phone or an
 #                        emulator on another host, and set inbox.devices.public_address in deploy/compose/config.hcl.
 #   PORTAL_VERSION       version of the build (default: the version of Cargo.toml)
 #   PORTAL_SECRETS_DIR   directory of the secret files (default: deploy/compose/secrets)

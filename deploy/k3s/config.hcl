@@ -3,9 +3,9 @@
 # The check needs the files that the configuration names. Make dummy files for a check outside the cluster.
 #
 # Edit these values for your cluster before you apply the manifests:
-#   server.trusted_proxies and inbox.devices.trusted_proxies  the pod network
+#   server.trusted_proxies                                    the pod network (the pages and the phone port)
 #   identity.issuer                                           the base URL of the portal
-#   inbox.devices.public_address                              the address that phones use
+#   inbox.devices.public_address                              the address that phones use (a relay)
 #   postgres.host                                             the read-write Service of the database
 #   the blocks group and producer                             your alert groups and sources
 
@@ -83,12 +83,13 @@ inbox {
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    # Phones, producers, webhooks, /healthz and /readyz. The Service portal-devices and the relay inbox-edge reach it.
+    # The phone port: /v1/enroll, /v1/session, /healthz and /readyz. The Service portal-devices and the relay inbox-edge
+    # reach it. The producers and the webhooks use the port of the pages (4181) through Traefik, not this one.
     listen                = "0.0.0.0:8080"
     # The address that a phone uses to reach a relay (host port 8087 of every server). It is in the enrollment code.
+    # The relay inbox-edge sets X-Forwarded-For to the real client address. It runs in the pod network, which
+    # server.trusted_proxies lists. The phone port uses that list too.
     public_address        = "inbox.example.org:8087"
-    # The relay inbox-edge sets X-Forwarded-For to the real client address. It runs in the pod network.
-    trusted_proxies       = ["10.42.0.0/16"]
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

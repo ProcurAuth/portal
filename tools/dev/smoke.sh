@@ -4,8 +4,9 @@
 # The script makes the secrets in a temporary directory, starts the stack under the project name portal-smoke
 # on high ports, checks it, and always deletes the stack and its volumes.
 # Checks:
-#   /healthz of the portal and /healthz, /readyz of the devices listener answer 200
-#   a producer token is accepted at POST /api/v1/alerts of the devices listener (201), a wrong token is not (401)
+#   /healthz, /readyz and /api/version of the portal answer 200, and /healthz, /readyz of the phone port too
+#   a producer token is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong token is not (401)
+#   the API of the producers is not on the phone port (404)
 #   the metrics of the portal show inbox_* series
 #   an account that is not signed in cannot read the admin calls of the inbox (401)
 set -eu
@@ -43,18 +44,20 @@ pages="http://127.0.0.1:$PORTAL_PORT"
 devices="http://127.0.0.1:$PORTAL_DEVICES_PORT"
 
 check "portal /healthz" 200 "$(code "$pages/healthz")"
-check "devices /healthz" 200 "$(code "$devices/healthz")"
-check "devices /readyz" 200 "$(code "$devices/readyz")"
-check "devices /api/version" 200 "$(code "$devices/api/version")"
+check "phone port /healthz" 200 "$(code "$devices/healthz")"
+check "phone port /readyz" 200 "$(code "$devices/readyz")"
+check "portal /readyz" 200 "$(code "$pages/readyz")"
+check "portal /api/version" 200 "$(code "$pages/api/version")"
+check "phone port has no API of the producers" 404 "$(code "$devices/api/version")"
 
 token=$(cat "$PORTAL_SECRETS_DIR/inbox_producer_token")
 key="smoke-$(date +%s)"
 body='{"group":"infra","title":"Smoke test"}'
-check "alert with the producer token" 201 "$(code -X POST "$devices/api/v1/alerts" \
+check "alert with the producer token" 201 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
-check "same alert again (idempotent)" 200 "$(code -X POST "$devices/api/v1/alerts" \
+check "same alert again (idempotent)" 200 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
-check "alert with a wrong token" 401 "$(code -X POST "$devices/api/v1/alerts" \
+check "alert with a wrong token" 401 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer wrong" -H "Idempotency-Key: $key-2" -H 'Content-Type: application/json' -d "$body")"
 check "admin call without a session" 401 "$(code "$pages/auth/inbox/api/overview")"
 

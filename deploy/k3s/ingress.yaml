@@ -2,8 +2,10 @@
 # (namespace edge). forward-auth calls http://portal.edge.svc.cluster.local:4181/auth/verify and copies the header
 # X-Identity-Token to the request.
 #
-# The devices listener of the inbox has no route here. ForwardAuth would block phones and webhooks. The relay
-# inbox-edge (edge.yaml) serves it on host port 8087. The admin pages of the inbox are pages of the portal.
+# The inbox is a feature of the portal. The producers and the webhooks use the same domain as the pages: the route
+# portal-inbox sends /api/v1/ to the portal without ForwardAuth, because they have no session and prove themselves.
+# The phones use the phone port, which has no route here: the relay inbox-edge (edge.yaml) serves it on host port
+# 8087. The admin pages of the inbox are pages of the portal under /auth/settings/inbox.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -20,6 +22,25 @@ spec:
           port: 4181
       middlewares:
         - name: secure-headers
+  tls:
+    secretName: traefik-tls
+---
+# The API of the inbox for the producers and the webhooks (Alertmanager, Grafana, scripts). No ForwardAuth: a producer
+# sends a token or a key, and the inbox checks it. The path /api/version needs no session either.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: portal-inbox
+  namespace: edge
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      priority: 50000
+      services:
+        - name: portal
+          port: 4181
   tls:
     secretName: traefik-tls
 ---

@@ -22,12 +22,12 @@ The stack has the portal, PostgreSQL and the inbox. It is for development and te
 4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the login and the password in the files `superadmin_login` and `superadmin_password`.
 5. Stop the stack and delete the database: `docker compose down -v`.
 
-The pages of the portal are on port 4181. The devices listener of the inbox is on port 8080. Phones, producers and webhooks use it. The admin pages of the inbox are in the portal. There is no admin port.
+The portal is on port 4181: the pages, and the API of the inbox for the producers and the webhooks (`/api/v1/*`). The inbox is a feature of the portal, so the producers use the port of the pages. The phone port of the inbox is port 8080. Only phones use it. The admin pages of the inbox are in the portal. There is no admin port. No proxy is in front of this stack, so no ForwardAuth applies.
 
 A producer sends an alert with the token in `deploy/compose/secrets/inbox_producer_token`:
 
 ```sh
-curl -fsS -X POST http://127.0.0.1:8080/api/v1/alerts \
+curl -fsS -X POST http://127.0.0.1:4181/api/v1/alerts \
   -H "Authorization: Bearer $(cat deploy/compose/secrets/inbox_producer_token)" \
   -H "Idempotency-Key: test-1" -H "Content-Type: application/json" \
   -d '{"group":"infra","title":"Test"}'
@@ -35,7 +35,7 @@ curl -fsS -X POST http://127.0.0.1:8080/api/v1/alerts \
 
 A phone enrolls with a code. An account that is signed in makes the code in the inbox pages. There is no shared device password. The server key in `inbox_server_key` makes each code and each phone valid for this server. Keep a copy of it. A new key invalidates every phone.
 
-The stack publishes its ports on `127.0.0.1`. To reach it from a phone or an emulator on another host, set `PORTAL_DEVICES_BIND=0.0.0.0`. Then set `inbox.devices.public_address` in `compose/config.hcl` to the address that the phone uses.
+The stack publishes its ports on `127.0.0.1`. To reach the phone port from a phone or an emulator on another host, set `PORTAL_DEVICES_BIND=0.0.0.0`. Then set `inbox.devices.public_address` in `compose/config.hcl` to the address that the phone uses.
 
 ### Two instances
 
@@ -54,8 +54,8 @@ The manifests in `k3s/` describe the target. This repository does not apply them
 | File | Content |
 |---|---|
 | `portal.yaml` | Service account, read-only rights, four Services, the Deployment with two replicas, the PodDisruptionBudget. |
-| `ingress.yaml` | IngressRoutes of the pages, the tile of the launcher and the fallback route. |
-| `edge.yaml` | DaemonSet `inbox-edge`: the relay of the devices listener on host port 8087. |
+| `ingress.yaml` | IngressRoutes of the pages, of the API of the producers (no ForwardAuth), of the launcher and the fallback route. |
+| `edge.yaml` | DaemonSet `inbox-edge`: the relay of the phone port on host port 8087. |
 | `edge-dynamic.yaml` | Traefik configuration of the relay. |
 | `network-policy.yaml` | Policies for the portal pods, the relay and the database. |
 | `config.hcl` | Configuration of the portal. Kustomize makes the ConfigMap `portal-config` from it. |
@@ -100,17 +100,23 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 ### Probes and stop
 
-- The startup probe waits up to 5 minutes for the port 4181. The portal opens it when the catalogue is complete.
-- The readiness probe reads `/readyz` of the devices listener. It answers `503` at SIGTERM. The Services then stop to send requests.
+- The inbox opens its ports at once. The port 4181 serves the API of the inbox at once, and answers `503` for every other route until the catalogue is complete. An alert and a phone never wait for the catalogue.
+- The startup probe reads `/healthz` of the portal and waits up to 5 minutes. It answers `200` when the catalogue is complete.
+- The readiness probe reads `/readyz` of the phone port. The portal answers `/readyz` on port 4181 too, with the same value. It answers `503` at SIGTERM. The Services then stop to send requests.
 - The liveness probe reads `/healthz` of the portal. It never reads the database.
 - `terminationGracePeriodSeconds` is 30. The portal and the inbox serve 5 seconds more, wait at most 10 seconds for the sessions, and then write to the database.
 - The update has `maxUnavailable: 0`. The PodDisruptionBudget lets one pod leave at a time.
 
 ### Network
 
-The devices listener has no session. Phones prove themselves with the Noise session. Producers send a bearer token. The DaemonSet `inbox-edge` relays port 8087 of every server to the Service `portal-devices`. The relay sets `X-Forwarded-For` to the real client address. Phones use `inbox.devices.public_address`, which must name a relay.
+The inbox is a feature of the portal. It has two entries.
 
-The pages of the inbox are under `/auth/settings/inbox` in the portal. ForwardAuth does not protect them. The portal checks the session itself. The portal lists the tile **Inbox** in the launcher by itself, for an account that has a permission of the service `inbox`.
+- **The producers and the webhooks** use the domain of the pages. The IngressRoute `portal-inbox` sends `/api/v1/*` and `/api/version` to the Service `portal` without ForwardAuth. A producer has no session. It sends a bearer token or a key, and the inbox checks it.
+- **The phones** use the phone port. It has no session. A phone proves itself with the Noise session. The DaemonSet `inbox-edge` relays port 8087 of every server to the Service `portal-devices`. The relay sets `X-Forwarded-For` to the real client address, and it retries a request when a node is lost. Phones use `inbox.devices.public_address`, which must name a relay. A phone on a mobile network reaches the relay, and the pages of the portal stay private.
+
+The portal reads the client address from `X-Forwarded-For` for the pages and for the phone port. It trusts the header from the networks in `server.trusted_proxies` only. The inbox has no list of its own.
+
+The pages of the inbox are under `/auth/settings/inbox` in the portal. ForwardAuth does not protect them. The portal checks the session itself. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
 
 ### Variant with SQLite
 

@@ -9,7 +9,7 @@
 # Build arguments:
 #   RUST_IMAGE        Alpine image of the pinned Rust toolchain. Alpine is musl: the binary is static.
 #   PORTAL_VERSION    Version that `portal version` shows. Empty: the version of Cargo.toml.
-#   PORTAL_GIT_SHA    Commit that the build comes from. `/api/version` of the devices listener shows it.
+#   PORTAL_GIT_SHA    Commit that the build comes from. `/api/version` of the portal shows it.
 #
 # Build for the other architecture with `docker buildx build --platform linux/arm64`. The compiler then
 # runs on that architecture (a native builder or QEMU). There is no cross compilation.
@@ -71,8 +71,8 @@ FROM scratch AS runtime
 COPY --from=build --chown=10001:10001 /out/rootfs/ /
 COPY --from=build /out/portal /portal
 USER 10001:10001
-# 4181: the pages of the portal. 4182: the AuthZEN PDP. 8080: the devices listener of the inbox.
-# Do not route 4182 through Traefik. Publish 8080 only when the inbox runs.
+# 4181: the portal: the pages, and the API of the inbox for the producers and the webhooks. 4182: the AuthZEN PDP.
+# 8080: the phone port of the inbox. Do not route 4182 through Traefik. Publish 8080 only when the inbox runs.
 EXPOSE 4181 4182 8080
 VOLUME ["/var/lib/portal"]
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --start-interval=1s --retries=3 \

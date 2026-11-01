@@ -52,12 +52,12 @@ inbox {
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    # Phones, producers, webhooks, /healthz and /readyz. The Compose file publishes this port.
+    # The phone port: /v1/enroll, /v1/session, /healthz and /readyz. The Compose file publishes this port.
+    # The producers and the webhooks use the port of the pages (4181), not this one.
     listen                = "0.0.0.0:8080"
-    # The address that a phone uses to reach this listener. It is in the enrollment code.
+    # The address that a phone uses to reach the phone port. It is in the enrollment code.
     # Change it when the phone is not on this host. An emulator reaches the host at 172.17.0.1:8080.
     public_address        = "127.0.0.1:8080"
-    trusted_proxies       = []
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

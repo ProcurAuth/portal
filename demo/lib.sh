@@ -1,6 +1,7 @@
 # Helpers that seed.sh and smoke.sh share. Source this file. It reads the passwords in .secrets/credentials.txt.
 # shellcheck shell=bash
 base=${DEMO_BASE:-http://localhost:8088}
+# The phone port of the inbox. The producers use $base: the port of the pages.
 devices=${DEMO_DEVICES:-http://127.0.0.1:8089}
 metrics=${DEMO_METRICS:-http://127.0.0.1:8091/metrics}
 creds=.secrets/credentials.txt

@@ -7,9 +7,10 @@
 # configuration reference in README.md.
 
 server {
-  # The pages of the portal, behind Traefik ForwardAuth. The account pages make the enrollment codes.
+  # The portal: the pages (behind Traefik ForwardAuth where needed) and the API of the inbox for the producers and
+  # the webhooks (/api/v1/*, no ForwardAuth). The account pages make the enrollment codes.
   listen_address  = "0.0.0.0:4181"
-  # Peers whose X-Forwarded-For / X-Real-IP headers the portal trusts. Empty: none.
+  # Peers whose X-Forwarded-For header the portal trusts, for the pages and for the phone port. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
 }
 
@@ -39,13 +40,13 @@ inbox {
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    # Phones (/v1/enroll, /v1/session), producer API, webhooks, /healthz, /readyz.
+    # The phone port: /v1/enroll, /v1/session, /healthz, /readyz. A phone on a mobile network reaches this port.
+    # The producers and the webhooks do not use it: they use the port of the pages (`server.listen_address`).
     listen          = "0.0.0.0:8080"
-    # The address that phones use to reach this listener, as they see it from outside. It is the `s` of the
-    # enrollment code: host:port, a domain, or an http(s) URL.
+    # The address that phones use to reach the phone port, as they see it from outside. It is the `s` of the
+    # enrollment code: host:port, a domain, or an http(s) URL. The client address of a phone comes from
+    # server.trusted_proxies.
     public_address  = "inbox.example.org"
-    # Peers whose X-Forwarded-For / X-Real-IP headers the inbox trusts. Empty: none.
-    trusted_proxies = ["127.0.0.1/32"]
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

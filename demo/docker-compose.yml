@@ -42,8 +42,9 @@ services:
       - inbox_server_key
       - inbox_producer_token
     ports:
-      # The devices listener of the inbox (phones, producers). The emulator reaches it through the
+      # The phone port of the inbox (phones only). The emulator reaches it through the
       # Docker bridge at 172.17.0.1:8089. This is the inbox.devices.public_address of portal.hcl.
+      # The producers use Traefik (8088), like the pages.
       - "127.0.0.1:8089:8080"
       - "172.17.0.1:8089:8080"
       # The pages listener, for the metrics and the health check from the host. Loopback only.
@@ -64,6 +65,12 @@ services:
       traefik.http.routers.portal-home.rule: Path(`/`)
       traefik.http.routers.portal-home.entrypoints: web
       traefik.http.routers.portal-home.service: portal
+      # The API of the inbox for the producers and the webhooks, on the port of the pages. They have no
+      # session and prove themselves with a token or a key, so no ForwardAuth applies.
+      traefik.http.routers.portal-inbox.rule: PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      traefik.http.routers.portal-inbox.entrypoints: web
+      traefik.http.routers.portal-inbox.priority: "50000"
+      traefik.http.routers.portal-inbox.service: portal
       traefik.http.services.portal.loadbalancer.server.port: "4181"
 
   notes:

@@ -1,4 +1,5 @@
 # Dynamic configuration of the proxy of docker-compose.ha.yml. Requests go to both instances in turn.
+# The entry point "pages" serves the pages and the API of the producers (/api/v1/). The entry point "devices" serves the phones.
 # A phone keeps one WebSocket on the instance that took it. The other instance wakes it through PostgreSQL.
 http:
   routers:
