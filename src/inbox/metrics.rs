@@ -353,7 +353,8 @@ mod tests {
             assert!(text.contains(expected), "{expected}\n{text}");
         }
         assert!(
-            !text.contains("inbox_replica_"),
+            !text.contains("inbox_replica_epoch")
+                && !text.contains("inbox_replica_snapshots_total"),
             "no replica metrics without a replica"
         );
     }

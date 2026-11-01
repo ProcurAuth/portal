@@ -1036,4 +1036,72 @@ mod tests {
         let future = now_ms() + 1_000_000;
         assert_eq!(purge(&mut c, future, future).unwrap().0, 1);
     }
+
+    #[test]
+    fn the_inbox_chain_has_its_own_version_table_and_refuses_a_newer_schema() {
+        let mut c = Connection::open_in_memory().unwrap();
+        // The chain of the portal keeps its version in this pragma.
+        c.execute_batch("PRAGMA user_version = 6;").unwrap();
+        migrate(&mut c).unwrap();
+        assert_eq!(schema_version(&c).unwrap(), SCHEMA_VERSION);
+        let portal_version: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            portal_version, 6,
+            "the inbox does not touch the version of the portal"
+        );
+        // A second start does nothing.
+        migrate(&mut c).unwrap();
+        assert_eq!(schema_version(&c).unwrap(), SCHEMA_VERSION);
+        c.execute("UPDATE inbox_schema_version SET version = 99", [])
+            .unwrap();
+        let error = migrate(&mut c).unwrap_err().to_string();
+        assert!(
+            error.contains("version 99") && error.contains("understands"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_portal_and_the_inbox_share_one_sqlite_file_in_any_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "portal-inbox-db-{}-{}",
+            std::process::id(),
+            random_id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for portal_first in [true, false] {
+            let path = dir.join(format!("shared-{portal_first}.db"));
+            let open_portal = || crate::store::Store::open(&path).unwrap();
+            let (portal, inbox) = if portal_first {
+                let portal = open_portal();
+                (portal, Db::open(&path).unwrap())
+            } else {
+                let inbox = Db::open(&path).unwrap();
+                (open_portal(), inbox)
+            };
+            // Each side reads and writes its own tables in the same file.
+            assert!(portal.load_users().unwrap().is_empty());
+            let (db, _closed) = inbox;
+            let id = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(db.call(|c| Ok(insert_device(c, "phone", "pseudonym", &[7; 32], "ip")?)))
+                .unwrap();
+            assert_eq!(id.len(), 32);
+            let versions: (i64, i64) = rusqlite::Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT (SELECT COALESCE(MAX(version), 0) FROM inbox_schema_version),
+                            (SELECT user_version FROM pragma_user_version)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(versions.0, SCHEMA_VERSION);
+            assert!(versions.1 > 0, "the portal wrote its own version");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
