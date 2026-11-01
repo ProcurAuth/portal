@@ -110,7 +110,7 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 The devices listener has no session. Phones prove themselves with the Noise session. Producers send a bearer token. The DaemonSet `inbox-edge` relays port 8087 of every server to the Service `portal-devices`. The relay sets `X-Forwarded-For` to the real client address. Phones use `inbox.devices.public_address`, which must name a relay.
 
-The inbox pages are under `/auth/inbox/` in the portal. ForwardAuth does not protect them. The portal checks the session itself.
+The pages of the inbox are under `/auth/settings/inbox` in the portal. ForwardAuth does not protect them. The portal checks the session itself. The portal lists the tile **Inbox** in the launcher by itself, for an account that has a permission of the service `inbox`.
 
 ### Variant with SQLite
 
