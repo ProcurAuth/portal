@@ -92,8 +92,9 @@ object Enroller {
             when (val e = q.poll(20, TimeUnit.SECONDS)) {
                 Ev.Open -> {}
                 is Ev.Closed -> throw closed(context, e.code)
-                is Ev.Failure -> throw failed(context, e)
                 // No WebSocket at all: wrong address, server down or no network.
+                is Ev.Failure -> throw if (e.http == 429) failed(context, e)
+                    else EnrollmentError(context.getString(R.string.err_unreachable))
                 else -> throw EnrollmentError(context.getString(R.string.err_unreachable))
             }
             ws.send(msg1.toByteString())
