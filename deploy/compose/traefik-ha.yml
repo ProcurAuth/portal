@@ -1,0 +1,23 @@
+# Dynamic configuration of the proxy of docker-compose.ha.yml. Requests go to both instances in turn.
+# A phone keeps one WebSocket on the instance that took it. The other instance wakes it through PostgreSQL.
+http:
+  routers:
+    pages:
+      entryPoints: [pages]
+      rule: "PathPrefix(`/`)"
+      service: pages
+    devices:
+      entryPoints: [devices]
+      rule: "PathPrefix(`/`)"
+      service: devices
+  services:
+    pages:
+      loadBalancer:
+        servers:
+        - url: "http://portal:4181"
+        - url: "http://portal2:4181"
+    devices:
+      loadBalancer:
+        servers:
+        - url: "http://portal:8080"
+        - url: "http://portal2:8080"

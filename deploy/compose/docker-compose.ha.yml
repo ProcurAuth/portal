@@ -1,0 +1,40 @@
+# Two active instances of the portal behind a small reverse proxy. Use it on top of the root file:
+#
+#   docker compose -f docker-compose.yml -f deploy/compose/docker-compose.ha.yml up -d
+#
+# Run it from the root of the repository: the paths of `extends` and of the volume are relative to the project directory.
+#
+# Both instances share the PostgreSQL database and the secrets. Traefik sends the pages (port 4181) and the devices
+# listener (port 8080) to both. Traefik is the only service that publishes ports. The portal sees the address of the
+# proxy as the client address, because deploy/compose/config.hcl has no trusted proxy: the limits of each client
+# then count all clients together. Do not use this file as a model for production: see deploy/k3s/.
+name: portal
+
+services:
+  portal:
+    ports: !reset []
+
+  portal2:
+    extends:
+      file: docker-compose.yml
+      service: portal
+    ports: !reset []
+
+  proxy:
+    image: traefik:v3.6
+    restart: unless-stopped
+    command:
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --entrypoints.pages.address=:4181
+      - --entrypoints.devices.address=:8080
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --log.level=INFO
+    depends_on:
+      - portal
+      - portal2
+    ports:
+      - "127.0.0.1:${PORTAL_PORT:-4181}:4181"
+      - "${PORTAL_DEVICES_BIND:-127.0.0.1}:${PORTAL_DEVICES_PORT:-8080}:8080"
+    volumes:
+      - ./deploy/compose/traefik-ha.yml:/etc/traefik/dynamic.yml:ro
