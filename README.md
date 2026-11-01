@@ -1,17 +1,80 @@
 # portal
 
-portal is an authentication service for Traefik `ForwardAuth`. It also contains the launcher page of the lab. portal is written in Rust. It does these functions:
+portal is one Rust program. It is the access gateway of a lab, the launcher page, the AuthZEN PDP, the service that makes keys, and a inbox that sends alerts to Android phones. It has one binary, one configuration file and one database.
 
 - A superadmin is defined by the environment.
-- Users get grants from the settings pages or from the configuration.
-- A gate protects each service.
+- Users get permissions from the settings pages or from the configuration.
+- A gate protects each service. The gate is a Traefik `ForwardAuth` server.
 - portal gives an identity token to the services.
 - portal is an AuthZEN PDP for the services.
+- A user makes keys. A key lets a program act for its owner, with limits.
 - portal keeps a history of who signed in and what they used.
+- The inbox sends alerts to phones. It makes sure that each phone shows each alert one time.
 
-portal is the access gateway and the PDP of section 11 of the MCP server contract. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or by annotation (Kubernetes IngressRoute). The launcher groups the services in full-width rows. It shows their health and an offline icon library. See the repository README for the labels.
+portal is the access gateway and the PDP of section 11 of the MCP server contract. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or by annotation (Kubernetes IngressRoute). See "Labels of a service". The launcher groups the services in full-width rows. It shows their health and an offline icon library.
 
-The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only script is the theme selector. The settings pages add one more small script, for the password generator. Accounts and history live in one SQLite file. The SQLite file is bundled in the static binary. To run several active instances, use a shared PostgreSQL database instead (see [Several instances](#several-instances-postgresql)). There is no Redis, no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
+The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only scripts are the theme selector and the scripts of the settings pages (the password generator, the editor of grants and the Copy button of the inbox). There is no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
+
+The data lives in one database. By default it is one SQLite file. The SQLite library is bundled in the static binary. To run several active instances, use a shared PostgreSQL database instead (see [Several instances](#several-instances-postgresql)). There is no Redis.
+
+## Architecture
+
+```text
+ Browser ── Traefik ──ForwardAuth──▶ portal  listen_address (4181)      pages, launcher, /auth/verify, /metrics
+ Services ──────────AuthZEN────────▶ portal  pdp.listen_address (4182)  decisions
+ Producers ─┐                        portal  inbox.devices.listen (8080) alerts, webhooks,
+ Phones ────┴── WebSocket (Noise) ─▶                                     enrollment, sessions
+                                     portal  inbox.cluster.listen       other instances (optional)
+                                       │
+                                       └── one database: SQLite file, or PostgreSQL
+```
+
+| Listener | Key | Use | Who reaches it |
+|---|---|---|---|
+| Pages | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz` and `/metrics`. | Traefik and Prometheus. Not the internet. |
+| PDP | `pdp.listen_address` | The AuthZEN decisions. Optional. | The services only. Do not route it through Traefik. |
+| Devices | `inbox.devices.listen` | Phones, producers, webhooks, `/healthz` and `/readyz`. No session. Optional. | Phones and producers, through a relay or a proxy. |
+| Cluster | `inbox.cluster.listen` | Copies of alerts between instances. Optional. | The pods of the service only. |
+
+The metrics of the portal and of the inbox are in one Prometheus text at `metrics.path` of the pages listener.
+
+The repository has these parts:
+
+| Path | Content |
+|---|---|
+| `src/` | The binary `portal`. The code of the inbox is in `src/inbox/`. |
+| `crates/inbox-core` | The protocol and the cryptography of the phones, with no I/O. The server and the app share it. |
+| `crates/inbox-android`, `android/` | The JNI bridge and the Android app (name Inbox, package `app.inbox`). |
+| `web/` | The style sheets and the script of the pages. |
+| `deploy/`, `docker-compose.yml`, `docker/` | The Compose stack, the K3s manifests and the Dockerfile. |
+| `demo/` | A local demo with Traefik and three example services. |
+| `tools/` | The scripts for the build, the tests, the emulator and the release. |
+| `docs/` | The design of the merge and the chapter of the inbox (`docs/inbox/`). |
+
+## Quick start
+
+Docker is the only tool that you need.
+
+1. Build the image: `tools/build.sh image`.
+2. Make the secrets: `deploy/compose/init-secrets.sh`.
+3. Start the stack: `docker compose up -d`.
+4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`.
+5. Stop the stack and delete its database: `docker compose down -v`.
+
+The stack has the portal with the inbox, and PostgreSQL. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
+
+## Security model
+
+- **One identity.** An account has one login and one set of permissions for the launcher, the keys and the inbox.
+- **Passwords.** The database keeps only Argon2id hashes. Each sign-in costs one Argon2 check, also for an unknown login. The failure message is always the same.
+- **Sessions.** A session is an opaque random token. The server keeps only its SHA-256 digest. The session is bound to the client address and the browser.
+- **Gate.** A new user has no permission. The gate reads the forwarded path in every way that a proxy can read it. It lets a request pass only if every reading is allowed.
+- **Keys.** A key never gets more than its owner. The portal keeps only the digest of the key text.
+- **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A producer proves itself with a bearer token. The permissions of the service `inbox` decide who sends, reads and revokes.
+- **Configuration.** The file is the only source. A secret comes only from `_env` or `_file`. An unknown key stops the program at start.
+- **Code.** The project code has no `unsafe` Rust. The binary is static.
+
+The file [`SECURITY.md`](SECURITY.md) gives the invariants. The page [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md) gives the model of the inbox.
 
 ## Authentication model
 
@@ -188,7 +251,7 @@ Rules:
 - The PDP returns the header `X-Request-ID` of the request.
 - The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`. The record also has the match: `node`, `subtree` or `invalid`.
 - The PDP has no TLS. The deployment must limit the network of the PDP to the services and portal. This differs from AuthZEN, which requires TLS.
-- In K3s, the NetworkPolicy `allow-portal-pdp` (`#tools/k3s/network/policies.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-edge` does not select the portal pods. The policy `allow-portal-http` opens only the port 4181 of portal, and only to the Traefik pods and the Prometheus pod. portal trusts `X-Forwarded-For` from the pod network (`server.trusted_proxies`). No other pod may reach the port 4181.
+- In K3s, the NetworkPolicy `allow-portal-pdp` (`deploy/k3s/network-policy.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-portal-http` opens only the port 4181 of portal, and only to the Traefik pods and the Prometheus pod. portal trusts `X-Forwarded-For` from the pod network (`server.trusted_proxies`). No other pod may reach the port 4181.
 
 A request about a database of the host `local`:
 
@@ -314,6 +377,27 @@ The instance reads the action documents at equal intervals, 64 at the same time 
 ## Launcher
 
 The launcher (`/`) shows one row for each group and one tile for each service. The launcher shows only the services that the viewer can open.
+
+### Labels of a service
+
+A service declares itself with labels (Docker Compose container labels) or annotations (Kubernetes IngressRoute). The prefix is `portal.`. The same names work in both runtimes. The portal also reads the `homepage.*` labels and the `gethomepage.dev/*` annotations. A `portal.*` value wins.
+
+| Label | Use |
+|---|---|
+| `portal.enabled` | `true` lists the service. `false` hides it. A `portal.name` also lists it. |
+| `portal.id` | The id of the service. It is the audience of its identity tokens and the resource id of its grants. The default is the slug of the group and the name. The ids `portal` and `inbox` are reserved. |
+| `portal.name` | The display name. |
+| `portal.group` | The group of the row. The default is `Other`. |
+| `portal.href` | Mandatory. A path or an http(s) URL. The service owns the longest path prefix. |
+| `portal.description`, `portal.icon` | The text and the icon of the tile. |
+| `portal.target` | `_blank` opens the tile in a new tab. |
+| `portal.weight` | An integer. The tiles sort by weight, then by name. The default is 0. |
+| `portal.health` | An http(s) URL for the health probe. |
+| `portal.pods` | K3s only. A label selector of the pods. The ready pods give the health. |
+| `portal.actions` | The URL of the action document. See "Actions of the services". |
+| `portal.exclude` | The paths open without a session. See "Paths open without a session". |
+
+A label that is not usable stops the listing of this service. The Services page names the problem.
 
 ### State of a service
 
@@ -505,7 +589,7 @@ The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data 
 
 The portal can run the inbox. The inbox sends alerts to phones. It makes sure that each phone shows each alert one time. The inbox starts when the file has a block `inbox`. Without this block, the portal has no inbox and opens no port for it.
 
-The inbox is a module of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. It does not use the sessions or the directory of the portal. It delivers alerts when the rest of the portal is not ready. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
+The inbox is a module of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a token of the file do not need a session of the portal. The inbox delivers alerts when the rest of the portal is not ready. The rights of the service `inbox` come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
 
 ```hcl
 inbox {
@@ -597,7 +681,7 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 |---|---|
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the token of a producer. |
-| `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file of the inbox into the empty PostgreSQL database that the configuration names. The file can be an old file of the standalone inbox or a file of the portal. |
+| `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the inbox. A file of the standalone Inbox before the merge has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the listener of the phones. |
 
 ### Rights of the service `inbox`
@@ -694,32 +778,7 @@ On SIGTERM, the inbox tells each phone to reconnect with the close code 1012. It
 
 ## Local test
 
-The Compose file contains the HCL directly through `configs.content`. The superadmin login and password come from the host environment. Compose writes them to secret files. The database is in a named volume.
-
-```bash
-export PORTAL_SUPERADMIN_LOGIN='admin'
-export PORTAL_SUPERADMIN_PASSWORD="$(head -c 18 /dev/urandom | base64)"
-echo "$PORTAL_SUPERADMIN_PASSWORD"
-docker compose up -d --build
-```
-
-The program refuses the example passwords that the repository publishes (`.env.example`, earlier versions of this section). Give a new random value.
-
-Open this URL:
-
-```text
-http://localhost:4181/auth/login
-```
-
-Sign in as `admin` with the password that `echo` printed. The gear opens the settings pages.
-
-Stop the stack with:
-
-```bash
-docker compose down
-```
-
-The local Compose file publishes port 4181 only on loopback. This is intentional. In production, the same binary runs behind Traefik. The port is not published publicly.
+See "Quick start" for the Compose stack and `demo/README.md` for the demo with Traefik. The Compose stack publishes its ports on loopback only. In production, the same binary runs behind Traefik, and its ports are not public.
 
 ## HCL example
 
@@ -1249,7 +1308,7 @@ Only failed password checks use the failure budgets. A successful authentication
 
 ## Prometheus
 
-When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime.
+When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime. The inbox adds the metrics `inbox_*`, and the alerts of the portal add `portal_alerts_*` (see "Operations").
 
 Do not put client IPs, raw URIs, passwords, cookies or return targets into metric labels.
 
@@ -1277,7 +1336,7 @@ Authentication does not rewrite application paths. If an application mounted und
 
 ## Reproducible dependency resolution
 
-After this Hyper migration, bootstrap `Cargo.lock` once on a development machine with Docker. Then commit it:
+Bootstrap `Cargo.lock` on a development machine with Docker. Then commit it:
 
 ```bash
 ./scripts/update-lockfile.sh
@@ -1305,7 +1364,12 @@ portal identity-public-key --config FILE
 portal healthcheck --config FILE
 portal import-sqlite --config FILE --from SQLITE_FILE
 portal end-sessions --config FILE
+portal revoke-keys --config FILE (--user LOGIN | --all)
 portal hash-password < password.txt
+portal inbox keygen --out FILE
+portal inbox token --out FILE
+portal inbox import-sqlite --config FILE --from SQLITE_FILE
+portal inbox healthcheck --config FILE
 portal version
 ```
 
@@ -1325,7 +1389,7 @@ Everything is built in Docker. The host needs Docker with BuildKit, POSIX `sh` a
 
 The image is `docker/Dockerfile`. It builds on `rust:1.98-alpine3.24`, so the binary is static. The runtime stage is `scratch`, with the user `10001`, and it works with a read-only root file system. Its `HEALTHCHECK` is `portal healthcheck`. For the other architecture, use `docker buildx build --platform linux/arm64`. The build runs natively on that architecture. There is no cross compilation.
 
-`docker compose up` at the root of the repository starts the portal, PostgreSQL and the inbox. `deploy/README.md` describes the Compose stack and the K3s manifests.
+`docker compose up` at the root of the repository starts the portal with the inbox, and PostgreSQL. `deploy/README.md` describes the Compose stack and the K3s manifests.
 
 | Check | Command |
 |---|---|
@@ -1335,3 +1399,70 @@ The image is `docker/Dockerfile`. It builds on `rust:1.98-alpine3.24`, so the bi
 | Compose stack | `tools/dev/smoke.sh` |
 
 The GitHub workflow `ci.yml` runs these checks and the build of the app. It also fails when a workflow mentions a container registry. The workflow `release.yml` starts on a tag `vX.Y.Z`. The tag must be equal to the version in `Cargo.toml`. The release holds the binaries for amd64 and arm64, the signed APK and `SHA256SUMS`. It holds no image. `tools/release/local-release.sh` builds the same files on this machine when GitHub Actions is not available.
+
+## Operations
+
+### Back up
+
+Back up two things: the database and the key file of the inbox server. With SQLite, copy the file with `sqlite3 .backup`, or stop the instance first. With PostgreSQL, use the backup of the database cluster.
+
+Losing the key file of the inbox server makes every enrolled phone and every enrollment code invalid. Each person must then enroll again. A new key file does the same. Keep the file as a secret.
+
+### Metrics
+
+Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in bold.
+
+| Metric | Meaning |
+|---|---|
+| **`inbox_oldest_pending_delivery_seconds`** | Age of the oldest alert that still waits for a phone. |
+| **`inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |
+| **`inbox_storage_degraded`** | 1 while the database has no writable primary and the inbox holds alerts in memory. |
+| **`inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
+| `inbox_alerts_accepted_total{source}` | Alerts accepted, by source: `producer`, `webhook`, `admin`, `portal`. |
+| `inbox_alerts_duplicate_total{source}` | Submissions that the idempotency key merged. |
+| `inbox_deliveries_created_total`, `inbox_deliveries_sent_total`, `inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
+| `inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
+| `inbox_deliveries_pending` | Deliveries that wait for a phone. |
+| `inbox_devices_enrolled`, `inbox_device_sessions` | Phones that are not revoked, and connected sessions. |
+| `inbox_device_session_closes_total{reason}` | Session ends, by reason. |
+| `inbox_auth_failures_total{kind}` | Failed authentications. |
+| `inbox_enrollments_total` | Phones enrolled. |
+| `inbox_alerts_spooled_total{source}`, `inbox_spool_alerts`, `inbox_spool_rejected_total` | The spool of the degraded mode. |
+| `inbox_replica_epoch`, `inbox_replica_snapshots_total`, `inbox_replica_snapshot_failures_total`, `inbox_replica_sync_failures_total` | The replica (with `inbox.replica` only). |
+| `portal_alerts_sent_total{kind}`, `portal_alerts_failed_total{kind}` | Alerts of the portal about itself, by kind: `service_unhealthy`, `service_recovered`, `sign_in_burst`. |
+| `portal_directory_age_seconds` | Time since the database last answered a read of the directory. It grows when the refresh fails. |
+
+The other `portal_*` metrics are in the sections "Prometheus" and "Several instances". The example `examples/prometheus.yml` shows a scrape job.
+
+### Logs
+
+The log is JSON, one line for each event, with the field `event`. The inbox writes in the same log.
+
+### Upgrades
+
+The new binary changes the schema at start. It only adds. Each chain of migrations refuses a schema that is newer than the binary. An earlier binary does not start on a new schema. A return to an earlier version needs a restore of the database from before the upgrade.
+
+Version 5.0.0 is the first version of the merged product. Read these points before you upgrade from a portal with grants and keys:
+
+- The inbox is new. Without the block `inbox`, nothing changes for the portal.
+- An account that has no permission `group.subscribe` loses its subscriptions at the first check that has a directory. Give the permission before you turn the inbox on for the people that use it.
+- A phone of the standalone Inbox (protocol 3) cannot connect. It gets the close code 4426. Each phone must enroll again with a code.
+- The standalone Inbox files `deploy/inbox/` and the image `inbox` do not exist. See `deploy/README.md`.
+
+Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
+
+## Limitations
+
+- The inbox is Android only. iOS cannot keep a connection in the background without the push service of Apple.
+- The inbox has no TLS. Noise protects the phones. A producer token travels in clear text on plain HTTP. Put a TLS proxy in front of the devices listener for the producers.
+- With SQLite, only one instance is active. A standby needs the block `inbox.replica`.
+- An alert that the inbox accepts while the database has no writable primary exists only in memory until the database returns. If every instance that holds it stops, the inbox loses it.
+- Each instance has its own rate limits and its own counter of refused sign-ins.
+- The phone settings `alarm`, `ring` and `notify` are local to the phone. The server does not know them.
+- The enrollment code is text. There is no QR code in this version.
+- The `inbox` permissions `group.subscribe`, `alert.send` and `alert.read` are given one group at a time. No permission covers all groups.
+- The release builds the binary for amd64 and for arm64. The image for arm64 is not built in this repository. No image is published.
+
+## Licence
+
+The licence of the merged code is an open point. The root package says `MIT OR Apache-2.0`, and the shared crates say `LicenseRef-Proprietary`. The owner has not decided. The files `LICENSE-MIT` and `LICENSE-APACHE` come from the earlier portal. They do not decide the licence of the merged code.

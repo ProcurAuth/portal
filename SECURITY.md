@@ -299,3 +299,17 @@ Measures:
 - On each entry point of Traefik, set `http.sanitizePath: true`. Set each key of `http.encodedCharacters` to `false`: `allowEncodedSlash`, `allowEncodedBackSlash`, `allowEncodedNullCharacter`, `allowEncodedSemicolon`, `allowEncodedPercent`, `allowEncodedQuestionMark` and `allowEncodedHash`. The Compose configuration of Traefik (`traefik/docker/compose.yaml`) sets these values. Set them also on the K3s entry point `websecure` (`traefik/k3s/controller.yaml`).
 - Check the effective configuration of the entry point after each upgrade of Traefik.
 
+
+## Inbox
+
+The inbox is a module of the portal. The page `docs/inbox/SECURITY.md` gives its model. These are the invariants.
+
+- A phone enrolls with a one-time code of an account of the portal. The code holds the address of the server, the public key of the server and a secret of 128 bits. The secret works one time and expires. The server keeps only its SHA-256 digest.
+- The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
+- The server limits the enrollment attempts for each client address.
+- The listener of the phones and producers has no session and serves no page of the portal.
+- A phone subscribes only to a group for which its account has `group.subscribe`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
+- A producer sends an alert with a bearer token. The server compares the tokens of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
+- The pages of the inbox need a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
+- The key file of the inbox server and the producer tokens use only `_env` or `_file`. A secret in clear text stops the start.
+- The listener of the phones has no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.
