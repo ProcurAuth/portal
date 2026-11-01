@@ -89,6 +89,20 @@ inbox {
     webhook_send_resolved = false
   }
 
+  # Optional: the portal sends an alert about itself to this group. A service of the launcher that
+  # stays unhealthy raises one. A burst of refused sign-ins raises one. Each value shown is the default,
+  # except `group`, which has no default.
+  # portal_alerts {
+  #   group             = "infra"
+  #   service_unhealthy = true
+  #   unhealthy_after   = "2m"
+  #   sign_in_burst     = true
+  #   sign_in_failures  = 10
+  #   sign_in_window    = "5m"
+  #   repeat_after      = "1h"
+  #   recovered         = true
+  # }
+
   # Optional, with SQLite only: standby replication to a directory that the standby instances share
   # (a ReadWriteMany volume).
   # replica {
