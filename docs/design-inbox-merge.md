@@ -26,8 +26,9 @@ The portal and Inbox become one binary, `portal` (version 5.0.0). One account gi
 - The root package `portal` is the binary. The code of the inbox is in `src/inbox/`.
 - `crates/inbox-core` holds the protocol and the cryptography of the phones, with no I/O. The server and the app share it.
 - `crates/inbox-android` is the JNI bridge. `android/` is the app.
+- `crates/inbox-server` is the old server of Inbox. It stays until step 3 moves its code to `src/inbox/`.
 - `deploy/` holds the Compose files and the K3s manifests of both parts.
-- The directory `inbox/` is the import of Inbox with its history. Each step moves its content to the final place, then the directory is gone.
+- The history of Inbox is in the git log of the repository.
 
 ## Network
 The binary has three listeners.

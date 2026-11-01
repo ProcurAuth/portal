@@ -720,7 +720,7 @@ fn write_counter(out: &mut String, metric: &str, label: &str, value: &str, count
 }
 
 fn format_seconds(micros: u64) -> String {
-    if micros % 1_000_000 == 0 {
+    if micros.is_multiple_of(1_000_000) {
         format!("{}", micros / 1_000_000)
     } else {
         let value = micros as f64 / 1_000_000.0;

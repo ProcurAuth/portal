@@ -491,7 +491,7 @@ pub fn valid_id(id: &str) -> bool {
 pub(crate) mod tests {
     use super::*;
 
-    pub const EXAMPLE: &str = include_str!("../../../config.example.hcl");
+    pub const EXAMPLE: &str = include_str!("../../../deploy/inbox/config.example.hcl");
 
     #[test]
     fn example_config_is_valid() {

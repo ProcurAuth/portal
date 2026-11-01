@@ -47,13 +47,13 @@ pub fn start(state: Arc<AppState>) -> Result<(), String> {
 pub fn run_round(state: &AppState, round: u32) {
     directory_round(state);
     state.sessions.sweep();
-    if round % CLEANUP_EVERY_ROUNDS == 0 {
+    if round.is_multiple_of(CLEANUP_EVERY_ROUNDS) {
         state.sessions.close_lost_history();
     }
-    if round % KEY_CHECKS_EVERY_ROUNDS == 0 {
+    if round.is_multiple_of(KEY_CHECKS_EVERY_ROUNDS) {
         write_key_checks(state);
     }
-    if round % PRUNE_EVERY_ROUNDS == 0 {
+    if round.is_multiple_of(PRUNE_EVERY_ROUNDS) {
         prune_keys(state);
     }
 }

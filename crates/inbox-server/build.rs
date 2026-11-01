@@ -62,10 +62,8 @@ fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
 }
 
 fn main() {
-    let web = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../web")
-        .canonicalize()
-        .expect("web/ directory");
+    let web =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("web").canonicalize().expect("web/ directory");
     println!("cargo:rerun-if-changed={}", web.display());
     println!("cargo:rerun-if-env-changed=INBOX_GIT_SHA");
 

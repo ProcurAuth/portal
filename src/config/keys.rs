@@ -1214,12 +1214,12 @@ pub fn parse_size(value: &str) -> Result<usize, String> {
 /// The shortest exact form of a duration.
 pub fn show_duration(value: Duration) -> String {
     let ms = value.as_millis();
-    if ms % 1000 != 0 {
+    if !ms.is_multiple_of(1000) {
         return format!("{ms}ms");
     }
     let s = value.as_secs();
     for (unit, size) in [("d", DAY), ("h", HOUR), ("m", MINUTE)] {
-        if s != 0 && s % size == 0 {
+        if s != 0 && s.is_multiple_of(size) {
             return format!("{}{unit}", s / size);
         }
     }
@@ -1229,7 +1229,7 @@ pub fn show_duration(value: Duration) -> String {
 /// The shortest exact form of a size.
 pub fn show_size(value: usize) -> String {
     for (unit, size) in [("MiB", 1024 * 1024), ("KiB", 1024)] {
-        if value != 0 && value % size == 0 {
+        if value != 0 && value.is_multiple_of(size) {
             return format!("{}{unit}", value / size);
         }
     }

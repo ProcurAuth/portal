@@ -1,5 +1,18 @@
-/target/
+# Android
+/android/app/src/main/jniLibs/
+/android/**/build/
+/android/.gradle/
+/android/.idea/
+/android/local.properties
 /dist/
-.env
-*.swp
 .DS_Store
+.env
+.env.*
+!.env.example
+*.iml
+*.jks
+*.keystore
+/secrets/
+*.swp
+/target*/
+/target/

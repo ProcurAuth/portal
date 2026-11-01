@@ -3311,18 +3311,13 @@ fn query_return_pair(uri: &str) -> Result<(Option<String>, Option<String>), Stri
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = crate::util::percent_decode_form(key)?;
         let value = crate::util::percent_decode_form(value)?;
-        match key.as_str() {
-            "rd" => {
-                if rd.replace(value).is_some() {
-                    return Err("duplicate rd query parameter".into());
-                }
-            }
-            "sig" => {
-                if sig.replace(value).is_some() {
-                    return Err("duplicate sig query parameter".into());
-                }
-            }
-            _ => {}
+        let duplicate = match key.as_str() {
+            "rd" => rd.replace(value).is_some().then_some("rd"),
+            "sig" => sig.replace(value).is_some().then_some("sig"),
+            _ => None,
+        };
+        if let Some(name) = duplicate {
+            return Err(format!("duplicate {name} query parameter"));
         }
     }
     Ok((rd, sig))

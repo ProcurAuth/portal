@@ -1,4 +1,4 @@
-name: ci
+name: inbox-ci
 
 on:
   push:

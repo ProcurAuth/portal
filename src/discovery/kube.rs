@@ -510,15 +510,22 @@ mod tests {
         let failing = pod(true, false, "Running", NOT_READY, false);
         let creating = pod(true, false, "Pending", CREATING, false);
         let unprobed = pod(false, false, "Running", NOT_READY, false);
-        assert_eq!(runtime_of(&[healthy.clone()]), Some(RuntimeHealth::Healthy));
-        assert_eq!(runtime_of(&[unprobed.clone()]), None, "no probe");
+        assert_eq!(
+            runtime_of(std::slice::from_ref(&healthy)),
+            Some(RuntimeHealth::Healthy)
+        );
+        assert_eq!(
+            runtime_of(std::slice::from_ref(&unprobed)),
+            None,
+            "no probe"
+        );
         assert_eq!(
             runtime_of(&[healthy.clone(), unprobed]),
             Some(RuntimeHealth::Healthy),
             "a pod without a probe does not count"
         );
         assert_eq!(
-            runtime_of(&[failing.clone()]),
+            runtime_of(std::slice::from_ref(&failing)),
             Some(RuntimeHealth::Unhealthy),
             "the container runs and its probe fails"
         );
@@ -528,7 +535,7 @@ mod tests {
             "one unhealthy pod is enough"
         );
         assert_eq!(
-            runtime_of(&[creating.clone()]),
+            runtime_of(std::slice::from_ref(&creating)),
             Some(RuntimeHealth::Starting)
         );
         assert_eq!(
@@ -551,7 +558,7 @@ mod tests {
     #[test]
     fn a_terminating_pod_gives_no_runtime_health() {
         let leaving = pod(true, false, "Running", NOT_READY, true);
-        assert_eq!(runtime_of(&[leaving.clone()]), None);
+        assert_eq!(runtime_of(std::slice::from_ref(&leaving)), None);
         assert_eq!(
             runtime_of(&[leaving, pod(true, true, "Running", RUNNING, false)]),
             Some(RuntimeHealth::Healthy)

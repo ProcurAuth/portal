@@ -1340,7 +1340,7 @@ CREATE TABLE user_roles (
         // The new table works, and a second open changes nothing.
         let grant = Grant::new("access", "grafana").unwrap();
         assert!(store
-            .update_user("alice", None, Some(&[grant.clone()]))
+            .update_user("alice", None, Some(std::slice::from_ref(&grant)))
             .unwrap());
         assert_eq!(store.load_users().unwrap()[0].grants, [grant]);
     }

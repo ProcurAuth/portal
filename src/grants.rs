@@ -699,18 +699,28 @@ mod tests {
         let logs = seg("database", "logs");
         let service = vec![grant("read on service:db")];
         assert!(covers(&service, "read", "db", &[]));
-        assert!(covers(&service, "read", "db", &[local.clone()]));
+        assert!(covers(&service, "read", "db", std::slice::from_ref(&local)));
         assert!(covers(
             &service,
             "read",
             "db",
             &[local.clone(), analytics.clone()]
         ));
-        assert!(!covers(&service, "read", "other", &[local.clone()]));
-        assert!(!covers(&service, "write", "db", &[local.clone()]));
+        assert!(!covers(
+            &service,
+            "read",
+            "other",
+            std::slice::from_ref(&local)
+        ));
+        assert!(!covers(
+            &service,
+            "write",
+            "db",
+            std::slice::from_ref(&local)
+        ));
 
         let host = vec![grant("read on service:db/host:local")];
-        assert!(covers(&host, "read", "db", &[local.clone()]));
+        assert!(covers(&host, "read", "db", std::slice::from_ref(&local)));
         assert!(covers(&host, "read", "db", &[local.clone(), logs.clone()]));
         assert!(
             !covers(&host, "read", "db", &[other.clone(), logs.clone()]),
@@ -736,7 +746,7 @@ mod tests {
         ));
         assert!(!covers(&one, "write", "db", &[local.clone(), logs.clone()]));
         assert!(
-            !covers(&one, "write", "db", &[local.clone()]),
+            !covers(&one, "write", "db", std::slice::from_ref(&local)),
             "not the parent"
         );
         assert!(
@@ -744,7 +754,7 @@ mod tests {
             "the same database on another host"
         );
         assert!(
-            !covers(&one, "write", "db", &[analytics.clone()]),
+            !covers(&one, "write", "db", std::slice::from_ref(&analytics)),
             "the database without its host"
         );
 

@@ -1683,7 +1683,7 @@ mod tests {
         assert!(users[0].grants.is_empty(), "a migrated user has no grant");
         let grant = Grant::new("access", "grafana").unwrap();
         assert!(migrated
-            .update_user("alice", None, Some(&[grant.clone()]))
+            .update_user("alice", None, Some(std::slice::from_ref(&grant)))
             .unwrap());
         assert_eq!(migrated.load_users().unwrap()[0].grants, [grant]);
         // A second start finds nothing to do.

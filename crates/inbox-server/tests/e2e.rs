@@ -1398,6 +1398,9 @@ fn through(s: &Server, admin_pg: &PgAdmin, to: u16) {
     let text = std::fs::read_to_string(s.config()).unwrap();
     let from = format!("port = {}\n", admin_pg.port);
     assert!(text.contains(&from), "no postgres port in the configuration");
+    // The proxy listens on this machine, whatever the host of the real database is.
+    let host = format!("host = \"{}\"\n", admin_pg.host);
+    let text = text.replace(&host, "host = \"127.0.0.1\"\n");
     std::fs::write(s.config(), text.replace(&from, &format!("port = {to}\n"))).unwrap();
 }
 
