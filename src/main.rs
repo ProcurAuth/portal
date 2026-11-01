@@ -21,6 +21,7 @@ mod limits;
 mod metrics;
 mod options;
 mod inbox;
+mod inbox_actions;
 mod portal_actions;
 mod rate_limit;
 mod session;

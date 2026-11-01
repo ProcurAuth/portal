@@ -255,10 +255,14 @@ impl AppState {
             icons: Icons::load(&config.ui.icons_dir),
             policy,
             signer,
-            actions: Arc::new(
-                actions::Registry::new(config.access.actions_max_age)
-                    .with_bounds(config.access.bounds),
-            ),
+            actions: Arc::new({
+                let registry = actions::Registry::new(config.access.actions_max_age)
+                    .with_bounds(config.access.bounds);
+                match &config.inbox {
+                    Some(inbox) => registry.with_inbox(crate::inbox_actions::document(inbox)),
+                    None => registry,
+                }
+            }),
             options: crate::options::Options::new(config.access.actions_timeout)?,
             pdp_clients,
             pdp_stats: pdp::Stats::default(),
@@ -440,6 +444,12 @@ async fn serve_until(
             if is_complete {
                 complete.store(true, std::sync::atomic::Ordering::SeqCst);
                 // The first reads need no wait for the end of a tick.
+            // The service `inbox` is a service of the portal itself: it is not in a workload label.
+            let catalog = if publisher.config.inbox.is_some() {
+                catalog.with_internal(crate::inbox_actions::service())
+            } else {
+                catalog
+            };
                 publisher.actions.wake_loop();
             }
         },
