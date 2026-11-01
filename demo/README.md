@@ -89,9 +89,9 @@ Tests to do with the phone:
 1. **Two producers.** Send one alert with the token and one with the key of `alice`. The phone shows each one time.
 2. **Critical.** Send an alert to `critical` with the token. The phone shows it.
 3. **No network.** Turn on the airplane mode: `adb shell cmd connectivity airplane-mode enable`. Send an alert. Turn the mode off. The alert arrives one time.
-4. **Rights.** As `admin`, open the page of `alice`, and remove `group.subscribe` on `critical`. Save. The phone loses the subscription within the age bound of the directory. A new alert to `critical` does not arrive.
+4. **Rights.** As `admin`, open the page of `alice`, and remove `group.subscribe` on `critical`. Save. The inbox removes the subscription within a few seconds, and the app shows the group as off. A new alert to `critical` does not arrive. To give the right back, tick the permission again and save.
 5. **Revoke.** As `admin`, open **Inbox**, then **Phones**, and revoke the phone. The app tells that it must enroll again.
-6. **Portal alert.** Run `docker stop portal-demo-wiki-1`. After 10 seconds the phone gets the alert that the service Wiki is unhealthy. Run `docker start portal-demo-wiki-1`. The phone gets the alert "healthy again".
+6. **Portal alert.** Run `docker pause portal-demo-wiki-1`. The container stays in the catalogue, and its health check fails. After about 15 seconds the phone gets the alert that the service Wiki is unhealthy. Run `docker unpause portal-demo-wiki-1`. The phone gets the alert "healthy again". Do not use `docker stop`: a service that leaves the catalogue is forgotten with no alert.
 
 ## Tests to do
 
