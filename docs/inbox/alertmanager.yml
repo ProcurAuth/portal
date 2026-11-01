@@ -2,7 +2,7 @@
 # Each alert in a notification becomes one alert of the inbox. The inbox deduplicates them
 # on fingerprint + status + startsAt, so Alertmanager retries and repeat_interval
 # re-sends never page twice for the same firing.
-# The URL is the address of inbox.devices.listen. The last path element is the group.
+# The URL is the address of the portal (the same host and port as the pages). The last path element is the group.
 # The token is the value of a block `producer` of the file, or a key of the portal (mcp_...)
 # that has the permission alert.send on the group. Use HTTPS when the token crosses a network.
 route:
@@ -15,7 +15,7 @@ route:
 receivers:
   - name: inbox-oncall
     webhook_configs:
-      - url: http://portal:8080/api/v1/webhooks/alertmanager/infra
+      - url: http://portal:4181/api/v1/webhooks/alertmanager/infra
         send_resolved: false
         max_alerts: 50
         http_config:

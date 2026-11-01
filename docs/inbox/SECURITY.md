@@ -19,7 +19,7 @@ The security model of the portal is in the root `SECURITY.md`. This page gives t
 
 ## Limits of the model
 
-- The listener `inbox.devices.listen` has no TLS. Noise protects the phones. The bearer token of a producer travels in clear text on plain HTTP. Put a TLS proxy in front for the producer routes, or use a private network.
+- The phone port `inbox.devices.listen` and the port of the portal have no TLS. Noise protects the phones. The bearer token of a producer travels in clear text on plain HTTP. Put a TLS proxy in front for the producer routes, or use a private network.
 - A code is a bearer secret until its first use. Whoever reads it can enroll a phone for the account. Show it only to its owner.
 - A key file of the server that leaks lets an attacker act as the server. Replace it and enroll every phone again.
 - The sessions that the superadmin opens as another account can read the phones and make a code for that account.
@@ -28,7 +28,8 @@ The security model of the portal is in the root `SECURITY.md`. This page gives t
 
 - Keep a copy of the key file of the server and of the database. Protect both. Both are secrets.
 - Send alerts with the header `Authorization: Bearer`. Query strings are often in logs.
-- List only the real proxies in `inbox.devices.trusted_proxies`. Do not list the Docker gateway or a whole bridge range.
+- List only the real proxies in `server.trusted_proxies`. Do not list the Docker gateway or a whole bridge range. The same list gives the client address for the limiter of the enrollment attempts on the phone port.
+- Send `/api/v1/` to the portal without ForwardAuth. A webhook has no session.
 - Keep `inbox.cluster.listen` on the private network of the pods.
-- Do not publish the devices listener to the internet without a relay or a proxy that you control.
+- Do not publish the phone port or the port of the portal to the internet without a relay or a proxy that you control.
 - Alert on `inbox_devices_unreachable`, `inbox_oldest_pending_delivery_seconds`, `inbox_storage_degraded` and `inbox_replica_last_snapshot_age_seconds`.

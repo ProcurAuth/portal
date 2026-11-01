@@ -22,8 +22,8 @@ The data lives in one database. By default it is one SQLite file. The SQLite lib
 ```text
  Browser ── Traefik ──ForwardAuth──▶ portal  listen_address (4181)      pages, launcher, /auth/verify, /metrics
  Services ──────────AuthZEN────────▶ portal  pdp.listen_address (4182)  decisions
- Producers ─┐                        portal  inbox.devices.listen (8080) alerts, webhooks,
- Phones ────┴── WebSocket (Noise) ─▶                                     enrollment, sessions
+ Producers ── Traefik, no ForwardAuth ▶ portal  listen_address (4181)      /api/v1/*: alerts, webhooks (same port as the pages)
+ Phones ────── WebSocket (Noise) ────▶ portal  inbox.devices.listen (8080) /v1/*: enrollment, sessions
                                      portal  inbox.cluster.listen       other instances (optional)
                                        │
                                        └── one database: SQLite file, or PostgreSQL
@@ -31,12 +31,12 @@ The data lives in one database. By default it is one SQLite file. The SQLite lib
 
 | Listener | Key | Use | Who reaches it |
 |---|---|---|---|
-| Pages | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz` and `/metrics`. | Traefik and Prometheus. Not the internet. |
+| Portal | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz`, `/readyz` and `/metrics`. With the block `inbox`, also the API of the inbox for the producers and the webhooks: `/api/v1/*` and `/api/version`. | Traefik and Prometheus. Traefik sends `/api/v1/` to it without ForwardAuth. |
 | PDP | `pdp.listen_address` | The AuthZEN decisions. Optional. | The services only. Do not route it through Traefik. |
-| Devices | `inbox.devices.listen` | Phones, producers, webhooks, `/healthz` and `/readyz`. No session. Optional. | Phones and producers, through a relay or a proxy. |
+| Phones | `inbox.devices.listen` | The phone port: `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`. No session. Optional. | Phones, through a relay or a proxy. A phone on a mobile network reaches this port, and the pages stay private. |
 | Cluster | `inbox.cluster.listen` | Copies of alerts between instances. Optional. | The pods of the service only. |
 
-The metrics of the portal and of the inbox are in one Prometheus text at `metrics.path` of the pages listener.
+The inbox is a feature of the portal. The producers and the webhooks use the port of the pages. Only the phones have a second port, so that they can be reached from outside while the pages stay private. The metrics of the portal and of the inbox are in one Prometheus text at `metrics.path` of the portal listener.
 
 The repository has these parts:
 
@@ -61,7 +61,7 @@ Docker is the only tool that you need.
 4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`.
 5. Stop the stack and delete its database: `docker compose down -v`.
 
-The stack has the portal with the inbox, and PostgreSQL. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
+The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181 serves the pages and the API of the producers. The phone port is 8080. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
 
 ## Security model
 
@@ -370,6 +370,8 @@ The instance opens its ports only when these tasks end:
 
 The startup probe of the pod MUST wait longer than the sum of these times. The liveness probe reads `/healthz`, which never reads the database.
 
+With the block `inbox`, one exception exists. The portal listener opens at once and serves the API of the inbox (`/api/v1/`, `/readyz`, `/api/version`), so that an alert never waits for the catalogue. The phone port opens at once too. Every other route of the portal, `/healthz` included, answers `503` with `starting` until the three tasks end. The gate never decides with an incomplete catalogue. The startup probe reads `/healthz`.
+
 On SIGTERM, the instance serves 5 seconds more. Then it closes its listeners and tells each connection to close. It waits at most 10 seconds for the answers in progress. Set `terminationGracePeriodSeconds` to 20.
 
 The instance reads the action documents at equal intervals, 64 at the same time at most. The catalogue reads the IngressRoutes and the pods in two lists, page by page, and it probes 64 services at the same time at most.
@@ -450,7 +452,7 @@ Each page is a column of flat parts, with the density of clickhouse-dash. A part
 5. **Activity** (`/auth/settings/logins`). One strip gives the figures of the last 24 hours and the connections of 30 days. Then the page shows the sign-in log (see below). A side column shows the graph of the connections of all accounts and a table of the recent changes. A recent change names its account with a link to the page of the account.
 6. **Inbox** (`/auth/settings/inbox`). The tab shows only when the file has the block `inbox` and the account has a permission of the service `inbox`. See "The tab Inbox" in the section "Inbox".
 
-An account that is not the superadmin sees the tabs Keys and Inbox only, and only the one that it may open. The code builds the list of tabs from three facts: the viewer is the superadmin, the viewer may read keys, the viewer has a permission of the inbox. The launcher has a tile **Inbox** for an account with a permission of the inbox. The tile links to the tab.
+An account that is not the superadmin sees the tabs Keys and Inbox only, and only the one that it may open. The code builds the list of tabs from three facts: the viewer is the superadmin, the viewer may read keys, the viewer has a permission of the inbox. The launcher has no tile for the inbox: the inbox is a feature of the portal, as the keys are. The superadmin opens the pages with the gear. An account that is not the superadmin and has a permission of the inbox gets the gear too, and the gear links to the tab Inbox.
 
 A form of an account returns to the page of the account, or to the editor of the service, with the outcome in a notice. The notice is one code from a fixed list (`?s=<code>`). The address never carries text.
 
@@ -589,7 +591,7 @@ The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data 
 
 The portal can run the inbox. The inbox sends alerts to phones. It makes sure that each phone shows each alert one time. The inbox starts when the file has a block `inbox`. Without this block, the portal has no inbox and opens no port for it.
 
-The inbox is a module of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a token of the file do not need a session of the portal. The inbox delivers alerts when the rest of the portal is not ready. The rights of the service `inbox` come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
+The inbox is a feature of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a token of the file do not need a session of the portal. The inbox delivers alerts when the rest of the portal is not ready. The rights of the service `inbox` come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
 
 ```hcl
 inbox {
@@ -599,7 +601,6 @@ inbox {
   devices {
     listen                = "0.0.0.0:8080"
     public_address        = "inbox.example.org:8080"   # the address that phones use; no default
-    trusted_proxies       = []
     heartbeat_interval    = "20s"                      # no default
     session_timeout       = "60s"                      # no default
     resend_after          = "15s"                      # no default
@@ -651,19 +652,33 @@ When the superadmin deletes an account, the inbox revokes the phones of the acco
 
 ### Listeners
 
-The inbox has its own listener, `inbox.devices.listen`. This listener has no session. Phones and producers prove themselves. It serves these routes:
+The inbox is a feature of the portal, so it has two kinds of route.
+
+**The phone port** is a listener of the inbox, `inbox.devices.listen`. It has no session. Phones prove themselves with the Noise session. A phone on a mobile network reaches this port, and the pages of the portal stay private. It serves only these routes:
 
 | Route | Use |
 |---|---|
 | `GET /v1/enroll` | WebSocket: enrollment of a phone with a one-time code. |
 | `GET /v1/session` | WebSocket: the session of an enrolled phone. |
+| `GET /healthz`, `GET /readyz` | Health. |
+
+**The API of the producers** is on the listener of the portal, `server.listen_address`, with the pages. These routes need no session of the portal and set no cookie. The portal applies no CSRF check and no origin check to them. A producer proves itself with a bearer token or a key. A proxy must send them to the portal without ForwardAuth (see "Reverse proxy"). The portal gives the paths `/api/v1/`, `/readyz` and `/api/version` to the inbox and to no other handler.
+
+| Route | Use |
+|---|---|
 | `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Producer API with a bearer token. |
 | `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks with a bearer token. |
-| `GET /healthz`, `GET /readyz`, `GET /api/version` | Health and version. |
+| `GET /readyz`, `GET /api/version` | Readiness and version. |
 
-`/readyz` answers `200` with PostgreSQL, also when the database has no writable primary (`degraded`). With SQLite it answers `503` when the file does not answer. After SIGTERM it answers `503` with `draining`. The cluster then removes the instance from its Service. `portal healthcheck` checks `/healthz` of the portal and `/readyz` of the inbox. `portal inbox healthcheck --config FILE` checks the inbox only.
+`GET /healthz` of the portal is a route of the portal. `/readyz` (on both listeners) answers `200` with PostgreSQL, also when the database has no writable primary (`degraded`). With SQLite it answers `503` when the file does not answer. After SIGTERM it answers `503` with `draining`. The cluster then removes the instance from its Service. `portal healthcheck` checks `/healthz` of the portal and `/readyz` of the phone port. `portal inbox healthcheck --config FILE` checks the inbox only.
+
+The client address of a phone comes from `server.trusted_proxies`, as for the pages. The inbox has no list of its own. It keys the limiter of the enrollment attempts. The key `inbox.devices.public_address` is the address that phones use to reach the phone port, for example `http://192.168.1.10:8089` or `inbox.example.org:8087` (a relay).
 
 With the block `inbox.cluster`, the inbox has a third listener for the other instances. Only the pods of the service must reach it. Each request carries an HMAC that the server key derives.
+
+### Reverse proxy
+
+Traefik must send `/api/v1/` and `/api/version` to the portal without ForwardAuth. An Alertmanager and a script have no session. In Traefik, use a router with the rule ``PathPrefix(`/api/v1/`) || Path(`/api/version`)``, a high priority, the service of the portal and no middleware. The files `demo/docker-compose.yml` (labels) and `deploy/k3s/ingress.yaml` (IngressRoute `portal-inbox`) show it. The phones use the phone port: expose it with a relay or a proxy that you control. When no proxy is in front, the producers and the pages share the port of the portal directly.
 
 ### Storage
 
@@ -682,11 +697,11 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the token of a producer. |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the inbox. A file of the standalone Inbox before the merge has an older schema, so the command refuses it. |
-| `portal inbox healthcheck --config FILE` | Asks `/readyz` of the listener of the phones. |
+| `portal inbox healthcheck --config FILE` | Asks `/readyz` of the phone port. |
 
 ### Rights of the service `inbox`
 
-The service `inbox` is the second service of the portal itself, after the service `portal`. The code holds its action document. It is a service of the catalogue with the id `inbox`: no workload can take this id. It shows in the launcher, in the page **Services**, and in the editor of permissions of the accounts and of the keys. The editor lists each group of the file as the node `group:<id>`, with the name of the group, so nobody types an id.
+The service `inbox` is the second service of the portal itself, after the service `portal`. The code holds its action document. It is a service of the catalogue with the id `inbox`: no workload can take this id. The launcher and the page **Services** do not list it, as for the service `portal`. It shows in the editor of permissions of the accounts and of the keys, with the name "Inbox (portal)". The editor lists each group of the file as the node `group:<id>`, with the name of the group, so nobody types an id.
 
 | Action | Applies to | Gives |
 |---|---|---|
@@ -942,7 +957,7 @@ The HTTP server.
 | `header_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request headers. |
 | `body_read_timeout` | duration, 1s to 1m | `"10s"` | The time that a client has to send the request body. |
 | `max_login_body_reads` | number, 1 to 100000 | `64` | The largest number of sign-in requests whose body the server reads at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`. |
-| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding and the login limiter. |
+| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies (Traefik) that set `X-Forwarded-For`. The server reads this header only from a TCP peer in these networks. It then takes the first address from the right that is not in these networks. From any other peer, the client address is the address of the peer. `[]` trusts no proxy. The client address keys the session binding, the login limiter and, for the phones, the limiter of the enrollment attempts (`inbox.devices.listen` uses this list too). |
 
 #### Block `authentication`
 
@@ -1079,7 +1094,7 @@ The Prometheus endpoint.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | `true` or `false` | `true` | Turn the Prometheus endpoint on or off. |
-| `path` | text: an absolute URL path of at most 128 bytes, not /healthz and not under /auth/ | `"/metrics"` | The URL path of the Prometheus endpoint. Applies only when `metrics.enabled` is `true`. |
+| `path` | text: an absolute URL path of at most 128 bytes, not /healthz, /readyz or /api/version, and not under /auth/ or /api/v1/ | `"/metrics"` | The URL path of the Prometheus endpoint. Applies only when `metrics.enabled` is `true`. |
 
 #### Block `discovery`
 
@@ -1121,13 +1136,12 @@ This block is optional. If it is present, this server runs the inbox: it sends a
 
 #### Block `inbox.devices`
 
-This block is inside the block `inbox`. It sets the listener for phones and producers, and the delivery values. This listener has no session: phones and producers prove themselves.
+This block is inside the block `inbox`. It sets the phone port, the address that phones use, and the delivery values. The phone port has no session: phones prove themselves. The producers use the listener of the portal.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `listen` | text: an IP address and a port, such as 0.0.0.0:8080 | required | The address and the port of the listener for phones, producers and webhooks. The listener serves `/v1/enroll`, `/v1/session`, `/api/v1/*`, `/healthz`, `/readyz` and `/api/version`. It must not use the port of `server.listen_address`. |
-| `public_address` | text: the address that phones use to reach the listener `inbox.devices.listen`: `host:port`, a domain, or an http(s) URL; 1 to 512 bytes, no white space, no control character | required | The address that phones use to reach the listener `inbox.devices.listen`, as the phones see it from outside: `host:port`, a domain, or an http(s) URL. It is the `s` of the enrollment code. The inbox does not open a connection to it. |
-| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the enrollment attempts. |
+| `listen` | text: an IP address and a port, such as 0.0.0.0:8080 | required | The address and the port of the listener of the phones, the phone port. The listener serves `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`. A phone on a mobile network reaches this port, and the pages of the portal stay private. The producers and the webhooks do not use it: they use `server.listen_address`. It must not use the port of `server.listen_address`. The client address of a phone comes from `server.trusted_proxies`. |
+| `public_address` | text: the address that phones use to reach the phone port `inbox.devices.listen`: `host:port`, a domain, or an http(s) URL; 1 to 512 bytes, no white space, no control character | required | The address that phones use to reach the phone port `inbox.devices.listen`, as the phones see it from outside: `host:port`, a domain, or an http(s) URL, for example `http://172.17.0.1:8089`. It is the `s` of the enrollment code. The inbox does not open a connection to it. |
 | `max_devices` | number, 1 to 100000 | `1000` | The largest number of enrolled phones that are not revoked. |
 | `heartbeat_interval` | duration, 5s to 1h | required | The app sends a ping at this interval. |
 | `session_timeout` | duration, 10s to 1d | required | A session without a frame for this time ends. The value is at least two times `inbox.devices.heartbeat_interval`. |
@@ -1454,7 +1468,7 @@ Roll the instances one at a time. A new instance opens its ports only when its c
 ## Limitations
 
 - The inbox is Android only. iOS cannot keep a connection in the background without the push service of Apple.
-- The inbox has no TLS. Noise protects the phones. A producer token travels in clear text on plain HTTP. Put a TLS proxy in front of the devices listener for the producers.
+- The inbox has no TLS. Noise protects the phones. A producer token travels in clear text on plain HTTP. Put a TLS proxy in front of the portal for the producers.
 - With SQLite, only one instance is active. A standby needs the block `inbox.replica`.
 - An alert that the inbox accepts while the database has no writable primary exists only in memory until the database returns. If every instance that holds it stops, the inbox loses it.
 - Each instance has its own rate limits and its own counter of refused sign-ins.

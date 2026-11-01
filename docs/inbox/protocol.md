@@ -199,5 +199,5 @@ These choices fill the gaps of the specification. Change them only with a new pr
 ## Other interfaces
 
 The admin pages of the inbox are pages of the portal, under `/auth/settings/inbox`. They need a session of the portal.
-The producers send alerts to the same listener as the phones. The routes are in [README.md](README.md).
+The producers send alerts to the listener of the portal, not to the phone port. The routes are in [README.md](README.md).
 The protocol of the phones has no admin call.

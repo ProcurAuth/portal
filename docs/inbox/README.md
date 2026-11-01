@@ -1,6 +1,6 @@
 # Inbox
 
-The inbox is a part of the portal. It sends alerts to Android phones. It makes sure that each subscribed phone shows each alert one time.
+The inbox is a feature of the portal. It sends alerts to Android phones. It makes sure that each subscribed phone shows each alert one time. The producers use the port of the pages. Only the phones have a port of their own.
 
 This chapter is for operators and for people who send alerts. The root `README.md` has the reference of the configuration. [`SPEC.md`](SPEC.md) has the requirements. [`protocol.md`](protocol.md) has the wire protocol of the phones. [`SECURITY.md`](SECURITY.md) has the security model.
 
@@ -60,7 +60,7 @@ The budget `alerts` limits `alert.send`. It counts alerts in a window of a secon
 
 ## Send an alert (producers)
 
-A producer sends a request to the listener `inbox.devices.listen`. This listener has no session. The producer proves itself with a bearer token.
+A producer sends a request to the portal, on the same host and port as the pages. These routes need no session of the portal, and the proxy does not apply ForwardAuth to them. The producer proves itself with a bearer token or a key. The phone port (`inbox.devices.listen`) does not serve these routes.
 
 | Route | Use |
 |---|---|
@@ -137,7 +137,7 @@ To remove a phone, open **My phones** and press **Revoke**. An account revokes i
 
 ## The pages of the tab Inbox
 
-The pages are under `/auth/settings/inbox`. The tab shows for an account that has a permission of the service `inbox`.
+The pages are under `/auth/settings/inbox`. The tab shows for an account that has a permission of the service `inbox`. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
 
 | Page | Needs | Use |
 |---|---|---|
@@ -182,7 +182,7 @@ No physical phone is needed for the tests of the app. `tools/android/emulator.sh
 
 1. Build the app: `tools/build.sh apk`. The script `tools/android/build-apk.sh` lists the variables for the key of the APK.
 2. Start the emulator: `tools/android/emulator.sh start`. The script installs `dist/inbox-<version>.apk`, grants the permissions and prints the address of the screen. Open <http://localhost:6080> in a browser.
-3. Start the stack (see `deploy/README.md`). Publish the devices listener to the network: `PORTAL_DEVICES_BIND=0.0.0.0`.
+3. Start the stack (see `deploy/README.md`). Publish the phone port to the network: `PORTAL_DEVICES_BIND=0.0.0.0`.
 4. Set `inbox.devices.public_address` to `172.17.0.1:<port>`. This address is the host as the emulator sees it through the Docker bridge.
 5. Make a code on the page "My phones". Open its link on the phone: `adb shell am start -a android.intent.action.VIEW -d '<link>'`.
 
@@ -241,7 +241,7 @@ An alert that the inbox accepts while the database is away exists only in memory
 
 | Symptom | Check |
 |---|---|
-| The app says the server is unreachable. | Open the address of `inbox.devices.public_address` from the phone. Check the port, the firewall and the relay. Run `portal inbox healthcheck --config FILE` on the server. |
+| The app says the server is unreachable. | Open the address of `inbox.devices.public_address` from the phone. Check the port, the firewall and the relay. The phone port serves the phones only. Run `portal inbox healthcheck --config FILE` on the server. |
 | The app says "The code is not valid". | The code is used or expired. Make a new code. Check `inbox.devices.max_devices`. The log has the event `enroll_refused` with a reason. |
 | The app says "Update the app". | The app is older than protocol 4. Install the current APK. |
 | A phone is `unreachable`. | The app is stopped, the phone is off, or the battery saver blocks the app. Check the permissions of the app. |

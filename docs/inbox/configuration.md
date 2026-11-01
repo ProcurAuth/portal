@@ -8,7 +8,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 
 ## Where the blocks go
 
-- The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it.
+- The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it. With it, the producers and the webhooks use `server.listen_address`, the port of the pages. The phones use the phone port `inbox.devices.listen`.
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `portal_alerts` are optional.
 - The blocks `group "<id>"` and `producer "<name>"` can occur more than once.
 - The inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
@@ -50,10 +50,10 @@ The optional keys have documented defaults. Examples: `inbox.name` is `"Inbox"`,
 
 | Old key | Now |
 |---|---|
-| `server.listen` | `inbox.devices.listen` |
+| `server.listen` | `inbox.devices.listen` (phones only). The producers use `server.listen_address` of the portal. |
 | `server.name` | `inbox.name` |
 | `server.admin_listen` | None. The pages are in the portal. |
-| `server.trusted_proxies` | `inbox.devices.trusted_proxies` |
+| `server.trusted_proxies` | `server.trusted_proxies` of the portal. The inbox has no list of its own. The phone port uses it too. |
 | `server.shutdown_grace` | None. The shutdown of the portal applies. |
 | `server.server_key_file` | `inbox.server_key_file` |
 | `admin.allowed_hosts` | None. The admin front is gone. |

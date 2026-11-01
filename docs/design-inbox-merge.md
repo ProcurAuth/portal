@@ -24,7 +24,7 @@ The third column gives the answers and the changes that the work made later.
 | D8 | The code lives in the private repository `portal`. The history of Inbox is kept. The repository Inbox is archived at the end. | The history is in the git log. The archive is not done yet. |
 | D9 | All HTTP code uses hyper. Inbox is written again on it. | Step 3. |
 | D10 | The configuration follows the global rules. The delivery values have no default. | Section 9. |
-| D11 | The binary has a listener `devices`. The DaemonSet `inbox-edge` relays it. | Section 4. |
+| D11 | The binary has a listener `devices`. The DaemonSet `inbox-edge` relays it. | Changed on 2026-11-01 by the owner: the API of the producers moved to the port of the pages. The phone port and the relay stay. See section 4 and section 15. |
 | D12 | The portal sends an alert when a service is unhealthy and when sign-ins fail in a burst. | Step 6. Section 10. |
 | D13 | Tests use the emulator. No physical phone. | `tools/android/emulator.sh`. |
 
@@ -41,12 +41,12 @@ The third column gives the answers and the changes that the work made later.
 
 The binary has up to four listeners.
 
-1. `server.listen_address`: the pages of the portal, behind Traefik ForwardAuth. The admin pages of the inbox are here. The metrics of the portal and of the inbox are here, at `metrics.path`. No separate metrics listener exists.
+1. `server.listen_address`: the portal. It serves the pages (behind Traefik ForwardAuth where needed), the admin pages of the inbox, the metrics of the portal and of the inbox at `metrics.path`, and the API of the inbox for the producers and the webhooks: `/api/v1/*`, `/api/version` and `/readyz`. These routes of the inbox have no session. Producers prove themselves with a token or a key. The inbox is a feature of the portal, not a second service.
 2. `pdp.listen_address`: the AuthZEN PDP. Only the services reach it.
-3. `inbox.devices.listen`: phones, producers, webhooks and the health routes. No session. Phones and producers prove themselves.
+3. `inbox.devices.listen`: the phone port. It serves `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`, and no other route. Phones prove themselves. A phone on a mobile network reaches this port, and the pages of the portal stay private.
 4. `inbox.cluster.listen`: the copies of alerts between instances. It exists with the block `inbox.cluster` only.
 
-The listeners of the inbox have a cap: `server.max_connections` plus two times `inbox.devices.max_devices` connections. The old server had no cap. The DaemonSet `inbox-edge` relays the devices listener on a host port of each node.
+The listeners of the inbox have a cap: `server.max_connections` plus two times `inbox.devices.max_devices` connections. The old server had no cap. The portal listener keeps the cap `server.max_connections`. The DaemonSet `inbox-edge` relays the phone port on a host port of each node.
 
 ## 5. Protocol 4 of the phones
 
@@ -89,7 +89,7 @@ The inbox is the second internal service of the portal, after the service `porta
 - **Critical group.** The key `inbox.group.<id>.critical` (boolean, default `false`) marks a group. A critical group skips the count. The inbox does not call the counter for it, so no memo of refusal can stop it either.
 - **Dependencies.** The service has no `needs` rule like the service `portal`. The page **Phones** needs `device.read`. **Revoke** needs `device.revoke` and `device.read` together.
 - **Catalogue.** The portal adds the service `inbox` to each catalogue that discovery gives, when the file has the block `inbox`. It is in the group "Portal" with the icon `tb:bell`. It owns no path, so the gate does not change. The id `inbox` is reserved for workloads in all cases, also without the block `inbox`, as the id `portal` is.
-- **Tile.** The tile **Inbox** shows for the superadmin. It also shows for an account that holds a permission that opens a page of the tab. The permission `access` alone does not open a page. It links to `/auth/settings/inbox`.
+- **Entry.** The launcher has no tile for the inbox (changed on 2026-11-01, section 15). The superadmin opens the pages with the gear. An account that holds a permission that opens a page of the tab gets the gear too, and it links to `/auth/settings/inbox`. The permission `access` alone does not open a page.
 
 ### 6.2 Producers
 
@@ -135,7 +135,7 @@ The block `inbox` joins the file of the portal. It holds these items: the name, 
 
 - **Blocks without a label.** The HCL parser accepts blocks without a label inside the block `inbox` (`devices`, `enrollment`, `storage`, `replica`, `cluster`, `portal_alerts`). It still refuses nested blocks everywhere else.
 - **Secrets.** `server_key_file` and `token_file` are secrets: each accepts `_file` and `_env`. The program does not trim the value. A key file that `portal inbox keygen` made has one final line end, and the program removes it.
-- **Keys of the old server.** `server.shutdown_grace`, `logging.format`, the block `telemetry`, the block `admin` and `limits.max_request_bytes` do not exist any more. The shutdown of the portal replaces `shutdown_grace`. The JSON log of the portal replaces the log format. `inbox.devices.max_request_bytes` replaces `limits.max_request_bytes`. `inbox.devices.max_auth_failures` and `inbox.devices.auth_failure_window` replace the block `security`. `inbox.devices.trusted_proxies` replaces `server.trusted_proxies`.
+- **Keys of the old server.** `server.shutdown_grace`, `logging.format`, the block `telemetry`, the block `admin` and `limits.max_request_bytes` do not exist any more. The shutdown of the portal replaces `shutdown_grace`. The JSON log of the portal replaces the log format. `inbox.devices.max_request_bytes` replaces `limits.max_request_bytes`. `inbox.devices.max_auth_failures` and `inbox.devices.auth_failure_window` replace the block `security`. The portal key `server.trusted_proxies` gives the client address for the inbox. (The first version of the merge had `inbox.devices.trusted_proxies`. Section 15 removed it.)
 - **Defaults.** Only the delivery values have no default. The block `inbox.replica` has defaults. `sync_alerts` has the safe default `true`.
 - **Example.** `deploy/config.example.hcl` is a complete configuration of the portal with the inbox.
 
@@ -182,7 +182,7 @@ The commands are in the section "Build and release" of the README. The files are
 - **Inbox image removed.** `docker/Dockerfile.inbox` and its ignore file are gone. A root `.dockerignore` limits the context to `src`, `crates`, `web` and the manifests. `docker/Dockerfile` copies `crates/`, because the portal depends on `inbox-core`.
 - **Compose.** `docker-compose.yml` at the root has the portal and PostgreSQL. It builds the image when it is absent. The secrets are files in a directory that `deploy/compose/init-secrets.sh` makes (`PORTAL_SECRETS_DIR` changes the directory). The script uses the image for `portal inbox keygen` and `portal inbox token`. There is no shared device password and no credential file. The file `.env.example` is gone, because the stack has no environment secrets.
 - **Two instances.** `deploy/compose/docker-compose.ha.yml` adds a second instance and Traefik. It is a test aid. It needs no new image.
-- **K3s.** `deploy/k3s/` has one Deployment with two replicas in the namespace `edge`, where the portal runs in the homelab. The inbox has no namespace of its own any more. The Services are `portal`, `portal-pdp`, `portal-devices` and `portal-peers`. The relay `inbox-edge` keeps its name and host port 8087, and it runs in `edge`. The probes use `/readyz` of the devices listener, because the portal has no `/readyz`.
+- **K3s.** `deploy/k3s/` has one Deployment with two replicas in the namespace `edge`, where the portal runs in the homelab. The inbox has no namespace of its own any more. The Services are `portal`, `portal-pdp`, `portal-devices` and `portal-peers`. The relay `inbox-edge` keeps its name and host port 8087, and it runs in `edge`. It relays the phone port only. The startup probe reads `/healthz` of the portal, and the readiness probe reads `/readyz` of the phone port.
 - **CI.** `ci.yml` has four jobs: the policy, the Rust checks, the image with the configuration files and the Compose smoke test, and the Android compile check. `release.yml` replaces both release workflows. It builds each architecture on a native runner. It has no step that touches a registry.
 - **Version of the release.** A tag `vX.Y.Z` starts the release. The old manual start with an independent version is gone.
 - **No push.** No command and no workflow pushes an image to a registry. A release holds binaries, the signed APK and `SHA256SUMS`.
@@ -228,5 +228,23 @@ The first plan had one chain of migrations, one admin front without a password, 
 - **Alert near a budget.** A key that comes near its budget raises no alert in this version.
 - **Physical phone.** The tests use the emulator only. The owner chose no physical phone.
 - **Archive of Inbox.** D8 says that the repository Inbox is archived at the end. This is not done.
-- **IngressRoute of the tile.** The IngressRoute `inbox` in `deploy/k3s/ingress.yaml` has `portal.href: /auth/inbox/`. No page serves this path. The portal lists its own tile (section 6.1), so this route should be fixed or removed.
 - **Old comments.** The comments of the moved code are not rewritten in Simplified Technical English.
+
+## 15. The API of the producers on the port of the pages (2026-11-01)
+
+The owner gave this instruction: "`/api/v1/alerts` must be on the same port, 8088. The inbox must not be a separate service but presented as a feature of the portal." The owner then said that the phones may keep a second port, because a phone on a mobile network must reach the server from outside while the pages stay private. This replaces D11 and the answer to Q14 in part. The record is `owner-decision-2026-11-01-inbox-same-port.md` in the repository of the specification.
+
+What changed:
+
+- **API of the producers.** The listener of the portal (`server.listen_address`) serves `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}`, `POST /api/v1/notify/{group}`, `POST /api/v1/webhooks/alertmanager/{group}`, `GET /api/version` and `GET /readyz`. The authentication (bearer token of the file, key of the portal, `?token=`), the refusals and the limits did not change. The function `inbox::serve_api` answers the paths that `inbox::owns_api` names. The portal checks these paths before every other route, so no handler of the portal shadows them, and the inbox does not shadow a route of the portal. The portal applies no session, no CSRF check, no origin check and no cookie to them. A proxy sends `/api/v1/` to the portal without ForwardAuth (demo labels, `deploy/k3s/ingress.yaml`).
+- **Phone port.** `inbox.devices.listen` stays, and the block keeps the name `devices`: a rename would touch the whole configuration and every document for no gain. The listener serves `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz` only. Every `/api/v1/*` route and `/api/version` left it, and a request for them gets 404. `inbox.devices.public_address` is the address that phones use to reach the phone port.
+- **Relay.** The DaemonSet `inbox-edge`, its host port 8087 and its retry stay. They relay the phone port only. A producer does not use the relay any more.
+- **Client address.** One source: `server.trusted_proxies` and the function `transport::client_ip` of the portal, for the API of the producers and for the phone port. The key `inbox.devices.trusted_proxies` is removed with no alias: a file that has it stops at start. The old inbox function also read `X-Real-IP` and accepted two `X-Forwarded-For` headers. The portal function ignores both. The relay and Traefik set `X-Forwarded-For`.
+- **Connection cap.** The portal listener keeps `server.max_connections`. The phone port keeps its own cap, `server.max_connections` plus two times `inbox.devices.max_devices`. A WebSocket of a phone never uses the budget of the pages.
+- **Start.** With the block `inbox`, the portal listener opens before the catalogue is complete and serves the API of the inbox only. Every other route answers `503` until the catalogue is complete, so the gate never decides with an incomplete catalogue (portal 7.3b). Without the block `inbox`, the ports open at the same moment as before. An alert never waits for the catalogue, as before.
+- **Stop.** The signal gives the same sequence. The inbox sends the close code 1012 to each phone at once. The portal serves 5 more seconds and waits at most 10 seconds for the connections and the sessions.
+- **Readiness.** `GET /readyz` is on the portal listener and on the phone port. With the inbox both give the answers of the inbox: `200` `ready`, `200` `degraded` with PostgreSQL and no primary, `503` `draining` after the signal. Without the block `inbox`, the portal answers `200`. `portal healthcheck` reads `/healthz` of the portal and `/readyz` of the phone port. The startup probe of K3s reads `/healthz`.
+- **Presentation.** The inbox is a feature of the portal, as the keys are. The launcher has no tile. The Services page does not list it. The editors of permissions keep it as "Inbox (portal)". The gear of the launcher opens the pages, and an account that is not the superadmin gets the gear when it has a permission of the inbox. The page **Documentation** of the inbox shows the address of the portal as the request shows it. The API routes have the metric label `inbox_api`.
+- **Android.** No change. The app takes any `http` or `https` address, keeps its path prefix and appends `/v1/enroll` or `/v1/session` (`Address.kt`).
+
+Behaviours that are lost: the API of the producers on the phone port, the relay as an entry for the producers (a producer request to a lost node is not retried by the relay), and the independent list of trusted proxies of the inbox.

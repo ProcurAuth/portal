@@ -1,7 +1,7 @@
 # Grafana alerting provisioning: a "Webhook" contact point for the inbox of the portal.
 # Place it in /etc/grafana/provisioning/alerting/ and set INBOX_URL / INBOX_TOKEN
 # in Grafana's environment (Grafana expands $__env{...} in provisioning files).
-# INBOX_URL is the address of inbox.devices.listen. INBOX_TOKEN is the value of a block `producer`,
+# INBOX_URL is the address of the portal (the same host and port as the pages). INBOX_TOKEN is the value of a block `producer`,
 # or a key of the portal (mcp_...) that has the permission alert.send on the group.
 #
 # Grafana contact points are built into Grafana and cannot be extended by plugins,
