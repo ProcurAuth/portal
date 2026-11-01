@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run the tests of the workspace in Docker, with a throwaway PostgreSQL.
 # Usage: tools/dev/test.sh [cargo test arguments]
+# PORTAL_SLOT: suffix of the Docker volume of the build output, so two worktrees do not share it.
 # PROCURAUTH_CONFORMANCE: directory of the conformance data (default: ../procurauth/conformance).
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -13,14 +14,14 @@ if ! docker ps --format '{{.Names}}' | grep -qx portal-pg; then
     postgres:18 -c fsync=off -c max_connections=2000 -c shared_buffers=128MB >/dev/null
   for _ in $(seq 1 40); do docker exec portal-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 fi
-docker volume inspect portal-target >/dev/null 2>&1 || docker volume create portal-target >/dev/null
+docker volume inspect portal-target${PORTAL_SLOT:+-$PORTAL_SLOT} >/dev/null 2>&1 || docker volume create portal-target${PORTAL_SLOT:+-$PORTAL_SLOT} >/dev/null
 docker volume inspect portal-cargo >/dev/null 2>&1 || docker volume create portal-cargo >/dev/null
 # The tests of the degraded mode need an IP address, not a name.
 pgip=$(docker inspect -f '{{(index .NetworkSettings.Networks "portal-net").IPAddress}}' portal-pg)
 confmount=""; [ -n "$conf" ] && confmount="-v $conf:/conformance:ro -e PROCURAUTH_CONFORMANCE=/conformance"
 exec docker run --rm --ulimit nofile=1048576:1048576 --network portal-net $confmount \
   ${PROCURAUTH_CASES:+-e PROCURAUTH_CASES=$PROCURAUTH_CASES} \
-  -v "$root":/src:ro -v portal-target:/target -v portal-cargo:/usr/local/cargo/registry \
+  -v "$root":/src:ro -v portal-target${PORTAL_SLOT:+-$PORTAL_SLOT}:/target -v portal-cargo:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/target \
   -e PORTAL_TEST_POSTGRES=postgres://postgres:testonly@portal-pg/portal_test \
   -e INBOX_TEST_PG=$pgip:5432:postgres:testonly \
