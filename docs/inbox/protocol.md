@@ -33,7 +33,7 @@ inbox://enroll?s=<address>&k=<server key>&c=<secret>
 
 | Key | Value |
 |---|---|
-| `s` | Server address, percent-encoded (UTF-8). Same rules as the app: `host:port`, a domain, or an http(s) URL. 1 to 512 bytes, no white space, no control character. |
+| `s` | Public base URL of the portal, percent-encoded (UTF-8). Same rules as the app: `host:port`, a domain, or an http(s) URL with an optional path prefix. The app adds `/v1/enroll` and `/v1/session`. 1 to 512 bytes, no white space, no control character. |
 | `k` | Public key of the server. Base64url, no padding, 32 bytes. |
 | `c` | Secret. Base64url, no padding, 16 random bytes. |
 
@@ -199,5 +199,5 @@ These choices fill the gaps of the specification. Change them only with a new pr
 ## Other interfaces
 
 The admin pages of the inbox are pages of the portal, under `/auth/settings/inbox`. They need a session of the portal.
-The producers send alerts to the listener of the portal, not to the phone port. The routes are in [README.md](README.md).
+The producers send alerts to the same listener of the portal, on `/api/v1/`. The routes are in [README.md](README.md).
 The protocol of the phones has no admin call.

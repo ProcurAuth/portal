@@ -8,7 +8,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 
 ## Where the blocks go
 
-- The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it. With it, the producers and the webhooks use `server.listen_address`, the port of the pages. The phones use the phone port `inbox.devices.listen`.
+- The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it. With it, the producers, the webhooks and the phones use `server.listen_address`, the port of the pages. The inbox has no listener for them. `inbox.devices.public_address` is the public base URL of the portal as the phones reach it. The portal has no base path: a proxy under a prefix removes the prefix.
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `portal_alerts` are optional.
 - The blocks `group "<id>"` and `producer "<name>"` can occur more than once.
 - The inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
@@ -23,7 +23,6 @@ The examples use these values: `heartbeat_interval = "20s"`, `session_timeout = 
 
 Two keys that contradict each other stop the program at start. The message names the key, the range and the value.
 
-- `inbox.devices.listen` must not use the port of `server.listen_address`.
 - `inbox.devices.session_timeout` is at least two times `heartbeat_interval`.
 - `inbox.devices.unreachable_after` is at least `session_timeout`.
 - `inbox.devices.offline_warning_after` is at least two times `heartbeat_interval`.
@@ -50,10 +49,10 @@ The optional keys have documented defaults. Examples: `inbox.name` is `"Inbox"`,
 
 | Old key | Now |
 |---|---|
-| `server.listen` | `inbox.devices.listen` (phones only). The producers use `server.listen_address` of the portal. |
+| `server.listen` | None. The producers and the phones use `server.listen_address` of the portal. |
 | `server.name` | `inbox.name` |
 | `server.admin_listen` | None. The pages are in the portal. |
-| `server.trusted_proxies` | `server.trusted_proxies` of the portal. The inbox has no list of its own. The phone port uses it too. |
+| `server.trusted_proxies` | `server.trusted_proxies` of the portal. The inbox has no list of its own. The routes of the phones use it too. |
 | `server.shutdown_grace` | None. The shutdown of the portal applies. |
 | `server.server_key_file` | `inbox.server_key_file` |
 | `admin.allowed_hosts` | None. The admin front is gone. |

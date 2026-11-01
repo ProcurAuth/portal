@@ -307,9 +307,9 @@ The inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives it
 - A phone enrolls with a one-time code of an account of the portal. The code holds the address of the server, the public key of the server and a secret of 128 bits. The secret works one time and expires. The server keeps only its SHA-256 digest.
 - The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
 - The server limits the enrollment attempts for each client address.
-- The phone port has no session and serves no page of the portal and no API of the producers. The API of the producers shares the listener of the portal: it has no session, sets no cookie and needs no ForwardAuth.
+- The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the producers share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
 - A phone subscribes only to a group for which its account has `group.subscribe`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
 - A producer sends an alert with a bearer token. The server compares the tokens of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
 - The pages of the inbox need a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
 - The key file of the inbox server and the producer tokens use only `_env` or `_file`. A secret in clear text stops the start.
-- The phone port and the portal listener have no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.
+- The portal listener has no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.

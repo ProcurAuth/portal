@@ -127,7 +127,9 @@ The transport is at least once. The phone ignores a repeat. The result is that t
 
 5.6 The key file of the server is a secret. A new key file makes every phone and every code invalid. The operator MUST back it up.
 
-5.7 The phone port (`inbox.devices.listen`) has no session. It MUST NOT serve any page of the portal and MUST NOT serve the API of the producers. The API of the producers (`/api/v1/`) shares the listener of the portal: it has no session and sets no cookie, and the portal MUST NOT apply its session, CSRF or origin checks to it. No page of the portal MUST use a path under `/api/v1/`.
+5.7 The routes of the inbox share the listener of the portal: `/v1/enroll` and `/v1/session` for the phones, `/api/v1/` for the producers, `/api/version` and `/readyz`. They have no session and set no cookie. The portal MUST NOT apply its session, CSRF or origin checks to them. The portal MUST match them before every other route. No page of the portal MUST use a path under `/v1/` or `/api/v1/`.
+
+5.7a A phone session is long-lived. It MUST NOT use the budget of connections of the pages. The portal MUST give the permit of the pages back when a connection upgrades, and take a permit of a separate budget of sessions. A phone that cannot get a permit gets `503` before the upgrade.
 
 5.8 A secret MUST NOT be in clear text in the configuration. It comes from `_env` or `_file`.
 
