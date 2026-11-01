@@ -59,6 +59,6 @@ done
 echo
 echo "The demo runs at http://localhost:8088/"
 echo "The producers use the same address: POST http://localhost:8088/api/v1/alerts"
-echo "The phone port of the inbox is at http://127.0.0.1:8089 and, for an emulator, at http://172.17.0.1:8089"
+echo "The phones use the same port too. An emulator reaches it at http://172.17.0.1:8088"
 echo "The logins and the passwords are in demo/$secrets/credentials.txt"
 echo "Stop it with: docker compose -f demo/docker-compose.yml down -v"

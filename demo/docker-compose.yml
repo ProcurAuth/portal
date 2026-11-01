@@ -13,7 +13,10 @@ services:
       - --accesslog=true
       - --log.level=INFO
     ports:
+      # The one public port of the demo: the pages, the API of the producers and the phones.
       - "127.0.0.1:8088:80"
+      # The Android emulator reaches the host at 172.17.0.1. This is the inbox.devices.public_address of portal.hcl.
+      - "172.17.0.1:8088:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
@@ -42,12 +45,8 @@ services:
       - inbox_server_key
       - inbox_producer_token
     ports:
-      # The phone port of the inbox (phones only). The emulator reaches it through the
-      # Docker bridge at 172.17.0.1:8089. This is the inbox.devices.public_address of portal.hcl.
-      # The producers use Traefik (8088), like the pages.
-      - "127.0.0.1:8089:8080"
-      - "172.17.0.1:8089:8080"
-      # The pages listener, for the metrics and the health check from the host. Loopback only.
+      # The listener of the portal without Traefik, for the metrics and the health check from the
+      # host. Loopback only. The pages, the producers and the phones use Traefik (8088).
       - "127.0.0.1:8091:4181"
     volumes:
       - portal_data:/var/lib/portal
@@ -65,11 +64,14 @@ services:
       traefik.http.routers.portal-home.rule: Path(`/`)
       traefik.http.routers.portal-home.entrypoints: web
       traefik.http.routers.portal-home.service: portal
-      # The API of the inbox for the producers and the webhooks, on the port of the pages. They have no
-      # session and prove themselves with a token or a key, so no ForwardAuth applies.
-      traefik.http.routers.portal-inbox.rule: PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      # The routes of the inbox on the port of the pages: the phones (`/v1/enroll` and `/v1/session`,
+      # WebSocket upgrades), and the API of the producers and the webhooks. They have no session and
+      # prove themselves (Noise, token or key), so no ForwardAuth applies. The middleware inbox-retry
+      # (traefik-dynamic.yml) sends a request again when the portal does not answer at all.
+      traefik.http.routers.portal-inbox.rule: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)
       traefik.http.routers.portal-inbox.entrypoints: web
       traefik.http.routers.portal-inbox.priority: "50000"
+      traefik.http.routers.portal-inbox.middlewares: inbox-retry@file
       traefik.http.routers.portal-inbox.service: portal
       traefik.http.services.portal.loadbalancer.server.port: "4181"
 

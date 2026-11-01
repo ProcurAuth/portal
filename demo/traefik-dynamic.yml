@@ -26,3 +26,11 @@ http:
     portal-key-chain:
       chain:
         middlewares: ["portal-key", "drop-authorization"]
+    # The routes of the inbox: a request that the portal does not answer at all (a node that is lost, a
+    # connection refused) goes to the Service again, up to 4 attempts, 100 ms apart at first. Traefik
+    # retries only before the first byte of the answer. A WebSocket upgrade that got `101` is never
+    # sent again, and an answer of the portal (also 503) is final.
+    inbox-retry:
+      retry:
+        attempts: 4
+        initialInterval: 100ms

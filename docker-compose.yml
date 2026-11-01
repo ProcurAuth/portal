@@ -4,15 +4,14 @@
 #   docker compose up -d --build
 #   docker compose down -v                # stops the stack and deletes the database
 #
-# The portal: http://127.0.0.1:4181/ (the sign-in is /auth/login). The pages and the API of the inbox for the
-# producers and the webhooks (/api/v1/*) use this port. No proxy is in front of this stack, so no ForwardAuth applies.
-# The phone port of the inbox (phones only): port 8080. The admin pages of the inbox are in the portal, in the
-# tab "Inbox". No admin port exists.
+# The portal: http://127.0.0.1:4181/ (the sign-in is /auth/login). One port serves the pages, the API of the
+# inbox for the producers and the webhooks (/api/v1/*), and the phones (/v1/enroll and /v1/session). No proxy is
+# in front of this stack, so no ForwardAuth applies. The admin pages of the inbox are in the portal, in the tab
+# "Inbox". No other port exists for the inbox.
 #
 # Environment (all optional):
-#   PORTAL_PORT          host port of the pages of the portal (default 4181)
-#   PORTAL_DEVICES_PORT  host port of the phone port (default 8080)
-#   PORTAL_DEVICES_BIND  host address of the phone port (default 127.0.0.1). Use 0.0.0.0 for a phone or an
+#   PORTAL_PORT          host port of the portal (default 4181)
+#   PORTAL_BIND          host address of the portal (default 127.0.0.1). Use 0.0.0.0 for a phone or an
 #                        emulator on another host, and set inbox.devices.public_address in deploy/compose/config.hcl.
 #   PORTAL_VERSION       version of the build (default: the version of Cargo.toml)
 #   PORTAL_SECRETS_DIR   directory of the secret files (default: deploy/compose/secrets)
@@ -51,8 +50,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${PORTAL_PORT:-4181}:4181"
-      - "${PORTAL_DEVICES_BIND:-127.0.0.1}:${PORTAL_DEVICES_PORT:-8080}:8080"
+      - "${PORTAL_BIND:-127.0.0.1}:${PORTAL_PORT:-4181}:4181"
     configs:
       - source: portal_config
         target: /etc/portal/config.hcl

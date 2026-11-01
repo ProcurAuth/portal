@@ -54,16 +54,15 @@ metrics {
   path    = "/metrics"
 }
 
-# The inbox of the portal. The producers use the port of the pages (Traefik, 8088). The phones use the phone port
-# (8080 in the container, 8089 on the host).
+# The inbox of the portal. The pages, the producers and the phones use the same port (Traefik, 8088).
 inbox {
   name            = "Inbox demo"
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    listen                = "0.0.0.0:8080"
-    # The Android emulator reaches the host at 172.17.0.1. The host reaches this address too.
-    public_address        = "http://172.17.0.1:8089"
+    # The public base URL of the portal as the phones reach it. The Android emulator reaches the host
+    # at 172.17.0.1. The host reaches this address too.
+    public_address        = "http://172.17.0.1:8088"
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

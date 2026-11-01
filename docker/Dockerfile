@@ -71,9 +71,9 @@ FROM scratch AS runtime
 COPY --from=build --chown=10001:10001 /out/rootfs/ /
 COPY --from=build /out/portal /portal
 USER 10001:10001
-# 4181: the portal: the pages, and the API of the inbox for the producers and the webhooks. 4182: the AuthZEN PDP.
-# 8080: the phone port of the inbox. Do not route 4182 through Traefik. Publish 8080 only when the inbox runs.
-EXPOSE 4181 4182 8080
+# 4181: the portal: the pages, and the inbox for the producers, the webhooks and the phones. 4182: the AuthZEN PDP.
+# Do not route 4182 through Traefik.
+EXPOSE 4181 4182
 VOLUME ["/var/lib/portal"]
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --start-interval=1s --retries=3 \
   CMD ["/portal", "healthcheck", "--config", "/etc/portal/config.hcl"]

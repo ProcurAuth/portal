@@ -36,8 +36,9 @@ roleRef:
   kind: ClusterRole
   name: portal-readonly
 ---
-# The portal: the pages, ForwardAuth (/auth/verify) and the API of the inbox for the producers and the webhooks
-# (/api/v1/*, no ForwardAuth). Traefik routes to this Service.
+# The portal: the pages, ForwardAuth (/auth/verify) and the inbox: the API for the producers and the webhooks
+# (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no ForwardAuth.
+# Traefik routes to this Service.
 apiVersion: v1
 kind: Service
 metadata:
@@ -64,21 +65,6 @@ spec:
   - name: pdp
     port: 4182
     targetPort: pdp
----
-# The phone port of the inbox: /v1/enroll, /v1/session, /healthz and /readyz. The relay inbox-edge (edge.yaml) calls
-# this Service. No session protects this port: a phone proves itself with the Noise session. The producers do not use it.
-apiVersion: v1
-kind: Service
-metadata:
-  name: portal-devices
-  namespace: edge
-spec:
-  selector:
-    app: portal
-  ports:
-  - name: devices
-    port: 8080
-    targetPort: devices
 ---
 # The instances list each other through this Service (inbox.cluster.peers). It has no virtual IP. It has one address for
 # each pod, published before the pod is ready, so two instances that start together find each other.
@@ -143,10 +129,9 @@ spec:
         ports:
         - {name: http, containerPort: 4181}
         - {name: pdp, containerPort: 4182}
-        - {name: devices, containerPort: 8080}
         - {name: peers, containerPort: 8082}
-        # The inbox opens its ports at once: the phone port, and the port of the portal for the API of the producers (the
-        # other routes of the portal answer 503). The portal serves its pages when the directory is loaded, the counter rows
+        # The inbox opens the port of the portal at once, for the phones and the API of the producers (the other routes
+        # of the portal answer 503). The portal serves its pages when the directory is loaded, the counter rows
         # exist, the catalogue is complete and the first reads of the action documents ended. /healthz answers 503 until
         # then. This probe waits up to 5 minutes for it. It MUST wait longer than the sum of these times. The other probes
         # start after it succeeds.
@@ -156,13 +141,13 @@ spec:
             port: http
           periodSeconds: 2
           failureThreshold: 150
-        # The instance is ready when the inbox says so. The phone port and the port of the portal both answer /readyz.
-        # It answers 503 at SIGTERM, so the Services stop to send requests before the listeners close. PostgreSQL
-        # without a writable primary is still ready.
+        # The instance is ready when the inbox says so: /readyz of the port of the portal. It answers 503 at SIGTERM, so
+        # the Services stop to send requests before the listeners close. PostgreSQL without a writable primary is
+        # still ready.
         readinessProbe:
           httpGet:
             path: /readyz
-            port: devices
+            port: http
           periodSeconds: 5
         # /healthz of the portal never reads the database.
         livenessProbe:

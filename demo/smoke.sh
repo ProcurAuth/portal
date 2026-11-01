@@ -68,12 +68,14 @@ check "key: cannot write (no grant)" 403 "$(status -H "$auth" -H 'Content-Type: 
 check "a key opens no route of persons (files has no key route)" 302 "$(status -H "$auth" "$base/files/")"
 
 # ---- the inbox
-# The phone port has no session: it serves the routes of the phones and the health routes only. The API of
-# the producers is on the port of the pages, through Traefik without ForwardAuth. A producer proves itself
-# with a bearer token or a key.
-check "inbox: phone port /healthz" 200 "$(status "$devices/healthz")"
-check "inbox: phone port /readyz" 200 "$(status "$devices/readyz")"
-check "inbox: the API of the producers is not on the phone port" 404 "$(status "$devices/api/version")"
+# One port serves the pages, the producers and the phones. Traefik sends `/v1/`, `/api/v1/` and `/api/version`
+# to the portal without ForwardAuth. A producer proves itself with a bearer token or a key. A phone proves
+# itself inside the WebSocket.
+check "inbox: a plain GET of /v1/session reaches the inbox (400, not a ForwardAuth redirect)" 400 "$(status "$base/v1/session")"
+check "inbox: a plain GET of /v1/enroll reaches the inbox (400)" 400 "$(status "$base/v1/enroll")"
+check "inbox: a WebSocket upgrade of /v1/session through Traefik gives 101" 101 \
+  "$(status --max-time 2 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$base/v1/session")"
 check "inbox: /readyz on the port of the pages" 200 "$(status "$base/readyz")"
 check "inbox: /api/version on the port of the pages, no ForwardAuth" 200 "$(status "$base/api/version")"
 token=$(cat .secrets/inbox_producer_token)

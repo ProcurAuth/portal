@@ -13,7 +13,7 @@ The stack has these parts:
 
 | Part | Role |
 |---|---|
-| `traefik` | The edge. The port 8088 is open on loopback only. |
+| `traefik` | The edge. The port 8088 is open on loopback and on the Docker bridge (`172.17.0.1`, for the emulator). |
 | `portal` | The portal: sessions, the PDP on port 4182, the edge for keys, and the inbox. |
 | `notes` | A service with a front. It asks the PDP for each operation. |
 | `files`, `wiki` | Two example services. They show the request headers. |
@@ -23,11 +23,10 @@ The demo publishes these ports:
 
 | Port | Use |
 |---|---|
-| `127.0.0.1:8088` | The portal, through Traefik: the pages, and the API of the inbox for the producers and the webhooks (`/api/v1/*`, `/api/version`). |
-| `127.0.0.1:8089` and `172.17.0.1:8089` | The phone port of the inbox: `/v1/enroll`, `/v1/session`, `/healthz` and `/readyz`. The address `172.17.0.1` is the host as the Android emulator sees it. It is the `inbox.devices.public_address` of `portal.hcl`. |
+| `127.0.0.1:8088` and `172.17.0.1:8088` | The portal, through Traefik: the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`, `/api/version`), and the phones (`/v1/enroll`, `/v1/session`). The address `172.17.0.1` is the host as the Android emulator sees it. It is the `inbox.devices.public_address` of `portal.hcl`. |
 | `127.0.0.1:8091` | The listener of the portal without Traefik. Use it for `/metrics` and `/healthz`. |
 
-The inbox is a feature of the portal. The producers use the port of the pages. Traefik sends `/api/v1/` to the portal without ForwardAuth, because producers have no session. They prove themselves. The phones have their own port, so that a phone on a mobile network can reach the server while the pages stay private.
+The inbox is a feature of the portal, with one port. Traefik sends `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth, because phones and producers have no session. They prove themselves. The two routes of the phones are WebSocket upgrades. Traefik carries them with path routing. The middleware `inbox-retry` (4 attempts, 100 ms) sends a request again only when the portal does not answer at all.
 
 To check the main points from a terminal, run `./demo/smoke.sh`. It signs in, tests the gate, a ceiling, a budget, a key and the inbox. Read the rate budgets at the top of the script. The budget of `alice` is 5 uses each minute, so wait one minute before a second run.
 

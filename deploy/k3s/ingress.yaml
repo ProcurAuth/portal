@@ -2,10 +2,10 @@
 # (namespace edge). forward-auth calls http://portal.edge.svc.cluster.local:4181/auth/verify and copies the header
 # X-Identity-Token to the request.
 #
-# The inbox is a feature of the portal. The producers and the webhooks use the same domain as the pages: the route
-# portal-inbox sends /api/v1/ to the portal without ForwardAuth, because they have no session and prove themselves.
-# The phones use the phone port, which has no route here: the relay inbox-edge (edge.yaml) serves it on host port
-# 8087. The admin pages of the inbox are pages of the portal under /auth/settings/inbox.
+# The inbox is a feature of the portal, with one port and one domain. The producers, the webhooks and the phones use
+# the same domain as the pages: the route portal-inbox sends /v1/ (the phones, WebSocket), /api/v1/ and /api/version
+# to the portal without ForwardAuth, because they have no session and prove themselves. The admin pages of the inbox
+# are pages of the portal under /auth/settings/inbox.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -25,8 +25,37 @@ spec:
   tls:
     secretName: traefik-tls
 ---
-# The API of the inbox for the producers and the webhooks (Alertmanager, Grafana, scripts). No ForwardAuth: a producer
-# sends a token or a key, and the inbox checks it. The path /api/version needs no session either.
+# The retry of the routes of the inbox. When a node is lost, the Service keeps the endpoint of its pod until the node is
+# NotReady (about 35 s). Traefik sends a request that got no answer to another pod, up to 4 attempts, 100 ms apart at
+# first. It retries only before the first byte of the answer: an answer of the portal (also 503) is final, and a
+# WebSocket upgrade that got `101` is never sent again. The retry replaces the quick retry of the old relay.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: portal-inbox-retry
+  namespace: edge
+spec:
+  retry:
+    attempts: 4
+    initialInterval: 100ms
+---
+# A short dial timeout, so that the retry does not wait 30 s for a pod of a lost node.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: portal-inbox
+  namespace: edge
+spec:
+  forwardingTimeouts:
+    dialTimeout: 1s
+    idleConnTimeout: 30s
+---
+# The routes of the inbox: the phones (/v1/enroll and /v1/session, WebSocket upgrades over HTTP/1.1; Traefik carries them
+# with path routing), the API of the producers and the webhooks (Alertmanager, Grafana, scripts), and the version. No
+# ForwardAuth: a phone proves itself with the Noise handshake, a producer sends a token or a key, and the inbox checks
+# it. No secure-headers middleware: the routes answer with their own headers, and an added header must not touch the
+# upgrade. Without a prefix, the portal serves these paths at the root. A route under a prefix needs a StripPrefix
+# middleware: the portal has no base path.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -36,11 +65,14 @@ spec:
   entryPoints: [websecure]
   routes:
     - kind: Rule
-      match: PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      match: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)
       priority: 50000
       services:
         - name: portal
           port: 4181
+          serversTransport: portal-inbox
+      middlewares:
+        - name: portal-inbox-retry
   tls:
     secretName: traefik-tls
 ---

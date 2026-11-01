@@ -3,9 +3,9 @@
 # The check needs the files that the configuration names. Make dummy files for a check outside the cluster.
 #
 # Edit these values for your cluster before you apply the manifests:
-#   server.trusted_proxies                                    the pod network (the pages and the phone port)
+#   server.trusted_proxies                                    the pod network (the pages, the producers and the phones)
 #   identity.issuer                                           the base URL of the portal
-#   inbox.devices.public_address                              the address that phones use (a relay)
+#   inbox.devices.public_address                              the public base URL of the portal, as the phones reach it
 #   postgres.host                                             the read-write Service of the database
 #   the blocks group and producer                             your alert groups and sources
 
@@ -83,13 +83,11 @@ inbox {
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
-    # The phone port: /v1/enroll, /v1/session, /healthz and /readyz. The Service portal-devices and the relay inbox-edge
-    # reach it. The producers and the webhooks use the port of the pages (4181) through Traefik, not this one.
-    listen                = "0.0.0.0:8080"
-    # The address that a phone uses to reach a relay (host port 8087 of every server). It is in the enrollment code.
-    # The relay inbox-edge sets X-Forwarded-For to the real client address. It runs in the pod network, which
-    # server.trusted_proxies lists. The phone port uses that list too.
-    public_address        = "inbox.example.org:8087"
+    # The public base URL of the portal, as a phone reaches it. It is in the enrollment code. The phones use the
+    # domain of the portal: Traefik sends /v1/ to the portal without ForwardAuth (IngressRoute portal-inbox) and
+    # sets X-Forwarded-For to the real client address. Traefik runs in the pod network, which
+    # server.trusted_proxies lists.
+    public_address        = "https://portal.example.org"
     heartbeat_interval    = "20s"
     session_timeout       = "60s"
     resend_after          = "15s"

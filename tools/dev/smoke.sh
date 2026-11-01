@@ -4,9 +4,9 @@
 # The script makes the secrets in a temporary directory, starts the stack under the project name portal-smoke
 # on high ports, checks it, and always deletes the stack and its volumes.
 # Checks:
-#   /healthz, /readyz and /api/version of the portal answer 200, and /healthz, /readyz of the phone port too
+#   /healthz, /readyz and /api/version of the portal answer 200
 #   a producer token is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong token is not (401)
-#   the API of the producers is not on the phone port (404)
+#   the routes of the phones are on the same port: a plain GET of /v1/session is 400, and an upgrade gives 101
 #   the metrics of the portal show inbox_* series
 #   an account that is not signed in cannot read the admin calls of the inbox (401)
 set -eu
@@ -16,7 +16,6 @@ image=${1:-portal:local}
 tag=${image#*:}
 export PORTAL_IMAGE_TAG=$tag
 export PORTAL_PORT=${PORTAL_SMOKE_PORT:-14181}
-export PORTAL_DEVICES_PORT=${PORTAL_SMOKE_DEVICES_PORT:-18080}
 
 tmp=$(mktemp -d)
 export PORTAL_SECRETS_DIR="$tmp/secrets"
@@ -41,14 +40,14 @@ check() { # check <label> <expected status> <actual status>
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 pages="http://127.0.0.1:$PORTAL_PORT"
-devices="http://127.0.0.1:$PORTAL_DEVICES_PORT"
 
 check "portal /healthz" 200 "$(code "$pages/healthz")"
-check "phone port /healthz" 200 "$(code "$devices/healthz")"
-check "phone port /readyz" 200 "$(code "$devices/readyz")"
 check "portal /readyz" 200 "$(code "$pages/readyz")"
 check "portal /api/version" 200 "$(code "$pages/api/version")"
-check "phone port has no API of the producers" 404 "$(code "$devices/api/version")"
+check "phones: a plain GET of /v1/session reaches the inbox" 400 "$(code "$pages/v1/session")"
+check "phones: a WebSocket upgrade of /v1/session" 101 "$(code --max-time 2 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$pages/v1/session" || true)"
 
 token=$(cat "$PORTAL_SECRETS_DIR/inbox_producer_token")
 key="smoke-$(date +%s)"

@@ -6,7 +6,6 @@ kind: Kustomization
 resources:
 - portal.yaml
 - ingress.yaml
-- edge.yaml
 - network-policy.yaml
 # A change of the configuration renames the ConfigMap, because the name has a hash. The pods then roll.
 configMapGenerator:
@@ -14,16 +13,9 @@ configMapGenerator:
   namespace: edge
   files:
   - config.hcl=config.hcl
-- name: inbox-edge-config
-  namespace: edge
-  files:
-  - dynamic.yaml=edge-dynamic.yaml
 # The images. Build the portal image on this machine with `tools/build.sh image`, then load it in the registry of
 # the cluster with your own tools. Change `newName` to the name that your registry uses.
 images:
 - name: portal
   newName: portal
   newTag: 5.0.0
-- name: traefik
-  newName: traefik
-  newTag: v3.7.10

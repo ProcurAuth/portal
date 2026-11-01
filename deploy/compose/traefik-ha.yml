@@ -1,24 +1,29 @@
 # Dynamic configuration of the proxy of docker-compose.ha.yml. Requests go to both instances in turn.
-# The entry point "pages" serves the pages and the API of the producers (/api/v1/). The entry point "devices" serves the phones.
+# The entry point "pages" serves everything: the pages, the API of the producers (/api/v1/) and the phones (/v1/).
 # A phone keeps one WebSocket on the instance that took it. The other instance wakes it through PostgreSQL.
+# The routes of the inbox use the middleware inbox-retry: Traefik sends a request again to the other instance
+# when the first one does not answer at all. It never sends a request again after the first byte of the answer,
+# so a WebSocket upgrade that got `101` is not repeated.
 http:
   routers:
+    inbox:
+      entryPoints: [pages]
+      rule: "PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)"
+      priority: 1000
+      middlewares: [inbox-retry]
+      service: pages
     pages:
       entryPoints: [pages]
       rule: "PathPrefix(`/`)"
       service: pages
-    devices:
-      entryPoints: [devices]
-      rule: "PathPrefix(`/`)"
-      service: devices
+  middlewares:
+    inbox-retry:
+      retry:
+        attempts: 4
+        initialInterval: 100ms
   services:
     pages:
       loadBalancer:
         servers:
         - url: "http://portal:4181"
         - url: "http://portal2:4181"
-    devices:
-      loadBalancer:
-        servers:
-        - url: "http://portal:8080"
-        - url: "http://portal2:8080"
