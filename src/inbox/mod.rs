@@ -22,6 +22,7 @@ mod device;
 mod enrollment;
 mod http;
 mod hub;
+mod internal;
 pub mod log;
 pub mod metrics;
 mod net;
@@ -284,6 +285,20 @@ impl Slot {
             Some(app) => enrollment::revoke_devices_of(&app, login).await,
             None => Ok(0),
         }
+    }
+
+    /// Sends an alert that the portal makes about itself (source `portal`). The result is `true`
+    /// when the inbox already had the key. `Err` tells why the inbox did not accept the alert.
+    pub async fn send_portal_alert(
+        &self,
+        group: &str,
+        title: String,
+        key: String,
+    ) -> Result<bool, String> {
+        let app = self.app().ok_or("the inbox is not running")?;
+        internal::send_alert(&app, group, title, key)
+            .await
+            .map_err(|e| e.summary())
     }
 
     /// The text of the metrics of the inbox. Empty without the block `inbox`.

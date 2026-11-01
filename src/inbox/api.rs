@@ -39,6 +39,11 @@ impl ApiError {
         self.status
     }
 
+    /// One line for a log: the status, the code and the message.
+    pub fn summary(&self) -> String {
+        format!("{} {}: {}", self.status.as_u16(), self.code, self.message)
+    }
+
     pub fn storage(e: impl std::fmt::Display) -> ApiError {
         log::error!(event = "storage_error", error = %e);
         ApiError::new(

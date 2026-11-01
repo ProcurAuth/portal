@@ -164,6 +164,20 @@ impl Metrics {
         self.login_failure.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The sign-ins that the portal refused since the start: a wrong password, an unknown login
+    /// and a sign-in that a limiter blocked. The alerts of the portal read it.
+    pub fn refused_sign_ins(&self) -> u64 {
+        [
+            &self.login_failure,
+            &self.login_rate_limited_ip,
+            &self.login_rate_limited_global,
+        ]
+        .iter()
+        .fold(0u64, |sum, counter| {
+            sum.saturating_add(counter.load(Ordering::Relaxed))
+        })
+    }
+
     pub fn login_rate_limited_ip(&self) {
         self.login_rate_limited_ip.fetch_add(1, Ordering::Relaxed);
         self.rate_limit_blocks_ip.fetch_add(1, Ordering::Relaxed);

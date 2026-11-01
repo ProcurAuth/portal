@@ -163,6 +163,8 @@ pub struct AppState {
     pub stop: crate::shutdown::Stop,
     /// The inbox. It runs without a session of the portal.
     pub inbox: crate::inbox::Slot,
+    /// The counters of the alerts that the portal sends about itself.
+    pub alerts: crate::portal_alerts::Stats,
     pub ensured_counters: std::sync::Mutex<
         std::collections::HashSet<(crate::decision::CounterOwner, crate::grants::CounterId)>,
     >,
@@ -269,6 +271,7 @@ impl AppState {
             undeclared_values: std::sync::atomic::AtomicU64::new(0),
             stop: crate::shutdown::Stop::default(),
             inbox: crate::inbox::Slot::default(),
+            alerts: crate::portal_alerts::Stats::default(),
             ensured_counters: std::sync::Mutex::new(ensured),
             sessions,
             users,
@@ -477,6 +480,8 @@ async fn serve_until(
         None => None,
     };
     let mut accepting = Vec::new();
+    // The alerts of the portal about itself. The task ends at once without the block.
+    accepting.push(tokio::spawn(crate::portal_alerts::run(Arc::clone(&state))));
     if let Some(listener) = pdp_listener {
         accepting.push(tokio::spawn(pdp::serve(Arc::clone(&state), listener)));
     }
@@ -806,6 +811,15 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
     );
     body.push_str(&state.discovery.render());
     body.push_str(&state.inbox.render_metrics());
+    body.push_str(
+        &state.alerts.render(
+            state
+                .config
+                .inbox
+                .as_ref()
+                .is_some_and(|p| p.portal_alerts.is_some()),
+        ),
+    );
     if state.config.pdp.is_some() {
         body.push_str(&state.pdp_stats.render());
     }
