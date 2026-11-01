@@ -218,10 +218,7 @@ networks:
     name: demo
     ipam:
       config:
-        # The automatic addresses stay in the upper half: Traefik keeps the fixed address 172.30.0.2,
-        # which portal.hcl lists in trusted_proxies.
         - subnet: 172.30.0.0/24
-          ip_range: 172.30.0.128/25
 
 volumes:
   portal_data:
