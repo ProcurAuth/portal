@@ -109,8 +109,45 @@ This section lists what step 5b does, and the choices that the owner left open.
 - **Replication.** The creation of a code and an enrollment wait for the snapshot when `inbox.replica.sync_alerts` is true. If the snapshot fails, the inbox does not give the code, and it does not send message 2 (the new device is revoked and the phone needs a new code). With `sync_alerts = false`, the failure is only logged.
 - **Close codes.** A refusal because of `max_devices` is 4410 like all the other refusals of the code. The event `enroll_refused` has the real reason in the field `reason`: `unknown_code`, `used_code`, `expired_code`, `too_many_devices`, `unreadable_message`, `unsupported_protocol`, `text_frame`, `no_message`, `rate_limited` or `replica_sync_failed`. A storage error closes with 1011: the code stays unused. The rate limit closes with 4429 after the upgrade, as `/v1/session` does. The server does not answer the HTTP status 429 to the upgrade.
 - **Rate limit.** The limiter of the address counts each connection that sends a first frame, also a refused one. A success clears the count of the address, as before. A connection that sends no frame counts after 10 seconds.
-- **Call for the codes.** `POST /auth/inbox/api/enrollment-codes` answers `201` with the JSON object of the design. The body must be `{}`. The call and `GET /auth/inbox/api/csrf` are open to any signed-in account. The other calls stay for the superadmin. A session that the superadmin opened as another account makes a code for that account.
+- **Call for the codes.** Step 4 replaced the JSON call `POST /auth/inbox/api/enrollment-codes` with the button **Make a code** of the page **My phones** (`POST /auth/settings/inbox/code`). The function that makes the code is the same. A session that the superadmin opened as another account makes a code for that account.
 - **Deletion of an account.** The portal calls the inbox before it deletes the account. If the inbox fails, the account stays. A device that enrolls while the account is deleted either finds its code gone or is revoked afterwards. The call needs the inbox only when the block `inbox` exists. File accounts cannot be deleted, so they never reach this call.
 - **Copies.** `portal inbox import-sqlite` and the snapshot of the replica carry the table `enrollment_codes`.
 - **Old files of the standalone inbox.** The command `import-sqlite` accepts only a file at the current version of the inbox chain. A file from before step 5b must start once with this binary to migrate.
 - **Deploy files.** `deploy/inbox/config.example.hcl` is now a complete configuration of the portal with the inbox. The other files of `deploy/inbox/` still describe the standalone binary. A later step replaces them.
+
+## Step 4: rights, pages and keys as producers
+
+This section lists what step 4 does in another way than the plan above, and the choices that the owner left open.
+
+### Rights
+- **Name of the limit.** The limit of `alert.send` is the budget `alerts`, not `max_alerts`. A name that starts with `max_` is a ceiling by the protocol, and a ceiling has no window. A budget has windows (second, minute, hour, day). The value is on the permission `access on service:inbox`, like the budgets of each other service. The counters are the counters of `counting.rs`. Step 4 adds no second mechanism.
+- **What counts as a use.** One request of a key is one use. A webhook that holds many alerts is one use. A request that an `Idempotency-Key` repeats is a use too, because the decision comes before the check of duplicates. The form of the page counts for an account that is not the superadmin, for the same action. The superadmin has no limit.
+- **Critical group.** The key `inbox.group.<id>.critical` is new (boolean, default `false`). A critical group skips the count. The inbox does not call the counter for it, so no memo of refusal can stop it either.
+- **Types of the actions.** `group.subscribe`, `alert.send` and `alert.read` list only the type `group`. A permission on the whole service is not valid for them: the editor gives one permission for each group. A group that the file adds later needs a new permission. The owner can change this by adding the type `service` to the list of the three actions.
+- **Dependencies.** The service has no `needs` rule like the service `portal`. The page **Phones** needs `device.read`, and **Revoke** needs `device.revoke` and `device.read` together.
+- **Catalogue.** The portal adds the service `inbox` to each catalogue that discovery gives, when the file has the block `inbox`. It is in the group "Portal" with the icon `tb:bell`. It owns no path, so the gate does not change. The id `inbox` is reserved for workloads in all cases, also without the block `inbox`, as the id `portal` is.
+- **Tile.** The tile **Inbox** shows for an account that holds a permission that opens a page of the tab (not for `access` alone) and for the superadmin.
+
+### Producers
+- **Order of the tokens.** The inbox looks at the tokens of the file first, in constant time. Only a token that is none of them goes to the check of a key. A token of the file therefore never waits for the portal.
+- **Interface.** `crate::inbox::rights::Authorizer` has four calls: `check_key`, `decide`, `subscribable` and `directory_stamp`. The portal implements it in `src/http/inbox_rights.rs` and gives it with `Slot::set_authorizer` right after the start of the inbox. It holds only a weak reference to the state. Before this call, a key gets `503 directory_not_ready`.
+- **Decision.** `decide` calls the decision of the PDP in process (`decide_key_for` in `pdp.rs`). It is the same code as for a PDP client, with the same counters. The log has the line `inbox_key_decision`.
+- **Answers.** `403 forbidden_group` for a decision no, `401` for a text that is not a key or a key that is not valid, `429 rate_limited` with `Retry-After`, `503 directory_not_ready` when the directory is too old, and `503 rights_unavailable` when the count fails.
+- **Status of an alert.** `GET /api/v1/alerts/{id}` also accepts a key with `alert.read` on the group of the alert. A key that may not read the group gets `404`, as a token of the file does.
+- **Resolved.** A key never sends the notifications resolved of Alertmanager. The setting `webhook_send_resolved` belongs to the blocks `producer`.
+
+### Subscriptions
+- **Welcome.** The message lists the groups that the account may subscribe to. When the portal cannot tell, it lists all the groups, and nothing changes.
+- **Subscribe.** A group that the account may not subscribe to gets the error `forbidden_group`. The error `unavailable` means that the portal cannot tell. A new subscription never rests on a guess. The protocol version stays 4. `docs/inbox/docs/protocol.md` has the section "Rights of the account".
+- **Removal.** The task `rights::run` of the inbox looks at `Directory::generation` every 2 seconds. When the number changes, it reads the phones once and removes the subscriptions that a loaded directory refuses. At each `welcome` the inbox does the same for this phone. Each instance of a PostgreSQL installation does it for all phones. The removal is idempotent.
+- **Safety rule.** `PortalAuthorizer::subscribable` says `Unknown`, and the inbox changes nothing, when the directory of a shared database is older than `keys.directory_max_age` (60 seconds without the block `keys`) and when the account is not in the directory. An account that has no permission is a positive no. This includes a database account in the mode `static`, whose stored grants do not count in this mode.
+- **Pending alerts.** The removal changes the table of subscriptions only. The deliveries that exist stay, and `pending_deliveries` does not look at the subscriptions.
+
+### Pages
+- **Routes.** All the pages are under `/auth/settings/inbox`. The old routes `/auth/inbox/api/*` are gone with their tests. The functions that the pages call are the ones of `src/inbox/admin.rs`, called in process.
+- **Overview.** It needs `alert.read`, `device.read` or `connection.read`, and also `alert.send`. An account that only sends alerts needs a page for its form.
+- **Impersonation.** A session that the superadmin opened as an account can read and make a code (this was already so). It cannot send an alert and cannot revoke a phone.
+- **Revoke.** A phone is revoked with `device.revoke` and `device.read`, or by its owner who holds `group.subscribe`. A request for a phone of another account answers like a request for a phone that does not exist.
+- **Dedupe of the form.** The form of an alert carries a random key. A double click sends one alert. The source of the alert is `admin`.
+- **Tests.** The end-to-end tests read the pages. The rows of the tables carry `data-*` attributes for them (`data-device`, `data-state`, `data-alert`, `data-reason` and others). The tests of the first steps that read the JSON overview now read the page **Phones**. The filter `since_ms` of the old alert list is gone, and so is the field `live.ip`.
+- **Accounts of the tests.** A database account has no permission of the inbox at the start. The tests give `group.subscribe` on the two groups of the test server.

@@ -294,6 +294,7 @@ A key lets a program call a service for a user. Without the block `keys {}`, the
 - **Limits:** a grant can hold limit values. A ceiling is a value that the service applies. A budget is a count in a window (`second`, `minute`, `hour` or `day`) that the PDP counts. The PDP counts one use for the key and for its owner, and it takes the unit from both counters or from none. When a budget is empty, the PDP answers `false` with the reason `budget_exceeded` and `retry_after`.
 - **Counters:** the table `budget_counters` holds the counters. PostgreSQL uses a second pool of connections (`pdp.counter_connections`). `keys.max_counter_rows` limits the number of rows.
 - **Revoke:** the command `portal revoke-keys --config FILE (--user LOGIN | --all)` revokes keys without the web page. With SQLite, it refuses to run when an instance runs.
+- **Producers of alerts:** a key can send alerts to the inbox when its permissions and the permissions of its owner hold `alert.send` on the group (see "Producers" in the section "Inbox").
 - **Accounts of the file:** a block `user "<login>"` defines an account of the file, with optional blocks `key "<name>"`. A login comes from the file or from the database, never from both.
 
 ## Start and stop
@@ -363,6 +364,9 @@ Each page is a column of flat parts, with the density of clickhouse-dash. A part
 3. **Give access** (`/auth/settings/give?user=<login>&service=<id>`). The page of a service uses this address. It redirects to the page of the account, with the service chosen in the editor and the grant `access` ticked. The page saves nothing until the person clicks **Save access**.
 4. **Services** (`/auth/settings/services`). **Grants to check** comes first when there is one: the account (a link to its page), the grant and the problem. Then one table lists the services by group: the name and the id, the path and the paths open without sign-in, the accounts that have `access` (links), the number of actions, the resource types and the number of resources. Each row is one line. A list that can be long folds out under its count: the accounts, and the actions as small tags (the description is the title of a tag). A service whose actions document cannot be read has a warning icon, and its cell of actions folds out the message. A service without actions has `access` only: opening the service is then the full permission. The name of a service is a link to the page of the service (`/auth/settings/services/<id>`). That page shows **Who has access**: each account with a grant on the service, its state, its actions and its grants on resources, with **Edit**. **Give access to an account** is one list of the other accounts and one **Add** button. The button opens the editor with the box `access` ticked. A side block, **How a grant reads**, gives the three forms of a grant and the subtree match.
 5. **Activity** (`/auth/settings/logins`). One strip gives the figures of the last 24 hours and the connections of 30 days. Then the page shows the sign-in log (see below). A side column shows the graph of the connections of all accounts and a table of the recent changes. A recent change names its account with a link to the page of the account.
+6. **Inbox** (`/auth/settings/inbox`). The tab shows only when the file has the block `inbox` and the account has a permission of the service `inbox`. See "The tab Inbox" in the section "Inbox".
+
+An account that is not the superadmin sees the tabs Keys and Inbox only, and only the one that it may open. The code builds the list of tabs from three facts: the viewer is the superadmin, the viewer may read keys, the viewer has a permission of the inbox. The launcher has a tile **Inbox** for an account with a permission of the inbox. The tile links to the tab.
 
 A form of an account returns to the page of the account, or to the editor of the service, with the outcome in a notice. The notice is one code from a fixed list (`?s=<code>`). The address never carries text.
 
@@ -534,11 +538,11 @@ inbox {
   group "infra" {
     name        = "Infra prod"
     description = "Production outages"
+    critical    = false                                # default; true: no limit on alert.send
   }
 
   producer "grafana" {
     token_file = "/run/secrets/inbox_grafana_token"    # or: token_env
-    critical    = false                                # default; true: no limit on alert.send
     groups     = ["infra"]
   }
 }
@@ -550,12 +554,12 @@ The delivery values have no default. The program stops at start when one of them
 
 A phone enrolls with a one-time code. The code belongs to one account of the portal. The login of the account is the user name of the phone. The phone cannot change it.
 
-1. The account makes a code with `POST /auth/inbox/api/enrollment-codes`. Any account that is signed in can use this call. The code is for the login of the session. The call has no login parameter.
-2. The call gives `{"code": "inbox://enroll?s=...&k=...&c=...", "expires_at_ms": ..., "fingerprint": "..."}`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
+1. The account makes a code on the page **My phones** of the tab Inbox. The button **Make a code** sends `POST /auth/settings/inbox/code`. An account that has the permission `group.subscribe` on one group at least can use it. The code is for the login of the session. The form has no login field.
+2. The page shows the code one time: the text `inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The page has the header `Cache-Control: no-store`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
 3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `inbox/v1/enroll`. The first message holds the secret and the name of the phone.
 4. The inbox looks for the SHA-256 digest of the secret. A code works one time and lives `inbox.enrollment.code_ttl`. The inbox stores the phone and marks the code as used in one transaction. Then it sends message 2 and closes the connection.
 
-The inbox keeps only the digest of the secret. An account has at most `inbox.enrollment.max_active_per_account` codes that are not used and not expired. The inbox refuses another code with the status `429`.
+The inbox keeps only the digest of the secret. An account has at most `inbox.enrollment.max_active_per_account` codes that are not used and not expired. The inbox refuses another code, and the page tells the person.
 
 A refusal has no message 2. The inbox closes the WebSocket with the code 4410 when the code is unknown, used or expired, when it cannot read the message, and when the limit `inbox.devices.max_devices` is reached. The log has the reason in the event `enroll_refused`. The inbox closes with 4426 when the protocol is not 4, and with 4429 after too many attempts from one address. The inbox closes a connection that sends no message in 10 seconds. With a replica and `sync_alerts = true`, the inbox sends message 2 only after the copy holds the phone.
 
@@ -596,21 +600,52 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file of the inbox into the empty PostgreSQL database that the configuration names. The file can be an old file of the standalone inbox or a file of the portal. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the listener of the phones. |
 
-### Admin calls
+### Rights of the service `inbox`
 
-The standalone admin listener and the admin front do not exist any more. The calls of the inbox are temporarily under the `listen` of the portal, in `/auth/inbox/api/`. Only a session of the superadmin can use the admin calls. Any signed-in account can use the two calls that make a code. A request without a session gets `401`. Any other account gets `403` for an admin call. Without the block `inbox`, each call answers `404`.
+The service `inbox` is the second service of the portal itself, after the service `portal`. The code holds its action document. It is a service of the catalogue with the id `inbox`: no workload can take this id. It shows in the launcher, in the page **Services**, and in the editor of permissions of the accounts and of the keys. The editor lists each group of the file as the node `group:<id>`, with the name of the group, so nobody types an id.
 
-| Call | Use |
-|---|---|
-| `GET /auth/inbox/api/csrf` | Gives the anti-CSRF token of the session. Any signed-in account can use it. |
-| `POST /auth/inbox/api/enrollment-codes` | Makes an enrollment code for the login of the session. The body is `{}`. Any signed-in account can use it. |
-| `GET /auth/inbox/api/overview` | Phones, groups, producers and the delivery statistics. |
-| `GET /auth/inbox/api/alerts`, `GET /auth/inbox/api/alerts/{id}` | The alerts, and the delivery state of one alert. The query accepts `limit` and `since_ms`. |
-| `GET /auth/inbox/api/connections` | The connection log. The query accepts `limit` and `user`. |
-| `POST /auth/inbox/api/alerts` | Sends an alert. The body is `{"group", "title", "idempotency_key"}`. |
-| `POST /auth/inbox/api/devices/{id}/revoke` | Revokes a phone and closes its session. |
+| Action | Applies to | Gives |
+|---|---|---|
+| `group.subscribe` | `group` | The phones of the account can subscribe to the group. |
+| `alert.send` | `group` | Send an alert to the group (the form, the API with a key). It has the budget `alerts`. |
+| `alert.read` | `group` | See the alerts of the group and their delivery. |
+| `device.read` | the service | See all the phones. |
+| `device.revoke` | the service | Revoke any phone. It needs `device.read`. |
+| `connection.read` | the service | See the connection log. |
 
-A POST follows the rules of the other forms of the portal. The request has the `Origin` of the portal, the content type `application/json`, and the header `X-CSRF-Token` with the value of `GET /auth/inbox/api/csrf`. A later version adds rights and pages for these calls.
+The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
+
+- **Limit.** The action `alert.send` lists the budget `alerts`: a count of alerts in a window of a second, a minute, an hour or a day. The value is on the permission `access on service:inbox`, as for each other service. The portal counts one use for each request of a key and each send of the form, for the key and for its owner. A request that an `Idempotency-Key` repeats is a use too. A webhook with many alerts is one use. A budget that has no room gives `429` with `Retry-After`. The name of a budget cannot start with `max_`, so the budget has the name `alerts`.
+- **Critical groups.** A group with `critical = true` never counts a use. A limit never stops an alert to this group.
+- **Phones.** A phone subscribes to a group only when its account has `group.subscribe` on the group. The message `welcome` lists these groups. A `subscribe` to another group gets the error `forbidden_group`. When an account loses the permission, the inbox removes the subscription and tells the phone with the message `subscriptions`. The inbox checks this when the directory of the portal changes, not for each alert. The inbox never removes a subscription when it does not know: a directory that is not ready, old or empty, and an account that the directory does not know change nothing. An alert that exists stays deliverable. The accounts of the file (blocks `user`) and the superadmin follow the same rules.
+
+### Producers
+
+A producer sends alerts with a bearer token. The header is `Authorization: Bearer <token>`. The query `?token=<token>` works for the tools that cannot set a header. Two kinds of token work at the same time.
+
+- **A token of the file** is the value of a block `producer`. The block lists its groups. This token never depends on the state of the portal: it works when the portal is not ready.
+- **A key of the portal** starts with `mcp_`. The inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:inbox/group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the inbox answers `503` with the code `directory_not_ready`.
+
+The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The page **Documentation** of the tab Inbox shows them with the real address of the listener, and the recipes for Grafana and Alertmanager.
+
+### The tab Inbox
+
+The pages are in the style of the other settings pages. They work without script. The script only gives the Copy button. The routes are under `/auth/settings/inbox`. A page that the account may not open answers `403`. Without the block `inbox`, each route answers `404`. A form is a POST with the `Origin` of the portal, the content type of a form and the field `csrf`. A refused form returns to its page with a notice. A session that "Log in as" opens can read the pages and make a code. It does not send an alert and does not revoke a phone.
+
+| Page | Route | Needs |
+|---|---|---|
+| Overview | `/auth/settings/inbox` | `alert.read`, `device.read`, `connection.read` or `alert.send`. |
+| Alert | `/auth/settings/inbox/alerts/<id>` | `alert.read` on the group of the alert. |
+| Phones | `/auth/settings/inbox/devices` | `device.read`. |
+| Connections | `/auth/settings/inbox/connections?login=<login>` | `connection.read`. |
+| My phones | `/auth/settings/inbox/phones` | `group.subscribe` on one group at least. |
+| Documentation | `/auth/settings/inbox/doc` | A page of the tab. |
+
+- **Overview:** the figures of the delivery (with `device.read`), the groups with their critical mark and the number of phones, the form **Send an alert** and the last alerts. The form lists the groups that the account may send to. A double click sends one alert: the form has a key. The page of an alert shows each delivery: sent, received, expired.
+- **Phones:** the name, the owner, the state (online, offline, unreachable or revoked), the version of the app, the last time seen, the groups and the alerts that wait. **Revoke** needs `device.revoke` and a confirmation.
+- **My phones:** the phones of the account, with **Revoke**, and **Make a code**. The account revokes its own phones and no other.
+
+The JSON calls under `/auth/inbox/api/` of the first versions do not exist any more.
 
 ### Metrics
 
@@ -1076,6 +1111,7 @@ This block has a label and can occur more than one time. One group of alerts. Th
 |---|---|---|---|
 | `name` | text: 1 to 128 bytes, not blank | required | The name of the group that the phones show. |
 | `description` | text: at most 512 bytes | `""` | The description of the group. |
+| `critical` | `true` or `false` | `false` | `true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group. |
 
 #### Block `producer "<name>"`
 
@@ -1111,7 +1147,6 @@ Hyper parses HTTP/1. The application configures bounded HTTP behavior:
 Dynamic `Location`, `Set-Cookie` and `Retry-After` values are converted to typed HTTP header values. An invalid value fails closed. The program does not emit it.
 
 The crate uses `#![forbid(unsafe_code)]` for project code.
-| `critical` | `true` or `false` | `false` | `true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group. |
 
 ## CSRF and Origin/Referer verification
 
