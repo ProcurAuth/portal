@@ -20,6 +20,7 @@ mod keys_metrics;
 mod limits;
 mod metrics;
 mod options;
+mod inbox;
 mod portal_actions;
 mod rate_limit;
 mod session;
@@ -37,6 +38,7 @@ use std::env;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,13 +63,48 @@ fn real_main() -> Result<(), String> {
         "run" => {
             let config_path = parse_config_arg(args.collect())?;
             let (config, mut secrets) = Config::load(&config_path)?;
+            inbox::log::set_level(config.logging.level);
             let signing_secret = take_session_secret(&mut secrets)?;
             let superadmin = load_superadmin(&secrets, &signing_secret)?;
+            // With a replica, the inbox waits for its lease and restores the SQLite file here,
+            // before the portal opens the file. A signal ends the wait.
+            let terminated = config
+                .inbox
+                .as_ref()
+                .is_some_and(|inbox| inbox.replica.is_some())
+                .then(shutdown::terminated_flag);
+            let is_terminated = || {
+                terminated
+                    .as_ref()
+                    .is_some_and(|t| t.load(Ordering::SeqCst))
+            };
+            let terminated_now = terminated.clone();
+            let booted = match inbox::boot(&config, &mut secrets, &is_terminated)? {
+                inbox::Boot::Off => None,
+                inbox::Boot::Stopped => return Ok(()),
+                inbox::Boot::Ready(booted) => Some(booted),
+            };
             let store = Arc::new(open_store(&config, &secrets)?);
             // A command that writes to the SQLite file reads this mark (portal 10.4a).
             if let StorageBackend::Sqlite(path) = &config.storage.backend {
                 store::mark_sqlite_instance(path)?;
             }
+            // The inbox opens its storage on the same database.
+            let inbox_start = match booted {
+                Some(booted) => {
+                    let password = secrets
+                        .postgres_password
+                        .as_ref()
+                        .map(|p| {
+                            std::str::from_utf8(p.as_bytes())
+                                .map(|text| zeroize::Zeroizing::new(text.to_string()))
+                                .map_err(|_| "postgres.password is not valid UTF-8".to_string())
+                        })
+                        .transpose()?;
+                    Some(booted.start(&config, password)?)
+                }
+                None => None,
+            };
             let access = AccessSecrets {
                 identity_key: secrets.identity_key.take(),
                 pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
@@ -88,7 +125,45 @@ fn real_main() -> Result<(), String> {
                 access,
             )?);
             sync::start(Arc::clone(&state))?;
-            http::serve(state)
+            let lifecycle = match inbox_start {
+                Some((init, lifecycle)) => {
+                    state.inbox.prepare(init);
+                    Some(lifecycle)
+                }
+                None => None,
+            };
+            if is_terminated() {
+                return Ok(());
+            }
+            // The process stops when a signal comes, and when the inbox loses its replica lease.
+            let fence = lifecycle.as_ref().map(inbox::Lifecycle::fence);
+            let also_stop = async move {
+                tokio::select! {
+                    _ = async {
+                        match &fence {
+                            Some(fence) => fence.wait().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {}
+                    _ = async {
+                        // Only a inbox with a replica has the flag of the signals.
+                        match &terminated_now {
+                            Some(flag) => {
+                                while !flag.load(Ordering::SeqCst) {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                            }
+                            None => std::future::pending().await,
+                        }
+                    } => {}
+                }
+            };
+            let served = http::serve(state, also_stop);
+            // The runtime is gone. The last snapshot holds all the data of the file.
+            let finished = lifecycle.map(inbox::Lifecycle::finish).transpose();
+            served?;
+            finished?;
+            Ok(())
         }
         // Copies the accounts and the history of a SQLite file into the (empty) PostgreSQL database.
         // The configuration names the database. The file is only read.
@@ -155,6 +230,8 @@ fn real_main() -> Result<(), String> {
             signing_secret.zeroize();
             // The key must be a valid Ed25519 key. The check reads it as `run` does.
             let signer = identity_signer(&config, &mut secrets)?;
+            // The secrets of the inbox must decode: the key, the record and the tokens.
+            inbox::check_secrets(&config, &mut secrets)?;
             print!("{}", config.render_effective());
             if let Some(signer) = signer {
                 println!(
@@ -187,6 +264,8 @@ fn real_main() -> Result<(), String> {
             healthcheck(&config_path)
         }
         "hash-password" => hash_password_command(),
+        // The commands of the inbox: keys, secrets, import and health check.
+        "inbox" => inbox::cli::run(&args.collect::<Vec<_>>()),
         // Prints a synthetic page on stdout. Use it to look at the design without a runtime or a login.
         "render-demo" => {
             let icons = match args.next() {
@@ -372,16 +451,20 @@ fn healthcheck(path: &Path) -> Result<(), String> {
         .read(&mut response)
         .map_err(|e| format!("healthcheck read failed: {e}"))?;
     let prefix = &response[..n];
-    if prefix.starts_with(b"HTTP/1.1 200 ") || prefix.starts_with(b"HTTP/1.0 200 ") {
-        Ok(())
-    } else {
-        Err("healthcheck returned a non-200 response".into())
+    if !(prefix.starts_with(b"HTTP/1.1 200 ") || prefix.starts_with(b"HTTP/1.0 200 ")) {
+        return Err("healthcheck returned a non-200 response".into());
     }
+    // With a inbox, the listener of the phones must be ready too.
+    if let Some(inbox) = &config.inbox {
+        inbox::cli::healthcheck(inbox.devices.listen)
+            .map_err(|e| format!("inbox healthcheck failed: {e}"))?;
+    }
+    Ok(())
 }
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox credential --server-key FILE --out FILE [--password-stdin]\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
         release_version()
     );
 }

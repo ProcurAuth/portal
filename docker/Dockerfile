@@ -10,6 +10,7 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+COPY crates ./crates
 COPY web ./web
 
 RUN set -eux; \
