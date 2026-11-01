@@ -275,6 +275,12 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The number of Argon2 password checks that ran since the start.
+    #[cfg(test)]
+    pub fn password_checks(&self) -> u64 {
+        self.password_checks_total.load(Ordering::Relaxed)
+    }
+
     pub fn password_check_started(&self) -> PasswordCheckMetricGuard<'_> {
         self.password_checks_total.fetch_add(1, Ordering::Relaxed);
         self.password_checks_in_flight

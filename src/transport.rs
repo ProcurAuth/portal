@@ -1,10 +1,17 @@
 //! How the browser reached the portal. What a session cookie is tied to.
 //!
-//! Traefik can serve plain HTTP, for example on a LAN without certificates or in a test stack. It
-//! can also serve HTTPS. Browsers refuse `Secure` and `__Host-` cookies on HTTP. The cookie names
-//! and attributes therefore follow the scheme of each request. The scheme comes from the
-//! `X-Forwarded-Proto` header that Traefik sets. The value `trustForwardHeader: false` applies, so
-//! a client cannot choose the header.
+//! The portal does not know TLS. A proxy in front of it (Traefik, or another proxy that stands in
+//! front of Traefik) ends TLS and announces the scheme of the original request in the header
+//! `X-Forwarded-Proto`. The portal reads this header from a trusted proxy only
+//! (`server.trusted_proxies`). A client on the network can send any header: the portal ignores
+//! the header of every other peer.
+//!
+//! Two questions use this header:
+//!
+//! - [`forwarded_https`]: did the browser use `https`? The answer sets the cookie names and the
+//!   `Secure` attribute. Browsers refuse `Secure` and `__Host-` cookies on plain HTTP.
+//! - [`is_secure`]: may the portal handle a secret on this request? This is the one rule of the
+//!   secure transport. Each refusal of a secret in the portal calls it.
 //!
 //! Over plain HTTP, a cookie can be read on the network. The binding limits the value of a stolen
 //! cookie. It works only from the client address and User-Agent that logged in.
@@ -20,16 +27,35 @@ use crate::session::Binding;
 const HOST_PREFIX: &str = "__Host-";
 const MAX_USER_AGENT_BYTES: usize = 512;
 
-/// Tells whether the browser used HTTPS. Only a single `https` value counts as HTTPS. Any other
-/// value counts as plain HTTP.
-pub fn is_https(headers: &HeaderMap) -> bool {
+/// Tells whether a trusted proxy announced `https` for the original request.
+///
+/// The peer must be in `trusted`. The request must have exactly one `X-Forwarded-Proto` header.
+/// Its value must be `https`, in any case, with nothing else. The function does not trim the value
+/// and does not read a list. In every other case it returns `false`: a peer that is not trusted,
+/// no header, two headers, or another value.
+pub fn forwarded_https(headers: &HeaderMap, peer: IpAddr, trusted: &[Cidr]) -> bool {
+    let peer = peer.to_canonical();
+    if !trusted.iter().any(|net| net.contains(peer)) {
+        return false;
+    }
     let mut values = headers.get_all("x-forwarded-proto").iter();
     match (values.next(), values.next()) {
-        (Some(value), None) => value
-            .to_str()
-            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("https")),
+        (Some(value), None) => value.as_bytes().eq_ignore_ascii_case(b"https"),
         _ => false,
     }
+}
+
+/// The rule of the secure transport. A request is secure when one of these is true:
+///
+/// - Its peer is in `server.trusted_proxies` and the request has exactly one `X-Forwarded-Proto`
+///   header with the value `https` (see [`forwarded_https`]).
+/// - Its peer is a loopback address. This is the case of local tests and of an SSH tunnel.
+///
+/// Any other request is not secure: a client on the network cannot make a request secure with a
+/// header. When `session.allow_insecure_http` is `false`, the portal refuses on a request that is
+/// not secure everything that carries or shows a secret.
+pub fn is_secure(headers: &HeaderMap, peer: IpAddr, trusted: &[Cidr]) -> bool {
+    peer.to_canonical().is_loopback() || forwarded_https(headers, peer, trusted)
 }
 
 /// The session cookie name for this scheme. Over HTTPS, the name is the configured `__Host-` name.
@@ -198,24 +224,101 @@ mod tests {
         out
     }
 
-    #[test]
-    fn only_a_single_https_value_counts_as_https() {
-        assert!(is_https(&headers(&[("x-forwarded-proto", "https")])));
-        assert!(is_https(&headers(&[("x-forwarded-proto", "HTTPS")])));
-        assert!(!is_https(&headers(&[("x-forwarded-proto", "http")])));
-        assert!(!is_https(&headers(&[])));
-        assert!(!is_https(&headers(&[
-            ("x-forwarded-proto", "https"),
-            ("x-forwarded-proto", "https")
-        ])));
-    }
-
     fn nets(list: &[&str]) -> Vec<Cidr> {
         list.iter().map(|n| Cidr::parse(n).unwrap()).collect()
     }
 
     fn ip(text: &str) -> IpAddr {
         text.parse().unwrap()
+    }
+
+    const PROXY: &str = "10.42.0.9";
+    const STRANGER: &str = "203.0.113.7";
+
+    fn secure(entries: &[(&'static str, &'static str)], peer: &str) -> bool {
+        is_secure(&headers(entries), ip(peer), &nets(&["10.42.0.0/16"]))
+    }
+
+    #[test]
+    fn a_trusted_proxy_that_announces_a_single_https_makes_the_request_secure() {
+        assert!(secure(&[("x-forwarded-proto", "https")], PROXY));
+        assert!(secure(&[("x-forwarded-proto", "HTTPS")], PROXY));
+        assert!(secure(&[("x-forwarded-proto", "Https")], PROXY));
+        assert!(forwarded_https(
+            &headers(&[("x-forwarded-proto", "https")]),
+            ip("::ffff:10.42.0.9"),
+            &nets(&["10.42.0.0/16"])
+        ));
+    }
+
+    #[test]
+    fn a_header_from_a_peer_that_is_not_trusted_never_makes_the_request_secure() {
+        // The hole that this rule closes: a client on the network claims https.
+        assert!(!secure(&[("x-forwarded-proto", "https")], STRANGER));
+        assert!(!secure(&[("x-forwarded-proto", "HTTPS")], "10.43.0.1"));
+        assert!(!forwarded_https(
+            &headers(&[("x-forwarded-proto", "https")]),
+            ip(STRANGER),
+            &nets(&["10.42.0.0/16"])
+        ));
+        // No proxy is trusted: nothing is secure but loopback.
+        assert!(!is_secure(
+            &headers(&[("x-forwarded-proto", "https")]),
+            ip(PROXY),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_trusted_proxy_that_does_not_announce_a_single_https_makes_nothing_secure() {
+        assert!(!secure(&[], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "http")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "wss")], PROXY));
+        assert!(!secure(
+            &[
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-proto", "https")
+            ],
+            PROXY
+        ));
+        assert!(!secure(
+            &[
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-proto", "http")
+            ],
+            PROXY
+        ));
+        assert!(!secure(&[("x-forwarded-proto", "https, https")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "https,http")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "https ")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", " https")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "")], PROXY));
+        assert!(!secure(&[("x-forwarded-proto", "httpss")], PROXY));
+    }
+
+    #[test]
+    fn a_loopback_peer_is_secure_with_no_header() {
+        assert!(secure(&[], "127.0.0.1"));
+        assert!(secure(&[], "127.0.0.2"));
+        assert!(secure(&[], "::1"));
+        assert!(secure(&[], "::ffff:127.0.0.1"));
+        // The header does not matter for a loopback peer, and it cannot make it insecure.
+        assert!(secure(&[("x-forwarded-proto", "http")], "127.0.0.1"));
+        assert!(!forwarded_https(
+            &headers(&[("x-forwarded-proto", "https")]),
+            ip("127.0.0.1"),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn a_header_that_is_not_text_is_not_https() {
+        let mut map = HeaderMap::new();
+        map.append(
+            HeaderName::from_static("x-forwarded-proto"),
+            HeaderValue::from_bytes(b"http\xffs").unwrap(),
+        );
+        assert!(!is_secure(&map, ip(PROXY), &nets(&["10.42.0.0/16"])));
     }
 
     #[test]
