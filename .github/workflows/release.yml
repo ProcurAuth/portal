@@ -1,210 +1,134 @@
 name: Release
 
+# A tag vX.Y.Z starts the release. The tag must be equal to the version of Cargo.toml.
+# The release holds the static binaries (amd64, arm64), the signed APK and SHA256SUMS.
+# No container image is built here and none is published: images stay on the machine of the operator.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version to publish (example: 2.0.0 or v2.0.0)"
-        required: true
-        type: string
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  version:
-    name: Resolve release version
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ubuntu-24.04
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      plain: ${{ steps.version.outputs.plain }}
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
-      - name: Normalize release version
-        id: version
-        shell: bash
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
+      - uses: actions/checkout@v4
+      - name: Never publish container images
         run: |
-          set -euo pipefail
-
-          version="${INPUT_VERSION}"
-
-          # Accept either "2.0.0" or "v2.0.0" from the GitHub UI.
-          version="${version#v}"
-
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
-            echo "invalid release version: $version" >&2
-            echo "expected a semantic version such as 2.0.0 or v2.0.0" >&2
+          # The pattern is split so that this line does not match itself.
+          if grep -rnE 'ghcr''\.io|docker/login''-action|packages: *wr''ite|push: *tr''ue' .github/workflows; then
+            echo "::error::workflows must not publish container images"
             exit 1
-          }
+          fi
+      - id: v
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::invalid tag $tag (expected vX.Y.Z[-suffix])"; exit 1
+          fi
+          version=$(tools/version.sh)
+          if [ "v$version" != "$tag" ]; then
+            echo "::error::tag $tag does not match the version $version of Cargo.toml"; exit 1
+          fi
+          case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          { echo "tag=$tag"; echo "version=$version"; echo "prerelease=$pre"; } >> "$GITHUB_OUTPUT"
 
-          echo "plain=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "Publishing release v$version (Cargo.toml version is intentionally independent)."
-
-  build:
-    needs:
-      - version
-    name: Build ${{ matrix.platform }}
-    runs-on: ubuntu-latest
+  binaries:
+    needs: prepare
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
-          - platform: linux/amd64
-            asset_arch: amd64
-            rust_target: x86_64-unknown-linux-musl
-          - platform: linux/arm64
-            asset_arch: arm64
-            rust_target: aarch64-unknown-linux-musl
-          - platform: linux/arm/v7
-            asset_arch: arm
-            rust_target: armv7-unknown-linux-musleabihf
-
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Enable QEMU for non-native builders
-        uses: docker/setup-qemu-action@v3
-
-      # Run one native-architecture Rust container per target. The Rust musl
-      # targets ship their own musl runtime/CRT support; deliberately do not
-      # force Debian musl-gcc or +crt-static here.
-      - name: Build and test inside target CPU architecture
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          RUST_TARGET: ${{ matrix.rust_target }}
-          RELEASE_VERSION: ${{ needs.version.outputs.plain }}
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            --platform "$PLATFORM" \
-            --env RUST_TARGET="$RUST_TARGET" \
-            --env RELEASE_VERSION="$RELEASE_VERSION" \
-            --volume "$PWD:/work" \
-            --workdir /work \
-            rust:1.88-bookworm \
-            bash -euxo pipefail -c '
-              rustc --version
-              cargo --version
-              test -s Cargo.lock
-              rustup target add "$RUST_TARGET"
-
-              cargo fetch --locked
-              cargo test --frozen
-
-              PORTAL_RELEASE_VERSION="$RELEASE_VERSION" \
-                cargo build --release --frozen --target "$RUST_TARGET"
-
-              binary="target/${RUST_TARGET}/release/portal"
-              test -x "$binary"
-
-              actual="$($binary version)"
-              expected="portal ${RELEASE_VERSION}"
-              test "$actual" = "$expected" || {
-                echo "unexpected binary version: $actual (expected: $expected)" >&2
-                exit 1
-              }
-              echo "$actual"
-            '
-
-      - name: Verify architecture and scratch compatibility
-        env:
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-          RUST_TARGET: ${{ matrix.rust_target }}
-        run: |
-          set -euo pipefail
-          binary="target/${RUST_TARGET}/release/portal"
-
-          test -x "$binary"
-          file "$binary"
-          readelf -h "$binary"
-          readelf -l "$binary"
-
-          case "$ASSET_ARCH" in
-            amd64)
-              readelf -h "$binary" | grep -Eq 'Machine:.*(Advanced Micro Devices X86-64|x86-64)'
-              ;;
-            arm64)
-              readelf -h "$binary" | grep -Eq 'Machine:.*AArch64'
-              ;;
-            arm)
-              readelf -h "$binary" | grep -Eq 'Machine:.*ARM'
-              ;;
-            *)
-              echo "unsupported asset architecture: $ASSET_ARCH" >&2
-              exit 1
-              ;;
-          esac
-
-          if readelf -l "$binary" | grep -q 'Requesting program interpreter'; then
-            echo "binary requires a dynamic ELF interpreter; FROM scratch would not be valid" >&2
-            readelf -l "$binary" >&2
-            exit 1
-          fi
-
-          if readelf -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
-            echo "binary has dynamic ELF dependencies; FROM scratch would not be valid" >&2
-            readelf -d "$binary" >&2
-            exit 1
-          fi
-
-      - name: Package deterministic tarball
-        env:
-          VERSION: ${{ needs.version.outputs.tag }}
-          ASSET_ARCH: ${{ matrix.asset_arch }}
-          RUST_TARGET: ${{ matrix.rust_target }}
-        run: |
-          set -euo pipefail
-          binary="target/${RUST_TARGET}/release/portal"
-          archive="$(./scripts/package.sh "$VERSION" linux "$ASSET_ARCH" "$binary")"
-          test "$(tar -tzf "$archive" | wc -l)" -eq 1
-          tar -tzf "$archive" | grep -qx 'portal'
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      # The runner has the architecture of the binary: tools/build.sh builds natively, then checks that it is static.
+      - name: Build the static binary
+        run: tools/build.sh server
+      - uses: actions/upload-artifact@v4
         with:
-          name: portal-${{ matrix.asset_arch }}
-          path: dist/*
+          name: server-${{ matrix.arch }}
+          path: dist/portal_${{ needs.prepare.outputs.version }}_linux_${{ matrix.arch }}
           if-no-files-found: error
-          retention-days: 7
 
-  release:
-    name: Publish ${{ needs.version.outputs.tag }}
-    needs:
-      - version
-      - build
-    runs-on: ubuntu-latest
+  apk:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing key
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 secret is missing: releases are signed with the release key"; exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - name: Build the signed APK
+        env:
+          INBOX_KEYSTORE: ${{ runner.temp }}/release.jks
+          INBOX_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          INBOX_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          INBOX_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tools/build.sh apk
+          test -f "dist/inbox-${VERSION}.apk"
+      - name: Remove the signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: dist/inbox-${{ needs.prepare.outputs.version }}.apk
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, binaries, apk]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
-
     steps:
-      - name: Download all architecture artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
+          pattern: server-*
           path: dist
-          pattern: portal-*
           merge-multiple: true
-
-      - name: Publish GitHub Release
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: dist
+      # tools/build.sh dist makes the reproducible archives and SHA256SUMS from the files of dist/.
+      - name: Archives and checksums
+        run: |
+          chmod 0755 dist/portal_*_linux_*
+          tools/build.sh dist
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.version.outputs.tag }}
-          TARGET_SHA: ${{ github.sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          set -euo pipefail
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "release $RELEASE_TAG already exists; refusing to overwrite it" >&2
-            exit 1
-          fi
-
-          # No --verify-tag here: when launched from the GitHub Actions UI,
-          # gh release create will create the tag automatically at TARGET_SHA.
-          gh release create "$RELEASE_TAG" \
-            dist/*.tgz \
-            --target "$TARGET_SHA" \
-            --generate-notes \
-            --title "$RELEASE_TAG"
+          pre=""
+          [ "$PRERELEASE" = true ] && pre="--prerelease"
+          # shellcheck disable=SC2086
+          gh release create "$TAG" --verify-tag --title "portal $TAG" --generate-notes $pre \
+            dist/portal_"${VERSION}"_linux_*.tar.gz "dist/inbox-${VERSION}.apk" dist/SHA256SUMS

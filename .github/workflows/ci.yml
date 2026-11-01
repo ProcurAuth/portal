@@ -2,50 +2,83 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  policy:
+    name: Policy (no image is published)
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
+      - uses: actions/checkout@v4
+      - name: Never publish container images
+        # Images are built locally only. No workflow may log in to a registry or push to it.
         run: |
-          rustup show
-          rustc --version
-          cargo --version
+          # The pattern is split so that this line does not match itself.
+          if grep -rnE 'ghcr''\.io|docker/login''-action|packages: *wr''ite|push: *tr''ue' .github/workflows; then
+            echo "::error::workflows must not publish container images"
+            exit 1
+          fi
 
-      - name: Require committed lockfile
-        run: test -s Cargo.lock
+  rust:
+    name: Format, clippy and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Format and clippy
+        run: tools/dev/lint.sh
+      # tools/dev/test.sh starts a throwaway PostgreSQL in Docker and runs `cargo test --locked` with the arguments.
+      - name: Tests of the workspace (SQLite, and the tests that need PostgreSQL)
+        run: tools/dev/test.sh --workspace --no-fail-fast
+      - name: End-to-end tests of the inbox on PostgreSQL
+        env:
+          INBOX_E2E_BACKEND: postgres
+        run: tools/dev/test.sh --test inbox_e2e
 
-      # Fetch once while the network is available. Every actual validation and
-      # compilation step below is frozen and therefore cannot change resolution
-      # or reach the registry.
-      - name: Fetch locked dependencies
-        run: cargo fetch --locked
-
-      - name: Rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --frozen --all-targets --all-features -- -D warnings
-
-      - name: Tests
-        run: cargo test --frozen --all-features
-
-      - name: Release build
-        run: cargo build --release --frozen
-
-      - name: Install cargo-audit with the current stable toolchain
+  image:
+    name: Image, configuration files and Compose smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image (local only)
+        run: tools/build.sh image
+      - name: Check that the binary is static
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup run stable cargo install cargo-audit --locked
+          mkdir -p out
+          docker create --name portal-binary portal:local >/dev/null
+          docker cp portal-binary:/portal out/portal
+          docker rm portal-binary >/dev/null
+          python3 tools/release/check-static.py out/portal
+          docker run --rm portal:local version
+      - name: Check the configuration files of deploy/
+        run: tools/dev/check-configs.sh
+      - name: Smoke test of the Compose stack
+        run: tools/dev/smoke.sh
 
-      - name: Dependency audit
-        run: rustup run stable cargo audit
+  android:
+    name: Android app (compile check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway signing key (the APK is not uploaded)
+        run: |
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/ci.jks" -storepass ci-store-pass \
+            -keypass ci-store-pass -alias ci -keyalg RSA -keysize 2048 -validity 1 -dname "CN=Inbox CI"
+      - name: Build the APK
+        env:
+          INBOX_KEYSTORE: ${{ runner.temp }}/ci.jks
+          INBOX_KEYSTORE_PASSWORD: ci-store-pass
+          INBOX_KEY_ALIAS: ci
+          INBOX_KEY_PASSWORD: ci-store-pass
+        run: tools/android/build-apk.sh

@@ -6,12 +6,9 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
-    groups:
-      opentelemetry:
-        patterns: ["opentelemetry*", "tracing-opentelemetry"]
   - package-ecosystem: gradle
     directory: /android
     schedule: { interval: weekly }
   - package-ecosystem: docker
-    directories: ["/", "/tools/dev", "/tools/android"]
+    directories: ["/docker", "/tools/dev", "/tools/android"]
     schedule: { interval: weekly }
