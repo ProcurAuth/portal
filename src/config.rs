@@ -233,6 +233,9 @@ pub struct SessionConfig {
     pub bind: SessionBind,
     pub same_site: SameSite,
     pub max_active_sessions: usize,
+    /// Handle passwords, keys, codes and producer tokens on a request that is not secure.
+    /// See [`crate::transport::is_secure`].
+    pub allow_insecure_http: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -483,6 +486,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
                 _ => SameSite::Lax,
             },
             max_active_sessions: r.count("session", "max_active_sessions")?,
+            allow_insecure_http: r.bool("session", "allow_insecure_http")?,
         },
         security: SecurityConfig {
             max_password_bytes: r.count("security", "max_password_bytes")?,
