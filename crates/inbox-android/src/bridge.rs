@@ -7,69 +7,86 @@ use std::sync::Mutex;
 
 use inbox_core::Error;
 use inbox_core::b64;
-use inbox_core::enroll::{ClientStep, EnrollClient};
-use inbox_core::noise::{Initiator, Session};
-use inbox_core::rng::Rng;
+use inbox_core::enroll::{EnrollCode, EnrollInitiator};
+use inbox_core::noise::{self, Initiator, Keypair, Session};
 use serde_json::{Value, json};
 
 /// Error code and message surfaced to Kotlin as JSON `{"error": {...}}`.
 pub fn error_json(e: &Error) -> Value {
-    let (code, message) = match e {
-        Error::Rejected { code, message } => (code.clone(), message.clone()),
-        Error::AuthenticationFailed => ("auth_failed".to_string(), e.to_string()),
-        Error::UnsupportedProtocol(_) => ("protocol".to_string(), e.to_string()),
+    let code = match e {
         // Local validation of what the user typed.
-        Error::Malformed("user name" | "device name") => ("malformed".to_string(), e.to_string()),
-        Error::Malformed(_) | Error::UnexpectedMessage(_) => {
-            ("protocol".to_string(), e.to_string())
+        Error::Malformed("enroll code") => "bad_code",
+        Error::Malformed("device name") => "bad_device_name",
+        // Wrong server key, tampered or replayed message 2.
+        Error::AuthenticationFailed => "auth_failed",
+        Error::UnsupportedProtocol(_) | Error::Malformed(_) | Error::UnexpectedMessage(_) => {
+            "protocol"
         }
-        Error::Internal(_) => ("internal".to_string(), e.to_string()),
+        Error::Internal(_) => "internal",
     };
-    json!({ "error": { "code": code, "message": message } })
+    json!({ "error": { "code": code, "message": e.to_string() } })
 }
 
 // ---------------------------------------------------------------- enrollment
 
+/// Reads an enrollment code. Returns `{"code": {...}}` or `{"error": {...}}`.
+/// The secret never reaches Kotlin.
+pub fn enroll_parse(text: &str) -> Value {
+    match EnrollCode::parse(text) {
+        Ok(code) => json!({ "code": {
+            "address": code.address,
+            "server_public_key": b64::encode(&code.server_public_key),
+            "fingerprint": code.fingerprint(),
+        }}),
+        Err(e) => error_json(&e),
+    }
+}
+
+struct Pending {
+    initiator: EnrollInitiator,
+    device: Keypair,
+    code: EnrollCode,
+}
+
 pub struct Enroll {
-    client: Mutex<Option<EnrollClient>>,
+    pending: Mutex<Option<Pending>>,
 }
 
-/// Starts an enrollment under the user's pseudonym (empty: none). Returns the
-/// handle and the first text frame to send.
+/// Starts an enrollment with a fresh device key. Returns the handle and Noise message 1.
 pub fn enroll_start(
-    password: &[u8],
+    code_text: &str,
     device_name: &str,
-    user_name: &str,
-) -> Result<(Box<Enroll>, String), Error> {
-    let (client, msg) = EnrollClient::start(password, device_name, user_name, Rng::os())?;
-    Ok((Box::new(Enroll { client: Mutex::new(Some(client)) }), msg))
+    app_version: &str,
+) -> Result<(Box<Enroll>, Vec<u8>), Error> {
+    let code = EnrollCode::parse(code_text)?;
+    let device = noise::generate_keypair()?;
+    let (initiator, msg1) =
+        EnrollInitiator::start(&device.private, &code, device_name, app_version)?;
+    let pending = Pending { initiator, device, code };
+    Ok((Box::new(Enroll { pending: Mutex::new(Some(pending)) }), msg1))
 }
 
-/// Feeds a server text frame. Returns `{"send": "..."}`, `{"done": {...}}` or `{"error": {...}}`.
-pub fn enroll_on_message(handle: &Enroll, text: &str) -> Value {
-    let mut guard = match handle.client.lock() {
+/// Consumes Noise message 2. Returns `{"done": {...}}` or `{"error": {...}}`.
+/// The handle is exhausted afterwards, whatever the result.
+pub fn enroll_finish(handle: &Enroll, msg2: &[u8]) -> Value {
+    let mut guard = match handle.pending.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let Some(client) = guard.as_mut() else {
+    let Some(p) = guard.take() else {
         return error_json(&Error::UnexpectedMessage("enrollment finished"));
     };
-    match client.on_message(text) {
-        Ok(ClientStep::Send(msg)) => json!({ "send": msg }),
-        Ok(ClientStep::Done(d)) => {
-            *guard = None;
-            json!({ "done": {
-                "device_id": d.device_id,
-                "server_name": d.server_name,
-                "device_private_key": b64::encode(&d.device_private_key),
-                "device_public_key": b64::encode(&d.device_public_key),
-                "server_public_key": b64::encode(&d.server_public_key),
-            }})
-        }
-        Err(e) => {
-            *guard = None;
-            error_json(&e)
-        }
+    match p.initiator.finish(msg2) {
+        Ok(a) => json!({ "done": {
+            "address": p.code.address,
+            "device_id": a.device_id,
+            "server_name": a.server_name,
+            "user_name": a.user_name,
+            "device_private_key": b64::encode(&p.device.private),
+            "device_public_key": b64::encode(&p.device.public),
+            "server_public_key": b64::encode(&p.code.server_public_key),
+        }}),
+        Err(e) => error_json(&e),
     }
 }
 
@@ -141,37 +158,62 @@ pub fn session_decrypt(conn: &Conn, frame: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inbox_core::enroll::EnrollServer;
-    use inbox_core::login;
+    use inbox_core::PROTOCOL_VERSION;
+    use inbox_core::enroll::EnrollResponder;
     use inbox_core::noise::Responder;
+    use inbox_core::proto::EnrollAccept;
     use inbox_core::server_key::ServerKey;
-    use inbox_core::suite::Role;
+
+    fn code_text(key: &ServerKey) -> String {
+        EnrollCode {
+            address: "inbox.example.com:8080".into(),
+            server_public_key: key.noise_public.clone().try_into().unwrap(),
+            secret: [3u8; 16],
+        }
+        .encode()
+    }
 
     #[test]
     fn enrollment_then_session_round_trip() {
-        let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let rec = login::register(&key.opaque, Role::Device, b"secret-pw", &mut Rng::os()).unwrap();
-        let rec = login::parse_record(&rec).unwrap();
-        let mut server = EnrollServer::new(&key, &rec);
+        let key = ServerKey::generate().unwrap();
+        let text = code_text(&key);
 
-        let (h, m1) = enroll_start(b"secret-pw", "Pixel", "alice").unwrap();
-        let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
-        let out = enroll_on_message(&h, &m2);
-        let m3 = out["send"].as_str().unwrap().to_string();
-        let verified = server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
-        assert_eq!(verified.user_name, "alice", "pseudo reaches the server");
-        let m4 = server.accepted("0123456789abcdef0123456789abcdef", "Prod").unwrap();
-        let done = enroll_on_message(&h, &m4);
-        let done = &done["done"];
+        let parsed = enroll_parse(&text);
+        assert_eq!(parsed["code"]["address"], "inbox.example.com:8080");
+        assert_eq!(parsed["code"]["fingerprint"].as_str().unwrap().len(), 8);
+        assert!(!parsed.to_string().contains("secret"), "the secret stays in Rust");
+
+        let (h, m1) = enroll_start(&text, "Pixel", "0.14.0").unwrap();
+        let (resp, device_public, hello) = EnrollResponder::start(&key.noise_private, &m1).unwrap();
+        assert_eq!(hello.secret, vec![3u8; 16]);
+        assert_eq!(hello.device_name, "Pixel");
+        let m2 = resp
+            .finish(&EnrollAccept {
+                protocol: PROTOCOL_VERSION,
+                device_id: "0123456789abcdef0123456789abcdef".into(),
+                server_name: "Prod".into(),
+                user_name: "alice".into(),
+            })
+            .unwrap();
+        let out = enroll_finish(&h, &m2);
+        let done = &out["done"];
         assert_eq!(done["server_name"], "Prod");
+        assert_eq!(done["user_name"], "alice");
+        assert_eq!(done["address"], "inbox.example.com:8080");
         let sk = b64::decode(done["device_private_key"].as_str().unwrap()).unwrap();
         let spk = b64::decode(done["server_public_key"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            b64::decode(done["device_public_key"].as_str().unwrap()).unwrap(),
+            device_public
+        );
         assert_eq!(spk, key.noise_public);
-        // Handle is exhausted after completion.
-        assert!(enroll_on_message(&h, &m4).get("error").is_some());
+        // The handle is exhausted after completion.
+        assert!(enroll_finish(&h, &m2).get("error").is_some());
 
+        // The stored keys open a normal session.
         let (conn, msg1) = session_start(&sk, &spk, b"{\"hello\":1}").unwrap();
-        let (resp, _remote, hello) = Responder::start(&key.noise_private, &msg1).unwrap();
+        let (resp, remote, hello) = Responder::start(&key.noise_private, &msg1).unwrap();
+        assert_eq!(remote, device_public);
         assert_eq!(hello, b"{\"hello\":1}");
         let (mut srv, msg2) = resp.finish(b"accept").unwrap();
         assert_eq!(session_finish(&conn, &msg2).unwrap(), b"accept");
@@ -184,27 +226,34 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_is_required_and_validated() {
-        let err = enroll_start(b"pw", "Pixel", "  ").err().expect("empty pseudo refused");
-        assert_eq!(error_json(&err)["error"]["code"], "malformed");
-        let err =
-            enroll_start(b"pw", "Pixel", "bad\u{7}name").err().expect("control characters refused");
-        assert_eq!(error_json(&err)["error"]["code"], "malformed");
+    fn bad_input_reports_error_codes() {
+        let key = ServerKey::generate().unwrap();
+        let text = code_text(&key);
+        assert_eq!(enroll_parse("inbox://add?url=x")["error"]["code"], "bad_code");
+        let err = enroll_start("junk", "Pixel", "1").err().expect("bad code refused");
+        assert_eq!(error_json(&err)["error"]["code"], "bad_code");
+        let err = enroll_start(&text, "  ", "1").err().expect("empty name refused");
+        assert_eq!(error_json(&err)["error"]["code"], "bad_device_name");
+        let err = enroll_start(&text, "bad\u{7}name", "1").err().expect("control refused");
+        assert_eq!(error_json(&err)["error"]["code"], "bad_device_name");
     }
 
     #[test]
-    fn wrong_password_reports_error_code() {
-        let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let rec = login::register(&key.opaque, Role::Device, b"secret-pw", &mut Rng::os()).unwrap();
-        let rec = login::parse_record(&rec).unwrap();
-        let mut server = EnrollServer::new(&key, &rec);
-        let (h, m1) = enroll_start(b"wrong-pw", "Pixel", "alice").unwrap();
-        let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
-        // Client cannot finish OPAQUE with a wrong password.
-        let out = enroll_on_message(&h, &m2);
-        assert_eq!(out["error"]["code"], "auth_failed");
-        let rejected = EnrollServer::rejected("bad_password", "wrong password");
-        let (h2, _) = enroll_start(b"x", "Pixel", "alice").unwrap();
-        assert_eq!(enroll_on_message(&h2, &rejected)["error"]["code"], "bad_password");
+    fn message_2_of_another_server_is_refused() {
+        let key = ServerKey::generate().unwrap();
+        let other = ServerKey::generate().unwrap();
+        let (h, _) = enroll_start(&code_text(&key), "Pixel", "1").unwrap();
+        let (h2, m1b) = enroll_start(&code_text(&other), "Pixel", "1").unwrap();
+        let (resp, _, _) = EnrollResponder::start(&other.noise_private, &m1b).unwrap();
+        let m2 = resp
+            .finish(&EnrollAccept {
+                protocol: PROTOCOL_VERSION,
+                device_id: "0123456789abcdef0123456789abcdef".into(),
+                server_name: "Evil".into(),
+                user_name: "alice".into(),
+            })
+            .unwrap();
+        assert_eq!(enroll_finish(&h, &m2)["error"]["code"], "auth_failed");
+        assert_eq!(enroll_finish(&h2, &m2)["done"]["server_name"], "Evil");
     }
 }

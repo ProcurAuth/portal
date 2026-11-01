@@ -1,327 +1,535 @@
-//! Device enrollment: OPAQUE login with the shared device password, then an
-//! exchange of static keys authenticated by the OPAQUE session key.
+//! Device enrollment with a one-time code (protocol 4).
+//!
+//! An account of the portal makes an [`EnrollCode`]. The person types it on the
+//! phone, or taps it as a link. The phone then runs one Noise IK handshake to the
+//! server key that the code holds (the pinned key):
 //!
 //! ```text
-//! device                                   server
-//!   Start{credential_request}          ->
-//!                                      <-  Challenge{credential_response}
-//!   Finish{finalization, name, pk, mac} ->      (verifies OPAQUE then mac)
-//!                                      <-  Accepted{device_id, server_pk, mac}
+//! device                                      server
+//!   Noise message 1 {secret, device_name, ..} ->
+//!                                             <-  Noise message 2 {device_id, user_name, ..}
 //! ```
 //!
-//! A passive observer learns nothing usable. An active attacker without the
-//! credential record cannot complete OPAQUE, so it can neither substitute its own
-//! server key nor register a device.
+//! The phone is enrolled only after it reads message 2. Message 2 can come only from
+//! the holder of the pinned server key. On refusal, the server sends no message 2.
+//! It closes the WebSocket with [`crate::proto::close::ENROLL_REFUSED`].
 
-use zeroize::Zeroizing;
+use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::PROTOCOL_VERSION;
+use crate::b64;
 use crate::error::{Error, Result};
-use crate::login::{self, LoginClient, LoginServer, SessionKey};
-use crate::noise;
-use crate::proto::{EnrollClientMsg, EnrollServerMsg};
-use crate::rng::Rng;
-use crate::server_key::ServerKey;
-use crate::suite::Role;
+use crate::noise::{ENROLL_PROLOGUE, Initiator, Responder};
+use crate::proto::{EnrollAccept, EnrollHello};
 
-const CLIENT_MAC: &str = "enroll/client-mac";
-const SERVER_MAC: &str = "enroll/server-mac";
-
+/// Length of the secret of a code, in bytes.
+pub const SECRET_LEN: usize = 16;
 /// Upper bound on the device name, in bytes.
 pub const MAX_DEVICE_NAME: usize = 64;
+/// Upper bound on the server address of a code, in bytes.
+pub const MAX_ADDRESS: usize = 512;
+/// Upper bound on the application version, in bytes.
+pub const MAX_APP_VERSION: usize = 64;
 
-/// What the device keeps after a successful enrollment.
-pub struct EnrolledDevice {
-    pub device_id: String,
-    pub server_name: String,
-    pub device_private_key: Zeroizing<Vec<u8>>,
-    pub device_public_key: Vec<u8>,
-    pub server_public_key: Vec<u8>,
+const SCHEME: &str = "inbox://enroll?";
+
+/// What the person types or taps to enroll a phone.
+///
+/// Text form: `inbox://enroll?s=<address>&k=<server key>&c=<secret>`. The address
+/// is percent-encoded. The key and the secret are base64url without padding.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EnrollCode {
+    /// The address of the server, as the app accepts it: `host:port`, a domain or an http(s) URL.
+    pub address: String,
+    /// The pinned public key of the server (X25519).
+    pub server_public_key: [u8; 32],
+    /// The one-time secret.
+    pub secret: [u8; SECRET_LEN],
 }
 
-/// Next action for the device side.
-pub enum ClientStep {
-    Send(String),
-    Done(EnrolledDevice),
+impl std::fmt::Debug for EnrollCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollCode")
+            .field("address", &self.address)
+            .field("server_public_key", &b64::encode_url(&self.server_public_key))
+            .field("secret", &"<hidden>")
+            .finish()
+    }
 }
 
-enum ClientState {
-    AwaitChallenge(Box<LoginClient>),
-    AwaitAccepted { key: SessionKey, device: noise::Keypair },
-    Finished,
+impl Drop for EnrollCode {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
-/// Device side of enrollment.
-pub struct EnrollClient {
-    device_name: String,
-    user_name: String,
-    state: ClientState,
-    rng: Rng,
+impl EnrollCode {
+    /// The text form of the code.
+    pub fn encode(&self) -> String {
+        format!(
+            "{SCHEME}s={}&k={}&c={}",
+            percent_encode(&self.address),
+            b64::encode_url(&self.server_public_key),
+            b64::encode_url(&self.secret)
+        )
+    }
+
+    /// Reads the text form. Surrounding white space is ignored. Any other deviation is an
+    /// error: wrong scheme, unknown or duplicate or missing key, bad length, bad base64,
+    /// bad percent-encoding, fragment.
+    pub fn parse(text: &str) -> Result<EnrollCode> {
+        const BAD: Error = Error::Malformed("enroll code");
+        let query = text.trim().strip_prefix(SCHEME).ok_or(BAD)?;
+        let (mut address, mut key, mut secret) = (None, None, None);
+        for pair in query.split('&') {
+            let (name, value) = pair.split_once('=').ok_or(BAD)?;
+            let slot = match name {
+                "s" => &mut address,
+                "k" => &mut key,
+                "c" => &mut secret,
+                _ => return Err(BAD),
+            };
+            if slot.replace(value).is_some() {
+                return Err(BAD);
+            }
+        }
+        let address = percent_decode(address.ok_or(BAD)?).ok_or(BAD)?;
+        if address.is_empty()
+            || address.len() > MAX_ADDRESS
+            || address.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(BAD);
+        }
+        let server_public_key = decode_fixed::<32>(key.ok_or(BAD)?).ok_or(BAD)?;
+        let secret = decode_fixed::<SECRET_LEN>(secret.ok_or(BAD)?).ok_or(BAD)?;
+        Ok(EnrollCode { address, server_public_key, secret })
+    }
+
+    /// Short fingerprint of the pinned key, to let the person compare it.
+    pub fn fingerprint(&self) -> String {
+        key_fingerprint(&self.server_public_key)
+    }
 }
 
+/// The first 8 hexadecimal characters of the SHA-256 digest of a public key.
+pub fn key_fingerprint(public_key: &[u8]) -> String {
+    Sha256::digest(public_key).iter().take(4).map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode_fixed<const N: usize>(text: &str) -> Option<[u8; N]> {
+    b64::decode_url(text)?.try_into().ok()
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Trims a device name typed by a person and checks it.
 pub fn validate_device_name(name: &str) -> Result<String> {
-    validate_label(name).ok_or(Error::Malformed("device name"))
+    let name = name.trim();
+    check_label(name, MAX_DEVICE_NAME)
+        .then(|| name.to_string())
+        .ok_or(Error::Malformed("device name"))
 }
 
-/// The pseudonym of the person using the device, shown and tracked by the server.
-pub fn validate_user_name(name: &str) -> Result<String> {
-    validate_label(name).ok_or(Error::Malformed("user name"))
+fn check_label(text: &str, max: usize) -> bool {
+    !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
 }
 
-fn validate_label(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() || text.len() > MAX_DEVICE_NAME || text.chars().any(char::is_control) {
-        return None;
+fn is_hex_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn check_accept(accept: &EnrollAccept) -> Result<()> {
+    if accept.protocol != PROTOCOL_VERSION {
+        return Err(Error::UnsupportedProtocol(accept.protocol));
     }
-    Some(text.to_string())
+    if !is_hex_id(&accept.device_id) {
+        return Err(Error::Malformed("device id"));
+    }
+    if accept.server_name.is_empty() || accept.user_name.is_empty() {
+        return Err(Error::Malformed("enroll accept"));
+    }
+    Ok(())
 }
 
-/// MAC input binding the device name, key and user name.
-fn client_mac_parts<'a>(name: &'a str, pk: &'a [u8], user: &'a str) -> [&'a [u8]; 4] {
-    [name.as_bytes(), pk, b"user", user.as_bytes()]
+/// Device side. One instance for each connection.
+pub struct EnrollInitiator {
+    inner: Initiator,
 }
 
-fn encode<T: serde::Serialize>(msg: &T) -> String {
-    serde_json::to_string(msg).expect("protocol messages always serialize")
-}
-
-impl EnrollClient {
-    /// Returns the client and the first message to send. `user_name` is the
-    /// pseudonym of the person using the device.
+impl EnrollInitiator {
+    /// Returns the initiator and Noise message 1. `device_private` is a fresh X25519 key
+    /// that the phone made. The device name is trimmed and checked.
     pub fn start(
-        password: &[u8],
+        device_private: &[u8],
+        code: &EnrollCode,
         device_name: &str,
-        user_name: &str,
-        mut rng: Rng,
-    ) -> Result<(EnrollClient, String)> {
-        let device_name = validate_device_name(device_name)?;
-        let user_name = validate_user_name(user_name)?;
-        let (login, request) = LoginClient::start(Role::Device, password, &mut rng)?;
-        let msg = encode(&EnrollClientMsg::Start {
+        app_version: &str,
+    ) -> Result<(EnrollInitiator, Vec<u8>)> {
+        let hello = EnrollHello {
             protocol: PROTOCOL_VERSION,
-            credential_request: request,
-        });
-        Ok((
-            EnrollClient {
-                device_name,
-                user_name,
-                state: ClientState::AwaitChallenge(Box::new(login)),
-                rng,
-            },
-            msg,
-        ))
-    }
-
-    /// Feeds one server message.
-    pub fn on_message(&mut self, text: &str) -> Result<ClientStep> {
-        let msg: EnrollServerMsg =
-            serde_json::from_str(text).map_err(|_| Error::Malformed("enrollment message"))?;
-        if let EnrollServerMsg::Rejected { code, message } = msg {
-            self.state = ClientState::Finished;
-            return Err(Error::Rejected { code, message });
-        }
-        match (std::mem::replace(&mut self.state, ClientState::Finished), msg) {
-            (
-                ClientState::AwaitChallenge(login),
-                EnrollServerMsg::Challenge { credential_response },
-            ) => {
-                let (finalization, key) = login.finish(&credential_response, &mut self.rng)?;
-                let device = noise::generate_keypair()?;
-                let mac = login::mac(
-                    &key.derive(CLIENT_MAC),
-                    &client_mac_parts(&self.device_name, &device.public, &self.user_name),
-                );
-                let reply = encode(&EnrollClientMsg::Finish {
-                    credential_finalization: finalization,
-                    device_name: self.device_name.clone(),
-                    user_name: self.user_name.clone(),
-                    device_public_key: device.public.clone(),
-                    mac: mac.to_vec(),
-                });
-                self.state = ClientState::AwaitAccepted { key, device };
-                Ok(ClientStep::Send(reply))
-            }
-            (
-                ClientState::AwaitAccepted { key, device },
-                EnrollServerMsg::Accepted { device_id, server_name, server_public_key, mac },
-            ) => {
-                login::verify_mac(
-                    &key.derive(SERVER_MAC),
-                    &[
-                        device_id.as_bytes(),
-                        server_name.as_bytes(),
-                        &server_public_key,
-                        &device.public,
-                    ],
-                    &mac,
-                )?;
-                if server_public_key.len() != 32 {
-                    return Err(Error::Malformed("server key length"));
-                }
-                Ok(ClientStep::Done(EnrolledDevice {
-                    device_id,
-                    server_name,
-                    device_private_key: device.private,
-                    device_public_key: device.public,
-                    server_public_key,
-                }))
-            }
-            _ => Err(Error::UnexpectedMessage("enrollment order")),
-        }
-    }
-}
-
-/// Server side of enrollment. One instance per WebSocket connection.
-pub struct EnrollServer<'a> {
-    key: &'a ServerKey,
-    record: &'a opaque_ke::ServerRegistration<crate::suite::Suite>,
-    login: Option<LoginServer>,
-    session: Option<SessionKey>,
-    device_public_key: Option<Vec<u8>>,
-}
-
-/// A device that proved knowledge of the password, waiting for an id.
-pub struct VerifiedDevice {
-    pub name: String,
-    pub user_name: String,
-    pub public_key: Vec<u8>,
-}
-
-impl<'a> EnrollServer<'a> {
-    pub fn new(
-        key: &'a ServerKey,
-        record: &'a opaque_ke::ServerRegistration<crate::suite::Suite>,
-    ) -> EnrollServer<'a> {
-        EnrollServer { key, record, login: None, session: None, device_public_key: None }
-    }
-
-    pub fn parse(text: &str) -> Result<EnrollClientMsg> {
-        serde_json::from_str(text).map_err(|_| Error::Malformed("enrollment message"))
-    }
-
-    /// Handles `Start`, returns the challenge to send.
-    pub fn on_start(&mut self, msg: EnrollClientMsg, rng: &mut Rng) -> Result<String> {
-        let EnrollClientMsg::Start { protocol, credential_request } = msg else {
-            return Err(Error::UnexpectedMessage("expected start"));
+            secret: code.secret.to_vec(),
+            device_name: validate_device_name(device_name)?,
+            app_version: app_version.trim().to_string(),
         };
-        if self.login.is_some() || self.session.is_some() {
-            return Err(Error::UnexpectedMessage("duplicate start"));
-        }
-        if protocol != PROTOCOL_VERSION {
-            return Err(Error::UnsupportedProtocol(protocol));
-        }
-        let (login, response) = LoginServer::start(
-            &self.key.opaque,
-            self.record,
-            Role::Device,
-            &credential_request,
-            rng,
-        )?;
-        self.login = Some(login);
-        Ok(encode(&EnrollServerMsg::Challenge { credential_response: response }))
-    }
-
-    /// Handles `Finish`. Fails with [`Error::AuthenticationFailed`] on a wrong password.
-    pub fn on_finish(&mut self, msg: EnrollClientMsg) -> Result<VerifiedDevice> {
-        let EnrollClientMsg::Finish {
-            credential_finalization,
-            device_name,
-            user_name,
-            device_public_key,
-            mac,
-        } = msg
-        else {
-            return Err(Error::UnexpectedMessage("expected finish"));
-        };
-        let login = self.login.take().ok_or(Error::UnexpectedMessage("finish before start"))?;
-        let key = login.finish(&credential_finalization)?;
-        login::verify_mac(
-            &key.derive(CLIENT_MAC),
-            &client_mac_parts(&device_name, &device_public_key, &user_name),
-            &mac,
-        )?;
-        let name = validate_device_name(&device_name)?;
-        let user_name = validate_user_name(&user_name)?;
-        if device_public_key.len() != 32 {
-            return Err(Error::Malformed("device key length"));
-        }
-        self.session = Some(key);
-        self.device_public_key = Some(device_public_key.clone());
-        Ok(VerifiedDevice { name, user_name, public_key: device_public_key })
-    }
-
-    /// Builds the `Accepted` reply once the device is stored.
-    pub fn accepted(&self, device_id: &str, server_name: &str) -> Result<String> {
-        let key = self.session.as_ref().ok_or(Error::UnexpectedMessage("accept before finish"))?;
-        let device_pk = self.device_public_key.as_ref().ok_or(Error::Internal("device key"))?;
-        let mac = login::mac(
-            &key.derive(SERVER_MAC),
-            &[device_id.as_bytes(), server_name.as_bytes(), &self.key.noise_public, device_pk],
+        let mut json =
+            serde_json::to_vec(&hello).map_err(|_| Error::Internal("enroll hello encoding"))?;
+        let started = Initiator::start_with_prologue(
+            ENROLL_PROLOGUE,
+            device_private,
+            &code.server_public_key,
+            &json,
         );
-        Ok(encode(&EnrollServerMsg::Accepted {
-            device_id: device_id.to_string(),
-            server_name: server_name.to_string(),
-            server_public_key: self.key.noise_public.clone(),
-            mac: mac.to_vec(),
-        }))
+        json.zeroize();
+        let (inner, msg1) = started?;
+        Ok((EnrollInitiator { inner }, msg1))
     }
 
-    pub fn rejected(code: &str, message: &str) -> String {
-        encode(&EnrollServerMsg::Rejected { code: code.to_string(), message: message.to_string() })
+    /// Reads Noise message 2. It fails unless the pinned server key made the message
+    /// for this handshake. A message of an earlier handshake fails too.
+    pub fn finish(self, message: &[u8]) -> Result<EnrollAccept> {
+        let (_session, payload) = self.inner.finish(message)?;
+        let accept: EnrollAccept =
+            serde_json::from_slice(&payload).map_err(|_| Error::Malformed("enroll accept"))?;
+        check_accept(&accept)?;
+        Ok(accept)
+    }
+}
+
+/// Server side. One instance for each connection.
+pub struct EnrollResponder {
+    inner: Responder,
+}
+
+impl EnrollResponder {
+    /// Reads Noise message 1. Returns the responder, the public key of the device and
+    /// the checked hello. The server must then check the secret.
+    pub fn start(
+        server_private: &[u8],
+        message: &[u8],
+    ) -> Result<(EnrollResponder, Vec<u8>, EnrollHello)> {
+        let (inner, device_public, mut payload) =
+            Responder::start_with_prologue(ENROLL_PROLOGUE, server_private, message)?;
+        let hello: std::result::Result<EnrollHello, _> = serde_json::from_slice(&payload);
+        payload.zeroize();
+        let hello = hello.map_err(|_| Error::Malformed("enroll hello"))?;
+        if hello.protocol != PROTOCOL_VERSION {
+            return Err(Error::UnsupportedProtocol(hello.protocol));
+        }
+        if hello.secret.len() != SECRET_LEN {
+            return Err(Error::Malformed("secret"));
+        }
+        if !check_label(&hello.device_name, MAX_DEVICE_NAME) {
+            return Err(Error::Malformed("device name"));
+        }
+        if !check_label(&hello.app_version, MAX_APP_VERSION) {
+            return Err(Error::Malformed("app version"));
+        }
+        Ok((EnrollResponder { inner }, device_public, hello))
+    }
+
+    /// Returns Noise message 2 that carries `accept`. Call it only after the server stored the device.
+    pub fn finish(self, accept: &EnrollAccept) -> Result<Vec<u8>> {
+        check_accept(accept)?;
+        let json =
+            serde_json::to_vec(accept).map_err(|_| Error::Internal("enroll accept encoding"))?;
+        let (_session, msg2) = self.inner.finish(&json)?;
+        Ok(msg2)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::noise::generate_keypair;
 
-    fn run(
-        server_pw: &[u8],
-        client_pw: &[u8],
-    ) -> Result<(EnrolledDevice, VerifiedDevice, Vec<u8>)> {
-        let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let record_bytes =
-            login::register(&key.opaque, Role::Device, server_pw, &mut Rng::os()).unwrap();
-        let record = login::parse_record(&record_bytes).unwrap();
-        let mut server = EnrollServer::new(&key, &record);
-        let (mut client, m1) =
-            EnrollClient::start(client_pw, " Pixel de garde ", " alice ", Rng::os())?;
-        let m2 = server.on_start(EnrollServer::parse(&m1)?, &mut Rng::os())?;
-        let ClientStep::Send(m3) = client.on_message(&m2)? else { panic!("expected send") };
-        let verified = server.on_finish(EnrollServer::parse(&m3)?)?;
-        let m4 = server.accepted("dev1", "Prod")?;
-        let ClientStep::Done(device) = client.on_message(&m4)? else { panic!("expected done") };
-        Ok((device, verified, key.noise_public.clone()))
+    const DEVICE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn code_for(server_public: &[u8]) -> EnrollCode {
+        EnrollCode {
+            address: "https://inbox.example.com:8443/prefix".into(),
+            server_public_key: server_public.try_into().unwrap(),
+            secret: [7u8; SECRET_LEN],
+        }
+    }
+
+    fn accept() -> EnrollAccept {
+        EnrollAccept {
+            protocol: PROTOCOL_VERSION,
+            device_id: DEVICE_ID.into(),
+            server_name: "Prod".into(),
+            user_name: "alice".into(),
+        }
     }
 
     #[test]
-    fn enrollment_succeeds_and_pins_server_key() {
-        let (device, verified, server_pk) = run(b"pw", b"pw").unwrap();
-        assert_eq!(device.device_id, "dev1");
-        assert_eq!(device.server_public_key, server_pk);
-        assert_eq!(verified.public_key, device.device_public_key);
-        assert_eq!(verified.name, "Pixel de garde");
-        assert_eq!(verified.user_name, "alice");
+    fn code_round_trip() {
+        let code = code_for(&[9u8; 32]);
+        let text = code.encode();
+        assert!(
+            text.starts_with(
+                "inbox://enroll?s=https%3A%2F%2Finbox.example.com%3A8443%2Fprefix&k="
+            )
+        );
+        assert_eq!(EnrollCode::parse(&text).unwrap(), code);
+        assert_eq!(EnrollCode::parse(&format!("  {text}\n")).unwrap(), code);
+        // Key order in the query does not matter.
+        let mixed = format!(
+            "inbox://enroll?c={}&s=host%3A80&k={}",
+            b64::encode_url(&code.secret),
+            b64::encode_url(&code.server_public_key)
+        );
+        assert_eq!(EnrollCode::parse(&mixed).unwrap().address, "host:80");
+        // A non-ASCII address survives.
+        let mut other = code_for(&[1u8; 32]);
+        other.address = "pagé.example".into();
+        assert_eq!(EnrollCode::parse(&other.encode()).unwrap(), other);
     }
 
     #[test]
-    fn wrong_password_is_rejected() {
-        assert!(run(b"pw", b"other").is_err());
+    fn code_rejections() {
+        let good = code_for(&[9u8; 32]).encode();
+        let k = b64::encode_url(&[9u8; 32]);
+        let c = b64::encode_url(&[7u8; 16]);
+        let bad = [
+            String::new(),
+            "inbox://enroll".to_string(),
+            "inbox://enroll?".to_string(),
+            good.replace("inbox://", "https://"),
+            good.replace("inbox://enroll", "inbox://add"),
+            good.to_uppercase(),
+            format!("{good}&x=1"),
+            format!("{good}&s=other"),
+            format!("{good}&k={k}"),
+            format!("{good}&c={c}"),
+            format!("{good}#frag"),
+            format!("{good}&"),
+            format!("inbox://enroll?k={k}&c={c}"),
+            format!("inbox://enroll?s=host&c={c}"),
+            format!("inbox://enroll?s=host&k={k}"),
+            format!("inbox://enroll?s=&k={k}&c={c}"),
+            format!("inbox://enroll?s=host&k={}&c={c}", b64::encode_url(&[9u8; 31])),
+            format!("inbox://enroll?s=host&k={k}&c={}", b64::encode_url(&[7u8; 17])),
+            format!("inbox://enroll?s=host&k={k}=&c={c}"),
+            format!("inbox://enroll?s=host&k={k}&c={c}="),
+            format!("inbox://enroll?s=host&k=+{}&c={c}", &k[1..]),
+            format!("inbox://enroll?s=host&k=!!&c={c}"),
+            format!("inbox://enroll?s=ho%zzst&k={k}&c={c}"),
+            format!("inbox://enroll?s=ho%2&k={k}&c={c}"),
+            format!("inbox://enroll?s=ho%FFst&k={k}&c={c}"),
+            format!("inbox://enroll?s=ho%20st&k={k}&c={c}"),
+            format!("inbox://enroll?s=ho%00st&k={k}&c={c}"),
+            format!("inbox://enroll?s={}&k={k}&c={c}", "a".repeat(MAX_ADDRESS + 1)),
+            format!("inbox://enroll?s=host&&k={k}&c={c}"),
+        ];
+        for text in bad {
+            assert!(EnrollCode::parse(&text).is_err(), "must be refused: {text}");
+        }
+        // A last base64 character with non-zero trailing bits is not canonical.
+        let loose = format!("inbox://enroll?s=host&k={k}&c={}", "A".repeat(21) + "B");
+        assert!(EnrollCode::parse(&loose).is_err());
     }
 
     #[test]
-    fn tampered_accept_is_rejected() {
-        let key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let record_bytes =
-            login::register(&key.opaque, Role::Device, b"pw", &mut Rng::os()).unwrap();
-        let record = login::parse_record(&record_bytes).unwrap();
-        let mut server = EnrollServer::new(&key, &record);
-        let (mut client, m1) = EnrollClient::start(b"pw", "phone", "alice", Rng::os()).unwrap();
-        let m2 = server.on_start(EnrollServer::parse(&m1).unwrap(), &mut Rng::os()).unwrap();
-        let ClientStep::Send(m3) = client.on_message(&m2).unwrap() else { panic!() };
-        server.on_finish(EnrollServer::parse(&m3).unwrap()).unwrap();
-        let m4 = server.accepted("dev1", "Prod").unwrap();
-        let forged = m4.replace("dev1", "dev2");
-        assert_eq!(client.on_message(&forged).err(), Some(Error::AuthenticationFailed));
+    fn code_hides_secret_in_debug() {
+        let text = format!("{:?}", code_for(&[9u8; 32]));
+        assert!(!text.contains(&b64::encode_url(&[7u8; 16])));
+        assert!(text.contains("hidden"));
+    }
+
+    #[test]
+    fn fingerprint_is_eight_hex_of_sha256() {
+        let code = code_for(&[0u8; 32]);
+        // SHA-256 of 32 zero bytes: 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
+        assert_eq!(code.fingerprint(), "66687aad");
+        assert_eq!(key_fingerprint(&[0u8; 32]), "66687aad");
+    }
+
+    #[test]
+    fn enrollment_round_trip() {
+        let server = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        let code = code_for(&server.public);
+        let (init, m1) =
+            EnrollInitiator::start(&device.private, &code, "  Pixel de garde ", "0.14.0").unwrap();
+        let (resp, device_public, hello) = EnrollResponder::start(&server.private, &m1).unwrap();
+        assert_eq!(device_public, device.public);
+        assert_eq!(hello.protocol, 4);
+        assert_eq!(hello.secret, code.secret);
+        assert_eq!(hello.device_name, "Pixel de garde");
+        assert_eq!(hello.app_version, "0.14.0");
+        let m2 = resp.finish(&accept()).unwrap();
+        assert_eq!(init.finish(&m2).unwrap(), accept());
+    }
+
+    #[test]
+    fn wire_payloads_match_the_contract() {
+        let hello = EnrollHello {
+            protocol: 4,
+            secret: vec![0u8; 16],
+            device_name: "p".into(),
+            app_version: "1".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&hello).unwrap(),
+            r#"{"protocol":4,"secret":"AAAAAAAAAAAAAAAAAAAAAA==","device_name":"p","app_version":"1"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&accept()).unwrap(),
+            format!(
+                r#"{{"protocol":4,"device_id":"{DEVICE_ID}","server_name":"Prod","user_name":"alice"}}"#
+            )
+        );
+        assert!(serde_json::from_str::<EnrollAccept>(&format!(
+            r#"{{"protocol":4,"device_id":"{DEVICE_ID}","server_name":"P","user_name":"u","x":1}}"#
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn wrong_pinned_key_is_rejected_on_both_sides() {
+        let server = generate_keypair().unwrap();
+        let other = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        // Server side: the code pins another key, so the server cannot read message 1.
+        let (_, m1) =
+            EnrollInitiator::start(&device.private, &code_for(&other.public), "phone", "1")
+                .unwrap();
+        assert!(EnrollResponder::start(&server.private, &m1).is_err());
+        // Device side: a server with another key answers a handshake of its own.
+        // The device pinned to the real key refuses that message 2.
+        let (init, _) =
+            EnrollInitiator::start(&device.private, &code_for(&server.public), "phone", "1")
+                .unwrap();
+        let (resp, _, _) = EnrollResponder::start(&other.private, &m1).unwrap();
+        let forged = resp.finish(&accept()).unwrap();
+        assert_eq!(init.finish(&forged).err(), Some(Error::AuthenticationFailed));
+    }
+
+    #[test]
+    fn tampered_messages_are_rejected() {
+        let server = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        let code = code_for(&server.public);
+        let (init, m1) = EnrollInitiator::start(&device.private, &code, "phone", "1").unwrap();
+        let mut bad1 = m1.clone();
+        let last = bad1.len() - 1;
+        bad1[last] ^= 1;
+        assert!(EnrollResponder::start(&server.private, &bad1).is_err());
+        let (resp, _, _) = EnrollResponder::start(&server.private, &m1).unwrap();
+        let mut m2 = resp.finish(&accept()).unwrap();
+        m2[40] ^= 1;
+        assert_eq!(init.finish(&m2).err(), Some(Error::AuthenticationFailed));
+    }
+
+    #[test]
+    fn replayed_message_2_is_rejected() {
+        let server = generate_keypair().unwrap();
+        let code = code_for(&server.public);
+        let run = |device: &crate::noise::Keypair| {
+            let (init, m1) = EnrollInitiator::start(&device.private, &code, "phone", "1").unwrap();
+            let (resp, _, _) = EnrollResponder::start(&server.private, &m1).unwrap();
+            (init, resp.finish(&accept()).unwrap())
+        };
+        let (_, old_m2) = run(&generate_keypair().unwrap());
+        // Same device key, same code, new handshake: the old message 2 does not fit.
+        let device = generate_keypair().unwrap();
+        let (_, first_m2) = run(&device);
+        let (second, _) = run(&device);
+        assert_eq!(second.finish(&first_m2).err(), Some(Error::AuthenticationFailed));
+        let (third, _) = run(&generate_keypair().unwrap());
+        assert_eq!(third.finish(&old_m2).err(), Some(Error::AuthenticationFailed));
+    }
+
+    #[test]
+    fn session_prologue_is_not_accepted_for_enrollment() {
+        let server = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        let (_, m1) = Initiator::start(&device.private, &server.public, b"{}").unwrap();
+        assert!(EnrollResponder::start(&server.private, &m1).is_err());
+    }
+
+    #[test]
+    fn responder_checks_the_hello() {
+        let server = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        let send = |json: &str| {
+            let (_, m1) = Initiator::start_with_prologue(
+                ENROLL_PROLOGUE,
+                &device.private,
+                &server.public,
+                json.as_bytes(),
+            )
+            .unwrap();
+            EnrollResponder::start(&server.private, &m1).map(|(_, _, h)| h)
+        };
+        let secret = "AAAAAAAAAAAAAAAAAAAAAA==";
+        let ok =
+            format!(r#"{{"protocol":4,"secret":"{secret}","device_name":"p","app_version":"1"}}"#);
+        assert!(send(&ok).is_ok());
+        assert_eq!(
+            send(&ok.replace(r#""protocol":4"#, r#""protocol":3"#)).err(),
+            Some(Error::UnsupportedProtocol(3))
+        );
+        assert!(send(&ok.replace(secret, "AAAA")).is_err());
+        assert!(send(&ok.replace(r#""device_name":"p""#, r#""device_name":"""#)).is_err());
+        assert!(send(&ok.replace(r#""device_name":"p""#, r#""device_name":"a\u0007b""#)).is_err());
+        let long = "x".repeat(MAX_DEVICE_NAME + 1);
+        assert!(
+            send(&ok.replace(r#""device_name":"p""#, &format!(r#""device_name":"{long}""#)))
+                .is_err()
+        );
+        assert!(send(&ok.replace("}", r#","extra":1}"#)).is_err());
+        assert!(send("not json").is_err());
+    }
+
+    #[test]
+    fn initiator_checks_the_inputs_and_the_accept() {
+        let server = generate_keypair().unwrap();
+        let device = generate_keypair().unwrap();
+        let code = code_for(&server.public);
+        assert_eq!(
+            EnrollInitiator::start(&device.private, &code, "  ", "1").err(),
+            Some(Error::Malformed("device name"))
+        );
+        assert!(EnrollInitiator::start(&device.private, &code, "a\u{7}", "1").is_err());
+        assert!(EnrollInitiator::start(&device.private, &code, &"x".repeat(65), "1").is_err());
+        assert!(EnrollInitiator::start(&device.private[..31], &code, "p", "1").is_err());
+        // The server side cannot send a bad accept either.
+        let (_, m1) = EnrollInitiator::start(&device.private, &code, "p", "1").unwrap();
+        let (resp, _, _) = EnrollResponder::start(&server.private, &m1).unwrap();
+        let mut bad = accept();
+        bad.device_id = "ABC".into();
+        assert!(resp.finish(&bad).is_err());
     }
 }

@@ -7,14 +7,12 @@ use std::fmt;
 pub enum Error {
     /// The peer sent bytes that do not decode as the expected message.
     Malformed(&'static str),
-    /// Authentication failed: wrong password, bad MAC or unknown key.
+    /// Authentication failed: wrong key, tampered or replayed message.
     AuthenticationFailed,
     /// A message arrived in a state where it is not allowed.
     UnexpectedMessage(&'static str),
     /// The peer speaks an unsupported protocol version.
     UnsupportedProtocol(u32),
-    /// The server rejected the request with a stable code.
-    Rejected { code: String, message: String },
     /// Local misuse or an internal cryptographic failure.
     Internal(&'static str),
 }
@@ -26,7 +24,6 @@ impl fmt::Display for Error {
             Error::AuthenticationFailed => f.write_str("authentication failed"),
             Error::UnexpectedMessage(what) => write!(f, "unexpected message: {what}"),
             Error::UnsupportedProtocol(v) => write!(f, "unsupported protocol version {v}"),
-            Error::Rejected { code, message } => write!(f, "rejected ({code}): {message}"),
             Error::Internal(what) => write!(f, "internal error: {what}"),
         }
     }

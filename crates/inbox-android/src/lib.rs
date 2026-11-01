@@ -2,7 +2,7 @@
 //!
 //! Every entry point catches panics (the Android build uses `panic = "unwind"`)
 //! and turns them, like misuse, into a Java `IllegalStateException`. Expected
-//! protocol failures (wrong password, rejection) are returned as JSON instead.
+//! protocol failures (bad code, wrong server key) are returned as JSON instead.
 
 mod bridge;
 
@@ -71,23 +71,36 @@ fn conn_ref<'a>(h: jlong) -> Result<&'a Conn, String> {
 
 // ---------------------------------------------------------------- enrollment
 
-/// Returns `{"handle": <long>, "send": "<first text frame>"}` or `{"error": {...}}`.
+/// Reads an enrollment code. Returns `{"code": {...}}` or `{"error": {...}}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_inbox_core_Native_enrollParse<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    code: JString<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let code = Zeroizing::new(string(env, &code)?);
+        new_string(env, &bridge::enroll_parse(&code).to_string())
+    })
+}
+
+/// Returns `{"handle": <long>, "send": "<message 1, standard base64>"}` or `{"error": {...}}`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_inbox_core_Native_enrollStart<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
-    password: JByteArray<'l>,
+    code: JString<'l>,
     device_name: JString<'l>,
-    user_name: JString<'l>,
+    app_version: JString<'l>,
 ) -> jstring {
     guard(&mut env, std::ptr::null_mut(), |env| {
-        let password = bytes(env, &password)?;
+        let code = Zeroizing::new(string(env, &code)?);
         let name = string(env, &device_name)?;
-        let user = string(env, &user_name)?;
-        let out = match bridge::enroll_start(&password, &name, &user) {
-            Ok((handle, msg)) => {
+        let version = string(env, &app_version)?;
+        let out = match bridge::enroll_start(&code, &name, &version) {
+            Ok((handle, msg1)) => {
                 let ptr = Box::into_raw(handle) as jlong;
-                json!({ "handle": ptr, "send": msg })
+                json!({ "handle": ptr, "send": inbox_core::b64::encode(&msg1) })
             }
             Err(e) => bridge::error_json(&e),
         };
@@ -95,19 +108,20 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollStart<'l>(
     })
 }
 
-/// Returns `{"send": ...}`, `{"done": {...}}` or `{"error": {...}}`.
+/// Consumes Noise message 2. Returns `{"done": {...}}` or `{"error": {...}}`.
+/// The result holds the device private key: Kotlin must seal it at once.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_enrollOnMessage<'l>(
+pub extern "system" fn Java_app_inbox_core_Native_enrollFinish<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
-    text: JString<'l>,
+    msg2: JByteArray<'l>,
 ) -> jstring {
     guard(&mut env, std::ptr::null_mut(), |env| {
         let h = enroll_ref(handle)?;
-        let text = string(env, &text)?;
-        let out = bridge::enroll_on_message(h, &text);
-        new_string(env, &out.to_string())
+        let msg2 = bytes(env, &msg2)?;
+        let out = Zeroizing::new(bridge::enroll_finish(h, &msg2).to_string());
+        new_string(env, &out)
     })
 }
 

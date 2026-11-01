@@ -9,9 +9,6 @@ updates:
     groups:
       opentelemetry:
         patterns: ["opentelemetry*", "tracing-opentelemetry"]
-    ignore:
-      # Credential records and the server key embed its serialization: upgrade deliberately.
-      - dependency-name: opaque-ke
   - package-ecosystem: gradle
     directory: /android
     schedule: { interval: weekly }

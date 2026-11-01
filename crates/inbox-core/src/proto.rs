@@ -1,7 +1,7 @@
 //! Wire messages. All are JSON; binary fields are base64.
 //!
-//! Enrollment runs over WebSocket text frames at `/v1/enroll`. Sessions run over
-//! WebSocket binary frames at `/v1/session`, each frame being one Noise message.
+//! Enrollment (`/v1/enroll`) and sessions (`/v1/session`) run over WebSocket binary
+//! frames. Each frame is one Noise message.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,48 +32,40 @@ impl AckStage {
 
 // ---------------------------------------------------------------- enrollment
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EnrollClientMsg {
-    Start {
-        protocol: u32,
-        #[serde(with = "serde_bytes")]
-        credential_request: Vec<u8>,
-    },
-    Finish {
-        #[serde(with = "serde_bytes")]
-        credential_finalization: Vec<u8>,
-        device_name: String,
-        /// Pseudonym of the person using the device.
-        user_name: String,
-        #[serde(with = "serde_bytes")]
-        device_public_key: Vec<u8>,
-        /// Binds the device key and name to the OPAQUE session.
-        #[serde(with = "serde_bytes")]
-        mac: Vec<u8>,
-    },
+/// Payload of enrollment Noise message 1 (device to server).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollHello {
+    pub protocol: u32,
+    /// The one-time secret of the enrollment code (16 bytes).
+    #[serde(with = "serde_bytes")]
+    pub secret: Vec<u8>,
+    /// 1..64 bytes, no control characters.
+    pub device_name: String,
+    pub app_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EnrollServerMsg {
-    Challenge {
-        #[serde(with = "serde_bytes")]
-        credential_response: Vec<u8>,
-    },
-    Accepted {
-        device_id: String,
-        server_name: String,
-        #[serde(with = "serde_bytes")]
-        server_public_key: Vec<u8>,
-        /// Proves the server key comes from the party holding the credential record.
-        #[serde(with = "serde_bytes")]
-        mac: Vec<u8>,
-    },
-    Rejected {
-        code: String,
-        message: String,
-    },
+impl std::fmt::Debug for EnrollHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollHello")
+            .field("protocol", &self.protocol)
+            .field("secret", &"<hidden>")
+            .field("device_name", &self.device_name)
+            .field("app_version", &self.app_version)
+            .finish()
+    }
+}
+
+/// Payload of enrollment Noise message 2 (server to device).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollAccept {
+    pub protocol: u32,
+    /// 32 lowercase hexadecimal characters.
+    pub device_id: String,
+    pub server_name: String,
+    /// The login of the account. It is the name of the device owner.
+    pub user_name: String,
 }
 
 // ---------------------------------------------------------------- sessions
@@ -134,10 +126,6 @@ pub enum ClientMsg {
     Unsubscribe {
         group: String,
     },
-    /// Changes the pseudonym under which this device is tracked.
-    SetUserName {
-        user_name: String,
-    },
     Ping {
         nonce: u64,
     },
@@ -155,11 +143,7 @@ pub enum ServerMsg {
         heartbeat_interval_ms: u64,
         offline_warning_after_ms: u64,
         server_time_ms: i64,
-        /// Pseudonym recorded for this device.
-        user_name: String,
-    },
-    /// Confirms a `SetUserName`.
-    UserName {
+        /// Login of the account of this device. Read-only.
         user_name: String,
     },
     Alert(AlertMsg),
@@ -175,8 +159,10 @@ pub enum ServerMsg {
     },
 }
 
-/// WebSocket close codes used on `/v1/session`.
+/// WebSocket close codes used on `/v1/enroll` and `/v1/session`.
 pub mod close {
+    /// Enrollment: the code is unknown, already used or expired, or the account is revoked.
+    pub const ENROLL_REFUSED: u16 = 4410;
     /// The device id is unknown or its key does not match: enroll again.
     pub const UNKNOWN_DEVICE: u16 = 4401;
     /// The device was revoked from the admin front: enroll again.
@@ -218,5 +204,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn user_name_is_read_only() {
+        // The device cannot change the login of the account.
+        assert!(
+            serde_json::from_str::<ClientMsg>(r#"{"t":"set_user_name","user_name":"x"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<ServerMsg>(r#"{"t":"user_name","user_name":"x"}"#).is_err());
+        let w = r#"{"t":"welcome","server_name":"S","groups":[],"subscriptions":[],"heartbeat_interval_ms":1,"offline_warning_after_ms":2,"server_time_ms":3,"user_name":"alice"}"#;
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(w).unwrap(),
+            ServerMsg::Welcome { ref user_name, .. } if user_name == "alice"
+        ));
+    }
+
+    #[test]
+    fn close_codes_are_stable() {
+        assert_eq!(close::ENROLL_REFUSED, 4410);
+        assert_eq!(close::PROTOCOL, 4426);
+        assert_eq!(close::RATE_LIMITED, 4429);
     }
 }
