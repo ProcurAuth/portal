@@ -11,7 +11,7 @@ chmod 700 "$secrets"
 random() { openssl rand -base64 48 | tr -d '=+/\n' | head -c "$1"; }
 
 echo "Building the portal image (local/portal:demo)..."
-docker build -q -t local/portal:demo -f portal.Dockerfile ..
+docker build -q -t local/portal:demo -f ../docker/Dockerfile --target runtime ..
 
 if [ ! -f "$secrets/credentials.txt" ]; then
   umask 077

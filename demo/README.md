@@ -50,6 +50,6 @@ The superadmin can add users in the settings page. The superadmin can also make 
 - `docker-compose.yml`: the stack.
 - `portal.hcl`: the configuration of the portal. It has the block `keys {}`, the PDP, and the two accounts of the file.
 - `traefik-dynamic.yml`: the middlewares for persons and for keys.
-- `portal.Dockerfile`: the build of the portal image for this demo.
+- The portal image is `docker/Dockerfile` of the repository. `up.sh` builds it as `local/portal:demo`.
 - `smoke.sh`: the checks from a terminal.
 - `notes/`: the service Notes (`app.py`, `index.html`).

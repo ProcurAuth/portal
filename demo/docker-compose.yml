@@ -23,6 +23,8 @@ services:
   portal:
     image: local/portal:demo
     container_name: portal-demo
+    # The demo reads the Docker socket to find the services. The image runs as a user without access to it.
+    user: "0:0"
     # The portal reads the action documents at start. A service that is not up yet is read again
     # only after access.actions_refresh, so the services that publish a document start first.
     depends_on:
