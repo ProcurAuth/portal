@@ -12,6 +12,9 @@ cd "$(dirname "$0")"
 . ./lib.sh
 fail=0
 
+# bearer <token>: a header file for `curl -H @file`, from a pipe. The token stays off the command line, so `ps` does not show it.
+bearer() { printf 'Authorization: Bearer %s\n' "$1"; }
+
 check() { # name expected actual
   if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: expected $2, got $3"; fail=1; fi
 }
@@ -59,13 +62,12 @@ created=$(curl -s -b "$admin" -H "Origin: $base" --data-urlencode "csrf=$csrf" -
   --data-urlencode "$g_read=notes.read on service:notes" "$base/auth/keys/create")
 key=$(printf '%s' "$created" | sed -n 's/.*id="key-text"[^>]*value="\(mcp_[A-Za-z0-9]*\)".*/\1/p')
 case "$key" in mcp_*) echo "ok    the superadmin made a key (53 characters: ${#key})";; *) echo "FAIL  no key text"; fail=1;; esac
-auth="Authorization: Bearer $key"
-check "key: whoami" 200 "$(status -H "$auth" "$api/whoami")"
-sub=$(curl -s -H "$auth" "$api/whoami" | python3 -c 'import sys,json; print(json.load(sys.stdin)["claims"]["sub"][:4])')
+check "key: whoami" 200 "$(status -H @<(bearer "$key") "$api/whoami")"
+sub=$(curl -s -H @<(bearer "$key") "$api/whoami" | python3 -c 'import sys,json; print(json.load(sys.stdin)["claims"]["sub"][:4])')
 check "key: the subject of the token is a key" "key:" "$sub"
-check "key: read a notebook" 200 "$(status -H "$auth" "$api/notebooks/public/notes")"
-check "key: cannot write (no grant)" 403 "$(status -H "$auth" -H 'Content-Type: application/json' -d '{"text":"x"}' "$api/notebooks/public/notes")"
-check "a key opens no route of persons (files has no key route)" 302 "$(status -H "$auth" "$base/files/")"
+check "key: read a notebook" 200 "$(status -H @<(bearer "$key") "$api/notebooks/public/notes")"
+check "key: cannot write (no grant)" 403 "$(status -H @<(bearer "$key") -H 'Content-Type: application/json' -d '{"text":"x"}' "$api/notebooks/public/notes")"
+check "a key opens no route of persons (files has no key route)" 302 "$(status -H @<(bearer "$key") "$base/files/")"
 
 # ---- the inbox
 # One port serves the pages, the producers and the phones. Traefik sends `/v1/`, `/api/v1/` and `/api/version`
@@ -74,17 +76,18 @@ check "a key opens no route of persons (files has no key route)" 302 "$(status -
 check "inbox: a plain GET of /v1/session reaches the inbox (400, not a ForwardAuth redirect)" 400 "$(status "$base/v1/session")"
 check "inbox: a plain GET of /v1/enroll reaches the inbox (400)" 400 "$(status "$base/v1/enroll")"
 check "inbox: a WebSocket upgrade of /v1/session through Traefik gives 101" 101 \
-  "$(status --max-time 2 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  "$(status --http1.1 --max-time 2 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$base/v1/session")"
 check "inbox: /readyz on the port of the pages" 200 "$(status "$base/readyz")"
 check "inbox: /api/version on the port of the pages, no ForwardAuth" 200 "$(status "$base/api/version")"
 token=$(cat .secrets/inbox_producer_token)
 akey=$(cat .secrets/alice_key)
 run=$(date +%s)
-send() { # <token> <idempotency key> <group>: prints the HTTP status
-  status -X POST "$base/api/v1/alerts" -H "Authorization: Bearer $1" -H "Idempotency-Key: $2" \
-    -H 'Content-Type: application/json' -d "{\"group\":\"$3\",\"title\":\"Smoke test $run\"}"
+send_to() { # <base> <token> <idempotency key> <group>: prints the HTTP status
+  status -X POST "$1/api/v1/alerts" -H @<(bearer "$2") -H "Idempotency-Key: $3" \
+    -H 'Content-Type: application/json' -d "{\"group\":\"$4\",\"title\":\"Smoke test $run\"}"
 }
+send() { send_to "$base" "$@"; } # <token> <idempotency key> <group>
 check "inbox: alert with the token of the file (infra)" 201 "$(send "$token" "smoke-$run-a" infra)"
 check "inbox: the same alert again is a duplicate" 200 "$(send "$token" "smoke-$run-a" infra)"
 check "inbox: alert with the token of the file (critical)" 201 "$(send "$token" "smoke-$run-b" critical)"
@@ -92,6 +95,23 @@ check "inbox: a wrong token" 401 "$(send wrong "smoke-$run-c" infra)"
 check "inbox: alert with the key of alice (infra)" 201 "$(send "$akey" "smoke-$run-d" infra)"
 check "inbox: the key of alice cannot send to critical" 403 "$(send "$akey" "smoke-$run-e" critical)"
 check "inbox: a key that does not exist" 401 "$(send mcp_000000000000000000000000000000000000000000000000000 "smoke-$run-f" infra)"
+
+# ---- the secure transport
+# The pages and the producers use HTTPS (Traefik ends TLS). The phones also have a plain entrypoint on 8090 (demo only).
+phones=${DEMO_PHONES:-http://localhost:8090}
+check "phones: a plain GET of /v1/session on 8090 reaches the inbox" 400 "$(status "$phones/v1/session")"
+check "phones: a WebSocket upgrade of /v1/session on 8090 (plain http)" 101 \
+  "$(status --max-time 2 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$phones/v1/session")"
+check "phones: the plain entrypoint serves no page" 404 "$(status "$phones/auth/login")"
+check "phones: the plain entrypoint serves no producer API" 404 "$(status -X POST "$phones/api/v1/alerts")"
+# The port 8091 is the portal without Traefik. The request is plain http from the Docker gateway, which is not a
+# trusted proxy. A header X-Forwarded-Proto that the client sends does not change it.
+direct=${DEMO_DIRECT:-http://127.0.0.1:8091}
+check "plain http: the sign-in page is refused" 403 "$(status "$direct/auth/login")"
+check "plain http: a spoofed X-Forwarded-Proto does not help" 403 "$(status -H 'X-Forwarded-Proto: https' "$direct/auth/login")"
+check "plain http: a producer token is refused" 403 "$(send_to "$direct" "$token" "smoke-$run-g" infra)"
+check "plain http: the health route stays open" 200 "$(status "$direct/healthz")"
 
 # The tab Inbox shows the pages that the permissions open. carol has no permission of the inbox.
 carol=$(mktemp)

@@ -11,7 +11,10 @@ server {
   # the webhooks (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no
   # ForwardAuth. The account pages make the enrollment codes.
   listen_address  = "0.0.0.0:4181"
-  # Peers whose X-Forwarded-For header the portal trusts, for the pages, the producers and the phones. Empty: none.
+  # Peers whose X-Forwarded-For and X-Forwarded-Proto headers the portal trusts, for the pages, the producers and the
+  # phones. Empty: none. The portal does not know TLS: a proxy (Traefik) ends it. A request is secure when its peer is
+  # in this list and announces one `X-Forwarded-Proto: https`, or when its peer is a loopback address. The portal
+  # refuses the sign-in, the passwords, the keys and the producer tokens on a request that is not secure.
   trusted_proxies = ["127.0.0.1/32"]
 }
 
@@ -23,6 +26,9 @@ authentication {
 session {
   secret_mode = "provided"
   secret_file = "/run/secrets/session_secret"
+  # Default false. Never set it to true on a network: anyone on it can read the passwords, the keys and the session
+  # cookies. It lets the portal handle them over plain HTTP, for a local test only.
+  # allow_insecure_http = false
 }
 
 # SQLite. Instead of this block, the block `postgres` below lets several active instances share one database.

@@ -1,4 +1,6 @@
 # Local demo of the portal with the inbox: Traefik, the portal, example services. Start it with ./up.sh.
+# Traefik ends TLS on the port 8088 with a self-signed certificate that up.sh makes. The portal does not know
+# TLS: it runs on plain HTTP inside the demo network and trusts the Traefik container (portal.hcl).
 name: portal-demo
 
 services:
@@ -9,19 +11,30 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=demo
       - --providers.file.filename=/etc/traefik/dynamic.yml
-      - --entrypoints.web.address=:80
+      # The pages, the producers and the keys: HTTPS with the self-signed certificate of dynamic.yml.
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      # The phones: plain HTTP, for the path /v1/ only. A demo convenience: see demo/README.md.
+      - --entrypoints.web-phones.address=:8090
       - --accesslog=true
       - --log.level=INFO
     ports:
-      # The one public port of the demo: the pages, the API of the producers and the phones.
-      - "127.0.0.1:8088:80"
-      # The Android emulator reaches the host at 172.17.0.1. This is the inbox.devices.public_address of portal.hcl.
-      - "172.17.0.1:8088:80"
+      # The pages and the API of the producers: HTTPS. The Android emulator reaches the host at 172.17.0.1.
+      - "127.0.0.1:8088:443"
+      - "172.17.0.1:8088:443"
+      # The phones: plain HTTP, `/v1/` only. This is the inbox.devices.public_address of portal.hcl.
+      - "127.0.0.1:8090:8090"
+      - "172.17.0.1:8090:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
+      # The self-signed certificate that up.sh makes (subjectAltName localhost, 127.0.0.1, 172.17.0.1).
+      - ./.secrets/tls.crt:/etc/traefik/tls/tls.crt:ro
+      - ./.secrets/tls.key:/etc/traefik/tls/tls.key:ro
     networks:
-      - demo
+      demo:
+        # A fixed address: portal.hcl trusts this one address as a proxy, and no other.
+        ipv4_address: 172.30.0.2
 
   portal:
     image: local/portal:demo
@@ -46,7 +59,8 @@ services:
       - inbox_producer_token
     ports:
       # The listener of the portal without Traefik, for the metrics and the health check from the
-      # host. Loopback only. The pages, the producers and the phones use Traefik (8088).
+      # host. Loopback only. The pages and the producers use Traefik (8088). A request on this port is
+      # plain HTTP from the Docker gateway, which is not a trusted proxy: the portal refuses a sign-in or a token here.
       - "127.0.0.1:8091:4181"
     volumes:
       - portal_data:/var/lib/portal
@@ -58,27 +72,32 @@ services:
       traefik.docker.network: demo
       # The pages and the check addresses of the portal. No ForwardAuth here.
       traefik.http.routers.portal-auth.rule: PathPrefix(`/auth/`)
-      traefik.http.routers.portal-auth.entrypoints: web
+      traefik.http.routers.portal-auth.entrypoints: websecure
       traefik.http.routers.portal-auth.priority: "50000"
       traefik.http.routers.portal-auth.service: portal
       traefik.http.routers.portal-home.rule: Path(`/`)
-      traefik.http.routers.portal-home.entrypoints: web
+      traefik.http.routers.portal-home.entrypoints: websecure
       traefik.http.routers.portal-home.service: portal
       # The routes of the inbox on the port of the pages: the phones (`/v1/enroll` and `/v1/session`,
       # WebSocket upgrades), and the API of the producers and the webhooks. They have no session and
       # prove themselves (Noise, token or key), so no ForwardAuth applies. The middleware inbox-retry
       # (traefik-dynamic.yml) sends a request again when the portal does not answer at all.
       traefik.http.routers.portal-inbox.rule: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)
-      traefik.http.routers.portal-inbox.entrypoints: web
+      traefik.http.routers.portal-inbox.entrypoints: websecure
       traefik.http.routers.portal-inbox.priority: "50000"
       traefik.http.routers.portal-inbox.middlewares: inbox-retry@file
       traefik.http.routers.portal-inbox.service: portal
+      # The phones on the plain entrypoint: `/v1/` only, no ForwardAuth, with the same retry.
+      traefik.http.routers.portal-phones.rule: PathPrefix(`/v1/`)
+      traefik.http.routers.portal-phones.entrypoints: web-phones
+      traefik.http.routers.portal-phones.middlewares: inbox-retry@file
+      traefik.http.routers.portal-phones.service: portal
       traefik.http.services.portal.loadbalancer.server.port: "4181"
 
   notes:
     build: ./notes
     environment:
-      IDENTITY_ISSUER: http://localhost:8088
+      IDENTITY_ISSUER: https://localhost:8088
       IDENTITY_PUBLIC_KEY_FILE: /run/secrets/identity_pub
       PDP_TOKEN_FILE: /run/secrets/pdp_token_notes
       PDP_URL: http://portal:4182
@@ -101,13 +120,13 @@ services:
       traefik.http.services.notes.loadbalancer.server.port: "8080"
       # The persons.
       traefik.http.routers.notes-user.rule: PathPrefix(`/notes`)
-      traefik.http.routers.notes-user.entrypoints: web
+      traefik.http.routers.notes-user.entrypoints: websecure
       traefik.http.routers.notes-user.priority: "100"
       traefik.http.routers.notes-user.middlewares: portal-user@file
       traefik.http.routers.notes-user.service: notes
       # The keys: a request with `Authorization: Bearer mcp_...` on the API.
       traefik.http.routers.notes-key.rule: PathPrefix(`/notes/api/`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`)
-      traefik.http.routers.notes-key.entrypoints: web
+      traefik.http.routers.notes-key.entrypoints: websecure
       traefik.http.routers.notes-key.priority: "200"
       traefik.http.routers.notes-key.middlewares: portal-key-chain@file
       traefik.http.routers.notes-key.service: notes
@@ -129,7 +148,7 @@ services:
       traefik.docker.network: demo
       traefik.http.services.files.loadbalancer.server.port: "8080"
       traefik.http.routers.files.rule: PathPrefix(`/files`)
-      traefik.http.routers.files.entrypoints: web
+      traefik.http.routers.files.entrypoints: websecure
       traefik.http.routers.files.middlewares: portal-user@file
 
   wiki:
@@ -149,7 +168,7 @@ services:
       traefik.docker.network: demo
       traefik.http.services.wiki.loadbalancer.server.port: "8080"
       traefik.http.routers.wiki.rule: PathPrefix(`/wiki`)
-      traefik.http.routers.wiki.entrypoints: web
+      traefik.http.routers.wiki.entrypoints: websecure
       traefik.http.routers.wiki.middlewares: portal-user@file
 
   # A service with 424 actions and 220 resources, to try the pages with a large action document.
@@ -170,7 +189,7 @@ services:
       traefik.docker.network: demo
       traefik.http.services.bigdb.loadbalancer.server.port: "8080"
       traefik.http.routers.bigdb.rule: PathPrefix(`/bigdb`)
-      traefik.http.routers.bigdb.entrypoints: web
+      traefik.http.routers.bigdb.entrypoints: websecure
       traefik.http.routers.bigdb.middlewares: portal-user@file
 
   # A service that looks like ClickHouse Dash: hosts, databases and the actions of ChDash.
@@ -191,7 +210,7 @@ services:
       traefik.docker.network: demo
       traefik.http.services.chdash.loadbalancer.server.port: "8080"
       traefik.http.routers.chdash.rule: PathPrefix(`/chdash`)
-      traefik.http.routers.chdash.entrypoints: web
+      traefik.http.routers.chdash.entrypoints: websecure
       traefik.http.routers.chdash.middlewares: portal-user@file
 
 networks:

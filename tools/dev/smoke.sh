@@ -9,6 +9,7 @@
 #   the routes of the phones are on the same port: a plain GET of /v1/session is 400, and an upgrade gives 101
 #   the metrics of the portal show inbox_* series
 #   an account that is not signed in cannot read the admin calls of the inbox (401)
+#   the stack runs plain HTTP, so deploy/compose/config.hcl sets session.allow_insecure_http: the log has the warning
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
@@ -49,16 +50,23 @@ check "phones: a WebSocket upgrade of /v1/session" 101 "$(code --max-time 2 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$pages/v1/session" || true)"
 
-token=$(cat "$PORTAL_SECRETS_DIR/inbox_producer_token")
+# The token goes in a header file, not on a command line: `ps` would show it.
+( umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$PORTAL_SECRETS_DIR/inbox_producer_token")" > "$tmp/auth" )
 key="smoke-$(date +%s)"
 body='{"group":"infra","title":"Smoke test"}'
 check "alert with the producer token" 201 "$(code -X POST "$pages/api/v1/alerts" \
-  -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
+  -H "@$tmp/auth" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
 check "same alert again (idempotent)" 200 "$(code -X POST "$pages/api/v1/alerts" \
-  -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
+  -H "@$tmp/auth" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
 check "alert with a wrong token" 401 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer wrong" -H "Idempotency-Key: $key-2" -H 'Content-Type: application/json' -d "$body")"
 check "admin call without a session" 401 "$(code "$pages/auth/inbox/api/overview")"
+
+if compose logs --no-color portal 2>&1 | grep -q '"event":"insecure_http_allowed"'; then
+  echo "ok   the start log has the warning insecure_http_allowed"
+else
+  echo "FAIL: the start log has no warning insecure_http_allowed" >&2; exit 1
+fi
 
 metrics=$(curl -s "$pages/metrics")
 printf '%s\n' "$metrics" | grep -q '^inbox_' || { echo "FAIL: /metrics has no inbox_ series" >&2; exit 1; }

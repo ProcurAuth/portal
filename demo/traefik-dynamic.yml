@@ -1,3 +1,13 @@
+# Traefik ends TLS for the entrypoint websecure. The certificate is the self-signed one that up.sh makes.
+tls:
+  certificates:
+    - certFile: /etc/traefik/tls/tls.crt
+      keyFile: /etc/traefik/tls/tls.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/tls/tls.crt
+        keyFile: /etc/traefik/tls/tls.key
 http:
   middlewares:
     # The ForwardAuth of the persons: the session cookie.

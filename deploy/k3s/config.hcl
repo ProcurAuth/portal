@@ -11,7 +11,10 @@
 
 server {
   listen_address  = "0.0.0.0:4181"
-  # X-Forwarded-For counts only from a peer in these networks: the pod network, where the Traefik pods run.
+  # X-Forwarded-For and X-Forwarded-Proto count only from a peer in these networks: the pod network, where the Traefik
+  # pods run. Traefik ends TLS on the entrypoint websecure and sends `X-Forwarded-Proto: https`: the portal then
+  # handles the sign-in, the passwords, the keys and the producer tokens. It refuses them on a request that Traefik
+  # announces as http. See deploy/README.md for a proxy that ends TLS in front of Traefik.
   # A NetworkPolicy lets only the Traefik pods and the Prometheus pods reach this port.
   trusted_proxies = ["10.42.0.0/16"]
 }
