@@ -1,0 +1,116 @@
+# Inbox configuration.
+#
+# Every attribute is mandatory: Inbox refuses to start if one is missing,
+# misspelled or out of range. Validate with:  inbox check-config --config <file>
+# Durations accept ms, s, m, h and d suffixes.
+
+server {
+  # Shown in the app and the admin front.
+  name = "Inbox"
+  # Devices (/v1/enroll, /v1/session), producer API, webhooks, /healthz, /readyz.
+  listen = "0.0.0.0:8080"
+  # Admin front and admin API. It has NO password: bind it to localhost or a
+  # private network, or put an authenticating reverse proxy in front of it.
+  admin_listen = "127.0.0.1:8081"
+  # Peers whose X-Forwarded-For / X-Real-IP headers are trusted. Empty: none.
+  trusted_proxies = ["127.0.0.1/32"]
+  shutdown_grace  = "10s"
+  # Generated once with `inbox keygen`. Replacing it invalidates every device.
+  server_key_file = "/run/secrets/inbox_server_key"
+}
+
+storage {
+  path = "/var/lib/inbox/inbox.db"
+  # An alert a phone has not received within this delay is no longer sent to it.
+  delivery_ttl             = "7d"
+  # History (delivered and expired alerts) is purged after this; >= delivery_ttl.
+  alert_retention          = "30d"
+  connection_log_retention = "90d"
+}
+
+devices {
+  # Shared device password, from `inbox credential`.
+  credential_file       = "/run/secrets/inbox_device_credential"
+  heartbeat_interval    = "20s"
+  session_timeout       = "60s"
+  resend_after          = "15s"
+  max_inflight          = 32
+  unreachable_after     = "2m"
+  offline_warning_after = "3m"
+  max_devices           = 1000
+}
+
+admin {
+  # No password: anyone who reaches server.admin_listen can send alerts and
+  # revoke devices. Host headers accepted by the admin listener; any other host
+  # is refused (protection against DNS rebinding from a malicious web page).
+  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
+}
+
+security {
+  # Device password attempts per client address and window.
+  max_auth_failures   = 5
+  auth_failure_window = "10m"
+}
+
+limits {
+  max_request_bytes = 65536
+}
+
+logging {
+  level  = "info"
+  format = "json"
+}
+
+telemetry {
+  enabled         = true
+  otlp_endpoint   = "http://otel-collector:4318"
+  service_name    = "inbox"
+  export_interval = "15s"
+}
+
+# Optional, instead of storage.path: PostgreSQL, shared by any number of active instances (plain TCP, no TLS).
+# postgres {
+#   host            = "postgres.internal"
+#   port            = 5432
+#   database        = "inbox"
+#   user            = "inbox"
+#   password_file   = "/run/secrets/inbox_db_password"
+#   pool_size       = 8
+#   connect_timeout = "5s"
+# }
+
+# Optional (with postgres): how the instances copy to each other the alerts they accept while PostgreSQL has no writable
+# primary (see "Degraded mode" in the README). `peers` are host:port names that list the instances, e.g. a headless Service.
+# cluster {
+#   listen = "0.0.0.0:8082"
+#   peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
+# }
+
+# Optional (SQLite only): standby replication to a directory shared with the instances that may take over
+# (a ReadWriteMany volume). All attributes are mandatory when the block is present.
+# replica {
+#   dir               = "/replica"
+#   snapshot_interval = "10s"
+#   lease_ttl         = "30s"
+#   sync_timeout      = "5s"
+#   sync_alerts       = true
+# }
+
+group "infra" {
+  name        = "Infra prod"
+  description = "Production outages"
+}
+
+group "oncall" {
+  name        = "Astreinte"
+  description = "Pages for the on-call engineer"
+}
+
+# Optional: alert sources other than the admin front.
+producer "grafana" {
+  # From `inbox token`.
+  token_file            = "/run/secrets/inbox_grafana_token"
+  groups                = ["infra"]
+  webhook_send_resolved = false
+}

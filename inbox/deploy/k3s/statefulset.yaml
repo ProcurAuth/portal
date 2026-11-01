@@ -1,0 +1,124 @@
+# Single replica on purpose: state lives in one SQLite database on a local
+# volume. Do not scale this StatefulSet; two writers would corrupt delivery state.
+apiVersion: v1
+kind: Service
+metadata:
+  name: inbox
+  namespace: apps
+spec:
+  selector:
+    app: inbox
+  ports:
+  - name: devices
+    port: 8080
+    targetPort: devices
+  - name: admin
+    port: 8081
+    targetPort: admin
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: inbox
+  namespace: apps
+spec:
+  serviceName: inbox
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: inbox
+  template:
+    metadata:
+      labels:
+        app: inbox
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: inbox
+        image: registry:5000/custom.infra/inbox:v0.2.0
+        imagePullPolicy: IfNotPresent
+        args: ["serve", "--config", "/etc/inbox/config.hcl"]
+        ports:
+        - name: devices
+          containerPort: 8080
+        - name: admin
+          containerPort: 8081
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: devices
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: devices
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: "1"
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: config
+          mountPath: /etc/inbox/config.hcl
+          subPath: config.hcl
+          readOnly: true
+        - name: secrets
+          mountPath: /run/secrets
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/inbox
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: config
+        configMap:
+          name: inbox-config
+      - name: secrets
+        secret:
+          secretName: inbox-secrets
+          defaultMode: 0440
+          items:
+          - {key: server_key, path: inbox_server_key}
+          - {key: device_credential, path: inbox_device_credential}
+          - {key: alerting_token, path: inbox_alerting_token}
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+      nodeSelector:
+        home.server: 'true'
+      tolerations:
+      - key: home.server
+        operator: Equal
+        value: 'true'
+        effect: NoSchedule
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: local-path
+      resources:
+        requests:
+          storage: 1Gi

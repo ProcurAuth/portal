@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "Industrial glass", dark variant: graphite base, white-tinted glass, hairlines. -->
+<resources>
+    <!-- Surfaces -->
+    <color name="bg_page">#0B0E13</color>
+    <color name="glass">#14FFFFFF</color>
+    <color name="glass_strong">#B8121720</color>
+    <color name="glass_stroke">#1FFFFFFF</color>
+    <color name="glass_highlight">#14FFFFFF</color>
+    <color name="hairline">#14FFFFFF</color>
+    <color name="field">#0DFFFFFF</color>
+    <color name="bg_hover">#14FFFFFF</color>
+    <!-- Cards and list panels: near-opaque surface, crisp border. -->
+    <color name="card">#F2141922</color>
+    <color name="card_stroke">#24FFFFFF</color>
+    <color name="scrim">#80000000</color>
+
+    <!-- Text -->
+    <color name="text">#E6EAF0</color>
+    <color name="text_strong">#F5F7FA</color>
+    <color name="text_muted">#8A94A6</color>
+    <color name="text_subtle">#5B6576</color>
+
+    <!-- Accent and severities -->
+    <color name="primary">#3B8CF7</color>
+    <color name="primary_soft">#293B8CF7</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="danger">#F04438</color>
+    <color name="danger_soft">#29F04438</color>
+    <color name="warning">#F5A524</color>
+    <color name="warning_soft">#29F5A524</color>
+    <color name="info">#22B8CF</color>
+    <color name="info_soft">#2922B8CF</color>
+
+    <!-- Snackbar: inverse surface -->
+    <color name="snackbar">#DDE3EC</color>
+    <color name="on_snackbar">#10141B</color>
+    <color name="snackbar_action">#1F63D6</color>
+
+    <!-- The one soft blue light on the page (alpha applied when painted) -->
+    <color name="backdrop_glow">#2F5BEA</color>
+</resources>

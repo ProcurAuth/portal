@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/inbox-core", "crates/inbox-server", "crates/inbox-android"]
+# The JNI crate only builds for Android targets.
+default-members = ["crates/inbox-core", "crates/inbox-server"]
+
+[workspace.package]
+version = "0.13.0"
+edition = "2024"
+rust-version = "1.88"
+license = "LicenseRef-Proprietary"
+publish = false
+
+[workspace.dependencies]
+# Exact pin: credential records and the server key file embed opaque-ke serializations.
+opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2"] }
+# snow's "std" feature would pull ring (C + asm) for nothing: leave it off.
+snow = { version = "0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+# opaque-ke 4 is built on rand 0.8 / rand_core 0.6.
+rand_core = "0.6"
+zeroize = "1.9.0"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <script>(function(){var p=location.pathname;if(!/\/$/.test(p)&&!/\/doc$/.test(p)){location.replace(p+"/"+location.search+location.hash);}})();</script>
+  <script>(function(){try{var t=localStorage.getItem("inbox.theme");if(t==="light"||t==="dark"){document.documentElement.dataset.theme=t;}}catch(e){}})();</script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Inbox</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app fit loading">
+    <header class="topbar">
+      <a class="brand" href="./">
+        <img src="logo.svg" alt="" class="brand-mark" width="24" height="24">
+        <span id="server-name" class="brand-name">Inbox</span>
+        <span id="server-version" class="brand-version"></span>
+      </a>
+      <span class="topbar-spacer"></span>
+      <span id="freshness" class="freshness" title="Time since the dashboard data was last refreshed"></span>
+      <span id="status-pill" class="status-pill idle">
+        <span class="dot"></span><span id="status-text">Connecting…</span>
+      </span>
+      <div class="segmented" role="group" aria-label="Theme" data-theme-switch>
+        <button type="button" data-theme-value="system" title="Browser theme" aria-label="Browser theme"><span class="mdi mdi-theme-system"></span></button>
+        <button type="button" data-theme-value="light" title="Light theme" aria-label="Light theme"><span class="mdi mdi-theme-light"></span></button>
+        <button type="button" data-theme-value="dark" title="Dark theme" aria-label="Dark theme"><span class="mdi mdi-theme-dark"></span></button>
+      </div>
+      <a class="btn" href="doc" title="Integrations: Grafana, Alertmanager and other tools"><span class="mdi mdi-code-json"></span><span class="label">Integrations</span></a>
+    </header>
+
+    <div id="banners" class="banners">
+      <div id="host-error" class="banner danger" hidden>
+        <span class="mdi mdi-alert-circle-outline"></span>
+        <div>
+          <strong>Host not allowed.</strong>
+          Add <code id="host-error-host"></code> to <code>admin.allowed_hosts</code> in the server configuration,
+          or declare the reverse proxy in <code>server.trusted_proxies</code>, then restart Inbox.
+        </div>
+      </div>
+      <div id="offline-banner" class="banner danger" hidden>
+        <span class="mdi mdi-alert-circle-outline"></span>
+        <span id="offline-text"></span>
+      </div>
+    </div>
+
+    <section id="coverage" class="coverage" aria-label="Coverage per group">
+      <div id="coverage-list" class="coverage-list"></div>
+    </section>
+
+    <main class="dashboard">
+      <div class="col">
+        <section id="alerts" class="feed grow">
+          <div class="feed-head">
+            <h2>Latest alerts</h2>
+            <span id="alerts-summary" class="meta">last 24 h</span>
+            <span class="stale-tag">stale data</span>
+          </div>
+          <div id="alerts-body" class="feed-body">
+            <div id="alerts-list" class="cards"></div>
+            <div id="alerts-empty" class="empty" hidden>
+              <span class="mdi mdi-bell-outline"></span>
+              <p>No alert in the last 24 hours.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="send" class="panel send-panel">
+          <button id="send-toggle" class="send-toggle" type="button" aria-expanded="false" aria-controls="send-form">
+            <span class="mdi mdi-send"></span>
+            <span class="send-toggle-label">Send an alert</span>
+            <span id="send-targets" class="meta"></span>
+            <span class="mdi mdi-chevron-down send-chevron"></span>
+          </button>
+          <form id="send-form" class="send-form" novalidate hidden>
+            <div class="send-row">
+              <label class="field">
+                <span>Group</span>
+                <select id="send-group" required disabled>
+                  <option value="">Loading groups…</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Title <b id="title-count" class="counter">0/128</b></span>
+                <input id="send-title" type="text" maxlength="128" required autocomplete="off" placeholder="Shown in the notification">
+              </label>
+            </div>
+            <div class="send-foot">
+              <span id="send-hint" class="targets"></span>
+              <button id="send-cancel" class="btn" type="button">Close</button>
+              <button id="send-btn" class="btn primary" type="submit" disabled><span class="mdi mdi-send"></span>Send</button>
+            </div>
+            <div id="send-result" class="banner" hidden></div>
+          </form>
+        </section>
+      </div>
+
+      <div class="col">
+        <section id="devices" class="panel devices">
+          <div class="panel-head">
+            <h2>Devices</h2>
+            <span id="devices-summary" class="meta"></span>
+            <span class="stale-tag">stale data</span>
+            <button id="phone-link-btn" class="btn ghost" type="button" title="Copy the link that adds this server in the Inbox app" hidden>
+              <span class="mdi mdi-cellphone"></span><span class="label">Phone link</span>
+            </button>
+          </div>
+          <div id="user-filter" class="filter-chips" role="group" aria-label="Filter by user" hidden></div>
+          <div class="panel-body">
+            <div id="devices-list" class="rows"></div>
+            <div id="devices-empty" class="onboard" hidden>
+              <span class="mdi mdi-cellphone"></span>
+              <p class="onboard-title">No phone enrolled yet</p>
+              <p>Install the Inbox APK, then add this server in the app.</p>
+              <div class="addr">
+                <span class="addr-label">Server address</span>
+                <code id="api-address" class="addr-value"></code>
+                <button id="api-address-copy" class="btn" type="button"><span class="mdi mdi-content-copy"></span>Copy</button>
+              </div>
+              <div class="addr">
+                <span class="addr-label">Phone link</span>
+                <a id="phone-link" class="addr-value mono" href="#"></a>
+                <button id="phone-link-copy" class="btn" type="button"><span class="mdi mdi-content-copy"></span>Copy</button>
+              </div>
+              <p class="hint">Open the phone link on the phone (send it by message or mail): the app opens on the add-server form, already filled in.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="connections" class="panel grow connections">
+          <div class="panel-head">
+            <h2>Connections</h2>
+            <span id="connections-summary" class="meta"></span>
+            <span class="stale-tag">stale data</span>
+          </div>
+          <div class="panel-body">
+            <div id="connections-list" class="rows"></div>
+            <div id="connections-empty" class="empty" hidden>
+              <span class="mdi mdi-swap-horizontal"></span>
+              <p>No connection recorded.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="detail-dialog" class="sheet" aria-labelledby="detail-title">
+    <div class="sheet-head">
+      <div>
+        <h2 id="detail-title"></h2>
+        <p id="detail-meta"></p>
+      </div>
+      <button id="detail-close" class="icon-btn" type="button" aria-label="Close"><span class="mdi mdi-close"></span></button>
+    </div>
+    <div class="sheet-body">
+      <h3 class="sheet-section">Delivery per device</h3>
+      <div id="detail-deliveries" class="rows"></div>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm">
+    <form method="dialog">
+      <p id="confirm-text"></p>
+      <div class="form-actions">
+        <button value="cancel" class="btn" type="submit">Cancel</button>
+        <button id="confirm-ok" value="ok" class="btn primary" type="submit">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="false"></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="common.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,410 @@
+# Inbox
+
+Inbox is a self-hosted inbox. A single server receives alerts from your
+monitoring and makes subscribed Android phones ring, even when they are on silent.
+
+- **One static binary** (Rust, musl). The admin front is embedded, the database is
+  SQLite, and the configuration is one strict HCL file.
+- **Standalone.** It needs no Firebase, no Google services and no external
+  database. OpenTelemetry export is optional and never blocks delivery.
+- **Delivery guarantee.** Every subscribed device gets every alert exactly once,
+  including alerts sent while it was off, in airplane mode or disconnected.
+- **Secure on plain HTTP.** The password is used only inside OPAQUE, and device
+  sessions are Noise IK. A network capture yields neither the password nor any
+  material for an offline attack.
+- **Receive-only Android app.** For each group, the user chooses *alarm* (loud and
+  full-screen until stopped on the phone, overriding silent, vibrate and do-not-disturb),
+  *ring* (one sound, even on silent) or *notify*.
+
+French summary: [docs/SPEC.md](docs/SPEC.md) (cahier des charges).
+
+## Architecture
+
+```text
+ Alertmanager / Grafana ──webhook──┐
+ scripts, CI ──── POST /api/v1/alerts ─┤        ┌──────────────── inbox ────────────────┐
+                                      ├──8080──▶│ producer API   device sessions (Noise) │◀── WebSocket ── Android app
+ admin browser ── no password, ─────────8081──▶│ admin API + embedded front              │      (foreground service)
+                  private network               │ SQLite (WAL, synchronous=FULL)          │
+                                                │ OTLP/HTTP ──▶ collector (optional)      │
+                                                └─────────────────────────────────────────┘
+```
+
+| Path | Contents |
+|---|---|
+| `crates/inbox-core` | Protocol and cryptography, with no I/O. Shared by the server and the app (JNI). |
+| `crates/inbox-server` | The `inbox` binary. |
+| `crates/inbox-android`, `android/` | JNI bridge and the Android app. |
+| `web/` | Admin front (plain HTML, CSS and JavaScript, embedded in the binary). |
+| `deploy/` | Docker Compose and k3s. |
+| `docs/` | Specification, configuration, protocol, integrations. |
+
+## Quick start (Docker Compose)
+
+```sh
+git clone git@github.com:SCcagg5/Inbox.git && cd Inbox/deploy
+./init-secrets.sh            # builds the image, asks for the device password
+$EDITOR config.hcl           # name, groups, producers
+docker compose up -d --build
+docker compose ps            # wait for "healthy"
+```
+
+1. **Admin front.** It has no password and listens on `127.0.0.1:8081`. Reach it
+   with `ssh -L 8081:127.0.0.1:8081 <host>`, or put it behind a reverse proxy that
+   authenticates users (list the proxy in `server.trusted_proxies`; its hostname
+   does not need to be in `admin.allowed_hosts`). It works at the root or under
+   any path prefix, behind several proxies at once, with no extra setting.
+   It is a single page with no settings: send an alert, the 5 latest alerts of the
+   last 24 h with their receipts, devices and connections (filterable by user
+   pseudonym). `/doc` documents the producer API with the server's real URLs,
+   groups and producers, ready to copy.
+2. **Phone.** Install the APK from the GitHub release (`inbox-<version>.apk`). Add
+   a server with its address (`host:8080`, a domain, or an `https://` URL behind a
+   proxy), the device password and a device name. Grant the permissions the app
+   asks for, then choose an action for each group.
+3. **Test.** Send an alert from the front, or with curl:
+
+```sh
+TOKEN=$(cat deploy/secrets/alerting_token)
+curl -fsS -X POST http://localhost:8080/api/v1/alerts \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: test-$(date +%s)" \
+  -H "Content-Type: application/json" \
+  -d '{"group":"oncall","title":"Disk full on db-1"}'
+```
+
+### Démarrage rapide (FR)
+
+1. `cd deploy && ./init-secrets.sh` crée la clé serveur, le mot de passe des
+   appareils et le token d'émetteur.
+2. Adapter `config.hcl` (nom, groupes, émetteurs), puis lancer `docker compose up -d --build`.
+3. Ouvrir le front admin (port 8081, sans mot de passe, accessible en local
+   uniquement : tunnel SSH ou reverse proxy authentifiant). C'est une seule page
+   sans réglages (envoi d'alerte, 5 dernières alertes sur 24 h, appareils,
+   connexions) ; `/doc` documente l'API avec les vraies URL. Installer l'APK,
+   ajouter le serveur (adresse, mot de passe appareils, nom), puis choisir
+   l'action de chaque groupe. L'app gère plusieurs serveurs Inbox.
+
+Without Compose, the binary needs only a config file and its secret files:
+
+```sh
+inbox keygen --out /etc/inbox/server_key
+inbox credential --server-key /etc/inbox/server_key --out /etc/inbox/device_credential
+inbox token --out /etc/inbox/alerting_token
+inbox check-config --config /etc/inbox/config.hcl
+inbox serve --config /etc/inbox/config.hcl
+```
+
+## Delivery guarantees
+
+1. The API answers `201` only after the alert is on disk, together with one
+   delivery row per device subscribed at that moment, in a single transaction.
+2. The server resends every delivery the device has not confirmed as `received`.
+   It resends during the session (`resend_after`) and on every reconnection.
+3. The phone stores the alert before confirming it. It deduplicates on the
+   128-bit alert id, and on restart it re-posts alerts it stored but never showed.
+4. An alert a phone has not received yet is kept and retried for
+   `storage.delivery_ttl` (7 days in the examples), then expires for that phone
+   and shows as expired in the admin front. History is purged after
+   `storage.alert_retention` (which must be >= `delivery_ttl`).
+5. Gaps in coverage are visible:
+   - A subscribed device that stops reporting becomes *unreachable* in the front and in `inbox_devices_unreachable`.
+   - The phone shows its connection state permanently and warns after `offline_warning_after`.
+
+Every producer request requires an `Idempotency-Key`. Retrying with the same key
+returns the same `alert_id` (`200`, `"duplicate": true`) and never pages twice.
+Reusing a key with different content returns `409`.
+
+## Security model
+
+- **Enrollment** uses OPAQUE (ristretto255, Argon2id) with the shared device
+  password.
+  - The password never leaves the phone.
+  - An attacker without the server's credential record can neither impersonate
+    the server nor enroll a device.
+  - Credential records are created offline (`inbox credential`), so the running
+    server never sees a password.
+- **Sessions** use Noise IK between a key generated on the phone and the server
+  key the phone pinned at enrollment. This gives mutual authentication,
+  encryption and forward secrecy. The phone does not store the password, and
+  each device is revocable from the front.
+- **Admin front: no password, by design.** Anyone who can reach
+  `server.admin_listen` can send alerts and revoke devices, so access control is
+  where it listens:
+  - Bind it to localhost or a private network (Compose publishes it on
+    `127.0.0.1` only), or put a reverse proxy that authenticates users in front
+    (for example Traefik forward-auth).
+  - **DNS rebinding:** requests whose `Host` header is not listed in
+    `admin.allowed_hosts` are refused, so a malicious web page cannot reach a
+    localhost-bound admin front through a hostname it controls. Requests that
+    come from a peer listed in `server.trusted_proxies` are exempt (the proxy
+    already routed on its own hostnames), except loopback peers: SSH tunnels and
+    local browsers arrive from loopback. List only real proxy addresses, never the
+    Docker gateway or a whole bridge range (host and tunnel traffic come from it).
+  - **CSRF:** every `POST` must carry `Content-Type: application/json` and the
+    `X-Inbox-Request: 1` header, which a cross-site page cannot send without a
+    CORS preflight that Inbox never grants. Requests marked
+    `Sec-Fetch-Site: cross-site` are refused.
+- **Hardening.**
+  - Device password attempts are rate-limited per client address.
+  - Producer tokens are compared in constant time.
+  - The front has a strict CSP.
+  - The image is `scratch`, runs as non-root with a read-only root filesystem,
+    and drops all capabilities.
+- TLS is the reverse proxy's job. The app accepts `https://` addresses.
+
+Details: [docs/protocol.md](docs/protocol.md), [SECURITY.md](SECURITY.md).
+
+## Configuration
+
+Inbox reads one HCL file. Every attribute is mandatory, unknown attributes are
+rejected and secrets are only referenced as files. Nothing starts if anything is
+missing or invalid. To check a file and the secrets it references, run
+`inbox check-config --config <file>`.
+
+- [config.example.hcl](config.example.hcl) is annotated.
+- [docs/configuration.md](docs/configuration.md) is the complete reference.
+
+## HTTP API (port 8080)
+
+All producer routes take `Authorization: Bearer <token>`. A token is limited to
+the `groups` of its `producer` block.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /api/v1/alerts` | Body: `{"group": "...", "title": "..."}` (title: one line, at most 128 characters). `Idempotency-Key` header recommended; without it an identical request within the same minute is deduplicated. Returns `201 {alert_id, duplicate, targets}`. |
+| `POST /api/v1/notify/{group}` | Generic webhook for any tool. Title from `?title=`, the `X-Title` header, the `title` field of a JSON body, or else the body itself (plain text, or any JSON as text). Put on one line; too long text is truncated. |
+| `GET /api/v1/alerts/{id}` | Delivery status per device: sent and received, with attempt counts. Use it to escalate elsewhere. |
+| `POST /api/v1/webhooks/alertmanager/{group}` | Alertmanager / Grafana webhook payload. One Inbox alert per alert (title `[FIRING] <alertname>: <summary>`), deduplicated on fingerprint + status + `startsAt`. |
+
+Every producer endpoint takes `Authorization: Bearer <token>`, or `?token=<token>`
+for tools that cannot set headers (the URL may then appear in proxy logs). The
+admin front's `/doc` page gives ready-to-paste recipes for Grafana, Alertmanager
+and other alerting tools, with this server's real URLs.
+| `GET /healthz`, `GET /readyz` | Liveness, and readiness (SQLite: checks the database; PostgreSQL: ready while the instance runs, `degraded` while the database has no primary). |
+| `GET /api/version` | Version, git revision, protocol version. |
+
+Errors are JSON, of the form `{"error": {"code": "...", "message": "..."}}`.
+
+```sh
+# Delivery status of an alert
+curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/alerts/<alert_id>
+```
+
+## Grafana and Alertmanager
+
+Grafana contact points are compiled into Grafana: there is no plugin API to add a
+new contact point type. A "Inbox plugin" would not be able to receive alerts, so
+Inbox speaks the format Grafana already sends instead.
+
+- **Grafana:** create a **Webhook** contact point with:
+  - URL `http(s)://<inbox>/api/v1/webhooks/alertmanager/<group>`;
+  - *Authorization header* scheme `Bearer` and credentials = the producer token.
+  
+  The provisioning example is [docs/grafana/contact-point.yaml](docs/grafana/contact-point.yaml).
+- **Alertmanager:** use a `webhook_configs` receiver with a bearer token. The
+  example is [docs/alertmanager.yml](docs/alertmanager.yml).
+
+Resolved notifications are ignored unless `webhook_send_resolved = true`.
+Alertmanager's repeat notifications of the same firing are deduplicated.
+
+## Android app
+
+The app is Android-only and receives alerts only. One app can enroll in and
+manage several Inbox servers: it keeps one persistent, encrypted connection per
+server inside a foreground service, and group subscriptions are chosen per
+server. It does not use Firebase. It asks for these permissions:
+
+| Permission | Why |
+|---|---|
+| Notifications | Showing alerts (Android 13+). |
+| Battery optimization exemption | Keeps the connection alive in Doze. Without it, Android may delay delivery. |
+| Do not disturb access | Lets *alarm* and *ring* override do-not-disturb and silent mode. |
+| Full-screen intent | Shows the *alarm* screen over the lock screen. |
+| Run at startup | Reconnects after a reboot. |
+
+On some vendor ROMs (Xiaomi, Huawei, Samsung…), also allow background activity /
+"no restrictions" for Inbox. "Force stop" kills the app until it is opened again.
+The server then reports the device as unreachable.
+
+### Testing without a phone
+
+`tools/android/emulator.sh start` boots an Android 14 emulator in Docker (needs
+`/dev/kvm`), installs `dist/inbox-<version>.apk`, grants the onboarding
+permissions and prints the address of its screen, shown in the browser at
+<http://localhost:6080>. With Inbox running on the host (`docker compose up`
+in `deploy/`), add the server `172.17.0.1:8080` in the app: that is the host,
+seen through the Docker bridge. `emulator.sh logs` follows the app logs,
+`emulator.sh install` reinstalls a new build and `emulator.sh stop` removes
+the emulator. Sound, vibration and OEM battery savers can only be judged on a
+real phone. If the noVNC page reports a JavaScript error coming from a
+`chrome-extension://` script, a browser extension is injecting code into the
+page: open it in a private window or with extensions disabled.
+
+## Operations
+
+- **Back up** the SQLite database (`/var/lib/inbox/inbox.db`, use `sqlite3 .backup`
+  or stop the service) and **the server key**. Losing the server key means
+  re-enrolling every phone.
+- **Upgrades** apply schema migrations automatically at start. Downgrading to a
+  binary older than the schema is refused.
+- **Shutdown** on SIGTERM drains within `server.shutdown_grace`. Phones are told
+  1012 (server restarting) and reconnect as soon as the server is back.
+- **Logs** are JSON on stderr, one `event` field per line.
+- **Metrics** (OTLP) are listed below.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `inbox_alerts_accepted_total{source}` | counter | Alerts accepted (`producer`, `webhook`, `admin`) |
+| `inbox_alerts_duplicate_total{source}` | counter | Submissions deduplicated by idempotency key |
+| `inbox_deliveries_created_total` | counter | Per-device delivery rows |
+| `inbox_deliveries_sent_total` | counter | Alert frames sent, including retransmissions |
+| `inbox_delivery_receipts_total` | counter | Delivery receipts sent by devices |
+| `inbox_delivery_latency_seconds` | histogram | Acceptance to first receipt |
+| `inbox_deliveries_pending` | gauge | Deliveries still waiting for a device |
+| `inbox_oldest_pending_delivery_seconds` | gauge | Age of the oldest waiting alert. **Alert on this.** |
+| `inbox_devices_unreachable` | gauge | Subscribed devices not seen recently. **Alert on this.** |
+| `inbox_devices_enrolled` | gauge | Non-revoked devices |
+| `inbox_device_sessions` | up-down counter | Connected devices |
+| `inbox_device_session_closes_total{reason}` | counter | Session ends |
+| `inbox_auth_failures_total{kind}` | counter | Failed authentications |
+| `inbox_enrollments_total` | counter | Devices enrolled |
+| `inbox_replica_epoch` | gauge | Epoch of the replica lease this instance owns (replication only) |
+| `inbox_replica_last_snapshot_age_seconds` | gauge | Age of the newest snapshot in the shared directory. **Alert on this.** |
+| `inbox_replica_snapshots_total` | counter | Snapshots published |
+| `inbox_replica_snapshot_failures_total` | counter | Snapshots that failed |
+| `inbox_replica_sync_failures_total` | counter | Writes that could not be copied before the answer |
+
+## Building
+
+Building needs only Docker (BuildKit) and python3.
+
+```sh
+tools/build.sh server   # dist/inbox_<version>_linux_<arch>, static, verified
+tools/build.sh image    # inbox:<version>
+tools/build.sh apk      # dist/inbox-<version>.apk (signing key from INBOX_KEYSTORE*)
+tools/build.sh dist     # tarballs + SHA256SUMS
+tools/dev/cargo.sh test # cargo in the pinned toolchain image
+```
+
+Releases are built by `.github/workflows/release.yml`, on a `vX.Y.Z` tag that
+matches the workspace version. They contain:
+- static Linux amd64 and arm64 binaries;
+- the APK signed with the release key from repository secrets;
+- `SHA256SUMS`.
+
+No container image is ever published to a registry (GHCR or other): build it
+locally with `tools/build.sh image` or `docker compose up --build`.
+
+## Standby replication
+
+SQLite needs a real local filesystem (WAL uses shared memory), so the database cannot live on a network volume. To
+survive the loss of the node, give Inbox a `replica` block pointing at a directory **shared by every instance that may
+run it** (a ReadWriteMany plain-file volume). The database stays local; the shared directory holds:
+
+- `snapshot-<epoch>.db`: a consistent copy (SQLite online backup) rewritten when the database changed, at most every
+  `snapshot_interval`, and **before an alert, an enrollment or a revocation is acknowledged**;
+- `lease.json`: who is the active instance. It is renewed every `lease_ttl / 3`;
+- `claim-<epoch>`: created exclusively, so two standbys cannot take the same epoch.
+
+A starting instance waits until the lease is released (clean stop: at once) or has not changed for `lease_ttl` (lost
+node), takes the next epoch, **restores the newest snapshot that passes `PRAGMA quick_check`** (the local database is
+only a cache) and then serves. It writes `snapshot-<its epoch>.db` only, so a lost instance that comes back can never
+overwrite its successor; it also notices the new epoch at its next renewal, or fails to renew for `lease_ttl`, and
+stops by itself (fencing: exit status 1, the orchestrator restarts it as a standby).
+
+Delivery guarantees across a takeover:
+
+- With `sync_alerts = true` an alert is acknowledged (`201`/`200`) and delivered to devices only after the snapshot that
+  contains it is published, so a producer that never got an answer retries and is deduplicated, and every acknowledged
+  alert survives the loss of the node. If the shared directory is unavailable the producer gets
+  `503 replication_unavailable` and retries; with `false` the alert is accepted after the local commit and a failed copy
+  is only logged (`inbox_replica_sync_failures_total`).
+- Device receipts and last-seen times are copied with the next snapshot. After a takeover an alert may be sent again to a
+  phone whose receipt was lost: the app deduplicates on `alert_id`, so it is never shown twice.
+- First start with a `replica` block on an existing database: the shared directory is empty, so the local database is
+  kept and becomes snapshot 1.
+
+Run it as a Deployment with one replica and the `Recreate` strategy (not a StatefulSet: a StatefulSet pod on an
+unreachable node is never rescheduled by Kubernetes), the shared directory on a ReadWriteMany volume, the local
+database on an `emptyDir`, a short `tolerationSeconds` on `node.kubernetes.io/unreachable` and `not-ready` (the default is
+5 minutes), and a startup probe that tolerates the wait of a standby (`lease_ttl` plus the restore). Expect the
+service to be back about `node-monitor-grace-period + tolerationSeconds + lease_ttl` after the loss of the node.
+
+## Several active instances (PostgreSQL)
+
+By default Inbox keeps its state in a SQLite file and exactly one instance runs. With a `postgres` block in the
+configuration (and no `storage.path`) the state lives in PostgreSQL instead, and **any number of instances can be active
+at the same time**, behind a load balancer (a Kubernetes Service). Phones can connect to any of them, and any of them
+accepts alerts: the loss of an instance is only a reconnection for the phones it held.
+
+- **Delivery state is the database.** An alert and its delivery rows are one transaction; the idempotency key is a unique
+  index, so a producer that retries through another instance is deduplicated (`200`). The database decides, not the
+  instances: for the same guarantees as SQLite, use a PostgreSQL that is itself replicated (synchronous commit).
+- **Instances tell each other with `LISTEN`/`NOTIFY`:** a new alert wakes the phone connected to another instance within a
+  few milliseconds, a revoked device and a device that reconnected elsewhere lose their old session. Notifications are a
+  speed-up, not a dependency: a session also looks at the database every `min(devices.resend_after, 5s)`, and after a
+  lost notification connection every session is flushed at once.
+- **Instances heartbeat in the `instances` table** (every 5 s, with the database clock). The sessions of an instance
+  silent for 30 s are closed by the survivors (`close_reason = instance_lost`), and the admin front shows the phones
+  connected to any instance as online.
+- **Plain TCP, no TLS stack:** use the private network (the connection is password authenticated, SCRAM). One role and one
+  database are enough; the schema is created and migrated at start under an advisory lock, and refused if it is newer
+  than the binary.
+- **Rate limits are per instance** (`security.max_auth_failures`): N instances allow N times as many attempts.
+- The `replica` block is for SQLite only.
+- **Moving an existing SQLite installation to PostgreSQL** keeps the enrolled phones and the history:
+  `inbox import-sqlite --config <config with a postgres block> --from <inbox.db or a snapshot>` copies devices,
+  subscriptions, alerts, deliveries and the connection log in one transaction, into an empty database (it refuses
+  otherwise). Stop the SQLite instance (or use its last snapshot) first, import, then start the PostgreSQL instances.
+
+### Degraded mode: the database has no primary
+
+A PostgreSQL failover takes from a few seconds to a few minutes. During that time the instances **keep accepting alerts and
+delivering them**, and the phones keep their sessions; the pods stay in the service (`/readyz` answers `200 degraded`).
+
+- Every call to the database is bounded (2 s). When one fails because the database is away, or does not answer, the
+  instance switches to its memory at once and a probe (every second, on its own connection) watches for a writable
+  primary (`pg_is_in_recovery() = false`). Events `storage_degraded` and `storage_recovered` are logged; the gauges
+  `inbox_storage_degraded` and `inbox_spool_alerts` and the counter `inbox_alerts_spooled_total` are exported.
+- An alert accepted meanwhile is validated as usual and kept in a **spool** (at most 10 000 alerts; beyond that the
+  producer gets `503 spool_full` and retries), with one delivery per device subscribed to its group, as last read from the
+  database (devices and subscriptions are reloaded every 5 s). Its id is derived from the source and the idempotency key,
+  so the same alert accepted by two instances has the same id, and a retry gets the same answer (`200`, same id).
+- **Before the producer is answered** the alert is copied to the other instances (`cluster` block): they hold it in their
+  spool and wake the phones connected to them. The alert therefore survives the loss of the instance that accepted it, as
+  long as one other instance had received the copy (`spool_unreplicated` is logged when none had). The phones connected
+  to the accepting instance are woken first, without waiting for the copies.
+- Receipts of the phones are kept too (and copied), so nothing is sent again. A phone deduplicates on the alert id anyway.
+- **When the database has a primary again**, each instance writes its spool, oldest first: `INSERT ... ON CONFLICT
+  (source, idempotency_key) DO NOTHING`, then the delivery rows with their state. Two instances writing the same alert, or
+  a crash half way, end with one alert row and one delivery row per device. Entries are dropped from the spool only once
+  committed, and only if nothing changed since they were copied. Instances that cannot reach the database at SIGTERM write
+  what they hold if they can, and log `spool_lost` otherwise.
+- **What needs the database still needs it:** enrolling a phone, changing a subscription or a pseudonym, revoking a device
+  (the phone is told `unavailable` and keeps its session; a device revoked during the outage can still connect until the
+  database is back), the admin front's history, the connection log (sessions opened meanwhile are not recorded). A phone
+  that was never loaded by an instance cannot open a session on it while the database is away (devices are cached every
+  5 s).
+- **Limits:** an alert accepted while the database is away exists only in memory. If every instance that holds it stops
+  before the database is back (all pods lost together), it is lost; the producer was answered `201`. The first alert after
+  the database goes away waits up to 2 s for the database to give up. A request to the database that timed out may still
+  have been committed: if the producer retries it during the outage and no instance remembers it, the phone can receive it
+  twice with different ids. A pod that starts while the database is away waits for it (60 s) and then exits.
+
+## Limitations
+
+- **SQLite mode: one active instance.** State lives in one SQLite file, so never run two replicas at once. To survive
+  the loss of the node, use [standby replication](#standby-replication), or run
+  [several active instances on PostgreSQL](#several-active-instances-postgresql).
+- **Android only.** iOS cannot keep a connection in the background without Apple's push service.
+- **TLS** is the reverse proxy's job.
+- **Telemetry export** is OTLP/HTTP over `http://` only.
+
+## Kubernetes (k3s)
+
+[deploy/k3s](deploy/k3s) holds a single-replica StatefulSet on a `local-path`
+volume, a ConfigMap, a Secret mounted at `/run/secrets`, probes on `/healthz` and
+`/readyz`, and Traefik IngressRoutes. It follows the conventions of the Home
+infrastructure repository. To export telemetry to the cluster collector, first
+allow traffic from `apps` to `observability:4318` in the NetworkPolicies.

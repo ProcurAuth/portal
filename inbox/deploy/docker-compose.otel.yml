@@ -1,0 +1,42 @@
+# Optional: an OpenTelemetry Collector printing Inbox telemetry.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d --build
+#
+# Then enable the telemetry block in config.hcl (otlp_endpoint =
+# "http://otel-collector:4318"). Replace the debug exporter with your backend.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    configs:
+      - source: otel_config
+        target: /etc/otelcol/config.yaml
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+  inbox:
+    depends_on:
+      - otel-collector
+
+configs:
+  otel_config:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+      processors:
+        batch: {}
+      exporters:
+        debug:
+          verbosity: basic
+      service:
+        pipelines:
+          traces:  { receivers: [otlp], processors: [batch], exporters: [debug] }
+          metrics: { receivers: [otlp], processors: [batch], exporters: [debug] }
+          logs:    { receivers: [otlp], processors: [batch], exporters: [debug] }

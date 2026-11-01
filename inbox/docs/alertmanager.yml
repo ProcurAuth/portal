@@ -1,0 +1,21 @@
+# Prometheus Alertmanager receiver paging through Inbox.
+# Each alert in a notification becomes one Inbox alert. Inbox deduplicates them
+# on fingerprint + status + startsAt, so Alertmanager retries and repeat_interval
+# re-sends never page twice for the same firing.
+route:
+  receiver: inbox-oncall
+  group_by: ["alertname"]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: inbox-oncall
+    webhook_configs:
+      - url: http://inbox:8080/api/v1/webhooks/alertmanager/oncall
+        send_resolved: false
+        max_alerts: 50
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/inbox_token
