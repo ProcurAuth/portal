@@ -767,8 +767,11 @@
         head.appendChild(box);
         head.appendChild(node("span", "ge__svcName", svc.name));
         var info = open ? "Can open" : "Cannot open";
-        if (others) info += " · " + plural(others, "permission", "permissions");
-        if (others && !open) {
+        if (svc.gated === false) {
+          // No path belongs to this service: the permissions work with the switch off.
+          info = others ? plural(others, "permission", "permissions") : "No permission";
+        } else if (others) info += " · " + plural(others, "permission", "permissions");
+        if (others && !open && svc.gated !== false) {
           info += ": turn the switch on, or the permissions do nothing";
           row.classList.add("is-orphan");
         }

@@ -170,6 +170,8 @@ fn json_block(data: &EditorData) -> String {
                     .map(|(name, parent)| serde_json::json!({ "name": name, "parent": parent }))
                     .collect::<Vec<_>>(),
                 "fetch": service.fetch,
+                // The inbox owns no path: the switch does not open anything.
+                "gated": service.id != crate::inbox_actions::SERVICE,
             })
         })
         .collect();

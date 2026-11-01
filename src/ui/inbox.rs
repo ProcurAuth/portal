@@ -304,7 +304,7 @@ pub fn overview_page(frame: &Frame, rights: &Rights, view: &OverviewView<'_>) ->
             );
         } else {
             out.push_str(
-                r#"<div class="dataTableWrap"><table class="dataTable stack alertsTable"><thead><tr><th scope="col" class="num">When</th><th scope="col">Group</th><th scope="col">Title</th><th scope="col" class="num">Received</th><th scope="col" class="num">Expired</th></tr></thead><tbody>"#,
+                r#"<div class="dataTableWrap"><table class="dataTable stack alertsTable"><thead><tr><th scope="col" class="num">When</th><th scope="col" class="narrowHide">Group</th><th scope="col">Title</th><th scope="col" class="num">Received</th><th scope="col" class="num narrowHide">Expired</th></tr></thead><tbody>"#,
             );
             for alert in alerts {
                 alert_row(&mut out, &view.groups, alert);
@@ -319,7 +319,7 @@ pub fn overview_page(frame: &Frame, rights: &Rights, view: &OverviewView<'_>) ->
 fn alert_row(out: &mut String, groups: &[GroupLine], alert: &AlertSummary) {
     let _ = write!(
         out,
-        r#"<tr data-alert="{id}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num{danger}" data-label="Expired">{expired}</td></tr>"#,
+        r#"<tr data-alert="{id}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td class="narrowHide" data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num narrowHide{danger}" data-label="Expired">{expired}</td></tr>"#,
         id = html_escape(&alert.id),
         group = html_escape(&alert.group),
         source = html_escape(&alert.source),
@@ -376,7 +376,7 @@ pub fn alert_page(frame: &Frame, view: &AlertView<'_>) -> String {
     out.push_str(r#"<section class="pagePart" aria-labelledby="inbox-title">"#);
     let _ = write!(
         out,
-        r##"<div class="pagePart__head"><a class="pageBack" href="{OVERVIEW_PATH}" aria-label="Back to the overview" title="Back to the overview"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg></a><h2 class="pagePart__title" id="inbox-title">{}</h2><span class="pagePart__count">{}</span></div>"##,
+        r##"<div class="pagePart__head"><a class="pageBack" href="{OVERVIEW_PATH}" aria-label="Back to the overview" title="Back to the overview"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg></a><h2 class="pagePart__title pagePart__title--data" id="inbox-title">{}</h2><span class="pagePart__count">{}</span></div>"##,
         html_escape(&summary.title),
         plural(summary.targets as usize, "phone", "phones"),
     );
@@ -401,7 +401,7 @@ pub fn alert_page(frame: &Frame, view: &AlertView<'_>) -> String {
         );
     } else {
         out.push_str(
-            r#"<div class="dataTableWrap"><table class="dataTable stack deliveriesTable"><thead><tr><th scope="col">Phone</th><th scope="col">Owner</th><th scope="col" class="num">Sent</th><th scope="col" class="num">Received</th><th scope="col">State</th></tr></thead><tbody>"#,
+            r#"<div class="dataTableWrap"><table class="dataTable stack deliveriesTable"><thead><tr><th scope="col">Phone</th><th scope="col" class="narrowHide">Owner</th><th scope="col" class="num narrowHide">Sent</th><th scope="col" class="num">Received</th><th scope="col">State</th></tr></thead><tbody>"#,
         );
         for d in &view.detail.deliveries {
             let state = if d.received_at.is_some() {
@@ -417,7 +417,7 @@ pub fn alert_page(frame: &Frame, view: &AlertView<'_>) -> String {
             };
             let _ = write!(
                 out,
-                r#"<tr data-device="{id}"><th scope="row" data-label="Phone">{name}</th><td data-label="Owner">{owner}</td><td class="num" data-label="Sent">{sent}</td><td class="num" data-label="Received">{received}</td><td data-label="State">{state}</td></tr>"#,
+                r#"<tr data-device="{id}"><th scope="row" data-label="Phone">{name}</th><td class="narrowHide" data-label="Owner">{owner}</td><td class="num narrowHide" data-label="Sent">{sent}</td><td class="num" data-label="Received">{received}</td><td data-label="State">{state}</td></tr>"#,
                 id = html_escape(&d.device_id),
                 name = html_escape(&d.device_name),
                 owner = html_escape(&d.user_name),
@@ -479,7 +479,7 @@ fn device_row(out: &mut String, view: &DevicesView<'_>, row: &DeviceRow, show_ow
     };
     let _ = write!(
         out,
-        r#"<td data-label="State">{}</td><td data-label="App">{}</td><td class="num" data-label="Last seen">{}</td><td data-label="Groups">{}</td><td class="num{}" data-label="Waiting">{}</td><td data-label="Actions" class="keyActions">"#,
+        r#"<td data-label="State">{}</td><td class="narrowHide" data-label="App">{}</td><td class="num narrowHide" data-label="Last seen">{}</td><td class="narrowHide" data-label="Groups">{}</td><td class="num narrowHide{}" data-label="Waiting">{}</td><td data-label="Actions" class="keyActions">"#,
         state_badge(row.state),
         match &d.app_version {
             Some(v) if !v.is_empty() => html_escape(v),
@@ -512,7 +512,7 @@ pub struct DevicesView<'a> {
 fn devices_table(out: &mut String, view: &DevicesView<'_>, show_owner: bool) {
     let _ = write!(
         out,
-        r#"<div class="dataTableWrap"><table class="dataTable stack devicesTable"><thead><tr><th scope="col">Phone</th>{}<th scope="col">State</th><th scope="col">App</th><th scope="col" class="num">Last seen</th><th scope="col">Groups</th><th scope="col" class="num">Waiting</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody>"#,
+        r#"<div class="dataTableWrap"><table class="dataTable stack devicesTable"><thead><tr><th scope="col">Phone</th>{}<th scope="col">State</th><th scope="col" class="narrowHide">App</th><th scope="col" class="num narrowHide">Last seen</th><th scope="col" class="narrowHide">Groups</th><th scope="col" class="num narrowHide">Waiting</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody>"#,
         if show_owner {
             r#"<th scope="col">Owner</th>"#
         } else {
@@ -649,12 +649,12 @@ pub fn connections_page(frame: &Frame, rights: &Rights, view: &ConnectionsView<'
         );
     } else {
         out.push_str(
-            r#"<div class="dataTableWrap"><table class="dataTable stack connectionsTable"><thead><tr><th scope="col" class="num">Start</th><th scope="col">Login</th><th scope="col">Phone</th><th scope="col">Address</th><th scope="col">App</th><th scope="col" class="num">End</th><th scope="col">Reason</th></tr></thead><tbody>"#,
+            r#"<div class="dataTableWrap"><table class="dataTable stack connectionsTable"><thead><tr><th scope="col" class="num">Start</th><th scope="col">Login</th><th scope="col">Phone</th><th scope="col" class="narrowHide">Address</th><th scope="col" class="narrowHide">App</th><th scope="col" class="num narrowHide">End</th><th scope="col" class="narrowHide">Reason</th></tr></thead><tbody>"#,
         );
         for c in &view.rows {
             let _ = write!(
                 out,
-                r#"<tr data-login="{login}" data-device="{id}" data-reason="{reason_data}"><td class="num" data-label="Start">{start}</td><td data-label="Login">{login}</td><td data-label="Phone">{name}</td><td data-label="Address">{ip}</td><td data-label="App">{app}</td><td class="num" data-label="End">{end}</td><td data-label="Reason">{reason}</td></tr>"#,
+                r#"<tr data-login="{login}" data-device="{id}" data-reason="{reason_data}"><td class="num" data-label="Start">{start}</td><td data-label="Login">{login}</td><td data-label="Phone">{name}</td><td class="narrowHide" data-label="Address">{ip}</td><td class="narrowHide" data-label="App">{app}</td><td class="num narrowHide" data-label="End">{end}</td><td class="narrowHide" data-label="Reason">{reason}</td></tr>"#,
                 login = html_escape(&c.user_name),
                 id = html_escape(&c.device_id),
                 start = when(c.connected_at),
