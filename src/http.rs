@@ -2068,18 +2068,24 @@ async fn handle_login_post(
             );
         }
         state.metrics.login_failure();
+        // A person can type the password in the login field. The text is recorded only when it names an account.
+        let recorded = if known {
+            typed
+        } else {
+            String::from("(unknown login)")
+        };
         log(
             state,
             LogLevel::Warn,
             "login_failed",
             &[
                 ("client_ip", client_ip_text),
-                ("login", typed.clone()),
+                ("login", recorded.clone()),
                 ("known", known.to_string()),
             ],
         );
         state.tracker.emit(Event::Login(LoginAttempt {
-            login: typed,
+            login: recorded,
             known,
             success: false,
             ip: ip_text(client),

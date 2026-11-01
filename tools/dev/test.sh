@@ -11,7 +11,7 @@ image=${RUST_IMAGE:-rust:1.98}
 docker network inspect portal-net >/dev/null 2>&1 || docker network create portal-net >/dev/null
 if ! docker ps --format '{{.Names}}' | grep -qx portal-pg; then
   docker rm -f portal-pg >/dev/null 2>&1 || true
-  docker run -d --name portal-pg --network portal-net -e POSTGRES_PASSWORD=testonly -e POSTGRES_DB=portal_test \
+  docker run -d --name portal-pg --network portal-net -e POSTGRES_PASSWORD=testonly -e POSTGRES_DB=portal_test --shm-size=1g \
     postgres:18 -c fsync=off -c max_connections=2000 -c shared_buffers=128MB >/dev/null
   for _ in $(seq 1 40); do docker exec portal-pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 fi
