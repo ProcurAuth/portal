@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Starts the local demo of the portal. Docker is the only tool that this script needs, with openssl for the keys.
-# Nothing is published to a registry: the portal image stays on this machine.
+# Starts the local demo of the portal with the inbox. Docker is the only tool that this script needs,
+# with openssl for the keys and curl for the seed. Nothing is published to a registry: the portal
+# image stays on this machine.
+#
+# The superadmin password is `test`. This is for a demo on one machine only.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -13,30 +16,48 @@ random() { openssl rand -base64 48 | tr -d '=+/\n' | head -c "$1"; }
 echo "Building the portal image (local/portal:demo)..."
 docker build -q -t local/portal:demo -f ../docker/Dockerfile --target runtime ..
 
-if [ ! -f "$secrets/credentials.txt" ]; then
-  umask 077
-  printf 'admin' > "$secrets/superadmin_login"
-  random 24 > "$secrets/superadmin_password"
-  random 20 > "$secrets/alice_password"
-  random 20 > "$secrets/bob_password"
-  random 43 > "$secrets/pdp_token_notes"
+umask 077
+# Each file is made one time. A file that exists stays: delete it to make it again.
+[ -f "$secrets/superadmin_login" ] || printf 'admin' > "$secrets/superadmin_login"
+[ -f "$secrets/superadmin_password" ] || printf 'test' > "$secrets/superadmin_password"
+for user in alice bob carol; do
+  [ -f "$secrets/${user}_password" ] || random 20 > "$secrets/${user}_password"
+done
+[ -f "$secrets/pdp_token_notes" ] || random 43 > "$secrets/pdp_token_notes"
+if [ ! -f "$secrets/identity_key.pem" ]; then
   openssl genpkey -algorithm ed25519 -out "$secrets/identity_key.pem" 2> /dev/null
   openssl pkey -in "$secrets/identity_key.pem" -pubout -out "$secrets/identity_pub.pem"
-  for user in alice bob; do
-    docker run --rm -i local/portal:demo hash-password < "$secrets/${user}_password" > "$secrets/${user}_hash"
-  done
-  {
-    echo "URL:        http://localhost:8088/"
-    echo "superadmin: admin / $(cat "$secrets/superadmin_password")"
-    echo "alice:      alice / $(cat "$secrets/alice_password")"
-    echo "bob:        bob / $(cat "$secrets/bob_password")"
-  } > "$secrets/credentials.txt"
-  # The service notes runs as another user, and it must read its two files.
-  chmod 644 "$secrets"/* 
 fi
+# The Noise key of the inbox server and the token of the producer. A new key invalidates every phone.
+inbox() { docker run --rm --network none -u "$(id -u):$(id -g)" -v "$PWD/$secrets:/out" local/portal:demo inbox "$@"; }
+[ -f "$secrets/inbox_server_key" ] || inbox keygen --out /out/inbox_server_key > /dev/null
+[ -f "$secrets/inbox_producer_token" ] || inbox token --out /out/inbox_producer_token > /dev/null
+{
+  echo "URL:        http://localhost:8088/"
+  echo "superadmin: admin / $(cat "$secrets/superadmin_password")"
+  echo "alice:      alice / $(cat "$secrets/alice_password")"
+  echo "bob:        bob / $(cat "$secrets/bob_password")"
+  echo "carol:      carol / $(cat "$secrets/carol_password")"
+} > "$secrets/credentials.txt"
+# The service notes runs as another user, and it must read its files.
+chmod 644 "$secrets"/*
 
 docker compose up -d --build
+
+# The portal opens its port when its catalogue is complete. Traefik then needs a moment to route to it.
+code() { curl -s -o /dev/null -w '%{http_code}' "$1" || true; }
+echo "Waiting for the portal..."
+for _ in $(seq 1 120); do
+  [ "$(code http://localhost:8091/healthz)" = 200 ] && [ "$(code http://localhost:8088/auth/login)" = 200 ] && break
+  sleep 2
+done
+[ "$(code http://localhost:8088/auth/login)" = 200 ] \
+  || { echo "The portal did not start. Read: docker logs portal-demo" >&2; exit 1; }
+
+./seed.sh
+
 echo
 echo "The demo runs at http://localhost:8088/"
+echo "The devices listener of the inbox is at http://127.0.0.1:8089 and, for an emulator, at http://172.17.0.1:8089"
 echo "The logins and the passwords are in demo/$secrets/credentials.txt"
 echo "Stop it with: docker compose -f demo/docker-compose.yml down -v"
