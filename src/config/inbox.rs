@@ -92,6 +92,8 @@ pub struct ClusterConfig {
 pub struct GroupConfig {
     pub name: String,
     pub description: String,
+    /// A critical group never has a limit on `alert.send`.
+    pub critical: bool,
 }
 
 /// A block `producer`, without its token.
@@ -194,6 +196,7 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
             GroupConfig {
                 name: block.text("name")?,
                 description: block.text("description")?,
+                critical: block.bool("critical")?,
             },
         );
     }

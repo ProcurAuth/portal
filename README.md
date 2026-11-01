@@ -538,6 +538,7 @@ inbox {
 
   producer "grafana" {
     token_file = "/run/secrets/inbox_grafana_token"    # or: token_env
+    critical    = false                                # default; true: no limit on alert.send
     groups     = ["infra"]
   }
 }
@@ -1110,6 +1111,7 @@ Hyper parses HTTP/1. The application configures bounded HTTP behavior:
 Dynamic `Location`, `Set-Cookie` and `Retry-After` values are converted to typed HTTP header values. An invalid value fails closed. The program does not emit it.
 
 The crate uses `#![forbid(unsafe_code)]` for project code.
+| `critical` | `true` or `false` | `false` | `true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group. |
 
 ## CSRF and Origin/Referer verification
 

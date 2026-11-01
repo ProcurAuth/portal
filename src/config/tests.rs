@@ -1895,6 +1895,11 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     assert!(inbox.replica.is_none() && inbox.cluster.is_none());
     assert_eq!(inbox.groups.len(), 2);
     assert_eq!(inbox.groups["oncall"].description, "");
+    assert!(!inbox.groups["infra"].critical && !inbox.groups["oncall"].critical);
+    assert_eq!(
+        line(&config, "inbox.group.infra.critical").source,
+        "default"
+    );
     assert_eq!(inbox.producers["grafana"].groups, ["infra"]);
     assert!(!inbox.producers["grafana"].webhook_send_resolved);
     let secrets = secrets.inbox.unwrap();
@@ -1939,6 +1944,26 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     assert!(config
         .render_effective()
         .contains("inbox.devices.resend_after = \"15s\"  # file"));
+}
+
+#[test]
+fn a_group_can_be_critical_and_the_value_must_be_a_boolean() {
+    let text = with_inbox(&INBOX.replace(
+        "group \"oncall\" { name = \"On call\" }",
+        "group \"oncall\" { name = \"On call\" critical = true }",
+    ));
+    let (config, _) = inbox_ok(&text);
+    let inbox = config.inbox.as_ref().unwrap();
+    assert!(inbox.groups["oncall"].critical);
+    assert!(!inbox.groups["infra"].critical);
+    assert_eq!(line(&config, "inbox.group.oncall.critical").value, "true");
+    assert_eq!(line(&config, "inbox.group.oncall.critical").source, "file");
+    let text = with_inbox(&INBOX.replace(
+        "group \"oncall\" { name = \"On call\" }",
+        "group \"oncall\" { name = \"On call\" critical = \"yes\" }",
+    ));
+    let error = inbox_err(&text);
+    assert!(error.contains("inbox.group.oncall.critical"), "{error}");
 }
 
 #[test]

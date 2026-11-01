@@ -1278,6 +1278,14 @@ pub static LABELED_KEYS: &[Key] = &[
         doc: "The description of the group.",
     },
     Key {
+        block: "group",
+        name: "critical",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::LabeledBlock,
+        doc: "`true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group.",
+    },
+    Key {
         block: "producer",
         name: "token",
         kind: Kind::Secret { max_bytes: 1024 },
