@@ -1,10 +1,23 @@
+# The context of the image holds the Rust sources and the pages. Nothing else.
 .git
 .github
 .env
+.env.*
 target
+target-*
 dist
+secrets
+deploy
+demo
+android
+docs
+tools
+examples
+scripts
+tests
+*.md
 *.zip
 *.tgz
-*.sha256
+*.jks
+*.keystore
 .DS_Store
-demo
