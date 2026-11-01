@@ -29,6 +29,12 @@ pub enum Kind {
         check: fn(&str) -> Result<(), String>,
         max_items: usize,
     },
+    /// A list of grants. An item is a quoted grant, or an object with the members `grant` (the
+    /// quoted grant) and `limits` (an object of limit values). `expected` describes an item.
+    Grants {
+        expected: &'static str,
+        max_items: usize,
+    },
     /// A secret. The file never holds it: the key `<name>_env` names an environment variable, or the
     /// key `<name>_file` names a file. `max_bytes` is the largest size that the program reads.
     Secret { max_bytes: usize },
@@ -68,6 +74,8 @@ pub enum When {
     IdentityBlock,
     /// The block `pdp` is present.
     PdpBlock,
+    /// The block `keys` is present.
+    KeysBlock,
     /// A block with a label: the key applies in each block of its kind.
     LabeledBlock,
 }
@@ -80,6 +88,7 @@ impl When {
             | When::PostgresBlock
             | When::IdentityBlock
             | When::PdpBlock
+            | When::KeysBlock
             | When::LabeledBlock => "the key always applies",
             When::NoPostgres => "the postgres block is present",
             When::KubernetesOn => "discovery.kubernetes is false",
@@ -98,6 +107,7 @@ impl When {
             | When::PostgresBlock
             | When::IdentityBlock
             | When::PdpBlock
+            | When::KeysBlock
             | When::LabeledBlock => "",
             When::NoPostgres => "Applies only without the `postgres` block.",
             When::KubernetesOn => "Applies only when `discovery.kubernetes` is `true`.",
@@ -162,6 +172,12 @@ impl Key {
                 max_items,
                 ..
             } => format!("a list of at most {max_items} quoted strings: {expected}"),
+            Kind::Grants {
+                expected,
+                max_items,
+            } => format!(
+                "a list of at most {max_items} grants. Each item is a quoted grant or an object with grant and limits: {expected}"
+            ),
             Kind::Secret { .. } => "a secret".to_string(),
         }
     }
@@ -191,6 +207,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
     (
         "pdp",
         "This block is optional. If it is present, the server is an AuthZEN PDP on a second, internal listener.",
+    ),
+    (
+        "keys",
+        "This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys, and the edge and the PDP accept them. The block needs the blocks `identity` and `pdp`.",
     ),
     ("storage", "The history, and the SQLite file."),
     (
@@ -301,7 +321,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 256 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of machine principals. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
+        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of keys. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
     },
     Key {
         block: "authentication",
@@ -320,6 +340,14 @@ pub static KEYS: &[Key] = &[
         doc: "The largest number of accounts in the database.",
     },
     Key {
+        block: "users",
+        name: "max_grants",
+        kind: Kind::Int { min: 1, max: 30_000 },
+        presence: Presence::Default("512"),
+        when: When::Always,
+        doc: "The largest number of grants of one user. A key holds at most 512 grants, at any value of this key. A user with 3 grants for each service and the 8 actions of the service `portal` needs 3 x the number of services + 8 grants.",
+    },
+    Key {
         block: "access",
         name: "grants_mode",
         kind: Kind::Enum(&["static", "dynamic", "hybrid"]),
@@ -333,7 +361,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: Duration::from_millis(100), max: secs(30) },
         presence: Presence::Default("2s"),
         when: When::Always,
-        doc: "The time that the server waits for the `/.well-known/access-actions` document of one service.",
+        doc: "The time that the server waits for the `/.well-known/procurauth/actions` document of one service.",
     },
     Key {
         block: "access",
@@ -341,7 +369,47 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(10), max: secs(DAY) },
         presence: Presence::Default("5m"),
         when: When::Always,
-        doc: "The time between two reads of the `/.well-known/access-actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP.",
+        doc: "The time between two reads of the `/.well-known/procurauth/actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP.",
+    },
+    Key {
+        block: "access",
+        name: "actions_max_age",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
+        presence: Presence::Default("1h"),
+        when: When::Always,
+        doc: "The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document. The edge also refuses each key for this service. The value must be more than `access.actions_refresh`.",
+    },
+    Key {
+        block: "access",
+        name: "max_actions",
+        kind: Kind::Int { min: 64, max: 4096 },
+        presence: Presence::Default("1024"),
+        when: When::Always,
+        doc: "The largest number of actions in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 64 at least.",
+    },
+    Key {
+        block: "access",
+        name: "max_resources",
+        kind: Kind::Int { min: 256, max: 65_536 },
+        presence: Presence::Default("4096"),
+        when: When::Always,
+        doc: "The largest number of resources in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 256 at least.",
+    },
+    Key {
+        block: "access",
+        name: "max_document_bytes",
+        kind: Kind::Int { min: 64 * 1024, max: 4 * 1024 * 1024 },
+        presence: Presence::Default("262144"),
+        when: When::Always,
+        doc: "The largest size, in bytes, of the document of one service. The server stops the read at this size, and the document is bad. Protocol 5.3c asks a reader to accept 64 KiB at least. The server keeps the last good document of each service in memory.",
+    },
+    Key {
+        block: "access",
+        name: "start_read_deadline",
+        kind: Kind::Duration { min: secs(1), max: secs(300) },
+        presence: Presence::Default("5s"),
+        when: When::Always,
+        doc: "The longest time that the server waits, at start, for the first read of the documents of the services. After this time, the server opens its ports and reads the other documents in the background.",
     },
     Key {
         block: "identity",
@@ -379,7 +447,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::IdentityBlock,
-        doc: "The Ed25519 private key that signs the identity tokens (algorithm `EdDSA`): a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services.",
+        doc: "The Ed25519 private key that signs the identity tokens (algorithm `Ed25519`): a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services, as a JWK Set.",
     },
     Key {
         block: "pdp",
@@ -418,6 +486,70 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("64"),
         when: When::PdpBlock,
         doc: "The largest number of evaluations in one request to `/access/v1/evaluations`.",
+    },
+    Key {
+        block: "pdp",
+        name: "plain_http",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::PdpBlock,
+        doc: "Set it to `true` to accept an `http` value of `pdp.url`. Then the operator states that other means secure the link to the PDP. With `false`, an `http` URL stops the server. With `true`, an `https` URL also stops the server. With `true`, the start log has a warning.",
+    },
+    Key {
+        block: "pdp",
+        name: "counter_connections",
+        kind: Kind::Int { min: 1, max: 64 },
+        presence: Presence::Default("2"),
+        when: When::PdpBlock,
+        doc: "The number of database connections that count the uses of the budgets. Each connection counts approximately 1,000 uses each second. A use that waits more than 500 ms gets the HTTP status 503.",
+    },
+    Key {
+        block: "keys",
+        name: "default_lifetime",
+        kind: Kind::Duration { min: secs(DAY), max: secs(365 * DAY) },
+        presence: Presence::Default("30d"),
+        when: When::KeysBlock,
+        doc: "The lifetime that the form of a new key proposes. The form uses the lower of this value and the longest lifetime of the owner (`max_key_lifetime`).",
+    },
+    Key {
+        block: "keys",
+        name: "directory_max_age",
+        kind: Kind::Duration { min: secs(15), max: secs(300) },
+        presence: Presence::Default("30s"),
+        when: When::KeysBlock,
+        doc: "The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds.",
+    },
+    Key {
+        block: "keys",
+        name: "max_per_user",
+        kind: Kind::Int { min: 1, max: 10_000 },
+        presence: Presence::Default("100"),
+        when: When::KeysBlock,
+        doc: "The largest number of active keys of one user. An expired key and a key that is too old do not count.",
+    },
+    Key {
+        block: "keys",
+        name: "max_counter_rows",
+        kind: Kind::Int { min: 1, max: 100_000_000 },
+        presence: Presence::Default("2000000"),
+        when: When::KeysBlock,
+        doc: "The largest number of counter rows. The server refuses a write that makes more rows. A file that needs more rows stops the server at start. One row is approximately 300 bytes.",
+    },
+    Key {
+        block: "keys",
+        name: "max_directory_grants",
+        kind: Kind::Int { min: 1, max: 100_000_000 },
+        presence: Presence::Default("4000000"),
+        when: When::KeysBlock,
+        doc: "The largest number of grants of the directory: the grants of the users and the keys. The server refuses a write that makes more grants. A file that needs more grants stops the server at start. One grant takes approximately 200 bytes of memory.",
+    },
+    Key {
+        block: "keys",
+        name: "history_days",
+        kind: Kind::Int { min: 1, max: 3650 },
+        presence: Presence::Default("90"),
+        when: When::KeysBlock,
+        doc: "The number of days that the server keeps the summary row of a revoked key.",
     },
     Key {
         block: "storage",
@@ -779,6 +911,11 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
         "The grants of one user that the configuration gives (modes `static` and `hybrid`). The label is the login, as the server keeps it: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'. The account itself is in the database. The superadmin has all grants and has no `user` block.",
     ),
     (
+        "key",
+        "<name>",
+        "One key of a user of the file. The block is inside a block `user`. The label is the name of the key: 1 to 64 characters, with no control character. Two keys of one user have two names. The subject id of the key is `key:` and the first 16 hexadecimal characters of the SHA-256 digest of the login, a zero byte and the name. A key of the file has no expiry date. To stop it, remove the block and restart each instance. The block needs the block `keys`.",
+    ),
+    (
         "pdp_client",
         "<server>",
         "One server that asks the PDP for decisions. The label is the name of the server: the id of its service in the catalogue, and the audience of its identity tokens. The PDP answers only for the resources of this server.",
@@ -790,14 +927,48 @@ pub static LABELED_KEYS: &[Key] = &[
     Key {
         block: "user",
         name: "grants",
-        kind: Kind::List {
-            expected: "grants such as \"access on service:grafana\" or \"query.run.write on service:clickhouse-dash/host:local/database:analytics\": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded",
-            check: check_grant,
-            max_items: crate::grants::MAX_GRANTS_PER_USER,
+        kind: Kind::Grants {
+            expected: "a grant such as \"access on service:grafana\" or \"query.run.write on service:clickhouse-dash/host:local/database:analytics\": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded. To give limit values, write { grant = \"access on service:datastore\", limits = { requests = [ { amount = 300, window = \"minute\" } ] } }",
+            max_items: 30_000,
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant.",
+        doc: "The grants of the user. The user is an account of the file, with no row in the database. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. The `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget value is only on the grant `access` on a service. A grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON. The number of grants is at most `users.max_grants`. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give.",
+    },
+    Key {
+        block: "user",
+        name: "password_hash",
+        kind: Kind::Secret { max_bytes: 512 },
+        presence: Presence::Optional,
+        when: When::LabeledBlock,
+        doc: "The Argon2id digest of the password of the user, in the PHC string form, as the database keeps it. Without it, the account opens no session, and only its keys act for it.",
+    },
+    Key {
+        block: "key",
+        name: "grants",
+        kind: Kind::Grants {
+            expected: "the same form as `user.grants`",
+            max_items: 512,
+        },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The grants of the key, in the form of `user.grants`. A key holds at most 512 grants. A grant of an action of the service `portal` stops the server. The decision for a key never gives more than the grants of its owner.",
+    },
+    Key {
+        block: "key",
+        name: "key",
+        kind: Kind::Secret { max_bytes: 64 },
+        presence: Presence::Optional,
+        when: When::LabeledBlock,
+        doc: "The text of the key: `mcp_`, 43 characters and 6 characters of checksum. Give `key_env` or `key_file`, or give `key_sha256_env` or `key_sha256_file`: exactly one of the four. A bad form stops the server.",
+    },
+    Key {
+        block: "key",
+        name: "key_sha256",
+        kind: Kind::Secret { max_bytes: 128 },
+        presence: Presence::Optional,
+        when: When::LabeledBlock,
+        doc: "The SHA-256 digest of the text of the key: 64 hexadecimal characters, in upper or lower case. A digest that the database or another block also holds stops the server. The digest must be the digest of a text of the form `mcp_`, 43 characters and 6 characters of checksum: the server cannot check this at start.",
     },
     Key {
         block: "pdp_client",
@@ -824,14 +995,27 @@ pub fn block_names() -> Vec<&'static str> {
     BLOCKS.iter().map(|(name, _)| *name).collect()
 }
 
-/// The name of each block with a label, for the closed list of the parser.
+/// The blocks with a label that a block with a label holds: `(parent, child)`.
+pub const NESTED_BLOCKS: &[(&str, &str)] = &[("user", "key")];
+
+/// The name of each block with a label at the top of the file, for the closed list of the parser.
 pub fn labeled_block_names() -> Vec<&'static str> {
+    LABELED_BLOCKS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .filter(|name| !NESTED_BLOCKS.iter().any(|(_, child)| child == name))
+        .collect()
+}
+
+/// The name of each block with a label, at the top of the file or inside a block.
+#[cfg(test)]
+pub fn all_labeled_block_names() -> Vec<&'static str> {
     LABELED_BLOCKS.iter().map(|(name, _, _)| *name).collect()
 }
 
 /// The blocks that the file may omit. Their keys apply only when the block is present.
 pub fn is_optional_block(block: &str) -> bool {
-    matches!(block, "postgres" | "identity" | "pdp")
+    matches!(block, "postgres" | "identity" | "pdp" | "keys")
 }
 
 // Checks of the text keys. Each returns the reason when the value is bad.
@@ -861,7 +1045,7 @@ fn check_absolute_path(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_grant(value: &str) -> Result<(), String> {
+pub fn check_grant(value: &str) -> Result<(), String> {
     crate::grants::Grant::parse(value).map(|_| ())
 }
 
@@ -1079,6 +1263,12 @@ fn type_cell(key: &Key) -> String {
         } => {
             format!("list of at most {max_items} quoted strings: {expected}")
         }
+        Kind::Grants {
+            expected,
+            max_items,
+        } => format!(
+            "list of at most {max_items} grants, each a quoted text or an object with `grant` and `limits`: {expected}"
+        ),
         Kind::Secret { .. } => format!(
             "secret: give `{0}_env` (a variable name) or `{0}_file` (an absolute path), not both",
             key.name
@@ -1170,7 +1360,7 @@ mod tests {
                 "empty block {block}"
             );
         }
-        let labeled = labeled_block_names();
+        let labeled = all_labeled_block_names();
         for key in LABELED_KEYS {
             assert!(labeled.contains(&key.block), "{}", key.path());
             assert!(!blocks.contains(&key.block), "{} has a label", key.block);

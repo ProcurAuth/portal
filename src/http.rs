@@ -30,6 +30,8 @@ use crate::discovery;
 use crate::grants::{self, Grant, Policy};
 use crate::icons::{Icons, Set};
 use crate::identity::Signer;
+use crate::key_forms;
+use crate::keyauth;
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
 use crate::session::{Binding, NewSession, Principal, Session, SessionIssueError, SessionStore};
@@ -47,14 +49,14 @@ const HOME_PATH: &str = "/";
 const LOGIN_PATH: &str = "/auth/login";
 const LOGOUT_PATH: &str = "/auth/logout";
 const VERIFY_PATH: &str = "/auth/verify";
+const VERIFY_KEY_PATH: &str = "/auth/verify-key";
+const PORTAL_RIGHTS_PATH: &str = "/auth/users/portal-rights";
 const HEALTH_PATH: &str = "/healthz";
 const SUCCESS_PATH: &str = "/auth/success";
 const DENIED_PATH: &str = "/auth/denied";
 const USERS_ADD_PATH: &str = "/auth/users/add";
 const USERS_DELETE_PATH: &str = "/auth/users/delete";
 const USERS_UPDATE_PATH: &str = "/auth/users/update";
-const GRANT_ADD_PATH: &str = "/auth/users/grant-add";
-const GRANT_DELETE_PATH: &str = "/auth/users/grant-delete";
 const IMPERSONATE_PATH: &str = "/auth/users/impersonate";
 const IMPERSONATE_END_PATH: &str = "/auth/users/impersonate-end";
 const END_SESSIONS_PATH: &str = "/auth/users/end-sessions";
@@ -126,6 +128,10 @@ pub struct AppState {
     /// The sign-in bodies that the server reads at the same time (`server.max_login_body_reads`).
     /// Slow bodies cannot take every connection that ForwardAuth needs.
     pub login_body_gate: Arc<Semaphore>,
+    /// The bodies of the forms of the keys that the server reads at the same time: at most 4
+    /// (portal 5.8c). A fifth request gets the status 503.
+    pub key_body_gate: Arc<Semaphore>,
+
     pub metrics: Metrics,
     /// The current service catalog. Discovery replaces the whole snapshot.
     pub catalog: RwLock<Arc<Catalog>>,
@@ -137,9 +143,27 @@ pub struct AppState {
     pub signer: Option<Signer>,
     /// The actions that each service publishes.
     pub actions: Arc<actions::Registry>,
+    /// The options of the forms of grants: the children that a service lists (portal 3.1a).
+    pub options: crate::options::Options,
     /// The servers that can ask the PDP. Each server has the hash of its token.
-    pub pdp_clients: Vec<pdp::Client>,
+    pub pdp_clients: pdp::Clients,
     pub pdp_stats: pdp::Stats,
+    /// The key checks that passed, not yet written to the database (portal 5.5a).
+    pub key_checks: crate::keyauth::KeyChecks,
+    /// The count of the key checks of the edge, by result (portal 10.5).
+    pub key_stats: crate::keyauth::CheckStats,
+    /// The limit of the lines of the failed key checks (portal 10.5a).
+    pub key_failure_log: crate::keyauth::FailureLog,
+    /// The count of the uses of the budgets, with the refusal memo (portal 7.2b, 7.6).
+    pub counting: crate::counting::Counting,
+    /// The counters whose rows this instance made or found (portal 7.2a).
+    /// The number of limit values that the documents do not declare (portal 7.8).
+    pub undeclared_values: std::sync::atomic::AtomicU64,
+    /// The stop on SIGTERM: the live connections and the signal that closes them (portal 7.3a).
+    pub stop: crate::shutdown::Stop,
+    pub ensured_counters: std::sync::Mutex<
+        std::collections::HashSet<(crate::decision::CounterOwner, crate::grants::CounterId)>,
+    >,
 }
 
 /// The secrets of the access model: the key of the identity tokens and the tokens of the PDP clients.
@@ -168,11 +192,13 @@ impl AppState {
             (None, None) => None,
             _ => return Err("internal error: the identity block and its key do not agree".into()),
         };
-        let pdp_clients = access
-            .pdp_tokens
-            .iter()
-            .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
-            .collect();
+        let pdp_clients = pdp::clients(
+            access
+                .pdp_tokens
+                .iter()
+                .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
+                .collect(),
+        )?;
         drop(access);
         let policy = Policy::new(
             config.access.grants_mode,
@@ -190,7 +216,19 @@ impl AppState {
             // impersonated sessions on every instance.
             sessions.end_other_generations();
         }
-        let users = Directory::new(store.load_users()?, config.users.max_users);
+        let snapshot = store.load_directory()?;
+        crate::bootstrap::check_file_against_database(&config, &snapshot)?;
+        crate::bootstrap::check_user_grants(&config, &snapshot)?;
+        let users = Directory::from_snapshot(snapshot, config.users.max_users)
+            .with_file_keys(crate::bootstrap::file_keys(&config))
+            .with_file_accounts(
+                config
+                    .access
+                    .accounts
+                    .iter()
+                    .map(|(login, account)| (login, account.grants.as_slice())),
+            );
+        let ensured = crate::bootstrap::prepare_counters(&config, &store, &users, unix_now())?;
         let dummy_hash = hash_password(b"a password nobody has chosen")?;
         Ok(Self {
             ip_limiter: RateLimiter::new(
@@ -208,15 +246,27 @@ impl AppState {
                 config.security.max_concurrent_password_checks,
             )),
             login_body_gate: Arc::new(Semaphore::new(config.server.max_login_body_reads)),
+            key_body_gate: Arc::new(Semaphore::new(4)),
             metrics: Metrics::new(),
             catalog: RwLock::new(Arc::new(Catalog::default())),
             discovery: Arc::new(discovery::Stats::default()),
             icons: Icons::load(&config.ui.icons_dir),
             policy,
             signer,
-            actions: Arc::new(actions::Registry::default()),
+            actions: Arc::new(
+                actions::Registry::new(config.access.actions_max_age)
+                    .with_bounds(config.access.bounds),
+            ),
+            options: crate::options::Options::new(config.access.actions_timeout)?,
             pdp_clients,
             pdp_stats: pdp::Stats::default(),
+            key_checks: crate::keyauth::KeyChecks::default(),
+            key_stats: crate::keyauth::CheckStats::default(),
+            key_failure_log: crate::keyauth::FailureLog::default(),
+            counting: crate::counting::Counting::default(),
+            undeclared_values: std::sync::atomic::AtomicU64::new(0),
+            stop: crate::shutdown::Stop::default(),
+            ensured_counters: std::sync::Mutex::new(ensured),
             sessions,
             users,
             store,
@@ -244,10 +294,102 @@ pub fn serve(state: Arc<AppState>) -> Result<(), String> {
         .enable_time()
         .build()
         .map_err(|e| format!("cannot create Tokio runtime: {e}"))?;
-    runtime.block_on(serve_async(state))
+    runtime.block_on(serve_until(state, termination()))
 }
 
-async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
+/// Like [`serve`], with a stop that the caller gives in place of the signals. A test uses it.
+#[cfg(test)]
+pub fn serve_with(
+    state: Arc<AppState>,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(state.config.server.workers)
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|e| format!("cannot create Tokio runtime: {e}"))?;
+    runtime.block_on(serve_until(state, stop))
+}
+
+/// Ends on SIGTERM or SIGINT. When the process cannot listen for a signal, it never ends.
+async fn termination() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let notify = Arc::new(tokio::sync::Notify::new());
+    for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
+        if let Ok(mut stream) = signal(kind) {
+            let notify = Arc::clone(&notify);
+            tokio::spawn(async move {
+                stream.recv().await;
+                notify.notify_one();
+            });
+        }
+    }
+    notify.notified().await;
+}
+
+/// How often the start looks at the tasks that it waits for.
+const START_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+/// How often the start says that it waits for the catalogue.
+const START_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Waits for the tasks that must end before the ports open (portal 7.3b): the complete list of
+/// the services, then the first reads of their documents, at most `access.start_read_deadline`.
+/// The directory is loaded when the state exists. Gives `false` when the stop came first.
+async fn wait_ready(
+    state: &AppState,
+    catalog_complete: &std::sync::atomic::AtomicBool,
+    stopped: &tokio::sync::Notify,
+) -> bool {
+    let mut next_log = Instant::now() + START_LOG_EVERY;
+    while !catalog_complete.load(std::sync::atomic::Ordering::SeqCst) {
+        if tokio::time::timeout(START_TICK, stopped.notified())
+            .await
+            .is_ok()
+        {
+            return false;
+        }
+        if Instant::now() >= next_log {
+            next_log += START_LOG_EVERY;
+            log(
+                state,
+                LogLevel::Warn,
+                "start_waits",
+                &[("detail", "the catalogue is not complete yet".into())],
+            );
+        }
+    }
+    let deadline = Instant::now() + state.config.access.start_read_deadline;
+    loop {
+        if state.actions.first_reads_done(&current_catalog(state)) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            log(
+                state,
+                LogLevel::Warn,
+                "start_read_deadline",
+                &[(
+                    "detail",
+                    "the first reads of the documents go on in the background".into(),
+                )],
+            );
+            return true;
+        }
+        if tokio::time::timeout(START_TICK, stopped.notified())
+            .await
+            .is_ok()
+        {
+            return false;
+        }
+    }
+}
+
+/// Runs the server until `stop` ends (portal 7.3a, 7.3b).
+async fn serve_until(
+    state: Arc<AppState>,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
     // The value of each key that applies, with its source. The portal hides the secrets.
     for line in &state.config.effective {
         log(
@@ -261,31 +403,29 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
             ],
         );
     }
-    let listener = TcpListener::bind(state.config.server.listen_address)
-        .await
-        .map_err(|e| {
-            format!(
-                "cannot listen on {}: {e}",
-                state.config.server.listen_address
-            )
-        })?;
-    let connection_gate = Arc::new(Semaphore::new(state.config.server.max_connections));
-    let pdp_listener = match &state.config.pdp {
-        Some(pdp) => Some(TcpListener::bind(pdp.listen_address).await.map_err(|e| {
-            format!(
-                "cannot listen on {} (pdp.listen_address): {e}",
-                pdp.listen_address
-            )
-        })?),
-        None => None,
-    };
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    {
+        let stopped = Arc::clone(&stopped);
+        tokio::spawn(async move {
+            stop.await;
+            stopped.notify_one();
+        });
+    }
 
+    let catalog_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let publisher = Arc::clone(&state);
+    let complete = Arc::clone(&catalog_complete);
     tokio::spawn(discovery::run(
         state.config.discovery.clone(),
         Arc::clone(&state.discovery),
         move |catalog| {
+            let is_complete = catalog.is_complete();
             *publisher.catalog.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(catalog);
+            if is_complete {
+                complete.store(true, std::sync::atomic::Ordering::SeqCst);
+                // The first reads need no wait for the end of a tick.
+                publisher.actions.wake_loop();
+            }
         },
     ));
     let reader = Arc::clone(&state);
@@ -297,8 +437,30 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
         state.config.access.actions_timeout,
         state.config.access.actions_refresh,
     ));
+    if !wait_ready(&state, &catalog_complete, &stopped).await {
+        return Ok(());
+    }
+
+    let listener = TcpListener::bind(state.config.server.listen_address)
+        .await
+        .map_err(|e| {
+            format!(
+                "cannot listen on {}: {e}",
+                state.config.server.listen_address
+            )
+        })?;
+    let pdp_listener = match &state.config.pdp {
+        Some(pdp) => Some(TcpListener::bind(pdp.listen_address).await.map_err(|e| {
+            format!(
+                "cannot listen on {} (pdp.listen_address): {e}",
+                pdp.listen_address
+            )
+        })?),
+        None => None,
+    };
+    let mut accepting = Vec::new();
     if let Some(listener) = pdp_listener {
-        tokio::spawn(pdp::serve(Arc::clone(&state), listener));
+        accepting.push(tokio::spawn(pdp::serve(Arc::clone(&state), listener)));
     }
     log(
         &state,
@@ -339,6 +501,36 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
         ],
     );
 
+    accepting.push(tokio::spawn(accept_loop(Arc::clone(&state), listener)));
+
+    stopped.notified().await;
+    log(
+        &state,
+        LogLevel::Info,
+        "stopping",
+        &[(
+            "serve_seconds",
+            crate::shutdown::SERVE_AFTER_SIGNAL.as_secs().to_string(),
+        )],
+    );
+    tokio::time::sleep(crate::shutdown::SERVE_AFTER_SIGNAL).await;
+    for task in &accepting {
+        task.abort();
+    }
+    state.stop.close_connections();
+    let left = state.stop.drain(crate::shutdown::DRAIN_LIMIT).await;
+    log(
+        &state,
+        LogLevel::Info,
+        "stopped",
+        &[("connections_left", left.to_string())],
+    );
+    Ok(())
+}
+
+/// Accepts the connections of the main listener. It never ends on its own.
+async fn accept_loop(state: Arc<AppState>, listener: TcpListener) {
+    let connection_gate = Arc::new(Semaphore::new(state.config.server.max_connections));
     loop {
         let (stream, remote_addr) = match listener.accept().await {
             Ok(v) => v,
@@ -367,6 +559,7 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
         let state_for_connection = Arc::clone(&state);
         tokio::spawn(async move {
             let _permit = permit;
+            let _live = state_for_connection.stop.enter();
             let _ = stream.set_nodelay(true);
             let io = TokioIo::new(stream);
             let service_state = Arc::clone(&state_for_connection);
@@ -383,7 +576,11 @@ async fn serve_async(state: Arc<AppState>) -> Result<(), String> {
                 .half_close(false)
                 .keep_alive(true);
 
-            if let Err(error) = builder.serve_connection(io, service).await {
+            if let Err(error) = state_for_connection
+                .stop
+                .drive(builder.serve_connection(io, service))
+                .await
+            {
                 log(
                     &state_for_connection,
                     LogLevel::Debug,
@@ -429,8 +626,45 @@ async fn handle_request(
         handle_metrics(&state)
     } else if path == VERIFY_PATH {
         handle_verify(&state, request.headers(), &client)
+    } else if path == VERIFY_KEY_PATH {
+        edge::handle_verify_key(&state, request.headers(), &client)
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
+    } else if method == Method::GET && path == ui::keys::PATH {
+        keys_page::handle_keys(
+            &state,
+            &uri,
+            request.headers(),
+            &client,
+            keys_page::Page::List,
+        )
+        .await
+    } else if method == Method::GET && path == ui::keys::NEW_PATH {
+        keys_page::handle_keys(
+            &state,
+            &uri,
+            request.headers(),
+            &client,
+            keys_page::Page::New,
+        )
+        .await
+    } else if method == Method::GET && path == options_page::PATH {
+        options_page::handle_options(&state, &uri, request.headers(), &client).await
+    } else if method == Method::GET && path == ui::keys::EDIT_PAGE {
+        keys_page::handle_keys(
+            &state,
+            &uri,
+            request.headers(),
+            &client,
+            keys_page::Page::Edit,
+        )
+        .await
+    } else if method == Method::POST && path == ui::keys::CREATE_PATH {
+        keys_page::handle_keys_create(&state, request, &client).await
+    } else if method == Method::POST && path == ui::keys::EDIT_PATH {
+        keys_page::handle_keys_edit(&state, request, &client).await
+    } else if method == Method::POST && path == ui::keys::REVOKE_PATH {
+        keys_page::handle_keys_revoke(&state, request, &client).await
     } else if method == Method::GET && path == HOME_PATH {
         handle_home(&state, request.headers(), &client).await
     } else if method == Method::GET && path == STYLE_PATH {
@@ -455,10 +689,8 @@ async fn handle_request(
         handle_users_delete(&state, request, &client).await
     } else if method == Method::POST && path == USERS_UPDATE_PATH {
         handle_users_update(&state, request, &client).await
-    } else if method == Method::POST && path == GRANT_ADD_PATH {
-        handle_grant_add(&state, request, &client).await
-    } else if method == Method::POST && path == GRANT_DELETE_PATH {
-        handle_grant_delete(&state, request, &client).await
+    } else if method == Method::POST && path == PORTAL_RIGHTS_PATH {
+        handle_portal_rights(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_PATH {
         handle_impersonate(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_END_PATH {
@@ -552,6 +784,7 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
     if state.config.pdp.is_some() {
         body.push_str(&state.pdp_stats.render());
     }
+    body.push_str(&crate::keys_metrics::render(state));
     body.push_str(&state.metrics.render_accounts(
         state.users.count(),
         state.tracker.dropped(),
@@ -811,7 +1044,7 @@ fn is_settings_path(path: &str) -> bool {
         ui::settings::USERS_PATH
             | ui::settings::SERVICES_PATH
             | ui::settings::LOGINS_PATH
-            | ui::settings::ACCESS_PATH
+            | ui::settings::GIVE_PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
         || path.starts_with(ui::settings::SERVICE_PATH_PREFIX)
 }
@@ -843,6 +1076,8 @@ async fn handle_settings(
     };
     let frame = ui::Frame {
         logout_token: &logout_token,
+        keys: state.config.keys.is_some(),
+        superadmin: true,
     };
     let catalog = current_catalog(state);
     let page = match path {
@@ -893,10 +1128,21 @@ async fn handle_settings(
             let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
             ui::users_page(&frame, &view)
         }
-        ui::settings::ACCESS_PATH => match access_view(state, &catalog, uri, &users_token) {
-            Some(view) => ui::access_page(&frame, &view),
-            None => return handle_not_found(state, &Method::GET, uri, headers, client),
-        },
+        // "Give access" on the page of a service: the form picks an account, and the page of this
+        // account opens with the service chosen in the editor of grants.
+        ui::settings::GIVE_PATH => {
+            let login = query_value(uri, "user");
+            let service = query_value_up_to(uri, "service", grants::MAX_SERVICE_CHARS * 4);
+            match (login, service) {
+                (Some(login), Some(service)) if state.users.get(&login).is_some() => {
+                    return redirect_response(
+                        StatusCode::SEE_OTHER,
+                        &ui::settings::give_target(&login, &service),
+                    );
+                }
+                _ => return handle_not_found(state, &Method::GET, uri, headers, client),
+            }
+        }
         _ if path.starts_with(ui::settings::SERVICE_PATH_PREFIX) => {
             let asked = path
                 .strip_prefix(ui::settings::SERVICE_PATH_PREFIX)
@@ -971,8 +1217,9 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
 /// Writes one warning for each grant below `service` that does not follow its new document: the
 /// PDP does not apply this grant. The refresh loop of the documents calls it at the first answer
 /// of a service after the start and at each change of its document. The Services page shows the
-/// same grants under "Grants to check".
+/// same grants under "Permissions to check".
 fn log_grants_to_check(state: &AppState, service: &str, document: &actions::Document) {
+    crate::keys_metrics::refresh_undeclared(state);
     for (login, grant, problem) in grants_to_check(state, service, document) {
         log(
             state,
@@ -1051,6 +1298,9 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
                     .collect(),
                 document,
                 known,
+                fetch: state.signer.is_some()
+                    && state.config.identity.is_some()
+                    && service.actions_url.is_some(),
             }
         })
         .collect()
@@ -1092,6 +1342,18 @@ fn users_view<'a>(
             activity: activities.next().unwrap_or_default(),
         },
         unknown_failures_30d: snapshot.unknown_failures_30d,
+        file_accounts: state
+            .config
+            .access
+            .accounts
+            .iter()
+            .map(|(login, account)| ui::settings::FileAccountCard {
+                login: login.clone(),
+                password: account.password_hash.is_some(),
+                grants: account.grants.len(),
+                keys: account.keys.len(),
+            })
+            .collect(),
         max_users: state.config.users.max_users,
         token: users_token,
     }
@@ -1140,50 +1402,28 @@ fn user_view<'a>(
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
+        keys: key_rights_of(state, &found),
         user: found?,
         first_day,
         token: users_token,
     })
 }
 
-/// The data of the editor of one (account, service) pair. `None`: the query names no account of
-/// the directory, or no service of the catalogue. The superadmin has no grant to edit.
-fn access_view<'a>(
+/// The rights of an account on the keys, for its page. `None`: the portal accepts no key, or the
+/// account is the superadmin.
+fn key_rights_of(
     state: &AppState,
-    catalog: &Catalog,
-    uri: &str,
-    users_token: &'a str,
-) -> Option<ui::AccessView<'a>> {
-    let login = query_value(uri, "user")?;
-    let service_id = query_value_up_to(uri, "service", grants::MAX_SERVICE_CHARS * 4)?;
-    let record = state.users.get(&login)?;
-    let service = service_grants(state, catalog)
-        .into_iter()
-        .find(|s| s.id == service_id)?;
-    let grants = state.policy.effective(&login, &record.grants);
-    let known: Vec<Grant> = state
-        .users
-        .list()
-        .into_iter()
-        .flat_map(|(other, record)| state.policy.effective(&other, &record.grants))
-        .filter(|grant| grant.service == service_id)
-        .collect();
-    Some(ui::AccessView {
-        notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
-        mode: state.policy.mode,
-        service,
-        user: ui::UserCard {
-            configured: state.policy.configured(&login).to_vec(),
-            grants,
-            created_at: Some(record.created_at),
-            superadmin: false,
-            activity: Default::default(),
-            login,
-        },
-        give: query_value(uri, "give").as_deref() == Some("1"),
-        level: query_value(uri, "level"),
-        known,
-        token: users_token,
+    card: &Option<ui::UserCard>,
+) -> Option<ui::settings::KeysRights> {
+    state.config.keys.as_ref()?;
+    let card = card.as_ref().filter(|c| !c.superadmin)?;
+    Some(ui::settings::KeysRights {
+        held: crate::portal_actions::action_names()
+            .into_iter()
+            .filter(|a| crate::portal_actions::holds(&card.grants, a))
+            .map(str::to_string)
+            .collect(),
+        max_key_lifetime: crate::portal_actions::max_key_lifetime(&card.grants),
     })
 }
 
@@ -1224,6 +1464,11 @@ fn query_value_up_to(uri: &str, key: &str, max: usize) -> Option<String> {
     })
 }
 
+/// The current catalogue, for the other modules.
+pub fn current_catalog_of(state: &AppState) -> Arc<Catalog> {
+    current_catalog(state)
+}
+
 fn current_catalog(state: &AppState) -> Arc<Catalog> {
     Arc::clone(
         &state
@@ -1256,7 +1501,7 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
     let (grants, login) = match &session.principal {
         Principal::Superadmin => (None, state.superadmin_login.clone()),
         Principal::User(login) => match grants_of_known_user(state, login) {
-            Some(stored) => (Some(state.policy.effective(login, &stored)), login.clone()),
+            Some(grants) => (Some(grants), login.clone()),
             None => {
                 // The account was deleted while the session was open.
                 state.sessions.revoke(token, EndReason::Revoked);
@@ -1276,9 +1521,10 @@ fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Opt
 /// The account can have been created on another instance a moment ago, and its session can have been opened there.
 /// A session must not end for this reason.
 fn grants_of_known_user(state: &AppState, login: &str) -> Option<Vec<Grant>> {
-    state.users.grants_of(login).or_else(|| {
+    let grants = |state: &AppState| keyauth::person_grants(state, login).map(|(grants, _)| grants);
+    grants(state).or_else(|| {
         refresh_directory_if_due(state)
-            .then(|| state.users.grants_of(login))
+            .then(|| grants(state))
             .flatten()
     })
 }
@@ -1509,8 +1755,21 @@ async fn handle_login_post(
     }
 
     if !verify_csrf(csrf_cookie.as_deref().unwrap_or(""), &csrf) {
+        // The cookie of the token expired under an open page, or the browser dropped it. The
+        // answer is the sign-in page again, with a new token and a plain sentence.
         state.metrics.login_csrf_failure();
-        return text_response(StatusCode::FORBIDDEN, "CSRF validation failed\n");
+        let Ok(fresh) = new_csrf_token() else {
+            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+        };
+        return login_page(
+            state,
+            client.https,
+            &rd,
+            &sig,
+            &fresh,
+            Some("The page was open too long. Enter your login and password again."),
+            StatusCode::FORBIDDEN,
+        );
     }
 
     let client_ip_text = client_ip
@@ -1774,6 +2033,21 @@ fn identify(state: &AppState, typed: &str) -> Who {
         None if refresh_directory_if_due(state) => state.users.get(&login),
         None => None,
     }
+    // An account of the file has a password only when its block gives the digest (portal 3.4b).
+    .or_else(|| {
+        let digest = state
+            .config
+            .access
+            .accounts
+            .get(&login)?
+            .password_hash
+            .clone()?;
+        Some(UserRecord {
+            password_hash: digest,
+            grants: Vec::new(),
+            created_at: 0,
+        })
+    })
     .map_or(Who::Unknown, |record| Who::User(login, record))
 }
 
@@ -2083,15 +2357,6 @@ fn user_redirect(login: &str, code: &str) -> HttpResponse {
     )
 }
 
-/// The response returns to the editor of the access of `login` to `service`, with the outcome of
-/// the action.
-fn access_redirect(login: &str, service: &str, code: &str) -> HttpResponse {
-    redirect_response(
-        StatusCode::SEE_OTHER,
-        &format!("{}&s={code}", ui::settings::access_path(login, service)),
-    )
-}
-
 fn audit(
     state: &AppState,
     kind: AuditKind,
@@ -2128,48 +2393,50 @@ fn drop_covered(mut grants: Vec<Grant>) -> Vec<Grant> {
     grants
 }
 
-/// One check box of the permission forms, read from its name. `g.<service>.<action>` is a grant on
-/// the whole service. `r.<grant>` is a grant on a resource that the service names, with the grant in
-/// its text form. `None`: the name is not a box.
-fn read_box(name: &str, value: &str) -> Option<Result<Grant, ()>> {
-    if let Some((service, action)) = name
-        .strip_prefix("g.")
-        .and_then(|rest| rest.split_once('.'))
-    {
-        return Some(if value == "1" {
-            Grant::new(action, service).map_err(|_| ())
-        } else {
-            Err(())
-        });
-    }
-    let text = name.strip_prefix("r.")?;
-    Some(match Grant::parse(text) {
-        Ok(grant) if value == "1" && !grant.path.is_empty() => Ok(grant),
-        _ => Err(()),
-    })
+/// Why the grants of a form are refused.
+enum GrantsError {
+    /// A field that is not known: a bad request.
+    Bad,
+    /// A grant or a limit value that the rules refuse: the code of a notice.
+    Refused(&'static str),
 }
 
-/// Every grant that the permission forms offer as a box: for each service, `access`, its actions
-/// on the whole service, and each action on each resource that its document names. `only` limits
-/// the list to one service.
-fn offered_boxes(state: &AppState, only: Option<&str>) -> Vec<Grant> {
-    let mut out = Vec::new();
-    for service in service_grants(state, &current_catalog(state)) {
-        if only.is_some_and(|id| id != service.id) {
-            continue;
-        }
-        let names = std::iter::once(grants::ACCESS.to_string())
-            .chain(service.actions.iter().map(|(name, _)| name.clone()));
-        out.extend(names.filter_map(|action| Grant::new(&action, &service.id).ok()));
-        for node in &service.document.resources {
-            for action in service.document.actions_on(node) {
-                if let Ok(grant) = Grant::on_path(&action.name, &service.id, node.path.clone()) {
-                    out.push(grant);
-                }
-            }
-        }
-    }
-    out
+/// The grants of a form of an account: the fields of the editor of grants, `grant<n>` and
+/// `limit<n>.<name>[.<window>]`. Each grant follows the document of its service, and each limit
+/// value follows the declaration of the document (portal 3.2).
+fn account_grants(
+    state: &AppState,
+    fields: std::collections::HashMap<String, String>,
+    old_grants: Option<&[Grant]>,
+    unknown_code: &'static str,
+) -> Result<Vec<Grant>, GrantsError> {
+    let raw = key_forms::read(fields, true).map_err(|_| GrantsError::Bad)?;
+    let catalog = current_catalog(state);
+    let known: std::collections::HashSet<&str> = catalog
+        .groups()
+        .iter()
+        .flat_map(|g| g.services.iter())
+        .map(|s| s.id.as_str())
+        .collect();
+    let lookup = |service: &str| state.actions.declared(service);
+    let exists = |service: &str| known.contains(service);
+    let context = key_forms::Context {
+        now: unix_now(),
+        owner_grants: None,
+        max_lifetime: None,
+        document: &lookup,
+        service_exists: &exists,
+        old_grants,
+    };
+    key_forms::check_grants(&raw, &context, key_forms::Holder::Account)
+        .map(drop_covered)
+        .map_err(|code| {
+            GrantsError::Refused(if code == key_forms::BAD_LIMITS {
+                "bad-limits"
+            } else {
+                unknown_code
+            })
+        })
 }
 
 async fn handle_users_add(
@@ -2188,14 +2455,9 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The form can give grants at once, with the boxes of the page of an account. A new user has
-    // no other grant.
-    let mut ticked: Vec<Grant> = Vec::new();
-    for (name, value) in form.drain() {
-        match read_box(&name, &value) {
-            Some(Ok(grant)) => ticked.push(grant),
-            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
-        }
+    // The form has the login and the password only. The grants have their own page.
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
 
     let rejected = |code: &str| {
@@ -2212,25 +2474,13 @@ async fn handle_users_add(
     if let Err(code) = check_new_password(&password, state.config.security.max_password_bytes) {
         return rejected(code);
     }
-    if state.users.get(&login).is_some() {
+    // The file holds this login: an account comes from one source (portal 3.4a).
+    if state.users.get(&login).is_some() || state.config.access.accounts.contains_key(&login) {
         return rejected("exists");
     }
     if state.users.is_full() {
         return rejected("limit");
     }
-    let mut new_grants: Vec<Grant> = ticked;
-    if !new_grants.is_empty() {
-        if !state.policy.mode.editable() {
-            return rejected("grants-static");
-        }
-        // A box is valid when the page offers it.
-        let offered = offered_boxes(state, None);
-        if new_grants.iter().any(|grant| !offered.contains(grant)) {
-            return rejected("add-unknown-service");
-        }
-        new_grants = drop_covered(new_grants);
-    }
-
     // A hash calculation costs the same as a login check. It takes the same permit.
     let permit = match Arc::clone(&state.password_gate).acquire_owned().await {
         Ok(permit) => permit,
@@ -2249,7 +2499,7 @@ async fn handle_users_add(
     let row = UserRow {
         login: login.clone(),
         password_hash: password_hash.clone(),
-        grants: new_grants.clone(),
+        grants: Vec::new(),
         created_at: unix_now(),
     };
     let store = Arc::clone(&state.store);
@@ -2273,7 +2523,7 @@ async fn handle_users_add(
         login.clone(),
         UserRecord {
             password_hash,
-            grants: new_grants.clone(),
+            grants: Vec::new(),
             created_at,
         },
     );
@@ -2285,25 +2535,8 @@ async fn handle_users_add(
         client,
         &headers,
     );
-    if !new_grants.is_empty() {
-        audit(
-            state,
-            AuditKind::UserUpdated,
-            Some(login),
-            Some(state.superadmin_login.clone()),
-            client,
-            &headers,
-        );
-    }
     state.metrics.user_admin("add", "ok");
-    user_redirect(
-        &login_for_page,
-        if new_grants.is_empty() {
-            "user-added"
-        } else {
-            "user-added-access"
-        },
-    )
+    user_redirect(&login_for_page, "user-added")
 }
 
 async fn handle_users_delete(
@@ -2383,17 +2616,8 @@ async fn handle_users_update(
     // The form of the boxes carries `grants`. Without it, the request changes no grant: the
     // password form of the same page sends no box.
     let edit_grants = form.remove("grants").as_deref() == Some("1");
-    // The editor of one service names it with `only`. The request then changes the grants of that
-    // service only, so a Save never touches the access to another service.
-    let only = form.remove("only").filter(|id| !id.is_empty());
-    // The grant boxes are the remaining fields: `g.<service>.<action>` and `r.<grant>`.
-    let mut ticked: Vec<Grant> = Vec::new();
-    for (name, value) in form.drain() {
-        match read_box(&name, &value) {
-            Some(Ok(grant)) => ticked.push(grant),
-            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
-        }
-    }
+    // The grants are the remaining fields, as the editor of grants writes them.
+    let fields = std::mem::take(&mut form);
 
     let rejected = |code: &str| {
         state.metrics.user_admin("update", "rejected");
@@ -2406,39 +2630,42 @@ async fn handle_users_update(
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
-    // The answer returns to the editor that sent the form, or to the page of the account.
-    let back = |code: &str| match &only {
-        Some(service) => access_redirect(&login, service, code),
-        None => user_redirect(&login, code),
-    };
+    let back = |code: &str| user_redirect(&login, code);
     let rejected = |code: &str| {
         state.metrics.user_admin("update", "rejected");
         back(code)
     };
-    // The page shows one box for each grant that it offers. A box that the page did not show keeps
-    // its grant. An action that a service does not publish now is not lost.
     let grants = if !edit_grants {
-        if !ticked.is_empty() {
+        if !fields.is_empty() {
             return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
         }
         None
     } else if state.policy.mode.editable() {
-        let offered = offered_boxes(state, only.as_deref());
-        if ticked.iter().any(|grant| !offered.contains(grant)) {
-            return rejected("edit-unknown-grant");
-        }
+        let ticked =
+            match account_grants(state, fields, Some(&current.grants), "edit-unknown-grant") {
+                Ok(grants) => grants,
+                Err(GrantsError::Bad) => {
+                    return text_response(StatusCode::BAD_REQUEST, "Bad Request\n")
+                }
+                Err(GrantsError::Refused(code)) => return rejected(code),
+            };
+        // The form carries every grant that the account holds, but the rights on the keys: the
+        // grants on the service `portal` have their own form. The form replaces the others.
         let mut next: Vec<Grant> = current
             .grants
             .iter()
-            .filter(|grant| !offered.contains(grant))
+            .filter(|g| g.service == crate::portal_actions::SERVICE)
             .cloned()
-            .chain(drop_covered(ticked))
+            .chain(ticked)
             .collect();
         next.sort();
         next.dedup();
+        if next.len() > state.config.users.max_grants {
+            return rejected("grant-limit");
+        }
         Some(next)
     } else {
-        if !ticked.is_empty() {
+        if !fields.is_empty() {
             return rejected("grants-static");
         }
         None
@@ -2530,239 +2757,122 @@ async fn handle_users_update(
     })
 }
 
-/// Gives a user a grant on a node below a service. The form names the user, the service, the
-/// action, the type of the node, and one id for each type of its chain: `id0` for the type at
-/// depth 1, `id1` for the next one, and so on. The last known document of the service gives the
-/// chain of the type and the actions that list it. The server does not list the resources: the
-/// superadmin types the ids. Each id is used as typed: the server does not trim it or change its
-/// case.
-async fn handle_grant_add(
+/// Sets the rights of an account on the keys: the actions of the service `portal` and the longest
+/// key lifetime (portal 6.1, 6.3, 5.3). The form has one box `p.<action>` for each action.
+async fn handle_portal_rights(
     state: &Arc<AppState>,
     request: Request<Incoming>,
     client: &Client,
 ) -> HttpResponse {
     let headers = request.headers().clone();
-    let (viewer, mut form) = match admin_request(state, request, client, "grant_add").await {
+    let (viewer, mut form) = match admin_request(state, request, client, "portal_rights").await {
         Ok(v) => v,
         Err(response) => return response,
     };
-    if let Err(response) = require_superadmin(state, &viewer, "grant_add") {
+    if let Err(response) = require_superadmin(state, &viewer, "portal_rights") {
         return response;
     }
-    let mut field = |name: &str| form.remove(name).unwrap_or_default();
-    let (login, service, action, kind) = (
-        field("login"),
-        field("service"),
-        field("action"),
-        field("type"),
-    );
-    let mut ids: Vec<String> = Vec::new();
-    for index in 0..grants::MAX_DEPTH {
-        match form.remove(&format!("id{index}")) {
-            Some(id) => ids.push(id),
-            None => break,
-        }
-    }
-    if !form.is_empty() {
-        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
-    }
-    let rejected = |code: &str| {
-        state.metrics.user_admin("grant_add", "rejected");
-        settings_redirect(code)
-    };
-    if !state.policy.mode.editable() {
-        return rejected("grants-static");
-    }
-    let login = match normalize_login(&login) {
-        Ok(login) => login,
-        Err(_) => return rejected("no-user"),
-    };
-    let Some(current) = state.users.get(&login) else {
-        return rejected("no-user");
-    };
-    let in_catalog = current_catalog(state)
-        .groups()
-        .iter()
-        .flat_map(|group| group.services.iter())
-        .any(|s| s.id == service);
-    // The answer returns to the editor of the service, when the catalogue has the service.
-    let back = |code: &str| {
-        if in_catalog {
-            access_redirect(&login, &service, code)
-        } else {
-            user_redirect(&login, code)
-        }
-    };
-    let rejected = |code: &str| {
-        state.metrics.user_admin("grant_add", "rejected");
-        back(code)
-    };
-    if ids.iter().any(|id| grants::check_resource_id(id).is_err()) {
-        return rejected("grant-bad-id");
-    }
-    if !in_catalog {
-        return rejected("grant-undeclared");
-    }
-    // The tree of types comes from the service. While the service has not answered, no grant
-    // below the service is given.
-    let Some(declared) = state.actions.declared(&service) else {
-        return rejected("grant-not-known");
-    };
-    // The form gives one id for each type of the chain, from depth 1 to the type itself.
-    let Some(chain) = declared.chain(&kind) else {
-        return rejected("grant-undeclared");
-    };
-    if chain.len() != ids.len() {
-        return rejected("grant-undeclared");
-    }
-    let path: Result<Vec<grants::Segment>, String> = chain
-        .iter()
-        .zip(&ids)
-        .map(|(kind, id)| grants::Segment::new(kind, id))
-        .collect();
-    let Ok(grant) = path.and_then(|path| Grant::on_path(&action, &service, path)) else {
-        return rejected("grant-undeclared");
-    };
-    if declared.check_grant(&grant).is_err() {
-        return rejected("grant-undeclared");
-    }
-    if state
-        .policy
-        .effective(&login, &current.grants)
-        .contains(&grant)
-    {
-        state.metrics.user_admin("grant_add", "ok");
-        return back("unchanged");
-    }
-    if current.grants.len() >= grants::MAX_GRANTS_PER_USER {
-        return rejected("grant-limit");
-    }
-    let mut next = current.grants.clone();
-    next.push(grant);
-    next.sort();
-    match store_grants(state, &login, next, client, &headers).await {
-        Ok(()) => {
-            state.metrics.user_admin("grant_add", "ok");
-            back("grant-added")
-        }
-        Err(code) => rejected(code),
-    }
-}
-
-/// Removes a grant below a service from a user. The form names the user and the grant in its
-/// text form. A grant of the configuration cannot be removed here.
-async fn handle_grant_delete(
-    state: &Arc<AppState>,
-    request: Request<Incoming>,
-    client: &Client,
-) -> HttpResponse {
-    let headers = request.headers().clone();
-    let (viewer, mut form) = match admin_request(state, request, client, "grant_delete").await {
-        Ok(v) => v,
-        Err(response) => return response,
-    };
-    if let Err(response) = require_superadmin(state, &viewer, "grant_delete") {
-        return response;
+    if state.config.keys.is_none() {
+        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
     }
     let login = form.remove("login").unwrap_or_default();
-    let text = form.remove("grant").unwrap_or_default();
-    if !form.is_empty() {
-        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    let lifetime = form.remove("max_key_lifetime").unwrap_or_default();
+    let mut actions: Vec<&'static str> = Vec::new();
+    for (name, value) in form.drain() {
+        let known = name.strip_prefix("p.").and_then(|a| {
+            crate::portal_actions::action_names()
+                .into_iter()
+                .find(|n| *n == a)
+        });
+        match (known, value.as_str()) {
+            (Some(action), "1") => actions.push(action),
+            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
+        }
     }
+    let login = match normalize_login(&login) {
+        Ok(login) => login,
+        Err(_) => return settings_redirect("no-user"),
+    };
     let rejected = |code: &str| {
-        state.metrics.user_admin("grant_delete", "rejected");
-        settings_redirect(code)
+        state.metrics.user_admin("portal_rights", "rejected");
+        user_redirect(&login, code)
+    };
+    let Some(current) = state.users.get(&login) else {
+        return settings_redirect("no-user");
     };
     if !state.policy.mode.editable() {
         return rejected("grants-static");
     }
-    let login = match normalize_login(&login) {
-        Ok(login) => login,
-        Err(_) => return rejected("no-user"),
-    };
-    let Some(current) = state.users.get(&login) else {
-        return rejected("no-user");
-    };
-    let rejected = |code: &str| {
-        state.metrics.user_admin("grant_delete", "rejected");
-        user_redirect(&login, code)
-    };
-    let grant = match Grant::parse(&text) {
-        Ok(grant) if !grant.path.is_empty() => grant,
-        _ => return rejected("no-grant"),
-    };
-    // The answer returns to the editor of the service of the grant, when the catalogue has it.
-    let in_catalog = current_catalog(state)
-        .groups()
-        .iter()
-        .flat_map(|group| group.services.iter())
-        .any(|s| s.id == grant.service);
-    let back = |code: &str| {
-        if in_catalog {
-            access_redirect(&login, &grant.service, code)
-        } else {
-            user_redirect(&login, code)
+    let max_lifetime = if lifetime.is_empty() {
+        None
+    } else {
+        match lifetime
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| lifetime.parse::<u64>().ok())
+            .flatten()
+            .filter(|n| *n <= 31_536_000)
+        {
+            Some(n) => Some(n),
+            None => return rejected("keys-lifetime"),
         }
     };
-    let rejected = |code: &str| {
-        state.metrics.user_admin("grant_delete", "rejected");
-        back(code)
-    };
-    if !current.grants.contains(&grant) {
-        return rejected("no-grant");
-    }
-    let next: Vec<Grant> = current
+    let mut next: Vec<Grant> = current
         .grants
         .iter()
-        .filter(|held| **held != grant)
+        .filter(|g| g.service != crate::portal_actions::SERVICE || g.action == grants::ACCESS)
         .cloned()
         .collect();
-    match store_grants(state, &login, next, client, &headers).await {
-        Ok(()) => {
-            state.metrics.user_admin("grant_delete", "ok");
-            back("grant-deleted")
+    for action in &actions {
+        let Ok(mut grant) = Grant::new(action, crate::portal_actions::SERVICE) else {
+            return rejected("error");
+        };
+        if *action == crate::portal_actions::KEYS_OWN_USE {
+            if let Some(max) = max_lifetime {
+                let mut limits = crate::limits::Limits::new();
+                if limits
+                    .set(
+                        crate::portal_actions::MAX_KEY_LIFETIME,
+                        crate::limits::Value::Ceiling(max),
+                    )
+                    .is_err()
+                {
+                    return rejected("keys-lifetime");
+                }
+                grant = grant.with_limits(limits);
+            }
         }
-        Err(code) => rejected(code),
+        next.push(grant);
     }
-}
-
-/// Writes the new stored grants of a user: first in the database, then in the directory. An audit
-/// event records the change. The change applies at the next request. The error is a notice code.
-async fn store_grants(
-    state: &Arc<AppState>,
-    login: &str,
-    grants: Vec<Grant>,
-    client: &Client,
-    headers: &HeaderMap,
-) -> Result<(), &'static str> {
+    next.sort();
+    if crate::portal_actions::check_user_grants(&next).is_err() {
+        return rejected("keys-needs");
+    }
+    if next.len() > state.config.users.max_grants {
+        return rejected("grant-limit");
+    }
+    if next == current.grants {
+        return user_redirect(&login, "unchanged");
+    }
     let store = Arc::clone(&state.store);
-    let (target, for_store) = (login.to_string(), grants.clone());
-    match tokio::task::spawn_blocking(move || store.update_user(&target, None, Some(&for_store)))
-        .await
+    let (target, stored) = (login.clone(), next.clone());
+    match tokio::task::spawn_blocking(move || store.update_user(&target, None, Some(&stored))).await
     {
         Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return Err("no-user"),
-        Ok(Err(error)) => {
-            log(
-                state,
-                LogLevel::Error,
-                "user_update_failed",
-                &[("error", error)],
-            );
-            return Err("error");
-        }
-        Err(_) => return Err("error"),
+        Ok(Ok(false)) => return settings_redirect("no-user"),
+        _ => return rejected("error"),
     }
-    state.users.update(login, None, Some(grants));
+    state.users.update(&login, None, Some(next));
     audit(
         state,
         AuditKind::UserUpdated,
-        Some(login.to_string()),
+        Some(login.clone()),
         Some(state.superadmin_login.clone()),
         client,
-        headers,
+        &headers,
     );
-    Ok(())
+    state.metrics.user_admin("portal_rights", "ok");
+    user_redirect(&login, "user-updated")
 }
 
 /// "Log in as": the session of the superadmin becomes a session of the user. The session is flagged as impersonated.
@@ -3262,6 +3372,20 @@ fn empty_response(status: StatusCode) -> HttpResponse {
     secure_headers(Response::new(Full::new(Bytes::new())), status)
 }
 
+fn json_response(status: StatusCode, body: String) -> HttpResponse {
+    let mut response = response_with_body(status, Bytes::from(body));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-store"),
+    );
+    apply_secure_headers(&mut response, true);
+    response
+}
+
 fn html_response(status: StatusCode, body: String) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::from(body));
     response.headers_mut().insert(
@@ -3362,7 +3486,7 @@ fn apply_secure_headers(response: &mut HttpResponse, no_store: bool) {
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+            "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
         ),
     );
 }
@@ -3387,11 +3511,19 @@ fn append_dynamic_header(
     Ok(())
 }
 
+/// How long the browser keeps the token of the sign-in page: 12 hours. A person can leave the page
+/// open, and the token still works. The token is not a secret: it only binds the form to the cookie.
+const CSRF_COOKIE_SECS: u64 = 12 * 3600;
+
 fn csrf_cookie(state: &AppState, csrf: &str, https: bool) -> String {
     format!(
         "{}={csrf}; {}",
         transport::csrf_cookie_name(https),
-        transport::cookie_attributes(https, state.config.session.same_site.as_str(), 600)
+        transport::cookie_attributes(
+            https,
+            state.config.session.same_site.as_str(),
+            CSRF_COOKIE_SECS,
+        )
     )
 }
 
@@ -3422,6 +3554,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
     match path {
         HOME_PATH => "home",
         VERIFY_PATH => "verify",
+        VERIFY_KEY_PATH => "verify_key",
         HEALTH_PATH => "health",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
         _ if is_settings_path(path) => "settings",
@@ -3433,8 +3566,6 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         USERS_ADD_PATH => "users_add",
         USERS_DELETE_PATH => "users_delete",
         USERS_UPDATE_PATH => "users_update",
-        GRANT_ADD_PATH => "grant_add",
-        GRANT_DELETE_PATH => "grant_delete",
         IMPERSONATE_PATH => "impersonate",
         IMPERSONATE_END_PATH => "impersonate_end",
         _ => "not_found",
@@ -3476,6 +3607,9 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
     eprintln!("{line}");
 }
 
+mod edge;
+mod keys_page;
+mod options_page;
 mod pdp;
 
 #[cfg(test)]

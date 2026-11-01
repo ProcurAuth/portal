@@ -51,7 +51,7 @@ pub struct Service {
     pub new_tab: bool,
     pub weight: i32,
     pub health_url: Option<String>,
-    /// Where the service publishes its actions (`/.well-known/access-actions`). The value comes from
+    /// Where the service publishes its actions (`/.well-known/procurauth/actions`). The value comes from
     /// the label `portal.actions`. If that label is absent, the origin of the health URL is used.
     /// `None` means that the service has only `access`.
     pub actions_url: Option<String>,
@@ -111,6 +111,10 @@ pub struct Catalog {
     /// Path prefixes of the services with a local `href`, longest first. `/auth/verify` matches
     /// a request against these prefixes.
     gate: Vec<GateEntry>,
+    /// The position in `gate` of each prefix: the search of the owner of a path looks for each
+    /// prefix of the path in this table, longest first. It needs at most one search for each
+    /// segment of the path, at any number of services (portal 8.3a).
+    gate_index: HashMap<Segments, usize>,
     /// True when the snapshot holds every service of every source. The snapshot of the start is
     /// not complete. Discovery sets the value for each round.
     complete: bool,
@@ -178,11 +182,13 @@ impl Catalog {
         });
 
         let gate = build_gate(&by_group, closed);
+        let gate_index = index_gate(&gate);
         Self {
             groups: by_group,
             problems,
             duplicates,
             gate,
+            gate_index,
             complete: true,
         }
     }
@@ -223,15 +229,17 @@ impl Catalog {
             },
             duplicates: self.duplicates,
             gate: Vec::new(),
+            gate_index: HashMap::new(),
             complete: self.complete,
         }
     }
 
     /// The services that own the longest prefix of `segments`, if any.
     pub fn owner(&self, segments: &[String]) -> Option<&GateEntry> {
-        self.gate
-            .iter()
-            .find(|entry| segments.starts_with(&entry.prefix))
+        (1..=segments.len())
+            .rev()
+            .find_map(|length| self.gate_index.get(&segments[..length]))
+            .map(|position| &self.gate[*position])
     }
 
     pub fn groups(&self) -> &[Group] {
@@ -251,8 +259,18 @@ impl Catalog {
     }
 }
 
+/// The position of each prefix in the gate.
+fn index_gate(gate: &[GateEntry]) -> HashMap<Segments, usize> {
+    gate.iter()
+        .enumerate()
+        .map(|(position, entry)| (entry.prefix.clone(), position))
+        .collect()
+}
+
 fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
     let mut entries: Vec<GateEntry> = Vec::new();
+    // The position of each prefix in `entries`, so that the build looks at each prefix one time.
+    let mut positions: HashMap<Segments, usize> = HashMap::new();
     for service in groups.iter().flat_map(|g| g.services.iter()) {
         let Some(prefix) = crate::access::href_prefix(&service.href) else {
             continue;
@@ -261,17 +279,21 @@ fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
             id: service.id.clone(),
             exclude: service.exclude.clone(),
         };
-        match entries.iter_mut().find(|e| e.prefix == prefix) {
-            Some(entry) => entry.services.push(gate_service),
-            None => entries.push(GateEntry {
-                prefix,
-                services: vec![gate_service],
-            }),
+        match positions.get(&prefix) {
+            Some(position) => entries[*position].services.push(gate_service),
+            None => {
+                positions.insert(prefix.clone(), entries.len());
+                entries.push(GateEntry {
+                    prefix,
+                    services: vec![gate_service],
+                });
+            }
         }
     }
     // A closed prefix that a listed service also owns stays with that service.
     for prefix in closed {
-        if !entries.iter().any(|e| e.prefix == prefix) {
+        if !positions.contains_key(&prefix) {
+            positions.insert(prefix.clone(), entries.len());
             entries.push(GateEntry {
                 prefix,
                 services: Vec::new(),

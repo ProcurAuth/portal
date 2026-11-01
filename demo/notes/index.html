@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes demo</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2330;--mute:#5d6778;--line:#dde1e8;--ok:#13795b;--bad:#b42318;--warn:#a15c07;--acc:#2f5fd0}
+@media (prefers-color-scheme:dark){:root{--bg:#12161d;--card:#1b212b;--ink:#e6e9ef;--mute:#9aa5b8;--line:#2c3544;--ok:#4cc9a0;--bad:#ff8a80;--warn:#f0b35c;--acc:#7da2ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+header h1{font-size:18px;margin:0}
+header a{color:var(--acc)}
+main{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+section.wide{grid-column:1/-1}
+h2{font-size:15px;margin:0 0 8px}
+p.hint{color:var(--mute);margin:0 0 10px;font-size:13px}
+table{border-collapse:collapse;width:100%}
+td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer}
+button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}
+button:disabled{opacity:.5;cursor:default}
+input,select{font:inherit;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:6px;padding:4px 8px}
+input[type=text]{min-width:0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+.pill{display:inline-block;padding:0 8px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
+.yes{color:var(--ok);border-color:var(--ok)}.no{color:var(--bad);border-color:var(--bad)}
+pre{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;max-height:260px;font-size:12px}
+#log .entry{border-bottom:1px solid var(--line);padding:4px 0;font-size:13px}
+.s200,.s201{color:var(--ok)}.s403,.s401{color:var(--bad)}.s429{color:var(--warn)}
+code{font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Notes demo</h1>
+  <span id="who" class="pill">identity: loading</span>
+  <a href="/">Launcher</a>
+  <a href="/auth/keys">Keys</a>
+  <a href="/auth/logout">Sign out</a>
+</header>
+<main>
+  <section>
+    <h2>Identity token</h2>
+    <p class="hint">The portal gives this token. The service checks its signature, issuer, audience and expiry.</p>
+    <pre id="claims">…</pre>
+  </section>
+
+  <section>
+    <h2>Notebooks</h2>
+    <p class="hint">One batch question to the PDP gives the three buttons of each notebook.</p>
+    <table id="notebooks"><thead><tr><th>Notebook</th><th>Notes</th><th>Read</th><th>Write</th><th>Delete</th></tr></thead><tbody></tbody></table>
+    <div class="row"><button id="refresh">Ask again</button></div>
+  </section>
+
+  <section class="wide">
+    <h2>Notes of <span id="current">none</span></h2>
+    <p class="hint">Each read costs one unit of the budget <code>requests</code>. The ceiling <code>max_results</code> cuts the list.</p>
+    <div id="notes"></div>
+    <div class="row">
+      <input type="text" id="text" placeholder="A new note" maxlength="200">
+      <button id="add">Add (notes.write)</button>
+      <button id="burst">Read 8 times</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>PDP playground</h2>
+    <p class="hint">Ask any question for your own subject. Path example: <code>notebook:work/note:1</code>.</p>
+    <div class="row"><input type="text" id="p-action" value="notes.read" size="14">
+      <input type="text" id="p-path" value="notebook:work" size="20"></div>
+    <div class="row"><select id="p-match"><option>node</option><option>subtree</option></select>
+      <label><input type="checkbox" id="p-usage"> count one use</label>
+      <button class="primary" id="p-ask">Ask</button></div>
+    <pre id="p-out">…</pre>
+  </section>
+
+  <section>
+    <h2>Use a key</h2>
+    <p class="hint">Paste a key (<code>mcp_…</code>). The request carries only the header <code>Authorization</code>. The key route of Traefik checks it. Leave the field empty to use your session.</p>
+    <div class="row"><input type="text" id="k-text" placeholder="mcp_…" size="40" autocomplete="off">
+      <button class="primary" id="k-go">Call whoami + notebooks</button></div>
+    <pre id="k-out">…</pre>
+  </section>
+
+  <section class="wide">
+    <h2>Log of the questions to the PDP</h2>
+    <div id="log"></div>
+  </section>
+</main>
+<script>
+const API = "/notes/api";
+let current = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function log(label, status, pdp) {
+  const d = document.createElement("div");
+  d.className = "entry";
+  const ctx = pdp && pdp.response && pdp.response.context ? JSON.stringify(pdp.response.context) : "";
+  const dec = pdp && pdp.response && "decision" in pdp.response ? "decision=" + pdp.response.decision : "";
+  d.innerHTML = `<span class="s${status}">${status}</span> ${esc(label)} <code>${esc(dec)} ${esc(ctx)}</code>`;
+  $("log").prepend(d);
+  while ($("log").children.length > 40) $("log").lastChild.remove();
+}
+
+async function call(method, path, body, headers) {
+  const init = {method, headers: Object.assign({}, headers || {})};
+  if (body !== undefined) { init.body = JSON.stringify(body); init.headers["Content-Type"] = "application/json"; }
+  const r = await fetch(API + path, init);
+  let json = {};
+  try { json = await r.json(); } catch (e) { /* empty body */ }
+  return {status: r.status, json, retry: r.headers.get("Retry-After")};
+}
+
+async function whoami() {
+  const r = await call("GET", "/whoami");
+  $("claims").textContent = JSON.stringify(r.json, null, 2);
+  const sub = r.json.claims ? r.json.claims.sub : "none";
+  $("who").textContent = "identity: " + sub;
+}
+
+async function notebooks() {
+  const r = await call("GET", "/notebooks");
+  const body = $("notebooks").querySelector("tbody");
+  body.innerHTML = "";
+  if (!r.json.notebooks) { log("list of notebooks", r.status, r.json.pdp); return; }
+  log("batch: three actions on each notebook", r.status, r.json.pdp);
+  for (const n of r.json.notebooks) {
+    const pill = (v) => `<span class="pill ${v ? "yes" : "no"}">${v ? "yes" : "no"}</span>`;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><button data-n="${esc(n.id)}"${n.read ? "" : " disabled"}>${esc(n.id)}</button></td><td>${n.count}</td><td>${pill(n.read)}</td><td>${pill(n.write)}</td><td>${pill(n.delete)}</td>`;
+    body.appendChild(tr);
+  }
+  body.querySelectorAll("button[data-n]").forEach((b) => b.onclick = () => open(b.dataset.n));
+}
+
+async function open(name) {
+  current = name;
+  $("current").textContent = name;
+  const r = await call("GET", `/notebooks/${name}/notes`);
+  log("notes.read on " + name + " (counts one use)", r.status, r.json.pdp);
+  const box = $("notes");
+  if (r.status !== 200) {
+    const wait = r.retry ? ` Try again in ${r.retry} s.` : "";
+    box.innerHTML = `<p class="s${r.status}">${r.status}: ${esc(r.json.error || "refused")}${esc(r.json.reason ? " (" + r.json.reason + ")" : "")}.${esc(wait)}</p>`;
+    return r;
+  }
+  const lim = r.json.limits && r.json.limits.max_results;
+  box.innerHTML = `<p class="hint">${r.json.notes.length} of ${r.json.total} notes${lim ? " (ceiling max_results = " + lim + ")" : ""}; units counted: ${r.json.usage ? r.json.usage.units : "-"}</p>` +
+    "<table>" + r.json.notes.map((n) => `<tr><td>${n.id}</td><td>${esc(n.text)}</td><td><button data-d="${n.id}">Delete</button></td></tr>`).join("") + "</table>";
+  box.querySelectorAll("button[data-d]").forEach((b) => b.onclick = async () => {
+    const d = await call("DELETE", `/notebooks/${name}/notes/${b.dataset.d}`);
+    log(`notes.delete on ${name}/note:${b.dataset.d}`, d.status, d.json.pdp);
+    if (d.status !== 200) alert(d.status + ": " + (d.json.error || "refused"));
+    open(name);
+  });
+  return r;
+}
+
+$("add").onclick = async () => {
+  if (!current) { alert("Open a notebook first."); return; }
+  const r = await call("POST", `/notebooks/${current}/notes`, {text: $("text").value});
+  log("notes.write on " + current, r.status, r.json.pdp);
+  if (r.status >= 400) alert(r.status + ": " + (r.json.error || "refused") + (r.json.reason ? " (" + r.json.reason + ")" : ""));
+  $("text").value = "";
+  open(current);
+};
+
+$("burst").onclick = async () => {
+  if (!current) { alert("Open a notebook first."); return; }
+  const out = [];
+  for (let i = 0; i < 8; i++) {
+    const r = await call("GET", `/notebooks/${current}/notes`);
+    log(`read ${i + 1} of 8 on ${current}`, r.status, r.json.pdp);
+    out.push(r.status);
+  }
+  $("notes").innerHTML = `<p class="hint">Statuses of 8 reads: ${out.join(", ")}. A 429 comes from the budget <code>requests</code>.</p>`;
+};
+
+$("p-ask").onclick = async () => {
+  const r = await call("POST", "/pdp", {action: $("p-action").value, path: $("p-path").value, match: $("p-match").value, usage: $("p-usage").checked});
+  $("p-out").textContent = JSON.stringify(r.json.pdp || r.json, null, 2);
+  log("playground " + $("p-action").value + " on " + $("p-path").value, r.status, r.json.pdp);
+};
+
+$("k-go").onclick = async () => {
+  const key = $("k-text").value.trim();
+  const headers = key ? {Authorization: "Bearer " + key} : {};
+  const a = await call("GET", "/whoami", undefined, headers);
+  const b = await call("GET", "/notebooks", undefined, headers);
+  $("k-out").textContent = `whoami: ${a.status}\n${JSON.stringify(a.json, null, 2)}\n\nnotebooks: ${b.status}\n${JSON.stringify(b.json.notebooks || b.json, null, 2)}`;
+};
+
+$("refresh").onclick = () => { whoami(); notebooks(); };
+whoami(); notebooks();
+</script>
+</body>
+</html>

@@ -7,3 +7,4 @@ dist
 *.tgz
 *.sha256
 .DS_Store
+demo

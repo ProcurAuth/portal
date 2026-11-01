@@ -1,5 +1,5 @@
 //! The actions and the resource tree that each service publishes at
-//! `/.well-known/access-actions` (contract 11.4).
+//! `/.well-known/procurauth/actions` (protocol 5.1).
 //!
 //! The settings pages show the actions as check boxes on the page of a user, next to `access`.
 //! A service without the document has only `access`: for it, `access` is the full permission.
@@ -39,18 +39,40 @@ use crate::grants::{
     check_action, check_resource_type, parse_path, Grant, Segment, ACCESS, MAX_DEPTH, SERVICE_TYPE,
 };
 
-/// The largest document that the server reads.
-const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
-/// The largest number of actions of one service.
-pub const MAX_ACTIONS: usize = 64;
+/// The largest number of actions of one service, when the configuration does not say it
+/// (`access.max_actions`). Protocol 5.3c asks a reader to accept 64 at least.
+pub const DEFAULT_MAX_ACTIONS: usize = 1024;
+/// The largest number of resources of one service, when the configuration does not say it
+/// (`access.max_resources`). Protocol 5.3c asks a reader to accept 256 at least.
+pub const DEFAULT_MAX_RESOURCES: usize = 4096;
+/// The largest document that the server reads, when the configuration does not say it
+/// (`access.max_document_bytes`). Protocol 5.3c asks a reader to accept 64 KiB at least.
+pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 const MAX_DESCRIPTION_CHARS: usize = 300;
 /// The largest number of types in the list of one action, and in the top-level list.
 const MAX_RESOURCE_TYPES: usize = 16;
-/// The largest number of resources that a document names.
-pub const MAX_RESOURCES: usize = 256;
-const MAX_CONCURRENT_READS: usize = 8;
+/// The most documents that the loop reads at the same time (portal 7.10).
+const MAX_CONCURRENT_READS: usize = 64;
 /// How often the loop looks for a document that is due.
 const TICK: Duration = Duration::from_secs(5);
+
+/// The size that a document of a service can have (portal 7.9). A larger document is bad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    pub max_actions: usize,
+    pub max_resources: usize,
+    pub max_document_bytes: usize,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self {
+            max_actions: DEFAULT_MAX_ACTIONS,
+            max_resources: DEFAULT_MAX_RESOURCES,
+            max_document_bytes: DEFAULT_MAX_DOCUMENT_BYTES,
+        }
+    }
+}
 
 /// One action of a service.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +80,8 @@ pub struct Action {
     pub name: String,
     pub resource_types: Vec<String>,
     pub description: String,
+    /// The names of the limits (see [`crate::limits`]) that a grant of this action can give.
+    pub limits: Vec<String>,
 }
 
 /// One resource type below the root `service`.
@@ -80,6 +104,8 @@ pub struct Document {
     /// The resources that the service names, in the order of the document. The list is optional:
     /// without it, portal knows no id, and the superadmin types the ids.
     pub resources: Vec<Resource>,
+    /// The limits that the service declares. The actions list the limits that apply to them.
+    pub limits: Vec<crate::limits::Declaration>,
 }
 
 /// One resource that the service names: a node of the tree, such as one host. The settings pages
@@ -95,21 +121,7 @@ pub struct Resource {
     pub actions: Vec<String>,
 }
 
-/// One level of the settings form: a declared type, the chain of types from the service to it,
-/// and the actions that list it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Level {
-    /// The types from depth 1 to the type itself.
-    pub chain: Vec<String>,
-    pub actions: Vec<String>,
-}
-
-impl Resource {
-    /// The path in the text form of a grant, for example `host:prod`.
-    pub fn path_text(&self) -> String {
-        crate::grants::path_text(&self.path)
-    }
-}
+impl Resource {}
 
 impl Document {
     /// A document of one level, as a document without the top-level `resource_types` gives.
@@ -133,7 +145,39 @@ impl Document {
                 .collect(),
             actions,
             resources: Vec::new(),
+            limits: Vec::new(),
         }
+    }
+
+    /// The limits that a grant of `action` can hold (portal 3.2): on the action `access`, each
+    /// budget that the document declares; on another action, each ceiling that the action lists.
+    pub fn limit_inputs(&self, action: &str) -> Vec<crate::limits::Input> {
+        let listed: Vec<&String> = if action == ACCESS {
+            Vec::new()
+        } else {
+            match self.actions.iter().find(|a| a.name == action) {
+                Some(found) => found.limits.iter().collect(),
+                None => return Vec::new(),
+            }
+        };
+        self.limits
+            .iter()
+            .filter(|d| {
+                if action == ACCESS {
+                    d.kind == crate::limits::Kind::Budget
+                } else {
+                    d.kind == crate::limits::Kind::Ceiling && listed.contains(&&d.name)
+                }
+            })
+            .map(|d| crate::limits::Input {
+                name: d.name.clone(),
+                label: d.label.clone(),
+                description: d.description.clone(),
+                unit: d.unit.clone(),
+                budget: d.kind == crate::limits::Kind::Budget,
+                range: d.range,
+            })
+            .collect()
     }
 
     /// The parent of a declared type. `None`: the document does not declare the type.
@@ -205,42 +249,6 @@ impl Document {
         }
         Ok(())
     }
-
-    /// The actions that apply on a resource that the document names: the actions that the
-    /// resource lists, or each action that lists its type.
-    pub fn actions_on<'a>(&'a self, resource: &'a Resource) -> Vec<&'a Action> {
-        let kind = resource
-            .path
-            .last()
-            .map(|s| s.kind.as_str())
-            .unwrap_or_default();
-        self.actions
-            .iter()
-            .filter(|a| a.sub_resource_types().any(|k| k == kind))
-            .filter(|a| resource.actions.is_empty() || resource.actions.contains(&a.name))
-            .collect()
-    }
-
-    /// The levels that a grant below the service can name: each declared type that an action
-    /// lists, in the order of the document.
-    pub fn levels(&self) -> Vec<Level> {
-        self.types
-            .iter()
-            .filter_map(|t| {
-                let chain = self.chain(&t.name)?;
-                let actions: Vec<String> = self
-                    .actions
-                    .iter()
-                    .filter(|a| a.sub_resource_types().any(|k| k == t.name))
-                    .map(|a| a.name.clone())
-                    .collect();
-                (!actions.is_empty()).then(|| Level {
-                    chain: chain.into_iter().map(str::to_string).collect(),
-                    actions,
-                })
-            })
-            .collect()
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -254,23 +262,83 @@ struct Entry {
     /// URL makes it `false`.
     known: bool,
     read_at: Option<Instant>,
+    /// The time of the last good read: a good document (portal 10.3a, 10.3c).
+    good_at: Option<Instant>,
     /// The PDP asked for an early read. The next round reads the document, also when it is fresh.
     early: bool,
     /// The time of the last early read that the PDP asked for.
     early_at: Option<Instant>,
 }
 
+/// The longest time that the last good document of a service stays valid, when the configuration
+/// does not say it (`access.actions_max_age`).
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(3600);
+
 /// The actions of each service, by service id.
-#[derive(Default)]
 pub struct Registry {
     entries: RwLock<HashMap<String, Entry>>,
     /// Wakes the refresh loop before the end of its tick.
     wake: Notify,
+    /// The time of the start. A service with no good read counts its age from here (portal 10.3c).
+    started: Instant,
+    /// `access.actions_max_age` (portal 10.3a).
+    max_age: Duration,
+    /// The size of a document that the reads accept (portal 7.9).
+    bounds: Bounds,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_AGE)
+    }
 }
 
 impl Registry {
+    /// The same registry, with these bounds for the documents that it reads.
+    pub fn with_bounds(mut self, bounds: Bounds) -> Self {
+        self.bounds = bounds;
+        self
+    }
+
+    /// A registry whose documents stay valid for `max_age` after their last good read.
+    pub fn new(max_age: Duration) -> Self {
+        Self {
+            entries: RwLock::default(),
+            wake: Notify::new(),
+            started: Instant::now(),
+            max_age,
+            bounds: Bounds::default(),
+        }
+    }
+
+    /// The time since the last good read of the document of a service. A service that has no good
+    /// read yet counts from the start of the program (portal 10.3c).
+    pub fn age(&self, service: &str) -> Duration {
+        let good = self.read().get(service).and_then(|entry| entry.good_at);
+        Instant::now().saturating_duration_since(good.unwrap_or(self.started))
+    }
+
+    /// Whether the last good document of a service is older than `access.actions_max_age`. The
+    /// portal then acts as with no good document of the service (protocol 5.3a, 11.1). The
+    /// service `portal` has its document in the code: it never gets old.
+    pub fn too_old(&self, service: &str) -> bool {
+        service != crate::portal_actions::SERVICE && self.age(service) > self.max_age
+    }
+
+    /// The age of the oldest document among `services` (portal 10.3a, 10.5).
+    pub fn oldest_age<'a>(&self, services: impl Iterator<Item = &'a str>) -> Duration {
+        services
+            .filter(|service| *service != crate::portal_actions::SERVICE)
+            .map(|service| self.age(service))
+            .max()
+            .unwrap_or_default()
+    }
+
     /// The actions of a service. Empty: the service has only `access`.
     pub fn actions(&self, service: &str) -> Vec<Action> {
+        if service == crate::portal_actions::SERVICE {
+            return crate::portal_actions::document().actions.clone();
+        }
         self.read()
             .get(service)
             .map(|entry| entry.document.actions.clone())
@@ -281,6 +349,13 @@ impl Registry {
     /// a `404`. A `404` gives an empty document. `None`: the service is not in the catalogue, or
     /// no read has answered yet. The PDP fails closed on `None`.
     pub fn declared(&self, service: &str) -> Option<Arc<Document>> {
+        // The document of the service `portal` is in the code (portal 6.1).
+        if service == crate::portal_actions::SERVICE {
+            return Some(crate::portal_actions::document());
+        }
+        if self.too_old(service) {
+            return None;
+        }
         self.read()
             .get(service)
             .filter(|entry| entry.known)
@@ -354,12 +429,18 @@ impl Registry {
                 entry.document = Arc::new(document);
                 entry.problem = None;
                 entry.known = true;
+                entry.good_at = Some(now);
             }
             Outcome::Absent => {
-                entry.url = Some(url.to_string());
-                entry.document = Arc::default();
+                // A status 404 is a failed read (protocol 5.3): the last good document stays for
+                // `access.actions_max_age`. A service that has no document gives no problem.
+                if entry.url.as_deref() != Some(url) {
+                    entry.document = Arc::default();
+                    entry.url = Some(url.to_string());
+                    entry.known = false;
+                    entry.good_at = None;
+                }
                 entry.problem = None;
-                entry.known = true;
             }
             Outcome::Failed(problem) => {
                 // A different URL: the last list belongs to another document.
@@ -367,6 +448,7 @@ impl Registry {
                     entry.document = Arc::default();
                     entry.url = Some(url.to_string());
                     entry.known = false;
+                    entry.good_at = None;
                 }
                 entry.problem = Some(problem);
             }
@@ -422,6 +504,42 @@ impl Registry {
         out
     }
 
+    fn has_read(&self, service: &str) -> bool {
+        self.read()
+            .get(service)
+            .is_some_and(|e| e.read_at.is_some())
+    }
+
+    /// Wakes the refresh loop, so it reads the documents of a new catalogue at once.
+    pub fn wake_loop(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Tells whether each service of the catalogue that has a document URL had a first read, good or
+    /// not (portal 7.3b).
+    pub fn first_reads_done(&self, catalog: &Catalog) -> bool {
+        let wanted = wanted(catalog);
+        let entries = self.read();
+        wanted
+            .iter()
+            .filter(|(_, url)| url.is_some())
+            .all(|(id, _)| entries.get(id).is_some_and(|e| e.read_at.is_some()))
+    }
+
+    /// Moves the next read of a service to a stable point of the `refresh` period, so that the
+    /// reads of all services come at equal intervals (portal 7.10). The point depends on the id
+    /// of the service. Only the first read of a service applies this; each next read keeps it.
+    fn spread(&self, service: &str, refresh: Duration) {
+        let mut entries = self.write();
+        let Some(entry) = entries.get_mut(service) else {
+            return;
+        };
+        let phase = phase_of(service, refresh);
+        if let Some(at) = entry.read_at {
+            entry.read_at = at.checked_sub(phase).or(Some(at));
+        }
+    }
+
     /// A failed read of the URL that `set` uses.
     #[cfg(test)]
     pub fn fail(&self, service: &str) {
@@ -452,7 +570,7 @@ impl Registry {
 }
 
 #[cfg(test)]
-const TEST_URL: &str = "http://test/.well-known/access-actions";
+const TEST_URL: &str = "http://test/.well-known/procurauth/actions";
 
 /// The result of one read.
 #[derive(Debug, PartialEq, Eq)]
@@ -466,13 +584,15 @@ enum Outcome {
 #[derive(Deserialize)]
 struct RawDocument {
     server: String,
-    /// `None`: a document of one level.
-    #[serde(default)]
-    resource_types: Option<Vec<RawType>>,
+    /// The tree of types below the service: it can be empty, and it is mandatory (protocol 5.2).
+    resource_types: Vec<RawType>,
     actions: Vec<RawAction>,
     /// The resources of the service. The field is optional.
     #[serde(default)]
     resources: Vec<RawResource>,
+    /// The limits of the service. The field is optional.
+    #[serde(default)]
+    limits: Vec<crate::limits::RawDeclaration>,
 }
 
 #[derive(Deserialize)]
@@ -490,17 +610,20 @@ struct RawResource {
 struct RawType {
     name: String,
     parent: String,
-    #[serde(default)]
+    /// Mandatory and not empty (protocol 5.2, portal 12).
     description: String,
 }
 
 #[derive(Deserialize)]
 struct RawAction {
     name: String,
-    #[serde(default)]
+    /// Mandatory (protocol 5.2).
     resource_types: Vec<String>,
-    #[serde(default)]
+    /// Mandatory and not empty (protocol 5.2).
     description: String,
+    /// The names of the limits that apply to the action.
+    #[serde(default)]
+    limits: Vec<String>,
 }
 
 impl Action {
@@ -512,6 +635,14 @@ impl Action {
             .map(String::as_str)
             .filter(|kind| *kind != SERVICE_TYPE)
     }
+}
+
+/// A description that the document must give: not empty (protocol 5.2).
+fn require_description(description: &str, what: &str) -> Result<(), String> {
+    if description.trim().is_empty() {
+        return Err(format!("the description of {what} is empty"));
+    }
+    check_description(description, what)
 }
 
 fn check_description(description: &str, what: &str) -> Result<(), String> {
@@ -545,7 +676,7 @@ fn check_types(raw: Vec<RawType>) -> Result<Vec<ResourceType>, String> {
                 t.name
             ));
         }
-        check_description(&t.description, &format!("the resource type {:?}", t.name))?;
+        require_description(&t.description, &format!("the resource type {:?}", t.name))?;
         types.push(ResourceType {
             name: t.name,
             parent: t.parent,
@@ -576,6 +707,11 @@ fn check_types(raw: Vec<RawType>) -> Result<Vec<ResourceType>, String> {
 /// Check one document of the service `service`. Any bad action or type makes the whole document
 /// bad.
 pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
+    parse_within(service, body, &Bounds::default())
+}
+
+/// Check one document of the service `service`, with the bounds `bounds`.
+pub fn parse_within(service: &str, body: &[u8], bounds: &Bounds) -> Result<Document, String> {
     let document: RawDocument =
         serde_json::from_slice(body).map_err(|e| format!("the document is not valid: {e}"))?;
     if document.server != service {
@@ -584,11 +720,12 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
             document.server
         ));
     }
-    if document.actions.len() > MAX_ACTIONS {
-        return Err(format!("more than {MAX_ACTIONS} actions"));
+    if document.actions.len() > bounds.max_actions {
+        return Err(format!("more than {} actions", bounds.max_actions));
     }
-    let declared = document.resource_types.map(check_types).transpose()?;
+    let declared = Some(check_types(document.resource_types)?);
     let raw_resources = document.resources;
+    let limits = crate::limits::check_declarations(document.limits)?;
     let mut out: Vec<Action> = Vec::with_capacity(document.actions.len());
     for raw in document.actions {
         check_action(&raw.name)?;
@@ -603,10 +740,12 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
                 raw.name
             ));
         }
-        if raw.resource_types.len() > MAX_RESOURCE_TYPES {
+        // The list of an action can name `service` and each declared type.
+        if raw.resource_types.len() > MAX_RESOURCE_TYPES + 1 {
             return Err(format!(
-                "the action {:?} has more than {MAX_RESOURCE_TYPES} resource types",
-                raw.name
+                "the action {:?} has more than {} resource types",
+                raw.name,
+                MAX_RESOURCE_TYPES + 1
             ));
         }
         for (index, kind) in raw.resource_types.iter().enumerate() {
@@ -631,11 +770,26 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
                 }
             }
         }
-        check_description(&raw.description, &format!("the action {:?}", raw.name))?;
+        require_description(&raw.description, &format!("the action {:?}", raw.name))?;
+        for (index, name) in raw.limits.iter().enumerate() {
+            if !limits.iter().any(|d| d.name == *name) {
+                return Err(format!(
+                    "the action {:?} lists the limit {name:?}, which the document does not declare",
+                    raw.name
+                ));
+            }
+            if raw.limits[..index].contains(name) {
+                return Err(format!(
+                    "the action {:?} lists the limit {name:?} two times",
+                    raw.name
+                ));
+            }
+        }
         out.push(Action {
             name: raw.name,
             resource_types: raw.resource_types,
             description: raw.description,
+            limits: raw.limits,
         });
     }
     let mut document = match declared {
@@ -643,18 +797,24 @@ pub fn parse(service: &str, body: &[u8]) -> Result<Document, String> {
             types,
             actions: out,
             resources: Vec::new(),
+            limits: Vec::new(),
         },
         None => Document::one_level(out),
     };
-    document.resources = check_resources(&document, raw_resources)?;
+    document.limits = limits;
+    document.resources = check_resources(&document, raw_resources, bounds.max_resources)?;
     Ok(document)
 }
 
 /// Check the optional `resources`: each path follows the declared types, each path is there one
 /// time, and each action of a resource exists and lists the type of the node.
-fn check_resources(document: &Document, raw: Vec<RawResource>) -> Result<Vec<Resource>, String> {
-    if raw.len() > MAX_RESOURCES {
-        return Err(format!("more than {MAX_RESOURCES} resources"));
+fn check_resources(
+    document: &Document,
+    raw: Vec<RawResource>,
+    max_resources: usize,
+) -> Result<Vec<Resource>, String> {
+    if raw.len() > max_resources {
+        return Err(format!("more than {max_resources} resources"));
     }
     let mut out: Vec<Resource> = Vec::with_capacity(raw.len());
     for item in raw {
@@ -702,7 +862,7 @@ fn check_resources(document: &Document, raw: Vec<RawResource>) -> Result<Vec<Res
 }
 
 /// Read the document of one service.
-async fn read(client: &reqwest::Client, service: &str, url: &str) -> Outcome {
+async fn read(client: &reqwest::Client, service: &str, url: &str, bounds: &Bounds) -> Outcome {
     let response = match client
         .get(url)
         .header("accept", "application/json")
@@ -717,13 +877,27 @@ async fn read(client: &reqwest::Client, service: &str, url: &str) -> Outcome {
         404 => return Outcome::Absent,
         status => return Outcome::Failed(format!("{url} gave the status {status}")),
     }
-    match crate::discovery::read_capped(response, MAX_DOCUMENT_BYTES).await {
-        Ok(body) => match parse(service, &body) {
+    match crate::discovery::read_capped(response, bounds.max_document_bytes).await {
+        Ok(body) => match parse_within(service, &body, bounds) {
             Ok(document) => Outcome::Document(document),
             Err(e) => Outcome::Failed(format!("{url}: {e}")),
         },
         Err(e) => Outcome::Failed(format!("{url}: {e}")),
     }
+}
+
+/// The offset of a service in the period `refresh`: a stable value from 0 to `refresh`.
+fn phase_of(service: &str, refresh: Duration) -> Duration {
+    // FNV-1a: the same value in each run and on each instance.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in service.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let millis = u64::try_from(refresh.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    Duration::from_millis(hash % millis)
 }
 
 /// The document URL of each service of the catalogue.
@@ -747,21 +921,31 @@ async fn round(
     let wanted = wanted(catalog);
     registry.retain(&wanted);
     let due = registry.due(&wanted, refresh, Instant::now());
+    let first: std::collections::HashSet<String> = due
+        .iter()
+        .filter(|(service, _)| !registry.has_read(service))
+        .map(|(service, _)| service.clone())
+        .collect();
     let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_READS));
     let mut reads: JoinSet<(String, String, Outcome)> = JoinSet::new();
     for (service, url) in due {
         let client = client.clone();
         let limit = Arc::clone(&limit);
+        let bounds = registry.bounds;
         reads.spawn(async move {
             let _permit = limit.acquire_owned().await;
-            let outcome = read(&client, &service, &url).await;
+            let outcome = read(&client, &service, &url, &bounds).await;
             (service, url, outcome)
         });
     }
     let mut changed = Vec::new();
     while let Some(result) = reads.join_next().await {
         if let Ok((service, url, outcome)) = result {
-            if let Some(document) = registry.record(&service, &url, outcome, Instant::now()) {
+            let document = registry.record(&service, &url, outcome, Instant::now());
+            if first.contains(&service) {
+                registry.spread(&service, refresh);
+            }
+            if let Some(document) = document {
                 changed.push((service, document));
             }
         }
@@ -806,8 +990,42 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    /// A document with these actions. An action that lacks `resource_types` lists `service`, and
+    /// one that lacks `description` gets one. Each type that an action lists is declared with the
+    /// parent `service`. A text that is not a list of objects stays as it is.
     fn doc(server: &str, actions: &str) -> Vec<u8> {
-        format!(r#"{{"server":"{server}","actions":[{actions}]}}"#).into_bytes()
+        let parsed: Result<Vec<serde_json::Value>, _> =
+            serde_json::from_str(&format!("[{actions}]"));
+        let Ok(mut list) = parsed else {
+            return format!(r#"{{"server":"{server}","resource_types":[],"actions":[{actions}]}}"#)
+                .into_bytes();
+        };
+        let mut types: Vec<String> = Vec::new();
+        for action in &mut list {
+            let Some(object) = action.as_object_mut() else {
+                continue;
+            };
+            object
+                .entry("resource_types")
+                .or_insert_with(|| serde_json::json!(["service"]));
+            object
+                .entry("description")
+                .or_insert_with(|| serde_json::json!("The action."));
+            for kind in object["resource_types"].as_array().into_iter().flatten() {
+                if let Some(kind) = kind.as_str() {
+                    if kind != "service" && !types.iter().any(|t| t == kind) {
+                        types.push(kind.to_string());
+                    }
+                }
+            }
+        }
+        let declared: Vec<serde_json::Value> = types
+            .iter()
+            .map(|t| serde_json::json!({"name": t, "parent": "service", "description": "A type."}))
+            .collect();
+        serde_json::json!({"server": server, "resource_types": declared, "actions": list})
+            .to_string()
+            .into_bytes()
     }
 
     #[test]
@@ -824,13 +1042,13 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].name, "query.run.read");
         assert_eq!(actions[0].resource_types, ["service", "database"]);
-        assert_eq!(actions[1].description, "");
+        assert_eq!(actions[1].description, "The action.");
         assert_eq!(
             document.types,
             [ResourceType {
                 name: "database".into(),
                 parent: "service".into(),
-                description: String::new()
+                description: "A type.".into()
             }],
             "a document of one level: each type has the parent service"
         );
@@ -842,7 +1060,7 @@ mod tests {
     }
 
     const HOST_DATABASE: &str = r#"{"name":"host","parent":"service","description":"One server."},{"name":"database","parent":"host","description":"One database of a host."}"#;
-    const TREE_ACTIONS: &str = r#"{"name":"query.run.read","resource_types":["service","host","database"]},{"name":"system.read","resource_types":["service","host"]},{"name":"mcp.keys.read","resource_types":["service"]}"#;
+    const TREE_ACTIONS: &str = r#"{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."},{"name":"system.read","resource_types":["service","host"],"description":"The action system.read."},{"name":"mcp.keys.read","resource_types":["service"],"description":"The action mcp.keys.read."}"#;
 
     #[test]
     fn a_document_with_a_tree_gives_its_types_and_their_chains() {
@@ -862,31 +1080,28 @@ mod tests {
         );
         assert!(!document.follows(["host", "host"]));
         assert!(!document.follows(["host", "table"]));
-        assert_eq!(
-            document.levels(),
-            [
-                Level {
-                    chain: vec!["host".into()],
-                    actions: vec!["query.run.read".into(), "system.read".into()]
-                },
-                Level {
-                    chain: vec!["host".into(), "database".into()],
-                    actions: vec!["query.run.read".into()]
-                }
-            ]
-        );
         // The order of the list does not matter: a parent can come after its child.
-        let reversed = r#"{"name":"database","parent":"host"},{"name":"host","parent":"service"}"#;
+        let reversed = r#"{"name":"database","parent":"host","description":"The type database."},{"name":"host","parent":"service","description":"The type host."}"#;
         let document = parse("db", &tree(reversed, TREE_ACTIONS)).unwrap();
         assert_eq!(document.chain("database").unwrap(), ["host", "database"]);
         // Four levels below service.
-        let deep = r#"{"name":"a","parent":"service"},{"name":"b","parent":"a"},{"name":"c","parent":"b"},{"name":"d","parent":"c"}"#;
-        let document = parse("db", &tree(deep, r#"{"name":"x","resource_types":["d"]}"#)).unwrap();
+        let deep = r#"{"name":"a","parent":"service","description":"The type a."},{"name":"b","parent":"a","description":"The type b."},{"name":"c","parent":"b","description":"The type c."},{"name":"d","parent":"c","description":"The type d."}"#;
+        let document = parse(
+            "db",
+            &tree(
+                deep,
+                r#"{"name":"x","resource_types":["d"],"description":"The action x."}"#,
+            ),
+        )
+        .unwrap();
         assert_eq!(document.chain("d").unwrap(), ["a", "b", "c", "d"]);
         // An empty tree: the actions name only service.
         let document = parse(
             "db",
-            &tree("", r#"{"name":"x","resource_types":["service"]}"#),
+            &tree(
+                "",
+                r#"{"name":"x","resource_types":["service"],"description":"The action x."}"#,
+            ),
         )
         .unwrap();
         assert!(document.types.is_empty());
@@ -894,29 +1109,35 @@ mod tests {
 
     #[test]
     fn a_bad_tree_makes_the_whole_document_bad() {
-        let actions = r#"{"name":"x","resource_types":["service"]}"#;
+        let actions = r#"{"name":"x","resource_types":["service"],"description":"The action x."}"#;
         for (types, why) in [
             (
-                r#"{"name":"service","parent":"service"}"#,
+                r#"{"name":"service","parent":"service","description":"The type service."}"#,
                 "service is the root",
             ),
             (r#"{"name":"Host","parent":"service"}"#, "upper case"),
-            (r#"{"name":"1host","parent":"service"}"#, "a digit first"),
             (
-                r#"{"name":"host","parent":"service"},{"name":"host","parent":"service"}"#,
+                r#"{"name":"1host","parent":"service","description":"The type 1host."}"#,
+                "a digit first",
+            ),
+            (
+                r#"{"name":"host","parent":"service","description":"The type host."},{"name":"host","parent":"service","description":"The type host."}"#,
                 "two times",
             ),
             (
-                r#"{"name":"database","parent":"host"}"#,
+                r#"{"name":"database","parent":"host","description":"The type database."}"#,
                 "a parent that is not declared",
             ),
             (
-                r#"{"name":"a","parent":"b"},{"name":"b","parent":"a"}"#,
+                r#"{"name":"a","parent":"b","description":"The type a."},{"name":"b","parent":"a","description":"The type b."}"#,
                 "a cycle",
             ),
-            (r#"{"name":"a","parent":"a"}"#, "its own parent"),
             (
-                r#"{"name":"a","parent":"service"},{"name":"b","parent":"a"},{"name":"c","parent":"b"},{"name":"d","parent":"c"},{"name":"e","parent":"d"}"#,
+                r#"{"name":"a","parent":"a","description":"The type a."}"#,
+                "its own parent",
+            ),
+            (
+                r#"{"name":"a","parent":"service","description":"The type a."},{"name":"b","parent":"a","description":"The type b."},{"name":"c","parent":"b","description":"The type c."},{"name":"d","parent":"c","description":"The type d."},{"name":"e","parent":"d","description":"The type e."}"#,
                 "five levels",
             ),
             (
@@ -930,7 +1151,10 @@ mod tests {
         assert!(
             parse(
                 "db",
-                &tree(HOST_DATABASE, r#"{"name":"x","resource_types":["table"]}"#)
+                &tree(
+                    HOST_DATABASE,
+                    r#"{"name":"x","resource_types":["table"],"description":"The action x."}"#
+                )
             )
             .is_err(),
             "an action lists a type that the tree does not declare"
@@ -940,7 +1164,7 @@ mod tests {
                 "db",
                 &tree(
                     HOST_DATABASE,
-                    r#"{"name":"x","resource_types":["host","host"]}"#
+                    r#"{"name":"x","resource_types":["host","host"],"description":"The action x."}"#
                 )
             )
             .is_err(),
@@ -957,7 +1181,7 @@ mod tests {
     fn the_resources_of_a_document_name_the_hosts_with_the_actions_that_apply_on_each() {
         let body = |resources: &str| {
             format!(
-                r#"{{"server":"db","resource_types":[{{"name":"host","parent":"service"}},{{"name":"database","parent":"host"}}],"actions":[{{"name":"query.run.read","resource_types":["service","host","database"]}},{{"name":"explorer.read","resource_types":["service","host"]}},{{"name":"mcp.keys.read","resource_types":["service"]}}],"resources":{resources}}}"#
+                r#"{{"server":"db","resource_types":[{{"name":"host","parent":"service","description":"The type host."}},{{"name":"database","parent":"host","description":"The type database."}}],"actions":[{{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."}},{{"name":"explorer.read","resource_types":["service","host"],"description":"The action explorer.read."}},{{"name":"mcp.keys.read","resource_types":["service"],"description":"The action mcp.keys.read."}}],"resources":{resources}}}"#
             )
             .into_bytes()
         };
@@ -973,24 +1197,6 @@ mod tests {
         assert_eq!(
             document.resources[1].label, "replica",
             "the id when no label"
-        );
-        let names = |index: usize| -> Vec<&str> {
-            document
-                .actions_on(&document.resources[index])
-                .iter()
-                .map(|a| a.name.as_str())
-                .collect()
-        };
-        assert_eq!(names(0), ["query.run.read", "explorer.read"]);
-        assert_eq!(
-            names(1),
-            ["query.run.read", "explorer.read"],
-            "no list: each action that lists the type"
-        );
-        assert_eq!(
-            names(2),
-            ["query.run.read"],
-            "a database has no explorer.read"
         );
         // A document without the field has no resource.
         assert!(parse("db", &body("[]")).unwrap().resources.is_empty());
@@ -1019,6 +1225,57 @@ mod tests {
             (r#"[{"path":""}]"#, "an empty path"),
         ] {
             assert!(parse("db", &body(bad)).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_document_declares_limits_and_each_action_lists_the_limits_that_apply() {
+        let body = |limits: &str, actions: &str| {
+            format!(
+                r#"{{"server":"db","resource_types":[],"limits":{limits},"actions":{actions}}}"#
+            )
+            .into_bytes()
+        };
+        let limits = r#"[
+          {"name":"requests","label":"Queries","description":"The queries that a subject sends.",
+           "unit":"request","kind":"budget"},
+          {"name":"max_duration","label":"Maximum duration of a query","description":"The longest run of one query.",
+           "unit":"second","kind":"ceiling","min":0,"max":3600}]"#;
+        let actions = r#"[
+          {"name":"query.run.read","resource_types":["service"],"description":"A query.","limits":["max_duration"]},
+          {"name":"system.read","resource_types":["service"],"description":"The action system.read."}]"#;
+        let document = parse("db", &body(limits, actions)).unwrap();
+        assert_eq!(document.limits.len(), 2);
+        assert_eq!(document.limits[0].label, "Queries");
+        assert_eq!(document.actions[0].limits, ["max_duration"]);
+        assert!(document.actions[1].limits.is_empty());
+        // A document without the field has no limit.
+        let plain = parse("db", br#"{"server":"db","resource_types":[],"actions":[{"name":"a.b","resource_types":["service"],"description":"d"}]}"#).unwrap();
+        assert!(plain.limits.is_empty() && plain.actions[0].limits.is_empty());
+        // Any bad limit makes the whole document bad.
+        for (limits, actions, why) in [
+            (
+                limits,
+                r#"[{"name":"a.b","limits":["unknown"]}]"#,
+                "an undeclared limit",
+            ),
+            (
+                limits,
+                r#"[{"name":"a.b","limits":["max_duration","max_duration"]}]"#,
+                "a limit two times",
+            ),
+            (
+                r#"[{"name":"max_x","label":"x","description":"d","unit":"u","kind":"ceiling","min":2,"max":1}]"#,
+                "[]",
+                "bad range",
+            ),
+            (
+                r#"[{"name":"max_x","label":"x","description":"d","unit":"u","kind":"ceiling","min":1,"max":2,"colour":1}]"#,
+                "[]",
+                "unknown member",
+            ),
+        ] {
+            assert!(parse("db", &body(limits, actions)).is_err(), "{why}");
         }
     }
 
@@ -1060,7 +1317,7 @@ mod tests {
             "db",
             &doc(
                 "db",
-                r#"{"name":"query.run.read","resource_types":["service","database"]},{"name":"system.read","resource_types":["service"]},{"name":"plain"}"#,
+                r#"{"name":"query.run.read","resource_types":["service","database"],"description":"The action query.run.read."},{"name":"system.read","resource_types":["service"],"description":"The action system.read."},{"name":"plain"}"#,
             ),
         )
         .unwrap();
@@ -1094,7 +1351,10 @@ mod tests {
             ("db", r#"{"name":"access"}"#),
             ("db", r#"{"name":"Query.Run"}"#),
             ("db", r#"{"name":"a"},{"name":"a"}"#),
-            ("db", r#"{"name":"a","resource_types":["Data base"]}"#),
+            (
+                "db",
+                r#"{"name":"a","resource_types":["Data base"],"description":"The action a."}"#,
+            ),
             ("db", r#"{"name":"a","description":"line\nbreak"}"#),
         ] {
             assert!(
@@ -1107,7 +1367,47 @@ mod tests {
             .map(|i| format!(r#"{{"name":"a{i}"}}"#))
             .collect::<Vec<_>>()
             .join(",");
-        assert!(parse("db", &doc("db", &many)).is_err());
+        let least = Bounds {
+            max_actions: 64,
+            ..Bounds::default()
+        };
+        assert!(parse_within("db", &doc("db", &many), &least).is_err());
+        assert!(
+            parse("db", &doc("db", &many)).is_ok(),
+            "the default is higher"
+        );
+    }
+
+    #[test]
+    fn a_service_with_hundreds_of_actions_and_resources_is_good_within_the_bounds() {
+        let actions = (0..400)
+            .map(|i| {
+                format!(
+                    r#"{{"name":"area{}.verb{}","resource_types":["service","host"],"description":"The action {i}."}}"#,
+                    i / 20,
+                    i % 20
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let resources = (0..300)
+            .map(|i| format!(r#"{{"path":"host:h{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(
+            r#"{{"server":"db","resource_types":[{{"name":"host","parent":"service","description":"A host."}}],"actions":[{actions}],"resources":[{resources}]}}"#
+        );
+        let document = parse("db", body.as_bytes()).unwrap();
+        assert_eq!(
+            (document.actions.len(), document.resources.len()),
+            (400, 300)
+        );
+        let small = Bounds {
+            max_resources: 256,
+            ..Bounds::default()
+        };
+        let message = parse_within("db", body.as_bytes(), &small).unwrap_err();
+        assert!(message.contains("more than 256 resources"), "{message}");
     }
 
     fn serve(answers: Vec<(&'static str, String)>) -> String {
@@ -1171,10 +1471,13 @@ mod tests {
         runtime.block_on(round(&registry, &client, &catalog, Duration::ZERO));
         assert_eq!(
             registry.action_names("db"),
-            ["access"],
-            "a 404: only access"
+            ["access", "query.run.read"],
+            "a 404 is a failed read: the last good document stays (protocol 5.3)"
         );
-        assert!(registry.problems().is_empty());
+        assert!(
+            registry.problems().is_empty(),
+            "a service with no document is not a problem"
+        );
         // A service that left the catalogue leaves the registry.
         runtime.block_on(round(
             &registry,
@@ -1318,15 +1621,15 @@ mod tests {
             "a failure is not an answer"
         );
         registry.record("a", "http://a/x", Outcome::Absent, now);
-        assert_eq!(
-            *registry.declared("a").unwrap(),
-            Document::default(),
-            "a 404: no action"
+        assert!(
+            registry.declared("a").is_none(),
+            "a 404 is a failed read, not an empty document (protocol 5.3)"
         );
         let read = Action {
             name: "read".into(),
             resource_types: vec!["database".into()],
             description: String::new(),
+            limits: Vec::new(),
         };
         let document = Document::one_level(vec![read]);
         registry.record("a", "http://a/x", Outcome::Document(document.clone()), now);
@@ -1341,6 +1644,44 @@ mod tests {
     }
 
     #[test]
+    fn a_document_older_than_the_maximum_age_counts_as_no_good_document() {
+        let registry = Registry::new(Duration::from_secs(60));
+        let url = "http://a/x";
+        let document = Document::one_level(Vec::new());
+        // A good read now.
+        registry.record(
+            "a",
+            url,
+            Outcome::Document(document.clone()),
+            Instant::now(),
+        );
+        assert!(registry.declared("a").is_some());
+        assert!(!registry.too_old("a"));
+        assert!(registry.age("a") < Duration::from_secs(5));
+        // A good read an hour ago.
+        let old = Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .expect("the clock of the test is long enough");
+        registry.record("b", url, Outcome::Document(document), old);
+        assert!(registry.too_old("b"));
+        assert!(
+            registry.declared("b").is_none(),
+            "the portal acts as with no document"
+        );
+        assert!(registry.age("b") >= Duration::from_secs(3600));
+        // A service with no good read counts its age from the start of the registry.
+        assert!(!registry.too_old("never"));
+        assert!(registry.age("never") < Duration::from_secs(5));
+        // The service `portal` has its document in the code and never gets old.
+        assert!(registry.declared("portal").is_some());
+        assert!(!registry.too_old("portal"));
+        assert_eq!(registry.action_names("portal")[0], "access");
+        assert!(registry.action_names("portal").len() > 8);
+        // The oldest age among some services.
+        assert!(registry.oldest_age(["a", "b", "portal"].into_iter()) >= Duration::from_secs(3600));
+    }
+
+    #[test]
     fn a_read_reports_the_document_only_when_it_changes() {
         let registry = Registry::default();
         let now = Instant::now();
@@ -1349,6 +1690,7 @@ mod tests {
             name: "read".into(),
             resource_types: vec!["database".into()],
             description: String::new(),
+            limits: Vec::new(),
         }]);
         assert!(registry
             .record("a", url, Outcome::Failed("down".into()), now)
@@ -1369,10 +1711,9 @@ mod tests {
         assert!(registry
             .record("a", url, Outcome::Failed("down".into()), now)
             .is_none());
-        assert_eq!(
-            registry.record("a", url, Outcome::Absent, now).as_deref(),
-            Some(&Document::default()),
-            "a 404 removes the actions"
+        assert!(
+            registry.record("a", url, Outcome::Absent, now).is_none(),
+            "a 404 is a failed read: the document does not change"
         );
     }
 
@@ -1392,6 +1733,7 @@ mod tests {
                 name: "query.run.write".into(),
                 resource_types: kinds.iter().map(|k| k.to_string()).collect(),
                 description: String::new(),
+                limits: Vec::new(),
             }])
         };
         assert!(!applies(), "never read");
@@ -1412,13 +1754,13 @@ mod tests {
         assert!(!applies(), "the removal stays after a failure");
         let host_tree = parse(
             "a",
-            br#"{"server":"a","resource_types":[{"name":"host","parent":"service"},{"name":"database","parent":"host"}],"actions":[{"name":"query.run.write","resource_types":["service","host","database"]}]}"#,
+            br#"{"server":"a","resource_types":[{"name":"host","parent":"service","description":"The type host."},{"name":"database","parent":"host","description":"The type database."}],"actions":[{"name":"query.run.write","resource_types":["service","host","database"],"description":"The action query.run.write."}]}"#,
         )
         .unwrap();
         registry.record("a", url, Outcome::Document(host_tree), now);
         assert!(!applies(), "database now has the parent host");
         registry.record("a", url, Outcome::Document(typed(&["database"])), now);
         registry.record("a", url, Outcome::Absent, now);
-        assert!(!applies(), "a 404: no action");
+        assert!(applies(), "a 404 is a failed read: the last document stays");
     }
 }

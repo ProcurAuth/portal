@@ -36,9 +36,10 @@ use crate::catalog::{closed_prefix, parse_labels, Catalog, Health, RuntimeHealth
 use crate::config::DiscoveryConfig;
 
 use docker::Docker;
-use kube::Kube;
+use kube::{Kube, PodSet};
 
-const MAX_CONCURRENT_CHECKS: usize = 8;
+/// The most HTTP probes of services at the same time (portal 7.3c).
+const MAX_CONCURRENT_CHECKS: usize = 64;
 
 /// The data that a source reports about one workload. It contains the labels and, when the source knows them, how to check whether the workload runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +104,8 @@ pub struct Stats {
     down: AtomicUsize,
     duplicates: AtomicUsize,
     complete: AtomicUsize,
+    /// The number of items that the last lists hold: routes, containers and pods.
+    items: AtomicUsize,
     errors: Mutex<BTreeMap<&'static str, u64>>,
 }
 
@@ -177,6 +180,12 @@ impl Stats {
         );
         gauge(
             &mut out,
+            "portal_catalog_items",
+            "Items that the last lists hold: routes, containers and pods.",
+            self.items.load(Ordering::Relaxed) as u64,
+        );
+        gauge(
+            &mut out,
             "portal_discovery_last_success_timestamp_seconds",
             "Unix time of the last refresh where every source answered.",
             self.last_success_unix.load(Ordering::Relaxed),
@@ -231,6 +240,7 @@ pub async fn run(
     let mut answered_docker = docker.is_none();
     let mut last_kube: Vec<Workload> = Vec::new();
     let mut last_docker: Vec<Workload> = Vec::new();
+    let mut pods: Option<PodSet> = None;
     loop {
         let mut problems = setup_problems.clone();
         let mut healthy = setup_problems.is_empty();
@@ -241,6 +251,17 @@ pub async fn run(
                     answered_kube = true;
                 }
                 Err(e) => {
+                    stats.source_error("kubernetes");
+                    problems.push(format!("kubernetes: {e}"));
+                    healthy = false;
+                }
+            }
+            // The pods of all the selectors come from one list. A failed list gives an unknown
+            // state to each service that has a selector.
+            match kube.pod_set().await {
+                Ok(set) => pods = Some(set),
+                Err(e) => {
+                    pods = None;
                     stats.source_error("kubernetes");
                     problems.push(format!("kubernetes: {e}"));
                     healthy = false;
@@ -265,7 +286,11 @@ pub async fn run(
             .chain(last_docker.iter())
             .cloned()
             .collect();
-        let mut catalog = build_catalog(workloads, problems, kube.as_ref(), client.as_ref()).await;
+        stats.items.store(
+            last_kube.len() + last_docker.len() + pods.as_ref().map_or(0, PodSet::len),
+            Ordering::Relaxed,
+        );
+        let mut catalog = build_catalog(workloads, problems, pods.as_ref(), client.as_ref()).await;
         catalog.set_complete(is_complete(
             source_setup_failed,
             answered_kube,
@@ -290,7 +315,7 @@ fn is_complete(source_setup_failed: bool, answered_kube: bool, answered_docker: 
 async fn build_catalog(
     mut workloads: Vec<Workload>,
     mut problems: Vec<String>,
-    kube: Option<&Kube>,
+    pods: Option<&PodSet>,
     client: Option<&reqwest::Client>,
 ) -> Catalog {
     workloads.sort_by(|a, b| a.origin.cmp(&b.origin));
@@ -332,18 +357,18 @@ async fn build_catalog(
             Check::Pods {
                 namespace,
                 selector,
-            } => {
-                let Some(kube) = kube.cloned() else { continue };
-                let limit = Arc::clone(&limit);
-                checks.spawn(async move {
-                    let _permit = limit.acquire_owned().await;
-                    match kube.pods(&namespace, &selector).await {
-                        Ok(pods) if pods.ready == 0 => (index, Health::Down, pods.runtime),
-                        Ok(pods) => (index, Health::Up, pods.runtime),
-                        Err(_) => (index, Health::Unknown, None),
-                    }
-                });
-            }
+            } => match pods {
+                Some(set) => {
+                    let found = set.pods(&namespace, &selector);
+                    service.health = if found.ready == 0 {
+                        Health::Down
+                    } else {
+                        Health::Up
+                    };
+                    service.runtime = found.runtime.or(service.runtime);
+                }
+                None => service.health = Health::Unknown,
+            },
         }
     }
     while let Some(result) = checks.join_next().await {

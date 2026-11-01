@@ -36,6 +36,8 @@ A successful login creates a 256-bit random **opaque session ID**. The browser r
 
 ## Grants and the gate
 
+The settings pages say "permission" where this document and the protocol say "grant". The two words name the same thing.
+
 ### Grants
 
 A grant is an action on a node of the resource tree of a service (contract 11.8). A grant has this form:
@@ -51,7 +53,7 @@ A grant is an action on a node of the resource tree of a service (contract 11.8)
 The `<id>` is the id of the service in the catalogue. The id is the label `portal.id`, or the slug of the group and the name. The part after the service has 0 to 4 segments.
 
 - `access` lets the user open the service. portal decides `access` in `/auth/verify`.
-- The other actions are the actions that the service publishes at `/.well-known/access-actions` (contract 11.4). The service decides these actions. The service asks the PDP of portal.
+- The other actions are the actions that the service publishes at `/.well-known/procurauth/actions` (protocol 5.1). The service decides these actions. The service asks the PDP of portal.
 - A grant covers the node that it names and each node below it. portal compares the segments one by one (prefix match). For example, `query.run.read on service:db` covers each host and each database of `db`.
 - A grant below the service does not cover its parent, a node of another branch, or the whole service.
 - The service gives its tree of resource types. The top-level list `resource_types` of its document declares each type and its parent: `service` or another declared type. A document without this list has one level: each type of an action has the parent `service`.
@@ -90,7 +92,7 @@ user "alice" {
 
 The server reads the `user` blocks at each start. When you remove a grant from the file, the grant stops at the next start. The server does not write the grants of the configuration to the database.
 
-A `user` block can give a grant below the service, for example `"query.run.write on service:db/host:local/database:analytics"`. A grant with a bad form stops the start: a bad type, a bad encoding, or more than 4 segments. At start, portal does not know the services: the catalogue and the actions documents come at run time. Thus a grant that does not follow the tree of its service does not stop the start. The Services settings page shows this grant under **Grants to check**. At run time, the PDP does not apply this grant (see "AuthZEN PDP").
+A `user` block can give a grant below the service, for example `"query.run.write on service:db/host:local/database:analytics"`. A grant with a bad form stops the start: a bad type, a bad encoding, or more than 4 segments. At start, portal does not know the services: the catalogue and the actions documents come at run time. Thus a grant that does not follow the tree of its service does not stop the start. The Services settings page shows this grant under **Permissions to check**. At run time, the PDP does not apply this grant (see "AuthZEN PDP").
 
 ### The gate
 
@@ -101,7 +103,7 @@ Traefik routes on the clean path, but sends the raw URI. portal therefore reads 
 - A refused browser navigation goes to `/auth/denied`. Traefik limits the body of a ForwardAuth answer. The answer cannot hold the page. Other requests get a plain `403`.
 - The page `/auth/denied` does not give the name of a service. A user does not see a service that is not open to that user.
 - `/auth/*` is always open to a signed-in user. A path that no service owns (an absolute asset path) is open to each signed-in user.
-- The previous rule needs a complete catalogue. The catalogue is complete when each configured discovery source answered at least once. Until then, only the superadmin passes the gate. A source that failed at setup never makes the catalogue complete. The metric `portal_catalog_complete` shows the state. After the first answer, a failed listing keeps the last good answer, and the catalogue stays complete.
+- The previous rule needs a complete catalogue. The catalogue is complete when each configured discovery source gave its full list. The instance opens its ports only after this (see "Start and stop"), so a user never reaches the gate with an incomplete catalogue. A source that failed at setup never makes the catalogue complete. The metric `portal_catalog_complete` shows the state. After the first full list, a failed listing keeps the last good list, and the catalogue stays complete.
 - A workload with unusable labels is not listed. The gate keeps the path of its `href` closed: only the superadmin passes it. The same rule applies to a workload whose id another workload already uses with another `href`. The catalogue problems name both cases.
 - The launcher shows only the services for which the user has `access`. The discovery problems name workloads. Only the superadmin sees these problems.
 
@@ -109,7 +111,7 @@ portal stays a ForwardAuth server. Traefik is the only proxy. portal receives on
 
 ### Identity token
 
-With the `identity` block, `/auth/verify` gives an identity token (contract 11.3) to each service that a user can open. The token is in the response header `identity.header`. The default is `X-Identity-Token`. Traefik copies the token to the request. Add the header to `authResponseHeaders` of the ForwardAuth middleware. Traefik then removes a header of the same name that the client sends.
+With the `identity` block, `/auth/verify` gives an identity token (protocol section 9) to each service that a user can open. The token is in the response header `identity.header`. The default is `X-Identity-Token`. Traefik copies the token to the request. Add the header to `authResponseHeaders` of the ForwardAuth middleware. Traefik then removes a header of the same name that the client sends.
 
 ```hcl
 identity {
@@ -120,7 +122,7 @@ identity {
 }
 ```
 
-The token is a JWT. Its algorithm is `EdDSA` (Ed25519). The header has `kid`. `kid` is the RFC 7638 thumbprint of the public key. The claims are:
+The token is a JWT. Its algorithm is `Ed25519`. The header has `kid`. `kid` is the RFC 7638 thumbprint of the public key. The claims are:
 
 | Claim | Value |
 |---|---|
@@ -131,11 +133,11 @@ The token is a JWT. Its algorithm is `EdDSA` (Ed25519). The header has `kid`. `k
 
 The token contains no permission. The service asks the PDP. portal keeps one token for each session and each service. portal gives the same token again until half of its life is gone. A path that no service owns gets no token.
 
-Make the key with OpenSSL. Give the public key to each service in its `identity.public_keys_file` key:
+Make the key with OpenSSL. Give the public key to each service as a JWK Set (protocol 9.4):
 
 ```bash
 openssl genpkey -algorithm ed25519 -out portal_identity_key
-portal identity-public-key --config /etc/portal/config.hcl > portal_identity_public.pem
+portal identity-public-key --config /etc/portal/config.hcl > portal_identity_public.jwks
 ```
 
 The key file holds a PKCS#8 key in PEM format. The file can also hold the base64 text of the PEM on one line. `portal check-config` reads the key. It then prints the `kid`.
@@ -179,7 +181,7 @@ Rules:
 - In a batch, the `context` of an item replaces the `context` at the top of the request (AuthZEN 1.0). An item without `context` uses the top-level one. The action search reads `context.match` too.
 - A grant below the service applies only when the last known document of the service follows it (see "Grants"). The PDP keeps the last document that it read for each service. A failed read does not remove it. A new document that changes the tree removes the effect of the grants that do not follow it, at once. The reason in the log is `the grant does not follow the document of the service`. A grant on the whole service is not affected.
 - The subject type must be `user`. The subject must be an account or the superadmin. If not, the decision is `false`.
-- If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant. An id with a colon names a machine principal, not a person. No login has a colon. The portal makes no machine principal yet: such an id also gives `unknown_subject`.
+- If the subject type is `user` and no account or superadmin has this login, the answer has a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant. An id with a colon names a key, not a person (protocol 3.2). No login has a colon. The portal makes no key yet: such an id also gives `unknown_subject`.
 - The reasons `invalid_resource` and `invalid_request` tell that the request of the service is not correct. They do not show the grants of a user.
 - No other denial has a reason. The answer is `{"decision": false}`, so that it does not show the grants of a user. A subject type that is not `user` is one of these denials.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
@@ -204,12 +206,12 @@ A request about a database of the host `local`:
 
 ### Actions of the services
 
-portal reads the actions of each service at `/.well-known/access-actions`. The URL comes from the label `portal.actions`. This label is an absolute http or https URL. If the label is missing, the URL is the origin of the health URL (`portal.health`) with this path. A service without these two labels has only `access`.
+portal reads the actions of each service at `/.well-known/procurauth/actions`. The URL comes from the label `portal.actions`. This label is an absolute http or https URL. If the label is missing, the URL is the origin of the health URL (`portal.health`) with this path. A service without these two labels has only `access`.
 
-- The read has a timeout (`access.actions_timeout`) and a size limit of 64 KiB. portal reads the document again after `access.actions_refresh`.
+- The read has a timeout (`access.actions_timeout`) and a size limit (`access.max_document_bytes`, 256 KiB by default). portal reads the document again after `access.actions_refresh`.
 - When the PDP gives `invalid_resource` to a service, portal reads the document of this service again at once. The service can have a new tree that portal does not know yet. portal does this at most once in each `access.actions_refresh` interval for each service. The early read has the same timeout, size limit and number of concurrent reads as the other reads. The log has one line `actions_read_early` with the service.
 - The field `server` of the document must be the id of the service. Set `portal.id` to the name of the server.
-- The top-level list `resource_types` declares the tree of types (contract 11.4). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
+- The top-level list `resource_types` declares the tree of types (protocol 5.2). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
 - When the document has this list, each type in the list of an action is `service` or a declared type. A type occurs one time in the list of an action.
 - The document can have an optional list `resources`. This list names the nodes of the tree that the service knows, for example its hosts. Each item has `path` (the text form of a grant, for example `host:prod`), an optional `label`, and an optional list `actions`. A path follows the declared types. A path occurs one time. Each action of an item lists the type of the node. Without `actions`, the item takes each action that lists its type. The settings pages show each named resource apart, with the actions that apply on it only. The list has 256 items at most. The list is not part of AuthZEN: a service that does not give it works as before, and the superadmin types the ids.
 - A document that does not obey one of these rules is bad as a whole. portal keeps the last good document, and the Services page shows the problem.
@@ -234,10 +236,9 @@ portal reads the actions of each service at `/.well-known/access-actions`. The U
 
 - A `404` means that the service does not publish actions. The service then has only `access`. `access` is the full permission. portal lets the user in. The service does no other check.
 - Any other failure keeps the last good document. The Services settings page shows the problem. The PDP also uses this document: see "AuthZEN PDP".
-- The page of a user shows one check box for each action of each service. The check box `access` comes first. A box that the page did not show keeps its grant. A grant does not end when a service stops to publish its action for a short time.
-- Under **Grants on sub-resources**, the page of a user shows the grants below each service. Each grant shows its chain, for example `host local › database analytics`, with the decoded ids.
-- The service has one form for each declared type that an action lists. The form shows the chain of types, for example `host › database`. Select the action, then type one id for each level. The list shows only the actions that list this type. portal encodes the ids. portal does not list the resources of a service.
-- **Remove** deletes one grant. A grant of the configuration shows the mark *configuration*. It cannot change on the page. The forms are plain HTML: the page has no script for them.
+- The page of a user has one editor of grants, the same editor as the forms of the keys (see "Editor of grants"). The editor shows the tree of the resources of a service and the actions of the chosen node. A person who gives a grant on a resource does not type its id: the editor lists the resources. portal takes them from the member `resources` of the action document and from the options of the service (portal 3.1a, protocol 5.6).
+- One **Save access** sends every grant of the account, with its limit values. The form replaces the grants of the account. The grants on the service `portal` (the rights on the keys) have their own form. A grant that the document of the service does not name now stays in the editor. The editor shows it, so a person can remove it. A grant of the configuration shows a lock and cannot change on the page.
+- A limit field shows the largest value that the document allows. This is a hint. An empty field gives no value: the limits of the service still apply. The protocol has no default value for a limit.
 - While a service has not answered, portal refuses a new grant below it.
 - The Services page keeps the section **Grants to check**. It lists each grant below a service that does not follow the document of the service. The PDP does not apply these grants. The section does not list the grants of a service that has not answered yet.
 - The log also has one warning `grant_to_check` for each such grant, with the login, the grant and the problem. portal writes it at the first answer of the service after the start, and at each change of its document.
@@ -253,11 +254,11 @@ The credential generation of the superadmin needs one more change on PostgreSQL.
 The resource tree (portal 4.2.0) needs one more change. SQLite goes to schema version 5. PostgreSQL goes to version 5. The columns `sub_resource_type` and `sub_resource_id` of `user_grants` become one column `resource_path`. It holds the segments after the service in their text form, for example `host:local/database:analytics`. It is empty for a grant on the whole service. The primary key is the user, the action, the service and the path.
 
 - The migration keeps each grant. A grant on one sub-resource `(database, a/b)` becomes the path `database:a%2Fb`.
-- The migration does not add a level. A grant `database:analytics` stays at depth 1. When the document of the service puts `database` below `host`, this grant does not follow the tree. The PDP does not apply it. The Services page lists it under **Grants to check**, and the log has a warning `grant_to_check` for it. Give the grant again on the new tree, for example `host:local/database:analytics`, then remove the old grant.
+- The migration does not add a level. A grant `database:analytics` stays at depth 1. When the document of the service puts `database` below `host`, this grant does not follow the tree. The PDP does not apply it. The Services page lists it under **Permissions to check**, and the log has a warning `grant_to_check` for it. Give the grant again on the new tree, for example `host:local/database:analytics`, then remove the old grant.
 - A row that does not fit the new rules stops the migration. Examples: a type that does not start with `a-z`, an id of more than 256 bytes. The transaction rolls back. The database stays at the earlier version, and the new portal does not start. The error names `resource_path`.
 - An earlier portal refuses version 5: it does not start on it. During a rolling update, an instance of portal 4.1.0 that still operates cannot read or write the grants after the migration. It keeps the grants that it has in memory until it stops.
 
-The accesses (portal 4.3.0) need one more change. SQLite goes to schema version 6. PostgreSQL goes to version 6. The migration adds three tables: `accesses`, `access_grants` and `access_keys`. An access belongs to one user. A key belongs to one access. The key table holds the SHA-256 digest of a key and a short hint, never the key. When a user is deleted, the database deletes the accesses of the user, and with them their grants and their keys. No code uses these tables yet. The migration keeps all other data. An earlier portal refuses the new schema: it does not start on it. Therefore, a return to an earlier portal needs a restore of the database from before the migration.
+The keys and limits need one more change. SQLite goes to schema version 6. PostgreSQL goes to version 6. The migration adds the tables `keys`, `key_grants`, `key_history`, `budget_counters` and `directory_version`, and it adds the column `limits` to `user_grants`. A key belongs to one user. The table `keys` holds the SHA-256 digest of a key and a short hint, never the key. When a user is deleted, the database deletes the keys of the user, and with them their grants. Each write of a user or a key adds 1 to `directory_version`, and the other instances read the directory again at the next round. The migration keeps all other data. An earlier portal refuses the new schema: it does not start on it. Therefore, a return to an earlier portal needs a restore of the database from before the migration.
 
 ### Paths open without a session (`portal.exclude`)
 
@@ -281,6 +282,33 @@ The rules are strict by design:
 - portal ignores the query string. portal records nothing in a session, because there is no session. The request is counted in `portal_forward_auth_requests_total{result="excluded"}`.
 
 The Services settings page lists the rules of every service. The whole exposure can be audited in one place. A path that a rule opens is protected only by what the service does itself, for example by a webhook token. portal does not ask anything for these paths.
+
+## Keys and limits
+
+A key lets a program call a service for a user. Without the block `keys {}`, the keys are off: each address of the key pages answers 404.
+
+- **Key text:** `mcp_`, 43 base62 characters and 6 characters of CRC32, 53 characters in all. The portal shows the text one time, when it makes the key. It keeps only the SHA-256 digest and the last 4 characters.
+- **Key pages:** `GET /auth/keys` shows the keys. A user with the right `keys.own.create` makes a key on the page `GET /auth/keys/new`, with a name, an expiry date and grants. The grants of a key never go beyond the grants of its owner. The page of a new key has the editor of grants (see "Editor of grants"). The limit fields of a grant stand in the table of the ticked grants. A key has its own page of change, `GET /auth/keys/edit?id=<id>`, with the same editor. A refused form returns to the page of the new key, with the reason in a notice.
+- **Edge:** `GET /auth/verify-key` is the ForwardAuth address for the key routes. It reads only memory. A good key gives status 200 and an identity token. A bad key gives status 401, the header `WWW-Authenticate: Bearer error="invalid_token"` and an empty body.
+- **Rights of the portal:** the service `portal` has 8 actions: `keys.own.read`, `keys.own.create`, `keys.own.edit`, `keys.own.revoke`, `keys.own.use`, `keys.all.read`, `keys.all.revoke` and `users.read`. The ceiling `max_key_lifetime` limits the age of a key.
+- **Limits:** a grant can hold limit values. A ceiling is a value that the service applies. A budget is a count in a window (`second`, `minute`, `hour` or `day`) that the PDP counts. The PDP counts one use for the key and for its owner, and it takes the unit from both counters or from none. When a budget is empty, the PDP answers `false` with the reason `budget_exceeded` and `retry_after`.
+- **Counters:** the table `budget_counters` holds the counters. PostgreSQL uses a second pool of connections (`pdp.counter_connections`). `keys.max_counter_rows` limits the number of rows.
+- **Revoke:** the command `portal revoke-keys --config FILE (--user LOGIN | --all)` revokes keys without the web page. With SQLite, it refuses to run when an instance runs.
+- **Accounts of the file:** a block `user "<login>"` defines an account of the file, with optional blocks `key "<name>"`. A login comes from the file or from the database, never from both.
+
+## Start and stop
+
+The instance opens its ports only when these tasks end:
+
+1. The directory is loaded and the counter rows exist.
+2. The catalogue has the full list of the services.
+3. The first read of the document of each service ended, or `access.start_read_deadline` passed.
+
+The startup probe of the pod MUST wait longer than the sum of these times. The liveness probe reads `/healthz`, which never reads the database.
+
+On SIGTERM, the instance serves 5 seconds more. Then it closes its listeners and tells each connection to close. It waits at most 10 seconds for the answers in progress. Set `terminationGracePeriodSeconds` to 20.
+
+The instance reads the action documents at equal intervals, 64 at the same time at most. The catalogue reads the IngressRoutes and the pods in two lists, page by page, and it probes 64 services at the same time at most.
 
 ## Launcher
 
@@ -326,20 +354,37 @@ The pages work without script. The pages answer 404 to anyone who is not the sup
 
 Each page is a column of flat parts, with the density of clickhouse-dash. A part has a heading row with a title, a count in muted text and its controls at the right. Data is in hairline tables of 32 px rows. A state shows as a word in a pill, never as a colour alone. A description is the title of its item, or one muted line. Under a coarse pointer (touch), each control is 44 px. These are the pages:
 
-1. **Users** (`/auth/settings`). A table of the accounts. The superadmin is the first row. Each row gives the login, a summary of the access, the last sign-in, the sessions and the refused sign-ins of the last 30 days. The summary tells how many services the account opens, how many actions it has on whole services, how many grants it has on resources, and how many grants to check. The login is a link to the page of the account. A red line above the table counts the refused sign-ins of 30 days, with a link to the refused attempts. **Add a user** is one link (`?add=1`). It shows the form above the table. The form also shows after a refused attempt. While the add form is open, it is the whole page: the list of the accounts is not shown. The add form has the login and the password on the top row. Under them are the permissions, in the manner of the Explorer of clickhouse-dash. The permissions use the whole width of the window. At the left is the list: a search field, then the services by group. Each line has the box `access` of a service, its name, its id and a count. The list has no children and no fold. At the right is the panel of the selected service: its title, its marks, one line of facts, then all its boxes. The actions on the whole service are the first column. Each resource that the service names (for example a host) is a column next to it, with the actions that apply on it only and its own count. A click on a line shows its panel without a new page. All the panels are in the page, so a box that was ticked in one panel stays ticked when another panel shows. The boxes follow the tree: a grant on the whole service shows ticked on each host, because it covers them. A small script does this at once. A click on an action of the whole service ticks it on every host. A click that unticks it on one host unticks it on the whole service and on the nodes above, so the other hosts keep their own boxes. When every host is ticked one by one, the box of the whole service ticks too. The grant is then on the whole service, so it covers a host that the service adds later. When the page saves, the server keeps the broad grant and drops the grants that it covers. Without the box `access`, the other boxes of a service are unticked and locked: an action needs the open service. The count (for example `4/10`) is the number of ticked boxes of the service, and the script keeps it current. Without the script, every panel shows under the list, and a line links to its panel. The search field needs the script. Without a box, the new account has no grant and sees no service. One request makes the account and its grants. In the mode `static`, the form has no card. One request makes the account and its grants. After the add, the portal opens the page of the new account. The page ends with **End all sessions**. See "End all sessions" below.
+1. **Users** (`/auth/settings`). A table of the accounts. The superadmin is the first row. Each row gives the login, a summary of the access, the last sign-in, the sessions and the refused sign-ins of the last 30 days. The summary tells how many services the account opens, how many actions it has on whole services, how many grants it has on resources, and how many grants to check. The login is a link to the page of the account. A red line above the table counts the refused sign-ins of 30 days, with a link to the refused attempts. **New user** is one link (`?add=1`). It shows the form above the table. The form also shows after a refused attempt. While the add form is open, it is the whole page: the list of the accounts is not shown. The add form has the login and the password on the top row. Under them is the editor of grants. A new account has no grant and sees no service until a grant is ticked. One request makes the account and its grants. In the mode `static`, the form has no editor. After the add, the portal opens the page of the new account. The page ends with **End all sessions**. See "End all sessions" below.
 2. **Page of an account** (`/auth/settings/users/<login>`). This page has three parts:
-   - The page of an account has three views, as the Explorer has its tabs: **Access**, **Activity** and **Account**. A script shows one view at a time, and the address `#tab-activity` names the view that shows first. Without the script, the three views show one under the other. **Access** has the same list and the same panels as the add form, with the grants of the account ticked. The first service with a grant shows its panel. A line with a grant has a mark. A service with no action has one line and no panel. A panel also shows the other grants on resources as sentences with **Remove**, and **Add a grant on a resource**. A grant that the service does not declare has the mark *To check*. One form sends every box of the page: **Save access** is in the head of the part and at its end. In the mode `static`, the page has no form. In the mode `hybrid`, a grant of the configuration has the mark *configuration* and cannot change.
-   - **Activity** shows the connections per day over 30 days, the latest sessions (time, address, browser, duration, and how each session ended), and the services that the account used. The bars of the graph are neutral. The bar of today uses the accent. The peak day is written out. A graph is one SVG of three paths.
+   - The page of an account is one page with no tab. It has the editor of grants first, then the rights on the keys, then **Account**, then **Activity** (folded). The address `?service=<id>` chooses the service that shows first. One form sends every grant: **Save access** is in the head of the part and at its end. In the mode `static`, the page has no form. In the mode `hybrid`, a grant of the configuration has a lock and cannot change.
+   - **Activity** (a part that folds under a head of one line) shows the connections per day over 30 days, the latest sessions (time, address, browser, duration, and how each session ended), and the services that the account used. The bars of the graph are neutral. The bar of today uses the accent. The peak day is written out. A graph is one SVG of three paths.
    - **Account** has **Change password** and **Delete** on one row. A new password ends the sessions of the account at once. **Delete** is a two-step action. The head of the page is one line with the way back to **Users**, the login and **Log in as**, then one line of facts: creation, last sign-in, sessions and refused sign-ins of 30 days.
    The **Generate** button fills a password field with a random 20-character password. The browser draws this password. The password is never sent anywhere before the form is submitted. The password generator is the only script of these pages. It loads with the add form and on the page of an account only. The page of the superadmin shows its activity only: the superadmin has every grant, and the configuration file gives its login and password.
-3. **Editor of one service for one account** (`/auth/settings/access?user=<login>&service=<id>`). **Add a grant on a resource** and **Edit** (on the page of a service) open it. This page has two parts:
-   - **On the whole service** is a list of boxes. The first box is `access`. Each other box is one action of the service. Each box has its description in plain text. **Save** sends this form with the field `only`, which names the service. The server then changes the grants of that service only. A grant of another service is never changed. In the mode `hybrid`, a grant of the configuration has the mark *configuration* and cannot change.
-   - **On one resource** shows each grant on a resource as a sentence, for example `query.run.write on host local › database analytics and everything below`, with **Remove**. A grant that a broader grant of the same account already covers has the mark *Covered by …: adds nothing*. A new grant has two steps. Step 1 asks for the level, from the tree of types of the service. A service with one level has no step 1. Step 2 asks for one id for each type of the chain, and for one action among the actions that list the type. A field suggests the ids that other grants of the same service already use. The server does not list the resources: type the id as the service writes it. The two steps work without script, because step 1 is a GET form.
-   The page answers 404 for an unknown account or an unknown service.
-4. **Services** (`/auth/settings/services`). **Grants to check** comes first when there is one: the account (a link to its page), the grant and the problem. Then one table lists the services by group: the name and the id, the path and the paths open without sign-in, the accounts that have `access` (links), the actions as small tags (the description is the title of a tag), and the tree of the resource types. A service whose actions document cannot be read has a warning line under its row. A service without actions has `access` only: opening the service is then the full permission. The name of a service is a link to the page of the service (`/auth/settings/services/<id>`). That page shows **Who has access**: each account with a grant on the service, its state, its actions and its grants on resources, with **Edit**. **Give access to an account** is one list of the other accounts and one **Add** button. The button opens the editor with the box `access` ticked. A side block, **How a grant reads**, gives the three forms of a grant and the subtree match.
+3. **Give access** (`/auth/settings/give?user=<login>&service=<id>`). The page of a service uses this address. It redirects to the page of the account, with the service chosen in the editor and the grant `access` ticked. The page saves nothing until the person clicks **Save access**.
+4. **Services** (`/auth/settings/services`). **Grants to check** comes first when there is one: the account (a link to its page), the grant and the problem. Then one table lists the services by group: the name and the id, the path and the paths open without sign-in, the accounts that have `access` (links), the number of actions, the resource types and the number of resources. Each row is one line. A list that can be long folds out under its count: the accounts, and the actions as small tags (the description is the title of a tag). A service whose actions document cannot be read has a warning icon, and its cell of actions folds out the message. A service without actions has `access` only: opening the service is then the full permission. The name of a service is a link to the page of the service (`/auth/settings/services/<id>`). That page shows **Who has access**: each account with a grant on the service, its state, its actions and its grants on resources, with **Edit**. **Give access to an account** is one list of the other accounts and one **Add** button. The button opens the editor with the box `access` ticked. A side block, **How a grant reads**, gives the three forms of a grant and the subtree match.
 5. **Activity** (`/auth/settings/logins`). One strip gives the figures of the last 24 hours and the connections of 30 days. Then the page shows the sign-in log (see below). A side column shows the graph of the connections of all accounts and a table of the recent changes. A recent change names its account with a link to the page of the account.
 
 A form of an account returns to the page of the account, or to the editor of the service, with the outcome in a notice. The notice is one code from a fixed list (`?s=<code>`). The address never carries text.
+
+### Editor of grants
+
+A service can have hundreds of actions and hundreds of resources. A box for each pair of an action and a node does not fit in a page. The forms of the keys and the forms of the accounts use one editor. The page holds the data of the editor as a JSON block (`<script type="application/json">`, which the content security policy does not run). The script `settings.js` draws the editor from this block.
+
+At the left is the tree of the resources of a service, with a search field and the number of ticked grants of each node. A list of the services shows when the editor has more than one. At the right are the actions of the chosen node, in groups by the first part of the name. Each action has one line. A list of more than 60 actions starts with its groups closed. A filter and the button **Ticked** narrow the list. The box of a group ticks the actions that the list shows. An action that a grant above the node covers shows ticked, with the words "via the whole service" or "via" and the node. An action shows on the whole service only when its document lists the type `service`.
+
+A ticked action shows its limit fields on its own line, with the largest value of the document as a hint. Each service has a row with a switch for the grant `access` and a count of its permissions. On a form of a key, the button **Same as mine** ticks all the permissions that the owner holds on that service.
+
+The service lists its own resources. The editor shows the nodes of the member `resources` of the action document. When a node can have children that the document does not list, the editor asks the portal: `GET /auth/options?service=<id>&type=<type>&parent=<path>&q=<text>&after=<cursor>`. The portal asks the service at `/.well-known/procurauth/resources` (protocol 5.6), with an identity token for the person who fills the form. The portal makes this token only when the person can open the service. The service lists only what this person can see. The portal asks for 50 items at a time and keeps each answer for 60 seconds, for at most 5,000 entries and 32 MiB (portal 3.1c). The tree shows **Show more** under a page that has a next cursor. A search asks the service for the children of the chosen node. A service that has no such route gives no option. The page of the superadmin and the page of a user who makes keys use the route. The CSP allows `connect-src 'self'` for it.
+
+The page also writes the ticked grants as hidden fields, with the names that the server reads: `grant<n>` and `limit<n>.<name>[.<window>]`. A browser without script sends these fields as they are, so a change that does not touch the grants keeps them. The form of a key also has a text field for each blank grant in a `<noscript>` element. A key holds 512 grants at most.
+
+The portal accepts a document of 1,024 actions, 4,096 resources and 256 KiB by default. The keys `access.max_actions`, `access.max_resources` and `access.max_document_bytes` set these bounds. The minimum of each key is the number of protocol 5.3c.
+
+### Look and feel
+
+The pages share the look of the launcher: graphite panels with a thin border and a small upper-case title, controls of 34 to 36 px, one accent, a theme selector with three icons (System, Dark, Light) that the browser remembers. The file `web/portal.css` holds the tokens, the header, the buttons, the launcher and the sign-in card. The file `web/settings.css` holds the rules that only the settings pages use. The portal serves them at `/auth/style.css` and `/auth/settings.css`. The content security policy allows requests of the script from the same origin only.
+
+The pages use these component names: `pagePart` (a panel), `dataTable`, `uiField`, `uiInput`, `uiBanner` and `uiState`. A time is a `<time class="when">` element. The server writes the time in UTC. The script `settings.js` shows the time of the browser instead and keeps the UTC text in the tooltip. A state (key, session, sign-in) is one icon with a hidden word for a screen reader. A form with the attribute `data-gate` keeps its submit buttons disabled until its fields are valid.
 
 ### Sign-in log
 
@@ -353,7 +398,7 @@ A browser that the gate refuses goes to a 403 page. The page does not give the n
 
 ### End all sessions
 
-Use this tool after an incident, for example after a suspected theft of a cookie. It ends every session of every account. The sessions of the superadmin end too. Accounts, grants and history stay. Each user must sign in again.
+Use this tool after an incident, for example after a suspected theft of a cookie. It ends every session of every account. The sessions of the superadmin end too. Accounts, permissions and history stay. Each user must sign in again.
 
 There are two ways to start it:
 
@@ -651,7 +696,7 @@ The superadmin: the one account that is not in the database.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of machine principals. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
+| `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of keys. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
 | `superadmin_password` | secret: give `superadmin_password_env` (a variable name) or `superadmin_password_file` (an absolute path), not both | required | The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions. |
 
 #### Block `users`
@@ -661,6 +706,7 @@ The accounts in the database.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `max_users` | number, 1 to 1024 | `64` | The largest number of accounts in the database. |
+| `max_grants` | number, 1 to 30000 | `512` | The largest number of grants of one user. A key holds at most 512 grants, at any value of this key. A user with 3 grants for each service and the 8 actions of the service `portal` needs 3 x the number of services + 8 grants. |
 
 #### Block `access`
 
@@ -669,8 +715,13 @@ The grants of the users, and the actions that the services publish.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `grants_mode` | `static`, `dynamic`, `hybrid` | `"dynamic"` | Where the grants come from. `static`: only the `user` blocks; the settings pages show the grants and do not change them. `dynamic`: only the settings pages; a `user` block stops the server. `hybrid`: both; the grants of a `user` block are read-only in the settings pages. |
-| `actions_timeout` | duration, 100ms to 30s | `"2s"` | The time that the server waits for the `/.well-known/access-actions` document of one service. |
-| `actions_refresh` | duration, 10s to 1d | `"5m"` | The time between two reads of the `/.well-known/access-actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP. |
+| `actions_timeout` | duration, 100ms to 30s | `"2s"` | The time that the server waits for the `/.well-known/procurauth/actions` document of one service. |
+| `actions_refresh` | duration, 10s to 1d | `"5m"` | The time between two reads of the `/.well-known/procurauth/actions` documents. It is also the shortest time between two early reads of the document of one service, after an `invalid_resource` of the PDP. |
+| `actions_max_age` | duration, 1m to 7d | `"1h"` | The longest time that the server keeps the last good document of a service after its last good read. After this time, the server acts as if the service had no good document. The edge also refuses each key for this service. The value must be more than `access.actions_refresh`. |
+| `max_actions` | number, 64 to 4096 | `1024` | The largest number of actions in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 64 at least. |
+| `max_resources` | number, 256 to 65536 | `4096` | The largest number of resources in the document of one service. A larger document is bad. Protocol 5.3c asks a reader to accept 256 at least. |
+| `max_document_bytes` | number, 65536 to 4194304 | `262144` | The largest size, in bytes, of the document of one service. The server stops the read at this size, and the document is bad. Protocol 5.3c asks a reader to accept 64 KiB at least. The server keeps the last good document of each service in memory. |
+| `start_read_deadline` | duration, 1s to 5m | `"5s"` | The longest time that the server waits, at start, for the first read of the documents of the services. After this time, the server opens its ports and reads the other documents in the background. |
 
 #### Block `identity`
 
@@ -681,7 +732,7 @@ This block is optional. If it is present, the server gives an identity token to 
 | `header` | text: an HTTP header name of 1 to 64 characters: letters, digits and '-' | `"X-Identity-Token"` | The response header of `/auth/verify` that holds the identity token. Traefik copies it to the request with `authResponseHeaders`. |
 | `issuer` | text: 1 to 256 visible ASCII characters, for example https://portal.example.internal | required | The claim `iss` of each identity token. Each service compares it with its `identity.issuer`. |
 | `token_ttl` | duration, 10s to 1h | `"5m"` | The life of an identity token (`exp - iat`). It must not be more than the `identity.max_age` of the services. The server gives the same token again until half of its life is gone. |
-| `signing_key` | secret: give `signing_key_env` (a variable name) or `signing_key_file` (an absolute path), not both | required | The Ed25519 private key that signs the identity tokens (algorithm `EdDSA`): a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services. |
+| `signing_key` | secret: give `signing_key_env` (a variable name) or `signing_key_file` (an absolute path), not both | required | The Ed25519 private key that signs the identity tokens (algorithm `Ed25519`): a PKCS#8 key in PEM, or the base64 text of the PEM on one line. `portal identity-public-key` prints the public key for the services, as a JWK Set. |
 
 #### Block `pdp`
 
@@ -693,6 +744,21 @@ This block is optional. If it is present, the server is an AuthZEN PDP on a seco
 | `url` | text: an http or https URL without a path, a query or a fragment | required | The URL at which the services reach the PDP. `/.well-known/authzen-configuration` gives the endpoints under this URL. |
 | `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest request body that the PDP reads. |
 | `max_evaluations` | number, 1 to 1024 | `64` | The largest number of evaluations in one request to `/access/v1/evaluations`. |
+| `plain_http` | `true` or `false` | `false` | Set it to `true` to accept an `http` value of `pdp.url`. Then the operator states that other means secure the link to the PDP. With `false`, an `http` URL stops the server. With `true`, an `https` URL also stops the server. With `true`, the start log has a warning. |
+| `counter_connections` | number, 1 to 64 | `2` | The number of database connections that count the uses of the budgets. Each connection counts approximately 1,000 uses each second. A use that waits more than 500 ms gets the HTTP status 503. |
+
+#### Block `keys`
+
+This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys, and the edge and the PDP accept them. The block needs the blocks `identity` and `pdp`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `default_lifetime` | duration, 1d to 365d | `"30d"` | The lifetime that the form of a new key proposes. The form uses the lower of this value and the longest lifetime of the owner (`max_key_lifetime`). |
+| `directory_max_age` | duration, 15s to 5m | `"30s"` | The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. |
+| `max_per_user` | number, 1 to 10000 | `100` | The largest number of active keys of one user. An expired key and a key that is too old do not count. |
+| `max_counter_rows` | number, 1 to 100000000 | `2000000` | The largest number of counter rows. The server refuses a write that makes more rows. A file that needs more rows stops the server at start. One row is approximately 300 bytes. |
+| `max_directory_grants` | number, 1 to 100000000 | `4000000` | The largest number of grants of the directory: the grants of the users and the keys. The server refuses a write that makes more grants. A file that needs more grants stops the server at start. One grant takes approximately 200 bytes of memory. |
+| `history_days` | number, 1 to 3650 | `90` | The number of days that the server keeps the summary row of a revoked key. |
 
 #### Block `storage`
 
@@ -796,7 +862,18 @@ This block has a label and can occur more than one time. The grants of one user 
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `grants` | list of at most 512 quoted strings: grants such as "access on service:grafana" or "query.run.write on service:clickhouse-dash/host:local/database:analytics": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded | required | The grants of the user. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/access-actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. |
+| `grants` | list of at most 30000 grants, each a quoted text or an object with `grant` and `limits`: a grant such as "access on service:grafana" or "query.run.write on service:clickhouse-dash/host:local/database:analytics": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded. To give limit values, write { grant = "access on service:datastore", limits = { requests = [ { amount = 300, window = "minute" } ] } } | required | The grants of the user. The user is an account of the file, with no row in the database. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. The `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget value is only on the grant `access` on a service. A grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON. The number of grants is at most `users.max_grants`. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give. |
+| `password_hash` | secret: give `password_hash_env` (a variable name) or `password_hash_file` (an absolute path), not both | none | The Argon2id digest of the password of the user, in the PHC string form, as the database keeps it. Without it, the account opens no session, and only its keys act for it. |
+
+#### Block `key "<name>"`
+
+This block has a label and can occur more than one time. One key of a user of the file. The block is inside a block `user`. The label is the name of the key: 1 to 64 characters, with no control character. Two keys of one user have two names. The subject id of the key is `key:` and the first 16 hexadecimal characters of the SHA-256 digest of the login, a zero byte and the name. A key of the file has no expiry date. To stop it, remove the block and restart each instance. The block needs the block `keys`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `grants` | list of at most 512 grants, each a quoted text or an object with `grant` and `limits`: the same form as `user.grants` | required | The grants of the key, in the form of `user.grants`. A key holds at most 512 grants. A grant of an action of the service `portal` stops the server. The decision for a key never gives more than the grants of its owner. |
+| `key` | secret: give `key_env` (a variable name) or `key_file` (an absolute path), not both | none | The text of the key: `mcp_`, 43 characters and 6 characters of checksum. Give `key_env` or `key_file`, or give `key_sha256_env` or `key_sha256_file`: exactly one of the four. A bad form stops the server. |
+| `key_sha256` | secret: give `key_sha256_env` (a variable name) or `key_sha256_file` (an absolute path), not both | none | The SHA-256 digest of the text of the key: 64 hexadecimal characters, in upper or lower case. A digest that the database or another block also holds stops the server. The digest must be the digest of a text of the form `mcp_`, 43 characters and 6 characters of checksum: the server cannot check this at start. |
 
 #### Block `pdp_client "<server>"`
 
@@ -827,7 +904,7 @@ The crate uses `#![forbid(unsafe_code)]` for project code.
 
 `POST /auth/login`, `POST /auth/logout` and the account routes (`POST /auth/users/add`, `/delete`, `/impersonate`, `/impersonate-end`, `/end-sessions`) require both:
 
-1. a CSRF token. For login, the token is the double-submit cookie. For the other routes, the token is an HMAC of the session ID and of the purpose (`logout`, `users`). The form of the button carries the HMAC. The HMAC has no cookie that can expire under a page left open. A token for one action cannot be replayed on another action; and
+1. a CSRF token. For login, the token is the double-submit cookie. The cookie lives 12 hours. When it is gone, the portal gives the sign-in page again with a new token and the sentence "The page was open too long" (status 403). For the other routes, the token is an HMAC of the session ID and of the purpose (`logout`, `users`). The form of the button carries the HMAC. The HMAC has no cookie that can expire under a page left open. A token for one action cannot be replayed on another action; and
 2. a same-origin `Origin` check. The program uses `Referer` only when `Origin` is absent.
 
 The account routes also check on the server that the session belongs to the superadmin. The session must not be an impersonated one. In K3s, these paths do not pass through ForwardAuth. portal therefore cannot rely on the gate.
@@ -890,6 +967,7 @@ See:
 
 - `examples/traefik-entrypoint-snippet.yaml`
 - `examples/traefik-dynamic.yaml`
+- `demo/`: a complete local stack with Traefik, the portal, a service with a front, and the routes for keys (`demo/README.md`)
 
 ## Absolute JS/CSS paths
 

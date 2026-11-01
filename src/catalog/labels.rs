@@ -14,8 +14,8 @@ const MAX_TEXT_CHARS: usize = 160;
 const MAX_EXCLUDES: usize = 8;
 /// The id is the audience of the identity tokens. It is also the resource id of the grants.
 const MAX_ID_CHARS: usize = crate::grants::MAX_SERVICE_CHARS;
-/// The path of the actions document. See contract 11.4.
-pub const ACTIONS_PATH: &str = "/.well-known/access-actions";
+/// The path of the actions document. See protocol 5.1.
+pub const ACTIONS_PATH: &str = "/.well-known/procurauth/actions";
 const DEFAULT_GROUP: &str = "Other";
 
 /// Parses the labels of one workload. `origin` names the workload in errors. It is also the
@@ -83,6 +83,12 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     };
     if id.is_empty() {
         return Err(fail("id is empty after normalisation".into()));
+    }
+    // The id `portal` is the id of the service of the portal itself (portal 6.1).
+    if id == crate::portal_actions::SERVICE {
+        return Err(fail(
+            "the id portal is the id of the service of the portal: set another portal.id".into(),
+        ));
     }
     if id.chars().count() > MAX_ID_CHARS {
         return Err(fail(format!(
@@ -283,7 +289,7 @@ mod tests {
         );
         assert_eq!(
             service.actions_url.as_deref(),
-            Some("http://notes-server:8000/.well-known/access-actions"),
+            Some("http://notes-server:8000/.well-known/procurauth/actions"),
             "the origin of the health URL"
         );
         assert_eq!(service.icon.as_deref(), Some("notes"));
@@ -467,18 +473,18 @@ mod tests {
         assert_eq!(read(&[]), None, "no health URL, no label: only access");
         assert_eq!(
             read(&[("portal.health", "https://db.apps:8443/api/health?x=1")]).as_deref(),
-            Some("https://db.apps:8443/.well-known/access-actions")
+            Some("https://db.apps:8443/.well-known/procurauth/actions")
         );
         assert_eq!(
             read(&[
                 ("portal.health", "http://db:80/up"),
                 (
                     "portal.actions",
-                    "http://db-admin:9000/.well-known/access-actions"
+                    "http://db-admin:9000/.well-known/procurauth/actions"
                 ),
             ])
             .as_deref(),
-            Some("http://db-admin:9000/.well-known/access-actions"),
+            Some("http://db-admin:9000/.well-known/procurauth/actions"),
             "the label wins"
         );
     }
@@ -612,5 +618,53 @@ mod exclude_tests {
         assert!(parse("x", &labels("/dagu", &many))
             .unwrap_err()
             .contains("more than 8 rules"));
+    }
+}
+
+#[cfg(test)]
+mod portal_id_tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn the_id_portal_is_refused_with_a_reason_and_another_id_is_good() {
+        let refused = parse(
+            "x",
+            &labels(&[
+                ("portal.name", "Portal"),
+                ("portal.id", "portal"),
+                ("portal.href", "/p/"),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("portal.id") && refused.contains("service of the portal"),
+            "{refused}"
+        );
+        // The id that the name gives is `portal` too, with the group `portal`... no group: the
+        // id comes from the group and the name.
+        let derived = parse(
+            "x",
+            &labels(&[("portal.name", "portal"), ("portal.href", "/p/")]),
+        );
+        assert!(
+            derived.is_ok(),
+            "the id of a name in a group is `group-name`"
+        );
+        assert!(parse(
+            "x",
+            &labels(&[
+                ("portal.name", "Portal"),
+                ("portal.id", "portal2"),
+                ("portal.href", "/p/")
+            ])
+        )
+        .is_ok());
     }
 }

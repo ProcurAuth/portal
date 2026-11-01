@@ -6,7 +6,7 @@
 //! Callers run these methods on blocking threads. Such a thread is the writer thread of [`crate::tracking`], or a `spawn_blocking` call from a handler.
 //! The request path reads the in-memory directory instead. It never waits on the database.
 
-mod pg;
+pub mod pg;
 mod sqlite;
 
 use std::path::Path;
@@ -33,21 +33,33 @@ const MAX_LOGIN_ROWS: i64 = 20_000;
 
 /// A row of `user_grants` as a grant. The column `resource_path` holds the segments after the
 /// service in their text form (`host:local/database:analytics`). It is empty for a grant on the
-/// whole service. A row that is not a valid grant stops the read: the database holds only what
-/// the servers wrote.
-fn grant_from_row(action: &str, kind: &str, id: &str, path: &str) -> Result<Grant, String> {
+/// whole service. The column `limits` holds the limit values as JSON. A row that is not a valid
+/// grant stops the read: the database holds only what the servers wrote.
+fn grant_from_row(
+    action: &str,
+    kind: &str,
+    id: &str,
+    path: &str,
+    limits: &str,
+) -> Result<Grant, String> {
     if kind != crate::grants::SERVICE_TYPE {
         return Err(format!("user_grants: unknown resource type {kind:?}"));
     }
-    Grant::from_path_text(action, id, path).map_err(|e| format!("user_grants: {e}"))
+    let limits = crate::limits::Limits::from_json(limits)
+        .map_err(|e| format!("user_grants: the limits of a grant: {e}"))?;
+    Grant::from_path_text(action, id, path)
+        .map(|grant| grant.with_limits(limits))
+        .map_err(|e| format!("user_grants: {e}"))
 }
 
-/// The columns of a grant in `user_grants`: `resource_type`, `resource_id` and `resource_path`.
-fn grant_columns(grant: &Grant) -> (&'static str, &str, String) {
+/// The columns of a grant in `user_grants`: `resource_type`, `resource_id`, `resource_path` and
+/// `limits`.
+fn grant_columns(grant: &Grant) -> (&'static str, &str, String, String) {
     (
         crate::grants::SERVICE_TYPE,
         grant.service.as_str(),
         grant.path_text(),
+        grant.limits.to_json(),
     )
 }
 
@@ -72,6 +84,134 @@ pub struct UserRow {
     /// The grants that the settings pages gave, sorted.
     pub grants: Vec<Grant>,
     pub created_at: i64,
+}
+
+/// A key of the database, with its grants (portal 4, 5). The database keeps the SHA-256 digest of
+/// the text of the key, never the text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRow {
+    /// 16 characters from `0-9` and `a-f` (portal 4.7).
+    pub id: String,
+    /// The login of the owner. `None`: the key of the superadmin (portal 3.7b).
+    pub owner: Option<String>,
+    pub name: String,
+    pub digest: [u8; 32],
+    pub hint: String,
+    pub created_at: i64,
+    /// `None`: the key has no expiry date.
+    pub expires_at: Option<i64>,
+    pub last_check_at: Option<i64>,
+    pub check_count: i64,
+    /// Sorted.
+    pub grants: Vec<Grant>,
+}
+
+/// The summary row of a revoked key (portal 5.4). It holds no grant and no counter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyHistoryRow {
+    pub id: String,
+    pub owner: Option<String>,
+    pub name: String,
+    pub created_at: i64,
+    pub revoked_at: i64,
+    pub last_check_at: Option<i64>,
+    pub check_count: i64,
+}
+
+/// What an instance reads in one directory round (portal 10.7): the version, the users and the
+/// keys with their grants, all from one transaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DirectorySnapshot {
+    pub version: i64,
+    pub users: Vec<UserRow>,
+    pub keys: Vec<KeyRow>,
+}
+
+/// The result of the count of one use (portal 7.2b).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CountOutcome {
+    /// Each counter had room: the statement took one unit from each.
+    Counted,
+    /// One counter or more had no room: the statement took nothing. Each refusal gives the index
+    /// of the counter in the request and the seconds to the end of its window, by the clock of the
+    /// database (portal 7.6a).
+    Refused(Vec<Refusal>),
+    /// A counter has no row (portal 7.2b): the answer is HTTP 503.
+    RowMissing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Refusal {
+    pub index: usize,
+    pub seconds_left: f64,
+}
+
+/// One line of the page of the keys (portal 5.5): a key, or the summary row of a revoked key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyListItem {
+    pub id: String,
+    /// The login of the owner. `None`: the key of the superadmin.
+    pub owner: Option<String>,
+    pub name: String,
+    pub hint: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub last_check_at: Option<i64>,
+    pub check_count: i64,
+    /// `Some`: the key is revoked, and this is its summary row.
+    pub revoked_at: Option<i64>,
+    /// The grants of a key that exists. Empty for a revoked key.
+    pub grants: Vec<Grant>,
+}
+
+/// Which keys a page lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyScope<'a> {
+    /// The keys of all the users, and the keys of the superadmin (section "All").
+    All,
+    /// The keys of one user of the database (section "Mine").
+    Owner(&'a str),
+    /// The keys of the superadmin (section "Mine" of the superadmin).
+    Superadmin,
+}
+
+/// The checks of one key since the last write (portal 5.5a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyCheck {
+    pub id: String,
+    pub last_check_at: i64,
+    pub count: i64,
+}
+
+/// The bounds that a write of a key checks under its lock (portal 5.4, 7.2f, 10.7d).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyCaps {
+    /// `keys.max_per_user`.
+    pub max_per_user: usize,
+    /// `keys.max_counter_rows`.
+    pub max_counter_rows: usize,
+    /// `keys.max_directory_grants`.
+    pub max_directory_grants: usize,
+    /// The time of the write. A key with an expiry date at or before this time is not active.
+    pub now: i64,
+    /// A key created before this time is too old, so it is not active (portal 5.5b). `None`: the
+    /// owner has no `max_key_lifetime`.
+    pub created_not_before: Option<i64>,
+}
+
+/// Why the write of a key failed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyWriteError {
+    /// The owner has `max_per_user` active keys (portal 5.4).
+    TooManyKeys,
+    /// The write would put the counter rows above `keys.max_counter_rows`, or the grants of the
+    /// directory above `keys.max_directory_grants` (portal 5.8f `capacity`).
+    Capacity,
+    /// The owner does not exist.
+    UnknownOwner,
+    /// No such key for this owner.
+    UnknownKey,
+    Db(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -258,6 +398,9 @@ pub struct Dump {
     pub accesses: Vec<LoggedAccess>,
     pub audit: Vec<LoggedAudit>,
     pub logins: Vec<LoggedLogin>,
+    /// The keys with their grants, and the summary rows of the revoked keys (schema 6).
+    pub keys: Vec<KeyRow>,
+    pub key_history: Vec<KeyHistoryRow>,
 }
 
 /// What an import copied.
@@ -268,6 +411,34 @@ pub struct ImportReport {
     pub accesses: usize,
     pub audit: usize,
     pub logins: usize,
+    pub keys: usize,
+    pub key_history: usize,
+}
+
+/// The file that tells that a portal runs on a SQLite file: the file of the database and `.pid`.
+fn sqlite_pid_file(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".pid");
+    std::path::PathBuf::from(name)
+}
+
+/// Writes the process id of this portal next to its SQLite file. A command that writes to the
+/// file reads it (portal 10.4a).
+pub fn mark_sqlite_instance(path: &Path) -> Result<(), String> {
+    std::fs::write(sqlite_pid_file(path), format!("{}\n", std::process::id()))
+        .map_err(|e| format!("cannot write {}: {e}", sqlite_pid_file(path).display()))
+}
+
+/// Whether a portal runs on this SQLite file: the file `.pid` names a live process that is not
+/// this one. The check reads `/proc`.
+pub fn sqlite_instance_running(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(sqlite_pid_file(path)) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return false;
+    };
+    pid != std::process::id() && Path::new("/proc").join(pid.to_string()).exists()
 }
 
 pub enum Store {
@@ -290,8 +461,14 @@ impl Store {
     }
 
     /// Connects to PostgreSQL. The call waits up to one minute for it. Then it brings the schema up to date.
-    pub fn open_postgres(config: &PostgresConfig, password: &str) -> Result<Self, String> {
-        Pg::connect(config, password, pg::STARTUP_RETRY).map(|store| Store::Pg(Box::new(store)))
+    pub fn open_postgres(
+        config: &PostgresConfig,
+        password: &str,
+        counter_connections: usize,
+    ) -> Result<Self, String> {
+        let mut store = Pg::connect(config, password, pg::STARTUP_RETRY)?;
+        store.set_counter_connections(counter_connections);
+        Ok(Store::Pg(Box::new(store)))
     }
 
     #[cfg(test)]
@@ -311,6 +488,15 @@ impl Store {
         backend!(self.count(table))
     }
 
+    /// Runs SQL that the test needs, for example to remove a row. Not for the program.
+    #[cfg(test)]
+    pub fn execute_raw(&self, sql: &str) {
+        match self {
+            Store::Sqlite(store) => store.execute_raw(sql),
+            Store::Pg(store) => store.execute_raw(sql),
+        }
+    }
+
     /// What a lost connection looks like to the next calls. This applies to PostgreSQL only.
     #[cfg(test)]
     pub fn go_down(&self) {
@@ -321,6 +507,7 @@ impl Store {
 
     // Accounts --------------------------------------------------------------------------------
 
+    #[cfg(test)]
     pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
         backend!(self.load_users())
     }
@@ -342,6 +529,125 @@ impl Store {
 
     pub fn remove_user(&self, login: &str) -> Result<bool, String> {
         backend!(self.remove_user(login))
+    }
+
+    // Directory and keys ------------------------------------------------------------------------
+
+    /// The version of the directory: it grows with each write to the users, the grants and the
+    /// keys (portal 10.7).
+    pub fn directory_version(&self) -> Result<i64, String> {
+        backend!(self.directory_version())
+    }
+
+    /// The version, the users and the keys, read in one transaction.
+    pub fn load_directory(&self) -> Result<DirectorySnapshot, String> {
+        backend!(self.load_directory())
+    }
+
+    /// Makes a key. The write adds 1 to the version, and it makes the counter rows of the grants of
+    /// the key.
+    pub fn insert_key(&self, key: &KeyRow, caps: &KeyCaps) -> Result<(), KeyWriteError> {
+        backend!(self.insert_key(key, caps))
+    }
+
+    /// Changes the name and the grants of a key (portal 5.8d). `owner` is the login of the owner:
+    /// the key must be his. `None` is the key of the superadmin.
+    pub fn update_key(
+        &self,
+        id: &str,
+        owner: Option<&str>,
+        name: &str,
+        grants: &[Grant],
+        caps: &KeyCaps,
+    ) -> Result<(), KeyWriteError> {
+        backend!(self.update_key(id, owner, name, grants, caps))
+    }
+
+    /// Revokes a key: deletes it with its grants and its counters, and keeps one summary row.
+    /// `owner` limits the revocation to the keys of one owner (`Some(None)` is the superadmin).
+    /// `false`: no such key.
+    pub fn revoke_key(
+        &self,
+        id: &str,
+        owner: Option<Option<&str>>,
+        now: i64,
+    ) -> Result<bool, String> {
+        backend!(self.revoke_key(id, owner, now))
+    }
+
+    /// Revokes the keys of one user of the database, or all the keys of the database when `login`
+    /// is `None`. Returns the number of keys.
+    pub fn revoke_keys(&self, login: Option<&str>, now: i64) -> Result<usize, String> {
+        backend!(self.revoke_keys(login, now))
+    }
+
+    /// Adds the checks of the keys (portal 5.5a): the later time and the number of checks of each
+    /// key. A key that does not exist any more is ignored.
+    pub fn write_key_checks(&self, checks: &[KeyCheck]) -> Result<(), String> {
+        backend!(self.write_key_checks(checks))
+    }
+
+    /// Deletes the keys that expired more than `expired_before` seconds ago, and the summary rows
+    /// that are older than `history_before` (portal 5.4).
+    pub fn prune_keys(&self, expired_before: i64, history_before: i64) -> Result<(), String> {
+        backend!(self.prune_keys(expired_before, history_before))
+    }
+
+    /// Counts one use: takes one unit from each counter, or none (portal 7.2b). Each counter names
+    /// its owner, its budget, its window and its amount.
+    ///
+    /// `clock` replaces the clock of the database for the window of the counters, in seconds since
+    /// the Unix epoch. The program passes `None`: only a test fixes the clock.
+    pub fn count_use(
+        &self,
+        counters: &[crate::decision::Counter],
+        clock: Option<f64>,
+    ) -> Result<CountOutcome, String> {
+        backend!(self.count_use(counters, clock))
+    }
+
+    /// Makes the counter rows that the table does not hold yet (portal 7.2a). Returns the number of
+    /// rows that it made.
+    pub fn ensure_counter_rows(
+        &self,
+        rows: &[(crate::decision::CounterOwner, crate::grants::CounterId)],
+    ) -> Result<usize, String> {
+        backend!(self.ensure_counter_rows(rows))
+    }
+
+    /// Deletes the counter rows of the subjects of the file that the file no longer has
+    /// (portal 3.4d, 7.2d). `keep` lists the subjects that the file still has.
+    pub fn delete_file_counters(&self, keep: &[String]) -> Result<usize, String> {
+        backend!(self.delete_file_counters(keep))
+    }
+
+    /// The number of counter rows (portal 7.2f).
+    pub fn counter_rows(&self) -> Result<i64, String> {
+        backend!(self.counter_rows())
+    }
+
+    /// Whether the portal keeps the summary row of a revoked key with this id. `owner` limits the
+    /// row to one owner, as in [`Store::revoke_key`].
+    pub fn has_key_history(&self, id: &str, owner: Option<Option<&str>>) -> Result<bool, String> {
+        backend!(self.has_key_history(id, owner))
+    }
+
+    /// One page of the keys and the summary rows of the revoked keys, newest first, after the
+    /// cursor `after` (the creation time and the id of the last line of the page before). It gives
+    /// at most `limit` lines (portal 5.5).
+    pub fn list_keys(
+        &self,
+        scope: KeyScope<'_>,
+        after: Option<(i64, &str)>,
+        limit: usize,
+    ) -> Result<Vec<KeyListItem>, String> {
+        backend!(self.list_keys(scope, after, limit))
+    }
+
+    /// The summary rows of the revoked keys. The tests read them.
+    #[cfg(test)]
+    pub fn key_history(&self) -> Result<Vec<KeyHistoryRow>, String> {
+        backend!(self.key_history())
     }
 
     // History ---------------------------------------------------------------------------------
@@ -610,6 +916,771 @@ mod tests {
             user_agent: "Browser/1.0".into(),
             at,
         })
+    }
+
+    fn caps() -> KeyCaps {
+        KeyCaps {
+            max_per_user: 3,
+            max_counter_rows: 100,
+            max_directory_grants: 100,
+            now: NOW,
+            created_not_before: None,
+        }
+    }
+
+    /// A key with the grants `access on service:db` with a budget of two windows, and a read.
+    fn key(id: &str, owner: Option<&str>, byte: u8) -> KeyRow {
+        use crate::limits::Limits;
+        let budget = Limits::from_json(
+            r#"{"requests":[{"amount":10,"window":"second"},{"amount":300,"window":"minute"}]}"#,
+        )
+        .unwrap();
+        let mut grants = vec![
+            Grant::new("access", "db").unwrap().with_limits(budget),
+            Grant::from_path_text("data.read", "db", "host:prod").unwrap(),
+        ];
+        grants.sort();
+        KeyRow {
+            id: id.into(),
+            owner: owner.map(Into::into),
+            name: format!("key {id}"),
+            digest: [byte; 32],
+            hint: "ab12".into(),
+            created_at: NOW - 10,
+            expires_at: None,
+            last_check_at: None,
+            check_count: 0,
+            grants,
+        }
+    }
+
+    fn version(store: &Store) -> i64 {
+        store.directory_version().unwrap()
+    }
+
+    #[test]
+    fn each_write_to_the_users_the_grants_and_the_keys_adds_1_to_the_directory_version() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            assert_eq!(version(&store), 0);
+            store.insert_user(&user("alice", &[])).unwrap();
+            assert_eq!(version(&store), 1);
+            assert!(store
+                .update_user("alice", Some("h2"), Some(&access(&["db"])))
+                .unwrap());
+            assert_eq!(version(&store), 2);
+            assert!(!store.update_user("nobody", Some("h2"), None).unwrap());
+            assert_eq!(
+                version(&store),
+                2,
+                "a write that changes nothing adds nothing"
+            );
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            assert_eq!(version(&store), 3);
+            assert!(store.revoke_key("k1", None, NOW).unwrap());
+            assert_eq!(version(&store), 4);
+            assert!(!store.revoke_key("k1", None, NOW).unwrap());
+            assert_eq!(version(&store), 4);
+            assert!(store.remove_user("alice").unwrap());
+            assert_eq!(version(&store), 5);
+            assert!(!store.remove_user("alice").unwrap());
+            assert_eq!(version(&store), 5);
+            // The checks of the keys are not a change of the directory (portal 10.7b).
+            store.insert_user(&user("bob", &[])).unwrap();
+            store
+                .insert_key(&key("k2", Some("bob"), 2), &caps())
+                .unwrap();
+            let before = version(&store);
+            store
+                .write_key_checks(&[KeyCheck {
+                    id: "k2".into(),
+                    last_check_at: NOW,
+                    count: 1,
+                }])
+                .unwrap();
+            assert_eq!(version(&store), before);
+        });
+    }
+
+    #[test]
+    fn a_key_is_read_back_with_its_owner_its_grants_and_its_counter_rows() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            store.insert_key(&key("k0", None, 2), &caps()).unwrap();
+            let directory = store.load_directory().unwrap();
+            assert_eq!(directory.version, version(&store));
+            assert_eq!(directory.users.len(), 1);
+            assert_eq!(directory.keys.len(), 2);
+            let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
+            assert_eq!(*k1, key("k1", Some("alice"), 1));
+            let k0 = directory.keys.iter().find(|k| k.id == "k0").unwrap();
+            assert_eq!(k0.owner, None, "a key of the superadmin has no owner");
+            // One counter row for each window of the budget of each key.
+            assert_eq!(store.count("budget_counters"), 4);
+            // The same digest cannot name two keys.
+            let mut twin = key("k9", Some("alice"), 1);
+            twin.name = "twin".into();
+            assert!(matches!(
+                store.insert_key(&twin, &caps()),
+                Err(KeyWriteError::Db(_))
+            ));
+            assert_eq!(
+                store.insert_key(&key("k8", Some("nobody"), 8), &caps()),
+                Err(KeyWriteError::UnknownOwner)
+            );
+        });
+    }
+
+    #[test]
+    fn a_user_has_at_most_max_per_user_active_keys() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store.insert_user(&user("bob", &[])).unwrap();
+            // An expired key and a too-old key are not active (portal 5.4, 5.5b).
+            let mut expired = key("e1", Some("alice"), 11);
+            expired.expires_at = Some(NOW - 1);
+            let mut old = key("o1", Some("alice"), 12);
+            old.created_at = NOW - 5_000;
+            store.insert_key(&expired, &caps()).unwrap();
+            let mut with_age = caps();
+            with_age.created_not_before = Some(NOW - 1_000);
+            store.insert_key(&old, &with_age).unwrap();
+            for (n, id) in ["a1", "a2", "a3"].into_iter().enumerate() {
+                store
+                    .insert_key(&key(id, Some("alice"), n as u8 + 1), &with_age)
+                    .unwrap();
+            }
+            assert_eq!(
+                store.insert_key(&key("a4", Some("alice"), 4), &with_age),
+                Err(KeyWriteError::TooManyKeys)
+            );
+            // The refusal writes nothing, not even the version.
+            let after_refusal = version(&store);
+            assert_eq!(store.load_directory().unwrap().keys.len(), 5);
+            // Without the age bound, the old key counts: alice is above the maximum.
+            assert_eq!(
+                store.insert_key(&key("a5", Some("alice"), 5), &caps()),
+                Err(KeyWriteError::TooManyKeys)
+            );
+            assert_eq!(version(&store), after_refusal);
+            // The maximum is for each owner. The superadmin has its own count.
+            store
+                .insert_key(&key("b1", Some("bob"), 21), &with_age)
+                .unwrap();
+            store.insert_key(&key("s1", None, 22), &with_age).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_write_above_the_capacity_changes_nothing() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            let mut caps = caps();
+            // One key with a budget of two windows needs two counter rows.
+            caps.max_counter_rows = 3;
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps)
+                .unwrap();
+            let before = version(&store);
+            assert_eq!(
+                store.insert_key(&key("k2", Some("alice"), 2), &caps),
+                Err(KeyWriteError::Capacity)
+            );
+            assert_eq!(store.count("keys"), 1);
+            assert_eq!(store.count("budget_counters"), 2);
+            assert_eq!(version(&store), before);
+            caps.max_counter_rows = 100;
+            caps.max_directory_grants = 3;
+            assert_eq!(
+                store.insert_key(&key("k3", Some("alice"), 3), &caps),
+                Err(KeyWriteError::Capacity),
+                "the key adds 2 grants to the 2 of the first key"
+            );
+            assert_eq!(store.count("key_grants"), 2);
+        });
+    }
+
+    #[test]
+    fn a_key_changes_only_for_its_owner() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store.insert_user(&user("bob", &[])).unwrap();
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            store.insert_key(&key("s1", None, 2), &caps()).unwrap();
+            let one = vec![Grant::new("access", "other").unwrap()];
+            for (owner, id) in [
+                (Some("bob"), "k1"),
+                (None, "k1"),
+                (Some("alice"), "s1"),
+                (Some("nobody"), "s1"),
+                (Some("alice"), "missing"),
+            ] {
+                assert_eq!(
+                    store.update_key(id, owner, "renamed", &one, &caps()),
+                    Err(KeyWriteError::UnknownKey),
+                    "{owner:?} {id}"
+                );
+            }
+            store
+                .update_key("k1", Some("alice"), "renamed", &one, &caps())
+                .unwrap();
+            store.update_key("s1", None, "root", &one, &caps()).unwrap();
+            let directory = store.load_directory().unwrap();
+            let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
+            assert_eq!((k1.name.as_str(), &k1.grants), ("renamed", &one));
+            assert_eq!(k1.digest, [1; 32], "the digest does not change");
+            // The old counter rows of the key stay with the key (portal 7.2).
+            assert_eq!(store.count("budget_counters"), 4);
+        });
+    }
+
+    #[test]
+    fn a_revocation_deletes_the_key_with_its_rows_and_keeps_one_summary_row() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store.insert_user(&user("bob", &[])).unwrap();
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            store
+                .insert_key(&key("k2", Some("bob"), 2), &caps())
+                .unwrap();
+            store.insert_key(&key("s1", None, 3), &caps()).unwrap();
+            store
+                .write_key_checks(&[KeyCheck {
+                    id: "k1".into(),
+                    last_check_at: NOW - 5,
+                    count: 7,
+                }])
+                .unwrap();
+            // The owner limits the revocation.
+            assert!(!store.revoke_key("k1", Some(Some("bob")), NOW).unwrap());
+            assert!(!store.revoke_key("k1", Some(None), NOW).unwrap());
+            assert!(store.revoke_key("k1", Some(Some("alice")), NOW).unwrap());
+            assert!(!store.revoke_key("k1", None, NOW).unwrap());
+            assert_eq!(store.count("keys"), 2);
+            assert_eq!(store.count("key_grants"), 4);
+            assert_eq!(store.count("budget_counters"), 4, "the rows of k1 are gone");
+            let history = store.key_history().unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(
+                history[0],
+                KeyHistoryRow {
+                    id: "k1".into(),
+                    owner: Some("alice".into()),
+                    name: "key k1".into(),
+                    created_at: NOW - 10,
+                    revoked_at: NOW,
+                    last_check_at: Some(NOW - 5),
+                    check_count: 7,
+                }
+            );
+            // The superadmin key is revoked with `Some(None)`.
+            assert!(store.revoke_key("s1", Some(None), NOW + 1).unwrap());
+            assert_eq!(store.key_history().unwrap()[1].owner, None);
+            // All the keys of one user, then all the keys.
+            store
+                .insert_key(&key("k3", Some("bob"), 4), &caps())
+                .unwrap();
+            assert_eq!(store.revoke_keys(Some("bob"), NOW + 2).unwrap(), 2);
+            assert_eq!(store.revoke_keys(Some("bob"), NOW + 2).unwrap(), 0);
+            store
+                .insert_key(&key("k4", Some("alice"), 5), &caps())
+                .unwrap();
+            store.insert_key(&key("s2", None, 6), &caps()).unwrap();
+            assert_eq!(store.revoke_keys(None, NOW + 3).unwrap(), 2);
+            assert_eq!(store.count("keys"), 0);
+            assert_eq!(store.count("budget_counters"), 0);
+            assert_eq!(store.key_history().unwrap().len(), 6);
+        });
+    }
+
+    #[test]
+    fn a_checks_write_keeps_the_later_time_and_adds_the_counts() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            let check = |at, count| KeyCheck {
+                id: "k1".into(),
+                last_check_at: at,
+                count,
+            };
+            store.write_key_checks(&[check(NOW, 2)]).unwrap();
+            store.write_key_checks(&[check(NOW - 100, 3)]).unwrap();
+            store
+                .write_key_checks(&[
+                    check(NOW + 5, 1),
+                    KeyCheck {
+                        id: "gone".into(),
+                        last_check_at: 1,
+                        count: 1,
+                    },
+                ])
+                .unwrap();
+            let directory = store.load_directory().unwrap();
+            assert_eq!(directory.keys[0].last_check_at, Some(NOW + 5));
+            assert_eq!(directory.keys[0].check_count, 6);
+        });
+    }
+
+    #[test]
+    fn deleting_a_user_deletes_the_keys_but_not_the_keys_of_the_superadmin() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            store
+                .insert_key(&key("k1", Some("alice"), 1), &caps())
+                .unwrap();
+            store.insert_key(&key("s1", None, 2), &caps()).unwrap();
+            store.revoke_key("s1", None, NOW).unwrap();
+            store.insert_key(&key("s2", None, 3), &caps()).unwrap();
+            store.revoke_key("k1", None, NOW).unwrap();
+            store
+                .insert_key(&key("k5", Some("alice"), 4), &caps())
+                .unwrap();
+            assert!(store.remove_user("alice").unwrap());
+            let directory = store.load_directory().unwrap();
+            assert_eq!(
+                directory
+                    .keys
+                    .iter()
+                    .map(|k| k.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["s2"]
+            );
+            assert_eq!(store.count("budget_counters"), 2, "the rows of s2");
+            assert_eq!(store.count("key_grants"), 2);
+            let history = store.key_history().unwrap();
+            assert_eq!(
+                history.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+                ["s1"],
+                "the summary rows of the user go with the user (portal 5.7)"
+            );
+        });
+    }
+
+    #[test]
+    fn the_pages_of_the_keys_are_newest_first_with_a_cursor_and_hold_the_summary_rows() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let big = KeyCaps {
+                max_per_user: 100,
+                ..caps()
+            };
+            store.insert_user(&user("alice", &[])).unwrap();
+            store.insert_user(&user("bob", &[])).unwrap();
+            // Five lines for Alice: four keys (two with the same time) and one revoked key.
+            for (id, byte, created) in [
+                ("a1", 1u8, 100),
+                ("a2", 2, 200),
+                ("a3", 3, 200),
+                ("a4", 4, 400),
+                ("a5", 5, 300),
+            ] {
+                let mut row = key(id, Some("alice"), byte);
+                row.created_at = created;
+                store.insert_key(&row, &big).unwrap();
+            }
+            store.revoke_key("a5", None, NOW).unwrap();
+            let mut other = key("b1", Some("bob"), 9);
+            other.created_at = 250;
+            store.insert_key(&other, &big).unwrap();
+            let mut root = key("s1", None, 10);
+            root.created_at = 150;
+            store.insert_key(&root, &big).unwrap();
+            let ids =
+                |items: &[KeyListItem]| items.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+            // The section of Alice: newest first, and the id breaks a tie.
+            let first = store.list_keys(KeyScope::Owner("alice"), None, 3).unwrap();
+            assert_eq!(ids(&first), ["a4", "a5", "a3"]);
+            assert_eq!(first[1].revoked_at, Some(NOW), "the summary row");
+            assert!(first[1].grants.is_empty());
+            assert_eq!(first[0].grants, key("a4", Some("alice"), 4).grants);
+            let last = first.last().unwrap();
+            let second = store
+                .list_keys(
+                    KeyScope::Owner("alice"),
+                    Some((last.created_at, &last.id)),
+                    3,
+                )
+                .unwrap();
+            assert_eq!(ids(&second), ["a2", "a1"]);
+            // The keys of the superadmin, and all the keys.
+            assert_eq!(
+                ids(&store.list_keys(KeyScope::Superadmin, None, 50).unwrap()),
+                ["s1"]
+            );
+            let all = store.list_keys(KeyScope::All, None, 50).unwrap();
+            assert_eq!(ids(&all), ["a4", "a5", "b1", "a3", "a2", "s1", "a1"]);
+            assert_eq!(
+                all.iter().find(|i| i.id == "b1").unwrap().owner.as_deref(),
+                Some("bob")
+            );
+            assert_eq!(all.iter().find(|i| i.id == "s1").unwrap().owner, None);
+            assert!(store
+                .list_keys(KeyScope::Owner("nobody"), None, 50)
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn the_prune_deletes_old_expired_keys_and_old_summary_rows() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            store.insert_user(&user("alice", &[])).unwrap();
+            let mut gone = key("gone", Some("alice"), 1);
+            gone.expires_at = Some(NOW - 100);
+            let mut recent = key("recent", Some("alice"), 2);
+            recent.expires_at = Some(NOW - 10);
+            let forever = key("forever", Some("alice"), 3);
+            for key in [&gone, &recent, &forever] {
+                store.insert_key(key, &caps()).unwrap();
+            }
+            store
+                .insert_key(&key("r1", Some("alice"), 4), &caps())
+                .unwrap();
+            store.revoke_key("r1", None, NOW - 50).unwrap();
+            store
+                .insert_key(&key("r2", Some("alice"), 5), &caps())
+                .unwrap();
+            store.revoke_key("r2", None, NOW).unwrap();
+            let before = version(&store);
+            store.prune_keys(NOW - 50, NOW - 20).unwrap();
+            let ids: Vec<String> = store
+                .load_directory()
+                .unwrap()
+                .keys
+                .into_iter()
+                .map(|k| k.id)
+                .collect();
+            assert!(!ids.contains(&"gone".to_string()));
+            assert!(ids.contains(&"recent".to_string()) && ids.contains(&"forever".to_string()));
+            assert_eq!(version(&store), before + 1);
+            let history = store.key_history().unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].id, "r2");
+            store.prune_keys(NOW - 50, NOW - 20).unwrap();
+            assert_eq!(
+                version(&store),
+                before + 1,
+                "nothing to delete: no new version"
+            );
+        });
+    }
+
+    fn counter(
+        owner: crate::decision::CounterOwner,
+        window: crate::limits::Window,
+        amount: u64,
+    ) -> crate::decision::Counter {
+        crate::decision::Counter {
+            owner,
+            id: crate::grants::CounterId {
+                service: "db".into(),
+                budget: "requests".into(),
+                window,
+            },
+            amount,
+        }
+    }
+
+    /// Alice with a budget of one window each of the second and the minute, and one key.
+    fn alice_with_counters(store: &Store) {
+        use crate::limits::Limits;
+        let budget = Limits::from_json(
+            r#"{"requests":[{"amount":5,"window":"second"},{"amount":50,"window":"minute"}]}"#,
+        )
+        .unwrap();
+        let mut row = user("alice", &[]);
+        row.grants = vec![Grant::new("access", "db").unwrap().with_limits(budget)];
+        store.insert_user(&row).unwrap();
+        store
+            .insert_key(&key("k1", Some("alice"), 1), &caps())
+            .unwrap();
+    }
+
+    #[test]
+    fn a_use_takes_one_unit_from_each_counter_until_one_has_no_room() {
+        use crate::decision::CounterOwner as Owner;
+        use crate::limits::Window;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            alice_with_counters(&store);
+            let alice = Owner::User("alice".into());
+            let one_a_minute = vec![counter(alice.clone(), Window::Minute, 1)];
+            assert_eq!(
+                store.count_use(&one_a_minute, None).unwrap(),
+                CountOutcome::Counted
+            );
+            let CountOutcome::Refused(refusals) = store.count_use(&one_a_minute, None).unwrap()
+            else {
+                panic!("the second use must be refused");
+            };
+            assert_eq!(refusals.len(), 1);
+            assert_eq!(refusals[0].index, 0);
+            assert!(
+                refusals[0].seconds_left > 0.0 && refusals[0].seconds_left <= 60.0,
+                "{}",
+                refusals[0].seconds_left
+            );
+            // A counter with room: the amount is a parameter of the use. The refused use took
+            // nothing, so the counter has 1 unit and 2 uses are allowed.
+            let two = vec![counter(alice.clone(), Window::Minute, 2)];
+            assert_eq!(store.count_use(&two, None).unwrap(), CountOutcome::Counted);
+            assert!(matches!(
+                store.count_use(&two, None).unwrap(),
+                CountOutcome::Refused(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn a_use_takes_nothing_when_one_counter_of_the_use_has_no_room() {
+        use crate::decision::CounterOwner as Owner;
+        use crate::limits::Window;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            alice_with_counters(&store);
+            let alice = Owner::User("alice".into());
+            let key = Owner::Key("k1".into());
+            let both = |key_amount: u64, owner_amount: u64| {
+                vec![
+                    counter(key.clone(), Window::Minute, key_amount),
+                    counter(alice.clone(), Window::Minute, owner_amount),
+                    counter(alice.clone(), Window::Second, 5),
+                ]
+            };
+            // The owner has room for one use. The key has room for three.
+            assert_eq!(
+                store.count_use(&both(3, 1), None).unwrap(),
+                CountOutcome::Counted
+            );
+            let CountOutcome::Refused(refusals) = store.count_use(&both(3, 1), None).unwrap()
+            else {
+                panic!("the owner has no room");
+            };
+            assert_eq!(refusals.iter().map(|r| r.index).collect::<Vec<_>>(), [1]);
+            // The key counter did not move: with an amount of 2 it still has room for one use.
+            let key_only = vec![counter(key.clone(), Window::Minute, 2)];
+            assert_eq!(
+                store.count_use(&key_only, None).unwrap(),
+                CountOutcome::Counted
+            );
+            assert!(matches!(
+                store.count_use(&key_only, None).unwrap(),
+                CountOutcome::Refused(_)
+            ));
+            // Two counters can refuse together: each one is in the answer.
+            let CountOutcome::Refused(refusals) = store.count_use(&both(1, 1), None).unwrap()
+            else {
+                panic!("both refuse");
+            };
+            let mut indexes: Vec<usize> = refusals.iter().map(|r| r.index).collect();
+            indexes.sort();
+            assert_eq!(indexes, [0, 1]);
+        });
+    }
+
+    #[test]
+    fn a_window_that_ended_starts_again_with_no_unit() {
+        use crate::decision::CounterOwner as Owner;
+        use crate::limits::Window;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            alice_with_counters(&store);
+            let one = vec![counter(Owner::User("alice".into()), Window::Second, 1)];
+            // The window of one second can end between two statements: try until two statements
+            // fall in the same window.
+            let mut refused = false;
+            for _ in 0..20 {
+                if matches!(
+                    store.count_use(&one, None).unwrap(),
+                    CountOutcome::Refused(_)
+                ) {
+                    refused = true;
+                    break;
+                }
+            }
+            assert!(refused, "the second use of a window is refused");
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            assert_eq!(store.count_use(&one, None).unwrap(), CountOutcome::Counted);
+        });
+    }
+
+    #[test]
+    fn a_counter_without_a_row_is_reported_and_nothing_is_counted() {
+        use crate::decision::CounterOwner as Owner;
+        use crate::limits::Window;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            alice_with_counters(&store);
+            let alice = Owner::User("alice".into());
+            let missing = vec![
+                counter(alice.clone(), Window::Minute, 1),
+                counter(alice.clone(), Window::Hour, 1),
+            ];
+            assert_eq!(
+                store.count_use(&missing, None).unwrap(),
+                CountOutcome::RowMissing
+            );
+            // The first counter did not move.
+            let first = vec![counter(alice, Window::Minute, 1)];
+            assert_eq!(
+                store.count_use(&first, None).unwrap(),
+                CountOutcome::Counted
+            );
+            let nobody = vec![counter(Owner::User("nobody".into()), Window::Minute, 1)];
+            assert_eq!(
+                store.count_use(&nobody, None).unwrap(),
+                CountOutcome::RowMissing
+            );
+            let no_key = vec![counter(Owner::Key("nokey".into()), Window::Minute, 1)];
+            assert_eq!(
+                store.count_use(&no_key, None).unwrap(),
+                CountOutcome::RowMissing
+            );
+        });
+    }
+
+    #[test]
+    fn counter_rows_are_made_once_and_the_rows_of_the_file_follow_the_file() {
+        use crate::decision::CounterOwner as Owner;
+        use crate::grants::CounterId;
+        use crate::limits::Window;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            alice_with_counters(&store);
+            let id = |window| CounterId {
+                service: "db".into(),
+                budget: "requests".into(),
+                window,
+            };
+            let rows = vec![
+                (Owner::User("alice".into()), id(Window::Second)), // exists
+                (Owner::User("alice".into()), id(Window::Hour)),   // new
+                (Owner::Key("k1".into()), id(Window::Hour)),       // new
+                (Owner::File("carol".into()), id(Window::Day)),    // new
+                (Owner::File("key:34b1100f45b235ba".into()), id(Window::Day)), // new
+                (Owner::User("nobody".into()), id(Window::Day)),   // no such user: skipped
+                (Owner::Key("nokey".into()), id(Window::Day)),     // no such key: skipped
+            ];
+            let before = store.counter_rows().unwrap();
+            assert_eq!(store.ensure_counter_rows(&rows).unwrap(), 4);
+            assert_eq!(store.counter_rows().unwrap(), before + 4);
+            assert_eq!(
+                store.ensure_counter_rows(&rows).unwrap(),
+                0,
+                "a second call makes nothing"
+            );
+            // A row of the file counts like any other.
+            let file = vec![counter(Owner::File("carol".into()), Window::Day, 1)];
+            assert_eq!(store.count_use(&file, None).unwrap(), CountOutcome::Counted);
+            assert!(matches!(
+                store.count_use(&file, None).unwrap(),
+                CountOutcome::Refused(_)
+            ));
+            // The file no longer has `carol` (portal 3.4d).
+            assert_eq!(
+                store
+                    .delete_file_counters(&["key:34b1100f45b235ba".to_string()])
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                store.count_use(&file, None).unwrap(),
+                CountOutcome::RowMissing
+            );
+            assert_eq!(store.counter_rows().unwrap(), before + 3);
+        });
+    }
+
+    #[test]
+    fn the_budget_counter_rows_follow_the_grants_of_a_user() {
+        use crate::limits::Limits;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let budget = Limits::from_json(
+                r#"{"requests":[{"amount":5,"window":"hour"},{"amount":50,"window":"day"}]}"#,
+            )
+            .unwrap();
+            let mut row = user("alice", &[]);
+            row.grants = vec![Grant::new("access", "db").unwrap().with_limits(budget)];
+            store.insert_user(&row).unwrap();
+            assert_eq!(store.count("budget_counters"), 2);
+            // A new window adds a row. A removed value leaves its row: only the user deletes it.
+            let wider =
+                Limits::from_json(r#"{"requests":[{"amount":5,"window":"minute"}]}"#).unwrap();
+            let grants = vec![Grant::new("access", "db").unwrap().with_limits(wider)];
+            store.update_user("alice", None, Some(&grants)).unwrap();
+            assert_eq!(store.count("budget_counters"), 3);
+            store.remove_user("alice").unwrap();
+            assert_eq!(store.count("budget_counters"), 0);
+        });
+    }
+
+    #[test]
+    fn the_limit_values_of_a_grant_survive_a_write_a_read_and_an_update() {
+        use crate::limits::Limits;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let budget = Limits::from_json(
+                r#"{"requests":[{"amount":10,"window":"second"},{"amount":300,"window":"minute"}]}"#,
+            )
+            .unwrap();
+            let ceiling = Limits::from_json(r#"{"max_rows":1000}"#).unwrap();
+            let grants = vec![
+                Grant::new("access", "db").unwrap().with_limits(budget),
+                Grant::from_path_text("data.read", "db", "host:prod/database:test1")
+                    .unwrap()
+                    .with_limits(ceiling),
+                Grant::new("keys.own.read", "portal").unwrap(),
+            ];
+            let mut row = user("alice", &[]);
+            row.grants = grants.clone();
+            row.grants.sort();
+            store.insert_user(&row).unwrap();
+            let loaded = store.load_users().unwrap();
+            assert_eq!(loaded[0].grants, row.grants);
+            let read = loaded[0]
+                .grants
+                .iter()
+                .find(|g| g.action == "data.read")
+                .unwrap();
+            assert_eq!(read.limits.to_json(), r#"{"max_rows":1000}"#);
+            assert!(loaded[0]
+                .grants
+                .iter()
+                .find(|g| g.action == "keys.own.read")
+                .unwrap()
+                .limits
+                .is_empty());
+            // An update replaces the values with the grants.
+            let lower = Limits::from_json(r#"{"max_rows":10}"#).unwrap();
+            let changed =
+                vec![
+                    Grant::from_path_text("data.read", "db", "host:prod/database:test1")
+                        .unwrap()
+                        .with_limits(lower),
+                ];
+            assert!(store.update_user("alice", None, Some(&changed)).unwrap());
+            assert_eq!(store.load_users().unwrap()[0].grants, changed);
+        });
     }
 
     #[test]
@@ -1450,6 +2521,19 @@ mod tests {
         store.insert_user(&user("bob", &[])).unwrap();
         store.insert_user(&user("carol", &["viewer"])).unwrap();
         store.remove_user("bob").unwrap(); // a gap in the identifiers
+                                           // A key with a budget, a key of the superadmin and a revoked key (schema 6).
+        let big = KeyCaps {
+            max_per_user: 100,
+            ..caps()
+        };
+        store
+            .insert_key(&key("k1", Some("alice"), 1), &big)
+            .unwrap();
+        store.insert_key(&key("s1", None, 2), &big).unwrap();
+        store
+            .insert_key(&key("k2", Some("carol"), 3), &big)
+            .unwrap();
+        store.revoke_key("k2", None, NOW).unwrap();
         store
             .apply(&Batch {
                 events: vec![
@@ -1499,10 +2583,21 @@ mod tests {
                 sessions: 2,
                 accesses: 1,
                 audit: 1,
-                logins: 2
+                logins: 2,
+                keys: 2,
+                key_history: 1,
             }
         );
         assert_eq!(target.load_users().unwrap(), source.load_users().unwrap());
+        // The keys keep their digests, their grants and their owners. The import adds 1 to the
+        // version of the directory, so the instances read it again.
+        let (copied_keys, original_keys) = (
+            target.load_directory().unwrap(),
+            source.load_directory().unwrap(),
+        );
+        assert_eq!(copied_keys.keys, original_keys.keys);
+        assert!(copied_keys.version > 0);
+        assert_eq!(target.key_history().unwrap(), source.key_history().unwrap());
         assert_eq!(
             target.login_attempts(NOW, 0, false).unwrap(),
             source.login_attempts(NOW, 0, false).unwrap()
@@ -1593,5 +2688,32 @@ mod tests {
         assert!(target.import_sqlite(&path).is_err());
         assert_eq!(target.count("users"), 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::*;
+
+    #[test]
+    fn a_mark_of_a_live_process_other_than_this_one_tells_that_a_portal_runs() {
+        let dir = std::env::temp_dir().join(format!("portal-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("portal.db");
+        assert!(!sqlite_instance_running(&db), "no mark");
+        mark_sqlite_instance(&db).unwrap();
+        assert!(
+            !sqlite_instance_running(&db),
+            "the mark of this process is not another portal"
+        );
+        // The process 1 exists in a container and is not this one.
+        std::fs::write(sqlite_pid_file(&db), "1\n").unwrap();
+        assert!(sqlite_instance_running(&db));
+        // A process that does not exist, and a bad text.
+        std::fs::write(sqlite_pid_file(&db), "4194303\n").unwrap();
+        assert!(!sqlite_instance_running(&db));
+        std::fs::write(sqlite_pid_file(&db), "nonsense").unwrap();
+        assert!(!sqlite_instance_running(&db));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

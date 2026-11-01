@@ -4,9 +4,10 @@
 //! because it rotates. The cluster CA is the only trusted root. The required RBAC is `get` and
 //! `list` on `ingressroutes` and `pods`.
 //!
-//! One list of the pods gives the two states of a service. The number of ready pods gives up or
-//! down. The readiness probes of the containers give the runtime health. The pod list holds the
-//! spec of each pod, so the runtime health needs no other request and no other RBAC verb.
+//! The source reads two lists, page by page: the IngressRoutes and all the pods (portal 7.3c). It
+//! finds the pods of each selector in memory. The number of ready pods gives up or down. The
+//! readiness probes of the containers give the runtime health. The pod list holds the spec of
+//! each pod, so the runtime health needs no other request and no other RBAC verb.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ use crate::config::KubernetesApi;
 
 const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// The number of items that one request of a list asks for.
+const PAGE_ITEMS: usize = 500;
 
 #[derive(Clone)]
 pub struct Kube {
@@ -72,24 +75,52 @@ impl Kube {
         super::read_capped(response, MAX_BODY_BYTES).await
     }
 
-    /// Returns every IngressRoute with its annotations.
+    /// Returns every IngressRoute with its annotations, in as many requests as the list needs.
     pub async fn workloads(&self) -> Result<Vec<Workload>, String> {
-        let body = self
-            .get("/apis/traefik.io/v1alpha1/ingressroutes?limit=1000")
-            .await?;
-        parse_ingressroutes(&body)
+        let mut all = Vec::new();
+        let mut next = None;
+        loop {
+            let body = self
+                .get(&page_path(
+                    "/apis/traefik.io/v1alpha1/ingressroutes",
+                    next.as_deref(),
+                ))
+                .await?;
+            let (mut page, token) = parse_ingressroutes_page(&body)?;
+            all.append(&mut page);
+            match token {
+                Some(token) => next = Some(token),
+                None => return Ok(all),
+            }
+        }
     }
 
-    /// Returns the state of the pods that match `selector` in `namespace`.
-    pub async fn pods(&self, namespace: &str, selector: &str) -> Result<Pods, String> {
-        let body = self
-            .get(&format!(
-                "/api/v1/namespaces/{}/pods?labelSelector={}",
-                super::encode_component(namespace),
-                super::encode_component(selector)
-            ))
-            .await?;
-        parse_pods(&body)
+    /// Returns the state of every pod of the cluster, in as many requests as the list needs.
+    pub async fn pod_set(&self) -> Result<PodSet, String> {
+        let mut all = Vec::new();
+        let mut next = None;
+        loop {
+            let body = self
+                .get(&page_path("/api/v1/pods", next.as_deref()))
+                .await?;
+            let (mut page, token) = parse_pods_page(&body)?;
+            all.append(&mut page);
+            match token {
+                Some(token) => next = Some(token),
+                None => return Ok(PodSet { pods: all }),
+            }
+        }
+    }
+}
+
+/// The path of one page of a list. `token` is the `continue` value of the page before.
+fn page_path(path: &str, token: Option<&str>) -> String {
+    match token {
+        None => format!("{path}?limit={PAGE_ITEMS}"),
+        Some(token) => format!(
+            "{path}?limit={PAGE_ITEMS}&continue={}",
+            super::encode_component(token)
+        ),
     }
 }
 
@@ -97,6 +128,21 @@ impl Kube {
 struct List<T> {
     #[serde(default = "Vec::new")]
     items: Vec<T>,
+    #[serde(default)]
+    metadata: ListMetadata,
+}
+
+#[derive(Deserialize, Default)]
+struct ListMetadata {
+    /// The value for the next page. The last page has none, or an empty value.
+    #[serde(rename = "continue", default)]
+    next: Option<String>,
+}
+
+impl<T> List<T> {
+    fn next(&self) -> Option<String> {
+        self.metadata.next.clone().filter(|token| !token.is_empty())
+    }
 }
 
 #[derive(Deserialize)]
@@ -106,6 +152,8 @@ struct Metadata {
     namespace: String,
     #[serde(default)]
     annotations: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
     #[serde(rename = "deletionTimestamp", default)]
     deletion_timestamp: Option<String>,
 }
@@ -115,10 +163,12 @@ struct Route {
     metadata: Metadata,
 }
 
-pub(super) fn parse_ingressroutes(body: &[u8]) -> Result<Vec<Workload>, String> {
+/// The routes of one page of the list, and the value for the next page.
+fn parse_ingressroutes_page(body: &[u8]) -> Result<(Vec<Workload>, Option<String>), String> {
     let list: List<Route> =
         serde_json::from_slice(body).map_err(|e| format!("unexpected IngressRoute list: {e}"))?;
-    Ok(list
+    let next = list.next();
+    let workloads = list
         .items
         .into_iter()
         .map(|route| {
@@ -144,7 +194,8 @@ pub(super) fn parse_ingressroutes(body: &[u8]) -> Result<Vec<Workload>, String> 
                 runtime: None,
             }
         })
-        .collect())
+        .collect();
+    Ok((workloads, next))
 }
 
 /// Use equality selectors only (`app=registry-ui,tier=web`). The value ends up in a URL.
@@ -227,6 +278,68 @@ pub struct Pods {
     pub runtime: Option<RuntimeHealth>,
 }
 
+/// What the portal keeps of one pod: its place, its labels and its state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PodRecord {
+    namespace: String,
+    labels: BTreeMap<String, String>,
+    terminating: bool,
+    ready: bool,
+    /// The runtime health of a pod with a readiness probe. `None` for a pod without a probe.
+    runtime: Option<RuntimeHealth>,
+}
+
+/// Every pod of the cluster, from the last complete list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PodSet {
+    pods: Vec<PodRecord>,
+}
+
+impl PodSet {
+    /// The number of pods that the set holds.
+    pub fn len(&self) -> usize {
+        self.pods.len()
+    }
+
+    /// Counts the ready pods and resolves the runtime health for the pods of `namespace` that
+    /// match `selector`. A terminating pod does not count. The runtime health uses only the pods
+    /// with a readiness probe. One unhealthy pod makes the service unhealthy. The service is
+    /// starting when a pod starts and no pod with a probe is ready.
+    pub fn pods(&self, namespace: &str, selector: &str) -> Pods {
+        let wanted: Vec<(&str, Option<&str>)> = selector
+            .split(',')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| match pair.split_once('=') {
+                Some((key, value)) => (key, Some(value)),
+                None => (pair, None),
+            })
+            .collect();
+        let live = || {
+            self.pods.iter().filter(|pod| {
+                pod.namespace == namespace
+                    && !pod.terminating
+                    && wanted.iter().all(|(key, value)| match value {
+                        Some(value) => pod.labels.get(*key).map(String::as_str) == Some(*value),
+                        None => pod.labels.contains_key(*key),
+                    })
+            })
+        };
+        let ready = live().filter(|pod| pod.ready).count();
+        let probed: Vec<RuntimeHealth> = live().filter_map(|pod| pod.runtime).collect();
+        let any = |state: RuntimeHealth| probed.contains(&state);
+        let runtime = if probed.is_empty() {
+            None
+        } else if any(RuntimeHealth::Unhealthy) {
+            Some(RuntimeHealth::Unhealthy)
+        } else if any(RuntimeHealth::Starting) && !any(RuntimeHealth::Healthy) {
+            Some(RuntimeHealth::Starting)
+        } else {
+            Some(RuntimeHealth::Healthy)
+        };
+        Pods { ready, runtime }
+    }
+}
+
 impl Pod {
     fn ready(&self) -> bool {
         self.status
@@ -264,35 +377,38 @@ impl Pod {
     }
 }
 
-/// Counts the ready pods and resolves the runtime health. A terminating pod does not count. The
-/// runtime health uses only the pods with a readiness probe. One unhealthy pod makes the service
-/// unhealthy. The service is starting when a pod starts and no pod with a probe is ready.
-pub(super) fn parse_pods(body: &[u8]) -> Result<Pods, String> {
+/// The pods of one page of the list, and the value for the next page.
+fn parse_pods_page(body: &[u8]) -> Result<(Vec<PodRecord>, Option<String>), String> {
     let list: List<Pod> =
         serde_json::from_slice(body).map_err(|e| format!("unexpected Pod list: {e}"))?;
-    let live = || {
-        list.items
-            .iter()
-            .filter(|pod| pod.metadata.deletion_timestamp.is_none())
-    };
-    let ready = live().filter(|pod| pod.ready()).count();
-    let probed: Vec<RuntimeHealth> = live().filter_map(Pod::runtime).collect();
-    let any = |state: RuntimeHealth| probed.contains(&state);
-    let runtime = if probed.is_empty() {
-        None
-    } else if any(RuntimeHealth::Unhealthy) {
-        Some(RuntimeHealth::Unhealthy)
-    } else if any(RuntimeHealth::Starting) && !any(RuntimeHealth::Healthy) {
-        Some(RuntimeHealth::Starting)
-    } else {
-        Some(RuntimeHealth::Healthy)
-    };
-    Ok(Pods { ready, runtime })
+    let next = list.next();
+    let pods = list
+        .items
+        .iter()
+        .map(|pod| PodRecord {
+            namespace: pod.metadata.namespace.clone(),
+            labels: pod.metadata.labels.clone().unwrap_or_default(),
+            terminating: pod.metadata.deletion_timestamp.is_some(),
+            ready: pod.ready(),
+            runtime: pod.runtime(),
+        })
+        .collect();
+    Ok((pods, next))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_ingressroutes(body: &[u8]) -> Result<Vec<Workload>, String> {
+        parse_ingressroutes_page(body).map(|(workloads, _)| workloads)
+    }
+
+    /// The state of all the pods of a list, without selector and namespace.
+    fn parse_pods(body: &[u8]) -> Result<Pods, String> {
+        let (pods, _) = parse_pods_page(body)?;
+        Ok(PodSet { pods }.pods("", ""))
+    }
 
     #[test]
     fn ingress_routes_become_workloads_with_their_annotations() {
@@ -440,6 +556,52 @@ mod tests {
             runtime_of(&[leaving, pod(true, true, "Running", RUNNING, false)]),
             Some(RuntimeHealth::Healthy)
         );
+    }
+
+    #[test]
+    fn a_page_gives_the_value_for_the_next_page_and_the_last_page_gives_none() {
+        let first = br#"{"metadata":{"continue":"abc/def=="},"items":[{"metadata":{"name":"a","namespace":"x"}}]}"#;
+        let (workloads, next) = parse_ingressroutes_page(first).unwrap();
+        assert_eq!(workloads.len(), 1);
+        assert_eq!(next.as_deref(), Some("abc/def=="));
+        let last = br#"{"metadata":{"continue":""},"items":[]}"#;
+        assert_eq!(parse_ingressroutes_page(last).unwrap().1, None);
+        assert_eq!(parse_pods_page(br#"{"items":[]}"#).unwrap().1, None);
+        assert_eq!(
+            page_path("/api/v1/pods", None),
+            "/api/v1/pods?limit=500",
+            "the first page has no token"
+        );
+        assert_eq!(
+            page_path("/api/v1/pods", Some("a/b=")),
+            "/api/v1/pods?limit=500&continue=a%2Fb%3D"
+        );
+    }
+
+    #[test]
+    fn the_pods_of_a_selector_come_from_the_set_in_memory() {
+        let pod = |namespace: &str, labels: &str, ready: bool| {
+            format!(
+                r#"{{"metadata":{{"name":"p","namespace":"{namespace}","labels":{{{labels}}}}},"status":{{"conditions":[{{"type":"Ready","status":"{}"}}]}}}}"#,
+                if ready { "True" } else { "False" }
+            )
+        };
+        let body = format!(
+            r#"{{"items":[{},{},{},{}]}}"#,
+            pod("apps", r#""app":"web","tier":"front""#, true),
+            pod("apps", r#""app":"web","tier":"back""#, false),
+            pod("other", r#""app":"web""#, true),
+            pod("apps", r#""app":"db""#, true),
+        );
+        let (pods, _) = parse_pods_page(body.as_bytes()).unwrap();
+        let set = PodSet { pods };
+        assert_eq!(set.len(), 4);
+        assert_eq!(set.pods("apps", "app=web").ready, 1);
+        assert_eq!(set.pods("apps", "app=web,tier=back").ready, 0);
+        assert_eq!(set.pods("apps", "app=web,tier=front").ready, 1);
+        assert_eq!(set.pods("other", "app=web").ready, 1);
+        assert_eq!(set.pods("apps", "app").ready, 2, "a key without a value");
+        assert_eq!(set.pods("apps", "app=none").ready, 0);
     }
 
     #[test]

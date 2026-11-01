@@ -15,6 +15,9 @@ use zeroize::Zeroize;
 use super::hcl::{Document, Labeled, Lit};
 use super::keys::{self, Key, Kind, Presence, When, KEYS};
 
+/// The longest value that an error shows.
+const MAX_SHOWN_CHARS: usize = 300;
+
 /// The text that stands for a secret in the effective configuration.
 pub const HIDDEN: &str = "<hidden>";
 
@@ -43,6 +46,15 @@ impl std::fmt::Debug for Secret {
     }
 }
 
+/// One grant of a list of grants, as the file writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrantItem {
+    /// The text form of the grant.
+    pub text: String,
+    /// The members of the object `limits`, in the order of the file. Empty without the object.
+    pub limits: Vec<(String, Lit)>,
+}
+
 /// A typed value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Val {
@@ -52,6 +64,7 @@ pub enum Val {
     Duration(Duration),
     Size(usize),
     List(Vec<String>),
+    Grants(Vec<GrantItem>),
 }
 
 /// One line of the effective configuration.
@@ -71,17 +84,30 @@ pub struct LabeledValues {
     pub label: String,
     values: HashMap<&'static str, Val>,
     secrets: HashMap<&'static str, Secret>,
+    /// The blocks with a label inside this block, in the order of the file.
+    pub children: Vec<LabeledValues>,
 }
 
 impl LabeledValues {
-    pub fn list(&self, name: &str) -> Result<Vec<String>, String> {
+    /// The grants of a key `Kind::Grants`.
+    pub fn grants(&self, name: &str) -> Result<Vec<GrantItem>, String> {
         match self.values.get(name) {
-            Some(Val::List(items)) => Ok(items.clone()),
+            Some(Val::Grants(items)) => Ok(items.clone()),
             _ => Err(format!(
-                "internal error: {}.{}.{name} is not a list",
+                "internal error: {}.{}.{name} is not a list of grants",
                 self.kind, self.label
             )),
         }
+    }
+
+    /// The bytes of a secret of the block, for a check at start. `None`: the file did not give it.
+    pub fn secret_bytes(&self, name: &str) -> Option<&[u8]> {
+        self.secrets.get(name).map(Secret::as_bytes)
+    }
+
+    /// Whether the block has this secret: the file gave its `_env` or its `_file`.
+    pub fn has_secret(&self, name: &str) -> bool {
+        self.secrets.contains_key(name)
     }
 
     /// Take a secret out of the block. The caller owns it from here.
@@ -206,6 +232,7 @@ impl Resolved {
                 .is_ok_and(|mode| mode == "provided"),
             When::IdentityBlock => self.has_block("identity"),
             When::PdpBlock => self.has_block("pdp"),
+            When::KeysBlock => self.has_block("keys"),
             When::LabeledBlock => true,
         }
     }
@@ -274,7 +301,7 @@ pub fn resolve(document: &Document, env: Env<'_>) -> Result<Resolved, String> {
         resolved.values.insert((key.block, key.name), value);
     }
     for block in &document.labeled {
-        let values = resolve_labeled(block, env, &mut resolved.effective)?;
+        let values = resolve_labeled(block, "", env, &mut resolved.effective)?;
         resolved.labeled.push(values);
     }
     Ok(resolved)
@@ -283,7 +310,7 @@ pub fn resolve(document: &Document, env: Env<'_>) -> Result<Resolved, String> {
 /// The value of a key as the effective configuration shows it.
 fn shown_value(key: &Key, literal: &Lit) -> String {
     match (&key.kind, literal) {
-        (_, Lit::List(_)) => literal.shown(),
+        (_, Lit::List(_) | Lit::Items(_) | Lit::Object(_)) => literal.shown(),
         (
             Kind::Text { .. } | Kind::Duration { .. } | Kind::Size { .. } | Kind::Enum(_),
             Lit::Str(text) | Lit::Int(text) | Lit::Word(text),
@@ -295,10 +322,11 @@ fn shown_value(key: &Key, literal: &Lit) -> String {
 /// Read, check and type the keys of one block with a label. The table of labeled keys is closed.
 fn resolve_labeled(
     block: &Labeled,
+    parent: &str,
     env: Env<'_>,
     effective: &mut Vec<Effective>,
 ) -> Result<LabeledValues, String> {
-    let path = format!("{}.{}", block.kind, block.label);
+    let path = format!("{parent}{}.{}", block.kind, block.label);
     let mut written: Vec<&String> = block.values.keys().collect();
     written.sort();
     for name in written {
@@ -330,11 +358,19 @@ fn resolve_labeled(
         label: block.label.clone(),
         values: HashMap::new(),
         secrets: HashMap::new(),
+        children: Vec::new(),
     };
     for key in keys::LABELED_KEYS.iter().filter(|k| k.block == block.kind) {
         let key_path = format!("{path}.{}", key.name);
         if key.is_secret() {
             let get = |suffix: &str| block.values.get(&format!("{}{suffix}", key.name));
+            if matches!(key.presence, Presence::Optional)
+                && get("").is_none()
+                && get("_env").is_none()
+                && get("_file").is_none()
+            {
+                continue;
+            }
             let (secret, source) =
                 read_secret(key, &key_path, get(""), get("_env"), get("_file"), env)?;
             effective.push(Effective {
@@ -367,6 +403,11 @@ fn resolve_labeled(
             },
         });
         out.values.insert(key.name, value);
+    }
+    for child in &block.children {
+        let child_parent = format!("{path}.");
+        out.children
+            .push(resolve_labeled(child, &child_parent, env, effective)?);
     }
     Ok(out)
 }
@@ -405,11 +446,15 @@ fn check_names(document: &Document) -> Result<(), String> {
 
 fn type_error(key: &Key, literal: &Lit, detail: Option<&str>) -> String {
     let detail = detail.map(|d| format!(" ({d})")).unwrap_or_default();
+    // A list of 512 grants is too long for a line of a log: the message keeps its start.
+    let mut shown = literal.shown();
+    if shown.chars().count() > MAX_SHOWN_CHARS {
+        shown = shown.chars().take(MAX_SHOWN_CHARS).collect::<String>() + "... (cut)";
+    }
     format!(
-        "invalid {}: expected {}{detail}, got {}",
+        "invalid {}: expected {}{detail}, got {shown}",
         key.path(),
-        key.expected(),
-        literal.shown()
+        key.expected()
     )
 }
 
@@ -468,7 +513,90 @@ fn parse_scalar(key: &Key, literal: &Lit) -> Result<Val, String> {
             }
             Ok(Val::List(items.clone()))
         }
+        (Kind::Grants { max_items, .. }, Lit::List(texts)) => {
+            if texts.len() > *max_items {
+                return bad(Some("too many items"));
+            }
+            let mut items = Vec::with_capacity(texts.len());
+            for text in texts {
+                if let Err(reason) = keys::check_grant(text) {
+                    return bad(Some(&format!("item {text:?}: {reason}")));
+                }
+                if items.iter().any(|item: &GrantItem| item.text == *text) {
+                    return bad(Some(&format!("item {text:?} is written two times")));
+                }
+                items.push(GrantItem {
+                    text: text.clone(),
+                    limits: Vec::new(),
+                });
+            }
+            Ok(Val::Grants(items))
+        }
+        (Kind::Grants { max_items, .. }, Lit::Items(literals)) => {
+            if literals.len() > *max_items {
+                return bad(Some("too many items"));
+            }
+            let mut items: Vec<GrantItem> = Vec::with_capacity(literals.len());
+            for literal_item in literals {
+                let item = match grant_item(literal_item) {
+                    Ok(item) => item,
+                    Err(reason) => return bad(Some(&reason)),
+                };
+                if let Err(reason) = keys::check_grant(&item.text) {
+                    return bad(Some(&format!("item {:?}: {reason}", item.text)));
+                }
+                if items.iter().any(|other| other.text == item.text) {
+                    return bad(Some(&format!("item {:?} is written two times", item.text)));
+                }
+                items.push(item);
+            }
+            Ok(Val::Grants(items))
+        }
         _ => bad(None),
+    }
+}
+
+/// One item of a list of grants: a quoted grant, or an object with `grant` and `limits`.
+fn grant_item(item: &Lit) -> Result<GrantItem, String> {
+    match item {
+        Lit::Str(text) => Ok(GrantItem {
+            text: text.clone(),
+            limits: Vec::new(),
+        }),
+        Lit::Object(members) => {
+            let mut text = None;
+            let mut limits = Vec::new();
+            for (name, value) in members {
+                match (name.as_str(), value) {
+                    ("grant", Lit::Str(grant)) => text = Some(grant.clone()),
+                    ("grant", other) => {
+                        return Err(format!(
+                            "the member grant must be a quoted text, got {}",
+                            other.shown()
+                        ))
+                    }
+                    ("limits", Lit::Object(values)) => limits = values.clone(),
+                    ("limits", other) => {
+                        return Err(format!(
+                            "the member limits must be an object, got {}",
+                            other.shown()
+                        ))
+                    }
+                    (other, _) => {
+                        return Err(format!(
+                            "the member {other} is not known: an object of a grant has grant and limits"
+                        ))
+                    }
+                }
+            }
+            let text =
+                text.ok_or_else(|| "an object of a grant needs the member grant".to_string())?;
+            Ok(GrantItem { text, limits })
+        }
+        other => Err(format!(
+            "an item is a quoted grant or an object with grant and limits, got {}",
+            other.shown()
+        )),
     }
 }
 

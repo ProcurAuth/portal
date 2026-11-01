@@ -7,6 +7,7 @@
 //! The file is the only source. The program reads an environment variable only when the file
 //! names it (`<name>_env`), and a file only when the file names it (`<name>_file`).
 
+mod accounts;
 mod hcl;
 pub mod keys;
 mod resolve;
@@ -33,6 +34,11 @@ pub struct Config {
     pub identity: Option<IdentityConfig>,
     /// `None` when the file has no `pdp` block: the PDP listener is off.
     pub pdp: Option<PdpConfig>,
+    /// `None` when the file has no `keys` block: the portal refuses every key (portal 10.1).
+    pub keys: Option<KeysConfig>,
+    /// The values of the block `keys`, or the defaults of the table without the block. The bounds
+    /// of the counter rows and of the grants apply also without the block (portal 10.1a).
+    pub key_limits: KeysConfig,
     pub users: UsersConfig,
     pub storage: StorageConfig,
     pub ui: UiConfig,
@@ -63,8 +69,47 @@ pub struct AccessConfig {
     pub grants_mode: Mode,
     /// The `user` blocks: login to grants. Empty in the mode `dynamic`.
     pub configured_grants: BTreeMap<String, Vec<Grant>>,
+    /// The `user` blocks: the accounts of the file, with their keys (portal 3.4a).
+    pub accounts: BTreeMap<String, FileAccount>,
     pub actions_timeout: Duration,
     pub actions_refresh: Duration,
+    /// The longest time that the last good document of a service stays valid (portal 10.3a).
+    pub actions_max_age: Duration,
+    /// The longest wait for the first reads of the documents at start (portal 10.2c).
+    pub start_read_deadline: Duration,
+    /// The size that the document of a service can have (portal 7.9).
+    pub bounds: crate::actions::Bounds,
+}
+
+/// An account of the file (portal 3.4a): a block `user`.
+#[derive(Clone, Debug)]
+pub struct FileAccount {
+    pub grants: Vec<Grant>,
+    /// The Argon2id digest of the password. Without it, the account opens no session.
+    pub password_hash: Option<String>,
+    pub keys: Vec<FileKey>,
+}
+
+/// A key of the file (portal 3.4c): a block `key` inside a block `user`. The program never holds
+/// the text of the key, only its SHA-256 digest.
+#[derive(Clone, Debug)]
+pub struct FileKey {
+    pub name: String,
+    /// The local part of the subject id (portal 3.4c).
+    pub id: String,
+    pub digest: [u8; 32],
+    pub grants: Vec<Grant>,
+}
+
+/// The block `keys` (portal 10.2).
+#[derive(Clone, Debug)]
+pub struct KeysConfig {
+    pub default_lifetime: Duration,
+    pub directory_max_age: Duration,
+    pub max_per_user: usize,
+    pub max_counter_rows: usize,
+    pub max_directory_grants: usize,
+    pub history_days: u32,
 }
 
 /// The identity token that `/auth/verify` gives to a service (contract 11.3).
@@ -84,11 +129,17 @@ pub struct PdpConfig {
     pub url: String,
     pub max_body_bytes: usize,
     pub max_evaluations: usize,
+    /// `true`: the URL can be `http` (portal 9.7a).
+    pub plain_http: bool,
+    /// The database connections that count the uses (portal 7.7e).
+    pub counter_connections: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct UsersConfig {
     pub max_users: usize,
+    /// The largest number of grants of one user (portal 10.2d).
+    pub max_grants: usize,
 }
 
 /// Where the accounts and the connection history live.
@@ -258,7 +309,12 @@ impl Config {
     /// Parse the text of a file. `env` reads one environment variable: the program calls it only
     /// for the variables that the text names.
     pub fn parse(raw: &str, env: Env<'_>) -> Result<(Self, Secrets), String> {
-        let document = hcl::parse(raw, &keys::block_names(), &keys::labeled_block_names())?;
+        let document = hcl::parse(
+            raw,
+            &keys::block_names(),
+            &keys::labeled_block_names(),
+            keys::NESTED_BLOCKS,
+        )?;
         let mut resolved = resolve::resolve(&document, env)?;
         build(&mut resolved, env)
     }
@@ -303,8 +359,30 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         );
     }
 
+    // Without the block, each key of the block gives its default (portal 10.1a).
+    let key_limits = KeysConfig {
+        default_lifetime: r.duration("keys", "default_lifetime")?,
+        directory_max_age: r.duration("keys", "directory_max_age")?,
+        max_per_user: r.count("keys", "max_per_user")?,
+        max_counter_rows: r.count("keys", "max_counter_rows")?,
+        max_directory_grants: r.count("keys", "max_directory_grants")?,
+        history_days: u32::try_from(r.int("keys", "history_days")?)
+            .map_err(|_| "internal error: keys.history_days is out of range".to_string())?,
+    };
+    let keys = if r.has_block("keys") {
+        for block in ["identity", "pdp"] {
+            if !r.has_block(block) {
+                return Err(format!(
+                    "the block keys needs the block {block}: add the block {block}"
+                ));
+            }
+        }
+        Some(key_limits.clone())
+    } else {
+        None
+    };
     let mut secrets = build_secrets(r)?;
-    let access = build_access(r, &secrets.superadmin_login)?;
+    let access = build_access(r, &secrets.superadmin_login, keys.as_ref())?;
     secrets.pdp_tokens = build_pdp_tokens(r)?;
     let pdp = if r.has_block("pdp") {
         Some(PdpConfig {
@@ -315,6 +393,8 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             url: r.text("pdp", "url")?.trim_end_matches('/').to_string(),
             max_body_bytes: r.size("pdp", "max_body_bytes")?,
             max_evaluations: r.count("pdp", "max_evaluations")?,
+            plain_http: r.bool("pdp", "plain_http")?,
+            counter_connections: r.count("pdp", "counter_connections")?,
         })
     } else {
         if !secrets.pdp_tokens.is_empty() {
@@ -423,8 +503,11 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         access,
         identity,
         pdp,
+        keys,
+        key_limits,
         users: UsersConfig {
             max_users: r.count("users", "max_users")?,
+            max_grants: r.count("users", "max_grants")?,
         },
         storage: StorageConfig {
             backend: storage_backend,
@@ -441,6 +524,21 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         effective: std::mem::take(&mut r.effective),
     };
     if let Some(pdp) = &config.pdp {
+        // The two values must agree: an `http` URL needs `plain_http`, and `plain_http` needs an
+        // `http` URL (portal 10.2b).
+        let http = pdp.url.starts_with("http://");
+        if http && !pdp.plain_http {
+            return Err(format!(
+                "pdp.url is an http URL and pdp.plain_http is false: set pdp.plain_http to true, or use an https URL (pdp.url is {:?})",
+                pdp.url
+            ));
+        }
+        if !http && pdp.plain_http {
+            return Err(format!(
+                "pdp.plain_http is true and pdp.url is not an http URL: the two values contradict (pdp.url is {:?})",
+                pdp.url
+            ));
+        }
         let (a, b) = (config.server.listen_address, pdp.listen_address);
         let overlap = a.port() == b.port()
             && (a.ip() == b.ip() || a.ip().is_unspecified() || b.ip().is_unspecified());
@@ -449,6 +547,13 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
                 "pdp.listen_address must not use the port of server.listen_address: server.listen_address is {a}, pdp.listen_address is {b}"
             ));
         }
+    }
+    if config.access.actions_max_age <= config.access.actions_refresh {
+        return Err(format!(
+            "access.actions_max_age must be more than access.actions_refresh: actions_max_age is {}, actions_refresh is {}",
+            keys::show_duration(config.access.actions_max_age),
+            keys::show_duration(config.access.actions_refresh)
+        ));
     }
     if secrets.superadmin_password.len() > config.security.max_password_bytes {
         return Err(format!(
@@ -546,41 +651,40 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
 }
 
 /// The `access` block and the `user` blocks.
-fn build_access(r: &Resolved, superadmin_login: &str) -> Result<AccessConfig, String> {
+fn build_access(
+    r: &Resolved,
+    superadmin_login: &str,
+    keys: Option<&KeysConfig>,
+) -> Result<AccessConfig, String> {
     let grants_mode = Mode::parse(&r.text("access", "grants_mode")?)?;
-    let mut configured_grants: BTreeMap<String, Vec<Grant>> = BTreeMap::new();
-    for block in r.labeled.iter().filter(|b| b.kind == "user") {
-        let login = &block.label;
-        if grants_mode == Mode::Dynamic {
-            return Err(format!(
-                "user {login:?}: a user block is not permitted when access.grants_mode is \"dynamic\"; use \"static\" or \"hybrid\", or give the grants in the settings pages"
-            ));
-        }
-        if crate::users::normalize_login(login).as_deref() != Ok(login.as_str()) {
-            return Err(format!(
-                "user {login:?}: expected a login of 1 to 32 characters of a-z, 0-9, '.', '-' and '_'"
-            ));
-        }
-        if login == superadmin_login {
-            return Err(format!(
-                "user {login:?}: this is the login of the superadmin, who has all grants: remove the block"
-            ));
-        }
-        let mut grants = Vec::new();
-        for text in block.list("grants")? {
-            grants.push(
-                Grant::parse(&text)
-                    .map_err(|e| format!("invalid user.{login}.grants: item {text:?}: {e}"))?,
-            );
-        }
-        grants.sort();
-        configured_grants.insert(login.clone(), grants);
-    }
+    let rules = accounts::Rules {
+        mode: grants_mode,
+        superadmin_login: superadmin_login.to_string(),
+        keys_enabled: keys.is_some(),
+        max_grants: r.count("users", "max_grants")?,
+        max_keys_per_user: match keys {
+            Some(keys) => keys.max_per_user,
+            None => 0,
+        },
+    };
+    let accounts = accounts::build(r, &rules)?;
+    let configured_grants = accounts
+        .iter()
+        .map(|(login, account)| (login.clone(), account.grants.clone()))
+        .collect();
     Ok(AccessConfig {
         grants_mode,
         configured_grants,
+        accounts,
         actions_timeout: r.duration("access", "actions_timeout")?,
         actions_refresh: r.duration("access", "actions_refresh")?,
+        actions_max_age: r.duration("access", "actions_max_age")?,
+        start_read_deadline: r.duration("access", "start_read_deadline")?,
+        bounds: crate::actions::Bounds {
+            max_actions: r.count("access", "max_actions")?,
+            max_resources: r.count("access", "max_resources")?,
+            max_document_bytes: r.count("access", "max_document_bytes")?,
+        },
     })
 }
 
@@ -635,7 +739,7 @@ fn check_login(bytes: &[u8]) -> Result<String, String> {
     }
     if text.contains(crate::subject_id::SEPARATOR) {
         return Err(format!(
-            "the login must not have the character {:?}: the program keeps it for the ids of machine principals",
+            "the login must not have the character {:?}: the program keeps it for the ids of keys",
             crate::subject_id::SEPARATOR
         ));
     }

@@ -15,7 +15,7 @@
 //!
 //! The action `access` lets the user open the service: the access gateway decides it in
 //! `/auth/verify`. The action `access` has grants on the service only. The other actions are the
-//! names that a service publishes at `/.well-known/access-actions`. The service decides them: it
+//! names that a service publishes at `/.well-known/procurauth/actions`. The service decides them: it
 //! asks the PDP of this server (see [`crate::pdp`]).
 //!
 //! A grant covers the node that it names and each node below it: the PDP compares the segments
@@ -30,6 +30,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::limits::Limits;
+
 /// The action that lets a user open a service. Only the access gateway decides it.
 pub const ACCESS: &str = "access";
 /// The longest action name.
@@ -42,8 +44,6 @@ pub const MAX_RESOURCE_TYPE_CHARS: usize = 32;
 pub const MAX_RESOURCE_ID_BYTES: usize = 256;
 /// The largest number of segments after the service, in a grant or in a request.
 pub const MAX_DEPTH: usize = 4;
-/// The largest number of grants of one user, in the configuration or in the database.
-pub const MAX_GRANTS_PER_USER: usize = 512;
 /// The resource type of a whole service. It is the root of each tree.
 pub const SERVICE_TYPE: &str = "service";
 
@@ -114,12 +114,15 @@ pub fn parse_path(text: &str) -> Result<Vec<Segment>, String> {
 }
 
 /// One grant: the user can do `action` on the node `path` of the service `service`, and on each
-/// node below it. An empty `path` is the whole service.
+/// node below it. An empty `path` is the whole service. A grant can carry limit values (see
+/// [`crate::limits`]). The text form does not show them: the settings pages and the database keep
+/// them apart.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Grant {
     pub action: String,
     pub service: String,
     pub path: Vec<Segment>,
+    pub limits: Limits,
 }
 
 impl Grant {
@@ -131,7 +134,20 @@ impl Grant {
             action: action.to_string(),
             service: service.to_string(),
             path: Vec::new(),
+            limits: Limits::new(),
         })
+    }
+
+    /// The same grant with these limit values. The values are not checked here: [`Limits::check`]
+    /// does it against the document of the service.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Whether both grants name the same action and the same node, whatever their limit values.
+    pub fn same_node(&self, other: &Self) -> bool {
+        self.action == other.action && self.service == other.service && self.path == other.path
     }
 
     /// A grant on a node of the service. An empty path is the whole service. The action `access`
@@ -413,6 +429,37 @@ impl Policy {
         out.dedup();
         out
     }
+}
+
+/// One counter of a budget: the service, the name of the budget and the window.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CounterId {
+    pub service: String,
+    pub budget: String,
+    pub window: crate::limits::Window,
+}
+
+/// The counters that a set of grants needs for one subject: one for each window of each budget
+/// value of each grant `access` on a service (portal 3.2a, 7.2a). Sorted, without duplicates.
+pub fn counter_ids(grants: &[Grant]) -> Vec<CounterId> {
+    let mut out: Vec<CounterId> = Vec::new();
+    for grant in grants
+        .iter()
+        .filter(|g| g.action == ACCESS && g.path.is_empty())
+    {
+        for (name, value) in grant.limits.iter() {
+            if let crate::limits::Value::Budget(budget) = value {
+                out.extend(budget.items().iter().map(|item| CounterId {
+                    service: grant.service.clone(),
+                    budget: name.to_string(),
+                    window: item.window,
+                }));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Whether `grants` hold `action` on the whole service `service`. A grant below the service does

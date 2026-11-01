@@ -1,0 +1,207 @@
+# Local demo of the portal: Traefik, the portal, three example services. Start it with ./up.sh.
+name: portal-demo
+
+services:
+  traefik:
+    image: traefik:v3.6
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=demo
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --entrypoints.web.address=:80
+      - --accesslog=true
+      - --log.level=INFO
+    ports:
+      - "127.0.0.1:8088:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - demo
+
+  portal:
+    image: local/portal:demo
+    container_name: portal-demo
+    # The portal reads the action documents at start. A service that is not up yet is read again
+    # only after access.actions_refresh, so the services that publish a document start first.
+    depends_on:
+      - notes
+      - bigdb
+      - chdash
+    configs:
+      - source: portal_config
+        target: /etc/portal/config.hcl
+    secrets:
+      - superadmin_login
+      - superadmin_password
+      - identity_key
+      - pdp_token_notes
+      - alice_hash
+      - bob_hash
+    volumes:
+      - portal_data:/var/lib/portal
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - demo
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      # The pages and the check addresses of the portal. No ForwardAuth here.
+      traefik.http.routers.portal-auth.rule: PathPrefix(`/auth/`)
+      traefik.http.routers.portal-auth.entrypoints: web
+      traefik.http.routers.portal-auth.priority: "50000"
+      traefik.http.routers.portal-auth.service: portal
+      traefik.http.routers.portal-home.rule: Path(`/`)
+      traefik.http.routers.portal-home.entrypoints: web
+      traefik.http.routers.portal-home.service: portal
+      traefik.http.services.portal.loadbalancer.server.port: "4181"
+
+  notes:
+    build: ./notes
+    environment:
+      IDENTITY_ISSUER: http://localhost:8088
+      IDENTITY_PUBLIC_KEY_FILE: /run/secrets/identity_pub
+      PDP_TOKEN_FILE: /run/secrets/pdp_token_notes
+      PDP_URL: http://portal:4182
+    secrets:
+      - identity_pub
+      - pdp_token_notes
+    networks:
+      - demo
+    labels:
+      portal.id: notes
+      portal.group: Demo
+      portal.name: Notes
+      portal.description: A small service with a front. It asks the PDP for each operation.
+      portal.href: /notes/
+      portal.health: http://notes:8080/health
+      portal.actions: http://notes:8080/.well-known/procurauth/actions
+      portal.weight: "10"
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      traefik.http.services.notes.loadbalancer.server.port: "8080"
+      # The persons.
+      traefik.http.routers.notes-user.rule: PathPrefix(`/notes`)
+      traefik.http.routers.notes-user.entrypoints: web
+      traefik.http.routers.notes-user.priority: "100"
+      traefik.http.routers.notes-user.middlewares: portal-user@file
+      traefik.http.routers.notes-user.service: notes
+      # The keys: a request with `Authorization: Bearer mcp_...` on the API.
+      traefik.http.routers.notes-key.rule: PathPrefix(`/notes/api/`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`)
+      traefik.http.routers.notes-key.entrypoints: web
+      traefik.http.routers.notes-key.priority: "200"
+      traefik.http.routers.notes-key.middlewares: portal-key-chain@file
+      traefik.http.routers.notes-key.service: notes
+
+  files:
+    image: traefik/whoami:v1.11
+    command: ["--port=8080"]
+    networks:
+      - demo
+    labels:
+      portal.id: files
+      portal.group: Demo
+      portal.name: Files
+      portal.description: An example service. It shows the request headers.
+      portal.href: /files/
+      portal.health: http://files:8080/health
+      portal.weight: "20"
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      traefik.http.services.files.loadbalancer.server.port: "8080"
+      traefik.http.routers.files.rule: PathPrefix(`/files`)
+      traefik.http.routers.files.entrypoints: web
+      traefik.http.routers.files.middlewares: portal-user@file
+
+  wiki:
+    image: traefik/whoami:v1.11
+    command: ["--port=8080"]
+    networks:
+      - demo
+    labels:
+      portal.id: wiki
+      portal.group: Demo
+      portal.name: Wiki
+      portal.description: A second example service.
+      portal.href: /wiki/
+      portal.health: http://wiki:8080/health
+      portal.weight: "30"
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      traefik.http.services.wiki.loadbalancer.server.port: "8080"
+      traefik.http.routers.wiki.rule: PathPrefix(`/wiki`)
+      traefik.http.routers.wiki.entrypoints: web
+      traefik.http.routers.wiki.middlewares: portal-user@file
+
+  # A service with 424 actions and 220 resources, to try the pages with a large action document.
+  bigdb:
+    build: ./bigdb
+    networks:
+      - demo
+    labels:
+      portal.id: bigdb
+      portal.group: Demo
+      portal.name: Big database
+      portal.description: A service with hundreds of actions and resources.
+      portal.href: /bigdb/
+      portal.health: http://bigdb:8080/health
+      portal.actions: http://bigdb:8080/.well-known/procurauth/actions
+      portal.weight: "40"
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      traefik.http.services.bigdb.loadbalancer.server.port: "8080"
+      traefik.http.routers.bigdb.rule: PathPrefix(`/bigdb`)
+      traefik.http.routers.bigdb.entrypoints: web
+      traefik.http.routers.bigdb.middlewares: portal-user@file
+
+  # A service that looks like ClickHouse Dash: hosts, databases and the actions of ChDash.
+  chdash:
+    build: ./chdash
+    networks:
+      - demo
+    labels:
+      portal.id: data-clickhouse-dash
+      portal.group: Demo
+      portal.name: ClickHouse Dash
+      portal.description: Hosts, databases and the actions of ChDash.
+      portal.href: /chdash/
+      portal.health: http://chdash:8080/health
+      portal.actions: http://chdash:8080/.well-known/procurauth/actions
+      portal.weight: "5"
+      traefik.enable: "true"
+      traefik.docker.network: demo
+      traefik.http.services.chdash.loadbalancer.server.port: "8080"
+      traefik.http.routers.chdash.rule: PathPrefix(`/chdash`)
+      traefik.http.routers.chdash.entrypoints: web
+      traefik.http.routers.chdash.middlewares: portal-user@file
+
+networks:
+  demo:
+    name: demo
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  portal_data:
+
+configs:
+  portal_config:
+    file: ./portal.hcl
+
+secrets:
+  superadmin_login:
+    file: ./.secrets/superadmin_login
+  superadmin_password:
+    file: ./.secrets/superadmin_password
+  identity_key:
+    file: ./.secrets/identity_key.pem
+  identity_pub:
+    file: ./.secrets/identity_pub.pem
+  pdp_token_notes:
+    file: ./.secrets/pdp_token_notes
+  alice_hash:
+    file: ./.secrets/alice_hash
+  bob_hash:
+    file: ./.secrets/bob_hash

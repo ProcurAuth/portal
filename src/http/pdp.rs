@@ -1,22 +1,35 @@
-//! The AuthZEN PDP (contract 11.5, OpenID AuthZEN Authorization API 1.0), on a second listener.
+//! The AuthZEN PDP (protocol 1.3 and section 12, OpenID AuthZEN Authorization API 1.0), on a second
+//! listener.
 //!
-//! The servers of the deployment ask this PDP if a user can do an action. Each server has its own
-//! bearer token (a `pdp_client` block). The PDP answers only for the resources of the server that
-//! asks.
+//! The services of the deployment ask this PDP if a subject can do an action. Each service has its
+//! own bearer token (a `pdp_client` block). The PDP answers only for the resources of the service
+//! that asks.
 //!
-//! The resource is a node of the resource tree of the server (contract 11.4). The server itself
+//! The subject has the type `user`. Its id is the id of a person, or the subject id of a key
+//! (`key:<id>`, protocol 3.2). The decision for a person looks at the grants of the person. The
+//! decision for a key has two sides, the grants of the key and the grants of its owner, and each
+//! limit of both sides applies (see [`crate::decision`]).
+//!
+//! The resource is a node of the resource tree of the service (protocol 5.2). The service itself
 //! is `{"type": "service", "id": "<name>"}`. A node below it has `properties.ancestors`: the chain
-//! from the server to the parent of the node. The first ancestor must be the server that asks,
-//! and the chain must follow the parents of the last known document of this server. Otherwise,
+//! from the service to the parent of the node. The first ancestor must be the service that asks,
+//! and the chain must follow the parents of the last known document of this service. Otherwise,
 //! the answer is `false` with the reason `invalid_resource`. A node without `ancestors` is read as
-//! `[server, node]`: this is correct only when its type has the parent `service`.
+//! `[service, node]`: this is correct only when its type has the parent `service`.
 //!
 //! A grant covers the node that it names and each node below it (prefix match, segment by
 //! segment). With `context.match = "subtree"`, a grant on a node below the resource also gives
-//! `true`: a server uses this answer only to show or hide a navigation element (contract 11.5).
-//! The default is `"node"`. Another value gives `false` with the reason `invalid_request`. A grant below the service applies only when the last known document declares its
-//! chain and lists its type for its action. The PDP fails closed: with no known document, the
-//! decision on a node below the server is `false`.
+//! `true`: a service uses this answer only to show or hide a navigation element (protocol 4.4).
+//! The default is `"node"`. A grant below the service applies only when the last known document
+//! declares its chain and lists its type for its action. The PDP fails closed: with no known
+//! document, the decision on a node below the service is `false`.
+//!
+//! A `true` answer to a question about a node has `context.limits`: the ceilings of the action
+//! (protocol 7.3). A question with `context.usage` is one use: the PDP takes one unit from each
+//! counter of the use, or none (protocol 6.5, see [`crate::counting`]). The answer has
+//! `context.usage.units` (protocol 6.12). A counter without room gives `false` with the reason
+//! `budget_exceeded` and `retry_after`. A count that fails gives the HTTP status 503 and never a
+//! decision (protocol 6.9).
 //!
 //! Endpoints:
 //!
@@ -26,19 +39,19 @@
 //! - `GET /.well-known/authzen-configuration`: the metadata. It needs no token.
 //!
 //! The PDP fails closed: a request that it cannot read gets status `400`, a request without a
-//! valid token gets status `401`, and an unknown user, subject type or resource gets `false`.
-//! Each decision is in the log with the server, the subject, the action, the resource (in the
-//! text form of a grant path) and the decision. The PDP echoes `X-Request-ID`.
+//! valid token gets status `401`, and an unknown subject or resource gets `false`. A bad member of
+//! one evaluation gets `400`. In a batch, an item with a bad `context.match` or bad ancestors gets
+//! `false` with the reason `invalid_request`, and the other items get their decisions. Each
+//! decision is in the log with the service, the subject, the action, the resource (in the text
+//! form of a grant path) and the decision. The PDP echoes `X-Request-ID`.
 //!
-//! Three denials have a reason in the answer. A `context.match` that is not `"node"` or
-//! `"subtree"` gives `invalid_request`. When the subject is a `user` that does not exist, the
-//! answer is `{"decision": false, "context": {"reason": "unknown_subject"}}`. An id with a colon
-//! names a machine principal: nothing makes one yet, so it also gives `unknown_subject`. When the resource is
-//! not a correct node of the server, the reason is `invalid_resource`. No other denial has a
-//! reason, so that an answer never shows the grants of a user.
+//! The reasons of a `false` answer: `unknown_subject` (a person or a key that does not exist, a
+//! revoked, expired or too-old key, a key whose owner cannot use keys, a subject of another type,
+//! an id with an unknown prefix), `invalid_resource`, `invalid_request` and `budget_exceeded`. No
+//! other denial has a reason, so that an answer never shows the grants of a user.
 //!
-//! An `invalid_resource` can come from a new tree of the server that the PDP does not know yet.
-//! The PDP then asks for an early read of the document of the server, at most once in each
+//! An `invalid_resource` can come from a new tree of the service that the PDP does not know yet.
+//! The PDP then asks for an early read of the document of the service, at most once in each
 //! `access.actions_refresh` interval (see [`crate::actions::Registry::read_soon`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,10 +60,14 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::counting::{Outcome as CountOutcome, Unavailable};
+use crate::decision::{self, Counter, CounterOwner, Matching, Owner, Question, Verdict};
 use crate::grants::{
-    check_action, check_resource_id, check_resource_type, covers, encode_id, Grant, Segment,
-    ACCESS, MAX_DEPTH, SERVICE_TYPE,
+    check_action, check_resource_id, check_resource_type, encode_id, Grant, Segment, ACCESS,
+    MAX_DEPTH, SERVICE_TYPE,
 };
+use crate::keyauth::{self, Cause, OwnerSide};
+use crate::limits::{Limits, Value as LimitValue};
 use crate::subject_id::SubjectId;
 
 const EVALUATION_PATH: &str = "/access/v1/evaluation";
@@ -66,8 +83,11 @@ const NO_SUCH_USER: &str = "no such user";
 const UNKNOWN_SUBJECT: &str = "unknown_subject";
 /// The reason in the answer for a resource that is not a correct node of the server.
 const INVALID_RESOURCE: &str = "invalid_resource";
-/// The reason in the answer for a `context.match` that is not `"node"` or `"subtree"`.
+/// The reason in a batch item for a `context.match` that is not `"node"` or `"subtree"`, or for
+/// ancestors that are not an array of objects with `type` and `id`.
 const INVALID_REQUEST: &str = "invalid_request";
+/// The reason in the answer for a counter without room (protocol 11.1).
+const BUDGET_EXCEEDED: &str = "budget_exceeded";
 
 /// How a grant matches the resource (`context.match`, contract 11.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +118,33 @@ impl Match {
             Self::Invalid => "invalid",
         }
     }
+
+    /// The match of the decision module, for a valid value.
+    fn matching(self) -> Matching {
+        match self {
+            Self::Subtree => Matching::Subtree,
+            Self::Node | Self::Invalid => Matching::Node,
+        }
+    }
+}
+
+/// The servers that can ask the PDP, by the SHA-256 of their token.
+pub type Clients = std::collections::HashMap<[u8; 32], Client>;
+
+/// Makes the map of the clients. Two clients with the same token stop the program at start
+/// (portal 9.5a).
+pub fn clients(list: Vec<Client>) -> Result<Clients, String> {
+    let mut map = Clients::with_capacity(list.len());
+    for client in list {
+        let name = client.name.clone();
+        if let Some(other) = map.insert(client.digest, client) {
+            return Err(format!(
+                "pdp_client {name:?} and pdp_client {:?} have the same token",
+                other.name
+            ));
+        }
+    }
+    Ok(map)
 }
 
 /// The token of one server, as its SHA-256: the PDP does not keep the token itself.
@@ -115,25 +162,62 @@ impl Client {
     }
 }
 
+/// The decisions of the PDP by result and reason, in the order of [`DECISIONS`].
+const DECISIONS: [(bool, Option<&str>); 6] = [
+    (true, None),
+    (false, None),
+    (false, Some(UNKNOWN_SUBJECT)),
+    (false, Some(INVALID_RESOURCE)),
+    (false, Some(INVALID_REQUEST)),
+    (false, Some(BUDGET_EXCEEDED)),
+];
+
 /// Counters for `/metrics`.
 #[derive(Default)]
 pub struct Stats {
-    permit: AtomicU64,
-    deny: AtomicU64,
+    decisions: [AtomicU64; 6],
     unauthorized: AtomicU64,
     bad_request: AtomicU64,
+    /// The questions that got HTTP 503, by cause (portal 10.5). The wait that took more than 500
+    /// ms has its own measure.
+    unavailable_store: AtomicU64,
+    unavailable_row: AtomicU64,
+    /// The requests that got HTTP 400 for `context.usage` (portal 10.5).
+    usage_rejected: AtomicU64,
 }
 
 impl Stats {
+    /// Counts one decision.
+    fn decided(&self, decision: bool, reason: Option<&'static str>) {
+        if let Some(index) = DECISIONS
+            .iter()
+            .position(|(d, r)| *d == decision && *r == reason)
+        {
+            self.decisions[index].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn render(&self) -> String {
         let read = |c: &AtomicU64| c.load(Ordering::Relaxed);
-        format!(
-            "# HELP portal_pdp_decisions_total Decisions of the PDP, by result.\n# TYPE portal_pdp_decisions_total counter\nportal_pdp_decisions_total{{decision=\"true\"}} {}\nportal_pdp_decisions_total{{decision=\"false\"}} {}\n# HELP portal_pdp_refused_total PDP requests refused before a decision, by reason.\n# TYPE portal_pdp_refused_total counter\nportal_pdp_refused_total{{reason=\"unauthorized\"}} {}\nportal_pdp_refused_total{{reason=\"bad_request\"}} {}\n",
-            read(&self.permit),
-            read(&self.deny),
+        let mut out = String::from(
+            "# HELP portal_pdp_decisions_total Decisions of the PDP, by result and reason.\n# TYPE portal_pdp_decisions_total counter\n",
+        );
+        for ((decision, reason), count) in DECISIONS.iter().zip(&self.decisions) {
+            out.push_str(&format!(
+                "portal_pdp_decisions_total{{decision=\"{decision}\",reason=\"{}\"}} {}\n",
+                reason.unwrap_or("none"),
+                read(count)
+            ));
+        }
+        out.push_str(&format!(
+            "# HELP portal_pdp_refused_total PDP requests refused before a decision, by reason.\n# TYPE portal_pdp_refused_total counter\nportal_pdp_refused_total{{reason=\"unauthorized\"}} {}\nportal_pdp_refused_total{{reason=\"bad_request\"}} {}\n# HELP portal_usage_rejected_total Requests that got the HTTP status 400 for context.usage.\n# TYPE portal_usage_rejected_total counter\nportal_usage_rejected_total {}\n# HELP portal_pdp_unavailable_total Questions that got the HTTP status 503, by cause.\n# TYPE portal_pdp_unavailable_total counter\nportal_pdp_unavailable_total{{cause=\"store_error\"}} {}\nportal_pdp_unavailable_total{{cause=\"row_missing\"}} {}\n",
             read(&self.unauthorized),
             read(&self.bad_request),
-        )
+            read(&self.usage_rejected),
+            read(&self.unavailable_store),
+            read(&self.unavailable_row),
+        ));
+        out
     }
 }
 
@@ -184,6 +268,7 @@ pub async fn serve(state: Arc<AppState>, listener: TcpListener) {
         let connection_state = Arc::clone(&state);
         tokio::spawn(async move {
             let _permit = permit;
+            let _live = connection_state.stop.enter();
             let _ = stream.set_nodelay(true);
             let io = TokioIo::new(stream);
             let service_state = Arc::clone(&connection_state);
@@ -198,7 +283,10 @@ pub async fn serve(state: Arc<AppState>, listener: TcpListener) {
                 .max_headers(connection_state.config.server.max_headers)
                 .max_buf_size(connection_state.config.server.max_header_bytes)
                 .keep_alive(true);
-            let _ = builder.serve_connection(io, service).await;
+            let _ = connection_state
+                .stop
+                .drive(builder.serve_connection(io, service))
+                .await;
         });
     }
 }
@@ -292,14 +380,9 @@ fn client<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a Client> {
         return None;
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    // Compare with every client, so the time does not tell which one is near.
-    let mut found = None;
-    for client in &state.pdp_clients {
-        if constant_time_eq(&client.digest, &digest) {
-            found = Some(client);
-        }
-    }
-    found
+    // One search by the digest, at any number of clients (portal 9.5a). The key is a SHA-256 of
+    // the token, so the time of the search tells nothing about the token.
+    state.pdp_clients.get(&digest)
 }
 
 async fn decide_request(
@@ -341,7 +424,72 @@ async fn decide_request(
     };
     match answer {
         Ok(value) => json_response(StatusCode::OK, &value),
-        Err(reason) => bad_request(state, &reason),
+        Err(PdpError::Bad(reason)) => bad_request(state, &reason),
+        Err(PdpError::Usage(reason)) => {
+            state
+                .pdp_stats
+                .usage_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            json_response(StatusCode::BAD_REQUEST, &json!({ "error": reason }))
+        }
+        Err(PdpError::Unavailable(cause)) => {
+            match cause {
+                Unavailable::StoreError => {
+                    state
+                        .pdp_stats
+                        .unavailable_store
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Unavailable::RowMissing => {
+                    state
+                        .pdp_stats
+                        .unavailable_row
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                // The wait that took more than 500 ms is counted by the counting module.
+                Unavailable::WaitExceeded => {}
+            }
+            log(
+                state,
+                LogLevel::Warn,
+                "pdp_unavailable",
+                &[("cause", unavailable_name(cause).to_string())],
+            );
+            json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"error": "the count of the use did not work"}),
+            )
+        }
+    }
+}
+
+/// Why the PDP answers with a status, not with a decision.
+enum PdpError {
+    /// A request that the PDP cannot read: HTTP 400.
+    Bad(String),
+    /// A request with a bad `context.usage` (protocol 6.4, 6.11): HTTP 400, counted apart.
+    Usage(String),
+    /// The count of a use did not work: HTTP 503 (protocol 6.9).
+    Unavailable(Unavailable),
+}
+
+impl From<String> for PdpError {
+    fn from(reason: String) -> Self {
+        Self::Bad(reason)
+    }
+}
+
+impl From<&str> for PdpError {
+    fn from(reason: &str) -> Self {
+        Self::Bad(reason.to_string())
+    }
+}
+
+fn unavailable_name(cause: Unavailable) -> &'static str {
+    match cause {
+        Unavailable::StoreError => "store_error",
+        Unavailable::RowMissing => "row_missing",
+        Unavailable::WaitExceeded => "counter_wait_exceeded",
     }
 }
 
@@ -362,6 +510,22 @@ fn entity(value: Option<&Value>, what: &str) -> Result<Entity, String> {
         .ok_or_else(|| format!("{what} must be an object"))?;
     check_properties(object, what)?;
     entity_of(object, what)
+}
+
+/// The members `type` and `id` of an object of a resource: two strings of any length. A bad type
+/// or a bad id makes the resource invalid, not the request (protocol 4.1, 11.1): `chain_of`
+/// checks them.
+fn resource_entity_of(object: &Map<String, Value>, what: &str) -> Result<Entity, String> {
+    let text = |name: &str| -> Result<String, String> {
+        match object.get(name) {
+            Some(Value::String(text)) => Ok(text.clone()),
+            _ => Err(format!("{what}.{name} must be a string")),
+        }
+    };
+    Ok(Entity {
+        kind: text("type")?,
+        id: text("id")?,
+    })
 }
 
 /// The members `type` and `id` of an object.
@@ -389,35 +553,59 @@ fn entity_of(object: &Map<String, Value>, what: &str) -> Result<Entity, String> 
 struct Resource {
     node: Entity,
     ancestors: Option<Vec<Entity>>,
+    /// `properties.ancestors` is not an array of objects with `type` and `id`. Only a batch item
+    /// can hold such a resource: it gets the reason `invalid_request`.
+    invalid: bool,
 }
 
 /// Read the resource of a request. `properties.ancestors` is optional. When it is present, it
-/// must be an array of objects with `type` and `id`: else the request is bad (status `400`). The
-/// chain itself is checked later, against the document of the server.
+/// must be an array of objects with `type` and `id`. Otherwise the resource has the mark `invalid`:
+/// the caller refuses a request with one evaluation (status `400`), and a batch item gets the
+/// reason `invalid_request`. The chain itself is checked later, against the document of the
+/// service.
 fn read_resource(value: Option<&Value>, what: &str) -> Result<Resource, String> {
-    let node = entity(value, what)?;
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{what} must be an object"))?;
+    check_properties(object, what)?;
+    let node = resource_entity_of(object, what)?;
     let properties = value
         .and_then(Value::as_object)
         .and_then(|object| object.get("properties"))
         .and_then(Value::as_object);
+    let mut invalid = false;
     let ancestors = match properties.and_then(|p| p.get("ancestors")) {
         None => None,
-        Some(Value::Array(items)) => Some(
-            items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    let at = format!("{what}.properties.ancestors[{index}]");
-                    let object = item
-                        .as_object()
-                        .ok_or_else(|| format!("{at} must be an object"))?;
-                    entity_of(object, &at)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some(_) => return Err(format!("{what}.properties.ancestors must be an array")),
+        Some(Value::Array(items)) => {
+            let mut chain = Vec::with_capacity(items.len());
+            for item in items {
+                match item
+                    .as_object()
+                    .map(|object| resource_entity_of(object, what))
+                {
+                    Some(Ok(entity)) => chain.push(entity),
+                    _ => {
+                        invalid = true;
+                        break;
+                    }
+                }
+            }
+            if invalid {
+                None
+            } else {
+                Some(chain)
+            }
+        }
+        Some(_) => {
+            invalid = true;
+            None
+        }
     };
-    Ok(Resource { node, ancestors })
+    Ok(Resource {
+        node,
+        ancestors,
+        invalid,
+    })
 }
 
 impl Resource {
@@ -542,19 +730,95 @@ fn check_context(request: &Map<String, Value>) -> Result<(), String> {
     }
 }
 
-/// Whether one of `grants` gives `action` on a node below the node `chain` of the service: its
-/// path is longer than the chain and starts with it.
-fn extends(grants: &[Grant], action: &str, service: &str, chain: &[Segment]) -> bool {
-    grants.iter().any(|grant| {
-        grant.action == action
-            && grant.service == service
-            && grant.path.len() > chain.len()
-            && grant.path.starts_with(chain)
-    })
+/// The decision for one question and what the answer needs.
+struct Outcome {
+    decision: bool,
+    /// The reason for the log.
+    why: &'static str,
+    /// The reason of the answer (protocol 11.1).
+    reason: Option<&'static str>,
+    /// The ceilings of `context.limits`, for a `true` answer.
+    ceilings: Limits,
+    /// The units that the PDP took, for a `true` answer to a question with `context.usage`.
+    units: Option<u8>,
+    retry_after: Option<u64>,
+    /// The count of the use did not work: the request gets HTTP 503.
+    unavailable: Option<Unavailable>,
 }
 
-/// The decision for one subject, action and resource, asked by `client`, with the reason for
-/// the log and the reason for the answer. Fails closed.
+impl Outcome {
+    fn deny(why: &'static str, reason: Option<&'static str>) -> Self {
+        Self {
+            decision: false,
+            why,
+            reason,
+            ceilings: Limits::new(),
+            units: None,
+            retry_after: None,
+            unavailable: None,
+        }
+    }
+
+    fn allow(why: &'static str) -> Self {
+        Self {
+            decision: true,
+            ..Self::deny(why, None)
+        }
+    }
+
+    /// The members of `context` of the answer.
+    fn json(&self) -> Value {
+        let mut context = Map::new();
+        if self.decision {
+            if !self.ceilings.is_empty() {
+                let limits: Map<String, Value> = self
+                    .ceilings
+                    .iter()
+                    .filter_map(|(name, value)| match value {
+                        LimitValue::Ceiling(n) => Some((name.to_string(), json!(n))),
+                        LimitValue::Budget(_) => None,
+                    })
+                    .collect();
+                context.insert("limits".into(), Value::Object(limits));
+            }
+            if let Some(units) = self.units {
+                context.insert("usage".into(), json!({ "units": units }));
+            }
+        } else {
+            if let Some(reason) = self.reason {
+                context.insert("reason".into(), json!(reason));
+            }
+            if let Some(retry_after) = self.retry_after {
+                context.insert("retry_after".into(), json!(retry_after));
+            }
+        }
+        if context.is_empty() {
+            json!({ "decision": self.decision })
+        } else {
+            json!({ "decision": self.decision, "context": context })
+        }
+    }
+}
+
+/// The chain of the question, the service and the document, for the decision module.
+fn question<'a>(
+    client: &'a Client,
+    action: &'a str,
+    chain: &'a [Segment],
+    matching: Match,
+    document: Option<&'a crate::actions::Document>,
+) -> Question<'a> {
+    Question {
+        service: &client.name,
+        action,
+        chain,
+        matching: matching.matching(),
+        document,
+    }
+}
+
+/// The decision for one subject, action and resource, asked by `client`. `usage` is true when the
+/// question has `context.usage`: the question is a use. Fails closed.
 fn decide(
     state: &AppState,
     client: &Client,
@@ -562,88 +826,157 @@ fn decide(
     action: &str,
     resource: &Resource,
     matching: Match,
-) -> (bool, &'static str, Option<&'static str>) {
+    usage: bool,
+) -> Outcome {
     if matching == Match::Invalid {
-        return (
-            false,
+        return Outcome::deny(
             "context.match is not node or subtree",
             Some(INVALID_REQUEST),
         );
     }
+    if resource.invalid {
+        return Outcome::deny("the ancestors are not valid", Some(INVALID_REQUEST));
+    }
     if subject.kind != "user" {
-        return (false, "the subject type is not user", None);
+        return Outcome::deny("the subject type is not user", Some(UNKNOWN_SUBJECT));
     }
     if check_action(action).is_err() {
-        return (false, "the action name is not valid", None);
+        return Outcome::deny("the action name is not valid", None);
     }
     let chain = match chain_of(state, client, resource) {
         Ok(chain) => chain,
-        Err(Unresolved::Invalid(why)) => return (false, why, Some(INVALID_RESOURCE)),
+        Err(Unresolved::Invalid(why)) => return Outcome::deny(why, Some(INVALID_RESOURCE)),
         Err(Unresolved::NoDocument) => {
-            return (false, "the document of the service is not known", None)
+            return Outcome::deny("the document of the service is not known", None)
         }
     };
-    // Only a person can be the superadmin. Nothing makes an access yet: an id with a colon is an
-    // unknown subject, as it was before.
-    let SubjectId::User(login) = SubjectId::parse(&subject.id) else {
-        return (false, NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
-    };
-    if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
-        return (true, "superadmin", None);
-    }
-    let Some(stored) = stored_grants_of(state, login) else {
-        return (false, NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
-    };
-    let grants = state.policy.effective(login, &stored);
-    // A grant below the service applies only when the last known document of the service
-    // declares its chain and lists its type for its action. Without a known document, it does
-    // not apply. A grant on the whole service needs no declaration.
     let document = state.actions.declared(&client.name);
-    let applicable: Vec<Grant> = grants
+    let q = question(client, action, &chain, matching, document.as_deref());
+    match SubjectId::parse(&subject.id) {
+        SubjectId::User(login) => decide_person(state, login, &q, usage),
+        SubjectId::Key(id) => decide_key(state, id, &q, usage),
+        SubjectId::Unknown => Outcome::deny(NO_SUCH_USER, Some(UNKNOWN_SUBJECT)),
+    }
+}
+
+/// The decision for a person: the superadmin, an account of the file or an account of the
+/// database.
+fn decide_person(state: &AppState, login: &str, q: &Question<'_>, usage: bool) -> Outcome {
+    // The superadmin has every right and no limit. The PDP counts no use of the superadmin
+    // (portal 9.1).
+    if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
+        let mut outcome = Outcome::allow("superadmin");
+        if usage {
+            outcome.units = Some(0);
+        }
+        return outcome;
+    }
+    let Some((grants, from_file)) = known_person_grants(state, login, q.service) else {
+        return Outcome::deny(NO_SUCH_USER, Some(UNKNOWN_SUBJECT));
+    };
+    let verdict = if from_file {
+        decision::file_person(login, &grants, q)
+    } else {
+        decision::person(login, &grants, q)
+    };
+    finish(state, q, verdict, usage)
+}
+
+/// The grants of a person on one service and whether the account comes from the file. When the
+/// directory does not know the login, the PDP reads the directory again at most once each second:
+/// the account can be a few seconds old (portal 10.7c). `None`: no such person.
+fn known_person_grants(
+    state: &AppState,
+    login: &str,
+    service: &str,
+) -> Option<(std::sync::Arc<[Grant]>, bool)> {
+    keyauth::person_grants_on(state, login, service).or_else(|| {
+        refresh_directory_if_due(state)
+            .then(|| keyauth::person_grants_on(state, login, service))
+            .flatten()
+    })
+}
+
+/// The decision for a key (protocol 3.5).
+fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outcome {
+    if state.config.keys.is_none() {
+        return Outcome::deny("keys are not enabled", Some(UNKNOWN_SUBJECT));
+    }
+    let key = state.users.key_by_id(id).or_else(|| {
+        if refresh_directory_if_due(state) {
+            state.users.key_by_id(id)
+        } else {
+            None
+        }
+    });
+    let Some(key) = key else {
+        return Outcome::deny("no such key", Some(UNKNOWN_SUBJECT));
+    };
+    let principal = match keyauth::resolve(state, &key, crate::tracking::unix_now()) {
+        Ok(principal) => principal,
+        // The copy of the directory is too old: the PDP answers `false` for each key (protocol 3.9).
+        Err(Cause::DirectoryTooOld) => return Outcome::deny("the directory is too old", None),
+        Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
+    };
+    // A key never holds an action of the service `portal` (portal 6.5): the PDP ignores one.
+    let key_grants: Vec<Grant> = key
+        .grants
         .iter()
-        .filter(|grant| {
-            grant.path.is_empty()
-                || document
-                    .as_ref()
-                    .is_some_and(|d| d.check_grant(grant).is_ok())
-        })
+        .filter(|g| g.service != crate::portal_actions::SERVICE || g.action == ACCESS)
         .cloned()
         .collect();
-    if covers(&applicable, action, &client.name, &chain) {
-        (true, "grant", None)
-    } else if matching == Match::Subtree && extends(&applicable, action, &client.name, &chain) {
-        (true, "grant below the resource", None)
-    } else if covers(&grants, action, &client.name, &chain)
-        || (matching == Match::Subtree && extends(&grants, action, &client.name, &chain))
-    {
-        (
-            false,
-            "the grant does not follow the document of the service",
-            None,
-        )
-    } else {
-        (false, "no grant", None)
-    }
-}
-
-/// The answer of one decision, with its reason when it has one.
-struct Answer {
-    decision: bool,
-    reason: Option<&'static str>,
-}
-
-impl Answer {
-    /// The AuthZEN member of the answer. Only an unknown subject and an invalid resource have a
-    /// reason.
-    fn json(&self) -> Value {
-        match self.reason {
-            Some(reason) => json!({ "decision": self.decision, "context": { "reason": reason } }),
-            None => json!({ "decision": self.decision }),
+    let owner_grants: std::sync::Arc<[Grant]>;
+    let (owner, owner_counters) = match &principal.owner {
+        OwnerSide::Superadmin => (Owner::Superadmin, CounterOwner::User(String::new())),
+        OwnerSide::Person { login, from_file } => {
+            // The owner side reads only the grants of the service of the question.
+            let Some((grants, _)) = keyauth::person_grants_on(state, login, q.service) else {
+                return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT));
+            };
+            owner_grants = grants;
+            (
+                Owner::Person(&owner_grants),
+                if *from_file {
+                    CounterOwner::File(login.clone())
+                } else {
+                    CounterOwner::User(login.clone())
+                },
+            )
         }
-    }
+    };
+    let verdict = decision::key(&key.counter_owner(), &key_grants, owner, &owner_counters, q);
+    finish(state, q, verdict, usage)
 }
 
-/// Decide and write the decision in the log (contract 11.7).
+/// The answer from a verdict: for a use, the count of the units.
+fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, usage: bool) -> Outcome {
+    if !verdict.allowed {
+        return Outcome::deny("no grant", None);
+    }
+    let mut outcome = Outcome::allow("grant");
+    outcome.ceilings = verdict.ceilings;
+    if !usage {
+        return outcome;
+    }
+    debug_assert!(q.matching == Matching::Node);
+    match count(state, &verdict.counters) {
+        CountOutcome::Counted { units } => outcome.units = Some(units),
+        CountOutcome::Exceeded { retry_after } => {
+            outcome = Outcome::deny("budget exceeded", Some(BUDGET_EXCEEDED));
+            outcome.retry_after = Some(retry_after);
+        }
+        CountOutcome::Unavailable(cause) => outcome.unavailable = Some(cause),
+    }
+    outcome
+}
+
+/// Counts one use on a thread that may block (portal 7.7).
+fn count(state: &AppState, counters: &[Counter]) -> CountOutcome {
+    crate::util::blocking(|| state.counting.count(&state.store, counters))
+}
+
+/// Decide and write the decision in the log.
+#[allow(clippy::too_many_arguments)]
 fn decide_and_log(
     state: &AppState,
     client: &Client,
@@ -651,16 +984,15 @@ fn decide_and_log(
     action: &str,
     resource: &Resource,
     matching: Match,
+    usage: bool,
     request_id: Option<&str>,
-) -> Answer {
-    let (decision, why, reason) = decide(state, client, subject, action, resource, matching);
-    if reason == Some(INVALID_RESOURCE) {
+) -> Outcome {
+    let outcome = decide(state, client, subject, action, resource, matching, usage);
+    if outcome.reason == Some(INVALID_RESOURCE) {
         read_document_soon(state, client, request_id);
     }
-    if decision {
-        state.pdp_stats.permit.fetch_add(1, Ordering::Relaxed);
-    } else {
-        state.pdp_stats.deny.fetch_add(1, Ordering::Relaxed);
+    if outcome.unavailable.is_none() {
+        state.pdp_stats.decided(outcome.decision, outcome.reason);
     }
     log(
         state,
@@ -672,12 +1004,13 @@ fn decide_and_log(
             ("action", action.to_string()),
             ("resource", resource.log_text()),
             ("match", matching.as_str().to_string()),
-            ("decision", decision.to_string()),
-            ("reason", why.to_string()),
+            ("usage", usage.to_string()),
+            ("decision", outcome.decision.to_string()),
+            ("reason", outcome.why.to_string()),
             ("request_id", request_id.unwrap_or("").to_string()),
         ],
     );
-    Answer { decision, reason }
+    outcome
 }
 
 /// Asks for an early read of the document of the server after an `invalid_resource`. The log has
@@ -700,21 +1033,65 @@ fn read_document_soon(state: &AppState, client: &Client, request_id: Option<&str
     }
 }
 
+/// `context.usage` of a question: `None` without it. The only valid value is `{"units": 1}`
+/// (protocol 6.4); any other value gets HTTP 400.
+fn read_usage(context: Option<&Value>) -> Result<bool, String> {
+    let Some(usage) = context.and_then(|c| c.get("usage")) else {
+        return Ok(false);
+    };
+    match usage.as_object() {
+        Some(object)
+            if object.len() == 1 && object.get("units").and_then(Value::as_u64) == Some(1) =>
+        {
+            Ok(true)
+        }
+        _ => Err("context.usage must be {\"units\": 1}".into()),
+    }
+}
+
+/// Whether a `context` object has the member `usage`, with any value.
+fn has_usage(value: Option<&Value>) -> bool {
+    value
+        .and_then(|c| c.get("context"))
+        .and_then(Value::as_object)
+        .is_some_and(|c| c.contains_key("usage"))
+}
+
 fn evaluation(
     state: &AppState,
     client: &Client,
     request: &Map<String, Value>,
     request_id: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, PdpError> {
     let subject = entity(request.get("subject"), "subject")?;
     let action = action_name(request.get("action"))?;
     let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
+    // In a request with one evaluation, a bad member gets HTTP 400 (protocol 11.1).
+    if resource.invalid {
+        return Err(PdpError::Bad(
+            "resource.properties.ancestors must be an array of objects with type and id".into(),
+        ));
+    }
     let matching = Match::of(request.get("context"));
-    Ok(decide_and_log(
-        state, client, &subject, &action, &resource, matching, request_id,
-    )
-    .json())
+    if matching == Match::Invalid {
+        return Err(PdpError::Bad(
+            "context.match must be \"node\" or \"subtree\"".into(),
+        ));
+    }
+    let usage = read_usage(request.get("context")).map_err(PdpError::Usage)?;
+    if usage && matching == Match::Subtree {
+        return Err(PdpError::Usage(
+            "context.usage and context.match subtree cannot be in one request".into(),
+        ));
+    }
+    let outcome = decide_and_log(
+        state, client, &subject, &action, &resource, matching, usage, request_id,
+    );
+    if let Some(cause) = outcome.unavailable {
+        return Err(PdpError::Unavailable(cause));
+    }
+    Ok(outcome.json())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -730,18 +1107,26 @@ fn evaluations(
     client: &Client,
     request: &Map<String, Value>,
     request_id: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, PdpError> {
     let items = match request.get("evaluations") {
         None => return evaluation(state, client, request, request_id),
         Some(Value::Array(items)) if items.is_empty() => {
             return evaluation(state, client, request, request_id)
         }
         Some(Value::Array(items)) => items,
-        Some(_) => return Err("evaluations must be an array".into()),
+        Some(_) => return Err("evaluations must be an array".to_string().into()),
     };
+    // A request with items takes no `context.usage` at any level (protocol 6.11).
+    if has_usage(Some(&Value::Object(request.clone())))
+        || items.iter().any(|item| has_usage(Some(item)))
+    {
+        return Err(PdpError::Usage(
+            "context.usage is only for a request with one evaluation".into(),
+        ));
+    }
     let max = state.config.pdp.as_ref().map_or(0, |p| p.max_evaluations);
     if items.len() > max {
-        return Err(format!("more than {max} evaluations"));
+        return Err(format!("more than {max} evaluations").into());
     }
     let semantic = match request
         .get("options")
@@ -753,7 +1138,7 @@ fn evaluations(
         Some(Value::String(s)) if s == "execute_all" => Semantic::ExecuteAll,
         Some(Value::String(s)) if s == "deny_on_first_deny" => Semantic::DenyOnFirstDeny,
         Some(Value::String(s)) if s == "permit_on_first_permit" => Semantic::PermitOnFirstPermit,
-        Some(_) => return Err("options.evaluations_semantic is not one of execute_all, deny_on_first_deny, permit_on_first_permit".into()),
+        Some(_) => return Err("options.evaluations_semantic is not one of execute_all, deny_on_first_deny, permit_on_first_permit".to_string().into()),
     };
     check_context(request)?;
     // Check every item before the first decision: a bad batch gets no decision at all.
@@ -769,7 +1154,7 @@ fn evaluations(
         let resource = read_resource(pick("resource"), &format!("evaluations[{index}].resource"))?;
         match item.get("context") {
             None | Some(Value::Object(_)) => {}
-            Some(_) => return Err(format!("evaluations[{index}].context must be an object")),
+            Some(_) => return Err(format!("evaluations[{index}].context must be an object").into()),
         }
         // The context of an item replaces the default context of the request (AuthZEN 1.0).
         let matching = Match::of(pick("context"));
@@ -777,11 +1162,11 @@ fn evaluations(
     }
     let mut out = Vec::with_capacity(parsed.len());
     for (subject, action, resource, matching) in &parsed {
-        let answer = decide_and_log(
-            state, client, subject, action, resource, *matching, request_id,
+        let outcome = decide_and_log(
+            state, client, subject, action, resource, *matching, false, request_id,
         );
-        let decision = answer.decision;
-        out.push(answer.json());
+        let decision = outcome.decision;
+        out.push(outcome.json());
         let stop = match semantic {
             Semantic::ExecuteAll => false,
             Semantic::DenyOnFirstDeny => !decision,
@@ -794,30 +1179,47 @@ fn evaluations(
     Ok(json!({ "evaluations": out }))
 }
 
-/// The actions that the subject can do on the resource: `access` and the actions that the server
+/// The actions that the subject can do on the resource: `access` and the actions that the service
 /// publishes, kept when the decision is `true`. The resource has the same form as in an
 /// evaluation, with its ancestors, and `context.match` has the same meaning. The answer has one
-/// page.
+/// page. The request takes no `context.usage` (protocol 6.11).
 fn search_action(
     state: &AppState,
     client: &Client,
     request: &Map<String, Value>,
     request_id: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, PdpError> {
     let subject = entity(request.get("subject"), "subject")?;
     let resource = read_resource(request.get("resource"), "resource")?;
     check_context(request)?;
+    if has_usage(Some(&Value::Object(request.clone()))) {
+        return Err(PdpError::Usage(
+            "context.usage is only for a request with one evaluation".into(),
+        ));
+    }
+    if resource.invalid {
+        return Err(PdpError::Bad(
+            "resource.properties.ancestors must be an array of objects with type and id".into(),
+        ));
+    }
     let matching = Match::of(request.get("context"));
+    if matching == Match::Invalid {
+        return Err(PdpError::Bad(
+            "context.match must be \"node\" or \"subtree\"".into(),
+        ));
+    }
     match request.get("page") {
         None | Some(Value::Object(_)) => {}
-        Some(_) => return Err("page must be an object".into()),
+        Some(_) => return Err("page must be an object".to_string().into()),
     }
     let mut names = state.actions.action_names(&client.name);
     // Grants of actions that the document does not list now still count.
-    if let Some(stored) = stored_grants_of(state, &subject.id) {
-        for grant in state.policy.effective(&subject.id, &stored) {
-            if grant.service == client.name && !names.contains(&grant.action) {
-                names.push(grant.action);
+    if let SubjectId::User(login) = SubjectId::parse(&subject.id) {
+        if let Some((grants, _)) = keyauth::person_grants_on(state, login, &client.name) {
+            for grant in grants.iter() {
+                if !names.contains(&grant.action) {
+                    names.push(grant.action.clone());
+                }
             }
         }
     }
@@ -828,23 +1230,13 @@ fn search_action(
         .into_iter()
         .filter(|name| {
             decide_and_log(
-                state, client, &subject, name, &resource, matching, request_id,
+                state, client, &subject, name, &resource, matching, false, request_id,
             )
             .decision
         })
         .map(|name| json!({ "name": name }))
         .collect();
     Ok(json!({ "results": results, "page": { "next_token": "" } }))
-}
-
-/// The stored grants of an account, read again from a shared database when the directory does not
-/// know it yet. `None`: no such account.
-fn stored_grants_of(state: &AppState, login: &str) -> Option<Vec<crate::grants::Grant>> {
-    state.users.grants_of(login).or_else(|| {
-        refresh_directory_if_due(state)
-            .then(|| state.users.grants_of(login))
-            .flatten()
-    })
 }
 
 fn json_response(status: StatusCode, value: &Value) -> HttpResponse {
@@ -872,6 +1264,24 @@ mod tests {
             kind: "user".into(),
             id: id.into(),
         }
+    }
+
+    #[test]
+    fn two_clients_with_one_token_stop_the_start_and_the_map_finds_a_client_by_its_digest() {
+        let error = match clients(vec![client("db"), client("chat")]) {
+            Err(error) => error,
+            Ok(_) => panic!("the same token twice must fail"),
+        };
+        assert!(error.contains("db") && error.contains("chat"), "{error}");
+        let map = clients(vec![
+            Client::new("a".into(), b"token a"),
+            Client::new("b".into(), b"token b"),
+        ])
+        .unwrap();
+        let digest: [u8; 32] = Sha256::digest(b"token b").into();
+        assert_eq!(map.get(&digest).map(|c| c.name.as_str()), Some("b"));
+        let other: [u8; 32] = Sha256::digest(b"token c").into();
+        assert!(!map.contains_key(&other));
     }
 
     fn resource(kind: &str, id: &str) -> Entity {

@@ -1,62 +1,27 @@
-/* portal: the rules only the settings pages use. The page loads portal.css first: the colour tokens,
-   the header, the buttons and the theme selector come from there; the launcher and the login page never
-   load this file.
-   The density and the patterns follow clickhouse-dash: parts are flat regions with a 32px heading row,
-   data sits in hairline tables of 32px rows, chips and check boxes stay small, and descriptions live in a
-   title or a muted line. Scale: rows 32 (26 compact), controls 28 (24 small), cell padding 0 8px,
-   text 13 / 12 / 11px, titles 16px, radii 8 (side block), 6 (tables, fields, buttons), 4 (chips,
-   badges), round for status pills. Under a coarse pointer every control reaches 44px. */
+/* portal: the rules that only the settings pages use. The page loads portal.css first: the tokens, the
+   header, the buttons and the badges come from there. The look is the look of the launcher: graphite
+   panels with a thin border, a small upper-case title, compact rows of 32 px, one accent. */
 
 :root {
-  --s-row: 32px;
-  --s-row-compact: 26px;
-  --s-control: 28px;
-  --s-control-sm: 24px;
-  --s-pad-x: 8px;
-  --s-r-sm: 4px;
-  --s-r-md: 6px;
-  --s-r-lg: 8px;
-  --selected-bg: rgba(53, 111, 230, 0.22);
-  --danger-fill: #dc2626;
-  --danger-fill-hover: #c21f1f;
-  --row-hover: rgba(255, 255, 255, 0.03);
-  --row-divider: rgba(255, 255, 255, 0.06);
+  --radius-compact: 6px;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme]) {
-    --selected-bg: rgba(37, 88, 217, 0.12);
-    --row-hover: rgba(15, 18, 25, 0.03);
-    --row-divider: rgba(15, 18, 25, 0.07);
-  }
-}
+/* Frame ----------------------------------------------------------------------------------- */
 
-:root[data-theme="light"] {
-  --selected-bg: rgba(37, 88, 217, 0.12);
-  --row-hover: rgba(15, 18, 25, 0.03);
-  --row-divider: rgba(15, 18, 25, 0.07);
-}
-
-/* Skip link: the first stop of the Tab order, out of sight until it has the focus. */
 .skipLink {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 10;
-  padding: 6px 10px;
-  border-radius: var(--s-r-md);
-  background: var(--accent-fill);
-  color: var(--on-fill);
-  font-weight: 600;
-  text-decoration: none;
-  transform: translateY(-200%);
+  left: -9999px;
 }
 
 .skipLink:focus {
-  transform: none;
+  left: 12px;
+  top: 12px;
+  z-index: 10;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: var(--accent-fill);
+  color: var(--on-fill);
 }
-
-/* Header tabs ----------------------------------------------------------------------------- */
 
 .navRow {
   border-bottom: 1px solid var(--border);
@@ -65,7 +30,7 @@
 .contentTabs {
   display: flex;
   gap: 2px;
-  max-width: none;
+  max-width: var(--page-width);
   margin: 0 auto;
   padding: 0 24px;
   overflow-x: auto;
@@ -76,17 +41,15 @@
   display: none;
 }
 
-/* A tab is a link to a page of its own: no fill, no frame, only the line under the current one. */
 .contentTabs__tab {
   display: inline-flex;
   flex: none;
   align-items: center;
-  height: 36px;
+  height: 34px;
   padding: 0 12px;
   margin-bottom: -1px;
   border-bottom: 2px solid transparent;
   color: var(--muted);
-  font-size: 13px;
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
@@ -101,86 +64,94 @@
   color: var(--text);
 }
 
-/* Page ------------------------------------------------------------------------------------ */
-
+/* Compact density, from ClickHouse Dash: 13 px text, controls of 28 px, rows of 26 and 32 px. */
 .settings {
+  --control: 28px;
+  --row: 32px;
+  --row-compact: 26px;
   display: grid;
-  gap: 24px;
-  max-width: none;
+  align-content: start;
+  gap: 12px;
+  max-width: var(--page-width);
   margin: 0 auto;
-  padding: 16px 24px 48px;
+  padding: 14px 24px 40px;
   font-size: 13px;
+  line-height: 1.4;
 }
 
-.settings:focus {
-  outline: none;
+.settings > * {
+  min-width: 0;
 }
 
-.settings a {
+.settings a:not(.button) {
   color: var(--accent-text);
-  text-underline-offset: 2px;
 }
 
-.settings code {
+/* The inner scrollers and the browser parts follow the palette. */
+.ge__tree,
+.ge__list,
+.dataTableWrap,
+.contentTabs {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+input[type="search"]::-webkit-search-cancel-button {
+  filter: var(--mono-filter);
+}
+
+.settings code,
+code {
   font-family: var(--font-mono);
   font-size: 12px;
-}
-
-.settings var {
-  color: var(--accent-text);
-  font-style: normal;
 }
 
 .muted {
   color: var(--muted);
 }
 
-.settings .hint {
-  margin: 0;
-  font-size: 12px;
+.icon--sm {
+  width: 14px;
+  height: 14px;
 }
 
-.settings .notice {
-  width: auto;
-  margin: 0;
-  padding: 6px 10px;
-  border-radius: var(--s-r-md);
-  font-size: 13px;
+.icon--lg {
+  width: 18px;
+  height: 18px;
 }
 
-.notice--ok {
-  background: var(--accent-tint);
-  color: var(--accent-text);
-}
+/* A part: a panel with a small upper-case title, a count and its own controls ---------------- */
 
-.notice--error {
-  background: var(--danger-bg);
-  color: var(--danger);
-}
-
-/* A part: a flat region. A heading row (title, count, its own controls), one muted line, then data. */
-.part {
+.pagePart,
+.side {
   display: grid;
-  gap: 8px;
+  align-content: start;
+  gap: 10px;
   min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--panel);
 }
 
-.part__head {
+.pagePart__head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 12px;
-  min-height: 32px;
+  gap: 4px 10px;
+  min-height: var(--control);
+  min-width: 0;
 }
 
-.part__title {
+.pagePart__title {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 1.3;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
-.part__count {
+.pagePart__count {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -194,146 +165,232 @@
 }
 
 .part__lede {
-  max-width: 110ch;
-  margin: -4px 0 0;
+  margin: 0;
+  max-width: 100ch;
   color: var(--muted);
-  font-size: 12px;
 }
 
-.part--warn .part__title {
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-}
-
-.part--warn .tableBox {
+.part--warn {
   border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
 }
 
 .subTitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pageCols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.pageCols__main,
+.pageCols__side {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+@media (min-width: 1100px) {
+  .pageCols {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+  }
+}
+
+.model {
+  display: grid;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.model dt {
+  margin-top: 6px;
+  font-weight: 700;
+}
+
+.model dd {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
 }
 
-.empty {
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--s-r-md);
-  color: var(--muted);
-  font-size: 12px;
-}
+/* The way back, the crumbs and the head of an account ------------------------------------- */
 
-/* A one-line message above data: a refused count, a mode of the grants. */
-.alertLine {
-  margin: 0;
-  padding: 5px 10px;
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
-  border-radius: var(--s-r-md);
-  background: var(--danger-bg);
-  font-size: 12px;
-}
-
-.alertLine strong {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-.alertLine--info {
-  border-color: var(--border);
-  background: var(--raised);
+.pageBack {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-control);
   color: var(--muted);
 }
 
-/* The end of the Users page: a quiet row, not a card. */
-.dangerRow {
+.pageBack:hover {
+  color: var(--text);
+}
+
+.crumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.crumbs a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.crumbs a:hover {
+  color: var(--text);
+}
+
+.userHead {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 24px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+  gap: 8px 16px;
 }
 
-.dangerRow__title {
+.userHead__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+.userHead__name {
   margin: 0;
-  font-size: 13px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.facts > div {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.facts dt,
+.facts dd {
+  margin: 0;
+}
+
+.facts dd {
+  color: var(--text);
+}
+
+.danger,
+.num--danger {
+  color: var(--danger);
   font-weight: 600;
 }
 
-.split {
-  display: grid;
-  gap: 16px;
+/* Banners: one style, four tones ---------------------------------------------------------- */
+
+.uiBanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: var(--radius-tile);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-weight: 600;
 }
 
-.split__col {
-  display: grid;
-  align-content: start;
-  gap: 6px;
+.uiBanner p {
+  margin: 0;
+}
+
+.uiBanner__text {
   min-width: 0;
 }
 
-/* Badges: a word for a count or a state. A state never shows by colour alone. */
-.badge {
-  --badge-color: var(--muted);
+.uiBanner a {
+  color: inherit;
+}
+
+.uiBanner--info {
+  border-color: var(--border);
+  background: var(--raised);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.uiBanner--warn {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.uiBanner--ok {
+  border-color: color-mix(in srgb, var(--accent-fill) 40%, var(--border));
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.uiState {
+  padding: 18px 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.uiState__body {
+  margin: 0;
+}
+
+.statusIcon {
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-sm);
-  background: color-mix(in srgb, var(--muted) 8%, transparent);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  white-space: nowrap;
-  text-decoration: none;
   vertical-align: middle;
 }
 
-.badge--ok,
-.badge--warn,
-.badge--danger {
-  border-color: color-mix(in srgb, var(--badge-color) 42%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--badge-color) 12%, transparent);
-  color: var(--badge-color);
+.statusIcon--ok {
+  color: var(--success);
 }
 
-.badge--ok {
-  --badge-color: var(--success);
+.statusIcon--warn {
+  color: var(--warning);
 }
 
-.badge--danger {
-  --badge-color: var(--danger);
+.statusIcon--error {
+  color: var(--danger);
 }
 
-/* Amber on its own tint needs a fifth of the text colour to keep 4.5:1 in the light theme. */
-.badge--warn {
-  --badge-color: var(--warning);
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-}
-
-.settings a.badge--warn:hover {
-  border-color: var(--warning);
+time.when {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Buttons --------------------------------------------------------------------------------- */
 
 .settings .button {
-  height: var(--s-control);
-  gap: 6px;
+  height: var(--control);
   padding: 0 10px;
-  border-radius: var(--s-r-md);
   font-size: 13px;
-  font-weight: 500;
+  border-radius: var(--radius-compact);
 }
 
 .settings .button--small {
-  height: var(--s-control-sm);
+  height: 24px;
   padding: 0 8px;
   font-size: 12px;
 }
@@ -341,106 +398,150 @@
 .button--ghost {
   border-color: transparent;
   background: transparent;
+  color: var(--muted);
 }
 
-.settings .button--primary {
-  color: var(--on-fill);
-}
-
-.settings .button--ghost {
+.button--ghost:hover {
   color: var(--text);
 }
 
-.button--danger {
+/* One red for one meaning. The opener of a deletion is an outline. The confirmation is solid. */
+.button--quiet-danger {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: transparent;
   color: var(--danger);
 }
 
-.button--danger:hover {
+.button--quiet-danger:hover {
   border-color: var(--danger);
   background: var(--danger-bg);
 }
 
-.button--dangerFill {
+.button--danger {
   border-color: transparent;
-  background: var(--danger-fill);
+  background: var(--danger);
   color: var(--on-fill);
 }
 
-.button--dangerFill:hover {
+.button--danger:hover {
   border-color: transparent;
-  background: var(--danger-fill-hover);
+  background: color-mix(in srgb, var(--danger) 85%, black);
 }
 
-.linkButton {
+.badge {
+  background: var(--raised);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badge.badge--warn,
+.badge.badge--error,
+.badge.badge--danger {
+  border-color: transparent;
+}
+
+/* The head of a form that needs a button far from the top of a long page stays in view. */
+.pagePart__head:has(> #access-title),
+.pagePart__head:has(> #key-form-title) {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: -12px -12px 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  background: var(--panel);
+}
+
+.button:disabled,
+.button[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+}
+
+.segmented__option {
   display: inline-flex;
   align-items: center;
-  min-height: var(--s-control-sm);
-  color: var(--accent-text);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.linkButton:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.formActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 8px;
-}
-
-details > summary {
-  list-style: none;
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-compact);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }
 
-details > summary::-webkit-details-marker {
-  display: none;
+.segmented__option:hover {
+  color: var(--text);
 }
 
-.confirm > summary {
-  width: fit-content;
+.segmented__option.is-active {
+  background: var(--border-strong);
+  color: var(--text);
 }
 
-.confirm__panel {
-  display: flex;
-  flex-wrap: wrap;
+.segmented__option:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tag {
+  display: inline-flex;
   align-items: center;
-  gap: 8px 12px;
-  margin-top: 6px;
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
-  border-radius: var(--s-r-md);
-  background: var(--danger-bg);
-}
-
-.confirm__panel p {
-  margin: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-compact);
+  background: var(--raised);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
 /* Fields ---------------------------------------------------------------------------------- */
 
-.field {
+.uiForm {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.uiField {
   display: grid;
   align-content: start;
   gap: 4px;
   min-width: 0;
 }
 
-.field__label {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
+.uiField--narrow {
+  max-width: 16rem;
 }
 
-/* An empty live region stays in the page (so it is announced when it fills) but takes no room. */
-.field .hint:empty {
+.uiField__label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.uiField__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.uiField__hint:empty {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -449,41 +550,64 @@ details > summary::-webkit-details-marker {
   clip-path: inset(50%);
 }
 
-.settings input[type="text"],
-.settings input[type="password"],
-.settings input[type="search"],
-.settings select {
+.uiInput {
   width: 100%;
-  height: var(--s-control);
+  height: var(--control);
   padding: 0 8px;
-  border: 1px solid var(--input-border);
-  border-radius: var(--s-r-md);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
   background: var(--inset);
   color: var(--text);
   caret-color: var(--accent-text);
   font: inherit;
-  font-size: 13px;
+  transition: border-color 0.15s var(--ease);
 }
 
-.settings input[type="text"]:focus-visible,
-.settings input[type="password"]:focus-visible,
-.settings input[type="search"]:focus-visible,
-.settings select:focus-visible {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 1px;
+.uiInput::placeholder {
+  color: var(--muted);
+  opacity: 0.8;
 }
 
-.settings input[type="checkbox"] {
+.uiInput:hover:not(:focus):not(:disabled) {
+  border-color: var(--input-border);
+}
+
+.uiInput:focus {
+  border-color: var(--accent-fill);
+  outline: 2px solid var(--accent-tint);
+  outline-offset: 0;
+}
+
+.uiInput--mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+select.uiInput {
+  width: auto;
+  min-width: 14rem;
+  padding-right: 8px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   margin: 0;
   accent-color: var(--accent-fill);
 }
 
+.formActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .passwordRow {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .passwordRow input {
@@ -498,1030 +622,222 @@ details > summary::-webkit-details-marker {
 }
 
 .js .passwordRow .generate {
+  display: inline-grid;
+  min-width: 7rem;
+}
+
+/* Both labels sit in one cell: the button keeps its size when the result replaces the word. */
+.generate > * {
+  grid-area: 1 / 1;
   display: inline-flex;
-}
-
-.settings--wide .addUser {
-  padding: 0;
-  border: 0;
-  background: none;
-}
-
-.addUser {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--accent-fill) 40%, var(--border));
-  border-radius: var(--s-r-lg);
-  background: var(--panel);
-}
-
-/* The add form: the login and the password on the top row, then the permissions. */
-.addUser__fields {
-  display: grid;
-  grid-template-columns: minmax(0, 18rem) minmax(0, 22rem);
-  align-items: start;
-  gap: 8px 16px;
-}
-
-/* The permissions of an account: a list of services at the left and the panel of the selected
-   service at the right. The panel uses the width: the actions of the service and of each resource
-   that it names are columns side by side. A group is one heading in the list. */
-.permForm__perms {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.permForm__perms legend {
-  padding: 0;
-  margin-bottom: 4px;
-}
-
-.perms {
-  display: grid;
-  grid-template-columns: minmax(16rem, 20rem) minmax(0, 1fr);
-  align-items: start;
-  gap: 0 16px;
-}
-
-/* The tree at the left, as in the Explorer of clickhouse-dash: a search field, a root line, then
-   the services by group. */
-.perms__side {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  min-width: 0;
-  padding-right: 12px;
-  border-right: 1px solid var(--border);
-}
-
-.perms__tools {
-  display: none;
-}
-
-.js .perms__tools {
-  display: block;
-}
-
-.perms__root {
-  padding: 2px 6px;
-  font-size: 13px;
-}
-
-.perms__list {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 1px;
-  min-width: 0;
-}
-
-.perms__group {
-  margin: 8px 0 2px;
-  padding-left: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.perms__group:first-child {
-  margin-top: 0;
-}
-
-.perms__group[hidden],
-.perm__item[hidden] {
-  display: none;
-}
-
-.perm__row {
-  display: flex;
   align-items: center;
-  gap: 6px;
-  min-width: 0;
-  min-height: 30px;
-  padding: 0 6px 0 2px;
-  border: 1px solid transparent;
-  border-radius: var(--s-r-md);
-}
-
-.perm__row:hover {
-  background: var(--row-hover);
-}
-
-.perm__row.is-selected {
-  border-color: var(--selected-edge, var(--accent-fill));
-  background: var(--selected-bg);
-}
-
-.perm__link,
-.settings a.perm__link {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 4px 8px;
-  min-width: 0;
-  min-height: 28px;
-  overflow: hidden;
-  color: var(--text);
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.perm__name {
-  flex: 0 0 auto;
-  max-width: 75%;
-  min-width: 0;
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.perm__link .svcRow__id {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.perm__link .badge {
-  flex: none;
-}
-
-.perm__link:focus-visible {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 1px;
-  border-radius: var(--s-r-md);
-}
-
-.perm__count {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* The panel at the right: a title, marks, one line of facts, then the boxes and the tables. */
-.perm__panel {
-  min-width: 0;
-}
-
-/* With the script, one panel shows. Without it, every panel shows under the tree. */
-.js .perm__panel {
-  display: none;
-}
-
-.js .perm__panel.is-selected {
-  display: block;
-}
-
-.perm__panel + .perm__panel {
-  margin-top: 16px;
-}
-
-.js .perm__panel + .perm__panel {
-  margin-top: 0;
-}
-
-.perm__panelhead {
-  margin-bottom: 8px;
-}
-
-.perm__titlerow {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-}
-
-.perm__title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.perm__facts {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.perm__facts a {
-  color: var(--accent-text);
-}
-
-.perm__cols {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
-  align-items: start;
-  gap: 8px 28px;
-}
-
-.perm__col {
-  min-width: 0;
-}
-
-.perm__colhead {
-  display: flex;
-  align-items: baseline;
-  gap: 4px 8px;
-  margin: 12px 0 6px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.perm__colhead:first-of-type {
-  margin-top: 4px;
-}
-
-.perm__actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px 20px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.perm__action {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
-  column-gap: 8px;
-  cursor: pointer;
-}
-
-.perm__action > input {
-  grid-row: span 2;
-  align-self: start;
-  margin-top: 2px;
-}
-
-.settings .perm__action code {
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.perm__tip {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.3;
-}
-
-.perm__res {
-  display: grid;
+  justify-content: center;
   gap: 4px;
-  margin-top: 12px;
 }
 
-.perm__res .linkButton {
-  width: fit-content;
+.generate .generate__done {
+  visibility: hidden;
 }
 
-/* The pages of the settings use the whole width of the window, as the Explorer does. */
-.appHeader {
-  max-width: none;
+.generate.is-done .generate__idle {
+  visibility: hidden;
 }
 
-/* A page with a workspace (the permissions of an account): its parts keep the side margin, the
-   workspace goes to the two edges of the window. */
-.settings--wide {
-  padding-inline: 0;
+.generate.is-done .generate__done {
+  visibility: visible;
+  color: var(--success);
 }
 
-.settings--wide > :not(.userTab),
-.userTab > :not(.workspace) {
-  margin-inline: 24px;
-}
-
-.userTab {
-  display: grid;
-  gap: 12px;
-}
-
-.userTabs {
-  margin-bottom: -12px;
-  padding: 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.js .userTab:not(.is-selected) {
+.copyButton .copyButton__done {
   display: none;
 }
 
-/* The workspace is inside a part that has the side margin: it takes the margin back. */
-.settings--wide .workspace {
-  margin-inline: -24px;
-  border-top: 1px solid var(--border);
+.copyButton.is-copied .copyButton__idle {
+  display: none;
 }
 
-.workspace .perms {
-  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr);
-  align-items: stretch;
-  gap: 0;
-  min-height: calc(100vh - 300px);
+.copyButton.is-copied .copyButton__done {
+  display: inline-block;
 }
 
-.workspace .perms__side {
-  align-content: start;
-  padding: 10px 12px 12px 24px;
-  background: var(--panel);
+.copyButton.is-copied {
+  color: var(--success);
 }
 
-.workspace .perms__panels {
+.keyRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 48rem;
+}
+
+input.keyText {
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 12px 24px 24px 20px;
 }
 
-/* Tables: hairline box, 32px rows, 0 8px cells, a 12px semibold head ------------------------ */
+/* Tables: one line for each row ------------------------------------------------------------ */
 
-.tableBox {
+.dataTableWrap {
+  position: relative;
   max-width: 100%;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--panel);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
 }
 
-.table {
+.dataTable {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
-.table th,
-.table td {
-  height: var(--s-row);
-  padding: 0 var(--s-pad-x);
-  border-bottom: 1px solid var(--row-divider);
+.dataTable th,
+.dataTable td {
+  height: var(--row);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
   white-space: nowrap;
 }
 
-.table thead th {
-  border-bottom-color: var(--border);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.table tbody:last-child tr:last-child > * {
-  border-bottom-color: transparent;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .table tbody tr:hover > * {
-    background: var(--row-hover);
-  }
-
-  .table tbody tr.groupRow:hover > * {
-    background: var(--raised);
-  }
-
-  .table tbody tr.subRow:hover > * {
-    background: transparent;
-  }
-}
-
-.table tbody th {
-  font-weight: 600;
-}
-
-.table .num {
-  text-align: right;
-}
-
-/* A table whose cells may wrap (long grants, problems). */
-.table.wrap td,
-.servicesTable td,
-.servicesTable tbody th {
-  padding-top: 6px;
-  padding-bottom: 6px;
-  white-space: normal;
-}
-
-.num--danger {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-.settings .accountLink {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.settings .accountLink:hover {
-  color: var(--accent-text);
-}
-
-.access strong {
-  font-weight: 600;
-}
-
-/* A group of services inside a table: a quiet heading row. */
-.table .groupRow th {
-  height: var(--s-row-compact);
+.dataTable thead th {
   background: var(--raised);
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
 }
 
-/* What a visitor typed is shown as the data it is: monospace, never reordered. */
-.typed {
-  unicode-bidi: isolate;
+.dataTable tbody th {
+  font-weight: 600;
 }
 
-.grantText {
-  overflow-wrap: anywhere;
+.dataTable tbody tr:last-child > * {
+  border-bottom: 0;
 }
 
-.table.events {
+.dataTable .num {
+  text-align: right;
+}
+
+.dataTable th.num:first-child,
+.dataTable td.num:first-child {
+  text-align: left;
+}
+
+.dataTable .groupRow th {
+  height: var(--row-compact);
+  background: var(--raised);
+  color: var(--muted);
   font-size: 12px;
+  font-weight: 600;
 }
 
-.events__what {
-  font-weight: 500;
+.dataTable td.foldCell {
+  overflow: visible;
 }
 
-.events__row--danger .events__what {
-  color: var(--danger);
+.dataTable tbody > tr:has(.fold[open]) > * {
+  height: auto;
+  padding-block: 8px;
+  vertical-align: top;
 }
 
-/* Account page ---------------------------------------------------------------------------- */
-
-.userHead {
-  display: grid;
-  gap: 4px;
-}
-
-.userHead__main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
-  min-height: 32px;
-}
-
-.crumbs {
+.fold > summary {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 16px;
-}
-
-.crumbs .icon {
-  width: 14px;
-  height: 14px;
-}
-
-.settings .crumbs a {
-  color: var(--muted);
-  text-decoration: none;
-}
-
-.settings .crumbs a:hover {
+  gap: 6px;
   color: var(--accent-text);
-  text-decoration: underline;
+  cursor: pointer;
 }
 
-.userHead__name {
-  margin: 0 0 0 -6px;
-  font-size: 16px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
+.fold[open] {
+  white-space: normal;
 }
 
-.userHead__action {
-  margin: 0 0 0 auto;
+.fold p {
+  margin: 4px 0 0;
 }
 
-/* The facts of an account: one muted line of label and value pairs. */
-.facts {
+.fold .chips,
+.chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 20px;
-  margin: 0;
-  font-size: 12px;
+  gap: 4px;
+  margin-top: 4px;
 }
 
-.facts div {
-  display: flex;
-  gap: 6px;
-}
-
-.facts dt {
-  color: var(--muted);
-}
-
-.facts dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.facts dd.danger {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-/* The access of an account: one row for each service, then a row of its grants on resources. */
 .svcRow__name {
   font-weight: 600;
 }
 
-.settings .svcRow__id {
-  color: var(--muted);
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 400;
-}
-
-.chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  vertical-align: middle;
-}
-
-/* An action of a service: a small chip with its box. The description is the title of the chip. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 7px 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-sm);
-  background: var(--inset);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.chip:hover {
-  border-color: var(--border-strong);
-}
-
-.chip:has(input:checked) {
-  border-color: var(--accent-fill);
-  background: var(--selected-bg);
-}
-
-.chip:has(input:disabled) {
-  cursor: default;
-}
-
-.chip:has(input:focus-visible) {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: 1px;
-}
-
-.settings .chip code {
-  font-size: 12px;
-}
-
-.chip input:disabled + code {
+.svcRow__id {
   color: var(--muted);
 }
 
-/* A tag: an action name on the Services page, read-only. */
-.settings .tag {
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-sm);
-  background: var(--inset);
-  font-size: 12px;
-}
-
-.table .subRow > td {
-  height: auto;
-  padding: 0 var(--s-pad-x) 6px 24px;
-  white-space: normal;
-}
-
-.grantRows {
-  display: grid;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-/* One grant on a resource: one dense row. */
-.grantRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 8px;
-  min-height: var(--s-row-compact);
-  font-size: 12px;
-}
-
-.grantRow + .grantRow {
-  border-top: 1px solid var(--row-divider);
-}
-
-.settings .grantRow__action {
-  font-size: 12px;
+.accountLink {
+  color: var(--text);
   font-weight: 600;
-}
-
-.grantRow__end {
-  margin: 0 0 0 auto;
-}
-
-.grantRow__problem {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-}
-
-.grantRow__problem .icon,
-.cellWarn .icon {
-  width: 14px;
-  height: 14px;
-  flex: none;
-}
-
-.grantRow--warn .grantRow__action {
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-}
-
-.path {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px;
-}
-
-.path__type {
-  color: var(--muted);
-}
-
-.settings .path__id {
-  font-size: 12px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.path__sep {
-  color: var(--muted);
-}
-
-/* Password and deletion of an account, side by side. */
-.accountRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: start;
-  gap: 12px 32px;
-}
-
-.accountRow__password {
-  display: flex;
-  flex: 0 1 34rem;
-  flex-wrap: nowrap;
-  align-items: start;
-  gap: 8px;
-}
-
-.accountRow__password .field {
-  width: min(100%, 24rem);
-}
-
-.accountRow__password > .button {
-  margin-top: 20px;
-}
-
-.accountRow__delete {
-  display: grid;
-  gap: 4px;
-}
-
-/* One service of an account, or one account of a service: one line, then Edit. */
-.accessTable td[data-label="Access"] {
-  white-space: normal;
-}
-
-.accessTable .accessTable__end {
-  width: 1%;
-  text-align: right;
-}
-
-/* Choose one entry, then press Add or Next: one small line, no wide form. */
-.pick {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 6px 8px;
-}
-
-.pick .field {
-  flex: 0 1 18rem;
-}
-
-/* The editor of one (account, service) pair. A list of options: a box, its name, its meaning. */
-.editor,
-.step {
-  display: grid;
-  gap: 8px;
-}
-
-.options {
-  display: grid;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--panel);
-}
-
-.options > li + li {
-  border-top: 1px solid var(--row-divider);
-}
-
-.option {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 10px;
-  padding: 6px var(--s-pad-x);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.option > input {
-  align-self: center;
-}
-
-.option__name {
-  flex: 0 0 15rem;
-  max-width: 100%;
-}
-
-.option__text {
-  flex: 1 1 16rem;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.option.is-on .option__name {
-  font-weight: 600;
-}
-
-.option:has(input:focus-visible) {
-  outline: 2px solid var(--accent-fill);
-  outline-offset: -2px;
-}
-
-.option:has(input:disabled) {
-  cursor: default;
-}
-
-/* A grant on a resource, read as a sentence. */
-.sentence {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 6px;
-}
-
-/* A new grant on a resource: a box with its own title, in two steps. */
-.step__box {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--raised);
-}
-
-.step__title {
-  padding: 0 4px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.step__ids {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-}
-
-.step__ids .field {
-  flex: 0 1 14rem;
-}
-
-/* Graphs ---------------------------------------------------------------------------------- */
-
-.spark {
-  display: block;
-  width: 100%;
-  height: 32px;
-}
-
-.spark__bar {
-  fill: var(--muted);
-  opacity: 0.55;
-}
-
-.spark__bar--today {
-  fill: var(--accent-fill);
-  opacity: 1;
-}
-
-.spark__zero {
-  fill: var(--muted);
-  opacity: 0.3;
-}
-
-/* Services -------------------------------------------------------------------------------- */
-
-.servicesTable td,
-.servicesTable tbody th {
-  vertical-align: top;
-}
-
-.servicesTable tbody th[scope="row"] {
-  width: 24%;
-  min-width: 12rem;
-}
-
-.servicesTable td[data-label="Opened by"] {
-  min-width: 8rem;
-}
-
-.cellWarn {
-  display: flex;
-  max-width: 110ch;
-  align-items: flex-start;
-  gap: 4px;
-  margin-top: 2px;
-  color: color-mix(in srgb, var(--warning) 80%, var(--text));
-  font-size: 12px;
-  font-weight: 400;
-  white-space: normal;
 }
 
 .cellNote {
-  display: block;
-  margin-top: 2px;
   color: var(--muted);
-  font-size: 12px;
 }
 
-.typeTree,
-.typeTree ul {
-  margin: 0;
+.grantList {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0;
   padding: 0;
   list-style: none;
 }
 
-.typeTree ul {
-  margin: 2px 0 0 4px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-strong);
+.keyActions {
+  text-align: right;
+  white-space: nowrap;
 }
 
-.typeTree li + li {
-  margin-top: 2px;
+.keyActions form {
+  display: inline;
 }
 
-/* A side block of a page (How a grant reads), as the side column of clickhouse-dash. */
-.side {
-  display: grid;
-  gap: 8px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-lg);
-  background: var(--panel);
-}
-
-.side .part__title {
-  font-size: 14px;
-}
-
-.side .part__head {
-  min-height: 24px;
-}
-
-.model {
-  display: grid;
-  gap: 2px;
-  margin: 0;
-}
-
-.model dt {
-  margin-top: 6px;
-  font-weight: 600;
-}
-
-.settings .model dt code {
-  overflow-wrap: anywhere;
-}
-
-.model dd {
-  margin: 0;
+.keyAction {
+  min-width: 28px;
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
   color: var(--muted);
-  font-size: 12px;
 }
 
-/* Activity -------------------------------------------------------------------------------- */
-
-/* The figures of the page: one hairline strip, not a row of tiles. */
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  margin: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--panel);
+.keyAction:hover {
+  border-color: transparent;
+  color: var(--text);
 }
 
-.stat {
-  display: grid;
-  gap: 2px;
-  padding: 6px 12px;
-}
-
-.stat + .stat {
-  border-left: 1px solid var(--border);
-}
-
-.stat__label {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.stat__value {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat__value--danger {
+.keyAction--danger,
+.keyAction--danger:hover {
   color: var(--danger);
 }
 
-.layout {
-  display: grid;
-  gap: 24px;
-  min-width: 0;
+.keyAction__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
-.layout__main,
-.layout__side {
-  display: grid;
-  align-content: start;
-  gap: 24px;
-  min-width: 0;
-}
-
-/* Two links that behave as one control: the current one sits on the selected fill with an accent edge. */
-.segmented {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--s-r-md);
-  background: var(--inset);
-}
-
-.settings .segmented__option {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: var(--s-r-sm);
-  color: var(--muted);
-  font-size: 12px;
+.events__what {
   font-weight: 600;
-  text-decoration: none;
 }
 
-.settings .segmented__option:hover {
-  color: var(--text);
-}
-
-.settings .segmented__option.is-active {
-  border-color: var(--accent-fill);
-  background: var(--selected-bg);
-  color: var(--text);
+.events__row--danger .events__what {
+  color: var(--danger);
 }
 
 .inbox {
@@ -1531,209 +847,589 @@ details > summary::-webkit-details-marker {
   gap: 12px;
 }
 
-/* A window under 900px: the panel goes under the list. */
-@media (max-width: 899px) {
-  .perms {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 8px 0;
-  }
+/* Figures ---------------------------------------------------------------------------------- */
 
-  .perms__side,
-  .workspace .perms__side {
-    padding-right: 24px;
-    border-right: 0;
-  }
-
-  .workspace .perms__panels {
-    padding-left: 24px;
-  }
-
-  .workspace .perms {
-    grid-template-columns: minmax(0, 1fr);
-    min-height: 0;
-  }
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
 }
 
-/* Wide windows ---------------------------------------------------------------------------- */
+.stat {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+}
 
-@media (min-width: 1101px) {
+.stat__label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stat__value {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat__value--danger {
+  color: var(--danger);
+}
+
+.spark {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.spark__bar {
+  fill: var(--muted);
+  opacity: 0.6;
+}
+
+.spark__bar--today {
+  fill: var(--accent-fill);
+  opacity: 1;
+}
+
+.spark__zero {
+  fill: var(--muted);
+  opacity: 0.35;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+@media (min-width: 1100px) {
   .split {
-    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
   }
 }
 
-@media (min-width: 1280px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 27rem);
-    align-items: start;
-  }
+.split__col {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
 }
 
-/* Phones: a table of records becomes one block for each row; each cell carries its column name. */
-@media (max-width: 760px) {
-  .contentTabs,
-  .settings {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
+/* The page of an account ------------------------------------------------------------------ */
 
+.addUser {
+  display: grid;
+  gap: 12px;
+}
+
+.addUser__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 16rem) minmax(0, 22rem) auto;
+  align-items: end;
+  gap: 12px 16px;
+}
+
+@media (max-width: 899px) {
   .addUser__fields {
     grid-template-columns: minmax(0, 1fr);
   }
+}
 
-  .accounts thead,
-  .stack thead,
-  .accessTable thead {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+.accountRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 32px;
+}
+
+.accountRow__password {
+  display: flex;
+  flex: 0 1 38rem;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.accountRow__password .uiField {
+  width: min(100%, 24rem);
+}
+
+.accountRow__delete {
+  display: grid;
+}
+
+.dangerRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+}
+
+.dangerRow__title {
+  margin: 0 0 2px;
+  font-size: 13px;
+}
+
+.confirm {
+  position: relative;
+}
+
+.confirm > summary {
+  width: fit-content;
+  list-style: none;
+  cursor: pointer;
+}
+
+.confirm > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* The confirmation opens over the page, so the content under it does not move. */
+.confirm__panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: 22rem;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.confirm__panel p {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.partFold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  list-style: none;
+  cursor: pointer;
+}
+
+.partFold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.partFold[open] > summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+
+.partFold__chevron {
+  flex: none;
+  color: var(--muted);
+}
+
+.partFold[open] .partFold__chevron {
+  transform: rotate(90deg);
+}
+
+.partFold > .pagePart {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.options {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.option {
+  display: grid;
+  grid-template-columns: 16px minmax(10rem, 16rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  min-height: var(--row-compact);
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+.option:hover {
+  background: var(--raised);
+}
+
+.option__name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.option__text {
+  color: var(--muted);
+}
+
+.pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+/* Keys ------------------------------------------------------------------------------------- */
+
+.keyForm__top {
+  display: grid;
+  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 16px;
+}
+
+@media (max-width: 899px) {
+  .keyForm__top {
+    grid-template-columns: minmax(0, 1fr);
   }
+}
 
-  .accounts,
-  .accounts tbody,
-  .stack,
-  .stack tbody,
-  .accessTable,
-  .accessTable tbody {
-    display: block;
+.expiry__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.expiry__date {
+  width: 14rem;
+}
+
+/* The editor of grants ---------------------------------------------------------------------- */
+
+.ge {
+  display: grid;
+  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  gap: 12px;
+  height: clamp(20rem, 52vh, 34rem);
+}
+
+.ge__svcList {
+  display: grid;
+  gap: 8px;
+}
+
+.ge__svc {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-compact);
+  background: var(--raised);
+  transition: border-color 0.15s var(--ease);
+}
+
+.ge__svc:not(.is-expanded):hover {
+  border-color: var(--border-strong);
+}
+
+.ge__svc.is-expanded {
+  border-color: var(--border-strong);
+}
+
+.ge__svcHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--row);
+  padding: 0 8px 0 10px;
+  cursor: pointer;
+}
+
+.ge__svcName {
+  min-width: 8rem;
+  font-weight: 600;
+}
+
+.ge__svcInfo {
+  flex: 1;
+  color: var(--muted);
+}
+
+.ge__svc.is-open .ge__svcInfo {
+  color: var(--success);
+}
+
+.ge__svc.is-orphan .ge__svcInfo {
+  color: var(--warning);
+}
+
+.ge__toggle {
+  gap: 4px;
+}
+
+.ge__svcBody {
+  display: grid;
+  gap: 12px;
+  padding: 8px 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  cursor: default;
+  animation: ge-open 0.16s var(--ease);
+}
+
+@keyframes ge-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
   }
+}
 
-  .accounts tr,
-  .stack tr,
-  .accessTable tr {
-    display: flex;
+@media (prefers-reduced-motion: reduce) {
+  .ge__svcBody {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .ge__svcHead {
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: 2px 12px;
-    padding: 8px var(--s-pad-x);
-    border-bottom: 1px solid var(--row-divider);
+    row-gap: 6px;
+    padding-block: 8px;
   }
 
-  .table.accounts tbody tr > *,
-  .table.stack tbody tr > *,
-  .table.accessTable tbody tr > * {
-    height: auto;
-    padding: 0;
-    border: 0;
-    white-space: normal;
-  }
-
-  .accounts th,
-  .stack th[scope="row"],
-  .accessTable th[scope="row"],
-  .stack .groupRow th,
-  .accounts td[data-label="Access"],
-  .accessTable td[data-label="Access"],
-  .stack td[data-label="Grant"],
-  .stack td[data-label="Problem"],
-  .stack td[data-label="Actions"],
-  .stack .subRow > td {
+  .ge__svcInfo {
     flex-basis: 100%;
+    order: 3;
+    padding-left: 28px;
   }
 
-  .stack .groupRow {
-    background: var(--raised);
+  .ge__toggle {
+    margin-left: auto;
   }
 
-  .accounts td::before,
-  .stack td::before {
-    content: attr(data-label) " ";
-    color: var(--muted);
-    font-size: 12px;
+  .pagePart__head {
+    row-gap: 8px;
   }
 
-  .accounts td[data-label="Access"]::before,
-  .stack td[data-label="Actions"]::before {
-    content: none;
+  .ge__bar {
+    flex-wrap: wrap;
   }
 
-  .accessTable .accessTable__end {
-    width: auto;
-    text-align: left;
-  }
-
-  .option__name {
-    flex-basis: 100%;
+  .ge__filter {
+    max-width: none;
+    margin-left: 0;
+    flex: 1 1 100%;
   }
 
   .accountRow__password {
     flex-wrap: wrap;
   }
+}
 
-  .table .num {
-    text-align: left;
+.ge__side,
+.ge__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-tile);
+  background: var(--inset);
+}
+
+.ge__side {
+  gap: 8px;
+  padding: 8px;
+}
+
+.ge__tree {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.ge__node {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--row-compact);
+  padding-right: 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ge__node:hover {
+  background: var(--raised);
+}
+
+.ge__node.is-selected {
+  background: var(--border-strong);
+}
+
+.ge__twist {
+  display: inline-flex;
+  flex: none;
+  justify-content: center;
+  width: 16px;
+  color: var(--muted);
+}
+
+.ge__nodeName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ge__kind,
+.ge__ticks,
+.ge__limits,
+.ge__groupCount {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ge__ticks:not(:empty) {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--border);
+  color: var(--text);
+  text-align: center;
+}
+
+.ge__more,
+.ge__note {
+  height: 30px;
+  line-height: 30px;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.ge__more {
+  color: var(--accent-text);
+  cursor: pointer;
+}
+
+.ge__bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ge__filter {
+  max-width: 16rem;
+  margin-left: auto;
+}
+
+.ge__list {
+  flex: 1;
+  overflow: auto;
+}
+
+.ge__group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row-compact);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ge__act {
+  display: grid;
+  grid-template-columns: 16px minmax(10rem, 18rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-compact);
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.ge__act.is-on {
+  background: var(--border);
+}
+
+.ge__act code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ge__desc {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ge__limitsInline {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.ge__limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ge__limit .uiInput {
+  width: 4.5rem;
+  height: 22px;
+  padding: 0 6px;
+}
+
+@media (max-width: 899px) {
+  .ge {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
   }
 
-  .stat + .stat {
-    border-left: 0;
+  .ge__side,
+  .ge__main {
+    height: 20rem;
   }
 }
 
-/* Touch: every control reaches 44px. */
-@media (pointer: coarse) {
-  .settings .button,
-  .settings .button--small {
-    height: 44px;
-  }
+.formActions--end {
+  align-items: flex-end;
+}
 
-  .contentTabs__tab {
-    height: 44px;
-  }
-
-  .themeSwitch button {
-    width: 44px;
-    height: 44px;
-  }
-
-  .settings .segmented__option {
-    height: 40px;
-  }
-
-  .settings input[type="text"],
-  .settings input[type="password"],
-  .settings input[type="search"],
-  .settings select {
-    height: 44px;
-  }
-
-  .settings input[type="checkbox"] {
-    width: 20px;
-    height: 20px;
-  }
-
-  .chip,
-  .option,
-  .perm__row,
-  .perm__link,
-  .perm__action,
-  .linkButton {
-    min-height: 44px;
-  }
-
-  .chip {
-    height: auto;
-    padding: 0 12px 0 10px;
-  }
-
-  .option {
-    align-items: center;
-  }
-
-  .chips {
-    gap: 6px;
-  }
-
-  .crumbs a,
-  .settings .accountLink,
-  .settings a.badge--warn {
-    display: inline-flex;
-    align-items: center;
-    min-height: 44px;
-  }
-
-  .settings a.badge--warn {
-    height: auto;
-  }
+.ge__node:focus-visible,
+.ge__more:focus-visible,
+.ge__group:focus-visible {
+  outline-offset: -2px;
 }

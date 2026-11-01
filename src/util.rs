@@ -245,6 +245,73 @@ pub fn format_utc(unix: i64) -> String {
     )
 }
 
+/// A time as a `<time>` element. The text is in UTC for a page without script. The script of the
+/// settings pages (`settings.js`) shows the time of the browser instead. `seconds` adds the seconds.
+pub fn time_tag(unix: i64, seconds: bool) -> String {
+    let (text, secs) = if seconds {
+        (format_utc_secs(unix), r#" data-secs="1""#)
+    } else {
+        (format_utc(unix), "")
+    };
+    format!(
+        r#"<time class="when" datetime="{}"{secs}>{text} UTC</time>"#,
+        format_utc_instant(unix)
+    )
+}
+
+/// `2026-11-23T00:00:00Z`: the form of a date and a time in UTC of the form of a key (portal 5.8c).
+pub fn format_utc_instant(unix: i64) -> String {
+    let text = format_utc_secs(unix);
+    // `2026-10-10 14:03:27` becomes `2026-10-10T14:03:27Z`.
+    format!("{}Z", text.replacen(' ', "T", 1))
+}
+
+/// Reads `2026-11-23T00:00:00Z` (UTC), with these digits only, as seconds since the Unix epoch. Any
+/// other form, and a date that does not exist, gives `None`.
+pub fn parse_utc_instant(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let number = |from: usize, to: usize| -> Option<i64> {
+        let part = &text[from..to];
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let (year, month, day) = (number(0, 4)?, number(5, 7)?, number(8, 10)?);
+    let (hour, minute, second) = (number(11, 13)?, number(14, 16)?, number(17, 19)?);
+    if !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 || day < 1 {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 => 28 + i64::from(leap),
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day > days_in_month {
+        return None;
+    }
+    // Days from the civil date: the inverse of the algorithm of `format_utc`.
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 /// `2026-10-10 14:03:27` (UTC). The sign-in log uses this format. The seconds tell attempts apart.
 pub fn format_utc_secs(unix: i64) -> String {
     format!("{}:{:02}", format_utc(unix), unix.rem_euclid(60))
@@ -332,6 +399,41 @@ pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_date_in_utc_reads_and_writes_the_same_second() {
+        for unix in [0i64, 1, 86_399, 951_782_400, 1_792_569_648, 4_102_444_800] {
+            let text = format_utc_instant(unix);
+            assert_eq!(parse_utc_instant(&text), Some(unix), "{text}");
+        }
+        assert_eq!(format_utc_instant(1_792_569_648), "2026-10-21T08:00:48Z");
+        assert_eq!(
+            parse_utc_instant("2026-11-23T00:00:00Z"),
+            Some(1_795_392_000)
+        );
+        assert_eq!(
+            parse_utc_instant("2024-02-29T12:00:00Z"),
+            Some(1_709_208_000)
+        );
+        for bad in [
+            "",
+            "2026-11-23",
+            "2026-11-23 00:00:00Z",
+            "2026-11-23T00:00:00",
+            "2026-11-23T00:00:00+00:00",
+            "2026-13-01T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-11-23T24:00:00Z",
+            "2026-11-23T00:60:00Z",
+            "2026-11-23T00:00:60Z",
+            "2026-1-23T00:00:00Z",
+            " 2026-11-23T00:00:00Z",
+            "+026-11-23T00:00:00Z",
+        ] {
+            assert_eq!(parse_utc_instant(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn blocking_work_runs_on_a_plain_thread_and_on_either_kind_of_runtime() {
         assert_eq!(blocking(|| 1), 1);
         let multi = tokio::runtime::Builder::new_multi_thread()
@@ -413,6 +515,14 @@ mod tests {
         assert_eq!(format_utc(951_782_400), "2000-02-29 00:00");
         assert_eq!(format_utc(-86_400), "1969-12-31 00:00");
         assert_eq!(format_utc_secs(1_791_623_502), "2026-10-10 09:11:42");
+        assert_eq!(
+            time_tag(1_791_623_502, false),
+            r#"<time class="when" datetime="2026-10-10T09:11:42Z">2026-10-10 09:11 UTC</time>"#
+        );
+        assert_eq!(
+            time_tag(1_791_623_502, true),
+            r#"<time class="when" datetime="2026-10-10T09:11:42Z" data-secs="1">2026-10-10 09:11:42 UTC</time>"#
+        );
         assert_eq!(format_duration(-5), "0 s");
         assert_eq!(format_duration(45), "45 s");
         assert_eq!(format_duration(720), "12 min");

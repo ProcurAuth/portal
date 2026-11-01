@@ -1,0 +1,205 @@
+//! The checks and the work of the start of the program that need the database and the file
+//! together (portal 3.4a, 3.4d, 7.2a, 7.2d, 7.2f, 10.7d).
+//!
+//! The file and the database are two sources of accounts. An account and its keys come from one
+//! source: a login that both hold, or a key that both hold, stops the program. The counter rows of
+//! the subjects of the file are made at each start, and the rows of a subject that the file no
+//! longer has are deleted.
+
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+
+use crate::config::Config;
+use crate::decision::CounterOwner;
+use crate::grants::CounterId;
+use crate::store::{DirectorySnapshot, Store};
+use crate::users::{Directory, KeyOwner, KeyRecord};
+
+/// The keys of the file as the directory holds them. The key of the file has no creation date and
+/// no expiry date (portal 3.4c).
+pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
+    let mut out = Vec::new();
+    for (login, account) in &config.access.accounts {
+        for key in &account.keys {
+            out.push(KeyRecord {
+                id: key.id.clone(),
+                owner: KeyOwner::File(login.clone()),
+                name: key.name.clone(),
+                digest: key.digest,
+                hint: String::new(),
+                created_at: 0,
+                expires_at: None,
+                grants: key.grants.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Refuses a file that holds a login, a key id or a key digest that the database holds too
+/// (portal 3.4a, 3.4c). Each error names the login and, for a key, its name.
+pub fn check_file_against_database(
+    config: &Config,
+    snapshot: &DirectorySnapshot,
+) -> Result<(), String> {
+    for (login, account) in &config.access.accounts {
+        if snapshot.users.iter().any(|user| user.login == *login) {
+            return Err(format!(
+                "the login {login:?} is in the configuration file (a block user) and in the database: an account comes from one source, so remove the block or delete the account"
+            ));
+        }
+        for key in &account.keys {
+            if let Some(other) = snapshot.keys.iter().find(|k| k.id == key.id) {
+                return Err(format!(
+                    "user {login:?}, key {:?}: the subject id key:{} is also the id of a key of the database (named {:?})",
+                    key.name, key.id, other.name
+                ));
+            }
+            if snapshot.keys.iter().any(|k| k.digest == key.digest) {
+                return Err(format!(
+                    "user {login:?}, key {:?}: the digest of the key is also the digest of a key of the database",
+                    key.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a user of the database that holds more grants than `users.max_grants` (portal 10.2d).
+/// The error names the login, the number of grants and the maximum.
+pub fn check_user_grants(config: &Config, snapshot: &DirectorySnapshot) -> Result<(), String> {
+    let maximum = config.users.max_grants;
+    match snapshot
+        .users
+        .iter()
+        .find(|user| user.grants.len() > maximum)
+    {
+        Some(user) => Err(format!(
+            "user {:?}: the database holds {} grants, users.max_grants is {maximum}",
+            user.login,
+            user.grants.len()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The counters that the grants of the directory and of the file need (portal 7.2a).
+pub fn needed_counters(
+    config: &Config,
+    directory: &Directory,
+    now: i64,
+) -> HashSet<(CounterOwner, CounterId)> {
+    let file: std::collections::HashMap<String, Vec<crate::grants::Grant>> = config
+        .access
+        .accounts
+        .iter()
+        .map(|(login, account)| (login.clone(), account.grants.clone()))
+        .collect();
+    directory.counters_needed(&file, |key| {
+        // A revoked key is not in the directory. An expired or too-old key needs no counter.
+        if key.expired(now) {
+            return false;
+        }
+        let max = match &key.owner {
+            KeyOwner::User(login) => directory
+                .grants_of(login)
+                .and_then(|grants| crate::portal_actions::max_key_lifetime(&grants)),
+            _ => None,
+        };
+        !key.too_old(now, max)
+    })
+}
+
+/// The subjects of the file that hold counter rows: the logins of its accounts and the subject
+/// ids of its keys (portal 7.2d).
+pub fn file_subjects(config: &Config) -> Vec<String> {
+    let mut out = Vec::new();
+    for (login, account) in &config.access.accounts {
+        out.push(login.clone());
+        for key in &account.keys {
+            out.push(format!("{}{}", crate::subject_id::KEY_PREFIX, key.id));
+        }
+    }
+    out
+}
+
+/// What the start does with the counters: it checks that the rows fit in `keys.max_counter_rows`
+/// and the grants in `keys.max_directory_grants`, makes the rows that the directory and the file
+/// need, and deletes the rows of the subjects that the file no longer has (portal 7.2a, 7.2d,
+/// 7.2f, 10.7d).
+pub fn prepare_counters(
+    config: &Config,
+    store: &Store,
+    directory: &Directory,
+    now: i64,
+) -> Result<HashSet<(CounterOwner, CounterId)>, String> {
+    let limits = &config.key_limits;
+    let needed = needed_counters(config, directory, now);
+    let existing = store.counter_rows()?;
+    let needed_rows = needed.len() as i64;
+    // The grants alone need more rows than the table can hold: nothing to make.
+    if needed_rows > limits.max_counter_rows as i64 {
+        return Err(format!(
+            "keys.max_counter_rows is {}: the database holds {existing} counter rows and the grants need {needed_rows}",
+            limits.max_counter_rows
+        ));
+    }
+    let file_grants: usize = config
+        .access
+        .accounts
+        .values()
+        .map(|a| a.grants.len() + a.keys.iter().map(|k| k.grants.len()).sum::<usize>())
+        .sum();
+    let total_grants = directory.grant_count() + file_grants;
+    if total_grants > limits.max_directory_grants {
+        return Err(format!(
+            "keys.max_directory_grants is {}: the database and the file hold {total_grants} grants",
+            limits.max_directory_grants
+        ));
+    }
+    store.delete_file_counters(&file_subjects(config))?;
+    let rows: Vec<(CounterOwner, CounterId)> = needed.iter().cloned().collect();
+    store.ensure_counter_rows(&rows)?;
+    let after = store.counter_rows()?;
+    if after > limits.max_counter_rows as i64 {
+        return Err(format!(
+            "keys.max_counter_rows is {}: the database holds {after} counter rows after the start made the rows that the grants need",
+            limits.max_counter_rows
+        ));
+    }
+    Ok(needed)
+}
+
+/// Makes the counter rows that a new version of the directory needs and that the instance did not
+/// make yet (portal 7.2a). `ensured` holds the counters that the instance already has. Returns the
+/// number of rows that the call asked the database to make.
+pub fn ensure_new_counters(
+    config: &Config,
+    store: &Store,
+    directory: &Directory,
+    ensured: &std::sync::Mutex<HashSet<(CounterOwner, CounterId)>>,
+    rows_made: &std::sync::atomic::AtomicU64,
+    now: i64,
+) -> Result<usize, String> {
+    let needed = needed_counters(config, directory, now);
+    let fresh: Vec<(CounterOwner, CounterId)> = {
+        let known = ensured.lock().unwrap_or_else(|p| p.into_inner());
+        needed
+            .iter()
+            .filter(|c| !known.contains(*c))
+            .cloned()
+            .collect()
+    };
+    if fresh.is_empty() {
+        return Ok(0);
+    }
+    let made = store.ensure_counter_rows(&fresh)?;
+    rows_made.fetch_add(made as u64, std::sync::atomic::Ordering::Relaxed);
+    ensured
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .extend(fresh);
+    Ok(made)
+}

@@ -1,0 +1,28 @@
+http:
+  middlewares:
+    # The ForwardAuth of the persons: the session cookie.
+    portal-user:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify"
+        trustForwardHeader: false
+        maxResponseBodySize: 4096
+        preserveLocationHeader: true
+        # The session is tied to the User-Agent (session.bind), so the check needs this header.
+        authRequestHeaders: ["Cookie", "User-Agent"]
+        authResponseHeaders: ["X-Identity-Token"]
+    # The ForwardAuth of the keys: the header Authorization.
+    portal-key:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify-key"
+        trustForwardHeader: false
+        maxResponseBodySize: 4096
+        authRequestHeaders: ["Authorization"]
+        authResponseHeaders: ["X-Identity-Token"]
+    # The service never sees the key.
+    drop-authorization:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+    portal-key-chain:
+      chain:
+        middlewares: ["portal-key", "drop-authorization"]

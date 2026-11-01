@@ -19,6 +19,11 @@ pub enum Lit {
     Word(String),
     /// A list of quoted strings: `["a", "b"]`.
     List(Vec<String>),
+    /// A list that holds another kind of item: `["a", { grant = "b" }]`.
+    Items(Vec<Lit>),
+    /// An object: `{ grant = "a", limits = { max_rows = 10 } }`. The members keep the order of the
+    /// file. A name occurs one time.
+    Object(Vec<(String, Lit)>),
 }
 
 impl Lit {
@@ -35,6 +40,18 @@ impl Lit {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Lit::Items(items) => format!(
+                "[{}]",
+                items.iter().map(Lit::shown).collect::<Vec<_>>().join(", ")
+            ),
+            Lit::Object(members) => format!(
+                "{{ {} }}",
+                members
+                    .iter()
+                    .map(|(name, value)| format!("{name} = {}", value.shown()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -47,6 +64,9 @@ pub struct Labeled {
     /// The label: `alice`.
     pub label: String,
     pub values: HashMap<String, Lit>,
+    /// The blocks with a label inside this block, for example `key "nightly report" { ... }` in a
+    /// `user` block. They are in the order of the file.
+    pub children: Vec<Labeled>,
 }
 
 /// What the file says: the blocks that are present, and the key of each block.
@@ -71,12 +91,17 @@ enum Token {
     Equal,
 }
 
+/// The deepest nesting of arrays and objects in a value.
+const MAX_VALUE_DEPTH: usize = 6;
+
 /// Parse the file. `allowed_blocks` is the closed list of block names without a label.
-/// `labeled_blocks` is the closed list of block names that take a label.
+/// `labeled_blocks` is the closed list of block names that take a label. `nested_blocks` lists
+/// the pairs `(parent, child)`: a block `parent` can hold blocks `child` with a label.
 pub fn parse(
     raw: &str,
     allowed_blocks: &[&str],
     labeled_blocks: &[&str],
+    nested_blocks: &[(&str, &str)],
 ) -> Result<Document, String> {
     let tokens = tokenize(raw)?;
     let mut document = Document::default();
@@ -132,52 +157,18 @@ pub fn parse(
             Some(Token::LBrace) => i += 1,
             other => return Err(format!("expected '{{' after {path}, found {other:?}")),
         }
-        let mut values: HashMap<String, Lit> = HashMap::new();
-        loop {
-            match tokens.get(i) {
-                Some(Token::RBrace) => {
-                    i += 1;
-                    break;
-                }
-                Some(Token::Ident(key)) => {
-                    let key = key.clone();
-                    i += 1;
-                    match tokens.get(i) {
-                        Some(Token::Equal) => i += 1,
-                        other => {
-                            return Err(format!("expected '=' after {path}.{key}, found {other:?}"))
-                        }
-                    }
-                    let value = match tokens.get(i) {
-                        Some(Token::String(v)) => Lit::Str(v.clone()),
-                        Some(Token::Bare(v)) => Lit::Int(v.clone()),
-                        Some(Token::Ident(v)) => Lit::Word(v.clone()),
-                        Some(Token::LBracket) => {
-                            let (items, next) = list(&tokens, i + 1, &path, &key)?;
-                            i = next - 1;
-                            Lit::List(items)
-                        }
-                        other => {
-                            return Err(format!(
-                                "expected a value for {path}.{key}, found {other:?}"
-                            ))
-                        }
-                    };
-                    i += 1;
-                    if values.insert(key.clone(), value).is_some() {
-                        return Err(format!("duplicate configuration key: {path}.{key}"));
-                    }
-                }
-                Some(Token::LBrace) => return Err("nested HCL blocks are not supported".into()),
-                None => return Err(format!("unterminated block: {path}")),
-                other => return Err(format!("unexpected token in block {path}: {other:?}")),
-            }
-        }
+        let nested: Vec<&str> = nested_blocks
+            .iter()
+            .filter(|(parent, _)| *parent == block && label.is_some())
+            .map(|(_, child)| *child)
+            .collect();
+        let (values, children) = body(&tokens, &mut i, &path, &nested)?;
         match label {
             Some(label) => document.labeled.push(Labeled {
                 kind: block,
                 label,
                 values,
+                children,
             }),
             None => {
                 for (key, value) in values {
@@ -189,24 +180,136 @@ pub fn parse(
     Ok(document)
 }
 
-/// The items of a list that starts after `[` at `start`. The items are quoted strings, separated
-/// by commas. A comma after the last item is permitted. Returns the items and the index after `]`.
-fn list(
+/// The body of a block, after its `{` and up to its `}`: the `key = value` lines, and the blocks
+/// with a label that the block can hold (`nested`).
+fn body(
     tokens: &[Token],
-    start: usize,
+    i: &mut usize,
+    path: &str,
+    nested: &[&str],
+) -> Result<(HashMap<String, Lit>, Vec<Labeled>), String> {
+    let mut values: HashMap<String, Lit> = HashMap::new();
+    let mut children: Vec<Labeled> = Vec::new();
+    loop {
+        match tokens.get(*i) {
+            Some(Token::RBrace) => {
+                *i += 1;
+                return Ok((values, children));
+            }
+            Some(Token::Ident(key)) => {
+                let key = key.clone();
+                *i += 1;
+                if let Some(Token::String(label)) = tokens.get(*i) {
+                    // A block with a label inside the block.
+                    if !nested.contains(&key.as_str()) {
+                        return Err(format!("nested HCL blocks are not supported: {path}.{key}"));
+                    }
+                    let label = label.clone();
+                    *i += 1;
+                    if children.iter().any(|c| c.kind == key && c.label == label) {
+                        return Err(format!(
+                            "duplicate configuration block: {path}.{key} {label:?}"
+                        ));
+                    }
+                    let child_path = format!("{path}.{key}.{label}");
+                    match tokens.get(*i) {
+                        Some(Token::LBrace) => *i += 1,
+                        other => {
+                            return Err(format!(
+                                "expected '{{' after {child_path}, found {other:?}"
+                            ))
+                        }
+                    }
+                    let (child_values, grandchildren) = body(tokens, i, &child_path, &[])?;
+                    debug_assert!(grandchildren.is_empty());
+                    children.push(Labeled {
+                        kind: key,
+                        label,
+                        values: child_values,
+                        children: Vec::new(),
+                    });
+                    continue;
+                }
+                match tokens.get(*i) {
+                    Some(Token::Equal) => *i += 1,
+                    other => {
+                        return Err(format!("expected '=' after {path}.{key}, found {other:?}"))
+                    }
+                }
+                let value = value(tokens, i, path, &key, 0)?;
+                if values.insert(key.clone(), value).is_some() {
+                    return Err(format!("duplicate configuration key: {path}.{key}"));
+                }
+            }
+            Some(Token::LBrace) => return Err("nested HCL blocks are not supported".into()),
+            None => return Err(format!("unterminated block: {path}")),
+            other => return Err(format!("unexpected token in block {path}: {other:?}")),
+        }
+    }
+}
+
+/// One value at `tokens[*i]`: a scalar, an array or an object. The index goes after the value.
+fn value(
+    tokens: &[Token],
+    i: &mut usize,
     path: &str,
     key: &str,
-) -> Result<(Vec<String>, usize), String> {
-    let mut items = Vec::new();
-    let mut i = start;
+    depth: usize,
+) -> Result<Lit, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(format!("{path}.{key}: the value is nested too deep"));
+    }
+    let lit = match tokens.get(*i) {
+        Some(Token::String(v)) => {
+            *i += 1;
+            Lit::Str(v.clone())
+        }
+        Some(Token::Bare(v)) => {
+            *i += 1;
+            Lit::Int(v.clone())
+        }
+        Some(Token::Ident(v)) => {
+            *i += 1;
+            Lit::Word(v.clone())
+        }
+        Some(Token::LBracket) => {
+            *i += 1;
+            array(tokens, i, path, key, depth)?
+        }
+        Some(Token::LBrace) => {
+            *i += 1;
+            object(tokens, i, path, key, depth)?
+        }
+        other => {
+            return Err(format!(
+                "expected a value for {path}.{key}, found {other:?}"
+            ))
+        }
+    };
+    Ok(lit)
+}
+
+/// The items of an array after `[`. The items are separated by commas. A comma after the last
+/// item is permitted. An array of quoted strings is a `List`, any other array is `Items`.
+fn array(
+    tokens: &[Token],
+    i: &mut usize,
+    path: &str,
+    key: &str,
+    depth: usize,
+) -> Result<Lit, String> {
+    let mut items: Vec<Lit> = Vec::new();
     loop {
-        match tokens.get(i) {
-            Some(Token::RBracket) => return Ok((items, i + 1)),
-            Some(Token::String(item)) => {
-                items.push(item.clone());
-                i += 1;
-                match tokens.get(i) {
-                    Some(Token::Comma) => i += 1,
+        match tokens.get(*i) {
+            Some(Token::RBracket) => {
+                *i += 1;
+                break;
+            }
+            None => return Err(format!("unterminated list: {path}.{key}")),
+            _ => {
+                items.push(value(tokens, i, path, key, depth + 1)?);
+                match tokens.get(*i) {
+                    Some(Token::Comma) => *i += 1,
                     Some(Token::RBracket) => {}
                     other => {
                         return Err(format!(
@@ -215,10 +318,64 @@ fn list(
                     }
                 }
             }
-            None => return Err(format!("unterminated list: {path}.{key}")),
+        }
+    }
+    if items.iter().all(|item| matches!(item, Lit::Str(_))) {
+        Ok(Lit::List(
+            items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Lit::Str(text) => Some(text),
+                    _ => None,
+                })
+                .collect(),
+        ))
+    } else {
+        Ok(Lit::Items(items))
+    }
+}
+
+/// The members of an object after `{`: `name = value`, with an optional comma after each.
+fn object(
+    tokens: &[Token],
+    i: &mut usize,
+    path: &str,
+    key: &str,
+    depth: usize,
+) -> Result<Lit, String> {
+    let mut members: Vec<(String, Lit)> = Vec::new();
+    loop {
+        match tokens.get(*i) {
+            Some(Token::RBrace) => {
+                *i += 1;
+                return Ok(Lit::Object(members));
+            }
+            Some(Token::Ident(name)) => {
+                let name = name.clone();
+                *i += 1;
+                match tokens.get(*i) {
+                    Some(Token::Equal) => *i += 1,
+                    other => {
+                        return Err(format!(
+                            "expected '=' after {name} in the object {path}.{key}, found {other:?}"
+                        ))
+                    }
+                }
+                let member = value(tokens, i, path, &format!("{key}.{name}"), depth + 1)?;
+                if members.iter().any(|(other, _)| *other == name) {
+                    return Err(format!(
+                        "duplicate member {name} in the object {path}.{key}"
+                    ));
+                }
+                members.push((name, member));
+                if let Some(Token::Comma) = tokens.get(*i) {
+                    *i += 1;
+                }
+            }
+            None => return Err(format!("unterminated object: {path}.{key}")),
             other => {
                 return Err(format!(
-                    "expected a quoted string in the list {path}.{key}, found {other:?}"
+                    "expected a member name in the object {path}.{key}, found {other:?}"
                 ))
             }
         }
@@ -354,8 +511,10 @@ mod tests {
     const LABELED: &[&str] = &["user"];
 
     fn parse(raw: &str, blocks: &[&str]) -> Result<Document, String> {
-        super::parse(raw, blocks, LABELED)
+        super::parse(raw, blocks, LABELED, NESTED)
     }
+
+    const NESTED: &[(&str, &str)] = &[("user", "key")];
 
     #[test]
     fn keeps_the_written_form_of_each_scalar() {
@@ -418,10 +577,86 @@ mod tests {
             "a comma is mandatory"
         );
         assert!(
-            parse(r#"user "a" { g = [1] }"#, BLOCKS).is_err(),
-            "items are quoted"
+            parse(r#"user "a" { g = [1 2] }"#, BLOCKS).is_err(),
+            "a comma is mandatory"
         );
         assert!(parse(r#"user "a" { g = ["x" }"#, BLOCKS).is_err());
         assert!(parse(r#"user "a" { g = [] g = [] }"#, BLOCKS).is_err());
+    }
+
+    #[test]
+    fn an_array_can_hold_strings_and_objects_and_an_object_keeps_the_order_of_its_members() {
+        let doc = parse(
+            r#"user "a" {
+                 grants = [
+                   "access on service:x",
+                   { grant = "data.read on service:y", limits = { max_rows = 10, requests = [ { amount = 300, window = "minute" } ] } },
+                 ]
+               }"#,
+            BLOCKS,
+        )
+        .unwrap();
+        let Lit::Items(items) = &doc.labeled[0].values["grants"] else {
+            panic!("an array with an object is `Items`");
+        };
+        assert_eq!(items[0], Lit::Str("access on service:x".into()));
+        let Lit::Object(members) = &items[1] else {
+            panic!("the second item is an object");
+        };
+        assert_eq!(members[0].0, "grant");
+        assert_eq!(members[1].0, "limits");
+        let Lit::Object(limits) = &members[1].1 else {
+            panic!("the limits are an object");
+        };
+        assert_eq!(limits[0], ("max_rows".to_string(), Lit::Int("10".into())));
+        assert!(matches!(&limits[1].1, Lit::Items(rows) if rows.len() == 1));
+        for bad in [
+            r#"user "a" { g = { a = 1, a = 2 } }"#,
+            r#"user "a" { g = { a 1 } }"#,
+            r#"user "a" { g = { a = 1 "#,
+            r#"user "a" { g = [ { a = 1 ] }"#,
+            r#"user "a" { g = [[[[[[[[1]]]]]]]] }"#,
+        ] {
+            assert!(parse(bad, BLOCKS).is_err(), "{bad}");
+        }
+        assert!(parse(r#"user "a" { g = [] }"#, BLOCKS).is_ok());
+    }
+
+    #[test]
+    fn a_user_block_holds_blocks_key_with_a_label_and_nothing_else() {
+        let doc = parse(
+            r#"user "carol" {
+                 grants = ["access on service:x"]
+                 key "nightly report" { key_env = "CAROL_KEY" grants = [] }
+                 key "backup check" { key_sha256_file = "/run/secrets/sum" }
+               }"#,
+            BLOCKS,
+        )
+        .unwrap();
+        let carol = &doc.labeled[0];
+        assert_eq!(carol.children.len(), 2);
+        assert_eq!(carol.children[0].kind, "key");
+        assert_eq!(carol.children[0].label, "nightly report");
+        assert_eq!(
+            carol.children[0].values["key_env"],
+            Lit::Str("CAROL_KEY".into())
+        );
+        assert_eq!(carol.children[1].label, "backup check");
+        for bad in [
+            r#"user "a" { key "x" { } key "x" { } }"#,
+            r#"user "a" { other "x" { } }"#,
+            r#"user "a" { key "x" { key "y" { } } }"#,
+            r#"user "a" { key "x" }"#,
+            r#"user "a" { key "x" { a = 1 "#,
+            r#"server { key "x" { } }"#,
+        ] {
+            assert!(parse(bad, BLOCKS).is_err(), "{bad}");
+        }
+        // The same name in two users is permitted (portal 3.4c).
+        assert!(parse(
+            r#"user "a" { key "x" { } } user "b" { key "x" { } }"#,
+            BLOCKS
+        )
+        .is_ok());
     }
 }

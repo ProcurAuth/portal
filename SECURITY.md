@@ -77,7 +77,7 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 
 ## Identity token
 
-With the `identity` block, `/auth/verify` gives a JWT to each service that a user can open (contract 11.3). The server signs the token with Ed25519 (`EdDSA`). The token holds `iss`, `sub` (the login), `aud` (the id of the service), `iat`, and `exp`. It holds no permission. Its life is `identity.token_ttl`. The default is 5 minutes. The maximum is 1 hour.
+With the `identity` block, `/auth/verify` gives a JWT to each service that a user can open (protocol section 9). The server signs the token with Ed25519 (the `alg` value is `Ed25519`). The token holds `iss`, `sub` (the login), `aud` (the id of the service), `iat`, and `exp`. It holds no permission. Its life is `identity.token_ttl`. The default is 5 minutes. The maximum is 1 hour.
 
 - The server gets the private key from `identity.signing_key_env` or from `identity.signing_key_file`. The server reads the key once at start. A key that is not a PKCS#8 Ed25519 key stops the server. The effective configuration and the log show only its `kid`.
 - The server keeps one token for each session and each service. It issues the token again when half of its life is gone. The cache holds at most 16384 tokens. A token stays valid until `exp` after a logout. Keep `token_ttl` short.
@@ -97,9 +97,20 @@ With the `pdp` block, the server answers AuthZEN requests on a second listener (
 - The log records each decision (`pdp_decision`). Each entry has the server, the subject, the action, the resource, the decision, and the reason. The resource is the chain with the ids percent-encoded, so that an id cannot add a line or a field to the log. The counters `portal_pdp_decisions_total` and `portal_pdp_refused_total` are in `/metrics`.
 - The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS. In K3s, the NetworkPolicy `allow-portal-pdp` admits to the port 4182 only the pods with the label `portal-pdp-client: "true"` in the namespaces `apps`, `observability` and `edge`.
 
+## Keys
+
+- The portal never stores the text of a key. It stores the SHA-256 digest and the last 4 characters. The text has 43 random base62 characters and a CRC32 check, so a typing error gets no database read.
+- The edge `/auth/verify-key` reads only memory. A refusal gives status 401 with an empty body. The body and the headers never tell which check failed. The log has at most one line each minute for each address and cause.
+- A key never holds an action of the service `portal`, other than `access`. The PDP ignores such a grant.
+- A key never gives more than its owner. The PDP checks both sides at each question, and the lowest ceiling applies.
+- A secret of the configuration (password hash, key text) uses only `_env` or `_file`. A secret in clear text stops the start.
+- The portal counts the uses of a budget in the database, with one statement that takes the unit from each counter or from none. A failed count gives status 503, never `true`.
+- A form of the key page has a size limit and at most 4 forms are read at the same time.
+- On SIGTERM, the instance closes its listeners after 5 seconds and waits at most 10 seconds for the answers in progress.
+
 ## Actions of the services
 
-The server reads `/.well-known/access-actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses the whole document in these cases:
+The server reads `/.well-known/procurauth/actions` of each service. It reads the document from an internal URL that a label gives (`portal.actions`, or the origin of `portal.health`). The read has a timeout. It has a size limit of 64 KiB. The read does not follow redirects. The concurrency is limited. The server refuses the whole document in these cases:
 
 - a bad action;
 - a duplicate action;

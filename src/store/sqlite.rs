@@ -13,6 +13,8 @@ use super::*;
 use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
+mod keys;
+
 const SCHEMA_VERSION: i64 = 6;
 
 /// The tables of schema version 1 that the current version keeps.
@@ -118,39 +120,69 @@ CREATE TABLE user_grants_v5 (
 );
 ";
 
-/// Schema version 6: the accesses of the users, their grants and their keys. No code uses these
-/// tables yet. A file at version 6 opens with the programs that understand version 6. An `access`
-/// belongs to one user. A key belongs to one access. Deleting a user deletes the accesses of the
-/// user, and deleting an access deletes its grants and its keys. The `id` columns hold text that
-/// the program makes at random. The key table holds the SHA-256 digest of a key, never the key.
-const ACCESS_SCHEMA: &str = "
-CREATE TABLE accesses (
+/// Schema version 6: the keys of the users, their grants and their counters (portal 4, 5, 7 and
+/// 10.7). A file at version 6 opens only with the programs that understand version 6. A key
+/// belongs to one user, or to the superadmin: then `owner_id` is NULL (portal 3.7b). Deleting a
+/// user deletes the keys of the user with their grants and their counters. The `id` of a key is
+/// text that the program makes at random. The key table holds the SHA-256 digest of a key, never
+/// the key. A revoked key leaves one summary row in `key_history`. The column `limits` of a grant
+/// holds the limit values as JSON. The row of `directory_version` counts the writes to the users,
+/// the grants and the keys. The tables have the form of PostgreSQL (portal 10.4a).
+const KEYS_SCHEMA: &str = "
+ALTER TABLE user_grants ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE keys (
   id TEXT PRIMARY KEY,
-  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  digest BLOB NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  expires_at INTEGER,
+  last_check_at INTEGER,
+  check_count INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX accesses_owner ON accesses (owner_id);
-CREATE TABLE access_grants (
-  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+CREATE INDEX keys_owner ON keys (owner_id, created_at, id);
+CREATE INDEX keys_created ON keys (created_at, id);
+CREATE TABLE key_grants (
+  key_id TEXT NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
   action TEXT NOT NULL,
   resource_type TEXT NOT NULL,
   resource_id TEXT NOT NULL,
   resource_path TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (access_id, action, resource_type, resource_id, resource_path)
+  limits TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (key_id, action, resource_type, resource_id, resource_path)
 );
-CREATE TABLE access_keys (
+CREATE TABLE key_history (
   id TEXT PRIMARY KEY,
-  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
-  digest BLOB NOT NULL UNIQUE,
-  hint TEXT NOT NULL,
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  revoked_at INTEGER,
-  last_used_at INTEGER
+  revoked_at INTEGER NOT NULL,
+  last_check_at INTEGER,
+  check_count INTEGER NOT NULL
 );
-CREATE INDEX access_keys_access ON access_keys (access_id);
+CREATE INDEX key_history_owner ON key_history (owner_id, created_at, id);
+CREATE INDEX key_history_created ON key_history (created_at, id);
+CREATE TABLE budget_counters (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  key_id TEXT REFERENCES keys(id) ON DELETE CASCADE,
+  file_subject TEXT,
+  service TEXT NOT NULL,
+  budget TEXT NOT NULL,
+  \"window\" TEXT NOT NULL CHECK (\"window\" IN ('second', 'minute', 'hour', 'day')),
+  window_start INTEGER NOT NULL,
+  units INTEGER NOT NULL,
+  CHECK ((user_id IS NOT NULL) + (key_id IS NOT NULL) + (file_subject IS NOT NULL) = 1)
+);
+CREATE UNIQUE INDEX budget_counters_user ON budget_counters (user_id, service, budget, \"window\");
+CREATE UNIQUE INDEX budget_counters_key ON budget_counters (key_id, service, budget, \"window\");
+CREATE UNIQUE INDEX budget_counters_file ON budget_counters (file_subject, service, budget, \"window\");
+CREATE TABLE directory_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+INSERT INTO directory_version (id, version) VALUES (1, 0);
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -160,8 +192,10 @@ enum GrantColumns {
     ServiceOnly,
     /// Version 4: `sub_resource_type` and `sub_resource_id`.
     SubResource,
-    /// Version 5 and later: `resource_path`.
+    /// Version 5: `resource_path`.
     Path,
+    /// Version 6 and later: `resource_path` and `limits`.
+    PathLimits,
 }
 
 impl GrantColumns {
@@ -169,7 +203,8 @@ impl GrantColumns {
         match version {
             ..=3 => Self::ServiceOnly,
             4 => Self::SubResource,
-            _ => Self::Path,
+            5 => Self::Path,
+            _ => Self::PathLimits,
         }
     }
 }
@@ -216,18 +251,23 @@ fn migrate_to_resource_path(conn: &Connection) -> Result<(), String> {
 /// import reads files of earlier versions.
 fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<Vec<Grant>, String> {
     let sql = match columns {
+        GrantColumns::PathLimits => {
+            "SELECT action, resource_type, resource_id, resource_path, '', limits
+               FROM user_grants WHERE user_id = ?1
+              ORDER BY action, resource_id, resource_path"
+        }
         GrantColumns::Path => {
-            "SELECT action, resource_type, resource_id, resource_path, ''
+            "SELECT action, resource_type, resource_id, resource_path, '', '{}'
                FROM user_grants WHERE user_id = ?1
               ORDER BY action, resource_id, resource_path"
         }
         GrantColumns::SubResource => {
-            "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id
+            "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id, '{}'
                FROM user_grants WHERE user_id = ?1
               ORDER BY action, resource_id, sub_resource_type, sub_resource_id"
         }
         GrantColumns::ServiceOnly => {
-            "SELECT action, resource_type, resource_id, '', '' FROM user_grants
+            "SELECT action, resource_type, resource_id, '', '', '{}' FROM user_grants
               WHERE user_id = ?1 ORDER BY action, resource_id"
         }
     };
@@ -241,6 +281,7 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(db)?
@@ -248,12 +289,12 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
         .map_err(db)?;
     let mut grants = rows
         .iter()
-        .map(|(action, kind, id, third, fourth)| {
+        .map(|(action, kind, id, third, fourth, limits)| {
             let path = match columns {
-                GrantColumns::Path => third.clone(),
+                GrantColumns::Path | GrantColumns::PathLimits => third.clone(),
                 _ => migrated_path(third, fourth)?,
             };
-            grant_from_row(action, kind, id, &path)
+            grant_from_row(action, kind, id, &path, limits)
         })
         .collect::<Result<Vec<_>, _>>()?;
     grants.sort();
@@ -262,12 +303,12 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
 
 fn insert_grants(conn: &Connection, user_id: i64, grants: &[Grant]) -> rusqlite::Result<()> {
     for grant in grants {
-        let (kind, id, path) = grant_columns(grant);
+        let (kind, id, path, limits) = grant_columns(grant);
         conn.execute(
             "INSERT OR IGNORE INTO user_grants
-               (user_id, action, resource_type, resource_id, resource_path)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![user_id, grant.action, kind, id, path],
+               (user_id, action, resource_type, resource_id, resource_path, limits)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![user_id, grant.action, kind, id, path, limits],
         )?;
     }
     Ok(())
@@ -324,14 +365,14 @@ impl Sqlite {
                 let tx = conn.transaction().map_err(db)?;
                 tx.execute_batch(&missing).map_err(db)?;
                 migrate_to_resource_path(&tx)?;
-                tx.execute_batch(ACCESS_SCHEMA).map_err(db)?;
+                tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
             }
             5 => {
                 let tx = conn.transaction().map_err(db)?;
-                tx.execute_batch(ACCESS_SCHEMA).map_err(db)?;
+                tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -353,6 +394,11 @@ impl Sqlite {
     }
 
     #[cfg(test)]
+    pub fn execute_raw(&self, sql: &str) {
+        self.conn().execute_batch(sql).unwrap();
+    }
+
+    #[cfg(test)]
     pub fn count(&self, table: &str) -> i64 {
         self.conn()
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -361,8 +407,12 @@ impl Sqlite {
 
     // Accounts --------------------------------------------------------------------------------
 
+    #[cfg(test)]
     pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
-        let conn = self.conn();
+        Self::load_users_with(&self.conn())
+    }
+
+    fn load_users_with(conn: &Connection) -> Result<Vec<UserRow>, String> {
         let mut users = conn
             .prepare("SELECT id, login, password_hash, created_at FROM users ORDER BY login")
             .map_err(db)?
@@ -381,7 +431,7 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         for (id, user) in &mut users {
-            user.grants = grants_of(&conn, *id, GrantColumns::Path)?;
+            user.grants = grants_of(conn, *id, GrantColumns::PathLimits)?;
         }
         Ok(users.into_iter().map(|(_, user)| user).collect())
     }
@@ -403,6 +453,9 @@ impl Sqlite {
         }
         let id = tx.last_insert_rowid();
         insert_grants(&tx, id, &user.grants).map_err(|e| InsertError::Db(db(e)))?;
+        keys::insert_counter_rows(&tx, keys::Subject::User(id), &user.grants)
+            .map_err(|e| InsertError::Db(db(e)))?;
+        keys::bump(&tx).map_err(|e| InsertError::Db(db(e)))?;
         tx.commit().map_err(|e| InsertError::Db(db(e)))
     }
 
@@ -436,16 +489,23 @@ impl Sqlite {
             tx.execute("DELETE FROM user_grants WHERE user_id = ?1", [id])
                 .map_err(db)?;
             insert_grants(&tx, id, grants).map_err(db)?;
+            keys::insert_counter_rows(&tx, keys::Subject::User(id), grants).map_err(db)?;
         }
+        keys::bump(&tx).map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(true)
     }
 
     pub fn remove_user(&self, login: &str) -> Result<bool, String> {
-        let changed = self
-            .conn()
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(db)?;
+        let changed = tx
             .execute("DELETE FROM users WHERE login = ?1", [login])
             .map_err(db)?;
+        if changed > 0 {
+            keys::bump(&tx).map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
         Ok(changed > 0)
     }
 
@@ -941,12 +1001,20 @@ impl Sqlite {
         } else {
             Vec::new()
         };
+        // A file of version 6 has the keys and the summary rows of the revoked keys.
+        let (keys, key_history) = if version >= 6 {
+            (keys::read_keys(conn)?, keys::read_history(conn)?)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         Ok(Dump {
             users: with_grants,
             sessions,
             accesses,
             audit,
             logins,
+            keys,
+            key_history,
         })
     }
 }
@@ -1005,25 +1073,33 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Adds an access with a grant and a key for the user. The tables are those of version 6.
-    fn insert_access(store: &Sqlite, user_login: &str) {
+    /// Adds a key with a grant, a counter and a summary row for the user. The tables are those of
+    /// version 6.
+    fn insert_key(store: &Sqlite, user_login: &str) {
         let conn = store.conn();
         conn.execute(
-            "INSERT INTO accesses (id, owner_id, name, created_at)
-             SELECT 'acc1', id, 'agent', 1 FROM users WHERE login = ?1",
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at)
+             SELECT 'key1', id, 'agent', x'00ff', 'ab12', 1, 2 FROM users WHERE login = ?1",
             [user_login],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO access_grants (access_id, action, resource_type, resource_id)
-             VALUES ('acc1', 'access', 'service', 'db')",
+            "INSERT INTO key_grants (key_id, action, resource_type, resource_id, limits)
+             VALUES ('key1', 'access', 'service', 'db',
+                     '{\"requests\":[{\"amount\":10,\"window\":\"minute\"}]}')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
-             VALUES ('key1', 'acc1', x'00ff', 'mcp_ab12', 1, 2)",
+            "INSERT INTO budget_counters (key_id, service, budget, \"window\", window_start, units)
+             VALUES ('key1', 'db', 'requests', 'minute', 0, 0)",
             [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO key_history (id, owner_id, name, created_at, revoked_at, check_count)
+             SELECT 'key0', id, 'old', 1, 2, 0 FROM users WHERE login = ?1",
+            [user_login],
         )
         .unwrap();
     }
@@ -1035,36 +1111,68 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn a_new_database_has_the_tables_of_the_accesses() {
-        let store = Sqlite::open_in_memory();
-        assert_eq!(version(&store), 6);
-        for table in ["accesses", "access_grants", "access_keys"] {
-            assert!(has_table(&store, table), "{table}");
-        }
+    const KEY_TABLES: [&str; 5] = [
+        "keys",
+        "key_grants",
+        "key_history",
+        "budget_counters",
+        "directory_version",
+    ];
+
+    fn has_column(store: &Sqlite, table: &str, column: &str) -> bool {
+        let conn = store.conn();
+        let mut statement = conn
+            .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+            .unwrap();
+        let names: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        names.iter().any(|n| n == column)
     }
 
     #[test]
-    fn a_database_at_version_five_gains_the_tables_of_the_accesses_and_keeps_its_rows() {
-        let dir = std::env::temp_dir().join(format!("portal-v5-access-{}", std::process::id()));
+    fn a_new_database_has_the_tables_of_the_keys() {
+        let store = Sqlite::open_in_memory();
+        assert_eq!(version(&store), 6);
+        for table in KEY_TABLES {
+            assert!(has_table(&store, table), "{table}");
+        }
+        assert!(has_column(&store, "user_grants", "limits"));
+        assert!(has_column(&store, "key_grants", "limits"));
+        assert_eq!(count(&store, "directory_version"), 1);
+        let version: i64 = store
+            .conn()
+            .query_row("SELECT version FROM directory_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+    }
+
+    #[test]
+    fn a_database_at_version_five_gains_the_tables_of_the_keys_and_keeps_its_rows() {
+        let dir = std::env::temp_dir().join(format!("portal-v5-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("portal.db");
         let store = Sqlite::open(&path).unwrap();
         store.insert_user(&user("alice", &["db"])).unwrap();
         drop(store);
-        // This is the file of the portal before version 6: the three tables did not exist.
+        // This is the file of the portal before version 6: the tables and the column did not exist.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+            "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
+             DROP TABLE keys; DROP TABLE directory_version;
+             ALTER TABLE user_grants DROP COLUMN limits;
              PRAGMA user_version = 5;",
         )
         .unwrap();
         drop(conn);
         let store = Sqlite::open(&path).unwrap();
         assert_eq!(version(&store), SCHEMA_VERSION);
-        for table in ["accesses", "access_grants", "access_keys"] {
+        for table in KEY_TABLES {
             assert!(has_table(&store, table), "{table}");
         }
+        assert!(has_column(&store, "user_grants", "limits"));
         assert_eq!(
             store.load_users().unwrap(),
             [user("alice", &["db"])],
@@ -1077,37 +1185,104 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_user_deletes_the_accesses_their_grants_and_their_keys() {
+    fn deleting_a_user_deletes_the_keys_their_grants_their_counters_and_their_history() {
         let store = Sqlite::open_in_memory();
         store.insert_user(&user("alice", &[])).unwrap();
         store.insert_user(&user("bob", &[])).unwrap();
-        insert_access(&store, "alice");
-        assert_eq!(count(&store, "access_keys"), 1);
+        insert_key(&store, "alice");
+        assert_eq!(count(&store, "keys"), 1);
         assert!(store.remove_user("bob").unwrap());
-        assert_eq!(count(&store, "accesses"), 1, "the access of alice stays");
+        assert_eq!(count(&store, "keys"), 1, "the key of alice stays");
         assert!(store.remove_user("alice").unwrap());
-        for table in ["accesses", "access_grants", "access_keys"] {
+        for table in ["keys", "key_grants", "key_history", "budget_counters"] {
             assert_eq!(count(&store, table), 0, "{table}");
         }
     }
 
     #[test]
-    fn a_key_digest_is_unique_and_an_access_needs_an_owner() {
+    fn a_key_digest_is_unique_and_a_key_needs_an_existing_owner_or_none() {
         let store = Sqlite::open_in_memory();
         store.insert_user(&user("alice", &[])).unwrap();
-        insert_access(&store, "alice");
+        insert_key(&store, "alice");
         let conn = store.conn();
         let twice = conn.execute(
-            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
-             VALUES ('key2', 'acc1', x'00ff', 'mcp_cd34', 1, 2)",
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+             VALUES ('key2', NULL, 'x', x'00ff', 'cd34', 1)",
             [],
         );
         assert!(twice.is_err(), "the same digest cannot name two keys");
         let orphan = conn.execute(
-            "INSERT INTO accesses (id, owner_id, name, created_at) VALUES ('acc2', 999, 'x', 1)",
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+             VALUES ('key3', 999, 'x', x'01', 'cd34', 1)",
             [],
         );
-        assert!(orphan.is_err(), "an access needs an existing owner");
+        assert!(orphan.is_err(), "a key needs an existing owner");
+        // A key of the superadmin has no owner row and no expiry date (portal 3.7b, 5.3).
+        conn.execute(
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+             VALUES ('key4', NULL, 'root key', x'02', 'ef56', 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_counter_row_has_one_subject_and_one_row_for_each_budget_and_window() {
+        let store = Sqlite::open_in_memory();
+        store.insert_user(&user("alice", &[])).unwrap();
+        insert_key(&store, "alice");
+        let conn = store.conn();
+        let insert = |user_id: &str, key_id: &str, file: &str, window: &str| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO budget_counters
+                       (user_id, key_id, file_subject, service, budget, \"window\", window_start, units)
+                     VALUES ({user_id}, {key_id}, {file}, 'db', 'requests', '{window}', 0, 0)"
+                ),
+                [],
+            )
+        };
+        assert!(
+            insert("NULL", "NULL", "NULL", "second").is_err(),
+            "no subject"
+        );
+        assert!(
+            insert("1", "'key1'", "NULL", "second").is_err(),
+            "two subjects"
+        );
+        assert!(insert("1", "NULL", "NULL", "week").is_err(), "a bad window");
+        assert!(insert("1", "NULL", "NULL", "minute").is_ok());
+        assert!(
+            insert("1", "NULL", "NULL", "minute").is_err(),
+            "one row for each user, budget and window"
+        );
+        assert!(insert("NULL", "NULL", "'carol'", "minute").is_ok());
+        assert!(
+            insert("NULL", "NULL", "'carol'", "minute").is_err(),
+            "one row for each subject of the file, budget and window"
+        );
+        assert!(
+            insert("NULL", "'key1'", "NULL", "minute").is_err(),
+            "the helper already made the row of this key"
+        );
+    }
+
+    #[test]
+    fn the_directory_version_holds_exactly_one_row() {
+        let store = Sqlite::open_in_memory();
+        let conn = store.conn();
+        assert!(conn
+            .execute(
+                "INSERT INTO directory_version (id, version) VALUES (2, 0)",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO directory_version (id, version) VALUES (1, 0)",
+                []
+            )
+            .is_err());
     }
 
     #[test]

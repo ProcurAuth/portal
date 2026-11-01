@@ -171,12 +171,22 @@ fn start(store: Arc<Store>, cache_ttl: Option<Duration>) -> Node {
     start_with(store, cache_ttl, "")
 }
 
+/// A free local port. A port that this function gave once is never given again, so two servers of
+/// a test never get the same port when the first one has not bound it yet.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
 }
 
 /// A node with more configuration. The `extra` text is added to the file.
@@ -196,8 +206,15 @@ struct Custom {
     login: &'static str,
     password: &'static str,
     session_secret: &'static str,
-    /// Wait for a complete catalogue before the node is given to the test.
+    /// Wait for the open port and a complete catalogue before the node is given to the test.
+    /// A node that does not wait has no open port until its catalogue is complete (portal 7.3b).
     wait_complete: bool,
+    /// `users.max_users`.
+    max_users: usize,
+    /// More environment variables of the configuration.
+    env: Vec<(String, String)>,
+    /// The stop of the server, in place of SIGTERM. The server stops when it gets a value.
+    stop: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl Default for Custom {
@@ -209,6 +226,9 @@ impl Default for Custom {
             password: PASSWORD,
             session_secret: "0123456789abcdef0123456789abcdef",
             wait_complete: true,
+            max_users: 10,
+            env: Vec::new(),
+            stop: None,
         }
     }
 }
@@ -228,6 +248,9 @@ fn start_custom(
         password,
         session_secret,
         wait_complete,
+        max_users,
+        env,
+        stop,
     } = custom;
     let (config, mut secrets) = Config::parse(
         &format!(
@@ -237,7 +260,7 @@ fn start_custom(
           superadmin_login_env    = "PORTAL_TEST_LOGIN"
           superadmin_password_env = "PORTAL_TEST_PASSWORD"
         }}
-        users {{ max_users = 10 }}
+        users {{ max_users = {max_users} }}
         session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
         discovery {{ {discovery} }}
         {extra}
@@ -250,7 +273,10 @@ fn start_custom(
             "TEST_IDENTITY_KEY" => Some(key.clone()),
             "TEST_PDP_DB" => Some(PDP_DB_TOKEN.to_string()),
             "TEST_PDP_CHAT" => Some(PDP_CHAT_TOKEN.to_string()),
-            _ => None,
+            other => env
+                .iter()
+                .find(|(key, _)| key == other)
+                .map(|(_, value)| value.clone()),
         },
     )
     .unwrap();
@@ -283,9 +309,17 @@ fn start_custom(
     let state = Arc::new(state);
     let serving = Arc::clone(&state);
     std::thread::spawn(move || {
-        let _ = serve(serving);
+        let _ = match stop {
+            Some(stop) => super::serve_with(serving, async move {
+                let _ = stop.await;
+            }),
+            None => super::serve_with(serving, std::future::pending()),
+        };
     });
     let node = Node { port, state };
+    if !wait_complete {
+        return node;
+    }
     wait_until(Duration::from_secs(10), || {
         TcpStream::connect(("127.0.0.1", port)).is_ok()
             && send(port, "GET", "/healthz", &[], "").status == 200
@@ -294,12 +328,10 @@ fn start_custom(
     wait_until(Duration::from_secs(10), || {
         node.state.discovery.refreshes() >= 1
     });
-    if wait_complete {
-        assert!(
-            current_catalog(&node.state).is_complete(),
-            "the first round of a harness without a source is complete"
-        );
-    }
+    assert!(
+        current_catalog(&node.state).is_complete(),
+        "the first round of a harness without a source is complete"
+    );
     node
 }
 
@@ -354,6 +386,39 @@ fn sign_in(node: &Node, login: &str, password: &str) -> String {
     reply
         .cookie(&session_cookie_name(node))
         .expect("a session cookie")
+}
+
+#[test]
+fn a_sign_in_page_that_stayed_open_too_long_gives_the_page_again_with_a_new_token() {
+    let node = start_with(Arc::new(Backend::Sqlite.fresh()), None, "");
+    let origin = format!("http://127.0.0.1:{}", node.port);
+    let csrf = "A".repeat(32);
+    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
+    // The browser dropped the cookie of the token: the form has a token and the request has none.
+    let reply = send(
+        node.port,
+        "POST",
+        LOGIN_PATH,
+        &[
+            ("Origin", &origin),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+        ],
+        &format!("login=root&password={PASSWORD}&csrf={csrf}&rd=%2F&sig={signature}"),
+    );
+    assert_eq!(reply.status, 403);
+    assert!(
+        reply.body.contains("The page was open too long"),
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.body.contains(r#"name="csrf""#) && !reply.body.contains(&csrf),
+        "a new token"
+    );
+    let cookie = reply
+        .header("set-cookie")
+        .expect("the cookie of the new token");
+    assert!(cookie.contains("Max-Age=43200"), "{cookie}");
 }
 
 /// The result that Traefik gets from ForwardAuth. 204 lets the request through. 302 sends it to the login page.
@@ -594,7 +659,7 @@ fn listed(labels: &[(&str, &str)]) -> crate::catalog::Service {
 }
 
 /// The URL of the actions of the service `db` in the tests. The test fills the registry.
-const DB_ACTIONS_URL: &str = "http://test/.well-known/access-actions";
+const DB_ACTIONS_URL: &str = "http://test/.well-known/procurauth/actions";
 
 /// The catalogue has two services. Grafana (`other-grafana`, only `access`) and Db (`db`, with actions).
 fn publish_catalog(node: &Node, db_actions: &[&str]) {
@@ -619,6 +684,7 @@ fn publish_catalog(node: &Node, db_actions: &[&str]) {
                 name: name.to_string(),
                 resource_types: vec!["service".into(), "database".into()],
                 description: format!("The action {name}."),
+                limits: Vec::new(),
             })
             .collect(),
     );
@@ -673,13 +739,13 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             add.location(),
             Some("/auth/settings/users/alice?s=user-added")
         );
-        // The add form can open a service. An action, an unknown field or a service id that is
-        // not valid is a bad request. A service that the catalogue lacks is a notice.
+        // The add form has the login and the password only. A grant, a copy or any other field is
+        // a bad request. The grants have their own page.
         for bad in [
-            "login=bob&password=a-long-password-1&g.db.access=2",
-            "login=bob&password=a-long-password-1&g.db",
+            "login=bob&password=a-long-password-1&grant0=access+on+service%3Adb",
+            "login=bob&password=a-long-password-1&g.db.access=1",
+            "login=bob&password=a-long-password-1&copy=alice",
             "login=bob&password=a-long-password-1&other=1",
-            "login=bob&password=a-long-password-1&g.DB.access=1",
         ] {
             assert_eq!(
                 post(&node, &root, USERS_ADD_PATH, USERS_TOKEN, bad).status,
@@ -687,53 +753,6 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
                 "{bad}"
             );
         }
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                "login=bob&password=a-long-password-1&g.chat.access=1",
-            )
-            .location(),
-            Some("/auth/settings?s=add-unknown-service")
-        );
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                "login=bob&password=a-long-password-1&g.db.system.read=1",
-            )
-            .location(),
-            Some("/auth/settings?s=add-unknown-service"),
-            "an action that the service does not publish"
-        );
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                "login=bob&password=a-long-password-1&copy=alice",
-            )
-            .status,
-            400,
-            "the form has no copy of the access of another account"
-        );
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                "login=bob&password=a-long-password-1&r.query.run.read+on+service%3Adb%2Fhost%3Alocal=1",
-            )
-            .location(),
-            Some("/auth/settings?s=add-unknown-service"),
-            "a resource that the document of db does not name"
-        );
         assert!(
             node.state.users.get("bob").is_none(),
             "a refused add makes no account"
@@ -767,7 +786,7 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
                 &format!("grants=1&login=alice{fields}"),
             )
         };
-        let reply = update("&g.db.access=1&g.db.query.run.read=1&g.db.query.run.write=1");
+        let reply = update("&grant0=access+on+service%3Adb&grant1=query.run.read+on+service%3Adb&grant2=query.run.write+on+service%3Adb");
         assert_eq!(
             reply.location(),
             Some("/auth/settings/users/alice?s=user-updated")
@@ -801,16 +820,18 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
         assert!(free.header("x-identity-token").is_none());
 
         // The server refuses a grant that the page did not offer.
-        let reply = update("&g.other-grafana.dashboards.read=1");
+        let reply = update("&grant0=dashboards.read+on+service%3Aother-grafana");
         assert_eq!(
             reply.location(),
             Some("/auth/settings/users/alice?s=edit-unknown-grant")
         );
 
-        // An action that db no longer publishes keeps its grant. The page did not show the action.
+        // An action that db no longer publishes keeps its grant when the form sends it as it was.
+        // The editor shows it, so the person can remove it.
         publish_catalog(&node, &["query.run.read"]);
         assert_eq!(
-            update("&g.db.access=1").location(),
+            update("&grant0=access+on+service%3Adb&grant1=query.run.write+on+service%3Adb")
+                .location(),
             Some("/auth/settings/users/alice?s=user-updated")
         );
         let kept: Vec<String> = node
@@ -855,11 +876,15 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
 
 #[test]
 fn in_the_static_mode_only_the_configuration_gives_grants() {
-    let node = start_with(
+    let node = start_custom(
         Arc::new(Backend::Sqlite.fresh()),
         None,
+        Custom {
+            env: vec![("FRED_HASH".into(), password_hash("a-long-password-2"))],
+            ..Custom::default()
+        },
         r#"access { grants_mode = "static" }
-        user "alice" { grants = ["access on service:other-grafana"] }"#,
+        user "fred" { password_hash_env = "FRED_HASH" grants = ["access on service:other-grafana"] }"#,
     );
     publish_catalog(&node, &[]);
     let root = sign_in(&node, "root", PASSWORD);
@@ -875,13 +900,13 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
         &root,
         USERS_UPDATE_PATH,
         USERS_TOKEN,
-        "grants=1&login=alice&g.db.access=1",
+        "grants=1&login=alice&grant0=access+on+service%3Adb",
     );
     assert_eq!(
         reply.location(),
         Some("/auth/settings/users/alice?s=grants-static")
     );
-    // A grant in the database does not count in this mode.
+    // A grant in the database does not count in this mode (portal 3.4b).
     node.state
         .store
         .update_user("alice", None, Some(&[Grant::new("access", "db").unwrap()]))
@@ -889,15 +914,19 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
     crate::sync::run_round(&node.state, 1);
     let alice = sign_in(&node, "alice", "a-long-password-1");
     assert_eq!(
-        open(&node, &alice, "/grafana/").status,
+        open(&node, &alice, "/db/").status,
+        302,
+        "the database does not give access in this mode"
+    );
+    assert_eq!(open(&node, &alice, "/grafana/").status, 302);
+    // The account of the file gets its rights from the file.
+    let fred = sign_in(&node, "fred", "a-long-password-2");
+    assert_eq!(
+        open(&node, &fred, "/grafana/").status,
         204,
         "the configuration gives it"
     );
-    assert_eq!(
-        open(&node, &alice, "/db/").status,
-        302,
-        "the database does not"
-    );
+    assert_eq!(open(&node, &fred, "/db/").status, 302);
 }
 
 /// A request to the PDP listener.
@@ -932,7 +961,7 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
         &format!(
             r#"access {{ grants_mode = "hybrid" }}
             user "carol" {{ grants = ["query.run.read on service:db"] }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
             pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
         ),
@@ -1194,7 +1223,7 @@ fn the_pdp_answers_each_server_for_its_own_resources_and_fails_closed() {
     let metrics = send(node.port, "GET", "/metrics", &[], "");
     assert!(metrics
         .body
-        .contains("portal_pdp_decisions_total{decision=\"true\"}"));
+        .contains("portal_pdp_decisions_total{decision=\"true\",reason=\"none\"}"));
 }
 
 #[test]
@@ -1206,7 +1235,7 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
         &format!(
             r#"access {{ grants_mode = "hybrid" }}
             user "carol" {{ grants = ["query.run.read on service:db/database:logs"] }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
             pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
         ),
@@ -1360,7 +1389,7 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         &format!(
             r#"access {{ grants_mode = "hybrid" }}
             user "carol" {{ grants = ["query.run.read on service:db"] }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
             pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
         ),
     );
@@ -1405,8 +1434,8 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         unknown,
         "also on a sub-resource"
     );
-    // An id with a colon names a machine principal. Nothing makes one yet: it is an unknown subject.
-    for id in ["access:acc1", "access:", "key:k1", "carol:x"] {
+    // An id with a colon names a key. Nothing makes one yet: it is an unknown subject.
+    for id in ["key:acc1", "key:", "other:k1", "carol:x"] {
         assert_eq!(
             single("user", id, "access", "service", "db"),
             unknown,
@@ -1439,14 +1468,15 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         plain_false,
         "an account, an action name that is not valid"
     );
+    // A subject of another type is an unknown subject (protocol 3.3, 11.1).
     assert_eq!(
         single("group", "mallory", "access", "service", "db"),
-        plain_false,
+        unknown,
         "a subject type that is not user"
     );
     assert_eq!(
         single("group", "carol", "access", "service", "db"),
-        plain_false,
+        unknown,
         "a subject type that is not user, an existing login"
     );
     // A permit has no reason.
@@ -1478,7 +1508,7 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
             {"decision": true},
             {"decision": false, "context": {"reason": "unknown_subject"}},
             {"decision": false},
-            {"decision": false}
+            {"decision": false, "context": {"reason": "unknown_subject"}}
         ])
     );
     // A batch without `evaluations` is one decision, with the same reason.
@@ -1503,7 +1533,7 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
         &format!(
             r#"access {{ grants_mode = "hybrid" }}
             user "carol" {{ grants = ["query.run.write on service:db/database:analytics", "query.run.read on service:db/table:t", "system.read on service:db"] }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 4 }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
             pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
         ),
     );
@@ -1566,6 +1596,7 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
             name: "query.run.write".into(),
             resource_types: vec!["service".into()],
             description: String::new(),
+            limits: Vec::new(),
         }],
     );
     assert!(!write(), "the new document removes the type");
@@ -1604,7 +1635,7 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
               "system.read on service:db",
               "query.run.write on service:db/database:old"
             ] }}
-            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" max_evaluations = 8 }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 8 }}
             pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
             pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
         ),
@@ -2001,32 +2032,29 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         ),
         invalid
     );
+    // In a request with one evaluation, a bad `context.match` gets HTTP 400 (protocol 11.1).
     for bad in [
         serde_json::json!({"match": "tree"}),
         serde_json::json!({"match": "Subtree"}),
         serde_json::json!({"match": 1}),
         serde_json::json!({"match": null}),
     ] {
-        assert_eq!(
-            with_context(
-                "carol",
-                "query.run.write",
-                node_of("host", "local", &service),
-                bad.clone()
-            ),
-            invalid_request,
-            "{bad}"
-        );
-        assert_eq!(
-            with_context(
-                "root",
-                "query.run.write",
-                node_of("database", "x", &service),
-                bad.clone()
-            ),
-            invalid_request,
-            "the match comes first"
-        );
+        for subject in ["carol", "root"] {
+            let reply = pdp(
+                pdp_port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &serde_json::json!({
+                    "subject": {"type": "user", "id": subject},
+                    "action": {"name": "query.run.write"},
+                    "resource": {"type": "host", "id": "local", "properties": {"ancestors": [{"type": "service", "id": "db"}]}},
+                    "context": bad.clone()
+                })
+                .to_string(),
+                None,
+            );
+            assert_eq!(reply.status, 400, "{bad}: {}", reply.body);
+        }
     }
     // The batch: the default context of the request, replaced by the context of an item.
     let batch = ask(
@@ -2102,264 +2130,7 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
 }
 
 #[test]
-fn the_settings_give_and_remove_a_grant_on_a_sub_resource() {
-    each_backend(|backend| {
-        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
-        let root = sign_in(&node, "root", PASSWORD);
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_ADD_PATH,
-                USERS_TOKEN,
-                "login=alice&password=a-long-password-1",
-            )
-            .location(),
-            Some("/auth/settings/users/alice?s=user-added")
-        );
-        let add = |fields: &str| {
-            post(&node, &root, GRANT_ADD_PATH, USERS_TOKEN, fields)
-                .location()
-                .map(str::to_string)
-        };
-        let notice = |code: &str| {
-            Some(format!(
-                "/auth/settings/access?user=alice&service=db&s={code}"
-            ))
-        };
-        let fields = "login=alice&service=db&action=query.run.write&type=database&id0=analytics";
-        // The service has not answered yet: no grant on a sub-resource.
-        *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(
-            vec![listed(&[
-                ("portal.name", "Db"),
-                ("portal.id", "db"),
-                ("portal.href", "/db/"),
-                ("portal.actions", DB_ACTIONS_URL),
-            ])],
-            Vec::new(),
-        ));
-        assert_eq!(add(fields), notice("grant-not-known"));
-        publish_catalog(&node, &["query.run.read", "query.run.write"]);
-        assert_eq!(add(fields), notice("grant-added"));
-        assert_eq!(add(fields), notice("unchanged"));
-        for (bad, code) in [
-            (
-                "login=alice&service=db&action=query.run.write&type=table&id0=a",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=system.read&type=database&id0=a",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=access&type=database&id0=a",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=service&id0=db",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=chat&action=query.run.write&type=database&id0=a",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=database",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=database&id0=a&id1=b",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=database&id0=a%0Ab",
-                "grant-bad-id",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=database&id0=",
-                "grant-bad-id",
-            ),
-            (
-                "login=nobody&service=db&action=query.run.write&type=database&id0=a",
-                "no-user",
-            ),
-        ] {
-            let expected = if code == "no-user" {
-                Some(format!("/auth/settings?s={code}"))
-            } else if bad.contains("service=chat") {
-                // The catalogue lacks the service: the answer goes to the page of the account.
-                Some(format!("/auth/settings/users/alice?s={code}"))
-            } else {
-                notice(code)
-            };
-            assert_eq!(add(bad), expected, "{bad}");
-        }
-        let extra = post(
-            &node,
-            &root,
-            GRANT_ADD_PATH,
-            USERS_TOKEN,
-            &format!("{fields}&other=1"),
-        );
-        assert_eq!(extra.status, 400, "an unknown field");
-        let expected =
-            vec![Grant::parse("query.run.write on service:db/database:analytics").unwrap()];
-        assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
-        assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let editor = "/auth/settings/access?user=alice&service=db";
-        let page = page(&node, &root, editor);
-        assert_eq!(page.status, 200);
-        assert!(page.body.contains(
-            r#"<span class="path__type">database</span> <code class="path__id">analytics</code>"#
-        ));
-        // The page of the account lists the service with its grant: one line.
-        let account = self::page(&node, &root, "/auth/settings/users/alice");
-        assert!(
-            account.body.contains("1/3, 1 on resources")
-                || account.body.contains(", 1 on resources")
-        );
-        // The editor of an unknown service or account does not exist.
-        for gone in [
-            "/auth/settings/access?user=alice&service=chat",
-            "/auth/settings/access?user=nobody&service=db",
-            "/auth/settings/access?user=alice",
-            "/auth/settings/services/chat",
-        ] {
-            assert_eq!(self::page(&node, &root, gone).status, 404, "{gone}");
-        }
-        assert_eq!(
-            self::page(&node, &root, "/auth/settings/services/db").status,
-            200
-        );
-
-        // The edit form keeps the grant on the sub-resource: it shows only the grants on services.
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                USERS_UPDATE_PATH,
-                USERS_TOKEN,
-                "grants=1&login=alice&g.db.access=1"
-            )
-            .location(),
-            Some("/auth/settings/users/alice?s=user-updated")
-        );
-        assert_eq!(node.state.users.grants_of("alice").unwrap().len(), 2);
-
-        // A user cannot give a grant.
-        let alice = sign_in(&node, "alice", "a-long-password-1");
-        assert_eq!(
-            post(&node, &alice, GRANT_ADD_PATH, USERS_TOKEN, fields).status,
-            403
-        );
-
-        let delete = |grant: &str| {
-            post(
-                &node,
-                &root,
-                GRANT_DELETE_PATH,
-                USERS_TOKEN,
-                &format!(
-                    "login=alice&grant={}",
-                    grant
-                        .replace('%', "%25")
-                        .replace(' ', "+")
-                        .replace('/', "%2F")
-                        .replace(':', "%3A")
-                ),
-            )
-            .location()
-            .map(str::to_string)
-        };
-        assert_eq!(
-            delete("access on service:db"),
-            Some("/auth/settings/users/alice?s=no-grant".into()),
-            "only a sub-resource"
-        );
-        assert_eq!(
-            delete("query.run.write on service:db/database:logs"),
-            notice("no-grant")
-        );
-        assert_eq!(
-            delete("query.run.write on service:db/database:analytics"),
-            notice("grant-deleted")
-        );
-        assert_eq!(
-            node.state.users.grants_of("alice").unwrap(),
-            vec![Grant::new("access", "db").unwrap()]
-        );
-        assert_eq!(
-            node.state.store.load_users().unwrap()[0].grants,
-            vec![Grant::new("access", "db").unwrap()]
-        );
-
-        // A document with a tree: one id for each type of the chain.
-        publish_tree(&node);
-        for (fields, code) in [
-            (
-                "login=alice&service=db&action=query.run.write&type=database&id0=local&id1=a%2Fb+c",
-                "grant-added",
-            ),
-            (
-                "login=alice&service=db&action=query.run.read&type=host&id0=local",
-                "grant-added",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=database&id0=a",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=query.run.write&type=host&id0=a&id1=b",
-                "grant-undeclared",
-            ),
-            (
-                "login=alice&service=db&action=system.read&type=database&id0=a&id1=b",
-                "grant-undeclared",
-            ),
-        ] {
-            assert_eq!(add(fields), notice(code), "{fields}");
-        }
-        assert_eq!(
-            post(
-                &node,
-                &root,
-                GRANT_ADD_PATH,
-                USERS_TOKEN,
-                "login=alice&service=db&action=query.run.write&type=database&id0=a&id1=b&id4=c"
-            )
-            .status,
-            400,
-            "an id beyond the deepest level"
-        );
-        let mut expected = vec![
-            Grant::new("access", "db").unwrap(),
-            Grant::parse("query.run.read on service:db/host:local").unwrap(),
-            Grant::parse("query.run.write on service:db/host:local/database:a%2Fb%20c").unwrap(),
-        ];
-        expected.sort();
-        assert_eq!(node.state.users.grants_of("alice").unwrap(), expected);
-        assert_eq!(node.state.store.load_users().unwrap()[0].grants, expected);
-        let tree_page = self::page(&node, &root, editor);
-        assert!(tree_page.body.contains(r#"<span class="path__type">host</span> <code class="path__id">local</code><span class="path__sep" aria-hidden="true">›</span><span class="path__type">database</span> <code class="path__id">a/b c</code>"#));
-        // Step 1 offers the levels of the tree. Step 2 asks for the ids of the chain.
-        assert!(tree_page.body.contains(r#"name="level" value="database""#));
-        let step_two = self::page(&node, &root, &format!("{editor}&level=database"));
-        assert!(step_two.body.contains(r#"name="id0""#) && step_two.body.contains(r#"name="id1""#));
-        assert!(
-            step_two
-                .body
-                .contains(r#"<datalist id="ids-0"><option value="local"></datalist>"#),
-            "the ids that the grants use are suggested"
-        );
-        assert_eq!(
-            delete("query.run.write on service:db/host:local/database:a%2Fb%20c"),
-            notice("grant-deleted")
-        );
-    });
-}
-
-#[test]
-fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_service() {
+fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
     each_backend(|backend| {
         let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
         publish_catalog(&node, &["query.run.read", "query.run.write"]);
@@ -2384,10 +2155,25 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
                 .map(ToString::to_string)
                 .collect()
         };
-        // One POST makes the account and its grants: the database holds both.
+        let give = |login: &str, fields: &str| {
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                &format!("grants=1&login={login}&{fields}"),
+            )
+            .location()
+            .map(str::to_string)
+        };
+        // The add form makes the account. The page of the account sets its grants.
         assert_eq!(
-            add("login=alice&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1"),
-            Some("/auth/settings/users/alice?s=user-added-access".into())
+            add("login=alice"),
+            Some("/auth/settings/users/alice?s=user-added".into())
+        );
+        assert_eq!(
+            give("alice", "grant0=access+on+service%3Adb&grant1=query.run.read+on+service%3Adb&grant2=access+on+service%3Aother-grafana"),
+            Some("/auth/settings/users/alice?s=user-updated".into())
         );
         assert_eq!(
             grants_of("alice"),
@@ -2401,21 +2187,23 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
             node.state.store.load_users().unwrap()[0].grants,
             node.state.users.grants_of("alice").unwrap()
         );
-        // An account without a box has no grant.
+        // An account without a grant has none.
         assert_eq!(
             add("login=carol"),
             Some("/auth/settings/users/carol?s=user-added".into())
         );
         assert!(grants_of("carol").is_empty());
 
-        // The document of db names two hosts. A grant on one of them is a box named `r.<grant>`.
+        // The document of db names two hosts. A grant on a host is a grant like another: its path
+        // follows the types of the document.
         publish_hosts(&node);
-        let local_write = "r.query.run.write+on+service%3Adb%2Fhost%3Alocal=1";
         assert_eq!(
-            add(&format!(
-                "login=bob&g.db.access=1&g.db.query.run.read=1&g.other-grafana.access=1&{local_write}"
-            )),
-            Some("/auth/settings/users/bob?s=user-added-access".into())
+            add("login=bob"),
+            Some("/auth/settings/users/bob?s=user-added".into())
+        );
+        assert_eq!(
+            give("bob", "grant0=access+on+service%3Adb&grant1=query.run.read+on+service%3Adb&grant2=access+on+service%3Aother-grafana&grant3=query.run.write+on+service%3Adb%2Fhost%3Alocal"),
+            Some("/auth/settings/users/bob?s=user-updated".into())
         );
         assert_eq!(
             grants_of("bob"),
@@ -2426,58 +2214,72 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
                 "query.run.write on service:db/host:local",
             ]
         );
-        // The replica offers `query.run.read` only: a write on it is not a box of the page.
+        // A path that does not follow the types of the document is refused: a database has a host
+        // above it.
         assert_eq!(
-            add("login=dave&r.query.run.write+on+service%3Adb%2Fhost%3Areplica=1"),
-            Some("/auth/settings?s=add-unknown-service".into())
+            add("login=dave"),
+            Some("/auth/settings/users/dave?s=user-added".into())
+        );
+        assert_eq!(
+            give(
+                "dave",
+                "grant0=query.run.write+on+service%3Adb%2Fdatabase%3Ax"
+            ),
+            Some("/auth/settings/users/dave?s=edit-unknown-grant".into())
         );
         let bob = sign_in(&node, "bob", "a-long-password-1");
         assert_eq!(open(&node, &bob, "/db/").status, 204);
 
-        // A Save of the editor names its service. It changes the boxes of that service only.
+        // A Save sends every grant of the account. It replaces them.
         let reply = post(
             &node,
             &root,
             USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "grants=1&login=bob&only=db&g.db.query.run.write=1",
+            "grants=1&login=bob&grant0=query.run.write+on+service%3Adb",
         );
         assert_eq!(
             reply.location(),
-            Some("/auth/settings/access?user=bob&service=db&s=user-updated")
+            Some("/auth/settings/users/bob?s=user-updated")
         );
-        assert_eq!(
-            grants_of("bob"),
-            [
-                "access on service:other-grafana",
-                "query.run.write on service:db",
-            ],
-            "access, read and the box of the host are gone, write is set, Grafana stays"
-        );
+        assert_eq!(grants_of("bob"), ["query.run.write on service:db"]);
         let reply = post(
             &node,
             &root,
             USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "grants=1&login=bob&only=db&g.other-grafana.access=1",
+            "grants=1&login=bob&grant0=access+on+service%3Aghost",
         );
         assert_eq!(
             reply.location(),
-            Some("/auth/settings/access?user=bob&service=db&s=edit-unknown-grant"),
-            "a box of another service is refused"
+            Some("/auth/settings/users/bob?s=edit-unknown-grant"),
+            "a service that the catalogue lacks is refused"
         );
         let reply = post(
             &node,
             &root,
             USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "grants=1&login=bob&only=db&g.db.query.run.write=1",
+            "grants=1&login=bob&grant0=query.run.write+on+service%3Adb",
         );
         assert_eq!(
             reply.location(),
-            Some("/auth/settings/access?user=bob&service=db&s=unchanged")
+            Some("/auth/settings/users/bob?s=unchanged")
         );
-        // Only the superadmin adds with access.
+        // A limit value follows the declaration of the document (portal 3.2).
+        let reply = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&grant0=query.run.write+on+service%3Adb&limit0.max_rows=5",
+        );
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/users/bob?s=bad-limits"),
+            "the action lists no such limit"
+        );
+        // Only the superadmin adds.
         let alice = sign_in(&node, "alice", "a-long-password-1");
         assert_eq!(
             post(
@@ -2485,7 +2287,7 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
                 &alice,
                 USERS_ADD_PATH,
                 USERS_TOKEN,
-                "login=eve&password=a-long-password-1&g.db.access=1"
+                "login=eve&password=a-long-password-1"
             )
             .status,
             403
@@ -2494,7 +2296,7 @@ fn the_add_form_gives_access_at_once_copies_an_account_and_a_save_changes_one_se
 }
 
 #[test]
-fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_service_box_goes() {
+fn a_grant_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_whole_service_goes() {
     each_backend(|backend| {
         let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
         publish_catalog(&node, &["query.run.read", "query.run.write"]);
@@ -2509,26 +2311,22 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
                 .map(ToString::to_string)
                 .collect()
         };
-        let local = "r.query.run.read+on+service%3Adb%2Fhost%3Alocal=1";
-        let replica = "r.query.run.read+on+service%3Adb%2Fhost%3Areplica=1";
-        // The page shows the hosts ticked when the whole service is ticked, so the form sends all
-        // three boxes. The account keeps the grant on the whole service only.
+        let access = "grant0=access+on+service%3Adb";
+        let whole = "query.run.read+on+service%3Adb";
+        let local = "query.run.read+on+service%3Adb%2Fhost%3Alocal";
+        let replica = "query.run.read+on+service%3Adb%2Fhost%3Areplica";
+        // The editor shows the hosts ticked when the whole service is ticked, so a form can send
+        // all three grants. The account keeps the grant on the whole service only.
         let reply = post(
             &node,
             &root,
             USERS_ADD_PATH,
             USERS_TOKEN,
-            &format!(
-                "login=alice&password=a-long-password-1&g.db.access=1&g.db.query.run.read=1&{local}&{replica}"
-            ),
+            "login=alice&password=a-long-password-1",
         );
         assert_eq!(
             reply.location(),
-            Some("/auth/settings/users/alice?s=user-added-access")
-        );
-        assert_eq!(
-            grants_of("alice"),
-            ["access on service:db", "query.run.read on service:db"]
+            Some("/auth/settings/users/alice?s=user-added")
         );
         let update = |fields: &str| {
             post(
@@ -2541,9 +2339,19 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
             .location()
             .map(str::to_string)
         };
+        assert_eq!(
+            update(&format!(
+                "{access}&grant1={whole}&grant2={local}&grant3={replica}"
+            )),
+            Some("/auth/settings/users/alice?s=user-updated".into())
+        );
+        assert_eq!(
+            grants_of("alice"),
+            ["access on service:db", "query.run.read on service:db"]
+        );
         // The whole service is unticked and one host stays ticked: the grant is now on that host.
         assert_eq!(
-            update(&format!("g.db.access=1&{replica}")),
+            update(&format!("{access}&grant1={replica}")),
             Some("/auth/settings/users/alice?s=user-updated".into())
         );
         assert_eq!(
@@ -2553,13 +2361,13 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
                 "query.run.read on service:db/host:replica"
             ]
         );
-        // The page shows the replica ticked as a grant of its own, and the local host not ticked.
+        // The page holds the replica as a grant of its own, and not the local host.
         let page = page(&node, &root, "/auth/settings/users/alice");
-        assert!(page.body.contains(r#"name="r.query.run.read on service:db/host:replica" value="1" data-action="query.run.read" data-path="host:replica" checked"#));
-        assert!(page.body.contains(r#"name="r.query.run.read on service:db/host:local" value="1" data-action="query.run.read" data-path="host:local">"#));
-        // Ticking the whole service on the page shows every host ticked, with no grant of its own.
+        assert!(page.body.contains(r#"<input type="hidden" name="grant1" value="query.run.read on service:db/host:replica" form="grants">"#));
+        assert!(!page.body.contains("host:local\" form="));
+        // The whole service ticked again: one grant, and none for a host.
         assert_eq!(
-            update("g.db.access=1&g.db.query.run.read=1").as_deref(),
+            update(&format!("{access}&grant1={whole}")).as_deref(),
             Some("/auth/settings/users/alice?s=user-updated")
         );
         assert_eq!(
@@ -2567,28 +2375,15 @@ fn a_box_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_serv
             ["access on service:db", "query.run.read on service:db"]
         );
         let page = self::page(&node, &root, "/auth/settings/users/alice");
-        assert_eq!(
-            page.body
-                .matches(r#"data-action="query.run.read" data-path="host:"#)
-                .count(),
-            2
-        );
-        assert_eq!(
-            page.body
-                .matches(r#"data-path="host:local" checked"#)
-                .count()
-                + page
-                    .body
-                    .matches(r#"data-path="host:replica" checked"#)
-                    .count(),
-            2,
-            "both hosts show ticked: the whole service covers them"
-        );
+        assert!(page.body.contains(
+            r#"<input type="hidden" name="grant1" value="query.run.read on service:db" form="grants">"#
+        ));
+        assert!(!page.body.contains(r#"host:replica" form="#));
     });
 }
 
 #[test]
-fn in_the_static_mode_the_add_form_cannot_give_access() {
+fn in_the_static_mode_a_save_cannot_give_access() {
     let node = start_with(
         Arc::new(Backend::Sqlite.fresh()),
         None,
@@ -2596,18 +2391,29 @@ fn in_the_static_mode_the_add_form_cannot_give_access() {
     );
     publish_catalog(&node, &[]);
     let root = sign_in(&node, "root", PASSWORD);
+    let add = post(
+        &node,
+        &root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        "login=alice&password=a-long-password-1",
+    );
+    assert_eq!(
+        add.location(),
+        Some("/auth/settings/users/alice?s=user-added")
+    );
     assert_eq!(
         post(
             &node,
             &root,
-            USERS_ADD_PATH,
+            USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "login=alice&password=a-long-password-1&g.db.access=1",
+            "grants=1&login=alice&grant0=access+on+service%3Adb",
         )
         .location(),
-        Some("/auth/settings?s=grants-static")
+        Some("/auth/settings/users/alice?s=grants-static")
     );
-    assert!(node.state.users.get("alice").is_none());
+    assert!(node.state.users.grants_of("alice").unwrap().is_empty());
 }
 
 /// The document of `db` with a tree, and with two hosts that it names: `local` takes the read and the
@@ -2615,7 +2421,7 @@ fn in_the_static_mode_the_add_form_cannot_give_access() {
 fn publish_hosts(node: &Node) {
     let document = crate::actions::parse(
         "db",
-        br#"{"server":"db","resource_types":[{"name":"host","parent":"service"},{"name":"database","parent":"host"}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"]},{"name":"query.run.write","resource_types":["service","host","database"]},{"name":"system.read","resource_types":["service","host"]}],"resources":[{"path":"host:local","label":"Local","actions":["query.run.read","query.run.write"]},{"path":"host:replica","actions":["query.run.read"]}]}"#,
+        br#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"The type host."},{"name":"database","parent":"host","description":"The type database."}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."},{"name":"query.run.write","resource_types":["service","host","database"],"description":"The action query.run.write."},{"name":"system.read","resource_types":["service","host"],"description":"The action system.read."}],"resources":[{"path":"host:local","label":"Local","actions":["query.run.read","query.run.write"]},{"path":"host:replica","actions":["query.run.read"]}]}"#,
     )
     .unwrap();
     node.state.actions.set_document("db", document);
@@ -2625,10 +2431,150 @@ fn publish_hosts(node: &Node) {
 fn publish_tree(node: &Node) {
     let document = crate::actions::parse(
         "db",
-        br#"{"server":"db","resource_types":[{"name":"host","parent":"service"},{"name":"database","parent":"host"}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"]},{"name":"query.run.write","resource_types":["service","host","database"]},{"name":"system.read","resource_types":["service","host"]}]}"#,
+        br#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"The type host."},{"name":"database","parent":"host","description":"The type database."}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."},{"name":"query.run.write","resource_types":["service","host","database"],"description":"The action query.run.write."},{"name":"system.read","resource_types":["service","host"],"description":"The action system.read."}]}"#,
     )
     .unwrap();
     node.state.actions.set_document("db", document);
+}
+
+/// A service that lists options. It answers `GET /.well-known/procurauth/resources`: the databases
+/// of the host `prod` and a 404 for the rest. It records each request line and its headers.
+fn options_service() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 4096];
+            let n = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            let first = request.lines().next().unwrap_or("").to_string();
+            log.lock().unwrap().push(request.to_lowercase());
+            let (status, body) = if first.contains("type=database")
+                && first.contains("parent=host%3Aprod")
+            {
+                (
+                    "200 OK",
+                    r#"{"items":[{"id":"test1","label":"test1","has_children":true},{"id":"a/b","label":"a/b"}],"next":"p2"}"#,
+                )
+            } else {
+                ("404 Not Found", "{}")
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (port, seen)
+}
+
+#[test]
+fn the_options_of_a_node_come_from_the_service_with_the_token_of_the_person() {
+    each_backend(|backend| {
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            Some(Duration::ZERO),
+            r#"identity { issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" token_ttl = "5m" }"#,
+        );
+        let (port, seen) = options_service();
+        let catalog = Catalog::build(
+            vec![listed(&[
+                ("portal.name", "Db"),
+                ("portal.id", "db"),
+                ("portal.href", "/db/"),
+                (
+                    "portal.actions",
+                    &format!("http://127.0.0.1:{port}/.well-known/procurauth/actions"),
+                ),
+            ])],
+            Vec::new(),
+        );
+        *node.state.catalog.write().unwrap() = Arc::new(catalog);
+        publish_tree(&node);
+        let root = sign_in(&node, "root", PASSWORD);
+        let get = |session: &str, query: &str| {
+            let cookie = format!("{}={session}", session_cookie_name(&node));
+            send(
+                node.port,
+                "GET",
+                &format!("/auth/options{query}"),
+                &[("Cookie", &cookie)],
+                "",
+            )
+        };
+        let reply = get(&root, "?service=db&type=database&parent=host%3Aprod");
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let json: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(json["items"][0]["id"], "test1");
+        assert_eq!(json["items"][1]["id"], "a/b");
+        assert_eq!(json["next"], "p2");
+        assert_eq!(json["unavailable"], false);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert!(
+                seen[0].contains("get /.well-known/procurauth/resources?parent=host%3aprod&type=database&limit=50"),
+                "{}",
+                seen[0]
+            );
+            assert!(
+                seen[0].contains("x-identity-token: "),
+                "the token of the person"
+            );
+        }
+        // The portal keeps the answer: the same question does not reach the service again.
+        assert_eq!(
+            get(&root, "?service=db&type=database&parent=host%3Aprod").status,
+            200
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // A page and a search are other questions.
+        get(
+            &root,
+            "?service=db&type=database&parent=host%3Aprod&after=p2&q=t",
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        // A service that has no list gives no option, and the form says it.
+        let none = get(&root, "?service=db&type=host");
+        assert_eq!(none.status, 200);
+        let json: serde_json::Value = serde_json::from_str(&none.body).unwrap();
+        assert_eq!(json["unavailable"], true);
+        assert_eq!(json["items"], serde_json::json!([]));
+        // A type below another type, an unknown type, a missing parameter and a repeated one.
+        for bad in [
+            "?service=db&type=database",
+            "?service=db&type=nothing",
+            "?service=db",
+            "?type=host",
+            "?service=db&type=host&type=host",
+            "?service=db&type=host&other=1",
+            "?service=db&type=database&parent=bad",
+        ] {
+            assert_eq!(get(&root, bad).status, 400, "{bad}");
+        }
+        // A service that the catalogue lacks gives no option.
+        let ghost = get(&root, "?service=ghost&type=host");
+        assert!(
+            ghost.body.contains(r#""unavailable":false"#),
+            "{}",
+            ghost.body
+        );
+        // No session: 401. A user without a right on the keys: 403.
+        let cookie_less = send(
+            node.port,
+            "GET",
+            "/auth/options?service=db&type=host",
+            &[],
+            "",
+        );
+        assert_eq!(cookie_less.status, 401);
+        let alice = user_without_grant(&node, &root, "alice");
+        assert_eq!(get(&alice, "?service=db&type=host").status, 403);
+    });
 }
 
 // Security regressions -------------------------------------------------------------------------
@@ -2646,10 +2592,10 @@ fn user_without_grant(node: &Node, root: &str, login: &str) -> String {
     sign_in(node, login, "a-long-password-1")
 }
 
-/// A source that never answered gives a snapshot without its services. The gate cannot tell an
-/// unowned path from a path of a missing service: only the superadmin passes.
+/// A source that never answered gives a snapshot without its services. The instance does not
+/// open its ports until the catalogue is complete (portal 7.3b), so no user reaches the gate.
 #[test]
-fn a_source_that_never_answered_keeps_the_gate_closed_to_users() {
+fn a_source_that_never_answered_keeps_the_ports_closed() {
     let node = start_custom(
         Arc::new(Store::open_in_memory()),
         None,
@@ -2660,20 +2606,62 @@ fn a_source_that_never_answered_keeps_the_gate_closed_to_users() {
         },
         "",
     );
+    wait_until(Duration::from_secs(10), || {
+        node.state.discovery.refreshes() >= 1
+    });
     assert!(!current_catalog(&node.state).is_complete());
-    let root = sign_in(&node, "root", PASSWORD);
-    let alice = user_without_grant(&node, &root, "alice");
-    for uri in ["/grafana/d/1", "/an/unowned/path"] {
-        let reply = open(&node, &alice, uri);
-        assert_eq!(reply.status, 302, "{uri}");
-        assert_eq!(reply.location(), Some(DENIED_PATH), "{uri}");
-        assert_eq!(open(&node, &root, uri).status, 204, "{uri}");
-    }
-    let metrics = send(node.port, "GET", "/metrics", &[], "").body;
+    std::thread::sleep(Duration::from_millis(500));
     assert!(
-        metrics.contains("portal_catalog_complete 0"),
-        "the metric shows the state"
+        TcpStream::connect(("127.0.0.1", node.port)).is_err(),
+        "the port stays closed"
     );
+}
+
+/// On SIGTERM the instance serves 5 more seconds, then it closes its listener and its idle
+/// connections (portal 7.3a).
+#[test]
+fn the_instance_serves_five_seconds_after_the_stop_and_then_closes() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let node = start_custom(
+        Arc::new(Store::open_in_memory()),
+        None,
+        Custom {
+            stop: Some(rx),
+            ..Custom::default()
+        },
+        "",
+    );
+    // An idle connection that the client keeps open.
+    let mut idle = TcpStream::connect(("127.0.0.1", node.port)).unwrap();
+    idle.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let mut first = [0_u8; 512];
+    assert!(idle.read(&mut first).unwrap() > 0);
+    assert_eq!(node.state.stop.live(), 1);
+    let stopped = Instant::now();
+    tx.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        send(node.port, "GET", "/healthz", &[], "").status,
+        200,
+        "the instance still serves in the first seconds"
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", node.port)).is_err()
+    });
+    let closed_after = stopped.elapsed();
+    assert!(
+        closed_after >= Duration::from_millis(4800),
+        "the listener closed too early: {closed_after:?}"
+    );
+    idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut rest = [0_u8; 16];
+    assert_eq!(
+        idle.read(&mut rest).unwrap(),
+        0,
+        "the idle connection closed"
+    );
+    wait_until(Duration::from_secs(5), || node.state.stop.live() == 0);
 }
 
 /// Posts the login form from the local address `source`, with more headers. The reply is
@@ -3131,5 +3119,2824 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
                 .body
                 .contains("All sessions ended")
         });
+    });
+}
+
+// Keys at the PDP --------------------------------------------------------------------------------
+
+/// The service `db` of the tests of the keys: hosts and databases, a budget and two ceilings.
+const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
+  "resource_types":[{"name":"host","parent":"service","description":"A host."},
+                    {"name":"database","parent":"host","description":"A database."}],
+  "actions":[
+    {"name":"data.read","resource_types":["host","database"],"description":"Read.",
+     "limits":["requests","max_rows","max_duration"]},
+    {"name":"data.write","resource_types":["host","database"],"description":"Write.",
+     "limits":["max_duration"]}],
+  "limits":[
+    {"name":"requests","label":"Requests","description":"d","unit":"request","kind":"budget"},
+    {"name":"max_rows","label":"Rows","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000},
+    {"name":"max_duration","label":"Duration","description":"d","unit":"second","kind":"ceiling","min":1,"max":3600}]}"#;
+
+fn limits(text: &str) -> crate::limits::Limits {
+    crate::limits::Limits::from_json(text).unwrap()
+}
+
+fn key_caps() -> crate::store::KeyCaps {
+    crate::store::KeyCaps {
+        max_per_user: 100,
+        max_counter_rows: 1_000_000,
+        max_directory_grants: 1_000_000,
+        now: unix_now(),
+        created_not_before: None,
+    }
+}
+
+/// A node with the blocks of the keys and the service `db` with its document.
+fn key_node(backend: &Backend) -> (Node, u16) {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(backend.fresh()),
+        None,
+        &format!(
+            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
+            keys {{}}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    publish_catalog(&node, &[]);
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    (node, pdp_port)
+}
+
+/// Alice reads `host:prod` with `max_rows` 5000 and a budget of 3 each minute. She can use keys.
+fn add_alice(node: &Node, extra: &[Grant]) {
+    let mut grants = vec![
+        Grant::new("access", "db")
+            .unwrap()
+            .with_limits(limits(r#"{"requests":[{"amount":3,"window":"minute"}]}"#)),
+        Grant::from_path_text("data.read", "db", "host:prod")
+            .unwrap()
+            .with_limits(limits(r#"{"max_rows":5000}"#)),
+        Grant::parse("keys.own.use on service:portal").unwrap(),
+        Grant::parse("keys.own.read on service:portal").unwrap(),
+    ];
+    grants.extend(extra.iter().cloned());
+    grants.sort();
+    node.state
+        .store
+        .insert_user(&crate::store::UserRow {
+            login: "alice".into(),
+            password_hash: password_hash(PASSWORD),
+            grants,
+            created_at: 1,
+        })
+        .unwrap();
+    node.state.users.refresh(&node.state.store).unwrap();
+}
+
+fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, grants: Vec<Grant>) {
+    let mut grants = grants;
+    grants.sort();
+    node.state
+        .store
+        .insert_key(
+            &crate::store::KeyRow {
+                id: id.into(),
+                owner: owner.map(Into::into),
+                name: format!("key {id}"),
+                digest: [byte; 32],
+                hint: "ab12".into(),
+                created_at: unix_now() - 10,
+                expires_at: None,
+                last_check_at: None,
+                check_count: 0,
+                grants,
+            },
+            &key_caps(),
+        )
+        .unwrap();
+    node.state.users.refresh(&node.state.store).unwrap();
+}
+
+fn read_body(subject: &str, database: &str, context: serde_json::Value) -> String {
+    serde_json::json!({
+        "subject": {"type": "user", "id": subject},
+        "action": {"name": "data.read"},
+        "resource": {"type": "database", "id": database, "properties": {"ancestors": [
+            {"type": "service", "id": "db"}, {"type": "host", "id": "prod"}]}},
+        "context": context
+    })
+    .to_string()
+}
+
+#[test]
+fn the_pdp_decides_for_a_key_with_its_owner_its_ceilings_and_its_counters() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        add_key(
+            &node,
+            "9b1c04e2aa71f0c3",
+            Some("alice"),
+            1,
+            vec![
+                Grant::new("access", "db")
+                    .unwrap()
+                    .with_limits(limits(r#"{"requests":[{"amount":2,"window":"minute"}]}"#)),
+                Grant::from_path_text("data.read", "db", "host:prod/database:test2")
+                    .unwrap()
+                    .with_limits(limits(r#"{"max_rows":100}"#)),
+            ],
+        );
+        let ask = |body: String| -> serde_json::Value {
+            let reply = pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &body,
+                None,
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            reply.json()
+        };
+        let key = "key:9b1c04e2aa71f0c3";
+        let usage = serde_json::json!({"usage": {"units": 1}});
+        // No usage: the answer has the ceilings, the lowest of the key and of its owner, and no
+        // counter moves.
+        assert_eq!(
+            ask(read_body(key, "test2", serde_json::json!({}))),
+            serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 100}}})
+        );
+        // The key has no grant on test1, although its owner reads it.
+        assert_eq!(
+            ask(read_body(key, "test1", serde_json::json!({}))),
+            serde_json::json!({"decision": false})
+        );
+        assert_eq!(
+            ask(read_body("alice", "test1", serde_json::json!({}))),
+            serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 5000}}})
+        );
+        // Two uses fit the budget of the key. Each use takes one unit from the counter of the key
+        // and one from the counter of Alice.
+        for _ in 0..2 {
+            assert_eq!(
+                ask(read_body(key, "test2", usage.clone())),
+                serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 100}, "usage": {"units": 1}}})
+            );
+        }
+        let refused = ask(read_body(key, "test2", usage.clone()));
+        assert_eq!(refused["decision"], false);
+        assert_eq!(refused["context"]["reason"], "budget_exceeded");
+        let retry = refused["context"]["retry_after"].as_u64().unwrap();
+        assert!((1..=60).contains(&retry), "{retry}");
+        assert!(refused["context"].get("limits").is_none());
+        // The budget of Alice has one unit left: the refusal of the key took nothing from it.
+        assert_eq!(
+            ask(read_body("alice", "test1", usage.clone()))["context"]["usage"]["units"],
+            1
+        );
+        let refused = ask(read_body("alice", "test1", usage.clone()));
+        assert_eq!(refused["context"]["reason"], "budget_exceeded");
+        // The superadmin takes no unit.
+        assert_eq!(
+            ask(read_body("root", "test1", usage.clone())),
+            serde_json::json!({"decision": true, "context": {"usage": {"units": 0}}})
+        );
+        // A person without a budget value counts no unit either.
+        node.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "bob".into(),
+                password_hash: password_hash(PASSWORD),
+                grants: vec![Grant::from_path_text("data.read", "db", "host:prod").unwrap()],
+                created_at: 1,
+            })
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(
+            ask(read_body("bob", "test1", usage.clone())),
+            serde_json::json!({"decision": true, "context": {"usage": {"units": 0}}})
+        );
+        // A false answer takes no unit and has no limit.
+        assert_eq!(
+            ask(read_body("bob", "test1", serde_json::json!({}))),
+            serde_json::json!({"decision": true})
+        );
+    });
+}
+
+#[test]
+fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an_unknown_subject() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        let read = vec![Grant::from_path_text("data.read", "db", "host:prod").unwrap()];
+        for (id, byte) in [("a1", 1u8), ("a2", 2), ("a3", 3)] {
+            add_key(&node, id, Some("alice"), byte, read.clone());
+        }
+        let ask = |subject: &str| -> serde_json::Value {
+            let reply = pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &read_body(subject, "test1", serde_json::json!({})),
+                None,
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            reply.json()
+        };
+        let unknown =
+            serde_json::json!({"decision": false, "context": {"reason": "unknown_subject"}});
+        let yes = serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 5000}}});
+        assert_eq!(ask("key:a1"), yes);
+        assert_eq!(ask("key:nope"), unknown);
+        assert_eq!(ask("key:UPPER"), unknown, "a bad local part");
+        assert_eq!(
+            ask("other:a1"),
+            unknown,
+            "a prefix that the protocol does not define"
+        );
+        // A revoked key is an unknown subject after the next round of the directory.
+        node.state.store.revoke_key("a1", None, unix_now()).unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(ask("key:a1"), unknown);
+        // An expired key.
+        node.state.store.execute_raw(&format!(
+            "UPDATE keys SET expires_at = {} WHERE id = 'a2';
+             UPDATE directory_version SET version = version + 1",
+            unix_now() - 1
+        ));
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(ask("key:a2"), unknown);
+        // The owner loses the right `keys.own.use`: the key gets the same answer (portal 9.3).
+        assert_eq!(ask("key:a3"), yes);
+        let without_use: Vec<Grant> = node
+            .state
+            .users
+            .grants_of("alice")
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.action != "keys.own.use")
+            .collect();
+        node.state
+            .store
+            .update_user("alice", None, Some(&without_use))
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(ask("key:a3"), unknown);
+        assert_eq!(
+            ask("alice")["decision"],
+            true,
+            "the person keeps the other rights"
+        );
+        // The value 0 of `max_key_lifetime` refuses each key (portal 5.3a).
+        let zero: Vec<Grant> = without_use
+            .into_iter()
+            .chain([Grant::parse("keys.own.use on service:portal")
+                .unwrap()
+                .with_limits(limits(r#"{"max_key_lifetime":0}"#))])
+            .collect();
+        node.state
+            .store
+            .update_user("alice", None, Some(&zero))
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(ask("key:a3"), unknown, "the key is older than 0 seconds");
+        // A high value lets the key work again.
+        let high: Vec<Grant> = zero
+            .into_iter()
+            .filter(|g| g.action != "keys.own.use")
+            .chain([Grant::parse("keys.own.use on service:portal")
+                .unwrap()
+                .with_limits(limits(r#"{"max_key_lifetime":3600}"#))])
+            .collect();
+        node.state
+            .store
+            .update_user("alice", None, Some(&high))
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert_eq!(ask("key:a3"), yes);
+    });
+}
+
+#[test]
+fn a_key_of_the_superadmin_has_only_its_own_grants_and_its_own_counters() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_key(
+            &node,
+            "5e0000000000000a",
+            None,
+            9,
+            vec![
+                Grant::new("access", "db")
+                    .unwrap()
+                    .with_limits(limits(r#"{"requests":[{"amount":1,"window":"minute"}]}"#)),
+                Grant::from_path_text("data.read", "db", "host:prod")
+                    .unwrap()
+                    .with_limits(limits(r#"{"max_rows":7}"#)),
+            ],
+        );
+        let ask = |body: String| -> serde_json::Value {
+            let reply = pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &body,
+                None,
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            reply.json()
+        };
+        let usage = serde_json::json!({"usage": {"units": 1}});
+        let key = "key:5e0000000000000a";
+        assert_eq!(
+            ask(read_body(key, "x", usage.clone())),
+            serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 7}, "usage": {"units": 1}}})
+        );
+        assert_eq!(
+            ask(read_body(key, "x", usage))["context"]["reason"],
+            "budget_exceeded"
+        );
+        // A key of the superadmin never gets more than its own grants.
+        let write = serde_json::json!({
+            "subject": {"type": "user", "id": key},
+            "action": {"name": "data.write"},
+            "resource": {"type": "host", "id": "prod", "properties": {"ancestors": [{"type": "service", "id": "db"}]}}
+        });
+        assert_eq!(
+            ask(write.to_string()),
+            serde_json::json!({"decision": false})
+        );
+    });
+}
+
+#[test]
+fn a_request_with_context_usage_follows_the_rules_of_protocol_6() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        let call = |path: &str, body: serde_json::Value| {
+            pdp(port, path, Some(PDP_DB_TOKEN), &body.to_string(), None)
+        };
+        let item = |context: serde_json::Value| {
+            serde_json::json!({
+                "subject": {"type": "user", "id": "alice"},
+                "action": {"name": "data.read"},
+                "resource": {"type": "host", "id": "prod", "properties": {"ancestors": [{"type": "service", "id": "db"}]}},
+                "context": context
+            })
+        };
+        // Any other value than {"units": 1} gets 400.
+        for bad in [
+            serde_json::json!({"usage": {"units": 2}}),
+            serde_json::json!({"usage": {"units": 0}}),
+            serde_json::json!({"usage": {"units": "1"}}),
+            serde_json::json!({"usage": {}}),
+            serde_json::json!({"usage": {"units": 1, "other": 1}}),
+            serde_json::json!({"usage": 1}),
+            serde_json::json!({"usage": {"units": 1}, "match": "subtree"}),
+        ] {
+            let reply = call("/access/v1/evaluation", item(bad.clone()));
+            assert_eq!(reply.status, 400, "{bad}: {}", reply.body);
+        }
+        assert_eq!(
+            call(
+                "/access/v1/evaluation",
+                item(serde_json::json!({"usage": {"units": 1}}))
+            )
+            .status,
+            200
+        );
+        // An Access Evaluations request with items takes no usage, at any level.
+        let mut batch = item(serde_json::json!({}));
+        batch["evaluations"] = serde_json::json!([{"context": {"usage": {"units": 1}}}]);
+        assert_eq!(call("/access/v1/evaluations", batch.clone()).status, 400);
+        let mut batch = item(serde_json::json!({"usage": {"units": 1}}));
+        batch["evaluations"] = serde_json::json!([{}]);
+        assert_eq!(call("/access/v1/evaluations", batch).status, 400);
+        // A request without items is one evaluation: usage is permitted.
+        let mut single = item(serde_json::json!({"usage": {"units": 1}}));
+        single["evaluations"] = serde_json::json!([]);
+        assert_eq!(call("/access/v1/evaluations", single).status, 200);
+        // A search takes no usage.
+        let search = serde_json::json!({
+            "subject": {"type": "user", "id": "alice"},
+            "resource": {"type": "host", "id": "prod", "properties": {"ancestors": [{"type": "service", "id": "db"}]}},
+            "context": {"usage": {"units": 1}}
+        });
+        assert_eq!(call("/access/v1/search/action", search).status, 400);
+        // The superadmin: the checks of the resource come first.
+        let root = serde_json::json!({
+            "subject": {"type": "user", "id": "root"},
+            "action": {"name": "data.read"},
+            "resource": {"type": "service", "id": "other"},
+            "context": {"usage": {"units": 1}}
+        });
+        let reply = call("/access/v1/evaluation", root);
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({"decision": false, "context": {"reason": "invalid_resource"}})
+        );
+        // Bad ancestors: HTTP 400 for one evaluation, `invalid_request` in a batch item.
+        let mut bad = item(serde_json::json!({}));
+        bad["resource"]["properties"]["ancestors"] = serde_json::json!("service");
+        assert_eq!(call("/access/v1/evaluation", bad.clone()).status, 400);
+        let mut batch = item(serde_json::json!({}));
+        batch["evaluations"] = serde_json::json!([
+            {},
+            {"resource": bad["resource"].clone()},
+            {"context": {"match": "bad"}}
+        ]);
+        let reply = call("/access/v1/evaluations", batch);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let answers = reply.json()["evaluations"].clone();
+        assert_eq!(answers[0]["decision"], true);
+        assert_eq!(
+            answers[1],
+            serde_json::json!({"decision": false, "context": {"reason": "invalid_request"}})
+        );
+        assert_eq!(
+            answers[2],
+            serde_json::json!({"decision": false, "context": {"reason": "invalid_request"}})
+        );
+    });
+}
+
+#[test]
+fn a_counter_that_cannot_be_counted_gives_the_status_503_and_no_decision() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        let usage = serde_json::json!({"usage": {"units": 1}});
+        let reply = pdp(
+            port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &read_body("alice", "test1", usage.clone()),
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        // A counter row that the table does not hold (portal 7.2b).
+        node.state.store.execute_raw("DELETE FROM budget_counters");
+        let reply = pdp(
+            port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &read_body("alice", "test1", usage.clone()),
+            None,
+        );
+        assert_eq!(reply.status, 503, "{}", reply.body);
+        assert!(reply.json().get("decision").is_none(), "never a decision");
+        assert_eq!(
+            node.state
+                .counting
+                .stats
+                .row_missing
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // A question without usage counts nothing, so it still gets its decision.
+        let reply = pdp(
+            port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &read_body("alice", "test1", serde_json::json!({})),
+            None,
+        );
+        assert_eq!(reply.status, 200);
+    });
+}
+
+#[test]
+fn the_pdp_refuses_each_key_when_the_directory_is_too_old_and_without_the_block_keys() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        add_key(
+            &node,
+            "a1",
+            Some("alice"),
+            1,
+            vec![Grant::from_path_text("data.read", "db", "host:prod").unwrap()],
+        );
+        let ask = |subject: &str| -> serde_json::Value {
+            pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &read_body(subject, "test1", serde_json::json!({})),
+                None,
+            )
+            .json()
+        };
+        assert_eq!(ask("key:a1")["decision"], true);
+        if node.state.store.is_shared() {
+            // The last good read is older than `keys.directory_max_age` (protocol 3.9).
+            node.state.users.set_last_success(0);
+            assert_eq!(ask("key:a1"), serde_json::json!({"decision": false}));
+            assert_eq!(
+                ask("alice")["decision"],
+                true,
+                "a person keeps the old decisions"
+            );
+            node.state.users.refresh(&node.state.store).unwrap();
+            assert_eq!(ask("key:a1")["decision"], true);
+        }
+    });
+    // Without the block `keys`, each key is an unknown subject (portal 10.1).
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    publish_catalog(&node, &[]);
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let reply = pdp(
+        pdp_port,
+        "/access/v1/evaluation",
+        Some(PDP_DB_TOKEN),
+        &read_body("key:a1", "test1", serde_json::json!({})),
+        None,
+    );
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({"decision": false, "context": {"reason": "unknown_subject"}})
+    );
+}
+
+// The conformance cases of the series D (a PDP) --------------------------------------------------
+
+/// The cases of the public repository of the protocol (`conformance/`). Each case loads its
+/// directory in the portal, sends its steps to the PDP and checks the answers. The test reads the
+/// path of the directory `conformance/` in `PROCURAUTH_CONFORMANCE`. Without this variable, the test
+/// does nothing.
+mod conformance_d {
+    use super::*;
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+
+    fn conformance_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from)
+    }
+
+    fn read_json(path: &std::path::Path) -> Value {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"))
+    }
+
+    /// The service ids of a directory, with their documents and the credential of each.
+    struct Service {
+        id: String,
+        document: Option<Value>,
+        credential: String,
+    }
+
+    /// The text of a credential: the one that a step of the case gives for this digest, or one that
+    /// the harness makes.
+    fn credential_of(id: &str, digest: Option<&str>, case: &Value) -> String {
+        let made = format!("{id}-credential-harness-0123456789abcdef");
+        let Some(digest) = digest else {
+            return made;
+        };
+        let mut found = None;
+        let mut visit = |value: &Value| {
+            if let Some(text) = value
+                .get("request")
+                .and_then(|r| r.get("headers"))
+                .and_then(|h| h.as_object())
+                .and_then(|h| {
+                    h.iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                })
+                .and_then(|(_, v)| v.as_str())
+                .and_then(|v| v.strip_prefix("Bearer "))
+            {
+                let hex: String = Sha256::digest(text.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                if hex == digest {
+                    found = Some(text.to_string());
+                }
+            }
+        };
+        if let Some(steps) = case.get("steps").and_then(Value::as_array) {
+            steps.iter().for_each(&mut visit);
+        }
+        found.unwrap_or(made)
+    }
+
+    fn limits_text(limits: Option<&Value>) -> String {
+        limits.map_or_else(|| "{}".to_string(), Value::to_string)
+    }
+
+    fn grants_of(subject: &Value) -> Vec<Grant> {
+        let mut grants: Vec<Grant> = subject["grants"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|g| {
+                let text = format!(
+                    "{} on {}",
+                    g["action"].as_str().unwrap(),
+                    g["resource"].as_str().unwrap()
+                );
+                Grant::parse(&text)
+                    .unwrap_or_else(|e| panic!("the grant {text:?} of the directory: {e}"))
+                    .with_limits(
+                        crate::limits::Limits::from_json(&limits_text(g.get("limits")))
+                            .unwrap_or_else(|e| panic!("the limits of {text:?}: {e}")),
+                    )
+            })
+            .collect();
+        grants.sort();
+        grants
+    }
+
+    /// The default service of a request: the service of its resource.
+    fn service_of(body: &Value) -> Option<String> {
+        let resource = body
+            .get("resource")
+            .or_else(|| body.get("evaluations")?.get(0)?.get("resource"))?;
+        if resource["type"] == "service" {
+            return resource["id"].as_str().map(str::to_string);
+        }
+        resource["properties"]["ancestors"][0]["id"]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// Loads the directory in the node. `now` is the fixed clock.
+    fn load(node: &Node, directory: &Value, counters: &[Value], now: i64) {
+        let store = &node.state.store;
+        let subjects = directory["subjects"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // The persons first: each key needs its owner.
+        for subject in subjects
+            .iter()
+            .filter(|s| !s["id"].as_str().unwrap().contains(':'))
+        {
+            let mut grants = grants_of(subject);
+            // The portal lets a person use keys only with this right (portal 5.3b).
+            grants.push(Grant::parse("keys.own.use on service:portal").unwrap());
+            grants.sort();
+            store
+                .insert_user(&crate::store::UserRow {
+                    login: subject["id"].as_str().unwrap().to_string(),
+                    password_hash: "h".into(),
+                    grants,
+                    created_at: 1,
+                })
+                .unwrap_or_else(|e| panic!("the person {}: {e:?}", subject["id"]));
+        }
+        for subject in subjects
+            .iter()
+            .filter(|s| s["id"].as_str().unwrap().contains(':'))
+        {
+            let id = subject["id"].as_str().unwrap();
+            let local = id.strip_prefix("key:").unwrap();
+            let owner = subject["owner"].as_str().unwrap();
+            let state = subject["state"].as_str().unwrap_or("active");
+            let owner_exists = subjects.iter().any(|s| s["id"] == owner);
+            // A revoked key is deleted, and a key whose owner does not exist cannot be stored: the
+            // PDP has no such key, so it is an unknown subject (protocol 11.1).
+            if state == "revoked" || !owner_exists {
+                continue;
+            }
+            store
+                .insert_key(
+                    &crate::store::KeyRow {
+                        id: local.to_string(),
+                        owner: Some(owner.to_string()),
+                        name: local.to_string(),
+                        digest: Sha256::digest(id.as_bytes()).into(),
+                        hint: "ab12".into(),
+                        created_at: unix_now() - 100,
+                        expires_at: (state == "expired").then(|| unix_now() - 50),
+                        last_check_at: None,
+                        check_count: 0,
+                        grants: grants_of(subject),
+                    },
+                    &key_caps(),
+                )
+                .unwrap_or_else(|e| panic!("the key {id}: {e:?}"));
+        }
+        node.state.users.refresh(&node.state.store).unwrap();
+        for counter in counters {
+            let subject = counter["subject"].as_str().unwrap();
+            let window = counter["window"].as_str().unwrap();
+            let length = crate::limits::Window::parse(window).unwrap().seconds() as i64;
+            let escape = |text: &str| text.replace('\'', "''");
+            let owner = match subject.strip_prefix("key:") {
+                Some(local) => format!("key_id = '{}'", escape(local)),
+                None => format!(
+                    "user_id = (SELECT id FROM users WHERE login = '{}')",
+                    escape(subject)
+                ),
+            };
+            store.execute_raw(&format!(
+                "UPDATE budget_counters SET units = {}, window_start = {}
+                  WHERE {owner} AND budget = '{}' AND \"window\" = '{window}'",
+                counter["used"].as_i64().unwrap(),
+                now - now.rem_euclid(length),
+                escape(counter["limit"].as_str().unwrap()),
+            ));
+        }
+    }
+
+    /// Runs one case against a fresh node. Gives the failures, as text.
+    fn run_case(backend: &Backend, dir: &std::path::Path, case: &Value) -> Vec<String> {
+        let id = case["id"].as_str().unwrap();
+        let given = &case["given"];
+        let directory = match &given["directory"] {
+            Value::String(name) => read_json(&dir.join("directories").join(name)),
+            inline => inline.clone(),
+        };
+        let now = given
+            .get("clock")
+            .or_else(|| directory.get("clock"))
+            .and_then(|c| c["now"].as_i64())
+            .unwrap_or(0);
+        let services: Vec<Service> = directory["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| Service {
+                id: s["id"].as_str().unwrap().to_string(),
+                document: s.get("document").cloned(),
+                credential: credential_of(
+                    s["id"].as_str().unwrap(),
+                    s.get("credential_sha256").and_then(Value::as_str),
+                    case,
+                ),
+            })
+            .collect();
+        let persons = directory["subjects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| !s["id"].as_str().unwrap().contains(':'))
+            .count();
+        let pdp_port = free_port();
+        let mut clients = String::new();
+        let mut env = Vec::new();
+        for (index, service) in services.iter().enumerate() {
+            clients.push_str(&format!(
+                "pdp_client \"{}\" {{ token_env = \"CONFORMANCE_TOKEN_{index}\" }}\n",
+                service.id
+            ));
+            env.push((
+                format!("CONFORMANCE_TOKEN_{index}"),
+                service.credential.clone(),
+            ));
+        }
+        let node = start_custom(
+            Arc::new(backend.fresh()),
+            None,
+            Custom {
+                max_users: persons.max(1),
+                env,
+                ..Custom::default()
+            },
+            &format!(
+                r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+                pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 64 max_body_bytes = "1MiB" }}
+                keys {{}}
+                {clients}"#
+            ),
+        );
+        // The catalogue holds each service, so the registry keeps its document.
+        let listed_services: Vec<crate::catalog::Service> = services
+            .iter()
+            .map(|s| {
+                let href = format!("/{}/", s.id);
+                let mut labels = vec![
+                    ("portal.name", s.id.as_str()),
+                    ("portal.id", s.id.as_str()),
+                    ("portal.href", href.as_str()),
+                ];
+                if s.document.is_some() {
+                    labels.push(("portal.actions", DB_ACTIONS_URL));
+                }
+                listed(&labels)
+            })
+            .collect();
+        *node.state.catalog.write().unwrap() =
+            Arc::new(Catalog::build(listed_services, Vec::new()));
+        let mut failures = Vec::new();
+        for service in &services {
+            if let Some(document) = &service.document {
+                match crate::actions::parse(&service.id, document.to_string().as_bytes()) {
+                    Ok(document) => node.state.actions.set_document(&service.id, document),
+                    Err(e) => failures.push(format!(
+                        "{id}: the reader of the portal refuses the document of {}: {e}",
+                        service.id
+                    )),
+                }
+            }
+        }
+        if now != 0 {
+            node.state.counting.set_clock(Some(now));
+        }
+        let counters: Vec<Value> = given
+            .get("counters")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| directory.get("counters").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        load(&node, &directory, &counters, now);
+        wait_until(Duration::from_secs(10), || {
+            TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+        });
+        for (number, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+            let name = step.get("name").and_then(Value::as_str).unwrap_or("");
+            let label = format!("{id} step {} ({name})", number + 1);
+            let request = &step["request"];
+            let (method, path) = match request.get("endpoint").and_then(Value::as_str) {
+                Some("evaluation") => ("POST", "/access/v1/evaluation".to_string()),
+                Some("evaluations") => ("POST", "/access/v1/evaluations".to_string()),
+                Some("metadata") => ("GET", "/.well-known/authzen-configuration".to_string()),
+                _ => (
+                    request["method"].as_str().unwrap_or("POST"),
+                    request["path"].as_str().unwrap_or("/").to_string(),
+                ),
+            };
+            let body = match (request.get("body"), request.get("body_text")) {
+                (Some(body), _) => body.to_string(),
+                (None, Some(text)) => text.as_str().unwrap().to_string(),
+                _ => String::new(),
+            };
+            let default_service = request
+                .get("body")
+                .and_then(service_of)
+                .and_then(|id| services.iter().find(|s| s.id == id))
+                .or_else(|| services.first());
+            let mut headers: Vec<(String, String)> =
+                vec![("Content-Type".into(), "application/json".into())];
+            let mut given_headers = request
+                .get("headers")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if !given_headers
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("authorization"))
+                && method == "POST"
+            {
+                if let Some(service) = default_service {
+                    given_headers.insert(
+                        "Authorization".into(),
+                        Value::String(format!("Bearer {}", service.credential)),
+                    );
+                }
+            }
+            for (name, value) in &given_headers {
+                headers.push((name.clone(), value.as_str().unwrap_or("").to_string()));
+            }
+            let header_refs: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let reply = send(pdp_port, method, &path, &header_refs, &body);
+            let expect = &step["expect"];
+            if let Some(matcher) = expect.get("status") {
+                check(
+                    &mut failures,
+                    &label,
+                    "status",
+                    &Value::from(reply.status),
+                    matcher,
+                );
+            }
+            if let Some(pointers) = expect.get("json").and_then(Value::as_object) {
+                let parsed: Option<Value> = serde_json::from_str(&reply.body).ok();
+                for (pointer, matcher) in pointers {
+                    let found = parsed.as_ref().and_then(|v| v.pointer(pointer));
+                    match found {
+                        Some(value) => check(&mut failures, &label, pointer, value, matcher),
+                        None => {
+                            if matcher.get("absent").is_none() {
+                                failures.push(format!(
+                                    "{label}: {pointer} is absent; expected {matcher}; body {}",
+                                    reply.body
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(matcher) = expect.get("body_text") {
+                check(
+                    &mut failures,
+                    &label,
+                    "body_text",
+                    &Value::from(reply.body.clone()),
+                    matcher,
+                );
+            }
+        }
+        failures
+    }
+
+    fn check(failures: &mut Vec<String>, label: &str, what: &str, value: &Value, matcher: &Value) {
+        if let Some(expected) = matcher.get("equals") {
+            if value != expected {
+                failures.push(format!("{label}: {what} is {value}, expected {expected}"));
+            }
+        } else if matcher.get("absent").is_some() {
+            failures.push(format!("{label}: {what} is {value}, expected it absent"));
+        } else if matcher.get("present").is_some() {
+            // The value is there.
+        } else {
+            failures.push(format!(
+                "{label}: the matcher {matcher} is not read by the harness"
+            ));
+        }
+    }
+
+    #[test]
+    fn the_cases_of_the_series_d_pass() {
+        let Some(dir) = conformance_dir() else {
+            eprintln!("PROCURAUTH_CONFORMANCE is not set: the cases of the series D are skipped");
+            return;
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(dir.join("cases/D"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        paths.sort();
+        let only = std::env::var("PROCURAUTH_CASES").ok();
+        let mut failures = Vec::new();
+        let mut run = 0;
+        each_backend(|backend| {
+            let _ = backend;
+        });
+        for backend in crate::store::testing::backends() {
+            for path in &paths {
+                let case = read_json(path);
+                let id = case["id"].as_str().unwrap().to_string();
+                if only
+                    .as_ref()
+                    .is_some_and(|only| !only.split(',').any(|o| o == id))
+                {
+                    continue;
+                }
+                run += 1;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_case(&backend, &dir, &case)
+                }));
+                match result {
+                    Ok(found) => failures.extend(
+                        found
+                            .into_iter()
+                            .map(|f| format!("[{}] {f}", backend.name())),
+                    ),
+                    Err(_) => failures.push(format!(
+                        "[{}] {id}: the harness or the portal panicked",
+                        backend.name()
+                    )),
+                }
+            }
+        }
+        eprintln!("{run} cases run, {} failures", failures.len());
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+}
+
+// The conformance cases of the series E (an edge) -------------------------------------------------
+
+/// The cases of the series E drive an edge: Traefik with its ForwardAuth middleware for the keys,
+/// and the portal behind it. The test acts as Traefik: it sends the headers of the request to
+/// `/auth/verify-key`, it returns a refusal as it is, and it forwards an accepted request to the
+/// service with the header of the identity token from the answer and without `Authorization`
+/// (portal 8.1, 8.1a). The test also acts as the service: it records the request that arrives.
+mod conformance_e {
+    use super::*;
+    use serde_json::Value;
+
+    /// A small matcher of regular expressions for the patterns of the cases: anchors, literals,
+    /// escapes, classes, groups, `?`, `*`, `+` and `{n,m}`.
+    mod regex {
+        #[derive(Debug, Clone)]
+        enum Node {
+            Char(char),
+            Any,
+            Class(bool, Vec<(char, char)>),
+            Start,
+            End,
+            Group(Vec<Node>),
+            Repeat(Box<Node>, usize, usize),
+        }
+
+        fn escape_class(c: char) -> Option<(bool, Vec<(char, char)>)> {
+            match c {
+                's' => Some((
+                    false,
+                    vec![(' ', ' '), ('\t', '\t'), ('\n', '\n'), ('\r', '\r')],
+                )),
+                'S' => Some((
+                    true,
+                    vec![(' ', ' '), ('\t', '\t'), ('\n', '\n'), ('\r', '\r')],
+                )),
+                'd' => Some((false, vec![('0', '9')])),
+                'w' => Some((false, vec![('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')])),
+                _ => None,
+            }
+        }
+
+        fn parse_seq(chars: &[char], i: &mut usize, in_group: bool) -> Vec<Node> {
+            let mut out: Vec<Node> = Vec::new();
+            while *i < chars.len() {
+                let c = chars[*i];
+                if c == ')' && in_group {
+                    return out;
+                }
+                *i += 1;
+                let node = match c {
+                    '^' => Node::Start,
+                    '$' => Node::End,
+                    '.' => Node::Any,
+                    '(' => {
+                        let inner = parse_seq(chars, i, true);
+                        *i += 1; // the closing parenthesis
+                        Node::Group(inner)
+                    }
+                    '[' => {
+                        let negate = chars.get(*i) == Some(&'^');
+                        if negate {
+                            *i += 1;
+                        }
+                        let mut items = Vec::new();
+                        while chars[*i] != ']' {
+                            let mut lo = chars[*i];
+                            if lo == '\\' {
+                                *i += 1;
+                                lo = chars[*i];
+                            }
+                            if chars.get(*i + 1) == Some(&'-') && chars.get(*i + 2) != Some(&']') {
+                                items.push((lo, chars[*i + 2]));
+                                *i += 3;
+                            } else {
+                                items.push((lo, lo));
+                                *i += 1;
+                            }
+                        }
+                        *i += 1;
+                        Node::Class(negate, items)
+                    }
+                    '\\' => {
+                        let e = chars[*i];
+                        *i += 1;
+                        match escape_class(e) {
+                            Some((negate, items)) => Node::Class(negate, items),
+                            None => Node::Char(e),
+                        }
+                    }
+                    other => Node::Char(other),
+                };
+                // A quantifier applies to the node before it.
+                let (min, max) = match chars.get(*i) {
+                    Some('?') => (0, 1),
+                    Some('*') => (0, usize::MAX),
+                    Some('+') => (1, usize::MAX),
+                    Some('{') => {
+                        let close = chars[*i..].iter().position(|c| *c == '}').unwrap() + *i;
+                        let body: String = chars[*i + 1..close].iter().collect();
+                        *i = close;
+                        match body.split_once(',') {
+                            Some((a, b)) => (
+                                a.parse().unwrap(),
+                                if b.is_empty() {
+                                    usize::MAX
+                                } else {
+                                    b.parse().unwrap()
+                                },
+                            ),
+                            None => (body.parse().unwrap(), body.parse().unwrap()),
+                        }
+                    }
+                    _ => {
+                        out.push(node);
+                        continue;
+                    }
+                };
+                *i += 1;
+                out.push(Node::Repeat(Box::new(node), min, max));
+            }
+            out
+        }
+
+        /// The end positions after the node, from `pos`.
+        fn run(node: &Node, text: &[char], pos: usize) -> Vec<usize> {
+            match node {
+                Node::Char(c) => (text.get(pos) == Some(c))
+                    .then_some(pos + 1)
+                    .into_iter()
+                    .collect(),
+                Node::Any => (pos < text.len()).then_some(pos + 1).into_iter().collect(),
+                Node::Class(negate, items) => match text.get(pos) {
+                    Some(c) => {
+                        let inside = items.iter().any(|(lo, hi)| lo <= c && c <= hi);
+                        (inside != *negate).then_some(pos + 1).into_iter().collect()
+                    }
+                    None => Vec::new(),
+                },
+                Node::Start => (pos == 0).then_some(pos).into_iter().collect(),
+                Node::End => (pos == text.len()).then_some(pos).into_iter().collect(),
+                Node::Group(nodes) => run_seq(nodes, text, pos),
+                Node::Repeat(inner, min, max) => {
+                    let mut results = Vec::new();
+                    let mut frontier = vec![pos];
+                    let mut count = 0;
+                    if *min == 0 {
+                        results.push(pos);
+                    }
+                    while count < *max && !frontier.is_empty() && count < text.len() + 2 {
+                        let mut next = Vec::new();
+                        for p in &frontier {
+                            for end in run(inner, text, *p) {
+                                if !next.contains(&end) {
+                                    next.push(end);
+                                }
+                            }
+                        }
+                        count += 1;
+                        if count >= *min {
+                            for p in &next {
+                                if !results.contains(p) {
+                                    results.push(*p);
+                                }
+                            }
+                        }
+                        frontier = next;
+                    }
+                    results
+                }
+            }
+        }
+
+        fn run_seq(nodes: &[Node], text: &[char], pos: usize) -> Vec<usize> {
+            let mut positions = vec![pos];
+            for node in nodes {
+                let mut next = Vec::new();
+                for p in positions {
+                    for end in run(node, text, p) {
+                        if !next.contains(&end) {
+                            next.push(end);
+                        }
+                    }
+                }
+                positions = next;
+            }
+            positions
+        }
+
+        /// Whether the pattern matches somewhere in the text. `^` and `$` anchor it.
+        pub fn is_match(pattern: &str, text: &str) -> bool {
+            let chars: Vec<char> = pattern.chars().collect();
+            let nodes = parse_seq(&chars, &mut 0, false);
+            let text: Vec<char> = text.chars().collect();
+            (0..=text.len()).any(|start| !run_seq(&nodes, &text, start).is_empty())
+        }
+
+        #[test]
+        fn the_matcher_reads_the_patterns_of_the_cases() {
+            assert!(is_match("^2[0-9]{2}$", "204"));
+            assert!(!is_match("^2[0-9]{2}$", "2044"));
+            assert!(!is_match("^2[0-9]{2}$", "404"));
+            let invalid = r#"^Bearer\s+(realm="[^"]*",\s*)?error="invalid_token"(,\s*error_description="[^"]*")?$"#;
+            assert!(is_match(invalid, r#"Bearer error="invalid_token""#));
+            assert!(is_match(
+                invalid,
+                r#"Bearer realm="x", error="invalid_token", error_description="y z""#
+            ));
+            assert!(!is_match(invalid, "Bearer"));
+            assert!(!is_match(invalid, r#"Bearer error="invalid_request""#));
+            let none = r#"^Bearer( realm="[^"]*")?$"#;
+            assert!(is_match(none, "Bearer"));
+            assert!(is_match(none, r#"Bearer realm="r""#));
+            assert!(!is_match(none, r#"Bearer error="invalid_token""#));
+            let jwt = r"^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}$";
+            assert!(is_match(
+                jwt,
+                "aaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbb.cccccccccccccccccc"
+            ));
+            assert!(!is_match(jwt, "forged.forged.forged"));
+            assert!(is_match("mcp_", "xxmcp_yy") && !is_match("^mcp_", "xxmcp_"));
+        }
+    }
+
+    fn conformance_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("PROCURAUTH_CONFORMANCE").map(std::path::PathBuf::from)
+    }
+
+    /// What the service behind the edge got.
+    #[derive(Default)]
+    struct Upstream {
+        requests: Vec<Vec<(String, String)>>,
+    }
+
+    struct Edge<'a> {
+        node: &'a Node,
+        upstream: std::sync::Mutex<Upstream>,
+        token_header: String,
+    }
+
+    struct Answer {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl Edge<'_> {
+        /// One request through the edge: the ForwardAuth call, then the service.
+        fn request(
+            &self,
+            method: &str,
+            path: &str,
+            headers: &[(String, String)],
+            body: &str,
+        ) -> Answer {
+            let mut auth: Vec<(&str, &str)> = vec![
+                ("X-Forwarded-Method", method),
+                ("X-Forwarded-Proto", "https"),
+                ("X-Forwarded-Host", "portal.test"),
+                ("X-Forwarded-For", "203.0.113.9"),
+            ];
+            auth.push(("X-Forwarded-Uri", path));
+            for (name, value) in headers {
+                if name.eq_ignore_ascii_case("authorization") {
+                    auth.push(("Authorization", value));
+                }
+            }
+            let reply = send(self.node.port, "GET", "/auth/verify-key", &auth, "");
+            if !(200..300).contains(&reply.status) {
+                // A refusal: Traefik returns the answer of the portal as it is.
+                return Answer {
+                    status: reply.status,
+                    headers: reply.headers.clone(),
+                    body: reply.body.clone(),
+                };
+            }
+            let mut forwarded: Vec<(String, String)> = headers
+                .iter()
+                .filter(|(name, _)| {
+                    !name.eq_ignore_ascii_case("authorization")
+                        && !name.eq_ignore_ascii_case(&self.token_header)
+                })
+                .cloned()
+                .collect();
+            if let Some(token) = reply.header(&self.token_header) {
+                forwarded.push((self.token_header.clone(), token.to_string()));
+            }
+            let _ = body;
+            self.upstream.lock().unwrap().requests.push(forwarded);
+            Answer {
+                status: 200,
+                headers: Vec::new(),
+                body: String::new(),
+            }
+        }
+    }
+
+    fn replace_variables(text: &str, variables: &[(String, String)]) -> String {
+        let mut out = text.to_string();
+        for (name, value) in variables {
+            out = out.replace(&format!("{{{{{name}}}}}"), value);
+        }
+        out
+    }
+
+    fn variables_in(value: &Value, variables: &[(String, String)]) -> Value {
+        match value {
+            Value::String(text) => Value::String(replace_variables(text, variables)),
+            Value::Array(items) => {
+                Value::Array(items.iter().map(|v| variables_in(v, variables)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (replace_variables(k, variables), variables_in(v, variables)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    fn matches(value: Option<&Value>, matcher: &Value) -> Result<(), String> {
+        if let Some(expected) = matcher.get("equals") {
+            return if value == Some(expected) {
+                Ok(())
+            } else {
+                Err(format!("is {value:?}, expected {expected}"))
+            };
+        }
+        if matcher.get("absent").is_some() {
+            return if value.is_none() {
+                Ok(())
+            } else {
+                Err(format!("is {value:?}, expected it absent"))
+            };
+        }
+        if matcher.get("present").is_some() {
+            return if value.is_some() {
+                Ok(())
+            } else {
+                Err("is absent, expected it present".into())
+            };
+        }
+        let text = value.map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string));
+        if let Some(pattern) = matcher.get("regex").and_then(Value::as_str) {
+            return match &text {
+                Some(text) if regex::is_match(pattern, text) => Ok(()),
+                other => Err(format!("is {other:?}, expected a match of {pattern}")),
+            };
+        }
+        if let Some(pattern) = matcher.get("not_regex").and_then(Value::as_str) {
+            return match &text {
+                Some(text) if regex::is_match(pattern, text) => {
+                    Err(format!("matches {pattern}: {text}"))
+                }
+                _ => Ok(()),
+            };
+        }
+        if let Some(options) = matcher.get("one_of").and_then(Value::as_array) {
+            return if value.is_some_and(|v| options.contains(v)) {
+                Ok(())
+            } else {
+                Err(format!("is {value:?}, expected one of {options:?}"))
+            };
+        }
+        Err(format!("the matcher {matcher} is not read by the harness"))
+    }
+
+    fn decode_part(token: &str, index: usize) -> Value {
+        use base64ct::{Base64UrlUnpadded, Encoding};
+        let part = token.split('.').nth(index).unwrap_or("");
+        Base64UrlUnpadded::decode_vec(part)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(Value::Null)
+    }
+
+    fn run_case(backend: &Backend, case: &Value) -> Vec<String> {
+        let id = case["id"].as_str().unwrap();
+        let pdp_port = free_port();
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            None,
+            &format!(
+                r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" token_ttl = "5m" }}
+                pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+                keys {{}}
+                pdp_client "probe" {{ token_env = "TEST_PDP_DB" }}"#
+            ),
+        );
+        let catalog = Catalog::build(
+            vec![listed(&[
+                ("portal.name", "Probe"),
+                ("portal.id", "probe"),
+                ("portal.href", "/probe/"),
+                ("portal.actions", DB_ACTIONS_URL),
+            ])],
+            Vec::new(),
+        );
+        *node.state.catalog.write().unwrap() = Arc::new(catalog);
+        node.state.actions.set_document(
+            "probe",
+            crate::actions::parse(
+                "probe",
+                br#"{"server":"probe","resource_types":[],"actions":[{"name":"probe.read","resource_types":["service"],"description":"Read."}]}"#,
+            )
+            .unwrap(),
+        );
+        node.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "ana".into(),
+                password_hash: "h".into(),
+                grants: vec![
+                    Grant::parse("access on service:probe").unwrap(),
+                    Grant::parse("keys.own.use on service:portal").unwrap(),
+                ],
+                created_at: 1,
+            })
+            .unwrap();
+        let make = |key_id: &str, byte: u8, grants: Vec<Grant>| -> String {
+            let text = crate::keys::generate().unwrap().to_string();
+            let _ = byte;
+            node.state
+                .store
+                .insert_key(
+                    &crate::store::KeyRow {
+                        id: key_id.into(),
+                        owner: Some("ana".into()),
+                        name: key_id.into(),
+                        digest: crate::keys::digest(&text),
+                        hint: crate::keys::hint(&text),
+                        created_at: unix_now() - 10,
+                        expires_at: None,
+                        last_check_at: None,
+                        check_count: 0,
+                        grants,
+                    },
+                    &key_caps(),
+                )
+                .unwrap();
+            text
+        };
+        let valid = make(
+            "9b1c04e2aa71f0c3",
+            1,
+            vec![Grant::parse("access on service:probe").unwrap()],
+        );
+        let no_access = make("4d2e8f6a10b37c95", 2, Vec::new());
+        node.state.users.refresh(&node.state.store).unwrap();
+        let unknown = crate::keys::generate().unwrap().to_string();
+        let token_header = node.state.config.identity.as_ref().unwrap().header.clone();
+        let variables: Vec<(String, String)> = vec![
+            ("valid_key_text".into(), valid),
+            ("unknown_key_text".into(), unknown),
+            ("no_access_key_text".into(), no_access),
+            ("valid_key_subject".into(), "key:9b1c04e2aa71f0c3".into()),
+            ("valid_key_owner".into(), "ana".into()),
+            ("token_header".into(), token_header.clone()),
+            ("service".into(), "probe".into()),
+            ("mcp_path".into(), "/probe/mcp".into()),
+        ];
+        let edge = Edge {
+            node: &node,
+            upstream: std::sync::Mutex::new(Upstream::default()),
+            token_header,
+        };
+        let mut failures = Vec::new();
+        for (number, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+            let label = format!(
+                "{id} step {} ({})",
+                number + 1,
+                step.get("name").and_then(Value::as_str).unwrap_or("")
+            );
+            let request = variables_in(&step["request"], &variables);
+            let method = request["method"].as_str().unwrap_or("GET").to_string();
+            let path = request["path"].as_str().unwrap().to_string();
+            let headers: Vec<(String, String)> = request
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|h| {
+                    h.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let body = match (request.get("body"), request.get("body_text")) {
+                (Some(body), _) => body.to_string(),
+                (None, Some(text)) => text.as_str().unwrap_or("").to_string(),
+                _ => String::new(),
+            };
+            let before = edge.upstream.lock().unwrap().requests.len();
+            let answer = edge.request(&method, &path, &headers, &body);
+            let received: Vec<Vec<(String, String)>> =
+                edge.upstream.lock().unwrap().requests[before..].to_vec();
+            let expect = variables_in(&step["expect"], &variables);
+            let mut record = |what: &str, result: Result<(), String>| {
+                if let Err(reason) = result {
+                    failures.push(format!("[{}] {label}: {what} {reason}", backend.name()));
+                }
+            };
+            if let Some(matcher) = expect.get("status") {
+                record(
+                    "status",
+                    matches(Some(&Value::from(answer.status)), matcher),
+                );
+            }
+            if let Some(headers) = expect.get("headers").and_then(Value::as_object) {
+                for (name, matcher) in headers {
+                    let value = answer
+                        .headers
+                        .iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                        .map(|(_, v)| Value::String(v.clone()));
+                    record(&format!("header {name}"), matches(value.as_ref(), matcher));
+                }
+            }
+            if let Some(matcher) = expect.get("body_text") {
+                record(
+                    "body_text",
+                    matches(Some(&Value::String(answer.body.clone())), matcher),
+                );
+            }
+            if let Some(upstream) = expect.get("upstream") {
+                if let Some(matcher) = upstream.get("count") {
+                    record(
+                        "upstream count",
+                        matches(Some(&Value::from(received.len())), matcher),
+                    );
+                }
+                let first = received.first();
+                if let Some(headers) = upstream.get("headers").and_then(Value::as_object) {
+                    for (name, matcher) in headers {
+                        let value = first.and_then(|h| {
+                            h.iter()
+                                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                                .map(|(_, v)| Value::String(v.clone()))
+                        });
+                        record(
+                            &format!("upstream header {name}"),
+                            matches(value.as_ref(), matcher),
+                        );
+                    }
+                }
+                let token = first.and_then(|h| {
+                    h.iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(&edge.token_header))
+                        .map(|(_, v)| v.clone())
+                });
+                for (member, part) in [("token_header", 0), ("token_claims", 1)] {
+                    if let Some(pointers) = upstream.get(member).and_then(Value::as_object) {
+                        let decoded = token.as_ref().map(|t| decode_part(t, part));
+                        for (pointer, matcher) in pointers {
+                            let value = decoded.as_ref().and_then(|d| d.pointer(pointer));
+                            record(&format!("{member} {pointer}"), matches(value, matcher));
+                        }
+                    }
+                }
+            }
+        }
+        failures
+    }
+
+    #[test]
+    fn the_cases_of_the_series_e_pass() {
+        let Some(dir) = conformance_dir() else {
+            eprintln!("PROCURAUTH_CONFORMANCE is not set: the cases of the series E are skipped");
+            return;
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(dir.join("cases/E"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        paths.sort();
+        let mut failures = Vec::new();
+        let mut run = 0;
+        for backend in crate::store::testing::backends() {
+            for path in &paths {
+                let case: Value =
+                    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                run += 1;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_case(&backend, &case)
+                }));
+                match result {
+                    Ok(found) => failures.extend(found),
+                    Err(_) => failures.push(format!(
+                        "[{}] {}: the harness or the portal panicked",
+                        backend.name(),
+                        case["id"]
+                    )),
+                }
+            }
+        }
+        eprintln!("{run} cases run, {} failures", failures.len());
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+}
+
+// The work on a timer ---------------------------------------------------------------------------
+
+#[test]
+fn the_rounds_write_the_key_checks_prune_the_old_keys_and_make_the_rows_of_a_new_directory() {
+    each_backend(|backend| {
+        let (node, _port) = key_node(backend);
+        add_alice(
+            &node,
+            &[Grant::new("access", "db")
+                .unwrap()
+                .with_limits(limits(r#"{"requests":[{"amount":3,"window":"minute"}]}"#))],
+        );
+        let text = crate::keys::generate().unwrap().to_string();
+        let grants = vec![Grant::parse("access on service:db").unwrap()];
+        node.state
+            .store
+            .insert_key(
+                &crate::store::KeyRow {
+                    id: "c0ffee0000000001".into(),
+                    owner: Some("alice".into()),
+                    name: "checked".into(),
+                    digest: crate::keys::digest(&text),
+                    hint: crate::keys::hint(&text),
+                    created_at: unix_now() - 10,
+                    expires_at: None,
+                    last_check_at: None,
+                    check_count: 0,
+                    grants,
+                },
+                &key_caps(),
+            )
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        let check = || {
+            send(
+                node.port,
+                "GET",
+                "/auth/verify-key",
+                &[
+                    ("Authorization", &format!("Bearer {text}")),
+                    ("X-Forwarded-Uri", "/db/x"),
+                    ("X-Forwarded-Method", "GET"),
+                ],
+                "",
+            )
+        };
+        for _ in 0..3 {
+            let reply = check();
+            assert_eq!(reply.status, 204, "{:?}", reply.headers);
+            assert!(reply.header("x-identity-token").is_some());
+        }
+        // The checks stay in memory until the round of 15 seconds writes them.
+        let stored = |node: &Node| {
+            node.state
+                .store
+                .load_directory()
+                .unwrap()
+                .keys
+                .into_iter()
+                .find(|k| k.id == "c0ffee0000000001")
+        };
+        assert_eq!(stored(&node).unwrap().check_count, 0);
+        crate::sync::run_round(&node.state, 1);
+        assert_eq!(
+            stored(&node).unwrap().check_count,
+            0,
+            "not a round of the checks"
+        );
+        crate::sync::run_round(&node.state, 3);
+        let key = stored(&node).unwrap();
+        assert_eq!(key.check_count, 3);
+        assert!(key.last_check_at.is_some_and(|at| at >= unix_now() - 5));
+        check();
+        crate::sync::run_round(&node.state, 6);
+        assert_eq!(stored(&node).unwrap().check_count, 4);
+        // A key that expired more than 30 days ago is deleted, and a summary row that is old.
+        node.state.store.execute_raw(&format!(
+            "UPDATE keys SET expires_at = {} WHERE id = 'c0ffee0000000001';
+             INSERT INTO key_history (id, owner_id, name, created_at, revoked_at, check_count)
+               VALUES ('old', NULL, 'old', 1, 2, 0)",
+            unix_now() - 31 * 86_400
+        ));
+        crate::sync::run_round(&node.state, 60);
+        assert!(stored(&node).is_none());
+        assert_eq!(node.state.store.count("key_history"), 0);
+    });
+}
+
+#[test]
+fn a_new_version_of_the_directory_makes_the_counter_rows_it_needs_and_clears_the_refusal_memo() {
+    each_backend(|backend| {
+        let (node, port) = key_node(backend);
+        add_alice(&node, &[]);
+        let usage = serde_json::json!({"usage": {"units": 1}});
+        let ask = |context: &serde_json::Value| {
+            pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &read_body("alice", "test1", context.clone()),
+                None,
+            )
+            .json()
+        };
+        // Three uses fit, the fourth is refused and enters the memo.
+        for _ in 0..3 {
+            assert_eq!(ask(&usage)["decision"], true);
+        }
+        assert_eq!(ask(&usage)["context"]["reason"], "budget_exceeded");
+        assert_eq!(node.state.counting.memo_entries(), 1);
+        // The superadmin gives Alice a bigger budget. The new version clears the memo.
+        let bigger: Vec<Grant> = node
+            .state
+            .users
+            .grants_of("alice")
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.action != "access")
+            .chain([Grant::new("access", "db").unwrap().with_limits(limits(
+                r#"{"requests":[{"amount":50,"window":"minute"},{"amount":5,"window":"hour"}]}"#,
+            ))])
+            .collect();
+        node.state
+            .store
+            .update_user("alice", None, Some(&bigger))
+            .unwrap();
+        crate::sync::run_round(&node.state, 1);
+        assert_eq!(node.state.counting.memo_entries(), 0);
+        // The rows of the new windows exist: the use is counted, not unavailable.
+        let reply = ask(&usage);
+        assert_eq!(reply["decision"], true, "{reply}");
+        assert_eq!(
+            node.state
+                .counting
+                .stats
+                .row_missing
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    });
+}
+
+#[test]
+fn the_measures_of_the_keys_the_counters_and_the_directory_are_given() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+            keys {{}}
+            metrics {{ enabled = true }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    publish_catalog(&node, &[]);
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    add_alice(&node, &[]);
+    let usage = serde_json::json!({"usage": {"units": 1}});
+    for _ in 0..4 {
+        pdp(
+            pdp_port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &read_body("alice", "test1", usage.clone()),
+            None,
+        );
+    }
+    pdp(
+        pdp_port,
+        "/access/v1/evaluation",
+        Some(PDP_DB_TOKEN),
+        &read_body("alice", "test1", serde_json::json!({"usage": {"units": 2}})),
+        None,
+    );
+    let refused = send(
+        node.port,
+        "GET",
+        "/auth/verify-key",
+        &[("Authorization", "Bearer mcp_nothing")],
+        "",
+    );
+    assert_eq!(refused.status, 401);
+    let missing = send(node.port, "GET", "/auth/verify-key", &[], "");
+    assert_eq!(missing.status, 401);
+    let body = send(node.port, "GET", "/metrics", &[], "").body;
+    let value = |line_start: &str| -> f64 {
+        body.lines()
+            .find(|l| l.starts_with(line_start))
+            .unwrap_or_else(|| panic!("{line_start} is not in the measures:\n{body}"))
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(value("portal_budget_units_total{result=\"counted\"}"), 3.0);
+    assert_eq!(value("portal_budget_units_total{result=\"refused\"}"), 1.0);
+    assert_eq!(
+        value("portal_pdp_decisions_total{decision=\"true\",reason=\"none\"}"),
+        3.0
+    );
+    assert_eq!(
+        value("portal_pdp_decisions_total{decision=\"false\",reason=\"budget_exceeded\"}"),
+        1.0
+    );
+    assert_eq!(value("portal_usage_rejected_total"), 1.0);
+    assert_eq!(
+        value("portal_pdp_refused_total{reason=\"bad_request\"}"),
+        0.0
+    );
+    assert_eq!(value("portal_key_checks_total{result=\"bad_format\"}"), 1.0);
+    assert_eq!(value("portal_key_checks_total{result=\"no_key\"}"), 1.0);
+    assert_eq!(value("portal_key_checks_total{result=\"ok\"}"), 0.0);
+    assert_eq!(value("portal_counter_statement_seconds_count"), 4.0);
+    assert_eq!(value("portal_counter_rows "), 1.0);
+    assert_eq!(value("portal_active_keys "), 0.0);
+    assert_eq!(value("portal_directory_age_seconds"), 0.0);
+    assert!(value("portal_directory_grants ") >= 4.0);
+    assert!(value("portal_actions_age_seconds") < 60.0);
+    assert_eq!(value("portal_limit_values_undeclared"), 0.0);
+    // No label names a user or a key.
+    assert!(!body.contains("alice"), "no measure names a user");
+}
+
+// The page "Keys" -------------------------------------------------------------------------------
+
+fn get_keys(node: &Node, session: &str, query: &str) -> Reply {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    send(
+        node.port,
+        "GET",
+        &format!("/auth/keys{query}"),
+        &[("Cookie", &cookie)],
+        "",
+    )
+}
+
+fn get_new_key(node: &Node, session: &str, query: &str) -> Reply {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    send(
+        node.port,
+        "GET",
+        &format!("/auth/keys/new{query}"),
+        &[("Cookie", &cookie)],
+        "",
+    )
+}
+
+/// A page of the keys: `new` or `edit?id=<id>`.
+fn get_key_page(node: &Node, session: &str, what: &str) -> Reply {
+    let cookie = format!("{}={session}", session_cookie_name(node));
+    send(
+        node.port,
+        "GET",
+        &format!("/auth/keys/{what}"),
+        &[("Cookie", &cookie)],
+        "",
+    )
+}
+
+/// The text of a key in a page: `mcp_` and 49 characters.
+fn key_text_in(body: &str) -> Option<String> {
+    let start = body.find("mcp_")?;
+    let text: String = body[start..].chars().take(53).collect();
+    (text.len() == 53 && crate::keys::check_format(&text).is_ok()).then_some(text)
+}
+
+fn keys_post(node: &Node, session: &str, action: &str, fields: &str) -> Reply {
+    post(
+        node,
+        session,
+        &format!("/auth/keys/{action}"),
+        super::keys_page::KEYS_TOKEN,
+        fields,
+    )
+}
+
+/// A user with the rights to manage keys, and a node with the service `db`.
+fn keys_user(backend: &Backend, extra_keys_block: &str) -> (Node, u16, String) {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(backend.fresh()),
+        None,
+        &format!(
+            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+            keys {{ {extra_keys_block} }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    publish_catalog(&node, &[]);
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    let rights: Vec<Grant> = [
+        "keys.own.read",
+        "keys.own.create",
+        "keys.own.edit",
+        "keys.own.revoke",
+        "keys.own.use",
+    ]
+    .iter()
+    .map(|a| Grant::parse(&format!("{a} on service:portal")).unwrap())
+    .collect();
+    add_alice(&node, &rights);
+    let session = sign_in(&node, "alice", PASSWORD);
+    (node, pdp_port, session)
+}
+
+#[test]
+fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
+    each_backend(|backend| {
+        let (node, _pdp, alice) = keys_user(backend, "");
+        let page = get_keys(&node, &alice, "");
+        assert_eq!(page.status, 200, "{}", page.body);
+        assert!(page.body.contains("New key"), "the link to the new key");
+        assert!(page.body.contains(r#"href="/auth/keys/new""#));
+        assert!(page.body.contains("No key yet"));
+        assert!(
+            !page
+                .body
+                .contains("<form method=\"post\" action=\"/auth/keys/create\""),
+            "the form of a new key is a page of its own"
+        );
+        let form = get_new_key(&node, &alice, "");
+        assert_eq!(form.status, 200, "{}", form.body);
+        assert!(
+            form.body.contains(r#""name":"data.read""#)
+                && form.body.contains(r#""path":"host:prod""#),
+            "the action and the node of her rights are in the editor"
+        );
+        assert!(
+            !form.body.contains("keys.own.read"),
+            "no box for an action of the portal"
+        );
+        assert!(form.body.contains(r#"action="/auth/keys/create""#));
+        assert!(!form.body.contains("No key yet"), "the page lists no key");
+
+        // Make a key: the answer shows the text one time.
+        let created = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=nightly+report&expires_at=&grant0=access+on+service%3Adb&grant1=data.read+on+service%3Adb%2Fhost%3Aprod&limit1.max_rows=100&limit0.requests.minute=2",
+        );
+        assert_eq!(created.status, 200, "{}", created.body);
+        assert_eq!(created.header("cache-control"), Some("no-store"));
+        let text = key_text_in(&created.body).expect("the text of the key");
+        assert!(
+            created.body.contains("acts as you"),
+            "the warning of portal 5.2"
+        );
+        // The key works at the edge, with the grants that the form gave.
+        let edge = |text: &str| {
+            send(
+                node.port,
+                "GET",
+                "/auth/verify-key",
+                &[
+                    ("Authorization", &format!("Bearer {text}")),
+                    ("X-Forwarded-Uri", "/db/x"),
+                ],
+                "",
+            )
+        };
+        assert_eq!(edge(&text).status, 204);
+        // The page lists the key with its hint and without its text.
+        let page = get_keys(&node, &alice, "");
+        assert!(page.body.contains("nightly report"));
+        assert!(
+            page.body.contains(&format!("mcp_{}", &text[4..8])),
+            "the hint"
+        );
+        assert!(!page.body.contains(&text), "the text is shown one time");
+        assert!(page.body.contains("max_rows 100"));
+        let key = node
+            .state
+            .users
+            .keys()
+            .into_iter()
+            .find(|k| k.name == "nightly report")
+            .unwrap();
+        assert_eq!(key.grants.len(), 2);
+        assert_eq!(key.expires_at, None);
+        assert_eq!(key.owner, crate::users::KeyOwner::User("alice".into()));
+        // The page of a new key copies the name, the ticks and the limit values of a key.
+        let copy = get_new_key(&node, &alice, &format!("?copy={}", key.id));
+        assert_eq!(copy.status, 200, "{}", copy.body);
+        assert!(copy.body.contains(r#"value="nightly report""#));
+        assert!(copy
+            .body
+            .contains(r#"<input type="hidden" name="limit1.max_rows" value="100">"#));
+        assert_eq!(
+            copy.body.matches(r#"type="hidden" name="grant"#).count(),
+            2,
+            "the two grants of the key"
+        );
+        // The page of the change holds the grants of the key, and no field `expires_at`.
+        let change = get_key_page(&node, &alice, &format!("edit?id={}", key.id));
+        assert_eq!(change.status, 200, "{}", change.body);
+        assert!(change.body.contains(r#"action="/auth/keys/edit""#));
+        assert!(change.body.contains(&format!(
+            r#"<input type="hidden" name="id" value="{}">"#,
+            key.id
+        )));
+        assert!(change.body.contains(r#"value="nightly report""#));
+        assert!(!change.body.contains(r#"name="expires_at""#));
+        assert_eq!(
+            change.body.matches(r#"type="hidden" name="grant"#).count(),
+            2
+        );
+        let other = get_key_page(&node, &alice, "edit?id=nonexistent");
+        assert_eq!(other.location(), Some("/auth/keys?s=unknown_key"));
+        assert!(page
+            .body
+            .contains(&format!("/auth/keys/edit?id={}", key.id)));
+
+        // Refusals: each one is a redirect with a code.
+        for (fields, code) in [
+            ("name=&grant0=access+on+service%3Adb", "bad_name"),
+            ("name=x&expires_at=nonsense", "bad_expiry"),
+            ("name=x&grant0=bad+text", "bad_grant"),
+            ("name=x&grant0=access+on+service%3Aghost", "bad_grant"),
+            (
+                "name=x&grant0=data.delete+on+service%3Adb%2Fhost%3Aprod",
+                "bad_grant",
+            ),
+            (
+                "name=x&grant0=data.write+on+service%3Adb%2Fhost%3Aprod",
+                "not_covered",
+            ),
+            (
+                "name=x&grant0=keys.own.read+on+service%3Aportal",
+                "bad_grant",
+            ),
+            (
+                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Adev",
+                "not_covered",
+            ),
+            (
+                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Aprod&limit0.max_rows=0",
+                "bad_limits",
+            ),
+        ] {
+            let reply = keys_post(&node, &alice, "create", fields);
+            assert_eq!(reply.status, 303, "{fields}: {}", reply.body);
+            assert_eq!(
+                reply.location(),
+                Some(format!("/auth/keys/new?s={code}").as_str()),
+                "{fields}"
+            );
+        }
+        // A bad request: an unknown field, a bad token, a repeated field.
+        assert_eq!(
+            keys_post(&node, &alice, "create", "name=x&colour=red").status,
+            400
+        );
+        assert_eq!(
+            keys_post(&node, &alice, "create", "name=x&name=y").status,
+            400
+        );
+        let cookie = format!("{}={alice}", session_cookie_name(&node));
+        let origin = format!("http://127.0.0.1:{}", node.port);
+        let no_token = send(
+            node.port,
+            "POST",
+            "/auth/keys/create",
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", &cookie),
+            ],
+            "name=x&csrf=wrong",
+        );
+        assert_eq!(no_token.status, 403);
+
+        // Change the key: a new name, one grant less. The change applies at the edge at once.
+        let edited = keys_post(
+            &node,
+            &alice,
+            "edit",
+            &format!(
+                "id={}&name=renamed&grant0=access+on+service%3Adb&limit0.requests.minute=1",
+                key.id
+            ),
+        );
+        assert_eq!(edited.status, 303);
+        assert_eq!(edited.location(), Some("/auth/keys?s=edited"));
+        let changed = node.state.users.key_by_id(&key.id).unwrap();
+        assert_eq!(
+            (changed.name.as_str(), changed.grants.len()),
+            ("renamed", 1)
+        );
+        assert_eq!(edge(&text).status, 204);
+        // A key of another user, and a key that does not exist, cannot be changed.
+        let reply = keys_post(&node, &alice, "edit", "id=nonexistent&name=x");
+        assert_eq!(reply.location(), Some("/auth/keys?s=unknown_key"));
+
+        // Revoke it. The edge refuses the text, and the page shows the summary row.
+        let revoked = keys_post(
+            &node,
+            &alice,
+            "revoke",
+            &format!("id={}&section=mine", key.id),
+        );
+        assert_eq!(revoked.status, 303);
+        assert_eq!(
+            revoked.location(),
+            Some("/auth/keys?section=mine&s=revoked")
+        );
+        assert_eq!(edge(&text).status, 401);
+        let page = get_keys(&node, &alice, "");
+        assert!(page.body.contains("revoked"));
+        // A second revocation gives the same answer and changes nothing.
+        let again = keys_post(
+            &node,
+            &alice,
+            "revoke",
+            &format!("id={}&section=mine", key.id),
+        );
+        assert_eq!(again.location(), Some("/auth/keys?section=mine&s=revoked"));
+        let missing = keys_post(&node, &alice, "revoke", "id=nonexistent&section=mine");
+        assert_eq!(
+            missing.location(),
+            Some("/auth/keys?section=mine&s=unknown_key")
+        );
+    });
+}
+
+#[test]
+fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
+    each_backend(|backend| {
+        let (node, _pdp, alice) = keys_user(backend, "max_per_user = 1");
+        // No session: a redirect to the sign-in page, on each address.
+        for (method, path) in [
+            ("GET", "/auth/keys"),
+            ("GET", "/auth/keys/new"),
+            ("POST", "/auth/keys/create"),
+            ("POST", "/auth/keys/edit"),
+            ("POST", "/auth/keys/revoke"),
+        ] {
+            let origin = format!("http://127.0.0.1:{}", node.port);
+            let reply = send(
+                node.port,
+                method,
+                path,
+                &[
+                    ("Origin", &origin),
+                    ("Content-Type", "application/x-www-form-urlencoded"),
+                ],
+                "",
+            );
+            assert_eq!(reply.status, 303, "{path}");
+            assert_eq!(reply.location(), Some("/auth/login"), "{path}");
+        }
+        // Bad parameters of the page.
+        for query in [
+            "?section=other",
+            "?section=mine&section=mine",
+            "?colour=red",
+            "?after=nonsense",
+            "?after=12.UPPER",
+            "?s=unknown",
+            "?copy=BAD",
+        ] {
+            assert_eq!(get_keys(&node, &alice, query).status, 400, "{query}");
+        }
+        assert_eq!(
+            get_keys(&node, &alice, "?after=1792569600.9b1c04e2aa71f0c3").status,
+            200
+        );
+        assert_eq!(
+            get_keys(&node, &alice, "?after=file.9b1c04e2aa71f0c3").status,
+            200
+        );
+        assert_eq!(get_keys(&node, &alice, "?s=bad_name").status, 200);
+        // The section "All" needs `keys.all.read`.
+        assert_eq!(get_keys(&node, &alice, "?section=all").status, 403);
+        // The maximum number of active keys.
+        let made = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=one&grant0=access+on+service%3Adb",
+        );
+        assert_eq!(made.status, 200);
+        let second = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=two&grant0=access+on+service%3Adb",
+        );
+        assert_eq!(second.location(), Some("/auth/keys/new?s=too_many_keys"));
+        // A user without the rights.
+        node.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "bob".into(),
+                password_hash: password_hash(PASSWORD),
+                grants: vec![Grant::parse("access on service:db").unwrap()],
+                created_at: 1,
+            })
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        let bob = sign_in(&node, "bob", PASSWORD);
+        assert_eq!(get_keys(&node, &bob, "").status, 403);
+        assert_eq!(keys_post(&node, &bob, "create", "name=x").status, 403);
+        assert_eq!(keys_post(&node, &bob, "edit", "id=x&name=x").status, 403);
+        assert_eq!(
+            keys_post(&node, &bob, "revoke", "id=x&section=mine").status,
+            403
+        );
+        // Bob cannot change or revoke a key of Alice, with any right.
+        node.state
+            .store
+            .update_user(
+                "bob",
+                None,
+                Some(&[
+                    Grant::parse("keys.own.read on service:portal").unwrap(),
+                    Grant::parse("keys.own.edit on service:portal").unwrap(),
+                    Grant::parse("keys.own.revoke on service:portal").unwrap(),
+                ]),
+            )
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        let key_of_alice = node.state.users.keys().into_iter().next().unwrap();
+        let edit = keys_post(
+            &node,
+            &bob,
+            "edit",
+            &format!("id={}&name=stolen", key_of_alice.id),
+        );
+        assert_eq!(edit.location(), Some("/auth/keys?s=unknown_key"));
+        let revoke = keys_post(
+            &node,
+            &bob,
+            "revoke",
+            &format!("id={}&section=mine", key_of_alice.id),
+        );
+        assert_eq!(
+            revoke.location(),
+            Some("/auth/keys?section=mine&s=unknown_key")
+        );
+        assert!(node.state.users.key_by_id(&key_of_alice.id).is_some());
+        // A session that "Log in as" opens changes no key, and revokes none (portal 3.7, 3.7a).
+        let root = sign_in(&node, "root", PASSWORD);
+        let reply = post(&node, &root, IMPERSONATE_PATH, USERS_TOKEN, "login=alice");
+        assert_eq!(reply.status, 303);
+        let as_alice = reply.cookie(&session_cookie_name(&node)).unwrap();
+        assert_eq!(get_keys(&node, &as_alice, "").status, 200, "it can read");
+        assert_eq!(keys_post(&node, &as_alice, "create", "name=x").status, 403);
+        assert_eq!(
+            keys_post(&node, &as_alice, "edit", "id=x&name=x").status,
+            403
+        );
+        assert_eq!(
+            keys_post(
+                &node,
+                &as_alice,
+                "revoke",
+                &format!("id={}&section=mine", key_of_alice.id)
+            )
+            .status,
+            403
+        );
+    });
+}
+
+#[test]
+fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
+    each_backend(|backend| {
+        let (node, _pdp, alice) = keys_user(backend, "");
+        let made = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=alices+key&grant0=access+on+service%3Adb",
+        );
+        assert_eq!(made.status, 200);
+        let key = node.state.users.keys().into_iter().next().unwrap();
+        let root = sign_in(&node, "root", PASSWORD);
+        // The superadmin makes a key: it has no owner row.
+        let root_key = keys_post(
+            &node,
+            &root,
+            "create",
+            "name=root+key&grant0=access+on+service%3Adb",
+        );
+        assert_eq!(root_key.status, 200, "{}", root_key.body);
+        assert!(
+            root_key.body.contains("every right"),
+            "the warning of the superadmin (portal 5.2)"
+        );
+        let all = get_keys(&node, &root, "?section=all");
+        assert_eq!(all.status, 200);
+        assert!(all.body.contains("alices key") && all.body.contains("root key"));
+        assert!(all.body.contains("superadmin"), "the owner of its key");
+        let mine = get_keys(&node, &root, "");
+        assert!(mine.body.contains("root key") && !mine.body.contains("alices key"));
+        // The superadmin revokes the key of Alice in the section "All".
+        let revoked = keys_post(
+            &node,
+            &root,
+            "revoke",
+            &format!("id={}&section=all", key.id),
+        );
+        assert_eq!(revoked.location(), Some("/auth/keys?section=all&s=revoked"));
+        assert!(node.state.users.key_by_id(&key.id).is_none());
+        // In the section "Mine" it cannot revoke the key of another user.
+        let other = keys_post(&node, &root, "make_it_fail", "");
+        assert_eq!(other.status, 404);
+    });
+}
+
+#[test]
+fn the_page_of_the_keys_does_not_exist_without_the_block_keys() {
+    let node = start_with(Arc::new(Backend::Sqlite.fresh()), None, "");
+    let root = sign_in(&node, "root", PASSWORD);
+    assert_eq!(get_keys(&node, &root, "").status, 404);
+    assert_eq!(keys_post(&node, &root, "create", "name=x").status, 404);
+    assert_eq!(keys_post(&node, &root, "edit", "id=x").status, 404);
+    assert_eq!(
+        keys_post(&node, &root, "revoke", "id=x&section=mine").status,
+        404
+    );
+}
+
+// The accounts and the keys of the file ------------------------------------------------------------
+
+#[test]
+fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
+    let pdp_port = free_port();
+    let key_text = crate::keys::generate().unwrap().to_string();
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            env: vec![
+                ("CAROL_HASH".into(), password_hash(PASSWORD)),
+                ("CAROL_KEY".into(), key_text.clone()),
+            ],
+            ..Custom::default()
+        },
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+            keys {{}}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
+            user "carol" {{
+              password_hash_env = "CAROL_HASH"
+              grants = [
+                {{ grant = "access on service:db", limits = {{ requests = [ {{ amount = 300, window = "minute" }} ] }} }},
+                "data.read on service:db/host:prod",
+                "keys.own.read on service:portal",
+                "keys.own.revoke on service:portal",
+                "keys.own.use on service:portal",
+              ]
+              key "nightly report" {{
+                key_env = "CAROL_KEY"
+                grants = [
+                  {{ grant = "access on service:db", limits = {{ requests = [ {{ amount = 60, window = "minute" }} ] }} }},
+                  "data.read on service:db/host:prod/database:test1",
+                ]
+              }}
+            }}
+            user "dave" {{ grants = ["access on service:db"] }}"#
+        ),
+    );
+    publish_catalog(&node, &[]);
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    let id = crate::keys::file_id("carol", "nightly report");
+    assert_eq!(node.state.users.key_count(), 1);
+    // The account signs in with the digest of its block. An account without a digest cannot.
+    let carol = sign_in(&node, "carol", PASSWORD);
+    let csrf = "A".repeat(32);
+    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
+    let origin = format!("http://127.0.0.1:{}", node.port);
+    let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
+    let dave = send(
+        node.port,
+        "POST",
+        LOGIN_PATH,
+        &[
+            ("Origin", &origin),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Cookie", &cookie),
+        ],
+        &format!("login=dave&password={PASSWORD}&csrf={csrf}&rd=%2F&sig={signature}"),
+    );
+    assert_eq!(dave.status, 401, "no digest: no session");
+    // The key of the file works at the edge, and the page shows it as read-only.
+    let edge = send(
+        node.port,
+        "GET",
+        "/auth/verify-key",
+        &[
+            ("Authorization", &format!("Bearer {key_text}")),
+            ("X-Forwarded-Uri", "/db/x"),
+        ],
+        "",
+    );
+    assert_eq!(edge.status, 204, "{:?}", edge.headers);
+    let page = get_keys(&node, &carol, "");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("nightly report") && page.body.contains(&id));
+    assert!(page.body.contains("Defined in the configuration file"));
+    assert!(
+        !page.body.contains("/auth/keys/edit?id="),
+        "no change of a key of the file"
+    );
+    assert!(
+        !page.body.contains("/auth/keys/revoke"),
+        "no button to revoke a key of the file"
+    );
+    assert!(
+        !page.body.contains("New key"),
+        "an account of the file makes no key"
+    );
+    assert!(
+        page.body.contains("1 checks"),
+        "the checks of the key of the file are in memory"
+    );
+    // No address changes a key of the file.
+    let revoke = keys_post(&node, &carol, "revoke", &format!("id={id}&section=mine"));
+    assert_eq!(
+        revoke.location(),
+        Some("/auth/keys?section=mine&s=file_key")
+    );
+    assert_eq!(keys_post(&node, &carol, "create", "name=x").status, 403);
+    assert_eq!(node.state.users.key_count(), 1);
+    // The settings page refuses a login that the file holds.
+    let root = sign_in(&node, "root", PASSWORD);
+    let added = post(
+        &node,
+        &root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        "login=carol&password=a-long-password-1",
+    );
+    assert_eq!(added.status, 303);
+    assert!(
+        added.location().unwrap().contains("exists"),
+        "{:?}",
+        added.location()
+    );
+    // The Users page shows the accounts of the file, read-only.
+    let users = send(
+        node.port,
+        "GET",
+        "/auth/settings",
+        &[("Cookie", &format!("{}={root}", session_cookie_name(&node)))],
+        "",
+    );
+    assert_eq!(users.status, 200);
+    assert!(users.body.contains("From the configuration file"));
+    assert!(
+        users.body.contains("carol")
+            && users.body.contains("dave")
+            && users.body.contains("keys only")
+    );
+    // The PDP knows the key of the file and its owner.
+    let reply = pdp(
+        pdp_port,
+        "/access/v1/evaluation",
+        Some(PDP_DB_TOKEN),
+        &read_body(
+            &format!("key:{id}"),
+            "test1",
+            serde_json::json!({"usage": {"units": 1}}),
+        ),
+        None,
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({"decision": true, "context": {"usage": {"units": 1}}}),
+        "the key of the file reads test1: the grant of the key covers it, and the owner holds host:prod"
+    );
+}
+
+#[test]
+fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database_both_hold() {
+    let key_text = crate::keys::generate().unwrap().to_string();
+    let vars = |extra: &[(&str, &str)]| {
+        let mut all: Vec<(String, String)> = [
+            ("PORTAL_TEST_LOGIN", "root"),
+            ("PORTAL_TEST_PASSWORD", PASSWORD),
+            ("PORTAL_TEST_SESSION", "0123456789abcdef0123456789abcdef"),
+            ("CAROL_KEY", key_text.as_str()),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        all.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        all
+    };
+    let identity = crate::identity::testing::new_key_pem();
+    let text = format!(
+        r#"server {{ listen_address = "127.0.0.1:{}" trusted_proxies = [] }}
+        authentication {{ superadmin_login_env = "PORTAL_TEST_LOGIN" superadmin_password_env = "PORTAL_TEST_PASSWORD" }}
+        session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
+        access {{ grants_mode = "hybrid" }}
+        identity {{ issuer = "i" signing_key_env = "IDENTITY" }}
+        pdp {{ listen_address = "127.0.0.1:{}" url = "https://pdp" }}
+        keys {{}}
+        user "carol" {{ grants = [] key "k" {{ key_env = "CAROL_KEY" grants = [] }} }}"#,
+        free_port(),
+        free_port()
+    );
+    let mut all = vars(&[("IDENTITY", &identity)]);
+    all.retain(|(k, _)| !k.is_empty());
+    let (config, _) = Config::parse(&text, &move |name| {
+        all.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    })
+    .unwrap();
+    let store = Backend::Sqlite.fresh();
+    let id = crate::keys::file_id("carol", "k");
+    // Nothing in common: good.
+    assert!(crate::bootstrap::check_file_against_database(
+        &config,
+        &store.load_directory().unwrap()
+    )
+    .is_ok());
+    // The same login.
+    store
+        .insert_user(&crate::store::UserRow {
+            login: "carol".into(),
+            password_hash: "h".into(),
+            grants: Vec::new(),
+            created_at: 1,
+        })
+        .unwrap();
+    let error =
+        crate::bootstrap::check_file_against_database(&config, &store.load_directory().unwrap())
+            .unwrap_err();
+    assert!(
+        error.contains("carol") && error.contains("file") && error.contains("database"),
+        "{error}"
+    );
+    store.remove_user("carol").unwrap();
+    // A user of the database with more grants than `users.max_grants`.
+    let grants: Vec<Grant> = (0..=config.users.max_grants)
+        .map(|n| Grant::parse(&format!("access on service:s{n}")).unwrap())
+        .collect();
+    store
+        .insert_user(&crate::store::UserRow {
+            login: "heavy".into(),
+            password_hash: "h".into(),
+            grants,
+            created_at: 1,
+        })
+        .unwrap();
+    let error =
+        crate::bootstrap::check_user_grants(&config, &store.load_directory().unwrap()).unwrap_err();
+    assert!(
+        error.contains("heavy") && error.contains("users.max_grants"),
+        "{error}"
+    );
+    store.remove_user("heavy").unwrap();
+    // The same id of a key.
+    store
+        .insert_user(&crate::store::UserRow {
+            login: "erin".into(),
+            password_hash: "h".into(),
+            grants: Vec::new(),
+            created_at: 1,
+        })
+        .unwrap();
+    let mut row = crate::store::KeyRow {
+        id: id.clone(),
+        owner: Some("erin".into()),
+        name: "other".into(),
+        digest: [5; 32],
+        hint: String::new(),
+        created_at: 1,
+        expires_at: None,
+        last_check_at: None,
+        check_count: 0,
+        grants: Vec::new(),
+    };
+    store.insert_key(&row, &key_caps()).unwrap();
+    let error =
+        crate::bootstrap::check_file_against_database(&config, &store.load_directory().unwrap())
+            .unwrap_err();
+    assert!(error.contains(&id) && error.contains("carol"), "{error}");
+    store.revoke_key(&id, None, 1).unwrap();
+    // The same digest.
+    row.id = "e000000000000001".into();
+    row.digest = crate::keys::digest(&key_text);
+    store.insert_key(&row, &key_caps()).unwrap();
+    let error =
+        crate::bootstrap::check_file_against_database(&config, &store.load_directory().unwrap())
+            .unwrap_err();
+    assert!(
+        error.contains("digest") && !error.contains(&key_text),
+        "{error}"
+    );
+}
+
+// The rights on the keys and the limit values, in the pages of the superadmin -----------------------
+
+#[test]
+fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
+    each_backend(|backend| {
+        let (node, _pdp) = key_node(backend);
+        let root = sign_in(&node, "root", PASSWORD);
+        let added = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-long-password-1",
+        );
+        assert_eq!(added.status, 303);
+        let page = send(
+            node.port,
+            "GET",
+            "/auth/settings/users/alice",
+            &[("Cookie", &format!("{}={root}", session_cookie_name(&node)))],
+            "",
+        );
+        assert_eq!(page.status, 200);
+        for action in [
+            "keys.own.read",
+            "keys.own.create",
+            "keys.own.use",
+            "keys.all.revoke",
+            "users.read",
+        ] {
+            assert!(
+                page.body.contains(&format!("name=\"p.{action}\"")),
+                "{action}"
+            );
+        }
+        // An action that needs another action is locked until the account holds it (portal 6.3a).
+        assert!(page.body.contains("Needs <code>keys.own.read</code>"));
+        let rights = |fields: &str| {
+            post(
+                &node,
+                &root,
+                "/auth/users/portal-rights",
+                USERS_TOKEN,
+                &format!("login=alice&{fields}"),
+            )
+        };
+        let refused = rights("p.keys.own.create=1");
+        assert!(
+            refused.location().unwrap().ends_with("?s=keys-needs"),
+            "{:?}",
+            refused.location()
+        );
+        assert!(rights("p.keys.nothing=1").status == 400);
+        assert!(rights("max_key_lifetime=abc")
+            .location()
+            .unwrap()
+            .ends_with("keys-lifetime"));
+        assert!(rights("max_key_lifetime=31536001")
+            .location()
+            .unwrap()
+            .ends_with("keys-lifetime"));
+        let ok = rights(
+            "p.keys.own.read=1&p.keys.own.create=1&p.keys.own.use=1&max_key_lifetime=2592000",
+        );
+        assert!(
+            ok.location().unwrap().ends_with("?s=user-updated"),
+            "{:?}",
+            ok.location()
+        );
+        let alice = node.state.users.grants_of("alice").unwrap();
+        assert_eq!(alice.len(), 3);
+        let used = alice.iter().find(|g| g.action == "keys.own.use").unwrap();
+        assert_eq!(used.limits.to_json(), r#"{"max_key_lifetime":2592000}"#);
+        // The same rights again: nothing changes. Remove one that another one needs: refused.
+        assert!(rights(
+            "p.keys.own.read=1&p.keys.own.create=1&p.keys.own.use=1&max_key_lifetime=2592000"
+        )
+        .location()
+        .unwrap()
+        .ends_with("unchanged"));
+        assert!(rights("p.keys.own.create=1&p.keys.own.use=1")
+            .location()
+            .unwrap()
+            .ends_with("keys-needs"));
+        // Alice reads her page of the keys now, and the new key needs an expiry date.
+        let alice_session = sign_in(&node, "alice", "a-long-password-1");
+        assert_eq!(get_keys(&node, &alice_session, "").status, 200);
+        let no_date = keys_post(&node, &alice_session, "create", "name=n");
+        assert!(
+            no_date.location().unwrap().ends_with("bad_expiry"),
+            "the maximum lifetime needs a date"
+        );
+        let soon = crate::util::format_utc_instant(unix_now() + 86_400);
+        let made = keys_post(
+            &node,
+            &alice_session,
+            "create",
+            &format!("name=n&expires_at={soon}"),
+        );
+        assert_eq!(made.status, 200, "{}", made.body);
+        let too_far = crate::util::format_utc_instant(unix_now() + 40 * 86_400);
+        let refused = keys_post(
+            &node,
+            &alice_session,
+            "create",
+            &format!("name=m&expires_at={too_far}"),
+        );
+        assert!(refused.location().unwrap().ends_with("bad_expiry"));
+
+        // The limit values of a grant: give `access` on db, then a budget. The page of the account
+        // sends the grants and their limit fields in one form.
+        let access_text = "grant0=access+on+service%3Adb";
+        let read_text = "grant1=data.read+on+service%3Adb%2Fhost%3Aprod";
+        let save = |fields: &str| {
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                &format!("login=alice&grants=1&{fields}"),
+            )
+        };
+        let give = save(&format!("{access_text}&{read_text}"));
+        assert_eq!(give.status, 303, "{:?}", give.location());
+        // The action lists the types host and database, not the whole service.
+        assert!(
+            save(&format!("{access_text}&grant1=data.read+on+service%3Adb"))
+                .location()
+                .unwrap()
+                .ends_with("edit-unknown-grant")
+        );
+        let saved = save(&format!(
+            "{access_text}&limit0.requests.minute=5&limit0.requests.second=1&limit0.requests.hour=&{read_text}"
+        ));
+        assert!(
+            saved.location().unwrap().ends_with("?s=user-updated"),
+            "{:?}",
+            saved.location()
+        );
+        let access = node
+            .state
+            .users
+            .grants_of("alice")
+            .unwrap()
+            .into_iter()
+            .find(|g| g.action == "access" && g.service == "db")
+            .unwrap();
+        assert_eq!(
+            access.limits.to_json(),
+            r#"{"requests":[{"amount":1,"window":"second"},{"amount":5,"window":"minute"}]}"#
+        );
+        // Bad values and bad names.
+        for fields in [
+            "limit0.requests.minute=0",
+            "limit0.unknown=1",
+            "limit0.max_rows=5",
+            "limit0.requests=5",
+            "limit0.requests.minute=x",
+        ] {
+            let reply = save(&format!("{access_text}&{fields}&{read_text}"));
+            assert!(
+                reply.location().unwrap().ends_with("bad-limits"),
+                "{fields}: {:?}",
+                reply.location()
+            );
+        }
+        assert_eq!(save(&format!("{access_text}&colour=red")).status, 400);
+        assert_eq!(
+            save(&format!("{access_text}&limit0.requests.week=1")).status,
+            400
+        );
+        // A ceiling of an action.
+        let ceiling = save(&format!(
+            "{access_text}&limit0.requests.minute=5&limit0.requests.second=1&{read_text}&limit1.max_rows=100&limit1.max_duration="
+        ));
+        assert!(ceiling.location().unwrap().ends_with("user-updated"));
+        let held = node.state.users.grants_of("alice").unwrap();
+        assert!(held
+            .iter()
+            .any(|g| g.action == "access" && !g.limits.is_empty()));
+        assert!(held
+            .iter()
+            .any(|g| g.action == "data.read" && g.limits.to_json() == r#"{"max_rows":100}"#));
+        // The rights on the keys stay: the editor does not carry them.
+        assert!(held.iter().any(|g| g.action == "keys.own.use"));
+        // The values reach the PDP at the next round of the directory.
+        crate::sync::run_round(&node.state, 1);
+        assert!(
+            node.state.store.counter_rows().unwrap() >= 2,
+            "the rows of the budget exist"
+        );
+        // Empty fields remove the values.
+        let cleared = save(&format!("{access_text}&{read_text}&limit1.max_rows=100"));
+        assert!(cleared.location().unwrap().ends_with("user-updated"));
+        let held = node.state.users.grants_of("alice").unwrap();
+        assert!(held
+            .iter()
+            .find(|g| g.action == "access" && g.service == "db")
+            .unwrap()
+            .limits
+            .is_empty());
     });
 }

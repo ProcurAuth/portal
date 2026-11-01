@@ -12,7 +12,7 @@ publish = false
 hyper = { version = "=1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.20", features = ["tokio"] }
 http-body-util = "=0.1.4"
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "time", "sync"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "time", "sync", "signal"] }
 getrandom = "=0.3.4"
 argon2 = "=0.5.3"
 hmac = "=0.12.1"

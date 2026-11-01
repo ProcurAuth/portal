@@ -2,17 +2,28 @@
 
 mod access;
 mod actions;
+mod bootstrap;
 mod catalog;
 mod config;
+mod counting;
 mod crypto;
+mod decision;
 mod discovery;
 mod grants;
 mod http;
 mod icons;
 mod identity;
+mod key_forms;
+mod keyauth;
+mod keys;
+mod keys_metrics;
+mod limits;
 mod metrics;
+mod options;
+mod portal_actions;
 mod rate_limit;
 mod session;
+mod shutdown;
 mod store;
 mod subject_id;
 mod sync;
@@ -53,6 +64,10 @@ fn real_main() -> Result<(), String> {
             let signing_secret = take_session_secret(&mut secrets)?;
             let superadmin = load_superadmin(&secrets, &signing_secret)?;
             let store = Arc::new(open_store(&config, &secrets)?);
+            // A command that writes to the SQLite file reads this mark (portal 10.4a).
+            if let StorageBackend::Sqlite(path) = &config.storage.backend {
+                store::mark_sqlite_instance(path)?;
+            }
             let access = AccessSecrets {
                 identity_key: secrets.identity_key.take(),
                 pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
@@ -86,8 +101,14 @@ fn real_main() -> Result<(), String> {
             let store = open_store(&config, &secrets)?;
             let report = store.import_sqlite(&from)?;
             println!(
-                "imported {} accounts, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
-                report.users, report.sessions, report.accesses, report.audit, report.logins
+                "imported {} accounts, {} keys, {} revoked keys, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
+                report.users,
+                report.keys,
+                report.key_history,
+                report.sessions,
+                report.accesses,
+                report.audit,
+                report.logins
             );
             Ok(())
         }
@@ -100,6 +121,26 @@ fn real_main() -> Result<(), String> {
             let store = open_store(&config, &secrets)?;
             let ended = store.end_all_sessions(tracking::unix_now())?;
             println!("ended {ended} sessions");
+            Ok(())
+        }
+        // Revokes the keys of the database of one user, or all the keys of the database (portal
+        // 5.6). It makes no key and does not revoke a key of the file. A running portal takes the
+        // change within one round of the directory. With a SQLite file, the command writes only when
+        // the portal does not run (portal 10.4a).
+        "revoke-keys" => {
+            let (config_path, who) = parse_revoke_args(args.collect())?;
+            let (config, secrets) = Config::load(&config_path)?;
+            if let StorageBackend::Sqlite(path) = &config.storage.backend {
+                if store::sqlite_instance_running(path) {
+                    return Err(format!(
+                        "the portal runs and holds the SQLite file {}: stop it first, or use PostgreSQL",
+                        path.display()
+                    ));
+                }
+            }
+            let store = open_store(&config, &secrets)?;
+            let revoked = store.revoke_keys(who.as_deref(), tracking::unix_now())?;
+            println!("revoked {revoked} keys");
             Ok(())
         }
         // Check the file, the variables and the files that it names.
@@ -130,7 +171,7 @@ fn real_main() -> Result<(), String> {
             let (config, mut secrets) = Config::load(&config_path)?;
             let signer = identity_signer(&config, &mut secrets)?
                 .ok_or("the configuration has no identity block")?;
-            print!("{}", signer.public_key_pem());
+            print!("{}", signer.jwk_set());
             Ok(())
         }
         // The configuration reference in Markdown. It is generated from the table of keys.
@@ -182,6 +223,22 @@ fn parse_config_arg(args: Vec<String>) -> Result<PathBuf, String> {
     Ok(PathBuf::from(&args[1]))
 }
 
+/// The arguments of `revoke-keys`: `--config <FILE>` and `--user <LOGIN>` or `--all`. The result
+/// is the login, or `None` for all the keys of the database.
+fn parse_revoke_args(args: Vec<String>) -> Result<(PathBuf, Option<String>), String> {
+    match args.as_slice() {
+        [config_flag, config, who_flag, login]
+            if config_flag == "--config" && who_flag == "--user" =>
+        {
+            Ok((PathBuf::from(config), Some(login.clone())))
+        }
+        [config_flag, config, all] if config_flag == "--config" && all == "--all" => {
+            Ok((PathBuf::from(config), None))
+        }
+        _ => Err("expected: --config <FILE> --user <LOGIN>, or --config <FILE> --all".into()),
+    }
+}
+
 /// Parses the arguments of the import command: `--config <FILE> --from <FILE>`.
 fn parse_import_args(args: Vec<String>) -> Result<(PathBuf, PathBuf), String> {
     match args.as_slice() {
@@ -214,7 +271,16 @@ fn open_store(config: &Config, secrets: &Secrets) -> Result<Store, String> {
                 .ok_or("internal error: the postgres block has no password")?;
             let password = std::str::from_utf8(password.as_bytes())
                 .map_err(|_| "postgres.password is not valid UTF-8".to_string())?;
-            Store::open_postgres(postgres, password)
+            Store::open_postgres(
+                postgres,
+                password,
+                config
+                    .pdp
+                    .as_ref()
+                    .map_or(store::pg::DEFAULT_COUNTER_CONNECTIONS, |pdp| {
+                        pdp.counter_connections
+                    }),
+            )
         }
     }
 }
@@ -315,7 +381,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|access|services|service|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
         release_version()
     );
 }

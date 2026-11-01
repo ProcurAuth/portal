@@ -442,7 +442,7 @@ fn the_session_secret_modes() {
     assert!(!message.contains("abc"), "{message}");
 }
 
-// The colon is the separator in the id of a machine principal: no login can have it.
+// The colon is the separator in the id of a key: no login can have it.
 
 #[test]
 fn a_superadmin_login_with_a_colon_is_refused() {
@@ -454,7 +454,7 @@ fn a_superadmin_login_with_a_colon_is_refused() {
             message.contains("authentication.superadmin_login"),
             "{message}"
         );
-        assert!(message.contains("machine principals"), "{message}");
+        assert!(message.contains("ids of keys"), "{message}");
         assert!(
             !message.contains(bad),
             "the login stays out of the error: {message}"
@@ -1187,7 +1187,7 @@ fn the_identity_block_reads_its_key_and_gives_its_defaults() {
 #[test]
 fn the_pdp_block_and_its_clients() {
     let (cfg, secrets) = ok(&with(
-        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://portal-pdp.edge:4182/" }
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://portal-pdp.edge:4182/" plain_http = true }
         pdp_client "db" { token_env = "PDP_DB" }
         pdp_client "chat" { token_env = "PDP_CHAT" }"#,
     ));
@@ -1204,7 +1204,8 @@ fn the_pdp_block_and_its_clients() {
 
 #[test]
 fn a_bad_pdp_configuration_stops_the_start() {
-    let pdp = r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" }"#;
+    let pdp =
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }"#;
     for (extra, expected) in [
         (
             r#"pdp_client "db" { token_env = "PDP_DB" }"#.to_string(),
@@ -1229,15 +1230,17 @@ fn a_bad_pdp_configuration_stops_the_start() {
             "service id",
         ),
         (
-            r#"pdp { listen_address = "0.0.0.0:4181" url = "http://pdp:4181" }"#.to_string(),
+            r#"pdp { listen_address = "0.0.0.0:4181" url = "http://pdp:4181" plain_http = true }"#
+                .to_string(),
             "must not use the port of server.listen_address",
         ),
         (
-            r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp/x" }"#.to_string(),
+            r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp/x" plain_http = true }"#
+                .to_string(),
             "pdp.url",
         ),
         (
-            r#"pdp { url = "http://pdp" }"#.to_string(),
+            r#"pdp { url = "http://pdp" plain_http = true }"#.to_string(),
             "pdp.listen_address",
         ),
     ] {
@@ -1321,4 +1324,488 @@ fn the_sign_in_bodies_must_leave_connections_for_forward_auth() {
         "",
     ));
     assert_eq!(cfg.server.max_login_body_reads, 2);
+}
+
+// Keys: the block `keys`, the accounts of the file and their keys ---------------------------------
+
+/// The blocks that the block `keys` needs.
+const KEYS_NEEDS: &str = r#"
+    identity { issuer = "https://portal.test" signing_key_env = "IDENTITY_KEY" }
+    pdp { listen_address = "0.0.0.0:4182" url = "https://portal-pdp.test:4182" }
+    keys {}
+"#;
+
+fn with_keys(extra: &str) -> String {
+    with(&format!(
+        "access {{ grants_mode = \"hybrid\" }}\n{KEYS_NEEDS}\n{extra}"
+    ))
+}
+
+/// The variables of the tests and the text of one new key.
+fn vars_with_key() -> (Vec<(String, String)>, String) {
+    let text = crate::keys::generate().unwrap().to_string();
+    let mut vars: Vec<(String, String)> = VARS
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    vars.push(("CAROL_KEY".into(), text.clone()));
+    (vars, text)
+}
+
+fn parse_keys(raw: &str, vars: &[(String, String)]) -> Result<(Config, Secrets), String> {
+    let vars = vars.to_vec();
+    Config::parse(raw, &move |name| {
+        vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    })
+}
+
+#[test]
+fn the_keys_block_gives_its_defaults_and_needs_the_identity_and_pdp_blocks() {
+    let (cfg, _) = ok(&with_keys(""));
+    let keys = cfg.keys.clone().unwrap();
+    assert_eq!(keys.default_lifetime, Duration::from_secs(30 * 86_400));
+    assert_eq!(keys.directory_max_age, Duration::from_secs(30));
+    assert_eq!(keys.max_per_user, 100);
+    assert_eq!(keys.max_counter_rows, 2_000_000);
+    assert_eq!(keys.max_directory_grants, 4_000_000);
+    assert_eq!(keys.history_days, 90);
+    assert_eq!(cfg.users.max_grants, 512);
+    assert_eq!(line(&cfg, "keys.max_per_user").source, "default");
+    assert!(ok(MINIMAL).0.keys.is_none(), "no block, no key");
+    for (extra, expected) in [
+        (r#"keys {}"#, "needs the block identity"),
+        (
+            r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" } keys {}"#,
+            "needs the block pdp",
+        ),
+    ] {
+        let message = err(&with(extra));
+        assert!(message.contains(expected), "{extra}: {message}");
+    }
+    for (attribute, value) in [
+        ("default_lifetime", r#""12h""#),
+        ("directory_max_age", r#""14s""#),
+        ("directory_max_age", r#""301s""#),
+        ("max_per_user", "0"),
+        ("max_per_user", "10001"),
+        ("max_counter_rows", "0"),
+        ("max_directory_grants", "100000001"),
+        ("history_days", "0"),
+        ("history_days", "3651"),
+    ] {
+        let raw = with(&format!(
+            "{}\n{}",
+            KEYS_NEEDS.replace("keys {}", ""),
+            format_args!("keys {{ {attribute} = {value} }}")
+        ));
+        let message = err(&raw);
+        assert!(message.contains(&format!("keys.{attribute}")), "{message}");
+        assert!(
+            message.contains(value.trim_matches('"')),
+            "the value: {message}"
+        );
+    }
+    assert!(parse(&with(&format!(
+        "{}\nkeys {{ unknown = 1 }}",
+        KEYS_NEEDS.replace("keys {}", "")
+    )))
+    .is_err());
+}
+
+#[test]
+fn a_http_url_of_the_pdp_needs_plain_http_and_plain_http_needs_a_http_url() {
+    let base = |pdp: &str| {
+        with(&format!(
+            "identity {{ issuer = \"i\" signing_key_env = \"IDENTITY_KEY\" }}\n{pdp}"
+        ))
+    };
+    let message = err(&base(
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" }"#,
+    ));
+    assert!(message.contains("pdp.plain_http"), "{message}");
+    let message = err(&base(
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "https://pdp:4182" plain_http = true }"#,
+    ));
+    assert!(message.contains("contradict"), "{message}");
+    let (cfg, _) = ok(&base(
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true counter_connections = 8 }"#,
+    ));
+    let pdp = cfg.pdp.unwrap();
+    assert!(pdp.plain_http);
+    assert_eq!(pdp.counter_connections, 8);
+    let (cfg, _) = ok(&base(
+        r#"pdp { listen_address = "0.0.0.0:4182" url = "https://pdp:4182" }"#,
+    ));
+    assert_eq!(cfg.pdp.unwrap().counter_connections, 2);
+}
+
+#[test]
+fn the_age_of_a_document_is_longer_than_the_time_between_two_reads() {
+    let (cfg, _) = ok(MINIMAL);
+    assert_eq!(cfg.access.actions_max_age, Duration::from_secs(3600));
+    assert_eq!(cfg.access.start_read_deadline, Duration::from_secs(5));
+    assert_eq!(
+        (
+            cfg.access.bounds.max_actions,
+            cfg.access.bounds.max_resources,
+            cfg.access.bounds.max_document_bytes
+        ),
+        (1024, 4096, 262_144)
+    );
+    let message = err(&with(
+        r#"access { actions_refresh = "10m" actions_max_age = "10m" }"#,
+    ));
+    assert!(message.contains("access.actions_max_age"), "{message}");
+    assert!(parse(&with(
+        r#"access { actions_refresh = "10m" actions_max_age = "11m" }"#
+    ))
+    .is_ok());
+    for bad in [
+        r#"access { actions_max_age = "30s" }"#,
+        r#"access { actions_max_age = "8d" }"#,
+        r#"access { start_read_deadline = "0s" }"#,
+        r#"access { start_read_deadline = "301s" }"#,
+        r#"access { max_actions = 63 }"#,
+        r#"access { max_resources = 255 }"#,
+        r#"access { max_document_bytes = 65535 }"#,
+    ] {
+        assert!(parse(&with(bad)).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_grant_of_a_user_block_can_carry_limit_values() {
+    let (cfg, _) = ok(&with_keys(
+        r#"user "carol" {
+          grants = [
+            { grant = "access on service:datastore", limits = { requests = [ { amount = 300, window = "minute" }, { amount = 10, window = "second" } ] } },
+            { grant = "data.read on service:datastore/host:prod/database:test1", limits = { max_rows = 1000 } },
+            "keys.own.read on service:portal",
+            { grant = "keys.own.use on service:portal", limits = { max_key_lifetime = 2592000 } },
+          ]
+        }"#,
+    ));
+    let carol = &cfg.access.accounts["carol"];
+    let by_action = |action: &str| carol.grants.iter().find(|g| g.action == action).unwrap();
+    assert_eq!(
+        by_action("access").limits.to_json(),
+        r#"{"requests":[{"amount":10,"window":"second"},{"amount":300,"window":"minute"}]}"#
+    );
+    assert_eq!(
+        by_action("data.read").limits.to_json(),
+        r#"{"max_rows":1000}"#
+    );
+    assert_eq!(
+        by_action("keys.own.use").limits.to_json(),
+        r#"{"max_key_lifetime":2592000}"#
+    );
+    assert!(by_action("keys.own.read").limits.is_empty());
+    assert_eq!(cfg.access.configured_grants["carol"], carol.grants);
+    assert!(carol.password_hash.is_none());
+    assert!(carol.keys.is_empty());
+}
+
+#[test]
+fn a_user_block_with_a_bad_limit_a_bad_right_or_too_many_grants_stops_the_start() {
+    let user = |grants: &str| {
+        err(&with_keys(&format!(
+            r#"user "carol" {{ grants = [ {grants} ] }}"#
+        )))
+    };
+    for (grants, expected) in [
+        (
+            r#"{ grant = "data.read on service:db/host:x", limits = { requests = [ { amount = 1, window = "minute" } ] } }"#,
+            "a budget value is only on the grant access",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9 } }"#,
+            "at most 8",
+        ),
+        (
+            r#"{ grant = "data.read on service:db", limits = { max_rows = 1000000001 } }"#,
+            "1000000000",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = { requests = [ { amount = 0, window = "minute" } ] } }"#,
+            "from 1",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = { requests = [ { amount = 1, window = "week" } ] } }"#,
+            "week",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = { requests = [ { amount = 1, window = "minute" }, { amount = 2, window = "minute" } ] } }"#,
+            "two times",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = { requests = [ { amount = 1, window = "minute", burst = 2 } ] } }"#,
+            "burst",
+        ),
+        (
+            r#"{ grant = "access on service:db", limits = 3 }"#,
+            "limits must be an object",
+        ),
+        (r#"{ limits = {} }"#, "needs the member grant"),
+        (
+            r#"{ grant = "access on service:db", colour = "red" }"#,
+            "colour",
+        ),
+        (
+            r#""keys.own.create on service:portal", "keys.own.read on service:portal""#,
+            "keys.own.create",
+        ),
+        (
+            r#""keys.own.edit on service:portal""#,
+            "needs the action keys.own.read",
+        ),
+        (
+            r#""keys.all.read on service:portal""#,
+            "needs the action users.read",
+        ),
+        (
+            r#""keys.own.stop on service:portal", "keys.own.read on service:portal""#,
+            "no action",
+        ),
+        (
+            r#""access on service:db", "access on service:db""#,
+            "two times",
+        ),
+    ] {
+        let message = user(grants);
+        assert!(message.contains(expected), "{grants}: {message}");
+        assert!(
+            message.contains("carol"),
+            "the error names the login: {message}"
+        );
+    }
+    // More grants than `users.max_grants`.
+    let message = err(&with_keys(
+        r#"users { max_grants = 2 }
+           user "carol" { grants = ["access on service:a", "access on service:b", "access on service:c"] }"#,
+    ));
+    assert!(
+        message.contains("carol") && message.contains("3 grants") && message.contains("is 2"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_user_block_can_hold_the_digest_of_a_password() {
+    let hash = crate::crypto::hash_password(b"a long password for carol").unwrap();
+    let mut vars: Vec<(String, String)> = VARS
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    vars.push(("CAROL_HASH".into(), hash.clone()));
+    vars.push(("BAD_HASH".into(), "plaintext".into()));
+    let raw =
+        |attribute: &str| with_keys(&format!(r#"user "carol" {{ grants = [] {attribute} }}"#));
+    let (cfg, _) = parse_keys(&raw(r#"password_hash_env = "CAROL_HASH""#), &vars).unwrap();
+    assert_eq!(
+        cfg.access.accounts["carol"].password_hash.as_deref(),
+        Some(hash.as_str())
+    );
+    assert_eq!(line(&cfg, "user.carol.password_hash").value, "<hidden>");
+    assert_eq!(
+        line(&cfg, "user.carol.password_hash").source,
+        "env:CAROL_HASH"
+    );
+    let message = parse_keys(&raw(r#"password_hash_env = "BAD_HASH""#), &vars)
+        .err()
+        .unwrap();
+    assert!(
+        message.contains("user.carol.password_hash") && message.contains("PHC"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("plaintext"),
+        "the value stays hidden: {message}"
+    );
+    let message = parse_keys(&raw(r#"password_hash = "x""#), &vars)
+        .err()
+        .unwrap();
+    assert!(message.contains("must not be written"), "{message}");
+}
+
+#[test]
+fn a_key_of_the_file_gives_its_digest_its_id_and_its_grants() {
+    let (vars, text) = vars_with_key();
+    let digest = crate::keys::digest(&text);
+    let hex: String = digest.iter().map(|b| format!("{b:02X}")).collect();
+    let mut vars = vars;
+    vars.push(("CAROL_SUM".into(), hex));
+    let raw = with_keys(
+        r#"user "carol" {
+          grants = ["access on service:datastore", "keys.own.use on service:portal"]
+          key "nightly report" {
+            key_env = "CAROL_KEY"
+            grants = [
+              { grant = "access on service:datastore", limits = { requests = [ { amount = 60, window = "minute" } ] } },
+              "data.read on service:datastore/host:prod/database:test1",
+            ]
+          }
+          key "backup check" {
+            key_sha256_env = "CAROL_SUM"
+            grants = ["access on service:datastore"]
+          }
+        }"#,
+    );
+    // Two keys cannot have the same digest: the second block takes the digest of the first.
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(
+        message.contains("backup check") && message.contains("digest"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&text),
+        "the text of the key stays hidden: {message}"
+    );
+    let other = crate::keys::generate().unwrap().to_string();
+    vars.push((
+        "OTHER_SUM".into(),
+        crate::keys::digest(&other)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    ));
+    let raw = raw.replace("CAROL_SUM", "OTHER_SUM");
+    let (cfg, _) = parse_keys(&raw, &vars).unwrap();
+    let carol = &cfg.access.accounts["carol"];
+    assert_eq!(carol.keys.len(), 2);
+    let nightly = carol
+        .keys
+        .iter()
+        .find(|k| k.name == "nightly report")
+        .unwrap();
+    assert_eq!(nightly.digest, digest);
+    assert_eq!(nightly.id, crate::keys::file_id("carol", "nightly report"));
+    assert_eq!(nightly.grants.len(), 2);
+    let backup = carol
+        .keys
+        .iter()
+        .find(|k| k.name == "backup check")
+        .unwrap();
+    assert_eq!(backup.digest, crate::keys::digest(&other));
+    assert_eq!(
+        line(&cfg, "user.carol.key.nightly report.key").value,
+        "<hidden>"
+    );
+    assert_eq!(
+        line(&cfg, "user.carol.key.nightly report.key").source,
+        "env:CAROL_KEY"
+    );
+    assert_eq!(
+        line(&cfg, "user.carol.key.backup check.key_sha256").source,
+        "env:OTHER_SUM"
+    );
+    assert!(!cfg.render_effective().contains(&text));
+}
+
+#[test]
+fn a_bad_block_key_stops_the_start_and_never_shows_the_text_of_a_key() {
+    let (mut vars, text) = vars_with_key();
+    vars.push(("BAD_FORM".into(), format!("{}x", &text[..52])));
+    vars.push(("BAD_SUM".into(), "not hexadecimal".into()));
+    vars.push(("SHORT_SUM".into(), "ab".repeat(31)));
+    let key = |attributes: &str, grants: &str| {
+        with_keys(&format!(
+            r#"user "carol" {{ grants = [] key "k" {{ {attributes} grants = [{grants}] }} }}"#
+        ))
+    };
+    for (raw, expected) in [
+        (key(r#"key_env = "BAD_FORM""#, ""), "user.carol.key.k.key"),
+        (
+            key(r#"key_sha256_env = "BAD_SUM""#, ""),
+            "64 hexadecimal characters",
+        ),
+        (
+            key(r#"key_sha256_env = "SHORT_SUM""#, ""),
+            "64 hexadecimal characters",
+        ),
+        (
+            key(r#"key_env = "CAROL_KEY" key_sha256_env = "SHORT_SUM""#, ""),
+            "not two",
+        ),
+        (key("", ""), "exactly one"),
+        (key(r#"key = "mcp_x""#, ""), "must not be written"),
+        (key(r#"key_sha256 = "ab""#, ""), "must not be written"),
+        (
+            key(
+                r#"key_env = "CAROL_KEY""#,
+                r#""keys.own.read on service:portal""#,
+            ),
+            "never holds one",
+        ),
+        (
+            key(r#"key_env = "MISSING_VARIABLE""#, ""),
+            "MISSING_VARIABLE",
+        ),
+    ] {
+        let message = parse_keys(&raw, &vars)
+            .err()
+            .unwrap_or_else(|| panic!("must stop:\n{raw}"));
+        assert!(message.contains(expected), "{expected}: {message}");
+        assert!(
+            message.contains("carol"),
+            "the error names the login: {message}"
+        );
+        assert!(
+            !message.contains(&text),
+            "the text of the key is in the message: {message}"
+        );
+    }
+    // A name of 65 characters, and a control character.
+    let long = "n".repeat(65);
+    let raw = with_keys(&format!(
+        r#"user "carol" {{ grants = [] key "{long}" {{ key_env = "CAROL_KEY" grants = [] }} }}"#
+    ));
+    assert!(parse_keys(&raw, &vars).is_err());
+    // Without the block `keys`, a block `key` stops the program.
+    let raw = with(
+        r#"access { grants_mode = "hybrid" } user "carol" { grants = [] key "k" { key_env = "CAROL_KEY" grants = [] } }"#,
+    );
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(message.contains("needs the block keys"), "{message}");
+}
+
+#[test]
+fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() {
+    let (mut vars, _) = vars_with_key();
+    let second = crate::keys::generate().unwrap().to_string();
+    vars.push(("SECOND_KEY".into(), second));
+    let raw = with(&format!(
+        r#"access {{ grants_mode = "hybrid" }}
+        {}
+        keys {{ max_per_user = 1 }}
+        user "carol" {{ grants = []
+          key "a" {{ key_env = "CAROL_KEY" grants = [] }}
+          key "b" {{ key_env = "SECOND_KEY" grants = [] }}
+        }}"#,
+        KEYS_NEEDS.replace("keys {}", "")
+    ));
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(
+        message.contains("carol") && message.contains("max_per_user"),
+        "{message}"
+    );
+    let many: Vec<String> = (0..513)
+        .map(|i| format!("\"access on service:s{i}\""))
+        .collect();
+    let raw = with(&format!(
+        r#"access {{ grants_mode = "hybrid" }}
+        {KEYS_NEEDS}
+        users {{ max_grants = 600 }}
+        user "carol" {{ grants = [] key "a" {{ key_env = "CAROL_KEY" grants = [{}] }} }}"#,
+        many.join(", ")
+    ));
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(
+        message.contains("too many items") && message.contains("512"),
+        "{message}"
+    );
+    assert!(
+        message.len() < 2_000,
+        "the error is cut: {} bytes",
+        message.len()
+    );
 }

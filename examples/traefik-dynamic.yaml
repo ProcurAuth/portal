@@ -28,9 +28,37 @@ http:
         preserveLocationHeader: true
         forwardBody: false
         maxResponseBodySize: 4096
+        # The session is tied to the User-Agent and the client address (session.bind).
+        # Without User-Agent here, the check sees the header of Traefik, not the header of the user.
         authRequestHeaders:
           - Cookie
+          - User-Agent
         # The identity token of the service (portal identity block). Traefik copies it to the
         # request, and removes a header of the same name that the client sends.
         authResponseHeaders:
           - X-Identity-Token
+
+    # The ForwardAuth of the keys (portal 8.1a, 8.2). Use it on a router of its own for the agents,
+    # for example PathPrefix(`/app/api/`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`), with a
+    # priority above the route of the persons. Never use `portal` on this router. The portal ignores
+    # the cookies on this route. A route for keys is never in `portal.exclude`.
+    portal-key:
+      forwardAuth:
+        address: "http://portal:4181/auth/verify-key"
+        trustForwardHeader: false
+        authRequestHeaders:
+          - Authorization
+        authResponseHeaders:
+          - X-Identity-Token
+
+    # The service never gets the key.
+    drop-authorization:
+      headers:
+        customRequestHeaders:
+          Authorization: ""
+
+    portal-key-chain:
+      chain:
+        middlewares:
+          - portal-key
+          - drop-authorization

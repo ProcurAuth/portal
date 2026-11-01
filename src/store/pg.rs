@@ -22,6 +22,8 @@ use crate::config::PostgresConfig;
 use crate::grants::Grant;
 use crate::tracking::{unix_now, AuditEvent, Batch, EndReason, Event, LoginAttempt, SessionStart};
 
+mod keys;
+
 /// How long the first connection is retried. A pod can start before its network is ready.
 /// The database can also be failing over.
 pub const STARTUP_RETRY: Duration = Duration::from_secs(60);
@@ -173,46 +175,77 @@ ALTER TABLE user_grants
   ADD PRIMARY KEY (user_id, action, resource_type, resource_id, resource_path);
 "#,
     "
--- Version 6: the accesses of the users, their grants and their keys. No code uses these tables yet.
--- An access belongs to one user. A key belongs to one access. Deleting a user deletes the accesses
--- of the user, and deleting an access deletes its grants and its keys. The id columns hold text
--- that the program makes at random. The key table holds the SHA-256 digest of a key, never the key.
-CREATE TABLE accesses (
+-- Version 6: the keys of the users, their grants and their counters (portal 4, 5, 7 and 10.7). A
+-- key belongs to one user, or to the superadmin: then owner_id is NULL (portal 3.7b). Deleting a
+-- user deletes the keys of the user with their grants and their counters. The id of a key is text
+-- that the program makes at random. The key table holds the SHA-256 digest of a key, never the
+-- key. A revoked key leaves one summary row in key_history. The column limits of a grant holds the
+-- limit values as JSON. No index of budget_counters covers units or window_start, so that each
+-- update of a counter is a heap-only tuple update. The row of directory_version counts the writes
+-- to the users, the grants and the keys.
+ALTER TABLE user_grants ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE keys (
   id TEXT PRIMARY KEY,
-  owner_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
+  digest BYTEA NOT NULL UNIQUE,
+  hint TEXT NOT NULL,
   created_at BIGINT NOT NULL,
-  revoked_at BIGINT
+  expires_at BIGINT,
+  last_check_at BIGINT,
+  check_count BIGINT NOT NULL DEFAULT 0
 );
-CREATE INDEX accesses_owner ON accesses (owner_id);
-CREATE TABLE access_grants (
-  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
+CREATE INDEX keys_owner ON keys (owner_id, created_at, id);
+CREATE INDEX keys_created ON keys (created_at, id);
+CREATE TABLE key_grants (
+  key_id TEXT NOT NULL REFERENCES keys(id) ON DELETE CASCADE,
   action TEXT NOT NULL,
   resource_type TEXT NOT NULL,
   resource_id TEXT NOT NULL,
   resource_path TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY (access_id, action, resource_type, resource_id, resource_path)
+  limits TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (key_id, action, resource_type, resource_id, resource_path)
 );
-CREATE TABLE access_keys (
+CREATE TABLE key_history (
   id TEXT PRIMARY KEY,
-  access_id TEXT NOT NULL REFERENCES accesses(id) ON DELETE CASCADE,
-  digest BYTEA NOT NULL UNIQUE,
-  hint TEXT NOT NULL,
+  owner_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
   created_at BIGINT NOT NULL,
-  expires_at BIGINT NOT NULL,
-  revoked_at BIGINT,
-  last_used_at BIGINT
+  revoked_at BIGINT NOT NULL,
+  last_check_at BIGINT,
+  check_count BIGINT NOT NULL
 );
-CREATE INDEX access_keys_access ON access_keys (access_id);
+CREATE INDEX key_history_owner ON key_history (owner_id, created_at, id);
+CREATE INDEX key_history_created ON key_history (created_at, id);
+CREATE TABLE budget_counters (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+  key_id TEXT REFERENCES keys(id) ON DELETE CASCADE,
+  file_subject TEXT,
+  service TEXT NOT NULL,
+  budget TEXT NOT NULL,
+  \"window\" TEXT NOT NULL CHECK (\"window\" IN ('second', 'minute', 'hour', 'day')),
+  window_start BIGINT NOT NULL,
+  units BIGINT NOT NULL,
+  CHECK (num_nonnulls(user_id, key_id, file_subject) = 1)
+) WITH (fillfactor = 50);
+CREATE UNIQUE INDEX budget_counters_user ON budget_counters (user_id, service, budget, \"window\");
+CREATE UNIQUE INDEX budget_counters_key ON budget_counters (key_id, service, budget, \"window\");
+CREATE UNIQUE INDEX budget_counters_file ON budget_counters (file_subject, service, budget, \"window\");
+CREATE TABLE directory_version (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  version BIGINT NOT NULL
+);
+INSERT INTO directory_version (id, version) VALUES (1, 0);
 ",
 ];
 
-/// The grants of the rows of `user_grants`: action, resource type, resource id, resource path.
-/// A row that is not a valid grant stops the read. The database holds only what the servers
-/// wrote.
-fn grants_from(rows: Vec<[String; 4]>) -> Result<Vec<Grant>, String> {
+/// The grants of the rows of `user_grants`: action, resource type, resource id, resource path and
+/// limits. A row that is not a valid grant stops the read. The database holds only what the
+/// servers wrote.
+fn grants_from(rows: Vec<[String; 5]>) -> Result<Vec<Grant>, String> {
     rows.iter()
-        .map(|[action, kind, id, path]| grant_from_row(action, kind, id, path))
+        .map(|[action, kind, id, path, limits]| grant_from_row(action, kind, id, path, limits))
         .collect()
 }
 
@@ -222,15 +255,19 @@ fn insert_grants(
     grants: &[Grant],
 ) -> Result<(), postgres::Error> {
     for grant in grants {
-        let (kind, id, path) = grant_columns(grant);
+        let (kind, id, path, limits) = grant_columns(grant);
         tx.execute(
-            "INSERT INTO user_grants (user_id, action, resource_type, resource_id, resource_path)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            &[&user_id, &grant.action, &kind, &id, &path],
+            "INSERT INTO user_grants
+               (user_id, action, resource_type, resource_id, resource_path, limits)
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+            &[&user_id, &grant.action, &kind, &id, &path, &limits],
         )?;
     }
     Ok(())
 }
+
+/// A row of the read of the users: login, password hash, creation time and one grant, if any.
+type UserQueryRow = (String, String, i64, Option<[String; 5]>);
 
 /// What went wrong. The cause is included when the server does not state it.
 /// A refused connection reads "error connecting to server: Connection refused" rather than the first half only.
@@ -279,6 +316,8 @@ struct Pool {
     #[cfg(test)]
     down: std::sync::atomic::AtomicBool,
     max: usize,
+    /// How long a caller waits for a free connection.
+    wait: Duration,
     state: Mutex<PoolState>,
     freed: Condvar,
 }
@@ -338,7 +377,7 @@ impl Pool {
         if self.down.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("the database is down (test)".into());
         }
-        let give_up = Instant::now() + POOL_WAIT;
+        let give_up = Instant::now() + self.wait;
         let mut state = self.state();
         loop {
             while let Some(client) = state.idle.pop() {
@@ -379,6 +418,44 @@ impl Pool {
 
 pub struct Pg {
     pool: Pool,
+    /// The connections of the counter statements (portal 7.7): their own pool, with a short
+    /// statement timeout and the asynchronous commit.
+    counters: Pool,
+}
+
+/// The default number of counter connections (`pdp.counter_connections`, portal 7.7e).
+pub const DEFAULT_COUNTER_CONNECTIONS: usize = 2;
+/// The longest time of a counter statement and of the wait for a counter connection (portal 7.7).
+pub const COUNTER_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn pool(config: postgres::Config, max: usize, wait: Duration) -> Pool {
+    Pool {
+        config,
+        #[cfg(test)]
+        down: std::sync::atomic::AtomicBool::new(false),
+        max,
+        wait,
+        state: Mutex::new(PoolState {
+            idle: Vec::new(),
+            open: 0,
+        }),
+        freed: Condvar::new(),
+    }
+}
+
+/// The configuration of a counter connection: the options of the main connections, but a statement
+/// timeout of 500 ms and the asynchronous commit (portal 7.7).
+fn counter_config(config: &postgres::Config) -> postgres::Config {
+    let mut counters = config.clone();
+    // The later `-c` of an option wins, so the timeout of the main connections is replaced. The
+    // other options, for example the search path of a test, stay.
+    counters.options(&format!(
+        "{} -c statement_timeout={} -c synchronous_commit=off",
+        config.get_options().unwrap_or_default(),
+        COUNTER_TIMEOUT.as_millis()
+    ));
+    counters.application_name("portal-counters");
+    counters
 }
 
 impl Pg {
@@ -403,22 +480,27 @@ impl Pg {
 
     fn start(config: postgres::Config, pool_size: usize, retry: Duration) -> Result<Self, String> {
         let pg = Self {
-            pool: Pool {
-                config,
-                #[cfg(test)]
-                down: std::sync::atomic::AtomicBool::new(false),
-                max: pool_size,
-                state: Mutex::new(PoolState {
-                    idle: Vec::new(),
-                    open: 0,
-                }),
-                freed: Condvar::new(),
-            },
+            counters: pool(
+                counter_config(&config),
+                DEFAULT_COUNTER_CONNECTIONS,
+                COUNTER_TIMEOUT,
+            ),
+            pool: pool(config, pool_size, POOL_WAIT),
         };
         pg.wait_until_reachable(retry)?;
         pg.migrate()
             .map_err(|e| format!("postgres schema migration: {e}"))?;
         Ok(pg)
+    }
+
+    /// Sets the number of counter connections (`pdp.counter_connections`). Call it before the
+    /// store is shared.
+    pub fn set_counter_connections(&mut self, connections: usize) {
+        self.counters = pool(
+            counter_config(&self.pool.config),
+            connections,
+            COUNTER_TIMEOUT,
+        );
     }
 
     fn wait_until_reachable(&self, retry: Duration) -> Result<(), String> {
@@ -504,38 +586,48 @@ impl Pg {
 
     // Accounts --------------------------------------------------------------------------------
 
+    #[cfg(test)]
     pub fn load_users(&self) -> Result<Vec<UserRow>, String> {
-        // One row for each grant, and one row for a user without a grant. The rows of a user
-        // follow each other.
-        let rows = self.run(|c| {
-            Ok(c.query(
-                "SELECT u.login, u.password_hash, u.created_at, g.action, g.resource_type,
-                        g.resource_id, g.resource_path
-                   FROM users u LEFT JOIN user_grants g ON g.user_id = u.id
-                  ORDER BY u.login COLLATE \"C\", g.action COLLATE \"C\",
-                           g.resource_id COLLATE \"C\", g.resource_path COLLATE \"C\"",
-                &[],
-            )?
-            .into_iter()
-            .map(|row| {
-                let grant = match (
-                    row.get::<_, Option<String>>(3),
-                    row.get::<_, Option<String>>(4),
-                    row.get::<_, Option<String>>(5),
-                    row.get::<_, Option<String>>(6),
-                ) {
-                    (Some(a), Some(k), Some(i), Some(p)) => Some([a, k, i, p]),
-                    _ => None,
-                };
-                (
-                    row.get::<_, String>(0),
-                    row.get::<_, String>(1),
-                    row.get::<_, i64>(2),
-                    grant,
-                )
-            })
-            .collect::<Vec<_>>())
-        })?;
+        let rows = self.run(Self::users_query)?;
+        Self::assemble_users(rows)
+    }
+
+    /// One row for each grant, and one row for a user without a grant. The rows of a user follow
+    /// each other.
+    fn users_query<C: postgres::GenericClient>(
+        c: &mut C,
+    ) -> Result<Vec<UserQueryRow>, postgres::Error> {
+        Ok(c.query(
+            "SELECT u.login, u.password_hash, u.created_at, g.action, g.resource_type,
+                    g.resource_id, g.resource_path, g.limits
+               FROM users u LEFT JOIN user_grants g ON g.user_id = u.id
+              ORDER BY u.login COLLATE \"C\", g.action COLLATE \"C\",
+                       g.resource_id COLLATE \"C\", g.resource_path COLLATE \"C\"",
+            &[],
+        )?
+        .into_iter()
+        .map(|row| {
+            let grant = match (
+                row.get::<_, Option<String>>(3),
+                row.get::<_, Option<String>>(4),
+                row.get::<_, Option<String>>(5),
+                row.get::<_, Option<String>>(6),
+                row.get::<_, Option<String>>(7),
+            ) {
+                (Some(a), Some(k), Some(i), Some(p), Some(l)) => Some([a, k, i, p, l]),
+                _ => None,
+            };
+            (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, i64>(2),
+                grant,
+            )
+        })
+        .collect::<Vec<_>>())
+    }
+
+    fn assemble_users(rows: Vec<UserQueryRow>) -> Result<Vec<UserRow>, String> {
         let mut users: Vec<UserRow> = Vec::new();
         for (login, password_hash, created_at, grant) in rows {
             if users.last().is_none_or(|last| last.login != login) {
@@ -571,6 +663,8 @@ impl Pg {
                 };
                 let id: i64 = row.get(0);
                 insert_grants(&mut tx, id, &user.grants)?;
+                keys::insert_counter_rows(&mut tx, keys::Subject::User(id), &user.grants)?;
+                keys::bump(&mut tx)?;
                 tx.commit()?;
                 Ok(true)
             })
@@ -607,14 +701,24 @@ impl Pg {
             if let Some(grants) = grants {
                 tx.execute("DELETE FROM user_grants WHERE user_id = $1", &[&id])?;
                 insert_grants(&mut tx, id, grants)?;
+                keys::insert_counter_rows(&mut tx, keys::Subject::User(id), grants)?;
             }
+            keys::bump(&mut tx)?;
             tx.commit()?;
             Ok(true)
         })
     }
 
     pub fn remove_user(&self, login: &str) -> Result<bool, String> {
-        self.run(|c| Ok(c.execute("DELETE FROM users WHERE login = $1", &[&login])? > 0))
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            keys::bump(&mut tx)?;
+            let removed = tx.execute("DELETE FROM users WHERE login = $1", &[&login])? > 0;
+            if removed {
+                tx.commit()?;
+            }
+            Ok(removed)
+        })
     }
 
     // History: writes -------------------------------------------------------------------------
@@ -1069,6 +1173,61 @@ impl Pg {
                 tx.execute(&user, &[id, &row.login, &row.password_hash, &row.created_at])?;
                 insert_grants(&mut tx, *id, &row.grants)?;
             }
+            // The keys keep their id and their digest. The rows of the counters are not copied: each
+            // instance makes the rows that the grants need at its start.
+            for key in &dump.keys {
+                let owner_id: Option<i64> = match &key.owner {
+                    None => None,
+                    Some(login) => dump
+                        .users
+                        .iter()
+                        .find(|(_, user)| user.login == *login)
+                        .map(|(id, _)| *id),
+                };
+                tx.execute(
+                    "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
+                                       last_check_at, check_count)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    &[
+                        &key.id,
+                        &owner_id,
+                        &key.name,
+                        &key.digest.as_slice(),
+                        &key.hint,
+                        &key.created_at,
+                        &key.expires_at,
+                        &key.last_check_at,
+                        &key.check_count,
+                    ],
+                )?;
+                keys::insert_key_grants(&mut tx, &key.id, &key.grants)?;
+            }
+            for row in &dump.key_history {
+                let owner_id: Option<i64> = match &row.owner {
+                    None => None,
+                    Some(login) => dump
+                        .users
+                        .iter()
+                        .find(|(_, user)| user.login == *login)
+                        .map(|(id, _)| *id),
+                };
+                tx.execute(
+                    "INSERT INTO key_history
+                       (id, owner_id, name, created_at, revoked_at, last_check_at, check_count)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    &[
+                        &row.id,
+                        &owner_id,
+                        &row.name,
+                        &row.created_at,
+                        &row.revoked_at,
+                        &row.last_check_at,
+                        &row.check_count,
+                    ],
+                )?;
+            }
+            // The directory changed: the instances read it again (portal 10.7).
+            keys::bump(&mut tx)?;
             let session = tx.prepare(
                 "INSERT INTO sessions_log
                    (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason)
@@ -1149,6 +1308,8 @@ impl Pg {
                 accesses: dump.accesses.len(),
                 audit: dump.audit.len(),
                 logins: dump.logins.len(),
+                keys: dump.keys.len(),
+                key_history: dump.key_history.len(),
             }))
         })?
     }
@@ -1203,6 +1364,11 @@ impl Pg {
     }
 
     #[cfg(test)]
+    pub fn execute_raw(&self, sql: &str) {
+        self.run(|c| c.batch_execute(sql)).unwrap();
+    }
+
+    #[cfg(test)]
     pub fn count(&self, table: &str) -> i64 {
         self.run(|c| {
             Ok(c.query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])?
@@ -1213,7 +1379,9 @@ impl Pg {
 }
 
 /// The tables that the import fills. All of them must be empty.
-const IMPORTED_TABLES: [&str; 5] = [
+const IMPORTED_TABLES: [&str; 7] = [
+    "keys",
+    "key_history",
     "users",
     "sessions_log",
     "service_access",
@@ -1374,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn the_migration_to_version_six_adds_the_tables_of_the_accesses_and_keeps_the_rows() {
+    fn the_migration_to_version_six_adds_the_tables_of_the_keys_and_keeps_the_rows() {
         use crate::store::testing::{postgres, Backend};
         let Some(Backend::Postgres(url)) = postgres() else {
             return;
@@ -1385,10 +1553,13 @@ mod tests {
         assert_eq!(SCHEMA.len(), 6);
         let config = fresh.pool.config.clone();
         let mut admin = config.connect(NoTls).unwrap();
-        // This database was made by the portal before version 6: the three tables did not exist.
+        // This database was made by the portal before version 6: the tables and the column did
+        // not exist.
         admin
             .batch_execute(
-                "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
+                 DROP TABLE keys; DROP TABLE directory_version;
+                 ALTER TABLE user_grants DROP COLUMN limits;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
             )
@@ -1401,28 +1572,65 @@ mod tests {
             .get(0);
         assert_eq!(version as usize, SCHEMA.len());
         assert_eq!(migrated.load_users().unwrap().len(), 1, "the account stays");
+        let directory: i64 = admin
+            .query_one("SELECT version FROM directory_version", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(directory, 0);
         admin
             .batch_execute(
-                "INSERT INTO accesses (id, owner_id, name, created_at) VALUES ('acc1', 1, 'agent', 1);
-                 INSERT INTO access_grants (access_id, action, resource_type, resource_id)
-                   VALUES ('acc1', 'access', 'service', 'db');
-                 INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
-                   VALUES ('key1', 'acc1', '\\x00ff', 'mcp_ab12', 1, 2);",
+                "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at)
+                   VALUES ('key1', 1, 'agent', '\\x00ff', 'ab12', 1, 2);
+                 INSERT INTO key_grants (key_id, action, resource_type, resource_id, limits)
+                   VALUES ('key1', 'access', 'service', 'db',
+                           '{\"requests\":[{\"amount\":10,\"window\":\"minute\"}]}');
+                 INSERT INTO budget_counters (key_id, service, budget, \"window\", window_start, units)
+                   VALUES ('key1', 'db', 'requests', 'minute', 0, 0);
+                 INSERT INTO key_history (id, owner_id, name, created_at, revoked_at, check_count)
+                   VALUES ('key0', 1, 'old', 1, 2, 0);",
             )
             .unwrap();
         let twice = admin.batch_execute(
-            "INSERT INTO access_keys (id, access_id, digest, hint, created_at, expires_at)
-             VALUES ('key2', 'acc1', '\\x00ff', 'mcp_cd34', 1, 2)",
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+             VALUES ('key2', NULL, 'x', '\\x00ff', 'cd34', 1)",
         );
         assert!(twice.is_err(), "the same digest cannot name two keys");
-        // Deleting the user deletes the access, its grants and its keys.
+        // A key of the superadmin has no owner row (portal 3.7b).
+        admin
+            .batch_execute(
+                "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+                 VALUES ('key4', NULL, 'root key', '\\x02', 'ef56', 1)",
+            )
+            .unwrap();
+        let two_subjects = admin.batch_execute(
+            "INSERT INTO budget_counters (user_id, key_id, service, budget, \"window\", window_start, units)
+             VALUES (1, 'key1', 'db', 'requests', 'second', 0, 0)",
+        );
+        assert!(two_subjects.is_err(), "a counter row has one subject");
+        let bad_window = admin.batch_execute(
+            "INSERT INTO budget_counters (user_id, service, budget, \"window\", window_start, units)
+             VALUES (1, 'db', 'requests', 'week', 0, 0)",
+        );
+        assert!(
+            bad_window.is_err(),
+            "a window is second, minute, hour or day"
+        );
+        let second_row =
+            admin.batch_execute("INSERT INTO directory_version (id, version) VALUES (2, 0)");
+        assert!(second_row.is_err(), "the directory version has one row");
+        // Deleting the user deletes the keys, their grants, their counters and their history.
         assert!(migrated.remove_user("alice").unwrap());
-        for table in ["accesses", "access_grants", "access_keys"] {
+        for (table, left) in [
+            ("keys", 1), // the key of the superadmin stays
+            ("key_grants", 0),
+            ("budget_counters", 0),
+            ("key_history", 0),
+        ] {
             let rows: i64 = admin
                 .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
                 .unwrap()
                 .get(0);
-            assert_eq!(rows, 0, "{table}");
+            assert_eq!(rows, left, "{table}");
         }
         // A second start finds nothing to do.
         assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
@@ -1444,7 +1652,7 @@ mod tests {
             .batch_execute(
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
-                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                 DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1498,7 +1706,7 @@ mod tests {
             .batch_execute(
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
-                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                 DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1553,7 +1761,7 @@ mod tests {
         admin
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
-                 DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                 DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -1595,7 +1803,7 @@ mod tests {
     fn version_four(admin: &mut Client, rows: &str) {
         admin
             .batch_execute(&format!(
-                "DROP TABLE access_keys; DROP TABLE access_grants; DROP TABLE accesses;
+                "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
                  DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (

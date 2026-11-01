@@ -12,6 +12,8 @@
 //! of [`settings`], the embedded assets ([`CSS`], [`SETTINGS_CSS`], [`THEME_JS`], [`SETTINGS_JS`]),
 //! and [`demo_page`] (synthetic data for `portal render-demo`).
 
+pub mod grant_editor;
+pub mod keys;
 pub mod settings;
 
 use std::fmt::Write as _;
@@ -20,9 +22,8 @@ use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Servic
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
-    access_page, logins_page, notice_for, service_page, services_page, user_page, users_page,
-    AccessView, Frame, LoginsView, ServiceActions, ServiceView, ServicesView, UserCard, UserView,
-    UsersView,
+    logins_page, notice_for, service_page, services_page, user_page, users_page, Frame, LoginsView,
+    ServiceActions, ServiceView, ServicesView, UserCard, UserView, UsersView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -155,8 +156,14 @@ fn sprite(ids: &[&str]) -> String {
     out
 }
 
-/// The System / Dark / Light selector. The script sets the pressed state and shows the selector.
-/// Without script, the selector stays hidden, because it does nothing.
+/// A state as one icon. The word stays in the page for a screen reader and in the tooltip.
+/// `tone` is `ok`, `warn` or `error`; `icon` is a symbol of the sprite.
+pub fn status_icon(tone: &str, icon: &str, word: &str) -> String {
+    format!(
+        r##"<span class="statusIcon statusIcon--{tone}" title="{word}"><svg class="icon" aria-hidden="true"><use href="#i-{icon}"/></svg><span class="visually-hidden">{word}</span></span>"##
+    )
+}
+
 fn theme_switch() -> String {
     let mut out = String::from(
         r#"<div class="themeSwitch" data-theme-switch role="group" aria-label="Theme">"#,
@@ -250,7 +257,7 @@ fn group_row(out: &mut String, index: usize, group: &Group, icons: &Icons, singl
         if unhealthy > 0 {
             let _ = write!(
                 out,
-                r#"<span class="badge badge--warning">{unhealthy} unhealthy</span>"#
+                r#"<span class="badge badge--warn">{unhealthy} unhealthy</span>"#
             );
         }
         out.push_str("</div>");
@@ -540,6 +547,7 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
                     .collect(),
                 document: std::sync::Arc::new(document),
                 known: true,
+                fetch: false,
             }
         })
         .collect()
@@ -612,6 +620,7 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
         ],
         superadmin: card("root", &[], 1, true),
         unknown_failures_30d: 3,
+        file_accounts: Vec::new(),
         max_users: 64,
         token: "demo",
     }
@@ -694,6 +703,8 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
     let catalog = demo_catalog();
     let frame = Frame {
         logout_token: "demo",
+        keys: true,
+        superadmin: true,
     };
     Some(match name {
         "launcher" => home_page(
@@ -721,29 +732,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     user: users.users.remove(0),
                     first_day: demo_first_day(),
                     token: "demo",
-                },
-            )
-        }
-        "access" => {
-            let mut users = demo_users(&catalog);
-            let services = std::mem::take(&mut users.services);
-            let service = services
-                .iter()
-                .find(|s| s.id == "data-clickhouse-dash")
-                .cloned()
-                .unwrap_or_else(|| services[0].clone());
-            let user = users.users.remove(0);
-            access_page(
-                &frame,
-                &AccessView {
-                    notice: None,
-                    mode: users.mode,
-                    known: user.grants.clone(),
-                    service,
-                    user,
-                    give: false,
-                    level: None,
-                    token: "demo",
+                    keys: Some(settings::KeysRights::default()),
                 },
             )
         }
@@ -785,7 +774,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     holders: &holders,
                     problems: vec![(
                         "infra-s3-browser".into(),
-                        "http://s3-browser:8080/.well-known/access-actions gave the status 500"
+                        "http://s3-browser:8080/.well-known/procurauth/actions gave the status 500"
                             .into(),
                     )],
                 },
@@ -930,16 +919,14 @@ mod tests {
         assert_eq!(
             settings.matches("<symbol ").count(),
             5,
-            "the header icons and the back chevron"
+            "the header icons and the back arrow"
         );
-        assert!(settings.contains(r#"<symbol id="i-chevron-left""#));
+        assert!(settings.contains(r#"<symbol id="i-arrow-left""#));
     }
 
     #[test]
     fn every_demo_page_renders_and_an_unknown_one_does_not() {
-        for name in [
-            "launcher", "users", "user", "access", "services", "service", "logins",
-        ] {
+        for name in ["launcher", "users", "user", "services", "service", "logins"] {
             let page = demo_page(name, &Icons::empty()).unwrap();
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }
@@ -950,7 +937,7 @@ mod tests {
         );
         let services = demo_page("services", &Icons::empty()).unwrap();
         assert!(
-            services.contains(r#"class="cellWarn""#),
+            services.contains("statusIcon--warn"),
             "a demo service has a problem"
         );
         assert!(
@@ -1061,7 +1048,7 @@ mod tests {
             assert!(page.contains(state), "{state}");
         }
         assert_eq!(
-            page.matches(r#"<span class="badge badge--warning">1 unhealthy</span>"#)
+            page.matches(r#"<span class="badge badge--warn">1 unhealthy</span>"#)
                 .count(),
             1
         );
@@ -1117,7 +1104,7 @@ mod tests {
             &Icons::empty(),
             &ctx(),
         );
-        assert!(page.contains(r#"<span class="badge badge--warning">1 unhealthy</span>"#));
+        assert!(page.contains(r#"<span class="badge badge--warn">1 unhealthy</span>"#));
         assert!(page.contains(r#"<h2 class="group__title" id="g-0">Infra</h2>"#));
     }
 
