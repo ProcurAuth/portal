@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
-# Checks the demo from a terminal: sign-in, the gate, grants, ceiling, budget and keys.
+# Checks the demo from a terminal: sign-in, the gate, grants, ceiling, budget, keys and the inbox.
 # Run it after ./up.sh. It reads the passwords in .secrets/credentials.txt.
-# The budget of alice is 5 uses each minute: wait one minute before a second run.
+# Rate budgets:
+#   - The budget of alice on notes is 5 uses each minute: wait one minute before a second run.
+#   - Each run makes one enrollment code for bob. A code lives 10 minutes, and an account may hold 5 codes
+#     that are not used (inbox.enrollment.max_active_per_account). A sixth run in 10 minutes fails at the code.
+#   - Each run sends 3 alerts to the groups infra and critical. The phones that are enrolled get them.
 set -uo pipefail
 cd "$(dirname "$0")"
-base=http://localhost:8088
+# shellcheck source=lib.sh
+. ./lib.sh
 fail=0
-creds=.secrets/credentials.txt
-pw() { if [ "$1" = admin ]; then grep '^superadmin:' "$creds"; else grep "^$1:" "$creds"; fi | sed 's/^[^/]*\/ //'; }
 
 check() { # name expected actual
   if [ "$2" = "$3" ]; then echo "ok    $1"; else echo "FAIL  $1: expected $2, got $3"; fail=1; fi
 }
-
-login() { # user jar
-  local jar=$2 page csrf
-  page=$(curl -s -c "$jar" "$base/auth/login")
-  csrf=$(printf '%s' "$page" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')
-  local sig rd
-  sig=$(printf '%s' "$page" | sed -n 's/.*name="sig" value="\([^"]*\)".*/\1/p')
-  rd=$(printf '%s' "$page" | sed -n 's/.*name="rd" value="\([^"]*\)".*/\1/p')
-  curl -s -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" -H "Origin: $base" \
-    --data-urlencode "csrf=$csrf" --data-urlencode "rd=$rd" --data-urlencode "sig=$sig" \
-    --data-urlencode "login=$1" --data-urlencode "password=$(pw "$1")" "$base/auth/login"
-}
-
-status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 alice=$(mktemp); bob=$(mktemp)
 check "alice signs in" 303 "$(login alice "$alice")"
@@ -78,5 +67,50 @@ check "key: read a notebook" 200 "$(status -H "$auth" "$api/notebooks/public/not
 check "key: cannot write (no grant)" 403 "$(status -H "$auth" -H 'Content-Type: application/json' -d '{"text":"x"}' "$api/notebooks/public/notes")"
 check "a key opens no route of persons (files has no key route)" 302 "$(status -H "$auth" "$base/files/")"
 
-rm -f "$alice" "$bob" "$admin"
+# ---- the inbox
+# The listener of the phones and the producers has no session. A producer proves itself with a bearer token.
+check "inbox: devices /healthz" 200 "$(status "$devices/healthz")"
+check "inbox: devices /readyz" 200 "$(status "$devices/readyz")"
+token=$(cat .secrets/inbox_producer_token)
+akey=$(cat .secrets/alice_key)
+run=$(date +%s)
+send() { # <token> <idempotency key> <group>: prints the HTTP status
+  status -X POST "$devices/api/v1/alerts" -H "Authorization: Bearer $1" -H "Idempotency-Key: $2" \
+    -H 'Content-Type: application/json' -d "{\"group\":\"$3\",\"title\":\"Smoke test $run\"}"
+}
+check "inbox: alert with the token of the file (infra)" 201 "$(send "$token" "smoke-$run-a" infra)"
+check "inbox: the same alert again is a duplicate" 200 "$(send "$token" "smoke-$run-a" infra)"
+check "inbox: alert with the token of the file (critical)" 201 "$(send "$token" "smoke-$run-b" critical)"
+check "inbox: a wrong token" 401 "$(send wrong "smoke-$run-c" infra)"
+check "inbox: alert with the key of alice (infra)" 201 "$(send "$akey" "smoke-$run-d" infra)"
+check "inbox: the key of alice cannot send to critical" 403 "$(send "$akey" "smoke-$run-e" critical)"
+check "inbox: a key that does not exist" 401 "$(send mcp_000000000000000000000000000000000000000000000000000 "smoke-$run-f" infra)"
+
+# The tab Inbox shows the pages that the permissions open. carol has no permission of the inbox.
+carol=$(mktemp)
+check "carol signs in" 303 "$(login carol "$carol")"
+inbox=$base/auth/settings/inbox
+check "inbox page: admin opens the overview" 200 "$(status -b "$admin" "$inbox")"
+check "inbox page: admin opens the phones" 200 "$(status -b "$admin" "$inbox/devices")"
+check "inbox page: alice opens the overview (alert.send)" 200 "$(status -b "$alice" "$inbox")"
+check "inbox page: alice cannot open the phones of all (no device.read)" 403 "$(status -b "$alice" "$inbox/devices")"
+check "inbox page: bob has no overview, the tab opens My phones" 303 "$(status -b "$bob" "$inbox")"
+check "inbox page: bob opens My phones" 200 "$(status -b "$bob" "$inbox/phones")"
+check "inbox page: carol cannot open the overview" 403 "$(status -b "$carol" "$inbox")"
+check "inbox page: carol cannot open My phones" 403 "$(status -b "$carol" "$inbox/phones")"
+
+# An enrollment code: the page of the account makes it and shows it one time.
+page=$(curl -s -b "$bob" "$inbox/phones")
+csrf=$(form_csrf "$page" /auth/settings/inbox/code)
+answer=$(curl -s -b "$bob" -H "Origin: $base" --data-urlencode "csrf=$csrf" "$inbox/code")
+case "$answer" in
+  *inbox://enroll*) echo "ok    bob makes an enrollment code" ;;
+  *) echo "FAIL  bob makes an enrollment code: no link in the answer"; fail=1 ;;
+esac
+check "inbox: carol cannot make a code" 403 "$(status -b "$carol" -H "Origin: $base" --data-urlencode "csrf=$csrf" "$inbox/code")"
+
+series=$(curl -s "$metrics" | grep -c '^inbox_alerts_accepted_total')
+[ "$series" -gt 0 ] && echo "ok    metrics: inbox_alerts_accepted_total has $series series" || { echo "FAIL  metrics: no inbox_alerts_accepted_total"; fail=1; }
+
+rm -f "$alice" "$bob" "$admin" "$carol"
 exit $fail

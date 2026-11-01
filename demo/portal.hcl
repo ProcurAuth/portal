@@ -1,4 +1,4 @@
-# Configuration of the portal for the local demo. The secrets come from files that up.sh writes.
+# Configuration of the portal for the local demo, with the inbox. The secrets come from files that up.sh writes.
 server {
   listen_address  = "0.0.0.0:4181"
   # The Traefik container of the demo network. The portal then reads the client address from X-Forwarded-For.
@@ -10,9 +10,9 @@ authentication {
   superadmin_password_file = "/run/secrets/superadmin_password"
 }
 
-# The grants of alice and bob come from this file. The grants of the other users come from the settings pages.
+# The grants of every account come from the settings pages. seed.sh sets those of alice and bob.
 access {
-  grants_mode = "hybrid"
+  grants_mode = "dynamic"
 }
 
 storage {
@@ -49,25 +49,57 @@ pdp_client "notes" {
 # Keys: the page /auth/keys and the edge /auth/verify-key.
 keys {}
 
-# alice can do much in the service notes. Her budget is 5 uses each minute, and one read gives 2 notes at most.
-user "alice" {
-  password_hash_file = "/run/secrets/alice_hash"
-  grants = [
-    { grant = "access on service:notes", limits = { requests = [{ amount = 5, window = "minute" }] } },
-    { grant = "notes.read on service:notes", limits = { max_results = 2 } },
-    "notes.write on service:notes/notebook:work",
-    "notes.delete on service:notes/notebook:work",
-    "access on service:files",
-    "access on service:wiki",
-  ]
+metrics {
+  enabled = true
+  path    = "/metrics"
 }
 
-# bob can read the public notebook only.
-user "bob" {
-  password_hash_file = "/run/secrets/bob_hash"
-  grants = [
-    "access on service:notes",
-    "notes.read on service:notes/notebook:public",
-    "access on service:wiki",
-  ]
+# The inbox. The phones use the devices listener (port 8080 in the container, 8089 on the host).
+inbox {
+  name            = "Inbox demo"
+  server_key_file = "/run/secrets/inbox_server_key"
+
+  devices {
+    listen                = "0.0.0.0:8080"
+    # The Android emulator reaches the host at 172.17.0.1. The host reaches this address too.
+    public_address        = "172.17.0.1:8089"
+    # The phones connect to the published port with no proxy in front.
+    trusted_proxies       = []
+    heartbeat_interval    = "20s"
+    session_timeout       = "60s"
+    resend_after          = "15s"
+    max_inflight          = 32
+    unreachable_after     = "2m"
+    offline_warning_after = "3m"
+  }
+
+  storage {
+    delivery_ttl             = "7d"
+    alert_retention          = "30d"
+    connection_log_retention = "90d"
+  }
+
+  group "infra" {
+    name        = "Infra"
+    description = "Alerts about the infrastructure."
+  }
+
+  # A critical group has no limit on alert.send.
+  group "critical" {
+    name        = "Critical"
+    description = "Pages that must wake somebody."
+    critical    = true
+  }
+
+  # One producer with a token. The token is a file that up.sh makes.
+  producer "local" {
+    token_file = "/run/secrets/inbox_producer_token"
+    groups     = ["infra", "critical"]
+  }
+
+  # The portal tells the group infra when a service stays unhealthy. 10 seconds is the shortest value.
+  portal_alerts {
+    group           = "infra"
+    unhealthy_after = "10s"
+  }
 }

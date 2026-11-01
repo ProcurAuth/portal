@@ -872,12 +872,13 @@ input.keyText {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
 }
 
 .stat {
   display: grid;
+  min-width: 0;
   gap: 4px;
   padding: 12px 14px;
   border: 1px solid var(--border);
@@ -893,8 +894,13 @@ input.keyText {
   text-transform: uppercase;
 }
 
+.stat__value time.when {
+  white-space: normal;
+}
+
 .stat__value {
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: 18px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -1227,6 +1233,11 @@ input.keyText {
 }
 
 @media (max-width: 640px) {
+  /* A table of the inbox keeps its main columns and its action on a narrow screen. */
+  .narrowHide {
+    display: none;
+  }
+
   .ge__svcHead {
     flex-wrap: wrap;
     row-gap: 6px;
@@ -1513,4 +1524,10 @@ input.keyText {
 
 .docs .subTitle {
   margin-top: 10px;
+}
+
+/* A title that comes from outside keeps its letters: no capitals, no letter spacing. */
+.pagePart__title--data {
+  text-transform: none;
+  letter-spacing: normal;
 }

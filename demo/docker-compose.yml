@@ -1,4 +1,4 @@
-# Local demo of the portal: Traefik, the portal, three example services. Start it with ./up.sh.
+# Local demo of the portal with the inbox: Traefik, the portal, example services. Start it with ./up.sh.
 name: portal-demo
 
 services:
@@ -39,8 +39,15 @@ services:
       - superadmin_password
       - identity_key
       - pdp_token_notes
-      - alice_hash
-      - bob_hash
+      - inbox_server_key
+      - inbox_producer_token
+    ports:
+      # The devices listener of the inbox (phones, producers). The emulator reaches it through the
+      # Docker bridge at 172.17.0.1:8089. This is the inbox.devices.public_address of portal.hcl.
+      - "127.0.0.1:8089:8080"
+      - "172.17.0.1:8089:8080"
+      # The pages listener, for the metrics and the health check from the host. Loopback only.
+      - "127.0.0.1:8091:4181"
     volumes:
       - portal_data:/var/lib/portal
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -203,7 +210,7 @@ secrets:
     file: ./.secrets/identity_pub.pem
   pdp_token_notes:
     file: ./.secrets/pdp_token_notes
-  alice_hash:
-    file: ./.secrets/alice_hash
-  bob_hash:
-    file: ./.secrets/bob_hash
+  inbox_server_key:
+    file: ./.secrets/inbox_server_key
+  inbox_producer_token:
+    file: ./.secrets/inbox_producer_token
