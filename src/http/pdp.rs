@@ -86,6 +86,8 @@ const INVALID_RESOURCE: &str = "invalid_resource";
 /// The reason in a batch item for a `context.match` that is not `"node"` or `"subtree"`, or for
 /// ancestors that are not an array of objects with `type` and `id`.
 const INVALID_REQUEST: &str = "invalid_request";
+/// The reason in the log for a directory that is too old.
+const TOO_OLD: &str = "the directory is too old";
 /// The reason in the answer for a counter without room (protocol 11.1).
 const BUDGET_EXCEEDED: &str = "budget_exceeded";
 
@@ -915,7 +917,7 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outc
     let principal = match keyauth::resolve(state, &key, crate::tracking::unix_now()) {
         Ok(principal) => principal,
         // The copy of the directory is too old: the PDP answers `false` for each key (protocol 3.9).
-        Err(Cause::DirectoryTooOld) => return Outcome::deny("the directory is too old", None),
+        Err(Cause::DirectoryTooOld) => return Outcome::deny(TOO_OLD, None),
         Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
     };
     // A key never holds an action of the service `portal` (portal 6.5): the PDP ignores one.
@@ -946,6 +948,79 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outc
     };
     let verdict = decision::key(&key.counter_owner(), &key_grants, owner, &owner_counters, q);
     finish(state, q, verdict, usage)
+}
+
+/// The answer of the portal to the inbox for a key or an account (see `inbox_rights.rs` and
+/// `inbox_page.rs`).
+pub(super) enum UseVerdict {
+    Allowed,
+    /// The key or the account is not valid or not known.
+    UnknownSubject,
+    /// The decision is no.
+    Denied,
+    /// A counter has no room. The value is the seconds to wait.
+    Limited(u64),
+    /// The directory is too old to decide.
+    NotReady,
+    /// The count of the use did not work.
+    Unavailable,
+}
+
+fn use_verdict(outcome: &Outcome) -> UseVerdict {
+    if outcome.unavailable.is_some() {
+        UseVerdict::Unavailable
+    } else if outcome.decision {
+        UseVerdict::Allowed
+    } else if let Some(seconds) = outcome.retry_after {
+        UseVerdict::Limited(seconds)
+    } else if outcome.reason == Some(UNKNOWN_SUBJECT) {
+        UseVerdict::UnknownSubject
+    } else if outcome.why == TOO_OLD {
+        UseVerdict::NotReady
+    } else {
+        UseVerdict::Denied
+    }
+}
+
+/// The decision for a key on a node of the service `service`, made by the portal for itself and not
+/// for a PDP client. `usage` is true when the call is one use: it takes one unit from each counter.
+pub(super) fn decide_key_for(
+    state: &AppState,
+    id: &str,
+    service: &str,
+    action: &str,
+    chain: &[Segment],
+    usage: bool,
+) -> UseVerdict {
+    let document = state.actions.declared(service);
+    let q = Question {
+        service,
+        action,
+        chain,
+        matching: Matching::Node,
+        document: document.as_deref(),
+    };
+    use_verdict(&decide_key(state, id, &q, usage))
+}
+
+/// The same for an account: the superadmin, an account of the file or an account of the database.
+pub(super) fn decide_person_for(
+    state: &AppState,
+    login: &str,
+    service: &str,
+    action: &str,
+    chain: &[Segment],
+    usage: bool,
+) -> UseVerdict {
+    let document = state.actions.declared(service);
+    let q = Question {
+        service,
+        action,
+        chain,
+        matching: Matching::Node,
+        document: document.as_deref(),
+    };
+    use_verdict(&decide_person(state, login, &q, usage))
 }
 
 /// The answer from a verdict: for a use, the count of the units.

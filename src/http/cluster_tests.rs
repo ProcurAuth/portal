@@ -5940,3 +5940,305 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
             .is_empty());
     });
 }
+
+// The authorizer that the portal gives to the inbox (`inbox_rights.rs`). The inbox does not run in
+// these tests: the authorizer reads the state of the portal only.
+
+mod inbox_rights_tests {
+    use super::*;
+    use crate::keyauth::Cause;
+    use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
+    use crate::store::KeyRow;
+
+    fn inbox_node(backend: &Backend) -> (Node, std::sync::Arc<dyn Authorizer>) {
+        let pdp_port = free_port();
+        let devices = free_port();
+        let server_key = inbox_core::server_key::ServerKey::generate()
+            .unwrap()
+            .encode()
+            .to_string();
+        let node = start_custom(
+            Arc::new(backend.fresh()),
+            None,
+            Custom {
+                env: vec![("INBOX_TEST_KEY".into(), server_key)],
+                ..Custom::default()
+            },
+            &format!(
+                r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+                pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
+                keys {{}}
+                inbox {{
+                  server_key_env = "INBOX_TEST_KEY"
+                  devices {{
+                    listen = "127.0.0.1:{devices}"
+                    public_address = "127.0.0.1:{devices}"
+                    trusted_proxies = []
+                    heartbeat_interval = "20s"
+                    session_timeout = "60s"
+                    resend_after = "15s"
+                    max_inflight = 32
+                    unreachable_after = "2m"
+                    offline_warning_after = "3m"
+                  }}
+                  storage {{
+                    delivery_ttl = "7d"
+                    alert_retention = "30d"
+                    connection_log_retention = "90d"
+                  }}
+                  group "infra" {{ name = "Infra" }}
+                  group "oncall" {{ name = "On call" critical = true }}
+                }}"#
+            ),
+        );
+        let authorizer: std::sync::Arc<dyn Authorizer> = std::sync::Arc::new(
+            super::super::inbox_rights::PortalAuthorizer::new(&node.state),
+        );
+        (node, authorizer)
+    }
+
+    fn add_account(node: &Node, login: &str, grants: &[&str]) {
+        let mut grants: Vec<Grant> = grants.iter().map(|g| Grant::parse(g).unwrap()).collect();
+        grants.sort();
+        node.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: login.into(),
+                password_hash: password_hash(PASSWORD),
+                grants,
+                created_at: 1,
+            })
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+    }
+
+    /// A key with a real text. The result is the text and the id.
+    fn add_real_key(node: &Node, owner: Option<&str>, grants: &[&str]) -> (String, String) {
+        let text = crate::keys::generate().unwrap().to_string();
+        let digest = crate::keys::digest(&text);
+        let id: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let mut grants: Vec<Grant> = grants.iter().map(|g| Grant::parse(g).unwrap()).collect();
+        grants.sort();
+        node.state
+            .store
+            .insert_key(
+                &KeyRow {
+                    id: id.clone(),
+                    owner: owner.map(Into::into),
+                    name: format!("key {id}"),
+                    digest,
+                    hint: "ab12".into(),
+                    created_at: unix_now() - 10,
+                    expires_at: None,
+                    last_check_at: None,
+                    check_count: 0,
+                    grants,
+                },
+                &key_caps(),
+            )
+            .unwrap();
+        node.state.users.refresh(&node.state.store).unwrap();
+        (text, id)
+    }
+
+    fn groups(ids: &[&str]) -> Subscribable {
+        Subscribable::Groups(ids.iter().map(|g| g.to_string()).collect())
+    }
+
+    #[test]
+    fn the_rights_to_subscribe_come_from_the_directory_and_say_unknown_when_it_cannot_tell() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            add_account(
+                &node,
+                "alice",
+                &["group.subscribe on service:inbox/group:infra"],
+            );
+            add_account(&node, "bob", &[]);
+            add_account(
+                &node,
+                "carol",
+                &[
+                    "group.subscribe on service:inbox/group:infra",
+                    "group.subscribe on service:inbox/group:oncall",
+                    "alert.send on service:inbox/group:oncall",
+                ],
+            );
+            assert_eq!(authorizer.subscribable("alice"), groups(&["infra"]));
+            assert_eq!(authorizer.subscribable("bob"), groups(&[]), "a positive no");
+            assert_eq!(
+                authorizer.subscribable("carol"),
+                groups(&["infra", "oncall"])
+            );
+            // The superadmin has every permission.
+            assert_eq!(
+                authorizer.subscribable("root"),
+                groups(&["infra", "oncall"])
+            );
+            // An account that the directory does not know is not a refusal.
+            assert_eq!(authorizer.subscribable("nobody"), Subscribable::Unknown);
+            // The stamp changes with the directory.
+            let before = authorizer.directory_stamp().unwrap();
+            node.state.users.update(
+                "alice",
+                None,
+                Some(vec![Grant::parse(
+                    "group.subscribe on service:inbox/group:oncall",
+                )
+                .unwrap()]),
+            );
+            assert_ne!(authorizer.directory_stamp().unwrap(), before);
+            assert_eq!(authorizer.subscribable("alice"), groups(&["oncall"]));
+            // A directory that is old says nothing: no answer, no stamp, no removal.
+            if node.state.store.is_shared() {
+                node.state.users.set_last_success(0);
+                assert_eq!(authorizer.subscribable("bob"), Subscribable::Unknown);
+                assert_eq!(authorizer.subscribable("root"), Subscribable::Unknown);
+                assert_eq!(authorizer.directory_stamp(), None);
+                node.state.users.refresh(&node.state.store).unwrap();
+                assert_eq!(authorizer.subscribable("bob"), groups(&[]));
+                assert!(authorizer.directory_stamp().is_some());
+            }
+        });
+    }
+
+    #[test]
+    fn a_key_is_checked_in_memory_and_a_text_that_is_not_a_key_is_not_a_key() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            add_account(
+                &node,
+                "alice",
+                &[
+                    "keys.own.use on service:portal",
+                    "alert.send on service:inbox/group:infra",
+                ],
+            );
+            let (text, id) = add_real_key(
+                &node,
+                Some("alice"),
+                &["alert.send on service:inbox/group:infra"],
+            );
+            assert_eq!(authorizer.check_key(&text), KeyCheck::Valid { key_id: id });
+            assert_eq!(
+                authorizer.check_key("a token of the file"),
+                KeyCheck::NotAKey
+            );
+            assert_eq!(authorizer.check_key("mcp_short"), KeyCheck::NotAKey);
+            let ghost = crate::keys::generate().unwrap().to_string();
+            assert_eq!(authorizer.check_key(&ghost), KeyCheck::Invalid);
+            // An owner without keys.own.use: the key is not valid.
+            add_account(&node, "bob", &["alert.send on service:inbox/group:infra"]);
+            let (no_use, _) = add_real_key(
+                &node,
+                Some("bob"),
+                &["alert.send on service:inbox/group:infra"],
+            );
+            assert_eq!(authorizer.check_key(&no_use), KeyCheck::Invalid);
+            assert!(node
+                .state
+                .key_stats
+                .counts()
+                .iter()
+                .any(|(r, n)| *r == Cause::OwnerCannotUseKeys.as_str() && *n >= 1));
+            if node.state.store.is_shared() {
+                // An old directory: not ready, never a wrong refusal.
+                node.state.users.set_last_success(0);
+                assert_eq!(authorizer.check_key(&text), KeyCheck::NotReady);
+                node.state.users.refresh(&node.state.store).unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn the_decision_for_a_key_follows_both_sides_the_limit_and_the_critical_group() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            // The owner has a budget of 2 each minute on the service inbox.
+            let mut owner = vec![
+                Grant::new("access", "inbox")
+                    .unwrap()
+                    .with_limits(limits(r#"{"alerts":[{"amount":2,"window":"minute"}]}"#)),
+                Grant::parse("keys.own.use on service:portal").unwrap(),
+                Grant::parse("alert.send on service:inbox/group:infra").unwrap(),
+                Grant::parse("alert.send on service:inbox/group:oncall").unwrap(),
+            ];
+            owner.sort();
+            node.state
+                .store
+                .insert_user(&crate::store::UserRow {
+                    login: "alice".into(),
+                    password_hash: password_hash(PASSWORD),
+                    grants: owner,
+                    created_at: 1,
+                })
+                .unwrap();
+            node.state.users.refresh(&node.state.store).unwrap();
+            let (_, id) = add_real_key(
+                &node,
+                Some("alice"),
+                &[
+                    "alert.send on service:inbox/group:infra",
+                    "alert.send on service:inbox/group:oncall",
+                ],
+            );
+            let refused = |decision: Decision| matches!(decision, Decision::Refused { .. });
+            // A group with no permission: refused, nothing counted.
+            assert!(refused(authorizer.decide(
+                &id,
+                "alert.send",
+                "missing",
+                true
+            )));
+            assert!(refused(authorizer.decide(
+                &id,
+                "alert.read",
+                "infra",
+                false
+            )));
+            // Two uses fit, the third finds no room.
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", true),
+                Decision::Allowed
+            );
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", true),
+                Decision::Allowed
+            );
+            let Decision::Limited { retry_after } =
+                authorizer.decide(&id, "alert.send", "infra", true)
+            else {
+                panic!("the limit must refuse");
+            };
+            assert!((1..=60).contains(&retry_after));
+            // The inbox does not count a critical group: the same key, never a limit.
+            for _ in 0..10 {
+                assert_eq!(
+                    authorizer.decide(&id, "alert.send", "oncall", false),
+                    Decision::Allowed
+                );
+            }
+            // A decision without a use takes no unit, also when the budget is empty.
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Allowed
+            );
+            // A key that does not exist is not valid.
+            assert_eq!(
+                authorizer.decide("0000000000000000", "alert.send", "infra", true),
+                Decision::Refused {
+                    reason: "key_not_valid"
+                }
+            );
+            // The superadmin as the owner: no limit, no counter.
+            let (_, root_key) =
+                add_real_key(&node, None, &["alert.send on service:inbox/group:infra"]);
+            for _ in 0..5 {
+                assert_eq!(
+                    authorizer.decide(&root_key, "alert.send", "infra", true),
+                    Decision::Allowed
+                );
+            }
+        });
+    }
+}

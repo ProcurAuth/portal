@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ use super::http::Resp;
 use super::hub::Live;
 use super::log;
 use super::net::client_ip;
+use super::rights;
 use super::state::{App, SocketGuard};
 use super::util::{is_hex_id, now_ms};
 use super::ws::{self, Message, Socket};
@@ -363,6 +364,7 @@ async fn established(
     let (kick_tx, mut kick_rx) = watch::channel(None);
     let wake = Arc::new(Notify::new());
     let last_seen = Arc::new(AtomicI64::new(now_ms()));
+    let resub = Arc::new(AtomicBool::new(false));
     let app_version = inbox_core::enroll::validate_device_name(&app_version)
         .unwrap_or_else(|_| "unknown".into());
     let connected_at = now_ms();
@@ -376,6 +378,7 @@ async fn established(
             last_seen: last_seen.clone(),
             wake: wake.clone(),
             kick: kick_tx,
+            resub: resub.clone(),
         },
         close::REPLACED,
     );
@@ -415,6 +418,7 @@ async fn established(
         &mut kick_rx,
         &wake,
         &last_seen,
+        &resub,
     )
     .await;
 
@@ -449,6 +453,8 @@ async fn established(
     );
 }
 
+// The session loop needs these handles of one session; a struct for them would only rename the arguments.
+#[allow(clippy::too_many_arguments)]
 async fn deliver(
     app: &App,
     socket: &mut Socket,
@@ -457,20 +463,54 @@ async fn deliver(
     kick_rx: &mut watch::Receiver<Option<u16>>,
     wake: &Notify,
     last_seen: &AtomicI64,
+    resub: &AtomicBool,
 ) -> End {
     let cfg = &app.config.devices;
-    let (subscriptions, user_name) = match app.db.profile(device_id).await {
+    let (mut subscriptions, user_name) = match app.db.profile(device_id).await {
         Ok(p) => p,
         Err(e) => return End::Storage(e),
     };
+    // The phone sees only the groups that its account may subscribe to. When the portal cannot
+    // tell, the phone sees all the groups and nothing changes.
+    let allowed = rights::subscribable_groups(app, &user_name);
+    let groups = match &allowed {
+        Some(allowed) => app
+            .groups
+            .iter()
+            .filter(|g| allowed.contains(&g.id))
+            .cloned()
+            .collect(),
+        None => app.groups.clone(),
+    };
+    if let Some(allowed) = &allowed {
+        // A loaded directory says that the account lost the right: the subscription goes now.
+        for group in subscriptions
+            .clone()
+            .iter()
+            .filter(|g| !allowed.contains(*g))
+        {
+            match app.db.unsubscribe(device_id, group).await {
+                Ok(left) => {
+                    log::info!(
+                        event = "subscription_removed_by_rights",
+                        device.id = %device_id,
+                        user.name = %user_name,
+                        group = %group
+                    );
+                    subscriptions = left;
+                }
+                Err(e) => log::warn!(event = "rights_unsubscribe_failed", error = %e),
+            }
+        }
+    }
     let welcome = ServerMsg::Welcome {
         server_name: app.config.name.clone(),
-        groups: app.groups.clone(),
+        groups,
         subscriptions,
         heartbeat_interval_ms: cfg.heartbeat_interval.as_millis() as u64,
         offline_warning_after_ms: cfg.offline_warning_after.as_millis() as u64,
         server_time_ms: now_ms(),
-        user_name,
+        user_name: user_name.clone(),
     };
     if let Err(e) = send_msg(socket, session, &welcome).await {
         return e;
@@ -483,6 +523,20 @@ async fn deliver(
     let mut flush = true;
 
     loop {
+        if resub.swap(false, Ordering::SeqCst) {
+            // The rights of the account changed the subscriptions. The phone learns it.
+            match app.db.profile(device_id).await {
+                Ok((subscriptions, _)) => {
+                    if let Err(e) =
+                        send_msg(socket, session, &ServerMsg::Subscriptions { subscriptions }).await
+                    {
+                        return e;
+                    }
+                }
+                Err(e) if e.is_unavailable() => {}
+                Err(e) => return End::Storage(e),
+            }
+        }
         if flush {
             flush = false;
             if let Err(e) = flush_deliveries(app, socket, session, device_id, &mut inflight).await {
@@ -514,7 +568,7 @@ async fn deliver(
                 last_seen.store(now_ms(), Ordering::Relaxed);
                 let Ok(plain) = session.decrypt(&frame) else { return End::Protocol("decrypt failed") };
                 let Ok(msg) = serde_json::from_slice::<ClientMsg>(&plain) else { return End::Protocol("malformed message") };
-                match handle(app, socket, session, device_id, msg, &mut inflight).await {
+                match handle(app, socket, session, device_id, &user_name, msg, &mut inflight).await {
                     Ok(f) => flush |= f,
                     Err(e) => return e,
                 }
@@ -532,6 +586,7 @@ async fn handle(
     socket: &mut Socket,
     session: &mut Session,
     device_id: &str,
+    login: &str,
     msg: ClientMsg,
     inflight: &mut HashMap<i64, Instant>,
 ) -> Result<bool, End> {
@@ -577,6 +632,35 @@ async fn handle(
                 )
                 .await?;
                 return Ok(false);
+            }
+            // The account needs `group.subscribe` on the group. When the portal cannot tell, the
+            // phone gets a retry error: a new subscription never rests on a guess.
+            match rights::subscribable_groups(app, login) {
+                Some(allowed) if allowed.contains(&group) => {}
+                Some(_) => {
+                    send_msg(
+                        socket,
+                        session,
+                        &ServerMsg::Error {
+                            code: "forbidden_group".into(),
+                            message: group,
+                        },
+                    )
+                    .await?;
+                    return Ok(false);
+                }
+                None => {
+                    send_msg(
+                        socket,
+                        session,
+                        &ServerMsg::Error {
+                            code: "unavailable".into(),
+                            message: "the rights are not ready, retry in a moment".into(),
+                        },
+                    )
+                    .await?;
+                    return Ok(false);
+                }
             }
             let subs = match app.db.subscribe(device_id, &group).await {
                 Ok(subs) => subs,

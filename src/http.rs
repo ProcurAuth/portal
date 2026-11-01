@@ -431,6 +431,10 @@ async fn serve_until(
 
     // The inbox starts first. It does not wait for the catalogue: an alert must not wait for it.
     state.inbox.start().await?;
+    // The inbox asks the portal for the rights of keys and accounts (see `inbox_rights.rs`).
+    state
+        .inbox
+        .set_authorizer(Arc::new(inbox_rights::PortalAuthorizer::new(&state)));
 
     let catalog_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let publisher = Arc::clone(&state);
@@ -3655,6 +3659,7 @@ mod edge;
 mod keys_page;
 mod options_page;
 mod inbox_admin;
+mod inbox_rights;
 mod pdp;
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ mod peer;
 mod pg;
 mod ratelimit;
 mod replica;
+pub mod rights;
 mod shutdown;
 mod spool;
 mod state;
@@ -267,6 +268,14 @@ impl Slot {
     pub fn app(&self) -> Option<Arc<App>> {
         self.app.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
+    /// Gives the inbox what it needs for the rights. The portal calls it once, after the start.
+    /// Before this call the inbox makes no decision with keys and removes no subscription.
+    pub fn set_authorizer(&self, authorizer: Arc<dyn rights::Authorizer>) {
+        if let Some(app) = self.app() {
+            let _ = app.authorizer.set(authorizer);
+        }
+    }
+
 
     /// Makes an enrollment code for `login`. `None` without the block `inbox` or before the start.
     pub async fn create_enrollment_code(
@@ -383,9 +392,11 @@ impl Slot {
             next_session_id: AtomicU64::new(1),
             http,
             stop: crate::shutdown::Stop::default(),
+            authorizer: std::sync::OnceLock::new(),
             sockets: Default::default(),
             config,
         });
+        tokio::spawn(rights::run(Arc::clone(&app)));
         tasks::spawn_background(Arc::clone(&app));
         let mut handles = vec![tokio::spawn(http::accept_loop(
             Arc::clone(&app),

@@ -121,11 +121,21 @@ The messages `set_user_name` and `user_name` do not exist in protocol 4. The ser
 
 | `t` | Fields |
 |---|---|
-| `welcome` | `server_name`, `groups[] {id,name,description}`, `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (login of the account, read-only) |
+| `welcome` | `server_name`, `groups[] {id,name,description}` (only the groups that the account may subscribe to), `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (login of the account, read-only) |
 | `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title` (one line, at most 128 characters), `created_at_ms` |
-| `subscriptions` | `subscriptions[]`, sent after each change |
+| `subscriptions` | `subscriptions[]`, sent after each change. The server also sends it when the account loses the permission for a group: the server removes the subscription, and the message tells the phone. |
 | `pong` | `nonce` |
-| `error` | `code`, `message` (for example `unknown_group`) |
+| `error` | `code`, `message`. The codes are `unknown_group` (the group does not exist), `forbidden_group` (the account has no permission `group.subscribe` on the group, `message` is the group), and `unavailable` (the storage or the rights are not ready: send the message again later). |
+
+### Rights of the account
+
+A phone subscribes only to a group for which its account has the permission `group.subscribe` of the service `inbox` of the portal. This adds no message and no version: protocol 4 stays as it is.
+
+- The `welcome` lists only the groups that the account may subscribe to.
+- `subscribe` to another group gets the error `forbidden_group`. When the portal cannot tell the rights (its directory is not ready or is old), the error is `unavailable`, and the phone can send the message again.
+- When the account loses the permission, the server removes the subscription and sends `subscriptions`. This check runs when the directory of the portal changes, and at each `welcome`. It does not run for each alert. The next alerts of the group are not made for the phone.
+- The server never removes a subscription when it does not know. A directory that is not ready, a directory that is old, an empty directory and an account that the directory does not know remove nothing.
+- An alert that exists is always delivered. A phone that loses the permission still gets the alerts that the server made before. They stay in its backlog until the phone confirms them or they expire.
 
 ### Delivery rules
 

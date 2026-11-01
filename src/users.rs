@@ -181,6 +181,8 @@ pub struct Directory {
     refresh_errors: AtomicU64,
     /// The version of the directory that the last good round used. It is -1 before the first.
     version: AtomicI64,
+    /// Counts each change of the content: a change made here and a new read of the database.
+    generation: AtomicU64,
 }
 
 impl Directory {
@@ -212,6 +214,7 @@ impl Directory {
             last_success: AtomicU64::new(now_millis()),
             refresh_errors: AtomicU64::new(0),
             version: AtomicI64::new(version),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -288,6 +291,13 @@ impl Directory {
         Duration::from_millis(now_millis().saturating_sub(last))
     }
 
+    /// A number that grows each time the content of the directory changes: after a change made
+    /// through this instance, and after a new read of the database. The inbox uses it to know when
+    /// to look at the rights of the phones again.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     /// The version of the database directory that this instance uses.
     #[cfg(test)]
     pub fn version(&self) -> i64 {
@@ -307,6 +317,7 @@ impl Directory {
             return false;
         }
         *inner = Inner::from_snapshot(snapshot);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.version.store(inner.version, Ordering::Release);
         self.loaded_changes.store(seen, Ordering::Release);
         true
@@ -374,6 +385,7 @@ impl Directory {
     pub fn insert(&self, login: String, user: UserRecord) {
         let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
         self.changes.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         inner.index.insert(login.clone(), index_of(&user.grants));
         inner.users.insert(login, user);
     }
@@ -388,6 +400,7 @@ impl Directory {
     ) -> bool {
         let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
         self.changes.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         match inner.users.get_mut(login) {
             Some(user) => {
                 if let Some(hash) = password_hash {
@@ -407,6 +420,7 @@ impl Directory {
     pub fn remove(&self, login: &str) -> bool {
         let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
         self.changes.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         let removed = inner.users.remove(login).is_some();
         inner.index.remove(login);
         if removed {
