@@ -78,5 +78,5 @@ case "${1:-}" in
   apk) build_apk ;;
   dist) build_dist ;;
   all) build_server; build_image; build_apk; build_dist ;;
-  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
