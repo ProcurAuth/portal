@@ -1,6 +1,6 @@
 # portal
 
-portal is one Rust program. It is the access gateway of a lab, the launcher page, the AuthZEN PDP, the service that makes keys, and a inbox that sends alerts to Android phones. It has one binary, one configuration file and one database.
+portal is one Rust program. It has one binary, one configuration file and one database. It does these functions:
 
 - A superadmin is defined by the environment.
 - Users get permissions from the settings pages or from the configuration.
@@ -13,7 +13,7 @@ portal is one Rust program. It is the access gateway of a lab, the launcher page
 
 portal is the access gateway and the PDP of section 11 of the MCP server contract. The launcher (`/`) lists the services that declare themselves by label (Docker Compose) or by annotation (Kubernetes IngressRoute). See "Labels of a service". The launcher groups the services in full-width rows. It shows their health and an offline icon library.
 
-The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only scripts are the theme selector and the scripts of the settings pages (the password generator, the editor of grants and the Copy button of the inbox). There is no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
+The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only scripts are the theme selector and the scripts of the settings pages. These are the password generator, the editor of grants and the Copy button of the inbox. There is no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
 
 The data lives in one database. By default it is one SQLite file. The SQLite library is bundled in the static binary. To run several active instances, use a shared PostgreSQL database instead (see [Several instances](#several-instances-postgresql)). There is no Redis.
 
@@ -68,7 +68,7 @@ The stack has the portal with the inbox, and PostgreSQL. [`deploy/README.md`](de
 - **One identity.** An account has one login and one set of permissions for the launcher, the keys and the inbox.
 - **Passwords.** The database keeps only Argon2id hashes. Each sign-in costs one Argon2 check, also for an unknown login. The failure message is always the same.
 - **Sessions.** A session is an opaque random token. The server keeps only its SHA-256 digest. The session is bound to the client address and the browser.
-- **Gate.** A new user has no permission. The gate reads the forwarded path in every way that a proxy can read it. It lets a request pass only if every reading is allowed.
+- **Gate.** A new user has no permission. The gate checks the forwarded path in every way that a proxy can interpret it. It lets a request pass only if every interpretation is allowed.
 - **Keys.** A key never gets more than its owner. The portal keeps only the digest of the key text.
 - **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A producer proves itself with a bearer token. The permissions of the service `inbox` decide who sends, reads and revokes.
 - **Configuration.** The file is the only source. A secret comes only from `_env` or `_file`. An unknown key stops the program at start.
@@ -397,7 +397,7 @@ A service declares itself with labels (Docker Compose container labels) or annot
 | `portal.actions` | The URL of the action document. See "Actions of the services". |
 | `portal.exclude` | The paths open without a session. See "Paths open without a session". |
 
-A label that is not usable stops the listing of this service. The Services page names the problem.
+A label that is not usable keeps this service out of the launcher. The Services page names the problem.
 
 ### State of a service
 
@@ -1406,13 +1406,13 @@ The GitHub workflow `ci.yml` runs these checks and the build of the app. It also
 
 Back up two things: the database and the key file of the inbox server. With SQLite, copy the file with `sqlite3 .backup`, or stop the instance first. With PostgreSQL, use the backup of the database cluster.
 
-Losing the key file of the inbox server makes every enrolled phone and every enrollment code invalid. Each person must then enroll again. A new key file does the same. Keep the file as a secret.
+If you lose the key file of the inbox server, every enrolled phone and every enrollment code becomes invalid. Each person must then enroll again. A new key file has the same effect. Keep the file secret.
 
 ### Metrics
 
 Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in bold.
 
-| Metric | Meaning |
+| Metric | Use |
 |---|---|
 | **`inbox_oldest_pending_delivery_seconds`** | Age of the oldest alert that still waits for a phone. |
 | **`inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |

@@ -2,7 +2,7 @@
 
 The inbox reads its settings from the block `inbox` of the configuration file of the portal. There is no second file.
 
-The reference of every key is in the root `README.md`, in the section "Configuration reference". It comes from the table of keys in `src/config/keys.rs`. It gives the type, the range, the default and the meaning of each key. This page does not copy it. This page gives only the rules that the table cannot show.
+The reference of every key is in the root `README.md`, in the section "Configuration reference". It comes from the table of keys in `src/config/keys.rs`. It gives the type, the range, the default and what each key does. This page does not copy it. This page gives only the rules that the table cannot show.
 
 Check a file with `portal check-config --config FILE`. The command prints the value that applies to each key and its source. The annotated example is [`deploy/config.example.hcl`](../../deploy/config.example.hcl). The file of the Compose stack is [`deploy/compose/config.hcl`](../../deploy/compose/config.hcl).
 
@@ -15,7 +15,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 
 ## Delivery values have no default
 
-These keys have no default: `heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after` and `offline_warning_after` of `inbox.devices`, and `delivery_ttl`, `alert_retention` and `connection_log_retention` of `inbox.storage`. The program stops at start when one is missing. A wrong default could hide an alert, so the operator chooses each value.
+These keys have no default: `heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after` and `offline_warning_after` of `inbox.devices`, and `delivery_ttl`, `alert_retention` and `connection_log_retention` of `inbox.storage`. The program stops at start when one is absent. A wrong default could hide an alert, so the operator chooses each value.
 
 The examples use these values: `heartbeat_interval = "20s"`, `session_timeout = "60s"`, `resend_after = "15s"`, `max_inflight = 32`, `unreachable_after = "2m"`, `offline_warning_after = "3m"`, `delivery_ttl = "7d"`, `alert_retention = "30d"` and `connection_log_retention = "90d"`.
 

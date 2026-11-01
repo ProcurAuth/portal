@@ -1,4 +1,4 @@
-# Contributing
+# Contribute
 
 This page is for the whole repository: the portal, the inbox, the shared crates and the Android app.
 

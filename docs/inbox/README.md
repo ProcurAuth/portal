@@ -6,7 +6,7 @@ This chapter is for operators and for people who send alerts. The root `README.m
 
 ## Concepts
 
-| Word | Meaning |
+| Word | Use |
 |---|---|
 | Alert | One group and one title. The title has one line of 128 characters at most. An alert has no body and no severity. |
 | Group | A named list of phones that follow it. The configuration file defines the groups. A group can be `critical`. |
@@ -17,7 +17,7 @@ This chapter is for operators and for people who send alerts. The root `README.m
 | Delivery | The record that one alert must reach one phone. The inbox makes one delivery for each phone that is subscribed when it accepts the alert. |
 | Enrollment code | A text that the account makes in the inbox pages. It lets one phone enroll one time. |
 
-The phone decides how it reacts to an alert. The server never knows this setting. The choices are `alarm`, `ring` and `notify` (see "The Android app").
+The phone decides how it reacts to an alert. The server never knows this choice. The choices are `alarm`, `ring` and `notify` (see "The Android app").
 
 ## What the inbox guarantees
 
@@ -66,7 +66,7 @@ A producer sends a request to the listener `inbox.devices.listen`. This listener
 |---|---|
 | `POST /api/v1/alerts` | Body: `{"group": "<id>", "title": "<text>"}`. The answer is `201` with `alert_id`, `duplicate` and `targets`. |
 | `POST /api/v1/notify/{group}` | A webhook for any tool. The title comes from `?title=`, from the header `X-Title`, from the field `title` of a JSON body, or from the body. The inbox cuts a long title. |
-| `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each firing alert makes one alert. |
+| `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each alert with the status `firing` makes one alert. |
 | `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. |
 | `GET /healthz`, `GET /readyz`, `GET /api/version` | Health and version. No token. |
 
@@ -81,9 +81,9 @@ Make a token of the file with `portal inbox token --out FILE`. Make a key on the
 
 The header `Idempotency-Key` is optional. It has 1 to 128 printable ASCII characters. Two requests with the same key make one alert. The second answer is `200` with `"duplicate": true`. A key that two different alerts use gets `409`. Without the header, the inbox derives a key from the content and the minute.
 
-| Status | Meaning |
+| Status | Use |
 |---|---|
-| `401` | The token is missing or not valid. |
+| `401` | The token is absent or not valid. |
 | `403` | The token cannot send to this group. The code is `forbidden_group`. |
 | `409` | The idempotency key belongs to a different alert. |
 | `413` | The title has more than 128 characters, or the request body is too large. |
@@ -102,7 +102,7 @@ Grafana has a fixed list of contact point types. A plugin cannot add one. The in
 - **Alertmanager.** Use a `webhook_configs` receiver with a bearer token. The example is [`alertmanager.yml`](alertmanager.yml).
 - **Grafana.** Make a contact point of the type Webhook. The example is [`grafana/contact-point.yaml`](grafana/contact-point.yaml).
 
-The inbox ignores the notifications `resolved`. A producer of the file can set `webhook_send_resolved = true` to turn them into alerts. A key never sends them. The inbox deduplicates a repeat of the same firing on the fingerprint, the status and `startsAt`.
+The inbox ignores the notifications `resolved`. A producer of the file can set `webhook_send_resolved = true` to turn them into alerts. A key never sends them. The inbox merges a repeat of the same alert. It compares the fingerprint, the status and `startsAt`.
 
 ### Alerts of the portal
 
@@ -180,7 +180,7 @@ A person cannot change the login of a phone. The app shows it read-only. The sou
 
 No physical phone is needed for the tests of the app. `tools/android/emulator.sh` runs an Android 14 emulator in Docker. It needs `/dev/kvm`.
 
-1. Build the app: `tools/build.sh apk`. See `tools/android/build-apk.sh` for the signing variables.
+1. Build the app: `tools/build.sh apk`. The script `tools/android/build-apk.sh` lists the variables for the key of the APK.
 2. Start the emulator: `tools/android/emulator.sh start`. The script installs `dist/inbox-<version>.apk`, grants the permissions and prints the address of the screen. Open <http://localhost:6080> in a browser.
 3. Start the stack (see `deploy/README.md`). Publish the devices listener to the network: `PORTAL_DEVICES_BIND=0.0.0.0`.
 4. Set `inbox.devices.public_address` to `172.17.0.1:8080`. This address is the host as the emulator sees it through the Docker bridge.
@@ -204,7 +204,7 @@ The block names a directory that every instance shares. It must be a volume of p
 - `lease.json`, the name of the active instance. The owner renews it every `lease_ttl / 3`.
 - `claim-<epoch>`, a file that the inbox creates with exclusive access. Two standby instances cannot take the same epoch.
 
-A starting instance waits until the lease is released or has not changed for `lease_ttl`. It takes the next epoch. It restores the newest snapshot that passes `PRAGMA quick_check`. Then it serves. An instance that loses its lease stops the whole process. The orchestrator starts it again as a standby.
+An instance that starts waits until the lease is released or has not changed for `lease_ttl`. It takes the next epoch. It restores the newest snapshot that passes `PRAGMA quick_check`. Then it serves. An instance that loses its lease stops the whole process. The orchestrator starts it again as a standby.
 
 With `sync_alerts = true`, the inbox confirms an alert only after the snapshot that holds it exists. A producer that gets no answer sends the alert again, and the idempotency key makes one alert. If the shared directory fails, the producer gets `503 replication_unavailable`. With `sync_alerts = false`, the inbox confirms after the local commit, and a failed copy is only logged (`inbox_replica_sync_failures_total`).
 
@@ -226,7 +226,7 @@ To move from SQLite to PostgreSQL, stop the SQLite instance. Run `portal inbox i
 
 ### Degraded mode: the database has no primary
 
-A PostgreSQL failover takes seconds to minutes. In this time, the instances keep accepting alerts and keep delivering them. The phones keep their sessions. `/readyz` answers `200 degraded`.
+A PostgreSQL failover takes seconds to minutes. In this time, the instances still accept alerts and still deliver them. The phones keep their sessions. `/readyz` answers `200 degraded`.
 
 - Each call to the database has a limit of 2 seconds. When a call fails, the instance switches to memory. A probe checks each second for a writable primary. The log has `storage_degraded` and `storage_recovered`. The gauges `inbox_storage_degraded` and `inbox_spool_alerts` show the state.
 - The inbox validates an alert as usual and keeps it in a spool. The spool holds 10 000 alerts at most. When it is full, the producer gets `503 spool_full` and sends the alert again. The spool holds one delivery for each phone that is subscribed. The id of the alert comes from the source and the idempotency key. Two instances that accept the same alert make the same id.

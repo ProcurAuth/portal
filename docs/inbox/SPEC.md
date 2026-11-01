@@ -2,7 +2,7 @@
 
 This document states what the inbox does and why. The inbox is a module of the portal. The code is the reference for details. The design of the merge is in [`../design-inbox-merge.md`](../design-inbox-merge.md).
 
-The words MUST, MUST NOT, SHOULD and MAY have the meaning of RFC 2119 and RFC 8174.
+The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8174.
 
 ## 1. Purpose
 
@@ -77,15 +77,15 @@ The words MUST, MUST NOT, SHOULD and MAY have the meaning of RFC 2119 and RFC 81
 
 ### 3.5 Alerts of the portal
 
-3.5.1 The portal MAY send an alert when a service is unhealthy, when it is healthy again, and when refused sign-ins come in a burst. The block `inbox.portal_alerts` turns this on.
+3.5.1 The portal MAY send an alert in three cases. A service is unhealthy. A service is healthy again. Refused sign-ins come in a burst. The block `inbox.portal_alerts` turns this on.
 
-3.5.2 These alerts MUST use the same path as an alert of the API: one transaction, the idempotency key and the copy to the replica.
+3.5.2 These alerts MUST use the path of an alert of the API. This gives one transaction, the idempotency key and the copy to the replica.
 
 ## 4. Delivery guarantee
 
 The transport is at least once. The phone ignores a repeat. The result is that the user sees each alert exactly once.
 
-4.1 The inbox MUST answer `201` for an alert only after the alert and one delivery for each phone that is subscribed at that moment are on disk. This is one transaction.
+4.1 The inbox MUST answer `201` only after two things are on disk. They are the alert and one delivery for each phone that is subscribed at that moment. This is one transaction.
 
 4.2 The phones that an alert targets are the phones that are subscribed when the inbox accepts it. They can be online or offline.
 
@@ -111,7 +111,7 @@ The transport is at least once. The phone ignores a repeat. The result is that t
 
 4.10.1 With the block `inbox.replica`, the inbox copies the whole database to a shared directory. With `sync_alerts = true`, it confirms an alert, an enrollment and a revocation only after the copy holds them.
 
-4.10.2 A lease with a growing epoch names the active instance. An instance that loses its lease MUST stop the whole process.
+4.10.2 A lease with an epoch that increases names the active instance. An instance that loses its lease MUST stop the whole process.
 
 ## 5. Security
 
@@ -137,7 +137,7 @@ The details are in [`SECURITY.md`](SECURITY.md) and [`protocol.md`](protocol.md)
 
 6.1 The inbox is a module of the one Rust binary `portal`. It uses Hyper for HTTP. It has no embedded front.
 
-6.2 The configuration follows the rules of the portal: one HCL file, a closed schema, a stop at start on an error, no coercion, `_env` and `_file` for secrets, and `portal check-config`. The delivery values (`heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention`, `connection_log_retention`) MUST have no default. A wrong default could hide an alert.
+6.2 The configuration follows the rules of the portal. It is one HCL file with a closed schema. An error stops the program at start. The program does not coerce a value. A secret uses `_env` or `_file`. The command `portal check-config` checks the file. The delivery values (`heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention`, `connection_log_retention`) MUST have no default. A wrong default could hide an alert.
 
 6.3 The inbox uses the database of the portal. It has its own chain of migrations. Each chain MUST refuse a schema that is newer than the binary.
 

@@ -94,7 +94,7 @@ kubectl -n edge create secret generic portal-secret \
 
 ### Configuration
 
-Edit `config.hcl` before you render the manifests. Check it with dummy secrets: `tools/dev/check-configs.sh`. Read the values that you must change in the comment at the top of the file. The delivery values of the inbox have no default. The program stops at start if one is missing.
+Edit `config.hcl` before you render the manifests. Check it with dummy secrets: `tools/dev/check-configs.sh`. Read the values that you must change in the comment at the top of the file. The delivery values of the inbox have no default. The program stops at start if one is absent.
 
 A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
