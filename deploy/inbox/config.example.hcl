@@ -1,116 +1,119 @@
-# Inbox configuration.
+# Configuration of the portal with the inbox. Check it with:  portal check-config --config <file>
 #
-# Every attribute is mandatory: Inbox refuses to start if one is missing,
-# misspelled or out of range. Validate with:  inbox check-config --config <file>
-# Durations accept ms, s, m, h and d suffixes.
+# The inbox starts when the file has a block `inbox`. The delivery values have no default: the
+# program stops at start if one is missing, misspelled or out of range. Durations accept the
+# units ms, s, m, h and d. Secrets come from a file (`_file`) or from a variable (`_env`).
+# The keys of the portal that this example does not set have documented defaults: see the
+# configuration reference in README.md.
 
 server {
-  # Shown in the app and the admin front.
-  name = "Inbox"
-  # Devices (/v1/enroll, /v1/session), producer API, webhooks, /healthz, /readyz.
-  listen = "0.0.0.0:8080"
-  # Admin front and admin API. It has NO password: bind it to localhost or a
-  # private network, or put an authenticating reverse proxy in front of it.
-  admin_listen = "127.0.0.1:8081"
-  # Peers whose X-Forwarded-For / X-Real-IP headers are trusted. Empty: none.
+  # The pages of the portal, behind Traefik ForwardAuth. The account pages make the enrollment codes.
+  listen_address  = "0.0.0.0:4181"
+  # Peers whose X-Forwarded-For / X-Real-IP headers the portal trusts. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
-  shutdown_grace  = "10s"
-  # Generated once with `inbox keygen`. Replacing it invalidates every device.
-  server_key_file = "/run/secrets/inbox_server_key"
 }
 
+authentication {
+  superadmin_login_file    = "/run/secrets/superadmin_login"
+  superadmin_password_file = "/run/secrets/superadmin_password"
+}
+
+session {
+  secret_mode = "provided"
+  secret_file = "/run/secrets/session_secret"
+}
+
+# SQLite. Instead of this block, the block `postgres` below lets several active instances share one database.
 storage {
-  path = "/var/lib/inbox/inbox.db"
-  # An alert a phone has not received within this delay is no longer sent to it.
-  delivery_ttl             = "7d"
-  # History (delivered and expired alerts) is purged after this; >= delivery_ttl.
-  alert_retention          = "30d"
-  connection_log_retention = "90d"
-}
-
-devices {
-  # Shared device password, from `inbox credential`.
-  credential_file       = "/run/secrets/inbox_device_credential"
-  heartbeat_interval    = "20s"
-  session_timeout       = "60s"
-  resend_after          = "15s"
-  max_inflight          = 32
-  unreachable_after     = "2m"
-  offline_warning_after = "3m"
-  max_devices           = 1000
-}
-
-admin {
-  # No password: anyone who reaches server.admin_listen can send alerts and
-  # revoke devices. Host headers accepted by the admin listener; any other host
-  # is refused (protection against DNS rebinding from a malicious web page).
-  allowed_hosts = ["localhost:8081", "127.0.0.1:8081"]
-}
-
-security {
-  # Device password attempts per client address and window.
-  max_auth_failures   = 5
-  auth_failure_window = "10m"
-}
-
-limits {
-  max_request_bytes = 65536
+  database = "/var/lib/portal/portal.db"
 }
 
 logging {
-  level  = "info"
-  format = "json"
+  level = "info"
 }
 
-telemetry {
-  enabled         = true
-  otlp_endpoint   = "http://otel-collector:4318"
-  service_name    = "inbox"
-  export_interval = "15s"
+inbox {
+  # Shown in the app.
+  name            = "Inbox"
+  # Made once with `portal inbox keygen --out FILE`. Replacing it invalidates every phone and every enrollment code.
+  server_key_file = "/run/secrets/inbox_server_key"
+
+  devices {
+    # Phones (/v1/enroll, /v1/session), producer API, webhooks, /healthz, /readyz.
+    listen          = "0.0.0.0:8080"
+    # The address that phones use to reach this listener, as they see it from outside. It is the `s` of the
+    # enrollment code: host:port, a domain, or an http(s) URL.
+    public_address  = "inbox.example.org"
+    # Peers whose X-Forwarded-For / X-Real-IP headers the inbox trusts. Empty: none.
+    trusted_proxies = ["127.0.0.1/32"]
+    heartbeat_interval    = "20s"
+    session_timeout       = "60s"
+    resend_after          = "15s"
+    max_inflight          = 32
+    unreachable_after     = "2m"
+    offline_warning_after = "3m"
+    # Defaults: max_devices = 1000, max_auth_failures = 5, auth_failure_window = "10m", max_request_bytes = "64KiB".
+    max_devices = 1000
+  }
+
+  # Optional. The defaults are shown.
+  enrollment {
+    # A code works one time and lives this long after an account made it.
+    code_ttl               = "10m"
+    # The most codes of one account that are not used and not expired.
+    max_active_per_account = 5
+  }
+
+  storage {
+    # An alert that a phone did not receive within this time is not sent to it any more.
+    delivery_ttl             = "7d"
+    # History (delivered and expired alerts) is deleted after this time. It is at least delivery_ttl.
+    alert_retention          = "30d"
+    connection_log_retention = "90d"
+  }
+
+  group "infra" {
+    name        = "Infra prod"
+    description = "Production outages"
+  }
+
+  group "oncall" {
+    name        = "On call"
+    description = "Pages for the on-call engineer"
+  }
+
+  # Optional: alert sources. A token is made with `portal inbox token --out FILE`.
+  producer "grafana" {
+    token_file            = "/run/secrets/inbox_grafana_token"
+    groups                = ["infra"]
+    webhook_send_resolved = false
+  }
+
+  # Optional, with SQLite only: standby replication to a directory that the standby instances share
+  # (a ReadWriteMany volume).
+  # replica {
+  #   dir               = "/replica"
+  #   snapshot_interval = "10s"
+  #   lease_ttl         = "30s"
+  #   sync_timeout      = "5s"
+  #   sync_alerts       = true
+  # }
+
+  # Optional, with PostgreSQL only: the instances copy to each other the alerts that they accept while
+  # PostgreSQL has no writable primary. `peers` names the instances, for example a headless Service.
+  # cluster {
+  #   listen = "0.0.0.0:8082"
+  #   peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
+  # }
 }
 
-# Optional, instead of storage.path: PostgreSQL, shared by any number of active instances (plain TCP, no TLS).
+# Optional, instead of the block `storage`: PostgreSQL, shared by any number of active instances (plain TCP, no TLS).
 # postgres {
 #   host            = "postgres.internal"
 #   port            = 5432
-#   database        = "inbox"
-#   user            = "inbox"
-#   password_file   = "/run/secrets/inbox_db_password"
+#   database        = "portal"
+#   user            = "portal"
+#   password_file   = "/run/secrets/db_password"
 #   pool_size       = 8
 #   connect_timeout = "5s"
 # }
-
-# Optional (with postgres): how the instances copy to each other the alerts they accept while PostgreSQL has no writable
-# primary (see "Degraded mode" in the README). `peers` are host:port names that list the instances, e.g. a headless Service.
-# cluster {
-#   listen = "0.0.0.0:8082"
-#   peers  = ["inbox-peers.apps.svc.cluster.local:8082"]
-# }
-
-# Optional (SQLite only): standby replication to a directory shared with the instances that may take over
-# (a ReadWriteMany volume). All attributes are mandatory when the block is present.
-# replica {
-#   dir               = "/replica"
-#   snapshot_interval = "10s"
-#   lease_ttl         = "30s"
-#   sync_timeout      = "5s"
-#   sync_alerts       = true
-# }
-
-group "infra" {
-  name        = "Infra prod"
-  description = "Production outages"
-}
-
-group "oncall" {
-  name        = "Astreinte"
-  description = "Pages for the on-call engineer"
-}
-
-# Optional: alert sources other than the admin front.
-producer "grafana" {
-  # From `inbox token`.
-  token_file            = "/run/secrets/inbox_grafana_token"
-  groups                = ["infra"]
-  webhook_send_resolved = false
-}
