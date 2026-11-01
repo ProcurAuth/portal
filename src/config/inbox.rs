@@ -20,6 +20,7 @@ pub struct InboxConfig {
     /// The name that the phones show.
     pub name: String,
     pub devices: DevicesConfig,
+    pub enrollment: EnrollmentConfig,
     pub storage: InboxStorageConfig,
     /// `None` without the block `inbox.replica`.
     pub replica: Option<ReplicaConfig>,
@@ -35,6 +36,8 @@ pub struct InboxConfig {
 #[derive(Clone, Debug)]
 pub struct DevicesConfig {
     pub listen: SocketAddr,
+    /// The address that phones use to reach the listener. It is the `s` of an enrollment code.
+    pub public_address: String,
     pub trusted_proxies: Vec<Cidr>,
     pub max_devices: u32,
     pub heartbeat_interval: Duration,
@@ -46,6 +49,15 @@ pub struct DevicesConfig {
     pub max_auth_failures: u32,
     pub auth_failure_window: Duration,
     pub max_request_bytes: usize,
+}
+
+/// The block `inbox.enrollment`.
+#[derive(Clone, Debug)]
+pub struct EnrollmentConfig {
+    /// How long an enrollment code works.
+    pub code_ttl: Duration,
+    /// The most codes of one account that are not used and not expired.
+    pub max_active_per_account: u32,
 }
 
 /// The block `inbox.storage`.
@@ -93,8 +105,6 @@ pub struct ProducerConfig {
 pub struct InboxSecrets {
     /// The text of the key of the server.
     pub server_key: Secret,
-    /// The text of the OPAQUE record of the phones.
-    pub credential: Secret,
     /// The token of each block `producer`, by name.
     pub producers: Vec<(String, Secret)>,
 }
@@ -120,6 +130,7 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
     }
     let devices = DevicesConfig {
         listen: socket(r, "inbox.devices", "listen")?,
+        public_address: r.text("inbox.devices", "public_address")?,
         trusted_proxies: r
             .list("inbox.devices", "trusted_proxies")?
             .iter()
@@ -136,6 +147,10 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         max_auth_failures: small(r, "inbox.devices", "max_auth_failures")?,
         auth_failure_window: r.duration("inbox.devices", "auth_failure_window")?,
         max_request_bytes: r.size("inbox.devices", "max_request_bytes")?,
+    };
+    let enrollment = EnrollmentConfig {
+        code_ttl: r.duration("inbox.enrollment", "code_ttl")?,
+        max_active_per_account: small(r, "inbox.enrollment", "max_active_per_account")?,
     };
     let storage = InboxStorageConfig {
         delivery_ttl: r.duration("inbox.storage", "delivery_ttl")?,
@@ -224,14 +239,12 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         server_key: r
             .take_secret("inbox", "server_key")
             .ok_or("internal error: the secret inbox.server_key is missing")?,
-        credential: r
-            .take_secret("inbox.devices", "credential")
-            .ok_or("internal error: the secret inbox.devices.credential is missing")?,
         producers: tokens,
     };
     let config = InboxConfig {
         name: r.text("inbox", "name")?,
         devices,
+        enrollment,
         storage,
         replica,
         cluster,

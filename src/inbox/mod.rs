@@ -4,7 +4,8 @@
 //! stops with the portal. It does not use the sessions or the directory of the portal: it can
 //! deliver an alert when the rest of the portal is not ready.
 //!
-//! - `device`: enrollment and sessions of the phones (WebSocket, protocol 3).
+//! - `device`: enrollment and sessions of the phones (WebSocket, protocol 4).
+//! - `enrollment`: the enrollment codes that the accounts make, and the devices of an account.
 //! - `api`: the API of the producers and the webhooks.
 //! - `admin`: the admin calls. The portal serves them for the session of the superadmin.
 //! - `db`, `pg`, `store`: SQLite and PostgreSQL. The inbox uses the database of the portal.
@@ -18,6 +19,7 @@ mod api;
 pub mod cli;
 mod db;
 mod device;
+mod enrollment;
 mod http;
 mod hub;
 pub mod log;
@@ -264,6 +266,24 @@ impl Slot {
     /// The running inbox. `None` without the block `inbox`, or before the start.
     pub fn app(&self) -> Option<Arc<App>> {
         self.app.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Makes an enrollment code for `login`. `None` without the block `inbox` or before the start.
+    pub async fn create_enrollment_code(
+        &self,
+        login: &str,
+    ) -> Option<Result<enrollment::NewCode, ApiError>> {
+        let app = self.app()?;
+        Some(enrollment::create_code(&app, login).await)
+    }
+
+    /// Deletes the unused enrollment codes of `login` and revokes its devices. Without the block
+    /// `inbox`, there is nothing to do and the result is `Ok`.
+    pub async fn revoke_devices_of(&self, login: &str) -> Result<usize, String> {
+        match self.app() {
+            Some(app) => enrollment::revoke_devices_of(&app, login).await,
+            None => Ok(0),
+        }
     }
 
     /// The text of the metrics of the inbox. Empty without the block `inbox`.

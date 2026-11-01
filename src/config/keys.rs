@@ -236,6 +236,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "This block is inside the block `inbox`. It sets the listener for phones and producers, and the delivery values. This listener has no session: phones and producers prove themselves.",
     ),
     (
+        "inbox.enrollment",
+        "This block is optional and is inside the block `inbox`. It sets the enrollment codes: an account of the portal makes a code, and a phone uses it one time to enroll. Every key has a default.",
+    ),
+    (
         "inbox.storage",
         "This block is inside the block `inbox`. It sets the lifetime of alerts and of the connection log. The inbox keeps its tables in the database of the portal: the SQLite file of the block `storage`, or the database of the block `postgres`.",
     ),
@@ -942,7 +946,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone invalid. Back it up.",
+        doc: "The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone and each enrollment code invalid. Back it up.",
     },
     Key {
         block: "inbox.devices",
@@ -957,11 +961,14 @@ pub static KEYS: &[Key] = &[
     },
     Key {
         block: "inbox.devices",
-        name: "credential",
-        kind: Kind::Secret { max_bytes: 4096 },
+        name: "public_address",
+        kind: Kind::Text {
+            expected: "the address that phones use to reach the listener `inbox.devices.listen`: `host:port`, a domain, or an http(s) URL; 1 to 512 bytes, no white space, no control character",
+            check: check_public_address,
+        },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The OPAQUE record of the shared password of the phones. Make it with `portal inbox credential`.",
+        doc: "The address that phones use to reach the listener `inbox.devices.listen`, as the phones see it from outside: `host:port`, a domain, or an http(s) URL. It is the `s` of the enrollment code. The inbox does not open a connection to it.",
     },
     Key {
         block: "inbox.devices",
@@ -973,7 +980,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the password attempts.",
+        doc: "The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the enrollment attempts.",
     },
     Key {
         block: "inbox.devices",
@@ -1037,7 +1044,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 1000 },
         presence: Presence::Default("5"),
         when: When::Always,
-        doc: "The number of password attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started attempt counts until it succeeds.",
+        doc: "The number of enrollment attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started enrollment counts until it succeeds.",
     },
     Key {
         block: "inbox.devices",
@@ -1054,6 +1061,22 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("64KiB"),
         when: When::Always,
         doc: "The largest request body that the listener reads.",
+    },
+    Key {
+        block: "inbox.enrollment",
+        name: "code_ttl",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(DAY) },
+        presence: Presence::Default("10m"),
+        when: When::Always,
+        doc: "An enrollment code works for this time after an account made it. A code works one time.",
+    },
+    Key {
+        block: "inbox.enrollment",
+        name: "max_active_per_account",
+        kind: Kind::Int { min: 1, max: 100 },
+        presence: Presence::Default("5"),
+        when: When::Always,
+        doc: "The largest number of enrollment codes of one account that are not used and not expired. The inbox refuses a new code above this number.",
     },
     Key {
         block: "inbox.storage",
@@ -1325,6 +1348,7 @@ pub const NESTED_BLOCKS: &[(&str, &str)] =
 /// the child are in the block `parent.child` of the table.
 pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "devices"),
+    ("inbox", "enrollment"),
     ("inbox", "storage"),
     ("inbox", "replica"),
     ("inbox", "cluster"),
@@ -1354,7 +1378,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "identity" => Some("identity"),
         "pdp" => Some("pdp"),
         "keys" => Some("keys"),
-        "inbox" | "inbox.devices" | "inbox.storage" => Some("inbox"),
+        "inbox" | "inbox.devices" | "inbox.enrollment" | "inbox.storage" => Some("inbox"),
         "inbox.replica" => Some("inbox.replica"),
         "inbox.cluster" => Some("inbox.cluster"),
         _ => None,
@@ -1439,6 +1463,73 @@ fn check_host(value: &str) -> Result<(), String> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
     {
         return Err("not a host name or an address".into());
+    }
+    Ok(())
+}
+
+/// The address of the listener of the phones, as the phones write it: `host:port`, a domain or an
+/// http(s) URL with an optional path prefix. The rules are the rules of the app.
+fn check_public_address(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 512 {
+        return Err("not 1 to 512 bytes".into());
+    }
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("it has white space or a control character".into());
+    }
+    let rest = match value.split_once("://") {
+        Some((scheme, rest)) => {
+            if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+                return Err("the scheme is not http or https".into());
+            }
+            rest
+        }
+        None => value,
+    };
+    if rest.contains(['?', '#']) {
+        return Err("it has a query or a fragment".into());
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err("it has a user name".into());
+    }
+    let ipv6 = authority.starts_with('[');
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        let (host, after) = inner
+            .split_once(']')
+            .ok_or_else(|| "the IPv6 address has no closing bracket".to_string())?;
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err("not an IPv6 address".into());
+        }
+        if after.is_empty() {
+            (host, None)
+        } else {
+            let port = after
+                .strip_prefix(':')
+                .ok_or_else(|| "there is text after the IPv6 address".to_string())?;
+            (host, Some(port))
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || (!ipv6
+            && !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
+    {
+        return Err("the host is empty or has a bad character".into());
+    }
+    if let Some(port) = port {
+        if port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || port.parse::<u16>().ok().is_none_or(|n| n == 0)
+        {
+            return Err("the port is not a number from 1 to 65535".into());
+        }
     }
     Ok(())
 }

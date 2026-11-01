@@ -205,8 +205,8 @@ pub fn spawn_background(app: Arc<App>) {
             let alert_cutoff = now - a.config.storage.alert_retention.as_millis() as i64;
             let conn_cutoff = now - a.config.storage.connection_log_retention.as_millis() as i64;
             match a.db.purge(alert_cutoff, conn_cutoff).await {
-                Ok((alerts, connections)) if alerts + connections > 0 => {
-                    log::info!(event = "retention_purged", alerts, connections)
+                Ok((alerts, connections, codes)) if alerts + connections + codes > 0 => {
+                    log::info!(event = "retention_purged", alerts, connections, codes)
                 }
                 Ok(_) => {}
                 Err(e) => log::warn!(event = "retention_failed", error = %e),

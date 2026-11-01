@@ -230,7 +230,7 @@ fn real_main() -> Result<(), String> {
             signing_secret.zeroize();
             // The key must be a valid Ed25519 key. The check reads it as `run` does.
             let signer = identity_signer(&config, &mut secrets)?;
-            // The secrets of the inbox must decode: the key, the record and the tokens.
+            // The secrets of the inbox must decode: the key and the tokens.
             inbox::check_secrets(&config, &mut secrets)?;
             print!("{}", config.render_effective());
             if let Some(signer) = signer {
@@ -464,7 +464,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox credential --server-key FILE --out FILE [--password-stdin]\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
         release_version()
     );
 }

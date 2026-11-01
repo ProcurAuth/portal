@@ -421,10 +421,9 @@ fn replaced(app: &App, body: &[u8]) -> Resp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inbox_core::rng::Rng;
 
     fn auth() -> PeerAuth {
-        PeerAuth::new(&ServerKey::generate(&mut Rng::os()).unwrap())
+        PeerAuth::new(&ServerKey::generate().unwrap())
     }
 
     #[test]

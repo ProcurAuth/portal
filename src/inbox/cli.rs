@@ -1,42 +1,32 @@
 //! The commands `portal inbox ...`. No flag has a default: a command that needs a file requires
 //! its path.
 //!
-//! - `keygen --out FILE`: makes the key of the server.
-//! - `credential --server-key FILE --out FILE [--password-stdin]`: makes the record of the shared
-//!   password of the phones.
+//! - `keygen --out FILE`: makes the key of the server. The file holds the Noise key pair only.
 //! - `token --out FILE`: makes the token of a producer.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
 //! - `healthcheck --config FILE`: asks `/readyz` of the listener of the phones.
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use inbox_core::rng::Rng;
 use inbox_core::server_key::ServerKey;
-use inbox_core::suite::Role;
 use zeroize::Zeroizing;
 
 use super::pg::{PgSettings, PgStore};
 use crate::config::{Config, StorageBackend};
 
-/// The shortest shared password of the phones.
-const MIN_PASSWORD_LEN: usize = 8;
-
-/// Reads the flags of a command. A flag with a value, and a flag without a value.
+/// Reads the flags of a command. Each flag has a value.
 struct Flags {
     values: Vec<(String, String)>,
-    switches: Vec<String>,
 }
 
 impl Flags {
-    fn parse(args: &[String], with_value: &[&str], switches: &[&str]) -> Result<Flags, String> {
-        let mut f = Flags {
-            values: Vec::new(),
-            switches: Vec::new(),
-        };
+    fn parse(args: &[String], with_value: &[&str]) -> Result<Flags, String> {
+        let mut f = Flags { values: Vec::new() };
         let mut it = args.iter();
         while let Some(a) = it.next() {
             if with_value.contains(&a.as_str()) {
@@ -45,8 +35,6 @@ impl Flags {
                     return Err(format!("{a} given twice"));
                 }
                 f.values.push((a.clone(), v.clone()));
-            } else if switches.contains(&a.as_str()) {
-                f.switches.push(a.clone());
             } else {
                 return Err(format!("unknown argument {a:?}"));
             }
@@ -61,16 +49,11 @@ impl Flags {
             .map(|(_, v)| v.clone())
             .ok_or_else(|| format!("{name} is required"))
     }
-
-    fn has(&self, name: &str) -> bool {
-        self.switches.iter().any(|s| s == name)
-    }
 }
 
 /// The text of the usage of the commands.
 pub const USAGE: &str = "\
   portal inbox keygen --out FILE
-  portal inbox credential --server-key FILE --out FILE [--password-stdin]
   portal inbox token --out FILE
   portal inbox import-sqlite --config FILE --from SQLITE_FILE
   portal inbox healthcheck --config FILE";
@@ -82,9 +65,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     match cmd.as_str() {
         "keygen" => {
-            let f = Flags::parse(rest, &["--out"], &[])?;
+            let f = Flags::parse(rest, &["--out"])?;
             let out = PathBuf::from(f.required("--out")?);
-            let key = ServerKey::generate(&mut Rng::os()).map_err(|e| e.to_string())?;
+            let key = ServerKey::generate().map_err(|e| e.to_string())?;
             write_new_secret(&out, &key.encode())?;
             eprintln!(
                 "server key written to {} (back it up: a new key makes each enrolled phone invalid)",
@@ -92,29 +75,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
-        "credential" => {
-            let f = Flags::parse(rest, &["--server-key", "--out"], &["--password-stdin"])?;
-            let key_path = PathBuf::from(f.required("--server-key")?);
-            let out = PathBuf::from(f.required("--out")?);
-            let key_text = std::fs::read_to_string(&key_path)
-                .map(Zeroizing::new)
-                .map_err(|e| format!("--server-key: cannot read {}: {e}", key_path.display()))?;
-            let key =
-                ServerKey::decode(key_text.trim()).map_err(|e| format!("--server-key: {e}"))?;
-            let password = read_password(f.has("--password-stdin"))?;
-            let record = inbox_core::login::register(
-                &key.opaque,
-                Role::Device,
-                password.as_bytes(),
-                &mut Rng::os(),
-            )
-            .map_err(|e| e.to_string())?;
-            write_new_secret(&out, &inbox_core::b64::encode(&record))?;
-            eprintln!("device credential written to {}", out.display());
-            Ok(())
-        }
         "token" => {
-            let f = Flags::parse(rest, &["--out"], &[])?;
+            let f = Flags::parse(rest, &["--out"])?;
             let out = PathBuf::from(f.required("--out")?);
             let token = Zeroizing::new(super::util::hex(&Rng::os().bytes::<32>()));
             write_new_secret(&out, &token)?;
@@ -122,13 +84,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "import-sqlite" => {
-            let f = Flags::parse(rest, &["--config", "--from"], &[])?;
+            let f = Flags::parse(rest, &["--config", "--from"])?;
             let config_path = PathBuf::from(f.required("--config")?);
             let from = PathBuf::from(f.required("--from")?);
             import_sqlite(&config_path, &from)
         }
         "healthcheck" => {
-            let f = Flags::parse(rest, &["--config"], &[])?;
+            let f = Flags::parse(rest, &["--config"])?;
             let (config, _secrets) = Config::load(&PathBuf::from(f.required("--config")?))?;
             let inbox = config
                 .inbox
@@ -176,12 +138,13 @@ fn import_sqlite(config_path: &std::path::Path, from: &std::path::Path) -> Resul
         result
     })?;
     println!(
-        "imported {} devices, {} subscriptions, {} alerts, {} deliveries, {} connections from {}",
+        "imported {} devices, {} subscriptions, {} alerts, {} deliveries, {} connections, {} enrollment codes from {}",
         imported.devices,
         imported.subscriptions,
         imported.alerts,
         imported.deliveries,
         imported.connections,
+        imported.enrollment_codes,
         from.display()
     );
     Ok(())
@@ -200,29 +163,6 @@ fn write_new_secret(path: &std::path::Path, contents: &str) -> Result<(), String
         .and_then(|_| f.write_all(b"\n"))
         .and_then(|_| f.sync_all())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
-/// Reads the shared password of the phones. It comes from `--password-stdin` or from a standard
-/// input that is not a terminal. The command does not ask for the password at a terminal.
-fn read_password(from_stdin: bool) -> Result<Zeroizing<String>, String> {
-    if !from_stdin && std::io::stdin().is_terminal() {
-        return Err(
-            "the standard input is a terminal: give the password with --password-stdin, for example `printf '%s\\n' \"$PASSWORD\" | portal inbox credential --password-stdin ...`"
-                .into(),
-        );
-    }
-    let mut line = Zeroizing::new(String::new());
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| format!("cannot read password: {e}"))?;
-    let password = Zeroizing::new(line.trim_end_matches(['\r', '\n']).to_string());
-    if password.chars().count() < MIN_PASSWORD_LEN {
-        return Err(format!(
-            "device password must be at least {MIN_PASSWORD_LEN} characters"
-        ));
-    }
-    Ok(password)
 }
 
 /// `GET /readyz` on the listener of the phones, for the health checks of a container (the image

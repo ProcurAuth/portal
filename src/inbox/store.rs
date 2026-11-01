@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::db::{
-    self, AckOutcome, AlertDetail, AlertSummary, ConnectionView, Db, DbError, DeviceKey,
-    DeviceView, InsertOutcome, NewAlert, PendingDelivery,
+    self, AckOutcome, AlertDetail, AlertSummary, CodeInsert, ConnectionView, Db, DbError,
+    DeviceKey, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem,
 };
 use super::hub::LiveInfo;
 use super::pg::{PgStore, RecentAlert};
@@ -69,34 +69,89 @@ impl Store {
 
     // ------------------------------------------------------------ devices
 
-    /// Stores a new device unless `max_devices` active ones exist already (`None`).
-    pub async fn enroll_device(
+    /// Stores the digest of a new enrollment code of `login`, unless the account has `max_active`
+    /// codes that are not used and not expired.
+    pub async fn create_code(
         &self,
-        max_devices: u32,
-        name: String,
-        user_name: String,
-        public_key: Vec<u8>,
-        ip: String,
-    ) -> Result<Option<String>, DbError> {
+        digest: [u8; 32],
+        login: String,
+        ttl_ms: i64,
+        max_active: u32,
+    ) -> Result<CodeInsert, DbError> {
         match self {
             Store::Sqlite(db) => {
                 db.call(move |c| {
-                    if db::count_active_devices(c)? >= max_devices {
-                        return Ok(None);
-                    }
-                    Ok(Some(db::insert_device(
+                    Ok(db::insert_code(
                         c,
-                        &name,
-                        &user_name,
-                        &public_key,
-                        &ip,
-                    )?))
+                        &digest,
+                        &login,
+                        super::util::now_ms(),
+                        ttl_ms,
+                        max_active,
+                    )?)
                 })
                 .await
             }
             Store::Pg(pg) => {
-                pg.guard(pg.enroll_device(max_devices, &name, &user_name, &public_key, &ip))
+                pg.guard(pg.create_code(&digest, &login, ttl_ms, max_active))
                     .await
+            }
+        }
+    }
+
+    /// Removes a code that is not used.
+    pub async fn delete_code(&self, digest: [u8; 32]) -> Result<bool, DbError> {
+        match self {
+            Store::Sqlite(db) => db.call(move |c| Ok(db::delete_code(c, &digest)?)).await,
+            Store::Pg(pg) => pg.guard(pg.delete_code(&digest)).await,
+        }
+    }
+
+    /// Uses a code and stores the device of its account, in one transaction.
+    pub async fn redeem_code(
+        &self,
+        digest: [u8; 32],
+        max_devices: u32,
+        name: String,
+        public_key: Vec<u8>,
+        ip: String,
+    ) -> Result<Redeem, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                db.call(move |c| {
+                    Ok(db::redeem_code(
+                        c,
+                        &digest,
+                        super::util::now_ms(),
+                        max_devices,
+                        &name,
+                        &public_key,
+                        &ip,
+                    )?)
+                })
+                .await
+            }
+            Store::Pg(pg) => {
+                pg.guard(pg.redeem_code(&digest, max_devices, &name, &public_key, &ip))
+                    .await
+            }
+        }
+    }
+
+    /// Deletes the unused codes of `login` and revokes its devices. The result is the ids that
+    /// this call revoked.
+    pub async fn revoke_account(&self, login: &str) -> Result<Vec<String>, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                let login = login.to_string();
+                db.call(move |c| Ok(db::revoke_account(c, &login)?)).await
+            }
+            Store::Pg(pg) => {
+                let ids = pg.guard(pg.revoke_account(login)).await?;
+                for id in &ids {
+                    pg.cache_revoked(id);
+                }
+                Ok(ids)
             }
         }
     }
@@ -116,17 +171,6 @@ impl Store {
                 Err(e) if e.is_unavailable() => pg.cached_device(id).map(Some).ok_or(e),
                 Err(e) => Err(e),
             },
-        }
-    }
-
-    pub async fn set_user_name(&self, id: &str, user_name: &str) -> Result<(), DbError> {
-        match self {
-            Store::Sqlite(db) => {
-                let (id, name) = (id.to_string(), user_name.to_string());
-                db.call(move |c| Ok(db::set_user_name(c, &id, &name)?))
-                    .await
-            }
-            Store::Pg(pg) => pg.guard(pg.set_user_name(id, user_name)).await,
         }
     }
 
@@ -205,7 +249,7 @@ impl Store {
 
     // ------------------------------------------------------------ subscriptions
 
-    /// What a session needs to say welcome: subscribed groups and the pseudonym.
+    /// What a session needs to say welcome: the subscribed groups and the login of the account.
     pub async fn profile(&self, id: &str) -> Result<(Vec<String>, String), DbError> {
         match self {
             Store::Sqlite(db) => {
@@ -470,7 +514,7 @@ impl Store {
         &self,
         alert_cutoff: i64,
         connection_cutoff: i64,
-    ) -> Result<(usize, usize), DbError> {
+    ) -> Result<(usize, usize, usize), DbError> {
         match self {
             Store::Sqlite(db) => {
                 db.call(move |c| Ok(db::purge(c, alert_cutoff, connection_cutoff)?))

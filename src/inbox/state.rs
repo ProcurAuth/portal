@@ -4,10 +4,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::time::Duration;
 
-use inbox_core::opaque_ke::ServerRegistration;
 use inbox_core::proto::GroupInfo;
 use inbox_core::server_key::ServerKey;
-use inbox_core::suite::Suite;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -31,7 +29,6 @@ pub struct Producer {
 /// from a file.
 pub struct Secrets {
     pub server_key: ServerKey,
-    pub device_record: ServerRegistration<Suite>,
     pub producers: Vec<Producer>,
 }
 
@@ -40,16 +37,7 @@ impl Secrets {
     pub fn load(secrets: &InboxSecrets, config: &InboxConfig) -> Result<Secrets, String> {
         let key_text = text(secrets.server_key.as_bytes(), "inbox.server_key")?;
         let server_key = ServerKey::decode(&key_text).map_err(|e| {
-            format!("inbox.server_key: {e} (make a key with `portal inbox keygen`)")
-        })?;
-        let record_text = text(secrets.credential.as_bytes(), "inbox.devices.credential")?;
-        let bytes = Zeroizing::new(
-            inbox_core::b64::decode(&record_text)
-                .ok_or("inbox.devices.credential: the value is not base64")?,
-        );
-        let device_record = inbox_core::login::parse_record(&bytes).map_err(|_| {
-            "inbox.devices.credential: the value is not a credential record (make one with `portal inbox credential`)"
-                .to_string()
+            format!("inbox.server_key: {e} (make a key with `portal inbox keygen`; a key file of protocol 3 is not read)")
         })?;
         let mut producers = Vec::new();
         let mut hashes = std::collections::HashSet::new();
@@ -78,7 +66,6 @@ impl Secrets {
         }
         Ok(Secrets {
             server_key,
-            device_record,
             producers,
         })
     }
@@ -187,22 +174,11 @@ impl Drop for SocketGuard {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use inbox_core::rng::Rng;
-    use inbox_core::suite::Role;
 
     /// A configuration with two producers. `tokens` are their tokens.
-    fn load(tokens: [&str; 2], key: Option<&str>, record: Option<&str>) -> Result<Secrets, String> {
-        let server_key = ServerKey::generate(&mut Rng::os()).unwrap();
-        let credential = inbox_core::login::register(
-            &server_key.opaque,
-            Role::Device,
-            b"a shared password",
-            &mut Rng::os(),
-        )
-        .unwrap();
+    fn load(tokens: [&str; 2], key: Option<&str>) -> Result<Secrets, String> {
+        let server_key = ServerKey::generate().unwrap();
         let key_text = key.map_or_else(|| server_key.encode().to_string(), str::to_string);
-        let record_text =
-            record.map_or_else(|| inbox_core::b64::encode(&credential), str::to_string);
         let tokens = tokens.map(str::to_string);
         let raw = r#"
             server { listen_address = "0.0.0.0:4181" trusted_proxies = [] }
@@ -210,7 +186,7 @@ mod tests {
             inbox {
               server_key_env = "K"
               devices {
-                listen = "0.0.0.0:8080" credential_env = "C" trusted_proxies = []
+                listen = "0.0.0.0:8080" public_address = "inbox.example.org:8080" trusted_proxies = []
                 heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
                 max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
               }
@@ -223,7 +199,6 @@ mod tests {
             "L" => Some("root".into()),
             "P" => Some("a password for the tests".into()),
             "K" => Some(key_text.clone()),
-            "C" => Some(record_text.clone()),
             "A" => Some(tokens[0].clone()),
             "B" => Some(tokens[1].clone()),
             _ => None,
@@ -239,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_secrets_decode_and_the_producers_keep_only_the_hash_of_their_token() {
-        let secrets = load([TOKEN_A, TOKEN_B], None, None).unwrap();
+        let secrets = load([TOKEN_A, TOKEN_B], None).unwrap();
         assert_eq!(secrets.producers.len(), 2);
         let a = secrets.producers.iter().find(|p| p.name == "a").unwrap();
         let b = secrets.producers.iter().find(|p| p.name == "b").unwrap();
@@ -252,19 +227,13 @@ mod tests {
     #[test]
     fn a_bad_secret_stops_the_start_and_the_error_names_the_key() {
         let error = |r: Result<Secrets, String>| r.err().expect("must be refused");
-        assert!(error(load([TOKEN_A, TOKEN_A], None, None)).contains("inbox.producer.b.token"));
-        assert!(error(load(["short", TOKEN_B], None, None)).contains("inbox.producer.a.token"));
+        assert!(error(load([TOKEN_A, TOKEN_A], None)).contains("inbox.producer.b.token"));
+        assert!(error(load(["short", TOKEN_B], None)).contains("inbox.producer.a.token"));
         assert!(error(load(
             ["a token with spaces in it, long enough", TOKEN_B],
-            None,
             None
         ))
         .contains("printable"));
-        assert!(
-            error(load([TOKEN_A, TOKEN_B], Some("not a key"), None)).contains("inbox.server_key")
-        );
-        assert!(error(load([TOKEN_A, TOKEN_B], None, Some("%%%"))).contains("not base64"));
-        assert!(error(load([TOKEN_A, TOKEN_B], None, Some("AAAA")))
-            .contains("inbox.devices.credential"));
+        assert!(error(load([TOKEN_A, TOKEN_B], Some("not a key"))).contains("inbox.server_key"));
     }
 }

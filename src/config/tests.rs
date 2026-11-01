@@ -1814,7 +1814,6 @@ fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() 
 
 const INBOX_VARS: &[(&str, &str)] = &[
     ("INBOX_KEY", "the text of a server key"),
-    ("INBOX_CRED", "the text of a credential record"),
     (
         "INBOX_TOKEN",
         "a token of the producer grafana of 32 bytes or more",
@@ -1845,7 +1844,7 @@ const INBOX: &str = r#"inbox {
   server_key_env = "INBOX_KEY"
   devices {
     listen = "0.0.0.0:8080"
-    credential_env = "INBOX_CRED"
+    public_address = "inbox.example.org:8080"
     trusted_proxies = []
     heartbeat_interval = "20s"
     session_timeout = "60s"
@@ -1900,17 +1899,27 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     assert!(!inbox.producers["grafana"].webhook_send_resolved);
     let secrets = secrets.inbox.unwrap();
     assert_eq!(secrets.server_key.as_bytes(), b"the text of a server key");
-    assert_eq!(
-        secrets.credential.as_bytes(),
-        b"the text of a credential record"
-    );
     assert_eq!(secrets.producers.len(), 1);
     // The effective configuration shows the source and hides the secrets.
     assert_eq!(line(&config, "inbox.name").source, "default");
     assert_eq!(line(&config, "inbox.devices.listen").source, "file");
     assert_eq!(line(&config, "inbox.server_key").value, "<hidden>");
     assert_eq!(line(&config, "inbox.server_key").source, "env:INBOX_KEY");
-    assert_eq!(line(&config, "inbox.devices.credential").value, "<hidden>");
+    assert_eq!(
+        line(&config, "inbox.devices.public_address").value,
+        "\"inbox.example.org:8080\""
+    );
+    assert_eq!(inbox.devices.public_address, "inbox.example.org:8080");
+    assert_eq!(inbox.enrollment.code_ttl, Duration::from_secs(600));
+    assert_eq!(inbox.enrollment.max_active_per_account, 5);
+    assert_eq!(line(&config, "inbox.enrollment.code_ttl").source, "default");
+    assert!(
+        config
+            .effective
+            .iter()
+            .all(|l| l.key != "inbox.devices.credential"),
+        "the shared password does not exist any more"
+    );
     assert_eq!(
         line(&config, "inbox.producer.grafana.token").value,
         "<hidden>"
@@ -1999,6 +2008,71 @@ fn the_inbox_block_needs_its_inner_blocks_and_one_group() {
 }
 
 #[test]
+fn the_public_address_is_required_and_follows_the_rules_of_the_app() {
+    let without: String = INBOX
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("public_address "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let message = inbox_err(&with_inbox(&without));
+    assert!(
+        message.contains("missing required configuration key")
+            && message.contains("inbox.devices.public_address"),
+        "{message}"
+    );
+    for good in [
+        "inbox.example.org",
+        "inbox.example.org:8080",
+        "10.0.0.5:8080",
+        "[::1]:8080",
+        "http://inbox.example.org",
+        "https://inbox.example.org:8443/prefix",
+    ] {
+        let raw = INBOX.replace("inbox.example.org:8080", good);
+        let (config, _) = inbox_ok(&with_inbox(&raw));
+        assert_eq!(config.inbox.unwrap().devices.public_address, good);
+    }
+    let too_long = format!("{}.example", "a".repeat(512));
+    for bad in [
+        "",
+        "inbox example",
+        "inbox.example.org:0",
+        "inbox.example.org:65536",
+        "inbox.example.org:",
+        ":8080",
+        "ftp://inbox.example.org",
+        "https://user@inbox.example.org",
+        "https://inbox.example.org/?x=1",
+        "https://inbox.example.org/#top",
+        "inbox.example.org:80:90",
+        "[::1",
+        "[not-an-address]:80",
+        "inbox.exa\u{7}mple.org",
+        too_long.as_str(),
+    ] {
+        let raw = INBOX.replace("inbox.example.org:8080", bad);
+        let message = inbox_err(&with_inbox(&raw));
+        assert!(
+            message.contains("inbox.devices.public_address"),
+            "{bad:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn the_enrollment_block_changes_the_defaults() {
+    let raw = INBOX.replace(
+        "  storage {",
+        "  enrollment { code_ttl = \"1h\" max_active_per_account = 2 }\n  storage {",
+    );
+    let (config, _) = inbox_ok(&with_inbox(&raw));
+    let inbox = config.inbox.as_ref().unwrap();
+    assert_eq!(inbox.enrollment.code_ttl, Duration::from_secs(3600));
+    assert_eq!(inbox.enrollment.max_active_per_account, 2);
+    assert_eq!(line(&config, "inbox.enrollment.code_ttl").source, "file");
+}
+
+#[test]
 fn the_inbox_schema_is_closed_and_strict() {
     for (from, to, expected) in [
         (
@@ -2045,9 +2119,34 @@ fn the_inbox_schema_is_closed_and_strict() {
             "exactly one",
         ),
         (
-            "credential_env = \"INBOX_CRED\"",
-            "credential_env = \"NOT_SET\"",
-            "NOT_SET",
+            "public_address = \"inbox.example.org:8080\"",
+            "credential_env = \"INBOX_KEY\"",
+            "unknown configuration key: inbox.devices.credential",
+        ),
+        (
+            "  storage {",
+            "  enrollment { code_ttl = \"30s\" }\n  storage {",
+            "inbox.enrollment.code_ttl",
+        ),
+        (
+            "  storage {",
+            "  enrollment { code_ttl = \"25h\" }\n  storage {",
+            "inbox.enrollment.code_ttl",
+        ),
+        (
+            "  storage {",
+            "  enrollment { max_active_per_account = 0 }\n  storage {",
+            "inbox.enrollment.max_active_per_account",
+        ),
+        (
+            "  storage {",
+            "  enrollment { max_active_per_account = 101 }\n  storage {",
+            "inbox.enrollment.max_active_per_account",
+        ),
+        (
+            "  storage {",
+            "  enrollment { colour = 1 }\n  storage {",
+            "unknown configuration key: inbox.enrollment.colour",
         ),
         (
             "token_env = \"INBOX_TOKEN\"",

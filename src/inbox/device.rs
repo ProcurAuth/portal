@@ -16,17 +16,18 @@ use std::time::Duration;
 
 use hyper::body::Incoming;
 use hyper::Request;
-use inbox_core::enroll::EnrollServer;
+use inbox_core::enroll::EnrollResponder;
 use inbox_core::noise::{self, Responder, Session};
 use inbox_core::proto::{
-    close, AckStage, AlertMsg, ClientMsg, ServerMsg, SessionAccept, SessionHello,
+    close, AckStage, AlertMsg, ClientMsg, EnrollAccept, ServerMsg, SessionAccept, SessionHello,
 };
-use inbox_core::rng::Rng;
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Notify};
-use tokio::time::{timeout, Instant};
+use tokio::time::{timeout, timeout_at, Instant};
+use zeroize::Zeroize;
 
-use super::db::{DbError, DeviceKey};
+use super::db::{DbError, DeviceKey, Redeem};
 use super::http::Resp;
 use super::hub::Live;
 use super::log;
@@ -36,8 +37,8 @@ use super::util::{is_hex_id, now_ms};
 use super::ws::{self, Message, Socket};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Argon2 runs on the phone between the two enrollment messages.
-const ENROLL_FINISH_TIMEOUT: Duration = Duration::from_secs(60);
+/// An enrollment connection that sends no message 1 within this time is closed.
+const ENROLL_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const ENROLL_MAX_MESSAGE: usize = 8 * 1024;
 
 /// `GET /v1/enroll`: the upgrade to a WebSocket, then the enrollment.
@@ -66,13 +67,6 @@ async fn close_with(socket: &mut Socket, code: u16, reason: &str) {
     socket.close_with(code, reason).await;
 }
 
-async fn recv_text(socket: &mut Socket, limit: Duration) -> Option<String> {
-    match timeout(limit, socket.recv()).await {
-        Ok(Some(Ok(Message::Text(t)))) => Some(t.to_string()),
-        _ => None,
-    }
-}
-
 async fn recv_binary(socket: &mut Socket, limit: Duration) -> Option<Vec<u8>> {
     loop {
         match timeout(limit, socket.recv()).await {
@@ -85,112 +79,134 @@ async fn recv_binary(socket: &mut Socket, limit: Duration) -> Option<Vec<u8>> {
 
 // ---------------------------------------------------------------- enrollment
 
+/// The first frame of an enrollment connection.
+enum First {
+    /// Noise message 1.
+    Message(Vec<u8>),
+    /// A text frame. Protocol 4 uses binary frames only.
+    Text,
+    /// The phone did not send message 1 in time.
+    Silent,
+    /// The connection ended.
+    Gone,
+}
+
+/// Waits for the first data frame until `deadline`. A ping or a pong does not extend the deadline.
+async fn first_frame(socket: &mut Socket, deadline: Instant) -> First {
+    loop {
+        match timeout_at(deadline, socket.recv()).await {
+            Err(_) => return First::Silent,
+            Ok(Some(Ok(Message::Binary(b)))) => return First::Message(b.to_vec()),
+            Ok(Some(Ok(Message::Text(_)))) => return First::Text,
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)))) => continue,
+            Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return First::Gone,
+        }
+    }
+}
+
+/// Closes an enrollment connection after a refusal. The phone gets no message 2. The reason is for
+/// the log only: the phone gets the same close code for every cause that concerns the code.
+async fn refuse(socket: &mut Socket, ip: IpAddr, code: u16, reason: &str) {
+    log::info!(event = "enroll_refused", reason, client.address = %ip);
+    close_with(socket, code, "enrollment refused").await;
+}
+
 async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
-    let reject =
-        |code: &str, message: &str| Message::Text(EnrollServer::rejected(code, message).into());
     if !app.limiter.allowed(ip) {
-        let _ = socket
-            .send(reject(
-                "rate_limited",
-                "too many failed attempts, retry later",
-            ))
-            .await;
+        log::info!(event = "enroll_refused", reason = "rate_limited", client.address = %ip);
         close_with(&mut socket, close::RATE_LIMITED, "rate limited").await;
         return;
     }
-    let mut server = EnrollServer::new(&app.secrets.server_key, &app.secrets.device_record);
-
-    let Some(text) = recv_text(&mut socket, HANDSHAKE_TIMEOUT).await else {
-        return;
+    let message = match first_frame(&mut socket, Instant::now() + ENROLL_HELLO_TIMEOUT).await {
+        First::Message(m) => m,
+        First::Text => {
+            app.limiter.record_failure(ip);
+            refuse(&mut socket, ip, close::PROTOCOL, "text_frame").await;
+            return;
+        }
+        First::Silent => {
+            app.limiter.record_failure(ip);
+            refuse(&mut socket, ip, close::ENROLL_REFUSED, "no_message").await;
+            return;
+        }
+        First::Gone => return,
     };
-    let challenge =
-        match EnrollServer::parse(&text).and_then(|m| server.on_start(m, &mut Rng::os())) {
-            Ok(c) => c,
-            Err(CoreError::UnsupportedProtocol(v)) => {
-                let _ = socket
-                    .send(reject(
-                        "protocol",
-                        &format!("protocol {v} unsupported, update the app"),
-                    ))
-                    .await;
+    // Every started enrollment counts as an attempt until it succeeds. A phone that leaves after
+    // a refusal may never come back to tell the server.
+    app.limiter.record_failure(ip);
+    let (responder, device_public, mut hello) =
+        match EnrollResponder::start(&app.secrets.server_key.noise_private, &message) {
+            Ok(started) => started,
+            Err(CoreError::UnsupportedProtocol(_)) => {
+                refuse(&mut socket, ip, close::PROTOCOL, "unsupported_protocol").await;
                 return;
             }
-            Err(e) => {
-                log::info!(event = "enroll_rejected", reason = %e);
-                let _ = socket
-                    .send(reject("protocol", "malformed enrollment"))
-                    .await;
+            Err(_) => {
+                app.metrics.auth_failure("enroll_message");
+                refuse(&mut socket, ip, close::ENROLL_REFUSED, "unreadable_message").await;
                 return;
             }
         };
-    // With OPAQUE a wrong password is detected by the client, which may never come
-    // back: every started attempt counts as a failure until it succeeds.
-    app.limiter.record_failure(ip);
-    if socket.send(Message::Text(challenge.into())).await.is_err() {
-        return;
-    }
+    let digest: [u8; 32] = Sha256::digest(&hello.secret).into();
+    hello.secret.zeroize();
 
-    let Some(text) = recv_text(&mut socket, ENROLL_FINISH_TIMEOUT).await else {
-        return;
-    };
-    let verified = match EnrollServer::parse(&text).and_then(|m| server.on_finish(m)) {
-        Ok(v) => v,
-        Err(CoreError::AuthenticationFailed) => {
-            app.limiter.record_failure(ip);
-            app.metrics.auth_failure("device_password");
-            log::warn!(event = "enroll_bad_password", client.address = %ip);
-            let _ = socket.send(reject("bad_password", "wrong password")).await;
-            return;
-        }
-        Err(e) => {
-            log::info!(event = "enroll_rejected", reason = %e);
-            let _ = socket
-                .send(reject("protocol", "malformed enrollment"))
-                .await;
-            return;
-        }
-    };
-
-    let max_devices = app.config.devices.max_devices;
-    let name = verified.name.clone();
-    let user = verified.user_name.clone();
-    let stored = app
+    let redeemed = app
         .db
-        .enroll_device(
-            max_devices,
-            verified.name,
-            verified.user_name,
-            verified.public_key,
+        .redeem_code(
+            digest,
+            app.config.devices.max_devices,
+            hello.device_name.clone(),
+            device_public,
             ip.to_string(),
         )
         .await;
-    let device_id = match stored {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            let _ = socket
-                .send(reject(
-                    "too_many_devices",
-                    "device limit reached, revoke unused devices",
-                ))
-                .await;
+    let (device_id, login) = match redeemed {
+        Ok(Redeem::Enrolled { device_id, login }) => (device_id, login),
+        Ok(Redeem::Refused(why)) => {
+            app.metrics.auth_failure("enroll_code");
+            refuse(&mut socket, ip, close::ENROLL_REFUSED, why.as_str()).await;
+            return;
+        }
+        Ok(Redeem::TooManyDevices) => {
+            refuse(&mut socket, ip, close::ENROLL_REFUSED, "too_many_devices").await;
             return;
         }
         Err(e) => {
             log::error!(event = "enroll_store_failed", error = %e);
-            let _ = socket
-                .send(reject("internal", "server storage error"))
-                .await;
+            close_with(&mut socket, 1011, "storage error").await;
             return;
         }
     };
+    // The code is used and the device is stored. With a replica, the phone learns of it only
+    // after the copy holds it, so a takeover never loses a device that believes it is enrolled.
     if let Err(e) = app.replica.sync().await {
         app.metrics.replica_sync_failure();
         log::warn!(event = "replica_sync_failed", error = %e);
+        if app.replica.strict_alerts() {
+            if let Err(e) = app.db.revoke_device(&device_id).await {
+                log::error!(event = "enroll_cleanup_failed", device.id = %device_id, error = %e);
+            }
+            refuse(
+                &mut socket,
+                ip,
+                close::ENROLL_REFUSED,
+                "replica_sync_failed",
+            )
+            .await;
+            return;
+        }
     }
-    let accepted = match server.accepted(&device_id, &app.config.name) {
-        Ok(a) => a,
+    let accept = EnrollAccept {
+        protocol: PROTOCOL_VERSION,
+        device_id: device_id.clone(),
+        server_name: app.config.name.clone(),
+        user_name: login.clone(),
+    };
+    let reply = match responder.finish(&accept) {
+        Ok(m) => m,
         Err(e) => {
-            log::error!(event = "enroll_accept_failed", error = %e);
+            log::error!(event = "enroll_accept_failed", device.id = %device_id, error = %e);
+            close_with(&mut socket, 1011, "internal error").await;
             return;
         }
     };
@@ -199,11 +215,11 @@ async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
     log::info!(
         event = "device_enrolled",
         device.id = %device_id,
-        device.name = %name,
-        user.name = %user,
+        device.name = %hello.device_name,
+        user.name = %login,
         client.address = %ip
     );
-    let _ = socket.send(Message::Text(accepted.into())).await;
+    let _ = socket.send(Message::Binary(reply.into())).await;
     close_with(&mut socket, 1000, "enrolled").await;
 }
 
@@ -576,24 +592,6 @@ async fn handle(
                 },
             )
             .await?;
-            Ok(false)
-        }
-        ClientMsg::SetUserName { user_name } => {
-            let Ok(user_name) = inbox_core::enroll::validate_user_name(&user_name) else {
-                let error = ServerMsg::Error {
-                    code: "invalid_user_name".into(),
-                    message: "1..64 bytes without control characters".into(),
-                };
-                send_msg(socket, session, &error).await?;
-                return Ok(false);
-            };
-            match app.db.set_user_name(device_id, &user_name).await {
-                Ok(()) => {}
-                Err(e) if e.is_unavailable() => return unavailable(socket, session).await,
-                Err(e) => return Err(End::Storage(e)),
-            }
-            log::info!(event = "user_name_changed", user.name = %user_name);
-            send_msg(socket, session, &ServerMsg::UserName { user_name }).await?;
             Ok(false)
         }
         ClientMsg::Unsubscribe { group } => {

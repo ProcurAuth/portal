@@ -501,7 +501,7 @@ The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data 
 
 The portal can run the inbox. The inbox sends alerts to phones. It makes sure that each phone shows each alert one time. The inbox starts when the file has a block `inbox`. Without this block, the portal has no inbox and opens no port for it.
 
-The inbox is a module of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. It does not use the sessions or the directory of the portal. It delivers alerts when the rest of the portal is not ready. The wire protocol of the phones is protocol 3: the shared password (OPAQUE) and the Noise IK session. The specification is in `docs/inbox/`.
+The inbox is a module of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. It does not use the sessions or the directory of the portal. It delivers alerts when the rest of the portal is not ready. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
 
 ```hcl
 inbox {
@@ -510,7 +510,7 @@ inbox {
 
   devices {
     listen                = "0.0.0.0:8080"
-    credential_file       = "/run/secrets/inbox_device_credential"
+    public_address        = "inbox.example.org:8080"   # the address that phones use; no default
     trusted_proxies       = []
     heartbeat_interval    = "20s"                      # no default
     session_timeout       = "60s"                      # no default
@@ -518,6 +518,11 @@ inbox {
     max_inflight          = 32                         # no default
     unreachable_after     = "2m"                       # no default
     offline_warning_after = "3m"                       # no default
+  }
+
+  enrollment {                                         # optional block
+    code_ttl               = "10m"                     # default
+    max_active_per_account = 5                         # default
   }
 
   storage {
@@ -540,13 +545,28 @@ inbox {
 
 The delivery values have no default. The program stops at start when one of them is missing. They are `heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention` and `connection_log_retention`. A wrong default could hide an alert, so the operator chooses each value. The reference below lists every key.
 
+### Enrollment of a phone
+
+A phone enrolls with a one-time code. The code belongs to one account of the portal. The login of the account is the user name of the phone. The phone cannot change it.
+
+1. The account makes a code with `POST /auth/inbox/api/enrollment-codes`. Any account that is signed in can use this call. The code is for the login of the session. The call has no login parameter.
+2. The call gives `{"code": "inbox://enroll?s=...&k=...&c=...", "expires_at_ms": ..., "fingerprint": "..."}`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
+3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `inbox/v1/enroll`. The first message holds the secret and the name of the phone.
+4. The inbox looks for the SHA-256 digest of the secret. A code works one time and lives `inbox.enrollment.code_ttl`. The inbox stores the phone and marks the code as used in one transaction. Then it sends message 2 and closes the connection.
+
+The inbox keeps only the digest of the secret. An account has at most `inbox.enrollment.max_active_per_account` codes that are not used and not expired. The inbox refuses another code with the status `429`.
+
+A refusal has no message 2. The inbox closes the WebSocket with the code 4410 when the code is unknown, used or expired, when it cannot read the message, and when the limit `inbox.devices.max_devices` is reached. The log has the reason in the event `enroll_refused`. The inbox closes with 4426 when the protocol is not 4, and with 4429 after too many attempts from one address. The inbox closes a connection that sends no message in 10 seconds. With a replica and `sync_alerts = true`, the inbox sends message 2 only after the copy holds the phone.
+
+When the superadmin deletes an account, the inbox revokes the phones of the account and deletes its codes that are not used. The sessions of these phones close with the code 4403. If the inbox cannot do this, the account stays and the portal shows an error.
+
 ### Listeners
 
 The inbox has its own listener, `inbox.devices.listen`. This listener has no session. Phones and producers prove themselves. It serves these routes:
 
 | Route | Use |
 |---|---|
-| `GET /v1/enroll` | WebSocket: enrollment of a phone with the shared password. |
+| `GET /v1/enroll` | WebSocket: enrollment of a phone with a one-time code. |
 | `GET /v1/session` | WebSocket: the session of an enrolled phone. |
 | `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Producer API with a bearer token. |
 | `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks with a bearer token. |
@@ -560,7 +580,7 @@ With the block `inbox.cluster`, the inbox has a third listener for the other ins
 
 The inbox uses the database of the portal. With SQLite, it uses the same file. With PostgreSQL, it uses the same database and the connection settings of the block `postgres`. There is no second `postgres` block. The key `inbox.storage.pool_size` sets the number of connections of the inbox.
 
-The inbox and the portal have two independent chains of migrations. The portal keeps its version in `PRAGMA user_version` (SQLite) or in `schema_migrations` (PostgreSQL). The inbox keeps its version in the table `inbox_schema_version`. Each chain refuses a schema that is newer than its binary. The tables of the inbox are `devices`, `subscriptions`, `alerts`, `deliveries`, `connections` and, with PostgreSQL, `instances`.
+The inbox and the portal have two independent chains of migrations. The portal keeps its version in `PRAGMA user_version` (SQLite) or in `schema_migrations` (PostgreSQL). The inbox keeps its version in the table `inbox_schema_version`. Each chain refuses a schema that is newer than its binary. The tables of the inbox are `devices`, `subscriptions`, `alerts`, `deliveries`, `connections`, `enrollment_codes` and, with PostgreSQL, `instances`.
 
 With PostgreSQL, any number of instances can run. They share the phones, the alerts and the sessions through the database, `LISTEN` and `NOTIFY`. If the database has no writable primary, the inbox goes on: it accepts alerts in memory, it delivers them to the phones that are connected, and it writes them when the database is back. With the block `inbox.cluster`, the instances copy these alerts to each other before the producer gets its answer.
 
@@ -570,19 +590,19 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 
 | Command | Use |
 |---|---|
-| `portal inbox keygen --out FILE` | Makes the key of the server. The command never overwrites a file. |
-| `portal inbox credential --server-key FILE --out FILE [--password-stdin]` | Makes the record of the shared password. The command reads the password from `--password-stdin` or from a standard input that is not a terminal. |
+| `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the token of a producer. |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file of the inbox into the empty PostgreSQL database that the configuration names. The file can be an old file of the standalone inbox or a file of the portal. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the listener of the phones. |
 
 ### Admin calls
 
-The standalone admin listener and the admin front do not exist any more. The admin calls are temporarily under the `listen` of the portal, in `/auth/inbox/api/`. Only a session of the superadmin can use them. A request without a session gets `401`. Any other account gets `403`.
+The standalone admin listener and the admin front do not exist any more. The calls of the inbox are temporarily under the `listen` of the portal, in `/auth/inbox/api/`. Only a session of the superadmin can use the admin calls. Any signed-in account can use the two calls that make a code. A request without a session gets `401`. Any other account gets `403` for an admin call. Without the block `inbox`, each call answers `404`.
 
 | Call | Use |
 |---|---|
-| `GET /auth/inbox/api/csrf` | Gives the anti-CSRF token of the session. |
+| `GET /auth/inbox/api/csrf` | Gives the anti-CSRF token of the session. Any signed-in account can use it. |
+| `POST /auth/inbox/api/enrollment-codes` | Makes an enrollment code for the login of the session. The body is `{}`. Any signed-in account can use it. |
 | `GET /auth/inbox/api/overview` | Phones, groups, producers and the delivery statistics. |
 | `GET /auth/inbox/api/alerts`, `GET /auth/inbox/api/alerts/{id}` | The alerts, and the delivery state of one alert. The query accepts `limit` and `since_ms`. |
 | `GET /auth/inbox/api/connections` | The connection log. The query accepts `limit` and `user`. |
@@ -727,7 +747,7 @@ The program reads one HCL file. The HCL parser is a small, strict subset parser.
 
 ### Secrets: `_env` and `_file`
 
-These attributes hold a secret: `authentication.superadmin_login`, `authentication.superadmin_password`, `session.secret`, `postgres.password`, `identity.signing_key`, the `token` of each `pdp_client` block, `inbox.server_key`, `inbox.devices.credential` and the `token` of each `producer` block. The file never holds the value. Give exactly one of these two forms:
+These attributes hold a secret: `authentication.superadmin_login`, `authentication.superadmin_password`, `session.secret`, `postgres.password`, `identity.signing_key`, the `token` of each `pdp_client` block, `inbox.server_key` and the `token` of each `producer` block. The file never holds the value. Give exactly one of these two forms:
 
 | Form | The value is |
 |---|---|
@@ -965,7 +985,7 @@ This block is optional. If it is present, this server runs the inbox: it sends a
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `name` | text: 1 to 64 bytes, not blank | `"Inbox"` | The name that the phones show for this server. |
-| `server_key` | secret: give `server_key_env` (a variable name) or `server_key_file` (an absolute path), not both | required | The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone invalid. Back it up. |
+| `server_key` | secret: give `server_key_env` (a variable name) or `server_key_file` (an absolute path), not both | required | The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone and each enrollment code invalid. Back it up. |
 
 #### Block `inbox.devices`
 
@@ -974,8 +994,8 @@ This block is inside the block `inbox`. It sets the listener for phones and prod
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `listen` | text: an IP address and a port, such as 0.0.0.0:8080 | required | The address and the port of the listener for phones, producers and webhooks. The listener serves `/v1/enroll`, `/v1/session`, `/api/v1/*`, `/healthz`, `/readyz` and `/api/version`. It must not use the port of `server.listen_address`. |
-| `credential` | secret: give `credential_env` (a variable name) or `credential_file` (an absolute path), not both | required | The OPAQUE record of the shared password of the phones. Make it with `portal inbox credential`. |
-| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the password attempts. |
+| `public_address` | text: the address that phones use to reach the listener `inbox.devices.listen`: `host:port`, a domain, or an http(s) URL; 1 to 512 bytes, no white space, no control character | required | The address that phones use to reach the listener `inbox.devices.listen`, as the phones see it from outside: `host:port`, a domain, or an http(s) URL. It is the `s` of the enrollment code. The inbox does not open a connection to it. |
+| `trusted_proxies` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | required | The networks of the proxies that set `X-Forwarded-For` or `X-Real-IP` for this listener. The inbox reads these headers only from a TCP peer in these networks. `[]` trusts no proxy. The client address keys the limiter of the enrollment attempts. |
 | `max_devices` | number, 1 to 100000 | `1000` | The largest number of enrolled phones that are not revoked. |
 | `heartbeat_interval` | duration, 5s to 1h | required | The app sends a ping at this interval. |
 | `session_timeout` | duration, 10s to 1d | required | A session without a frame for this time ends. The value is at least two times `inbox.devices.heartbeat_interval`. |
@@ -983,9 +1003,18 @@ This block is inside the block `inbox`. It sets the listener for phones and prod
 | `max_inflight` | number, 1 to 1024 | required | The largest number of alerts that the inbox sends to one session before the phone confirms them. |
 | `unreachable_after` | duration, 10s to 30d | required | The inbox reports a subscribed phone as unreachable when it did not see the phone for this time. The value is at least `inbox.devices.session_timeout`. |
 | `offline_warning_after` | duration, 10s to 30d | required | The app warns its user after it was disconnected for this time. The value is at least two times `inbox.devices.heartbeat_interval`. |
-| `max_auth_failures` | number, 1 to 1000 | `5` | The number of password attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started attempt counts until it succeeds. |
+| `max_auth_failures` | number, 1 to 1000 | `5` | The number of enrollment attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started enrollment counts until it succeeds. |
 | `auth_failure_window` | duration, 1s to 1d | `"10m"` | The window of `inbox.devices.max_auth_failures`. |
 | `max_request_bytes` | size, 4KiB to 1MiB | `"64KiB"` | The largest request body that the listener reads. |
+
+#### Block `inbox.enrollment`
+
+This block is optional and is inside the block `inbox`. It sets the enrollment codes: an account of the portal makes a code, and a phone uses it one time to enroll. Every key has a default.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `code_ttl` | duration, 1m to 1d | `"10m"` | An enrollment code works for this time after an account made it. A code works one time. |
+| `max_active_per_account` | number, 1 to 100 | `5` | The largest number of enrollment codes of one account that are not used and not expired. The inbox refuses a new code above this number. |
 
 #### Block `inbox.storage`
 

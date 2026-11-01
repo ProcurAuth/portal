@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, NoTls};
 
 use super::db::{
-    AckOutcome, AlertDetail, AlertSummary, ConnectionView, DbError, DeliveryView, DeviceKey,
-    DeviceView, InsertOutcome, NewAlert, PendingDelivery,
+    AckOutcome, AlertDetail, AlertSummary, CodeInsert, ConnectionView, DbError, DeliveryView,
+    DeviceKey, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem, Refusal, CODE_KEEP_MS,
 };
 use super::hub::LiveInfo;
 use super::log;
@@ -57,8 +57,10 @@ const RECENT_ALERTS_MAX: i64 = 5_000;
 const LOCK_SCHEMA: i64 = 0x5041_4745_0001; // does not collide with the locks of the portal (0x7074_6c..)
 const LOCK_ENROLL: i64 = 0x5041_4745_0002;
 const LOCK_PURGE: i64 = 0x5041_4745_0003;
+const LOCK_CODES: i64 = 0x5041_4745_0004;
 
-const SCHEMA: &[&str] = &[r#"
+const SCHEMA: &[&str] = &[
+    r#"
 CREATE TABLE devices (
     id                TEXT PRIMARY KEY,
     name              TEXT NOT NULL,
@@ -127,7 +129,22 @@ CREATE INDEX connections_device ON connections(device_id, connected_at);
 CREATE INDEX connections_time ON connections(connected_at);
 CREATE INDEX connections_user ON connections(user_name, connected_at);
 CREATE INDEX connections_open ON connections(instance) WHERE disconnected_at IS NULL;
-"#];
+"#,
+    r#"
+-- Protocol 4: an account of the portal makes a one-time enrollment code. The table keeps the
+-- SHA-256 digest of the secret, never the secret. `login` is the account of the code and, later,
+-- the user name of the device.
+CREATE TABLE enrollment_codes (
+    digest        BYTEA PRIMARY KEY,
+    login         TEXT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    expires_at_ms BIGINT NOT NULL,
+    used_at_ms    BIGINT
+);
+CREATE INDEX enrollment_codes_login ON enrollment_codes(login, expires_at_ms);
+CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at_ms);
+"#,
+];
 
 /// The database clock, in milliseconds: liveness is judged by one clock, not by the instances' own.
 const DB_NOW: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
@@ -542,7 +559,7 @@ impl PgStore {
             .map(|d| d.key.clone())
     }
 
-    /// Subscriptions and pseudonym of a device, as last seen in the database.
+    /// Subscriptions and login of a device, as last seen in the database.
     pub fn cached_profile(&self, id: &str) -> Option<(Vec<String>, String)> {
         let cache = self.cache.read().expect("cache lock");
         cache
@@ -959,37 +976,153 @@ impl PgStore {
 
     // ------------------------------------------------------------ devices
 
-    pub async fn enroll_device(
+    /// Stores the digest of a new code of `login`. Two instances that make codes for one account
+    /// at the same time must not both take the last place: the transaction holds a lock.
+    pub async fn create_code(
         &self,
-        max_devices: u32,
-        name: &str,
-        user_name: &str,
-        public_key: &[u8],
-        ip: &str,
-    ) -> Result<Option<String>, DbError> {
+        digest: &[u8],
+        login: &str,
+        ttl_ms: i64,
+        max_active: u32,
+    ) -> Result<CodeInsert, DbError> {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
-        // Two instances enrolling at the same time must not both take the last place.
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_CODES])
+            .await
+            .map_err(db_error)?;
+        let now = now_ms();
+        let active: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM enrollment_codes
+                 WHERE login = $1 AND used_at_ms IS NULL AND expires_at_ms > $2",
+                &[&login, &now],
+            )
+            .await
+            .map_err(db_error)?
+            .get(0);
+        if active >= i64::from(max_active) {
+            return Ok(CodeInsert::TooMany);
+        }
+        let expires_at_ms = now + ttl_ms;
+        tx.execute(
+            "INSERT INTO enrollment_codes (digest, login, created_at_ms, expires_at_ms) VALUES ($1, $2, $3, $4)",
+            &[&digest, &login, &now, &expires_at_ms],
+        )
+        .await
+        .map_err(db_error)?;
+        tx.commit().await.map_err(db_error)?;
+        Ok(CodeInsert::Created { expires_at_ms })
+    }
+
+    /// Removes a code that is not used.
+    pub async fn delete_code(&self, digest: &[u8]) -> Result<bool, DbError> {
+        let c = self.client().await?;
+        let n = c
+            .execute(
+                "DELETE FROM enrollment_codes WHERE digest = $1 AND used_at_ms IS NULL",
+                &[&digest],
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(n > 0)
+    }
+
+    /// Uses a code and stores the device of its account, in one transaction. The row of the code
+    /// is locked, so a second instance that holds the same secret waits and then finds it used.
+    pub async fn redeem_code(
+        &self,
+        digest: &[u8],
+        max_devices: u32,
+        name: &str,
+        public_key: &[u8],
+        ip: &str,
+    ) -> Result<Redeem, DbError> {
+        let mut c = self.client().await?;
+        let tx = c.transaction().await.map_err(db_error)?;
+        // The limit of devices is a count: two instances must not both take the last place.
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_ENROLL])
             .await
             .map_err(db_error)?;
+        let now = now_ms();
+        let row = tx
+            .query_opt(
+                "SELECT login, expires_at_ms, used_at_ms FROM enrollment_codes WHERE digest = $1 FOR UPDATE",
+                &[&digest],
+            )
+            .await
+            .map_err(db_error)?;
+        let Some(row) = row else {
+            return Ok(Redeem::Refused(Refusal::Unknown));
+        };
+        let (login, expires_at_ms, used_at_ms): (String, i64, Option<i64>) =
+            (row.get(0), row.get(1), row.get(2));
+        if used_at_ms.is_some() {
+            return Ok(Redeem::Refused(Refusal::Used));
+        }
+        if expires_at_ms <= now {
+            return Ok(Redeem::Refused(Refusal::Expired));
+        }
         let active: i64 = tx
             .query_one("SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL", &[])
             .await
             .map_err(db_error)?
             .get(0);
         if active >= i64::from(max_devices) {
-            return Ok(None);
+            return Ok(Redeem::TooManyDevices);
         }
-        let id = random_id();
+        tx.execute(
+            "UPDATE enrollment_codes SET used_at_ms = $2 WHERE digest = $1 AND used_at_ms IS NULL",
+            &[&digest, &now],
+        )
+        .await
+        .map_err(db_error)?;
+        let device_id = random_id();
         tx.execute(
             "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip) VALUES ($1, $2, $3, $4, $5, $6)",
-            &[&id, &name, &user_name, &public_key, &now_ms(), &ip],
+            &[&device_id, &name, &login, &public_key, &now, &ip],
         )
         .await
         .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
-        Ok(Some(id))
+        Ok(Redeem::Enrolled { device_id, login })
+    }
+
+    /// Deletes the unused codes of `login` and revokes its devices, in one transaction. The other
+    /// instances close the sessions of the devices. The result is the ids that this call revoked.
+    pub async fn revoke_account(&self, login: &str) -> Result<Vec<String>, DbError> {
+        let mut c = self.client().await?;
+        let tx = c.transaction().await.map_err(db_error)?;
+        // The same lock as the enrollment: a phone that enrolls now is before or after this call.
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_ENROLL])
+            .await
+            .map_err(db_error)?;
+        tx.execute(
+            "DELETE FROM enrollment_codes WHERE login = $1 AND used_at_ms IS NULL",
+            &[&login],
+        )
+        .await
+        .map_err(db_error)?;
+        let rows = tx
+            .query(
+                "UPDATE devices SET revoked_at = $2 WHERE user_name = $1 AND revoked_at IS NULL RETURNING id",
+                &[&login, &now_ms()],
+            )
+            .await
+            .map_err(db_error)?;
+        let ids: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        for id in &ids {
+            tx.execute("DELETE FROM subscriptions WHERE device_id = $1", &[id])
+                .await
+                .map_err(db_error)?;
+            tx.execute(
+                "SELECT pg_notify('inbox_kick', $1)",
+                &[&format!("revoked {id}")],
+            )
+            .await
+            .map_err(db_error)?;
+        }
+        tx.commit().await.map_err(db_error)?;
+        Ok(ids)
     }
 
     pub async fn find_device(&self, id: &str) -> Result<Option<DeviceKey>, DbError> {
@@ -1007,25 +1140,6 @@ impl PgStore {
             name: r.get(2),
             user_name: r.get(3),
         }))
-    }
-
-    pub async fn set_user_name(&self, id: &str, user_name: &str) -> Result<(), DbError> {
-        let mut c = self.client().await?;
-        let tx = c.transaction().await.map_err(db_error)?;
-        tx.execute(
-            "UPDATE devices SET user_name = $2 WHERE id = $1",
-            &[&id, &user_name],
-        )
-        .await
-        .map_err(db_error)?;
-        // The open connection is attributed to the new pseudonym too.
-        tx.execute(
-            "UPDATE connections SET user_name = $2 WHERE device_id = $1 AND disconnected_at IS NULL",
-            &[&id, &user_name],
-        )
-        .await
-        .map_err(db_error)?;
-        tx.commit().await.map_err(db_error)
     }
 
     pub async fn revoke_device(&self, id: &str) -> Result<bool, DbError> {
@@ -1579,7 +1693,7 @@ impl PgStore {
         &self,
         alert_cutoff: i64,
         connection_cutoff: i64,
-    ) -> Result<(usize, usize), DbError> {
+    ) -> Result<(usize, usize, usize), DbError> {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         // One instance purges at a time; the others skip this round.
@@ -1589,7 +1703,7 @@ impl PgStore {
             .map_err(db_error)?
             .get(0);
         if !locked {
-            return Ok((0, 0));
+            return Ok((0, 0, 0));
         }
         tx.execute(
             "DELETE FROM deliveries WHERE alert_id IN (SELECT id FROM alerts WHERE created_at < $1)",
@@ -1608,8 +1722,15 @@ impl PgStore {
             )
             .await
             .map_err(db_error)?;
+        let codes = tx
+            .execute(
+                "DELETE FROM enrollment_codes WHERE expires_at_ms < $1",
+                &[&(now_ms() - CODE_KEEP_MS)],
+            )
+            .await
+            .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
-        Ok((alerts as usize, connections as usize))
+        Ok((alerts as usize, connections as usize, codes as usize))
     }
 }
 
@@ -1630,11 +1751,13 @@ pub struct Imported {
     pub alerts: usize,
     pub deliveries: usize,
     pub connections: usize,
+    pub enrollment_codes: usize,
 }
 
 impl PgStore {
     /// Copies a SQLite database (a Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
-    /// transaction: devices, subscriptions, alerts, deliveries and the connection log. Refuses a database that is not empty.
+    /// transaction: devices, subscriptions, alerts, deliveries, the connection log and the enrollment codes. Refuses a database
+    /// that is not empty.
     pub async fn import_sqlite(&self, path: &Path) -> Result<Imported, String> {
         use rusqlite::{Connection, OpenFlags};
         let lite = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -1670,7 +1793,7 @@ impl PgStore {
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_ENROLL])
             .await
             .map_err(|e| e.to_string())?;
-        for table in ["devices", "alerts"] {
+        for table in ["devices", "alerts", "enrollment_codes"] {
             let n: i64 = tx
                 .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
                 .await
@@ -1810,6 +1933,29 @@ impl PgStore {
             out.connections += 1;
         }
 
+        let mut stmt = lite
+            .prepare(
+                "SELECT digest, login, created_at_ms, expires_at_ms, used_at_ms FROM enrollment_codes",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (digest, login, created, expires): (Vec<u8>, String, i64, i64) = (
+                r.get(0).unwrap(),
+                r.get(1).unwrap(),
+                r.get(2).unwrap(),
+                r.get(3).unwrap(),
+            );
+            let used: Option<i64> = r.get(4).unwrap();
+            tx.execute(
+                "INSERT INTO enrollment_codes (digest, login, created_at_ms, expires_at_ms, used_at_ms) VALUES ($1, $2, $3, $4, $5)",
+                &[&digest, &login, &created, &expires, &used],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.enrollment_codes += 1;
+        }
+
         // The sequences continue after the imported rows.
         for (table, column) in [("deliveries", "seq"), ("connections", "id")] {
             tx.execute(
@@ -1851,5 +1997,324 @@ mod tests {
         assert_eq!(parse_notification("inbox_kick", "replaced dev1"), None);
         assert_eq!(parse_notification("inbox_kick", "bogus x"), None);
         assert_eq!(parse_notification("other", "x"), None);
+    }
+
+    /// A throwaway database on the server of `INBOX_TEST_PG=host:port:user:password`. The tests
+    /// that need it end at once without the variable. The database goes away with the value.
+    struct TestDatabase {
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+        name: String,
+    }
+
+    impl TestDatabase {
+        async fn admin(&self, database: &str) -> tokio_postgres::Client {
+            let mut config = tokio_postgres::Config::new();
+            config
+                .host(&self.host)
+                .port(self.port)
+                .user(&self.user)
+                .password(&self.password)
+                .dbname(database);
+            let (client, connection) = config.connect(NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client
+        }
+
+        async fn create() -> Option<TestDatabase> {
+            let raw = std::env::var("INBOX_TEST_PG").ok()?;
+            let mut parts = raw.splitn(4, ':');
+            let mut db = TestDatabase {
+                host: parts.next()?.to_string(),
+                port: parts.next()?.parse().ok()?,
+                user: parts.next()?.to_string(),
+                password: parts.next()?.to_string(),
+                name: format!("inbox_unit_{}", random_id()),
+            };
+            db.name = db.name.to_lowercase();
+            db.admin("postgres")
+                .await
+                .batch_execute(&format!("CREATE DATABASE {}", db.name))
+                .await
+                .unwrap();
+            Some(db)
+        }
+
+        async fn store(&self) -> PgStore {
+            PgStore::connect(&PgSettings {
+                host: self.host.clone(),
+                port: self.port,
+                database: self.name.clone(),
+                user: self.user.clone(),
+                password: zeroize::Zeroizing::new(self.password.clone()),
+                pool_size: 4,
+                connect_timeout: Duration::from_secs(5),
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn sql(&self, sql: &str) {
+            self.admin(&self.name)
+                .await
+                .batch_execute(sql)
+                .await
+                .unwrap();
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let (host, port, user, password, name) = (
+                self.host.clone(),
+                self.port,
+                self.user.clone(),
+                self.password.clone(),
+                self.name.clone(),
+            );
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let mut config = tokio_postgres::Config::new();
+                    config
+                        .host(&host)
+                        .port(port)
+                        .user(&user)
+                        .password(&password)
+                        .dbname("postgres");
+                    if let Ok((client, connection)) = config.connect(NoTls).await {
+                        tokio::spawn(connection);
+                        let _ = client
+                            .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                            .await;
+                    }
+                });
+            })
+            .join();
+        }
+    }
+
+    const MINUTE_MS: i64 = 60_000;
+
+    async fn redeem(store: &PgStore, digest: [u8; 32], key: u8) -> Redeem {
+        store
+            .redeem_code(&digest, 10, "phone", &[key; 32], "1.1.1.1")
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_code_works_one_time_and_expires() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let created = store
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        let CodeInsert::Created { expires_at_ms } = created else {
+            panic!("the code must be stored")
+        };
+        assert!(expires_at_ms > now_ms() + 9 * MINUTE_MS);
+        let Redeem::Enrolled { device_id, login } = redeem(&store, [1; 32], 1).await else {
+            panic!("the code must work")
+        };
+        assert_eq!(login, "alice");
+        let device = store.find_device(&device_id).await.unwrap().unwrap();
+        assert_eq!(
+            (device.user_name.as_str(), device.name.as_str()),
+            ("alice", "phone")
+        );
+        assert_eq!(
+            redeem(&store, [1; 32], 2).await,
+            Redeem::Refused(Refusal::Used)
+        );
+        assert_eq!(
+            redeem(&store, [2; 32], 3).await,
+            Redeem::Refused(Refusal::Unknown)
+        );
+        // Time travel: the code ends at its expiry time.
+        store
+            .create_code(&[3; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        db.sql("UPDATE enrollment_codes SET expires_at_ms = created_at_ms WHERE digest = decode(repeat('03', 32), 'hex')")
+            .await;
+        assert_eq!(
+            redeem(&store, [3; 32], 4).await,
+            Redeem::Refused(Refusal::Expired)
+        );
+        // The device limit leaves the code unused.
+        store
+            .create_code(&[4; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        let full = store
+            .redeem_code(&[4; 32], 1, "phone", &[9; 32], "ip")
+            .await
+            .unwrap();
+        assert_eq!(full, Redeem::TooManyDevices);
+        assert!(matches!(
+            redeem(&store, [4; 32], 5).await,
+            Redeem::Enrolled { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_account_has_a_limited_number_of_active_codes() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let (a, b) = (db.store().await, db.store().await);
+        // Two instances make codes at the same time: the account keeps its limit.
+        let digests: Vec<[u8; 32]> = (0..6u8).map(|i| [i; 32]).collect();
+        let mut made = Vec::new();
+        for (i, digest) in digests.iter().enumerate() {
+            let store = if i % 2 == 0 { &a } else { &b };
+            made.push(store.create_code(digest, "alice", MINUTE_MS, 3));
+        }
+        let results = futures_util::future::join_all(made).await;
+        let created = results
+            .iter()
+            .filter(|r| matches!(r, Ok(CodeInsert::Created { .. })))
+            .count();
+        assert_eq!(created, 3, "{results:?}");
+        assert!(
+            matches!(
+                b.create_code(&[9; 32], "bob", MINUTE_MS, 3).await,
+                Ok(CodeInsert::Created { .. })
+            ),
+            "another account has its own count"
+        );
+        // An expired code does not count.
+        db.sql("UPDATE enrollment_codes SET expires_at_ms = created_at_ms WHERE login = 'alice'")
+            .await;
+        assert!(matches!(
+            a.create_code(&[7; 32], "alice", MINUTE_MS, 3).await,
+            Ok(CodeInsert::Created { .. })
+        ));
+        // An unused code can be withdrawn.
+        assert!(a.delete_code(&[7; 32]).await.unwrap());
+        assert!(!a.delete_code(&[7; 32]).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_code_used_on_one_instance_cannot_be_used_on_another() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let (a, b) = (db.store().await, db.store().await);
+        a.create_code(&[5; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        assert!(matches!(
+            redeem(&a, [5; 32], 1).await,
+            Redeem::Enrolled { .. }
+        ));
+        assert_eq!(redeem(&b, [5; 32], 2).await, Redeem::Refused(Refusal::Used));
+        // Both instances use the code at the same moment: one wins.
+        a.create_code(&[6; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        let (first, second) = tokio::join!(redeem(&a, [6; 32], 3), redeem(&b, [6; 32], 4));
+        let won = [&first, &second]
+            .iter()
+            .filter(|r| matches!(r, Redeem::Enrolled { .. }))
+            .count();
+        assert_eq!(won, 1, "{first:?} {second:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_deleted_account_loses_its_codes_and_devices_and_old_codes_are_purged() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        store
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        store
+            .create_code(&[2; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        store
+            .create_code(&[3; 32], "bob", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        let Redeem::Enrolled { device_id: a, .. } = redeem(&store, [1; 32], 1).await else {
+            panic!()
+        };
+        let Redeem::Enrolled { device_id: b, .. } = redeem(&store, [3; 32], 2).await else {
+            panic!()
+        };
+        store.subscribe(&a, "infra").await.unwrap();
+        assert_eq!(
+            store.revoke_account("alice").await.unwrap(),
+            vec![a.clone()]
+        );
+        assert!(store.find_device(&a).await.unwrap().unwrap().revoked);
+        assert!(!store.find_device(&b).await.unwrap().unwrap().revoked);
+        assert_eq!(
+            redeem(&store, [2; 32], 3).await,
+            Redeem::Refused(Refusal::Unknown)
+        );
+        assert!(store.revoke_account("alice").await.unwrap().is_empty());
+        // Retention removes the codes that expired long ago.
+        store
+            .create_code(&[4; 32], "bob", MINUTE_MS, 5)
+            .await
+            .unwrap();
+        db.sql("UPDATE enrollment_codes SET expires_at_ms = 1 WHERE login = 'bob' AND used_at_ms IS NULL")
+            .await;
+        assert_eq!(store.purge(0, 0).await.unwrap().2, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_the_import_of_a_sqlite_file_carries_the_enrollment_codes() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("portal-inbox-import-{}", random_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("inbox.db");
+        {
+            let (lite, closed) = super::super::db::Db::open(&path).unwrap();
+            lite.call(|c| {
+                let now = now_ms();
+                super::super::db::insert_code(c, &[1; 32], "alice", now, 10 * MINUTE_MS, 5)?;
+                super::super::db::insert_code(c, &[2; 32], "alice", now, 10 * MINUTE_MS, 5)?;
+                super::super::db::redeem_code(c, &[1; 32], now, 10, "phone", &[7; 32], "ip")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            drop(lite);
+            assert!(closed.wait(Duration::from_secs(10)));
+        }
+        let store = db.store().await;
+        let imported = store.import_sqlite(&path).await.unwrap();
+        assert_eq!((imported.devices, imported.enrollment_codes), (1, 2));
+        // The used code stays used. The other code still works.
+        assert_eq!(
+            redeem(&store, [1; 32], 1).await,
+            Redeem::Refused(Refusal::Used)
+        );
+        assert!(matches!(
+            redeem(&store, [2; 32], 2).await,
+            Redeem::Enrolled { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

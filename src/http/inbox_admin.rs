@@ -1,9 +1,11 @@
-//! The admin API of the inbox, under `/auth/inbox/api/`.
+//! The API of the inbox in the portal, under `/auth/inbox/api/`.
 //!
-//! Only the session of the superadmin can use it. A request without a session gets `401`, and
-//! any other account gets `403`. A POST follows the rules of the other forms of the portal: the
-//! same origin, a JSON body, and an anti-CSRF token in the header `X-CSRF-Token`. The call
-//! `GET /auth/inbox/api/csrf` gives the token of the session.
+//! The admin calls need the session of the superadmin. A request without a session gets `401`,
+//! and any other account gets `403`. Two calls are for any signed-in account: `GET csrf`, and
+//! `POST enrollment-codes`, which makes a code for the login of the session only. A POST follows
+//! the rules of the other forms of the portal: the same origin, a JSON body, and an anti-CSRF
+//! token in the header `X-CSRF-Token`. The call `GET /auth/inbox/api/csrf` gives the token of the
+//! session.
 //!
 //! This is a temporary place. A later version gives these calls their own rights and pages.
 
@@ -49,26 +51,31 @@ async fn run(
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "sign in as the superadmin",
+            "sign in",
         ));
     };
-    if !is_superadmin(&viewer) {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let rest = path.strip_prefix(PREFIX).unwrap_or_default().to_string();
+    let query = request.uri().query().map(str::to_string);
+    let segments: Vec<&str> = rest.split('/').collect();
+    // These two calls are for any account. The others are for the superadmin.
+    let own = matches!(segments.as_slice(), ["csrf"] | ["enrollment-codes"]);
+    if !own && !is_superadmin(&viewer) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
             "only the superadmin can use this call",
         ));
     }
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let rest = path.strip_prefix(PREFIX).unwrap_or_default().to_string();
-    let query = request.uri().query().map(str::to_string);
-    let segments: Vec<&str> = rest.split('/').collect();
     let known_get = matches!(
         segments.as_slice(),
         ["csrf"] | ["overview"] | ["alerts"] | ["alerts", _] | ["connections"]
     );
-    let known_post = matches!(segments.as_slice(), ["alerts"] | ["devices", _, "revoke"]);
+    let known_post = matches!(
+        segments.as_slice(),
+        ["alerts"] | ["devices", _, "revoke"] | ["enrollment-codes"]
+    );
     if method == Method::GET && known_get {
         return match segments.as_slice() {
             ["csrf"] => {
@@ -110,6 +117,40 @@ async fn run(
             ),
         })?;
         return match segments.as_slice() {
+            ["enrollment-codes"] => {
+                // The body is an empty object. The code is for the login of the session: there is
+                // no parameter that names another account.
+                let empty_object = matches!(
+                    serde_json::from_slice::<serde_json::Value>(&body),
+                    Ok(serde_json::Value::Object(ref fields)) if fields.is_empty()
+                );
+                if !empty_object {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_json",
+                        "the body must be {}",
+                    ));
+                }
+                log(
+                    state,
+                    LogLevel::Info,
+                    "inbox_enrollment_code",
+                    &[("actor", viewer.login.clone())],
+                );
+                let made = state.inbox.create_enrollment_code(&viewer.login).await;
+                match made {
+                    Some(Ok(code)) => Ok(crate::inbox::json_response(
+                        StatusCode::CREATED,
+                        &serde_json::to_value(&code).unwrap_or(serde_json::Value::Null),
+                    )),
+                    Some(Err(e)) => Err(e),
+                    None => Err(ApiError::new(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "the inbox is not configured",
+                    )),
+                }
+            }
             ["alerts"] => {
                 log(
                     state,

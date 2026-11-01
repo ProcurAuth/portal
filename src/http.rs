@@ -2589,6 +2589,19 @@ async fn handle_users_delete(
         }
     };
 
+    // The inbox revokes the phones of the account and deletes its unused enrollment codes first. If
+    // the inbox fails, the account stays: a phone must not outlive its account. Without the block
+    // `inbox`, this call does nothing.
+    if let Err(error) = state.inbox.revoke_devices_of(&login).await {
+        log(
+            state,
+            LogLevel::Error,
+            "user_delete_inbox_failed",
+            &[("error", error)],
+        );
+        state.metrics.user_admin("delete", "rejected");
+        return settings_redirect("error");
+    }
     let store = Arc::clone(&state.store);
     let target = login.clone();
     match tokio::task::spawn_blocking(move || store.remove_user(&target)).await {

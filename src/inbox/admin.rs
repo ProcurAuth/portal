@@ -87,7 +87,7 @@ pub async fn overview(app: &App) -> Result<Resp, ApiError> {
 /// The query of the lists. The values come from the query string of the request.
 pub struct ListQuery {
     pub limit: Option<u32>,
-    /// Only connections of this user pseudonym.
+    /// Only connections of this login (the user name of the device).
     pub user: Option<String>,
     /// Only alerts created at or after this Unix time in milliseconds.
     pub since_ms: Option<i64>,
