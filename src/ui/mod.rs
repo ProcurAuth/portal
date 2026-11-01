@@ -605,7 +605,6 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
     };
     UsersView {
         notice: None,
-        no_passwords: false,
         add_open: false,
         mode: crate::grants::Mode::Dynamic,
         catalog,
@@ -733,7 +732,6 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 &frame,
                 &UserView {
                     notice: None,
-                    no_passwords: false,
                     mode: users.mode,
                     catalog: &catalog,
                     services: std::mem::take(&mut users.services),

@@ -435,16 +435,9 @@ impl ServiceActions {
     }
 }
 
-/// The sentence that replaces a form that sets a password when the connection is not encrypted.
-pub const NOT_ENCRYPTED: &str =
-    "This connection is not encrypted. The password forms are disabled. Use https.";
-
 /// The data of the Users page: the table of the accounts and the add form.
 pub struct UsersView<'a> {
     pub notice: Option<Notice>,
-    /// The request is not secure: the page has no form that sets a password. See
-    /// [`crate::transport::is_secure`].
-    pub no_passwords: bool,
     /// The add form is open: the address asks for it, or the last add was refused.
     pub add_open: bool,
     /// Where the grants come from.
@@ -667,14 +660,6 @@ fn password_field(out: &mut String, id: &str, label: &str, required: bool, hint:
 }
 
 fn add_form(out: &mut String, view: &UsersView) {
-    if view.no_passwords {
-        // A new user needs a password: without a secure connection the form is not offered.
-        let _ = write!(
-            out,
-            r#"<p class="uiBanner uiBanner--inset uiBanner--warn" role="alert">{NOT_ENCRYPTED}</p><p><a class="button" href="{USERS_PATH}">Back to the users</a></p>"#
-        );
-        return;
-    }
     // The add action is a rare task. The form shows when the address asks for it, or after a
     // refused attempt. It has the login and the password and one button. The portal opens the
     // page of the new account, where the editor of grants is.
@@ -695,8 +680,6 @@ fn add_form(out: &mut String, view: &UsersView) {
 /// The data of the page of one account.
 pub struct UserView<'a> {
     pub notice: Option<Notice>,
-    /// The request is not secure: the page has no form that sets a password.
-    pub no_passwords: bool,
     pub mode: Mode,
     /// The whole catalogue, not the filtered catalogue for display.
     pub catalog: &'a Catalog,
@@ -1131,30 +1114,20 @@ fn account_part(out: &mut String, view: &UserView) {
     let login = html_escape(&view.user.login);
     out.push_str(r#"<section class="pagePart" aria-labelledby="account-title">"#);
     part_head(out, "account-title", "Account", "", "");
-    if view.no_passwords {
-        let _ = write!(
-            out,
-            r#"<div class="accountRow"><p class="uiBanner uiBanner--inset uiBanner--warn accountRow__password" role="alert">{NOT_ENCRYPTED}</p>"#
-        );
-    } else {
-        let _ = write!(
-            out,
-            r#"<div class="accountRow"><form class="accountRow__password" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
-        );
-        password_field(
-            out,
-            &format!("pw-{}", view.user.login),
-            "New password",
-            true,
-            "At least 10 characters",
-        );
-        out.push_str(
-            r#"<button class="button" type="submit" title="The sessions of this account end at once">Change password</button></form>"#,
-        );
-    }
     let _ = write!(
         out,
-        r#"<div class="accountRow__delete"><details class="confirm"><summary class="button button--quiet-danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>Its sessions end at once. Its history stays until it expires. This cannot be undone.</p><button class="button button--danger" type="submit">Confirm: delete {login}</button></form></details></div></div></section>"#
+        r#"<div class="accountRow"><form class="accountRow__password" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
+    );
+    password_field(
+        out,
+        &format!("pw-{}", view.user.login),
+        "New password",
+        true,
+        "At least 10 characters",
+    );
+    let _ = write!(
+        out,
+        r#"<button class="button" type="submit" title="The sessions of this account end at once">Change password</button></form><div class="accountRow__delete"><details class="confirm"><summary class="button button--quiet-danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>Its sessions end at once. Its history stays until it expires. This cannot be undone.</p><button class="button button--danger" type="submit">Confirm: delete {login}</button></form></details></div></div></section>"#
     );
 }
 
@@ -1853,7 +1826,6 @@ mod tests {
         root.created_at = None;
         UsersView {
             notice: None,
-            no_passwords: false,
             add_open: false,
             mode: Mode::Dynamic,
             catalog,
@@ -1874,7 +1846,6 @@ mod tests {
     fn user_view(catalog: &Catalog, user: UserCard) -> UserView<'_> {
         UserView {
             notice: None,
-            no_passwords: false,
             mode: Mode::Dynamic,
             catalog,
             services: services(),

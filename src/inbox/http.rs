@@ -177,46 +177,12 @@ pub fn owns(path: &str) -> bool {
         || matches!(path, "/readyz" | "/api/version")
 }
 
-/// Tells whether a request of the producer API presents a credential: any `Authorization` header,
-/// or a query parameter `token`. The function reads no value: it only looks for the names.
-pub fn presents_credential(headers: &hyper::HeaderMap, query: Option<&str>) -> bool {
-    headers.contains_key(hyper::header::AUTHORIZATION)
-        || query.is_some_and(|raw| {
-            raw.split('&').any(|pair| {
-                let name = pair.split_once('=').map_or(pair, |(name, _)| name);
-                crate::util::percent_decode_form(name).map_or(name == "token", |n| n == "token")
-            })
-        })
-}
-
 /// Answers one request that [`owns`] names, on the listener of the portal. `ip` is the client
 /// address that the portal found with `server.trusted_proxies`. The limiter of the enrollment
 /// attempts uses it.
-///
-/// `plain_refused` is true when the request is not secure and `session.allow_insecure_http` is
-/// `false`. A request of the producer API (`/api/v1/`) that presents a credential then gets
-/// `403 insecure_transport` before anything reads the credential. The portal never compares,
-/// counts or logs it. The routes of the phones are not affected: they carry no password, and the
-/// Noise protocol encrypts and authenticates them.
-pub async fn serve(
-    app: Arc<App>,
-    ip: IpAddr,
-    plain_refused: bool,
-    request: Request<Incoming>,
-) -> Resp {
+pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    if plain_refused
-        && path.starts_with("/api/v1/")
-        && presents_credential(request.headers(), request.uri().query())
-    {
-        return ApiError::new(
-            StatusCode::FORBIDDEN,
-            "insecure_transport",
-            "this connection is not encrypted: the portal does not accept a token over plain http, use https",
-        )
-        .into_response();
-    }
     let get = method == Method::GET;
     let post = method == Method::POST;
     match path.as_str() {
@@ -293,30 +259,4 @@ pub fn version() -> Resp {
             "protocol": inbox_core::PROTOCOL_VERSION,
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-
-    #[test]
-    fn a_credential_is_an_authorization_header_or_a_token_parameter() {
-        let none = HeaderMap::new();
-        let mut bearer = HeaderMap::new();
-        bearer.insert(AUTHORIZATION, HeaderValue::from_static("Bearer x"));
-        let mut basic = HeaderMap::new();
-        basic.insert(AUTHORIZATION, HeaderValue::from_static("Basic eDp5"));
-        assert!(presents_credential(&bearer, None));
-        assert!(presents_credential(&basic, None));
-        assert!(presents_credential(&none, Some("token=x")));
-        assert!(presents_credential(&none, Some("title=a&token=x")));
-        assert!(presents_credential(&none, Some("token")));
-        assert!(presents_credential(&none, Some("tok%65n=x")));
-        // A bad escape in another parameter does not hide the token.
-        assert!(presents_credential(&none, Some("title=%zz&token=x")));
-        assert!(!presents_credential(&none, None));
-        assert!(!presents_credential(&none, Some("title=token")));
-        assert!(!presents_credential(&none, Some("tokens=x&mytoken=y")));
-    }
 }

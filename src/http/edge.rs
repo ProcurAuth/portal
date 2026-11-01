@@ -12,11 +12,6 @@
 //!   answer never shows the cause (protocol 9.8). The cause is in the log and in the measures.
 //!
 //! A key check reads no database row and writes none (portal 8.3).
-//!
-//! A key is a credential. When the original request was not secure (see
-//! [`crate::transport::is_secure`]) and `session.allow_insecure_http` is `false`, a request with an
-//! `Authorization` header gets 403 `insecure_transport`. The edge reads the original scheme in
-//! `X-Forwarded-Proto`, which Traefik sets on the ForwardAuth request.
 
 use super::*;
 use crate::decision::{self, Matching, Owner, Question};
@@ -33,17 +28,6 @@ pub(super) fn handle_verify_key(
     headers: &HeaderMap,
     client: &Client,
 ) -> HttpResponse {
-    // A key is a credential. Traefik sends the scheme of the original request in
-    // `X-Forwarded-Proto`, and the portal reads it from a trusted proxy only. A request that is not
-    // secure and presents `Authorization` gets 403 before the portal reads the key. The portal
-    // does not count or log it. A request with no `Authorization` follows the normal path.
-    if client.secrets_refused && headers.contains_key(hyper::header::AUTHORIZATION) {
-        return json_response(
-            StatusCode::FORBIDDEN,
-            r#"{"error":{"code":"insecure_transport","message":"this connection is not encrypted: the portal does not accept a key over plain http, use https"}}"#
-                .to_string(),
-        );
-    }
     match check(state, headers) {
         Ok(response) => response,
         Err(cause) => refuse(state, cause, client),

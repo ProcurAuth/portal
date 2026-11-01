@@ -593,21 +593,7 @@ fn http_full(
     headers: &[(&str, String)],
     body: &str,
 ) -> (u16, String, String) {
-    http_full_to("127.0.0.1", port, host, method, path, headers, body)
-}
-
-/// Like [`http_full`], to the address `to`. A connection to the address of the host has a peer that
-/// is not loopback.
-fn http_full_to(
-    to: &str,
-    port: u16,
-    host: &str,
-    method: &str,
-    path: &str,
-    headers: &[(&str, String)],
-    body: &str,
-) -> (u16, String, String) {
-    let mut s = TcpStream::connect((to, port)).unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
     // The portal waits for a connection that the proxy swallowed: up to 20 s.
     s.set_read_timeout(Some(Duration::from_secs(45))).unwrap();
     let mut req = format!(
@@ -991,24 +977,13 @@ async fn enroll_code_at(
     code_text: &str,
     name: &str,
 ) -> Result<Phone, EnrollFail> {
-    enroll_code_to(None, port, code_text, name).await
-}
-
-/// Like [`enroll_code_at`], to the address `host` when it is given.
-async fn enroll_code_to(
-    host: Option<&str>,
-    port: Option<u16>,
-    code_text: &str,
-    name: &str,
-) -> Result<Phone, EnrollFail> {
     let code = EnrollCode::parse(code_text).unwrap();
     let keys = inbox_core::noise::generate_keypair().unwrap();
     let (initiator, first) =
         EnrollInitiator::start(&keys.private, &code, name, "e2e").map_err(EnrollFail::Local)?;
-    let url = match (host, port) {
-        (Some(host), Some(port)) => format!("ws://{host}:{port}/v1/enroll"),
-        (None, Some(port)) => format!("ws://127.0.0.1:{port}/v1/enroll"),
-        _ => format!("ws://{}/v1/enroll", code.address),
+    let url = match port {
+        Some(port) => format!("ws://127.0.0.1:{port}/v1/enroll"),
+        None => format!("ws://{}/v1/enroll", code.address),
     };
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
     ws.send(Message::Binary(first.into())).await.unwrap();
@@ -1054,12 +1029,8 @@ enum Recv {
 
 impl Conn {
     async fn open(port: u16, dev: &Phone) -> Result<(Conn, ServerMsg), u16> {
-        Conn::open_at("127.0.0.1", port, dev).await
-    }
-
-    async fn open_at(host: &str, port: u16, dev: &Phone) -> Result<(Conn, ServerMsg), u16> {
         let (mut ws, _) =
-            tokio_tungstenite::connect_async(format!("ws://{host}:{port}/v1/session"))
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/session"))
                 .await
                 .unwrap();
         let hello = serde_json::to_vec(&SessionHello {
@@ -1678,220 +1649,6 @@ async fn one_port_serves_the_pages_the_producers_and_the_phones() {
 /// `inbox.devices.max_devices`. A connection that upgrades gives its permit of the pages back. With
 /// `max_connections = 3` and `max_devices = 1` the budget is 5 sessions: the sixth gets 503 before the
 /// upgrade, the pages still answer, and a closed session gives its permit back.
-/// The address of this host on its network: a connection to it has a peer that is not loopback.
-fn host_address() -> String {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-    socket
-        .connect("192.0.2.1:9")
-        .expect("this test needs a network interface with a route");
-    let address = socket.local_addr().unwrap().ip();
-    assert!(!address.is_loopback(), "an address that is not loopback");
-    address.to_string()
-}
-
-/// The secure transport on the real binary. The server listens on every address. The requests from
-/// the address of the host have a peer that is not loopback and that no trusted proxy announces.
-/// The portal then refuses the producer credentials, the sign-in and the enrollment code. The phones
-/// enroll, open a session and get an alert on the same plain connection: their routes are exempt.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_connection_that_is_not_secure_gets_no_secret_but_the_phones_and_the_alerts_work() {
-    let mut s = Server::setup();
-    let text = std::fs::read_to_string(s.config()).unwrap();
-    std::fs::write(
-        s.config(),
-        text.replace(
-            "listen_address = \"127.0.0.1:",
-            "listen_address = \"0.0.0.0:",
-        )
-        .replace(
-            "secret_mode = \"provided\"",
-            "bind = \"none\"\n  secret_mode = \"provided\"",
-        ),
-    )
-    .unwrap();
-    s.start();
-    let (net, port) = (host_address(), s.port);
-    let host = format!("127.0.0.1:{port}");
-    let admin = s.session().cookie.clone();
-    let bearer = ("Authorization", format!("Bearer {}", s.token));
-    let alert = r#"{"group":"infra","title":"over plain http"}"#;
-
-    // The producer credential: refused from the network before anything reads it.
-    let (st, _, body) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        "/api/v1/alerts",
-        std::slice::from_ref(&bearer),
-        alert,
-    );
-    assert_eq!(st, 403, "{body}");
-    let body: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(body["error"]["code"], "insecure_transport");
-    let (st, _, body) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        &format!("/api/v1/alerts?token={}", s.token),
-        &[],
-        alert,
-    );
-    assert_eq!(st, 403, "{body}");
-    // A spoofed header from a peer that is not trusted changes nothing.
-    let (st, _, _) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        "/api/v1/alerts",
-        &[
-            bearer.clone(),
-            ("X-Forwarded-Proto", "https".into()),
-            ("X-Forwarded-Host", host.clone()),
-        ],
-        alert,
-    );
-    assert_eq!(st, 403);
-    // No credential: the normal answer of the inbox.
-    let (st, _, _) = http_full_to(&net, port, &host, "POST", "/api/v1/alerts", &[], alert);
-    assert_eq!(st, 401);
-    // The sign-in: no form, no cookie, no password check.
-    let (st, head, page) = http_full_to(&net, port, &host, "GET", "/auth/login", &[], "");
-    assert_eq!(st, 403, "{page}");
-    assert!(page.contains("Sign-in is disabled") && !page.contains("type=\"password\""));
-    assert!(!head.to_ascii_lowercase().contains("set-cookie"), "{head}");
-    let form =
-        format!("login=root&password={SUPERADMIN_PASSWORD}&csrf=x&rd=%2F&sig=x").replace(' ', "+");
-    let (st, head, page) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        "/auth/login",
-        &[
-            ("Content-Type", "application/x-www-form-urlencoded".into()),
-            ("Origin", format!("http://{host}")),
-        ],
-        &form,
-    );
-    assert_eq!(st, 403, "{page}");
-    assert!(!head.to_ascii_lowercase().contains("set-cookie"), "{head}");
-
-    // The enrollment code is not made on the plain connection from the network.
-    let csrf = inbox_csrf(port, &admin);
-    let (st, _, page) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        "/auth/settings/inbox/code",
-        &[
-            ("Content-Type", "application/x-www-form-urlencoded".into()),
-            ("Origin", format!("http://{host}")),
-            ("Cookie", admin.clone()),
-        ],
-        &format!("csrf={csrf}"),
-    );
-    assert_eq!(st, 403, "{page}");
-    assert!(!page.contains("enroll-code"));
-
-    // The phones: enrollment and session on the plain connection from the network.
-    let code = code_for(&s, SUPERADMIN);
-    let phone = enroll_code_to(Some(&net), Some(port), &code, "plain phone")
-        .await
-        .unwrap();
-    let (mut c, _) = Conn::open_at(&net, port, &phone).await.unwrap();
-    c.subscribe("infra").await;
-    let (st, _, body) = http_full_to(
-        "127.0.0.1",
-        port,
-        &host,
-        "POST",
-        "/api/v1/alerts",
-        std::slice::from_ref(&bearer),
-        r#"{"group":"infra","title":"to the plain phone"}"#,
-    );
-    assert_eq!(st, 201, "{body}");
-    let got = c.alert().await;
-    assert_eq!(got.title, "to the plain phone");
-    c.ack(&got.alert_id, AckStage::Received).await;
-
-    // The refusals leave no credential in the log.
-    let log = s.log();
-    assert!(!log.contains(&s.token), "the token is not in the log");
-    assert!(
-        !log.contains(SUPERADMIN_PASSWORD),
-        "the password is not in the log"
-    );
-    assert!(
-        !log.contains("insecure_http_allowed"),
-        "no warning without the override"
-    );
-    drop(c);
-
-    // A trusted proxy that announces https makes the request secure: the token is examined.
-    // A trusted proxy that announces http, or two values, gets the refusal.
-    s.stop();
-    let text = std::fs::read_to_string(s.config()).unwrap();
-    std::fs::write(
-        s.config(),
-        text.replace("trusted_proxies = []", "trusted_proxies = [\"0.0.0.0/0\"]"),
-    )
-    .unwrap();
-    s.start();
-    let behind = |proto: &str, twice: bool| {
-        let mut headers = vec![
-            bearer.clone(),
-            ("X-Forwarded-Proto", proto.to_string()),
-            ("X-Forwarded-Host", host.clone()),
-        ];
-        if twice {
-            headers.push(("X-Forwarded-Proto", proto.to_string()));
-        }
-        let body = format!(r#"{{"group":"infra","title":"behind {proto} {twice}"}}"#);
-        http_full_to(&net, port, &host, "POST", "/api/v1/alerts", &headers, &body).0
-    };
-    assert_eq!(
-        behind("https", false),
-        201,
-        "a trusted proxy announces https"
-    );
-    assert_eq!(behind("http", false), 403);
-    assert_eq!(behind("https", true), 403, "two headers");
-
-    // The explicit override: the credential is examined on plain http, with one warning at start.
-    s.stop();
-    let text = std::fs::read_to_string(s.config()).unwrap();
-    std::fs::write(
-        s.config(),
-        text.replace(
-            "bind = \"none\"",
-            "bind = \"none\"\n  allow_insecure_http = true",
-        ),
-    )
-    .unwrap();
-    s.start();
-    let (st, _, body) = http_full_to(
-        &net,
-        port,
-        &host,
-        "POST",
-        "/api/v1/alerts",
-        std::slice::from_ref(&bearer),
-        r#"{"group":"infra","title":"override"}"#,
-    );
-    assert_eq!(st, 201, "{body}");
-    assert_eq!(
-        s.log()
-            .matches("\"event\":\"insecure_http_allowed\"")
-            .count(),
-        1,
-        "one warning at start"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn phone_sessions_have_a_budget_that_the_pages_do_not_share() {
     let mut s = Server::setup();

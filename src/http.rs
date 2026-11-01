@@ -86,28 +86,19 @@ type HttpResponse = Response<ResponseBody>;
 
 /// The data that the portal knows about the browser of one request.
 struct Client {
-    /// True when a trusted proxy announced `https` for this request. This value sets the cookie
-    /// names and the `Secure` attribute. A header from another peer does not count.
+    /// True when the browser uses HTTPS. This value sets the cookie names and the `Secure` attribute.
     https: bool,
     ip: Option<IpAddr>,
     /// The value that a session issued to this client is bound to.
     binding: Binding,
-    /// True when the portal must refuse everything that carries or shows a secret on this request:
-    /// the request is not secure (see [`transport::is_secure`]) and
-    /// `session.allow_insecure_http` is `false`.
-    secrets_refused: bool,
 }
 
 impl Client {
-    /// `peer` is the TCP peer. `ip` is the client address that `server.trusted_proxies` gives.
-    fn new(state: &AppState, headers: &HeaderMap, peer: IpAddr, ip: Option<IpAddr>) -> Self {
-        let trusted = &state.config.server.trusted_proxies;
+    fn new(state: &AppState, headers: &HeaderMap, ip: Option<IpAddr>) -> Self {
         Self {
-            https: transport::forwarded_https(headers, peer, trusted),
+            https: transport::is_https(headers),
             ip,
             binding: transport::binding(state.config.session.bind, headers, ip),
-            secrets_refused: !state.config.session.allow_insecure_http
-                && !transport::is_secure(headers, peer, trusted),
         }
     }
 }
@@ -439,18 +430,6 @@ async fn serve_until(
             ],
         );
     }
-    if state.config.session.allow_insecure_http {
-        log(
-            &state,
-            LogLevel::Warn,
-            "insecure_http_allowed",
-            &[(
-                "message",
-                "session.allow_insecure_http is true: anyone on the network can read the passwords, the keys and the session cookies"
-                    .to_string(),
-            )],
-        );
-    }
     let stopped = Arc::new(tokio::sync::Notify::new());
     {
         let stopped = Arc::clone(&stopped);
@@ -718,7 +697,7 @@ async fn handle_request(
         &state.config.server.trusted_proxies,
     );
     let client_ip = Some(found_ip);
-    let client = Client::new(&state, request.headers(), remote_addr.ip(), client_ip);
+    let client = Client::new(&state, request.headers(), client_ip);
     // The inbox owns `/v1/`, `/api/v1/`, `/readyz` and `/api/version` on this listener: the phones
     // (WebSocket), the API of the producers and the webhooks. No session and no other handler apply
     // to them. Without the block `inbox`, these paths are not found.
@@ -746,13 +725,10 @@ async fn handle_request(
     } else if method == Method::GET && path == HEALTH_PATH {
         text_response(StatusCode::OK, "ok\n")
     } else if let Some(app) = inbox_app {
-        crate::inbox::serve(app, found_ip, client.secrets_refused, request).await
+        crate::inbox::serve(app, found_ip, request).await
     } else if method == Method::GET && path == READY_PATH && state.config.inbox.is_none() {
         // Without the block `inbox`, the instance is ready whenever it runs.
         text_response(StatusCode::OK, "ready\n")
-    } else if let Some(refusal) = insecure_refusal(&method, &path, &client) {
-        // Not secure, and `session.allow_insecure_http` is `false`: the body is never read.
-        refusal
     } else if inbox_page::is_inbox_path(&path) {
         inbox_page::handle(&state, request, &client).await
     } else if method == Method::GET && path == ui::keys::PATH {
@@ -863,61 +839,6 @@ async fn handle_request(
     );
 
     Ok(response)
-}
-
-/// The sentence of the sign-in page when the connection is not encrypted.
-const SIGN_IN_DISABLED: &str = "This connection is not encrypted. Sign-in is disabled. Use https.";
-
-/// The routes that carry or show a secret, and the sentence that explains the refusal. The
-/// function answers `Some(403)` for them when the request is not secure and
-/// `session.allow_insecure_http` is `false`. It reads no body. The other routes get `None`.
-///
-/// - The sign-in page and its POST carry the password.
-/// - The POST of a new user carries a password. The POST of a change of an account is checked in
-///   its own handler, because it also changes grants.
-/// - The creation of a key and the creation of an enrollment code show a secret one time.
-fn insecure_refusal(method: &Method, path: &str, client: &Client) -> Option<HttpResponse> {
-    if !client.secrets_refused {
-        return None;
-    }
-    let get = method == Method::GET;
-    let post = method == Method::POST;
-    if path == LOGIN_PATH && (get || post) {
-        return Some(insecure_login_page());
-    }
-    let text = if post && path == USERS_ADD_PATH {
-        ui::settings::NOT_ENCRYPTED
-    } else if (get && path == ui::keys::NEW_PATH) || (post && path == ui::keys::CREATE_PATH) {
-        "This connection is not encrypted. The portal shows a new key one time, so it does not make a key here. Use https."
-    } else if post && path == ui::inbox::CODE_PATH {
-        "This connection is not encrypted. The portal shows an enrollment code one time, so it does not make a code here. Use https."
-    } else {
-        return None;
-    };
-    Some(insecure_page(text))
-}
-
-/// The sign-in page of a connection that is not encrypted. It has the notice and no form, no
-/// password field and no cookie. The status is 403.
-fn insecure_login_page() -> HttpResponse {
-    html_response(
-        StatusCode::FORBIDDEN,
-        ui::auth_document(
-            "Authentication",
-            &format!(
-                r#"<div class="error" role="alert">{}</div>"#,
-                html_escape(SIGN_IN_DISABLED)
-            ),
-        ),
-    )
-}
-
-/// The answer 403 of a route that shows or carries a secret on a connection that is not encrypted.
-fn insecure_page(text: &str) -> HttpResponse {
-    html_response(
-        StatusCode::FORBIDDEN,
-        ui::message_page("Connection not encrypted", text, "Back to the panel"),
-    )
 }
 
 /// In the mode `static`, the server does not use the grants that the database keeps.
@@ -1328,8 +1249,7 @@ async fn handle_settings(
         }
         ui::settings::USERS_PATH => {
             let (users, snapshot) = load_admin_data(state).await;
-            let mut view = users_view(state, &catalog, uri, &users_token, users, snapshot);
-            view.no_passwords = client.secrets_refused;
+            let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
             ui::users_page(&frame, &view)
         }
         // "Give access" on the page of a service: the form picks an account, and the page of this
@@ -1364,10 +1284,7 @@ async fn handle_settings(
                 .unwrap_or_default();
             let (users, snapshot) = load_admin_data(state).await;
             match user_view(state, &catalog, uri, &users_token, asked, users, snapshot) {
-                Some(mut view) => {
-                    view.no_passwords = client.secrets_refused;
-                    ui::user_page(&frame, &view)
-                }
+                Some(view) => ui::user_page(&frame, &view),
                 None => return handle_not_found(state, &Method::GET, uri, headers, client),
             }
         }
@@ -1535,7 +1452,6 @@ fn users_view<'a>(
         .collect();
     ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
-        no_passwords: false,
         add_open: query_value(uri, "add").as_deref() == Some("1"),
         mode: state.policy.mode,
         catalog,
@@ -1607,7 +1523,6 @@ fn user_view<'a>(
     }
     Some(ui::UserView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
-        no_passwords: false,
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
@@ -2841,12 +2756,6 @@ async fn handle_users_update(
     let login = form.remove("login").unwrap_or_default();
     // An empty value means "keep the password".
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The page offers no password field when the request is not secure. A client that sends a
-    // password anyway gets a refusal before any hash: the grants of the form stay possible.
-    if client.secrets_refused && !password.is_empty() {
-        state.metrics.user_admin("update", "rejected");
-        return insecure_page(ui::settings::NOT_ENCRYPTED);
-    }
     // The form of the boxes carries `grants`. Without it, the request changes no grant: the
     // password form of the same page sends no box.
     let edit_grants = form.remove("grants").as_deref() == Some("1");
