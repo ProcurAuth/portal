@@ -49,6 +49,8 @@ pub const GIVE_PATH: &str = "/auth/settings/give";
 pub const LOGINS_PATH: &str = "/auth/settings/logins";
 /// The page of the keys (portal 5.8a).
 pub const KEYS_PATH: &str = "/auth/keys";
+/// The page of the inbox: the first page of the tab "Inbox".
+pub const INBOX_PATH: &str = crate::inbox_actions::PAGE;
 
 /// The path of the page of one account. A login has only `a-z`, `0-9`, `.`, `-` and `_`, so the
 /// path needs no encoding. The caller escapes the path for HTML all the same.
@@ -88,23 +90,18 @@ pub enum Tab {
     Logins,
     /// The page of the keys (portal 5.8). Each user who can read keys sees it.
     Keys,
+    /// The pages of the inbox. Each user with a right of the service `inbox` sees it.
+    Inbox,
 }
 
 impl Tab {
-    /// Each tab, with the page of the keys.
-    pub(super) fn all_with_keys() -> Vec<Tab> {
-        Self::ALL.to_vec()
-    }
-
-    /// The tabs of the superadmin, with the page of the keys when the portal accepts keys.
-    const ALL: [Tab; 4] = [Tab::Users, Tab::Services, Tab::Logins, Tab::Keys];
-
     fn path(self) -> &'static str {
         match self {
             Self::Users => USERS_PATH,
             Self::Services => SERVICES_PATH,
             Self::Logins => LOGINS_PATH,
             Self::Keys => KEYS_PATH,
+            Self::Inbox => INBOX_PATH,
         }
     }
 
@@ -114,6 +111,7 @@ impl Tab {
             Self::Services => "Services",
             Self::Logins => "Activity",
             Self::Keys => "Keys",
+            Self::Inbox => "Inbox",
         }
     }
 }
@@ -121,10 +119,30 @@ impl Tab {
 /// The data that every settings page needs around its content.
 pub struct Frame<'a> {
     pub logout_token: &'a str,
-    /// The portal accepts keys: the tabs have the page of the keys.
+    /// The viewer sees the tab "Keys": the portal accepts keys.
     pub keys: bool,
-    /// The viewer is the superadmin, who sees all the tabs. Another user sees only the keys.
+    /// The viewer sees the tab "Inbox": the file has the block `inbox`, and the viewer has a right
+    /// of the service.
+    pub inbox: bool,
+    /// The viewer is the superadmin, who sees the tabs Users, Services and Activity too.
     pub superadmin: bool,
+}
+
+impl Frame<'_> {
+    /// The tabs of the viewer, in the order of the page.
+    pub fn tabs(&self) -> Vec<Tab> {
+        let mut tabs = Vec::new();
+        if self.superadmin {
+            tabs.extend([Tab::Users, Tab::Services, Tab::Logins]);
+        }
+        if self.keys {
+            tabs.push(Tab::Keys);
+        }
+        if self.inbox {
+            tabs.push(Tab::Inbox);
+        }
+        tabs
+    }
 }
 
 /// The outcome of the last action. The outcome is one code from a fixed list. The URL never
@@ -242,22 +260,12 @@ const ICONS: [&str; 20] = [
 /// The page around a tab. It has a header, the tab links, then `content`. `title` names the page
 /// for the browser and for the screen reader. Each page loads the small script of the settings pages.
 fn page(tab: Tab, frame: &Frame, title: &str, content: &str, wide: bool) -> String {
-    let tabs: Vec<Tab> = Tab::ALL
-        .into_iter()
-        .filter(|t| frame.keys || *t != Tab::Keys)
-        .collect();
-    shell(&tabs, tab, frame, title, content, wide)
+    shell(&frame.tabs(), tab, frame, title, content, wide)
 }
 
-/// The page of the keys: the tabs, then `content`.
-pub(super) fn page_shell(
-    tabs: &[Tab],
-    tab: Tab,
-    frame: &Frame,
-    title: &str,
-    content: &str,
-) -> String {
-    shell(tabs, tab, frame, title, content, true)
+/// A wide page of the tab `tab`: the tabs of the viewer, then `content`.
+pub(super) fn page_shell(tab: Tab, frame: &Frame, title: &str, content: &str) -> String {
+    shell(&frame.tabs(), tab, frame, title, content, true)
 }
 
 /// The page around the tabs `tabs`, with `tab` as the current one. A user who is not the
@@ -1763,6 +1771,7 @@ mod tests {
         Frame {
             logout_token: "out<",
             keys: false,
+            inbox: false,
             superadmin: true,
         }
     }
@@ -2572,5 +2581,42 @@ mod tests {
         ] {
             assert!(notice_for(code).is_some(), "{code}");
         }
+    }
+
+    #[test]
+    fn the_tabs_follow_the_viewer_the_keys_and_the_inbox() {
+        let tabs = |superadmin, keys, inbox| {
+            Frame {
+                logout_token: "t",
+                keys,
+                inbox,
+                superadmin,
+            }
+            .tabs()
+        };
+        assert_eq!(
+            tabs(true, true, true),
+            [
+                Tab::Users,
+                Tab::Services,
+                Tab::Logins,
+                Tab::Keys,
+                Tab::Inbox
+            ]
+        );
+        assert_eq!(
+            tabs(true, false, false),
+            [Tab::Users, Tab::Services, Tab::Logins]
+        );
+        assert_eq!(tabs(false, true, true), [Tab::Keys, Tab::Inbox]);
+        assert_eq!(tabs(false, false, true), [Tab::Inbox]);
+        assert_eq!(tabs(false, true, false), [Tab::Keys]);
+        assert!(tabs(false, false, false).is_empty());
+        // A page shows the links of the tabs of its frame, and marks the current one.
+        let html = users_page(&frame(), &view(&Catalog::default()));
+        assert!(
+            !html.contains("/auth/settings/inbox"),
+            "no inbox in this frame"
+        );
     }
 }

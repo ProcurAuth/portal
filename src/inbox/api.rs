@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use super::db::{InsertOutcome, NewAlert};
 use super::http::{json, read_body, Resp};
 use super::log;
+use super::rights::{Decision, KeyCheck};
 use super::spool::{self, Accepted as Spooled};
 use super::state::{App, Producer};
 use super::util::{hex, is_hex_id, now_ms, truncate_chars};
@@ -24,6 +25,8 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// The seconds in the header `Retry-After` of the answer, for a limit that has no room.
+    retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -32,7 +35,14 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    /// The same error, with the header `Retry-After`.
+    pub fn retry_after(mut self, seconds: u64) -> ApiError {
+        self.retry_after = Some(seconds);
+        self
     }
 
     pub fn status(&self) -> StatusCode {
@@ -56,7 +66,15 @@ impl ApiError {
     /// The JSON answer of the error.
     pub fn into_response(self) -> Resp {
         let body = json!({ "error": { "code": self.code, "message": self.message } });
-        json(self.status, &body)
+        let mut response = json(self.status, &body);
+        if let Some(seconds) = self.retry_after {
+            if let Ok(value) = hyper::header::HeaderValue::from_str(&seconds.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(hyper::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -313,11 +331,40 @@ impl ProducerQuery {
     }
 }
 
-fn producer<'a>(
+/// Who sends an alert: a producer of the file, or a key of the portal.
+enum Sender<'a> {
+    Producer(&'a Producer),
+    Key { id: String },
+}
+
+impl Sender<'_> {
+    /// The name of the sender in the source of an alert.
+    fn name(&self) -> String {
+        match self {
+            Sender::Producer(p) => p.name.clone(),
+            Sender::Key { id } => format!("key:{id}"),
+        }
+    }
+
+    /// Whether a notification "resolved" of a webhook becomes an alert. A key never sends them.
+    fn sends_resolved(&self) -> bool {
+        match self {
+            Sender::Producer(p) => p.webhook_send_resolved,
+            Sender::Key { .. } => false,
+        }
+    }
+}
+
+/// The text of a key of the portal starts with this prefix.
+const KEY_PREFIX: &str = "mcp_";
+
+/// Finds who sends. The token of a producer of the file comes first: it never depends on the
+/// portal. A token that is not one of them can be a key of the portal.
+fn sender<'a>(
     app: &'a App,
     headers: &HeaderMap,
     query: &ProducerQuery,
-) -> Result<&'a Producer, ApiError> {
+) -> Result<Sender<'a>, ApiError> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -331,25 +378,101 @@ fn producer<'a>(
             "missing or invalid bearer token",
         )
     };
+    let not_ready = || {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "directory_not_ready",
+            "the portal cannot check keys yet, retry in a moment",
+        )
+    };
     let token = token.ok_or_else(unauthorized)?;
-    match app.producer_for_token(token) {
-        Some(p) => Ok(p),
-        None => {
+    if let Some(p) = app.producer_for_token(token) {
+        return Ok(Sender::Producer(p));
+    }
+    let Some(authorizer) = app.authorizer() else {
+        // Before the portal gives the authorizer, a key cannot be checked.
+        if token.starts_with(KEY_PREFIX) {
+            return Err(not_ready());
+        }
+        app.metrics.auth_failure("producer_token");
+        return Err(unauthorized());
+    };
+    match authorizer.check_key(token) {
+        KeyCheck::Valid { key_id } => Ok(Sender::Key { id: key_id }),
+        KeyCheck::NotReady => Err(not_ready()),
+        KeyCheck::NotAKey => {
             app.metrics.auth_failure("producer_token");
+            Err(unauthorized())
+        }
+        KeyCheck::Invalid => {
+            app.metrics.auth_failure("producer_key");
             Err(unauthorized())
         }
     }
 }
 
-fn check_group(p: &Producer, group: &str) -> Result<(), ApiError> {
-    if p.groups.iter().any(|g| g == group) {
-        Ok(())
-    } else {
-        Err(ApiError::new(
+/// Lets the sender do `action` on the group. A producer of the file needs the group in its list.
+/// A key needs the decision of the portal. For `alert.send` the decision counts one use, except for
+/// a critical group: a critical group never has a limit.
+fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Result<(), ApiError> {
+    let refused = || {
+        ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden_group",
-            format!("producer may not alert group {group:?}"),
-        ))
+            format!("the sender has no permission {action:?} on the group {group:?}"),
+        )
+    };
+    match sender {
+        Sender::Producer(p) => {
+            if p.groups.iter().any(|g| g == group) {
+                Ok(())
+            } else {
+                Err(refused())
+            }
+        }
+        Sender::Key { id } => {
+            let Some(authorizer) = app.authorizer() else {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "directory_not_ready",
+                    "the portal cannot check keys yet, retry in a moment",
+                ));
+            };
+            let count_use = action == crate::inbox_actions::ALERT_SEND && !app.is_critical(group);
+            match authorizer.decide(id, action, group, count_use) {
+                Decision::Allowed => Ok(()),
+                Decision::Refused {
+                    reason: "key_not_valid",
+                } => {
+                    app.metrics.auth_failure("producer_key");
+                    Err(ApiError::new(
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                        "missing or invalid bearer token",
+                    ))
+                }
+                Decision::Refused { .. } => {
+                    app.metrics.auth_failure("producer_rights");
+                    Err(refused())
+                }
+                Decision::Limited { retry_after } => Err(ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "the limit of alerts of this key is reached, retry later",
+                )
+                .retry_after(retry_after)),
+                Decision::NotReady => Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "directory_not_ready",
+                    "the portal cannot check keys yet, retry in a moment",
+                )),
+                Decision::Unavailable => Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "rights_unavailable",
+                    "the portal cannot count the use of this key now, retry in a moment",
+                )),
+            }
+        }
     }
 }
 
@@ -440,16 +563,16 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
         headers,
         body,
     } = read_call(app, request).await?;
-    let p = producer(app, &headers, &query)?;
+    let who = sender(app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
-    check_group(p, &req.group)?;
+    authorize(app, &who, crate::inbox_actions::ALERT_SEND, &req.group)?;
     let key = idempotency_key(&headers, &[&req.group, &req.title])?;
     let accepted = accept_alert(
         app,
         NewAlert {
             group: req.group,
             title: req.title,
-            source: format!("producer:{}", p.name),
+            source: format!("producer:{}", who.name()),
             idempotency_key: key,
         },
         "producer",
@@ -469,7 +592,7 @@ async fn get_alert_inner(
     id: &str,
 ) -> Result<Resp, ApiError> {
     let query = ProducerQuery::read(&request)?;
-    let p = producer(app, request.headers(), &query)?;
+    let who = sender(app, request.headers(), &query)?;
     let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such alert");
     if !is_hex_id(id) {
         return Err(not_found());
@@ -480,8 +603,18 @@ async fn get_alert_inner(
         .await
         .map_err(ApiError::storage)?;
     let detail = detail.ok_or_else(not_found)?;
-    if !p.groups.contains(&detail.summary.group) {
-        return Err(not_found());
+    // A sender that may not read the group sees the same answer as for an alert that is not there.
+    if let Err(error) = authorize(
+        app,
+        &who,
+        crate::inbox_actions::ALERT_READ,
+        &detail.summary.group,
+    ) {
+        return Err(if error.status() == StatusCode::FORBIDDEN {
+            not_found()
+        } else {
+            error
+        });
     }
     Ok(json(
         StatusCode::OK,
@@ -509,8 +642,8 @@ async fn alertmanager_inner(
         headers,
         body,
     } = read_call(app, request).await?;
-    let p = producer(app, &headers, &query)?;
-    check_group(p, group)?;
+    let who = sender(app, &headers, &query)?;
+    authorize(app, &who, crate::inbox_actions::ALERT_SEND, group)?;
     let payload: Value = parse_json(&body)?;
     let alerts = payload
         .get("alerts")
@@ -526,7 +659,7 @@ async fn alertmanager_inner(
     let (mut created, mut duplicates, mut skipped) = (0usize, 0usize, 0usize);
     for a in alerts {
         let status = a.get("status").and_then(Value::as_str).unwrap_or("firing");
-        if status == "resolved" && !p.webhook_send_resolved {
+        if status == "resolved" && !who.sends_resolved() {
             skipped += 1;
             continue;
         }
@@ -559,7 +692,7 @@ async fn alertmanager_inner(
             NewAlert {
                 group: group.to_string(),
                 title: truncate_chars(&title, MAX_TITLE_CHARS),
-                source: format!("webhook:{}", p.name),
+                source: format!("webhook:{}", who.name()),
                 idempotency_key: key,
             },
             "webhook",
@@ -597,8 +730,8 @@ async fn notify_inner(
         headers,
         body,
     } = read_call(app, request).await?;
-    let p = producer(app, &headers, &query)?;
-    check_group(p, group)?;
+    let who = sender(app, &headers, &query)?;
+    authorize(app, &who, crate::inbox_actions::ALERT_SEND, group)?;
     let header_title = headers
         .get("x-title")
         .and_then(|v| v.to_str().ok())
@@ -626,7 +759,7 @@ async fn notify_inner(
         NewAlert {
             group: group.to_string(),
             title,
-            source: format!("notify:{}", p.name),
+            source: format!("notify:{}", who.name()),
             idempotency_key: key,
         },
         "notify",

@@ -360,7 +360,7 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
         );
     }
     out.push_str("</form></section>");
-    page_shell(&tabs_for(frame), Tab::Keys, frame, &title, &out)
+    page_shell(Tab::Keys, frame, &title, &out)
 }
 
 fn key_row(out: &mut String, view: &KeysView<'_>, line: &KeyLine) {
@@ -582,16 +582,7 @@ pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
         );
     }
     out.push_str("</section>");
-    page_shell(&tabs_for(frame), Tab::Keys, frame, "Keys", &out)
-}
-
-/// The tabs that the user sees: the superadmin sees all of them. Another user sees only this one.
-fn tabs_for(frame: &Frame) -> Vec<Tab> {
-    if frame.superadmin {
-        Tab::all_with_keys()
-    } else {
-        vec![Tab::Keys]
-    }
+    page_shell(Tab::Keys, frame, "Keys", &out)
 }
 
 /// The page that shows the text of a new key one time (portal 5.2, 5.8c).
@@ -614,7 +605,7 @@ pub fn new_key_page(frame: &Frame, key: &NewKey<'_>) -> String {
         out,
         r#"<p><a class="button button--primary" href="{PATH}">Back to the keys</a></p></section></div></div>"#
     );
-    shell(&tabs_for(frame), Tab::Keys, frame, "New key", &out, true)
+    shell(&frame.tabs(), Tab::Keys, frame, "New key", &out, true)
 }
 
 /// The grant of a new key that the form offers as a box, from a grant of the owner.

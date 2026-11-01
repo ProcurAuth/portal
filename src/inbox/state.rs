@@ -112,12 +112,24 @@ pub struct App {
     pub stop: crate::shutdown::Stop,
     /// The WebSockets that are open, also those that did not finish their handshake.
     pub sockets: AtomicUsize,
+    /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.
+    pub authorizer: std::sync::OnceLock<std::sync::Arc<dyn super::rights::Authorizer>>,
 }
 
 impl App {
     /// Alerts created before this Unix time (ms) have expired for delivery.
     pub fn delivery_cutoff(&self) -> i64 {
         super::util::now_ms() - self.config.storage.delivery_ttl.as_millis() as i64
+    }
+
+    /// The authorizer of the portal. `None` before the portal gives it.
+    pub fn authorizer(&self) -> Option<&std::sync::Arc<dyn super::rights::Authorizer>> {
+        self.authorizer.get()
+    }
+
+    /// Whether the group is critical: a limit never applies to it.
+    pub fn is_critical(&self, group: &str) -> bool {
+        self.config.groups.get(group).is_some_and(|g| g.critical)
     }
 
     pub fn group_name(&self, id: &str) -> String {

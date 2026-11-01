@@ -90,6 +90,12 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
             "the id portal is the id of the service of the portal: set another portal.id".into(),
         ));
     }
+    // The id `inbox` is the id of the service of the inbox (inbox rights).
+    if id == crate::inbox_actions::SERVICE {
+        return Err(fail(
+            "the id inbox is the id of the service of the inbox: set another portal.id".into(),
+        ));
+    }
     if id.chars().count() > MAX_ID_CHARS {
         return Err(fail(format!(
             "id {id:?} is longer than {MAX_ID_CHARS} characters: set a shorter portal.id"

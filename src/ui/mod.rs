@@ -14,6 +14,7 @@
 
 pub mod grant_editor;
 pub mod keys;
+pub mod inbox;
 pub mod settings;
 
 use std::fmt::Write as _;
@@ -704,6 +705,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
     let frame = Frame {
         logout_token: "demo",
         keys: true,
+        inbox: true,
         superadmin: true,
     };
     Some(match name {

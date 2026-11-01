@@ -1,7 +1,7 @@
 //! The registry of the live sessions of the phones.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -18,6 +18,9 @@ pub struct Live {
     pub wake: Arc<Notify>,
     /// Set to a WebSocket close code to terminate the session.
     pub kick: watch::Sender<Option<u16>>,
+    /// Set when the subscriptions of the device changed without the phone: the session then sends
+    /// the message `subscriptions`.
+    pub resub: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +66,15 @@ impl Hub {
             if let Some(l) = map.get(id) {
                 l.wake.notify_one();
             }
+        }
+    }
+
+    /// Tells the session of `device_id`, when it is live here, that its subscriptions changed. The
+    /// session sends the message `subscriptions` to the phone.
+    pub fn subscriptions_changed(&self, device_id: &str) {
+        if let Some(l) = self.sessions.lock().expect("hub lock").get(device_id) {
+            l.resub.store(true, Ordering::SeqCst);
+            l.wake.notify_one();
         }
     }
 

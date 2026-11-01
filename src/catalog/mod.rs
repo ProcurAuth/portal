@@ -234,6 +234,38 @@ impl Catalog {
         }
     }
 
+    /// The same catalogue with one more service that the portal itself gives, such as the service
+    /// `inbox`. The service owns no path: the gate does not change. The service goes in the group
+    /// with its name, or in a new group. An id that the catalogue has already stays as it is.
+    pub fn with_internal(mut self, service: Service) -> Catalog {
+        if self
+            .groups
+            .iter()
+            .any(|g| g.services.iter().any(|s| s.id == service.id))
+        {
+            return self;
+        }
+        let slot = match self.groups.iter().position(|g| g.name == service.group) {
+            Some(slot) => slot,
+            None => {
+                self.groups.push(Group {
+                    name: service.group.clone(),
+                    services: Vec::new(),
+                });
+                self.groups.len() - 1
+            }
+        };
+        self.groups[slot].services.push(service);
+        self.groups[slot]
+            .services
+            .sort_by_cached_key(|s| (s.weight, s.name.to_lowercase(), s.id.clone()));
+        self.groups.sort_by_cached_key(|g| {
+            let lightest = g.services.iter().map(|s| s.weight).min().unwrap_or(0);
+            (lightest, g.name.to_lowercase())
+        });
+        self
+    }
+
     /// The services that own the longest prefix of `segments`, if any.
     pub fn owner(&self, segments: &[String]) -> Option<&GateEntry> {
         (1..=segments.len())

@@ -436,8 +436,26 @@ time.when {
 
 .badge.badge--warn,
 .badge.badge--error,
-.badge.badge--danger {
+.badge.badge--danger,
+.badge.badge--ok {
   border-color: transparent;
+}
+
+/* The state colours win over the neutral pill above. A word stays in the pill: the colour is never alone. */
+.badge.badge--warn {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.badge.badge--error,
+.badge.badge--danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.badge.badge--ok {
+  background: var(--success-bg);
+  color: var(--success);
 }
 
 /* The head of a form that needs a button far from the top of a long page stays in view. */
@@ -461,6 +479,8 @@ time.when {
 
 .segmented {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border);
@@ -481,6 +501,7 @@ time.when {
   font-size: 12.5px;
   font-weight: 600;
   text-decoration: none;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1432,4 +1453,64 @@ input.keyText {
 .ge__more:focus-visible,
 .ge__group:focus-visible {
   outline-offset: -2px;
+}
+
+/* The inbox pages --------------------------------------------------------------------------- */
+
+.sendForm__row,
+.filterForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.sendForm__row > .uiField:nth-child(2) {
+  flex: 1 1 22rem;
+}
+
+.filterForm {
+  margin-bottom: 8px;
+}
+
+.docCode {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.docCode code {
+  padding: 0;
+  background: none;
+}
+
+.docList {
+  margin: 0 0 12px;
+  padding-left: 1.2em;
+}
+
+.docList li + li {
+  margin-top: 6px;
+}
+
+.docs {
+  display: grid;
+  gap: 8px;
+  max-width: 64rem;
+}
+
+.docs p,
+.docs ul,
+.docs .subTitle,
+.docs .dataTableWrap {
+  margin: 0;
+}
+
+.docs .subTitle {
+  margin-top: 10px;
 }

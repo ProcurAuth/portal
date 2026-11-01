@@ -30,6 +30,7 @@ mod peer;
 mod pg;
 mod ratelimit;
 mod replica;
+pub mod rights;
 mod shutdown;
 mod spool;
 mod state;
@@ -50,7 +51,6 @@ use zeroize::Zeroizing;
 use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBackend};
 pub use api::ApiError;
 use db::Db;
-pub use http::json as json_response;
 use hub::Hub;
 use peer::Cluster;
 use pg::{PgSettings, PgStore};
@@ -269,6 +269,14 @@ impl Slot {
         self.app.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    /// Gives the inbox what it needs for the rights. The portal calls it once, after the start.
+    /// Before this call the inbox makes no decision with keys and removes no subscription.
+    pub fn set_authorizer(&self, authorizer: Arc<dyn rights::Authorizer>) {
+        if let Some(app) = self.app() {
+            let _ = app.authorizer.set(authorizer);
+        }
+    }
+
     /// Makes an enrollment code for `login`. `None` without the block `inbox` or before the start.
     pub async fn create_enrollment_code(
         &self,
@@ -399,9 +407,11 @@ impl Slot {
             http,
             stop: crate::shutdown::Stop::default(),
             sockets: Default::default(),
+            authorizer: std::sync::OnceLock::new(),
             config,
         });
         tasks::spawn_background(Arc::clone(&app));
+        tokio::spawn(rights::run(Arc::clone(&app)));
         let mut handles = vec![tokio::spawn(http::accept_loop(
             Arc::clone(&app),
             devices_listener,

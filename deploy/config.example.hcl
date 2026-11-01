@@ -80,6 +80,7 @@ inbox {
   group "oncall" {
     name        = "On call"
     description = "Pages for the on-call engineer"
+    critical    = true   # a limit on alert.send never applies to this group
   }
 
   # Optional: alert sources. A token is made with `portal inbox token --out FILE`.
