@@ -89,14 +89,14 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           tools/build.sh apk
-          test -f "dist/inbox-${VERSION}.apk"
+          test -f "dist/portal-inbox-${VERSION}.apk"
       - name: Remove the signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: dist/inbox-${{ needs.prepare.outputs.version }}.apk
+          path: dist/portal-inbox-${{ needs.prepare.outputs.version }}.apk
           if-no-files-found: error
 
   publish:
@@ -131,4 +131,4 @@ jobs:
           [ "$PRERELEASE" = true ] && pre="--prerelease"
           # shellcheck disable=SC2086
           gh release create "$TAG" --verify-tag --title "portal $TAG" --generate-notes $pre \
-            dist/portal_"${VERSION}"_linux_*.tar.gz "dist/inbox-${VERSION}.apk" dist/SHA256SUMS
+            dist/portal_"${VERSION}"_linux_*.tar.gz "dist/portal-inbox-${VERSION}.apk" dist/SHA256SUMS

@@ -7,7 +7,7 @@
 #   /healthz, /readyz and /api/version of the portal answer 200
 #   a producer token is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong token is not (401)
 #   the routes of the phones are on the same port: a plain GET of /v1/session is 400, and an upgrade gives 101
-#   the metrics of the portal show inbox_* series
+#   the metrics of the portal show portal_inbox_* series
 #   an account that is not signed in cannot read the admin calls of the inbox (401)
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -61,5 +61,5 @@ check "alert with a wrong token" 401 "$(code -X POST "$pages/api/v1/alerts" \
 check "admin call without a session" 401 "$(code "$pages/auth/inbox/api/overview")"
 
 metrics=$(curl -s "$pages/metrics")
-printf '%s\n' "$metrics" | grep -q '^inbox_' || { echo "FAIL: /metrics has no inbox_ series" >&2; exit 1; }
-echo "ok   /metrics has inbox_ series ($(printf '%s\n' "$metrics" | grep -c '^inbox_') lines)"
+printf '%s\n' "$metrics" | grep -q '^portal_inbox_' || { echo "FAIL: /metrics has no portal_inbox_ series" >&2; exit 1; }
+echo "ok   /metrics has portal_inbox_ series ($(printf '%s\n' "$metrics" | grep -c '^portal_inbox_') lines)"

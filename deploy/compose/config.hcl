@@ -7,6 +7,7 @@
 
 server {
   listen_address  = "0.0.0.0:4181"
+  name            = "Portal"
   # No proxy in front of this stack: the client address is the address of the TCP peer.
   trusted_proxies = []
 }
@@ -48,7 +49,6 @@ logging {
 }
 
 inbox {
-  name            = "Inbox"
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {

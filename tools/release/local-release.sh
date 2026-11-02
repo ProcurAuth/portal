@@ -71,8 +71,8 @@ done
 if [ "$apk" = 1 ]; then
   echo "== apk"
   tools/android/build-apk.sh
-  [ -f "dist/inbox-$version.apk" ] || { echo "dist/inbox-$version.apk was not produced" >&2; exit 1; }
-  cp "dist/inbox-$version.apk" "$out/"
+  [ -f "dist/portal-inbox-$version.apk" ] || { echo "dist/portal-inbox-$version.apk was not produced" >&2; exit 1; }
+  cp "dist/portal-inbox-$version.apk" "$out/"
 fi
 
 (cd "$out" && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
@@ -80,7 +80,7 @@ fi
 if [ "$publish" = 1 ]; then
   echo "== publish $tag"
   set -- "$out"/*.tar.gz "$out"/SHA256SUMS
-  [ "$apk" = 1 ] && set -- "$@" "$out/inbox-$version.apk"
+  [ "$apk" = 1 ] && set -- "$@" "$out/portal-inbox-$version.apk"
   # shellcheck disable=SC2086
   gh release create "$tag" --verify-tag --title "portal $tag" --generate-notes $pre "$@"
 else

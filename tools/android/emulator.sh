@@ -9,8 +9,8 @@
 #
 # Requires /dev/kvm. The emulator reaches the host through the Docker bridge
 # gateway (printed by `start`, usually 172.17.0.1): set `inbox.devices.public_address`
-# to <gateway>:<port> of a inbox published on the host, make an enrollment code on the
-# page "My phones", and open the link `inbox://enroll?...` on the phone (for example
+# to <gateway>:<port> of an inbox published on the host, make an enrollment code on the
+# page "My phones", and open the link `portal-inbox://enroll?...` on the phone (for example
 # `adb shell am start -a android.intent.action.VIEW -d '<link>'`). The host network is not used: the
 # emulator's virtual display would clash with the desktop's X server.
 set -eu
@@ -22,7 +22,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 
 apk_path() {
-  apk="${1:-$root/dist/inbox-$version.apk}"
+  apk="${1:-$root/dist/portal-inbox-$version.apk}"
   [ -f "$apk" ] || { echo "APK not found: $apk (build it: tools/android/build-apk.sh)" >&2; exit 1; }
 }
 
@@ -46,11 +46,11 @@ install_apk() {
   docker cp "$apk" "$NAME:/tmp/inbox.apk"
   adb install -r -g /tmp/inbox.apk >/dev/null
   # Permissions a user grants on the onboarding screen.
-  adb shell appops set app.inbox USE_FULL_SCREEN_INTENT allow >/dev/null 2>&1 || true
-  adb shell cmd notification allow_dnd app.inbox >/dev/null 2>&1 || true
-  adb shell dumpsys deviceidle whitelist +app.inbox >/dev/null 2>&1 || true
-  adb shell appops set app.inbox SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
-  adb shell monkey -p app.inbox -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  adb shell appops set app.portalinbox USE_FULL_SCREEN_INTENT allow >/dev/null 2>&1 || true
+  adb shell cmd notification allow_dnd app.portalinbox >/dev/null 2>&1 || true
+  adb shell dumpsys deviceidle whitelist +app.portalinbox >/dev/null 2>&1 || true
+  adb shell appops set app.portalinbox SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+  adb shell monkey -p app.portalinbox -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
   echo "installed $(basename "$apk")"
 }
 
@@ -76,7 +76,7 @@ case "${1:-}" in
     install_apk
     ;;
   logs)
-    pid=$(adb shell pidof app.inbox | tr -d '\r')
+    pid=$(adb shell pidof app.portalinbox | tr -d '\r')
     [ -n "$pid" ] || { echo "app not running" >&2; exit 1; }
     adb logcat --pid="$pid"
     ;;

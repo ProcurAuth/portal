@@ -11,6 +11,7 @@
 
 server {
   listen_address  = "0.0.0.0:4181"
+  name            = "Portal"
   # X-Forwarded-For counts only from a peer in these networks: the pod network, where the Traefik pods run.
   # A NetworkPolicy lets only the Traefik pods and the Prometheus pods reach this port.
   trusted_proxies = ["10.42.0.0/16"]
@@ -79,7 +80,6 @@ logging {
 }
 
 inbox {
-  name            = "Inbox"
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
@@ -121,7 +121,7 @@ inbox {
   }
 
   # The portal alerts about itself when a service stays unhealthy or when sign-ins fail in a burst.
-  portal_alerts {
+  watch {
     group = "infra"
   }
 }

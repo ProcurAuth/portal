@@ -111,13 +111,13 @@ page=$(curl -s -b "$bob" "$inbox/phones")
 csrf=$(form_csrf "$page" /auth/settings/inbox/code)
 answer=$(curl -s -b "$bob" -H "Origin: $base" --data-urlencode "csrf=$csrf" "$inbox/code")
 case "$answer" in
-  *inbox://enroll*) echo "ok    bob makes an enrollment code" ;;
+  *portal-inbox://enroll*) echo "ok    bob makes an enrollment code" ;;
   *) echo "FAIL  bob makes an enrollment code: no link in the answer"; fail=1 ;;
 esac
 check "inbox: carol cannot make a code" 403 "$(status -b "$carol" -H "Origin: $base" --data-urlencode "csrf=$csrf" "$inbox/code")"
 
-series=$(curl -s "$metrics" | grep -c '^inbox_alerts_accepted_total')
-[ "$series" -gt 0 ] && echo "ok    metrics: inbox_alerts_accepted_total has $series series" || { echo "FAIL  metrics: no inbox_alerts_accepted_total"; fail=1; }
+series=$(curl -s "$metrics" | grep -c '^portal_inbox_alerts_accepted_total')
+[ "$series" -gt 0 ] && echo "ok    metrics: portal_inbox_alerts_accepted_total has $series series" || { echo "FAIL  metrics: no portal_inbox_alerts_accepted_total"; fail=1; }
 
 rm -f "$alice" "$bob" "$admin" "$carol"
 exit $fail

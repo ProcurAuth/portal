@@ -11,6 +11,8 @@ server {
   # the webhooks (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no
   # ForwardAuth. The account pages make the enrollment codes.
   listen_address  = "0.0.0.0:4181"
+  # The name of this instance. The app shows it as the name of the server.
+  name            = "Portal"
   # Peers whose X-Forwarded-For header the portal trusts, for the pages, the producers and the phones. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
 }
@@ -35,8 +37,6 @@ logging {
 }
 
 inbox {
-  # Shown in the app.
-  name            = "Inbox"
   # Made once with `portal inbox keygen --out FILE`. Replacing it invalidates every phone and every enrollment code.
   server_key_file = "/run/secrets/inbox_server_key"
 
@@ -93,7 +93,7 @@ inbox {
   # Optional: the portal sends an alert about itself to this group. A service of the launcher that
   # stays unhealthy raises one. A burst of refused sign-ins raises one. Each value shown is the default,
   # except `group`, which has no default.
-  # portal_alerts {
+  # watch {
   #   group             = "infra"
   #   service_unhealthy = true
   #   unhealthy_after   = "2m"

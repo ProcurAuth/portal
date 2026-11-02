@@ -4,7 +4,7 @@
 #
 #   tools/build.sh server   dist/portal_<version>_linux_<arch>         (static musl binary, checked)
 #   tools/build.sh image    local image portal:<version> and portal:local
-#   tools/build.sh apk      dist/inbox-<version>.apk                  (see tools/android)
+#   tools/build.sh apk      dist/portal-inbox-<version>.apk                  (see tools/android)
 #   tools/build.sh dist     dist/portal_<version>_linux_<arch>.tar.gz and dist/SHA256SUMS
 #   tools/build.sh all      server, image, apk, dist
 #
@@ -66,7 +66,7 @@ build_dist() {
   (
     cd dist
     set -- ./portal_"${version}"_linux_*.tar.gz
-    [ -f "./inbox-${version}.apk" ] && set -- "$@" "./inbox-${version}.apk"
+    [ -f "./portal-inbox-${version}.apk" ] && set -- "$@" "./portal-inbox-${version}.apk"
     sha256sum -- "$@" | sed 's| \./| |' > SHA256SUMS
   )
   cat dist/SHA256SUMS

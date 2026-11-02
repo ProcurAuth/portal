@@ -104,7 +104,7 @@ spec:
       labels:
         app: portal
       annotations:
-        # The metrics of the portal and the metrics inbox_* of the inbox are on the same path.
+        # The metrics of the portal and the metrics portal_inbox_* of the inbox are on the same path.
         prometheus.io/scrape: 'true'
         prometheus.io/port: '4181'
         prometheus.io/path: /metrics

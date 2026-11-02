@@ -1,6 +1,7 @@
 # Configuration of the portal for the local demo, with the inbox. The secrets come from files that up.sh writes.
 server {
   listen_address  = "0.0.0.0:4181"
+  name            = "Portal demo"
   # The Traefik container of the demo network. The portal then reads the client address from X-Forwarded-For.
   trusted_proxies = ["172.30.0.0/24"]
 }
@@ -56,7 +57,6 @@ metrics {
 
 # The inbox of the portal. The pages, the producers and the phones use the same port (Traefik, 8088).
 inbox {
-  name            = "Inbox demo"
   server_key_file = "/run/secrets/inbox_server_key"
 
   devices {
@@ -96,7 +96,7 @@ inbox {
   }
 
   # The portal tells the group infra when a service stays unhealthy. 10 seconds is the shortest value.
-  portal_alerts {
+  watch {
     group           = "infra"
     unhealthy_after = "10s"
   }

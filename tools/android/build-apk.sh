@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the signed release APK: dist/inbox-<version>.apk
+# Builds the signed release APK: dist/portal-inbox-<version>.apk
 #
 # Signing comes from INBOX_KEYSTORE, INBOX_KEYSTORE_PASSWORD, INBOX_KEY_ALIAS and
 # INBOX_KEY_PASSWORD. If none is set and secrets/android-release.env exists, it is
@@ -83,7 +83,7 @@ cd /src/android
 gradle --no-daemon --console=plain -PinboxVersion="$version" testReleaseUnitTest assembleRelease
 
 mkdir -p /src/dist
-out="/src/dist/inbox-$version.apk"
+out="/src/dist/portal-inbox-$version.apk"
 cp app/build/outputs/apk/release/app-release.apk "$out"
 "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$out" | head -3
 sha256sum "$out"

@@ -58,7 +58,7 @@ The inbox has these groups and producers:
 | Group `infra` | A normal group. |
 | Group `critical` | A group with `critical = true`. A limit never applies to it. |
 | Producer `local` | A token in `demo/.secrets/inbox_producer_token`. It may send to `infra` and `critical`. |
-| `portal_alerts` | The portal sends an alert to `infra` when a service stays unhealthy for 10 seconds, and when it is healthy again. |
+| `watch` | The portal sends an alert to `infra` when a service stays unhealthy for 10 seconds, and when it is healthy again. |
 
 ## Send an alert from a terminal
 
@@ -78,7 +78,7 @@ Use the key of `alice` in the same way: replace the token with `$(cat demo/.secr
 This test needs `/dev/kvm`. The emulator is an Android 14 image in Docker. Its screen is at `http://localhost:6080`.
 
 1. Build the APK with a signing key that is only for this test. Run `tools/android/build-apk.sh` with the variables `INBOX_KEYSTORE`, `INBOX_KEYSTORE_PASSWORD`, `INBOX_KEY_ALIAS` and `INBOX_KEY_PASSWORD` set. Make the keystore with `keytool -genkeypair`. Do not use the keystore of a release.
-2. Run `tools/android/emulator.sh start dist/inbox-<version>.apk`. Wait until it prints the address of the screen.
+2. Run `tools/android/emulator.sh start dist/portal-inbox-<version>.apk`. Wait until it prints the address of the screen.
 3. Sign in as `alice`. Open **Inbox**, then **My phones**, then press **Make a code**. The page shows the code one time.
 4. Open the link of the code in the emulator: `docker exec inbox-emulator adb shell am start -a android.intent.action.VIEW -d '<link>'`. The app opens the form with the code filled in. Compare the fingerprint with the page.
 5. Type a name for the phone and press **Connect**. In the app, subscribe to the groups.
