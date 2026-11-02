@@ -16,7 +16,7 @@ user name of the device. The device cannot change it.
 
 | Key | Where | Created by |
 |---|---|---|
-| Server Noise static key (X25519) | server key file | the server, at first start or by a command |
+| Server Noise static key (X25519) | server key file | the command `portal inbox keygen` |
 | Device Noise static key (X25519) | phone only | the phone, at enrollment |
 | Enrollment secret (16 random bytes) | enrollment code; the server keeps only a digest | the server, for one account |
 
@@ -112,7 +112,7 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
 | `t` | Fields | Use |
 |---|---|---|
 | `ready` | | First transport frame. |
-| `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way: there is no human acknowledgement. Idempotent. |
+| `ack` | `alert_id`, `stage` (`received`) | Automatic delivery receipt, sent once the alert is stored durably. Alerts are one-way in protocol 4: there is no human acknowledgement. Idempotent. |
 | `subscribe` | `group` | Subscribes this device to the group. How the device reacts (alarm, ring, notification) is a local setting of the device: the server never knows it. |
 | `unsubscribe` | `group` | |
 | `ping` | `nonce` (u64) | Heartbeat; the server answers `pong`. |
@@ -195,8 +195,9 @@ These choices fill the gaps of the specification. Change them only with a new pr
    checks 1 to 64 bytes and no control character, and does not trim.
 9. **Login is read-only.** The phone stores `user_name` from message 2 and updates it
    at each `welcome`. The phone has no setting for it.
-10. **Old servers in the app.** Database version 6 removes every stored server of protocol 3
-    with its groups and alerts. The app tells the person once: "Enroll again".
+10. **Old servers in the app.** The upgrade of the database of the app (versions 6 and 7) removes
+    every stored server of protocol 3 with its groups and alerts. The app tells the person once:
+    "Enroll again".
 11. **Timeouts of the app.** It waits 20 seconds for the WebSocket to open and 90 seconds
     for message 2. The server SHOULD close an enrollment connection that sends no message 1
     within 10 seconds.
@@ -205,6 +206,6 @@ These choices fill the gaps of the specification. Change them only with a new pr
 
 ## Other interfaces
 
-The admin page of the inbox is a page of the portal, at `/auth/settings/inbox`. It needs a session of the portal.
-The producers send alerts to the same listener of the portal, on `/api/v1/`. The routes are in [README.md](README.md).
+The page of the Inbox is a page of the portal, at `/auth/settings/inbox`. It needs a session of the portal.
+The senders send alerts to the same listener of the portal, on `/api/v1/`. The routes are in [README.md](README.md).
 The protocol of the phones has no admin call.

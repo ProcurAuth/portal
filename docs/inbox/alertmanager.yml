@@ -1,10 +1,11 @@
-# Prometheus Alertmanager receiver for the inbox of the portal.
+# Prometheus Alertmanager receiver for the Inbox of the portal.
 # Each alert in a notification becomes one alert of the inbox. The inbox deduplicates them
 # on fingerprint + status + startsAt, so Alertmanager retries and repeat_interval
 # re-sends never page twice for the same firing.
 # The URL is the address of the portal (the same host and port as the pages). The last path element is the group.
-# The token is the value of a block `api_key` of the file, or an API key of the portal (api_...)
-# that has the permission alert.send on the group. Use HTTPS when the token crosses a network.
+# The token is an API key (api_...): the value of a block `api_key` of the file, or a key that an
+# account made on the page Keys. The key and its owner need the permission alert.send on the group.
+# Use HTTPS when the token crosses a network.
 route:
   receiver: inbox-oncall
   group_by: ["alertname"]

@@ -1,11 +1,12 @@
-# Grafana alerting provisioning: a "Webhook" contact point for the inbox of the portal.
+# Grafana alerting provisioning: a "Webhook" contact point for the Inbox of the portal.
 # Place it in /etc/grafana/provisioning/alerting/ and set INBOX_URL / INBOX_TOKEN
 # in Grafana's environment (Grafana expands $__env{...} in provisioning files).
-# INBOX_URL is the address of the portal (the same host and port as the pages). INBOX_TOKEN is the value of a block `producer`,
-# or a key of the portal (mcp_...) that has the permission alert.send on the group.
+# INBOX_URL is the address of the portal (the same host and port as the pages). INBOX_TOKEN is an
+# API key (api_...): the value of a block `api_key` of the file, or a key that an account made on the
+# page Keys. The key and its owner need the permission alert.send on the group.
 #
 # Grafana contact points are built into Grafana and cannot be extended by plugins,
-# so the inbox accepts the Alertmanager-compatible payload of the Webhook contact point.
+# so the Inbox accepts the Alertmanager-compatible payload of the Webhook contact point.
 # The last path element is the group to alert. The token must be allowed to send to it.
 apiVersion: 1
 contactPoints:
