@@ -10,8 +10,8 @@ use std::sync::Weak;
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
 use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
-use crate::inbox_actions as actions;
 use crate::keyauth::{self, Cause};
+use crate::portal_actions as actions;
 
 /// The age after which the inbox does not trust the directory of a shared database, when the
 /// file has no block `keys` to say it.
@@ -50,7 +50,10 @@ impl Authorizer for PortalAuthorizer {
         let Some(state) = self.state.upgrade() else {
             return KeyCheck::NotReady;
         };
-        if state.config.keys.is_none() || crate::keys::check_format(token).is_err() {
+        // The key of the database that this door accepts has the kind `api`, and the file turns
+        // this kind on (portal 8.3a).
+        let door_open = state.config.keys.as_ref().is_some_and(|keys| keys.api);
+        if !door_open || crate::keys::check_format(token) != Ok(crate::keys::KeyKind::Api) {
             return KeyCheck::NotAKey;
         }
         if keyauth::directory_too_old(&state) {
@@ -68,6 +71,10 @@ impl Authorizer for PortalAuthorizer {
             state.key_stats.failed(Cause::UnknownKey);
             return KeyCheck::Invalid;
         };
+        if key.kind != crate::keys::KeyKind::Api {
+            state.key_stats.failed(Cause::WrongKind);
+            return KeyCheck::Invalid;
+        }
         let now = unix_now();
         match keyauth::resolve(&state, &key, now) {
             Ok(_) => {
@@ -154,7 +161,7 @@ impl Authorizer for PortalAuthorizer {
             return Subscribable::Unknown;
         };
         let allowed: BTreeSet<String> =
-            actions::groups_with(&document, login, &grants, actions::GROUP_SUBSCRIBE, ids)
+            actions::groups_with(&document, login, &grants, actions::INBOX_RECEIVE, ids)
                 .into_iter()
                 .collect();
         Subscribable::Groups(allowed)

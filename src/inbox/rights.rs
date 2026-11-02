@@ -2,18 +2,19 @@
 //!
 //! The inbox does not read the state of the portal. The portal gives it one object at start, an
 //! [`Authorizer`]. The inbox uses it in three places:
-//! - A producer that sends a key of the portal as its token. The inbox checks the key, then asks for
+//! - A sender that gives a key of the kind `api` as its token. The inbox checks the key, then asks for
 //!   the decision on the action `alert.send` on the group (see `api.rs`).
 //! - A phone that subscribes to a group, and the list of groups in the message `welcome` (see
-//!   `device.rs`). The account of the phone needs `group.subscribe` on the group.
+//!   `device.rs`). The account of the phone needs `inbox.receive` on the group.
 //! - A change of the directory of the portal. The task [`run`] then removes the subscriptions that an
 //!   account lost.
 //!
 //! SAFETY RULE. A subscription is the way to a person that an alert can protect. The inbox
 //! removes a subscription only when a loaded directory positively says that the account has no
 //! right on the group. A missing authorizer, a directory that is not ready, a directory that is
-//! old, and an account that the directory does not know never remove a subscription. HCL tokens
-//! never depend on the authorizer: they work when the portal is not ready.
+//! old, and an account that the directory does not know never remove a subscription. The keys of
+//! the file (the blocks `api_key`) never depend on the authorizer: they work when the portal is not
+//! ready.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -54,7 +55,7 @@ pub enum Decision {
     Unavailable,
 }
 
-/// The groups for which an account has `group.subscribe`.
+/// The groups for which an account has `inbox.receive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Subscribable {
     /// The portal cannot tell: the directory is not ready or is old, or the account is unknown.

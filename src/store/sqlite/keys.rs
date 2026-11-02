@@ -152,14 +152,16 @@ fn clock_seconds() -> f64 {
 }
 
 /// The keys with their grants, oldest first.
-pub(super) fn read_keys(conn: &Connection) -> Result<Vec<KeyRow>, String> {
+pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow>, String> {
+    // A file of version 6 has no column `kind`: its keys are MCP keys.
+    let kind = if with_kind { "k.kind" } else { "'mcp'" };
     let rows = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                        k.last_check_at, k.check_count
+                        k.last_check_at, k.check_count, {kind}
                    FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                   ORDER BY k.created_at, k.id",
-        )
+        ))
         .map_err(db)?
         .query_map([], |row| {
             Ok((
@@ -172,15 +174,19 @@ pub(super) fn read_keys(conn: &Connection) -> Result<Vec<KeyRow>, String> {
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
             ))
         })
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
     let mut keys = Vec::with_capacity(rows.len());
-    for (id, owner, name, digest, hint, created_at, expires_at, last_check_at, check_count) in rows
+    for (id, owner, name, digest, hint, created_at, expires_at, last_check_at, check_count, kind) in
+        rows
     {
         keys.push(KeyRow {
+            kind: crate::keys::KeyKind::from_name(&kind)
+                .ok_or_else(|| format!("keys: the kind {kind:?} of the key {id} is not known"))?,
             grants: key_grants_of(conn, &id)?,
             id,
             owner,
@@ -386,16 +392,16 @@ impl Sqlite {
         let conn = self.conn();
         let mut statement = conn
             .prepare(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
-                            NULL AS revoked_at, k.owner_id AS owner_id
+                            NULL AS revoked_at, k.owner_id AS owner_id, k.kind AS kind
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, '', h.created_at, NULL, h.last_check_at,
-                            h.check_count, h.revoked_at, h.owner_id
+                            h.check_count, h.revoked_at, h.owner_id, NULL
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    )
                   WHERE (?1 OR (?2 IS NOT NULL AND login = ?2) OR (?3 AND owner_id IS NULL))
@@ -425,6 +431,9 @@ impl Sqlite {
                         last_check_at: row.get(6)?,
                         check_count: row.get(7)?,
                         revoked_at: row.get(8)?,
+                        kind: row
+                            .get::<_, Option<String>>(9)?
+                            .and_then(|name| crate::keys::KeyKind::from_name(&name)),
                         grants: Vec::new(),
                     })
                 },
@@ -458,7 +467,7 @@ impl Sqlite {
             )
             .map_err(db)?;
         let users = Self::load_users_with(&conn)?;
-        let keys = read_keys(&conn)?;
+        let keys = read_keys(&conn, true)?;
         Ok(DirectorySnapshot {
             version,
             users,
@@ -496,8 +505,8 @@ impl Sqlite {
         }
         tx.execute(
             "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                               last_check_at, check_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                               last_check_at, check_count, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 key.id,
                 owner_id,
@@ -507,7 +516,8 @@ impl Sqlite {
                 key.created_at,
                 key.expires_at,
                 key.last_check_at,
-                key.check_count
+                key.check_count,
+                key.kind.name()
             ],
         )
         .map_err(db)?;

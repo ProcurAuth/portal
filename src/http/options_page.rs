@@ -35,7 +35,7 @@ pub(super) async fn handle_options(
     let Some(viewer) = current_viewer(state, headers, client) else {
         return text_response(StatusCode::UNAUTHORIZED, "Unauthorized\n");
     };
-    if !keys_page::may_fill_forms(&viewer) {
+    if !keys_page::may_fill_forms(state, &viewer) {
         return text_response(StatusCode::FORBIDDEN, "Forbidden\n");
     }
     let mut params = std::collections::HashMap::new();

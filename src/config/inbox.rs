@@ -27,8 +27,8 @@ pub struct InboxConfig {
     pub watch: Option<WatchConfig>,
     /// The blocks `group`, by id.
     pub groups: BTreeMap<String, GroupConfig>,
-    /// The blocks `producer`, by name.
-    pub producers: BTreeMap<String, ProducerConfig>,
+    /// The blocks `api_key`, by name.
+    pub api_keys: BTreeMap<String, ApiKeyConfig>,
 }
 
 /// The block `inbox.devices`.
@@ -107,9 +107,12 @@ pub struct GroupConfig {
     pub critical: bool,
 }
 
-/// A block `producer`, without its token.
+/// A block `api_key`, without its text.
 #[derive(Clone, Debug)]
-pub struct ProducerConfig {
+pub struct ApiKeyConfig {
+    /// The login of the owner: an account of the file.
+    pub owner: String,
+    /// The groups that the block lists. The server keeps only those that the owner may send to.
     pub groups: Vec<String>,
     pub webhook_send_resolved: bool,
 }
@@ -118,12 +121,9 @@ pub struct ProducerConfig {
 pub struct InboxSecrets {
     /// The text of the key of the server.
     pub server_key: Secret,
-    /// The token of each block `producer`, by name.
-    pub producers: Vec<(String, Secret)>,
+    /// The text of each block `api_key`, by name.
+    pub api_keys: Vec<(String, Secret)>,
 }
-
-/// The shortest token of a producer.
-pub const MIN_TOKEN_LEN: usize = 32;
 
 fn socket(r: &Resolved, block: &str, name: &str) -> Result<SocketAddr, String> {
     r.text(block, name)?
@@ -136,8 +136,12 @@ fn small(r: &Resolved, block: &str, name: &str) -> Result<u32, String> {
         .map_err(|_| format!("internal error: {block}.{name} is out of range"))
 }
 
-/// Reads the block `inbox`. The result is `None` without the block.
-pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, String> {
+/// Reads the block `inbox`. The result is `None` without the block. `api_on` is the value of
+/// `keys.api`: a block `api_key` needs it.
+pub fn build(
+    r: &mut Resolved,
+    api_on: bool,
+) -> Result<Option<(InboxConfig, InboxSecrets)>, String> {
     if !r.has_block("inbox") {
         return Ok(None);
     }
@@ -225,43 +229,83 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
                 .into(),
         );
     }
-    let mut producers = BTreeMap::new();
-    let mut tokens: Vec<(String, Secret)> = Vec::new();
-    for block in r.labeled.iter_mut().filter(|b| b.kind == "producer") {
+    let mut api_keys = BTreeMap::new();
+    let mut texts: Vec<(String, Secret)> = Vec::new();
+    let sources: Vec<(String, String)> = r
+        .effective
+        .iter()
+        .map(|line| (line.key.clone(), line.source.clone()))
+        .collect();
+    for block in r.labeled.iter_mut().filter(|b| b.kind == "api_key") {
         let name = block.label.clone();
+        if !api_on {
+            return Err(format!(
+                "inbox.api_key {name:?}: a block api_key needs keys.api = true: keys.api is false, or the block keys is absent"
+            ));
+        }
         super::keys::check_inbox_id(&name)
-            .map_err(|e| format!("inbox.producer {name:?}: the label is not a name: {e}"))?;
+            .map_err(|e| format!("inbox.api_key {name:?}: the label is not a name: {e}"))?;
         let listed = block.list("groups")?;
         if listed.is_empty() {
             return Err(format!(
-                "invalid inbox.producer.{name}.groups: expected at least one group id, got []"
+                "invalid inbox.api_key.{name}.groups: expected at least one group id, got []"
             ));
         }
         for group in &listed {
             if !groups.contains_key(group) {
                 return Err(format!(
-                    "invalid inbox.producer.{name}.groups: the group {group:?} is not a block group of the block inbox"
+                    "invalid inbox.api_key.{name}.groups: the group {group:?} is not a block group of the block inbox"
                 ));
             }
         }
-        let token = block
-            .take_secret("token")
-            .ok_or_else(|| format!("internal error: inbox.producer.{name} has no token"))?;
-        producers.insert(
+        let secret = block
+            .take_secret("secret")
+            .ok_or_else(|| format!("internal error: inbox.api_key.{name} has no secret"))?;
+        // The text has the form of an API key. The error never shows the value.
+        let source = sources
+            .iter()
+            .find(|(key, _)| *key == format!("inbox.api_key.{name}.secret"))
+            .map(|(_, source)| source.clone())
+            .unwrap_or_default();
+        let text = std::str::from_utf8(secret.as_bytes()).unwrap_or_default();
+        match crate::keys::check_format(text) {
+            Ok(crate::keys::KeyKind::Api) => {}
+            Ok(kind) => {
+                return Err(format!(
+                    "inbox.api_key.{name}.secret: expected an API key with the prefix api_, 43 characters and 6 characters of checksum, 53 characters in all; the text is a {} key ({source}; the value is hidden)",
+                    kind.label()
+                ))
+            }
+            Err(reason) => {
+                return Err(format!(
+                    "inbox.api_key.{name}.secret: expected an API key with the prefix api_, 43 characters and 6 characters of checksum, 53 characters in all ({reason:?}; {source}; the value is hidden)"
+                ))
+            }
+        }
+        if let Some((other, _)) = texts
+            .iter()
+            .find(|(_, s)| s.as_bytes() == secret.as_bytes())
+        {
+            return Err(format!(
+                "inbox.api_key.{name}.secret: the key has the same text as inbox.api_key.{other}.secret ({source}; the value is hidden)"
+            ));
+        }
+        api_keys.insert(
             name.clone(),
-            ProducerConfig {
+            ApiKeyConfig {
+                owner: block.text("owner")?,
                 groups: listed,
                 webhook_send_resolved: block.bool("webhook_send_resolved")?,
             },
         );
-        tokens.push((name, token));
+        texts.push((name, secret));
     }
 
     let secrets = InboxSecrets {
         server_key: r
             .take_secret("inbox", "server_key")
             .ok_or("internal error: the secret inbox.server_key is missing")?,
-        producers: tokens,
+        api_keys: texts,
     };
     let config = InboxConfig {
         devices,
@@ -271,7 +315,7 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         cluster,
         watch,
         groups,
-        producers,
+        api_keys,
     };
     check_values(&config)?;
     Ok(Some((config, secrets)))
@@ -362,6 +406,51 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
                     "inbox.replica.dir must not be the directory of storage.database: storage.database is {}, inbox.replica.dir is {}",
                     path.display(),
                     replica.dir.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks each block `api_key` against the accounts of the file (portal 3.4a, 4.1). The owner is an
+/// account of the file. The owner must hold `keys.own.use` on the kind `api`, and `alert.send` on
+/// each group of the key. The error names the key, the expected value and the value found.
+pub fn check_api_keys(
+    config: &Config,
+    inbox: &InboxConfig,
+    features: &crate::portal_actions::Features,
+) -> Result<(), String> {
+    use crate::portal_actions as portal;
+    let document = portal::document(features);
+    for (name, key) in &inbox.api_keys {
+        let Some(account) = config.access.accounts.get(&key.owner) else {
+            return Err(format!(
+                "invalid inbox.api_key.{name}.owner: expected the login of an account of the file (a block user), got {:?}",
+                key.owner
+            ));
+        };
+        if !portal::effective_kind(
+            &account.grants,
+            portal::KEYS_OWN_USE,
+            crate::keys::KeyKind::Api,
+        ) {
+            return Err(format!(
+                "inbox.api_key.{name}: the owner {:?} does not hold keys.own.use on service:portal/key_kind:api: add this grant to the block user, or the key can do nothing",
+                key.owner
+            ));
+        }
+        for group in &key.groups {
+            if !portal::allows(
+                &document,
+                &key.owner,
+                &account.grants,
+                portal::ALERT_SEND,
+                Some(group),
+            ) {
+                return Err(format!(
+                    "inbox.api_key.{name}.groups: the owner {:?} does not hold alert.send on service:portal/inbox_group:{group}: add this grant to the block user, or remove the group from the key",
+                    key.owner
                 ));
             }
         }

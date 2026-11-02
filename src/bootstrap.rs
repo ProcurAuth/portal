@@ -30,6 +30,7 @@ pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
                 hint: String::new(),
                 created_at: 0,
                 expires_at: None,
+                kind: crate::keys::KeyKind::Mcp,
                 grants: key.grants.clone(),
             });
         }
@@ -105,7 +106,7 @@ pub fn needed_counters(
         let max = match &key.owner {
             KeyOwner::User(login) => directory
                 .grants_of(login)
-                .and_then(|grants| crate::portal_actions::max_key_lifetime(&grants)),
+                .and_then(|grants| crate::portal_actions::max_key_lifetime(&grants, key.kind)),
             _ => None,
         };
         !key.too_old(now, max)

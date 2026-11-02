@@ -285,9 +285,9 @@ pub struct Registry {
     max_age: Duration,
     /// The size of a document that the reads accept (portal 7.9).
     bounds: Bounds,
-    /// The document of the service `inbox`. It is in the code, and it is there only when the file
-    /// has the block `inbox`.
-    inbox: Option<Arc<Document>>,
+    /// The document of the service `portal`. It is in the code: it holds the features that the
+    /// file turns on (see [`crate::portal_actions`]).
+    portal: Arc<Document>,
 }
 
 impl Default for Registry {
@@ -303,9 +303,10 @@ impl Registry {
         self
     }
 
-    /// The same registry, with the document of the service `inbox` (see [`crate::inbox_actions`]).
-    pub fn with_inbox(mut self, document: Arc<Document>) -> Self {
-        self.inbox = Some(document);
+    /// The same registry, with the document of the service `portal` for the features that the file
+    /// turns on (see [`crate::portal_actions::document`]).
+    pub fn with_portal(mut self, document: Arc<Document>) -> Self {
+        self.portal = document;
         self
     }
 
@@ -317,20 +318,14 @@ impl Registry {
             started: Instant::now(),
             max_age,
             bounds: Bounds::default(),
-            inbox: None,
+            portal: crate::portal_actions::document(&crate::portal_actions::Features::default()),
         }
     }
 
-    /// The document of a service that the code holds: the service `portal`, and the service
-    /// `inbox` when the file has the block `inbox`. Such a document never gets old.
+    /// The document of a service that the code holds: the service `portal`. Such a document never
+    /// gets old.
     fn internal(&self, service: &str) -> Option<Arc<Document>> {
-        if service == crate::portal_actions::SERVICE {
-            return Some(crate::portal_actions::document());
-        }
-        if service == crate::inbox_actions::SERVICE {
-            return self.inbox.clone();
-        }
-        None
+        (service == crate::portal_actions::SERVICE).then(|| Arc::clone(&self.portal))
     }
 
     /// The time since the last good read of the document of a service. A service that has no good
@@ -371,7 +366,7 @@ impl Registry {
     /// a `404`. A `404` gives an empty document. `None`: the service is not in the catalogue, or
     /// no read has answered yet. The PDP fails closed on `None`.
     pub fn declared(&self, service: &str) -> Option<Arc<Document>> {
-        // The document of the service `portal` and of the service `inbox` is in the code (portal 6.1).
+        // The document of the service `portal` is in the code (portal 6.1).
         if let Some(document) = self.internal(service) {
             return Some(document);
         }
@@ -1698,7 +1693,14 @@ mod tests {
         assert!(registry.declared("portal").is_some());
         assert!(!registry.too_old("portal"));
         assert_eq!(registry.action_names("portal")[0], "access");
-        assert!(registry.action_names("portal").len() > 8);
+        // The document of the code follows the features that the file turns on.
+        let features = crate::portal_actions::Features {
+            inbox_groups: Some(vec![("infra".into(), "Infra".into())]),
+            kinds: crate::keys::KeyKind::ALL.to_vec(),
+        };
+        let with_features = Registry::new(Duration::from_secs(3600))
+            .with_portal(crate::portal_actions::document(&features));
+        assert_eq!(with_features.action_names("portal").len(), 1 + 14);
         // The oldest age among some services.
         assert!(registry.oldest_age(["a", "b", "portal"].into_iter()) >= Duration::from_secs(3600));
     }

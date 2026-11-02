@@ -314,16 +314,17 @@ impl Pg {
         };
         let (mut items, grants) = self.run(|c| {
             let rows = c.query(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
-                            NULL::bigint AS revoked_at, k.owner_id AS owner_id
+                            NULL::bigint AS revoked_at, k.owner_id AS owner_id,
+                            k.kind AS kind
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, ''::text, h.created_at, NULL::bigint,
-                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id
+                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id, NULL::text
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    ) AS lines
                   WHERE ($1::boolean OR ($2::text IS NOT NULL AND login = $2::text)
@@ -345,6 +346,9 @@ impl Pg {
                     last_check_at: row.get(6),
                     check_count: row.get(7),
                     revoked_at: row.get(8),
+                    kind: row
+                        .get::<_, Option<String>>(9)
+                        .and_then(|name| crate::keys::KeyKind::from_name(&name)),
                     grants: Vec::new(),
                 })
                 .collect();
@@ -413,7 +417,7 @@ impl Pg {
             let keys = tx
                 .query(
                     "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                            k.last_check_at, k.check_count
+                            k.last_check_at, k.check_count, k.kind
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                       ORDER BY k.created_at, k.id",
                     &[],
@@ -430,6 +434,7 @@ impl Pg {
                         row.get::<_, Option<i64>>(6),
                         row.get::<_, Option<i64>>(7),
                         row.get::<_, i64>(8),
+                        row.get::<_, String>(9),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -463,9 +468,21 @@ impl Pg {
             by_key.entry(key_id).or_default().push(row);
         }
         let mut keys = Vec::with_capacity(key_rows.len());
-        for (id, owner, name, digest, hint, created_at, expires_at, last_check_at, check_count) in
-            key_rows
+        for (
+            id,
+            owner,
+            name,
+            digest,
+            hint,
+            created_at,
+            expires_at,
+            last_check_at,
+            check_count,
+            kind,
+        ) in key_rows
         {
+            let kind = crate::keys::KeyKind::from_name(&kind)
+                .ok_or_else(|| format!("keys: the kind {kind:?} of the key {id} is not known"))?;
             let mut grants = grants_from(by_key.remove(&id).unwrap_or_default())
                 .map_err(|e| e.replacen("user_grants", "key_grants", 1))?;
             grants.sort();
@@ -479,6 +496,7 @@ impl Pg {
                 expires_at,
                 last_check_at,
                 check_count,
+                kind,
                 grants,
             });
         }
@@ -516,8 +534,8 @@ impl Pg {
             }
             tx.execute(
                 "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                   last_check_at, check_count)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                                   last_check_at, check_count, kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &key.id,
                     &owner_id,
@@ -528,6 +546,7 @@ impl Pg {
                     &key.expires_at,
                     &key.last_check_at,
                     &key.check_count,
+                    &key.kind.name(),
                 ],
             )?;
             insert_key_grants(&mut tx, &key.id, &key.grants)?;

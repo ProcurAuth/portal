@@ -179,7 +179,14 @@
     } catch (e) {
       return;
     }
-    if (!data.services.length) {
+    // The editor has two parts: the services (the workloads of the launcher) and the portal
+    // features (keys, inbox). The list shows the services first, then the features.
+    var services = data.services.slice();
+    if (data.features) {
+      data.features.feature = true;
+      services.push(data.features);
+    }
+    if (!services.length) {
       root.insertBefore(node("div", "uiState uiState--compact", "No service to give access to."), fields);
       return;
     }
@@ -212,7 +219,6 @@
       ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]), locked: true });
     });
 
-    var services = data.services;
     var serviceAt = 0;
     var query = new URLSearchParams(window.location.search);
     var wanted = query.get("service");
@@ -296,7 +302,7 @@
     // short words, and a button that opens the permissions of the service under the row.
     var strip = node("div", "ge__svcList");
     strip.setAttribute("role", "group");
-    strip.setAttribute("aria-label", "Services");
+    strip.setAttribute("aria-label", "Permissions");
     var treeSearch = node("input", "uiInput");
     treeSearch.type = "search";
     treeSearch.placeholder = "Find a resource";
@@ -748,7 +754,13 @@
     // The rows of the services: the switch of `access`, a short sentence, the buttons.
     function renderList() {
       strip.textContent = "";
+      var lastGroup = "";
       services.forEach(function (svc, at) {
+        var group = svc.feature ? "Portal features" : "Services";
+        if (group !== lastGroup) {
+          strip.appendChild(node("h3", "ge__groupTitle", group));
+          lastGroup = group;
+        }
         var open = ticked.get(keyOf(svc.id, "access", ""));
         var others = 0;
         ticked.forEach(function (item) {
@@ -758,20 +770,23 @@
         var row = node("div", "ge__svc" + (open ? " is-open" : "") + (expanded ? " is-expanded" : ""));
         row.dataset.at = String(at);
         var head = node("div", "ge__svcHead");
-        var box = node("input");
-        box.type = "checkbox";
-        box.checked = !!open;
-        box.dataset.switch = svc.id;
-        box.setAttribute("aria-label", "Can open " + svc.name);
-        if (open && open.locked) box.disabled = true;
-        head.appendChild(box);
+        if (!svc.feature) {
+          // The switch of a service is its grant `access`. A portal feature has no switch: no path
+          // belongs to it, and its permissions work as they are.
+          var box = node("input");
+          box.type = "checkbox";
+          box.checked = !!open;
+          box.dataset.switch = svc.id;
+          box.setAttribute("aria-label", "Can open " + svc.name);
+          if (open && open.locked) box.disabled = true;
+          head.appendChild(box);
+        }
         head.appendChild(node("span", "ge__svcName", svc.name));
         var info = open ? "Can open" : "Cannot open";
-        if (svc.gated === false) {
-          // No path belongs to this service: the permissions work with the switch off.
+        if (svc.feature) {
           info = others ? plural(others, "permission", "permissions") : "No permission";
         } else if (others) info += " · " + plural(others, "permission", "permissions");
-        if (others && !open && svc.gated !== false) {
+        if (others && !open && !svc.feature) {
           info += ": turn the switch on, or the permissions do nothing";
           row.classList.add("is-orphan");
         }

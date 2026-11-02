@@ -605,6 +605,7 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
     };
     UsersView {
         notice: None,
+        allow_creation: true,
         add_open: false,
         mode: crate::grants::Mode::Dynamic,
         catalog,
@@ -738,7 +739,8 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     user: users.users.remove(0),
                     first_day: demo_first_day(),
                     token: "demo",
-                    keys: Some(settings::KeysRights::default()),
+                    features: None,
+                    owned_keys: 0,
                 },
             )
         }

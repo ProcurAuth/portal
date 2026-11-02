@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use super::grant_editor::{self, EditorData, Place};
 use super::settings::{notice_html, page_shell, part_head, plural, shell, Frame, Notice, Tab};
 use crate::grants::{Grant, ACCESS};
+use crate::keys::KeyKind;
 use crate::limits::{Limits, Value, Window};
 use crate::util::{format_duration, format_utc_instant, html_escape, time_tag};
 
@@ -97,6 +98,8 @@ pub struct KeyLine {
     pub owner: Option<String>,
     pub name: String,
     pub hint: String,
+    /// The kind of the key. `None`: the summary row of a revoked key has no kind.
+    pub kind: Option<KeyKind>,
     pub state: KeyState,
     /// The key comes from the configuration file: it is read-only.
     pub file: bool,
@@ -131,6 +134,11 @@ pub struct KeysView<'a> {
     pub can_read_own: bool,
     pub can_read_all: bool,
     pub can_create: bool,
+    /// The kinds of key that the viewer may make: the kinds that the file turns on and that the
+    /// viewer holds `keys.own.create` on. The new-key page has a selector only with two or more.
+    pub create_kinds: Vec<KeyKind>,
+    /// The kind of the key that the form makes or changes. `None` on the list.
+    pub kind: Option<KeyKind>,
     pub can_revoke: bool,
     pub can_revoke_all: bool,
     /// The owner can make keys and cannot use them (portal 5.3b).
@@ -302,15 +310,49 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
     out.push_str(r#"<section class="pagePart" aria-labelledby="key-form-title">"#);
+    // The selector of the kind shows only for a new key, and only when the viewer may make more
+    // than one kind. It is a form that asks for the page again: the form of the key depends on the
+    // kind. Without a second kind, there is no selector.
+    let selector = if edit.is_none() && view.create_kinds.len() > 1 {
+        let options: String = view
+            .create_kinds
+            .iter()
+            .map(|kind| {
+                format!(
+                    r#"<option value="{}"{}>{}</option>"#,
+                    kind.name(),
+                    if Some(*kind) == view.kind {
+                        " selected"
+                    } else {
+                        ""
+                    },
+                    kind.label()
+                )
+            })
+            .collect();
+        format!(
+            r#"<form class="kindChoice" method="get" action="{NEW_PATH}"><label class="uiField__label" for="key-kind">Kind of key</label> <select class="uiInput" id="key-kind" name="kind">{options}</select> <button class="button" type="submit">Show the form</button></form>"#
+        )
+    } else {
+        String::new()
+    };
     let _ = write!(
         out,
         r##"<div class="pagePart__head"><a class="pageBack" href="{PATH}" aria-label="Back to the keys" title="Back to the keys"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg></a><h2 class="pagePart__title" id="key-form-title">{title}</h2><div class="part__controls"><a class="button" href="{PATH}">Cancel</a><button class="button button--primary" type="submit" form="{form_id}">{submit}</button></div></div>"##
     );
+    out.push_str(&selector);
     let _ = write!(
         out,
         r#"<form method="post" action="{action}" id="{form_id}" class="uiForm keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
         html_escape(view.csrf)
     );
+    if let (None, Some(kind)) = (edit, view.kind) {
+        let _ = write!(
+            out,
+            r#"<input type="hidden" name="kind" value="{}">"#,
+            kind.name()
+        );
+    }
     if let Some(target) = edit {
         let _ = write!(
             out,
@@ -366,19 +408,32 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
 fn key_row(out: &mut String, view: &KeysView<'_>, line: &KeyLine) {
     // One line: the state and the name, what the key can use, when it ends, when it was used.
     // The id, the hint and the creation date are in the tooltip of the name.
-    let hint = if line.hint.is_empty() {
-        String::new()
-    } else {
-        format!(" Starts with mcp_{}.", line.hint)
+    let hint = match line.kind {
+        Some(kind) if !line.hint.is_empty() => {
+            format!(" Starts with {}{}.", kind.prefix(), line.hint)
+        }
+        _ => String::new(),
     };
     let created = if line.file {
         String::new()
     } else {
         format!(" Made {}.", crate::util::format_utc(line.created_at))
     };
+    let kind_badge = match line.kind {
+        Some(kind) => format!(
+            r#" <span class="badge" data-kind="{}" title="{}">{}</span>"#,
+            kind.name(),
+            match kind {
+                KeyKind::Mcp => "An MCP key: for an agent. The key edge verifies it.",
+                KeyKind::Api => "An API key: for a service. The API of the inbox verifies it.",
+            },
+            kind.label()
+        ),
+        None => String::new(),
+    };
     let _ = write!(
         out,
-        r#"<tr><th scope="row" data-label="Key">{} <span class="svcRow__name" title="Id {}.{hint}{created}">{}</span>{}"#,
+        r#"<tr><th scope="row" data-label="Key">{} <span class="svcRow__name" title="Id {}.{hint}{created}">{}</span>{kind_badge}{}"#,
         line.state.icon(),
         html_escape(&line.id),
         html_escape(&line.name),
@@ -608,9 +663,16 @@ pub fn new_key_page(frame: &Frame, key: &NewKey<'_>) -> String {
     shell(&frame.tabs(), Tab::Keys, frame, "New key", &out, true)
 }
 
-/// The grant of a new key that the form offers as a box, from a grant of the owner.
-pub fn is_offered(grant: &Grant) -> bool {
-    grant.service != crate::portal_actions::SERVICE || grant.action == ACCESS
+/// The grant of a new key of this kind that the form offers as a box, from a grant of the owner.
+/// A key holds `access` on the service `portal` and the actions that its kind lists. An API key
+/// holds no grant on another service.
+pub fn is_offered(kind: KeyKind, grant: &Grant) -> bool {
+    if grant.service == crate::portal_actions::SERVICE {
+        grant.action == ACCESS
+            || crate::portal_actions::key_actions(kind).contains(&grant.action.as_str())
+    } else {
+        kind == KeyKind::Mcp
+    }
 }
 
 /// The text of a time in the form of the field `expires_at`.

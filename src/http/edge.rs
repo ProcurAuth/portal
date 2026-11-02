@@ -113,7 +113,12 @@ fn check(state: &AppState, headers: &HeaderMap) -> Result<HttpResponse, Cause> {
     if state.config.keys.is_none() {
         return Err(Cause::KeysDisabled);
     }
-    crate::keys::check_format(text).map_err(|_| Cause::BadFormat)?;
+    // The form first, before any lookup. The key edge verifies the kind `mcp` only (portal 8.3).
+    match crate::keys::check_format(text) {
+        Ok(crate::keys::KeyKind::Mcp) => {}
+        Ok(_) => return Err(Cause::WrongKind),
+        Err(_) => return Err(Cause::BadFormat),
+    }
     let digest = crate::keys::digest(text);
     let key = state.users.key_by_digest(&digest).or_else(|| {
         // The key can come from another instance, a few seconds ago (portal 10.7c).

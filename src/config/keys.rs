@@ -214,7 +214,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "keys",
-        "This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys, and the edge and the PDP accept them. The block needs the blocks `identity` and `pdp`.",
+        "This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox. The keys `mcp` and `api` turn each kind on or off. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. The block needs one kind on at least.",
     ),
     ("storage", "The history, and the SQLite file."),
     (
@@ -229,11 +229,11 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ("logging", "The log."),
     (
         "inbox",
-        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group \"<id>\"` and `producer \"<name>\"` are inside this block.",
+        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group \"<id>\"` and `api_key \"<name>\"` are inside this block.",
     ),
     (
         "inbox.devices",
-        "This block is inside the block `inbox`. It sets the public address that phones use, the limits of the phones, and the delivery values. The phones use the listener of the portal, as the producers do. The routes of the phones have no session: phones prove themselves.",
+        "This block is inside the block `inbox`. It sets the public address that phones use, the limits of the phones, and the delivery values. The phones use the listener of the portal, as the senders do. The routes of the phones have no session: phones prove themselves.",
     ),
     (
         "inbox.enrollment",
@@ -381,6 +381,14 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("64"),
         when: When::Always,
         doc: "The largest number of accounts in the database.",
+    },
+    Key {
+        block: "users",
+        name: "allow_creation",
+        kind: Kind::Bool,
+        presence: Presence::Default("true"),
+        when: When::Always,
+        doc: "`true`: the superadmin can make accounts in the database. `false`: the route that makes an account answers `404`, and the pages show no button and no entry that makes an account. The accounts that exist stay editable, as `access.grants_mode` says. The value `true` contradicts `access.grants_mode = \"static\"`: in this mode the database holds no account.",
     },
     Key {
         block: "users",
@@ -545,6 +553,22 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("2"),
         when: When::PdpBlock,
         doc: "The number of database connections that count the uses of the budgets. Each connection counts approximately 1,000 uses each second. A use that waits more than 500 ms gets the HTTP status 503.",
+    },
+    Key {
+        block: "keys",
+        name: "mcp",
+        kind: Kind::Bool,
+        presence: Presence::Default("true"),
+        when: When::KeysBlock,
+        doc: "`true`: the kind `mcp` is on. A user can make MCP keys, with the prefix `mcp_`, and the key edge and the PDP accept them. `false`: the kind is off. The key edge refuses these keys, and the pages show no MCP key, no MCP right and no MCP chip. The value `true` needs the blocks `identity` and `pdp`.",
+    },
+    Key {
+        block: "keys",
+        name: "api",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::KeysBlock,
+        doc: "`true`: the kind `api` is on. A user can make API keys, with the prefix `api_`, and the API of the inbox accepts them. `false`: the kind is off. The API of the inbox refuses these keys, and the pages show no API key, no API right and no API chip. The value `true` needs the block `inbox`. A block `api_key` needs the value `true`.",
     },
     Key {
         block: "keys",
@@ -1132,7 +1156,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Bool,
         presence: Presence::Default("true"),
         when: When::Always,
-        doc: "`true`: the inbox confirms an alert only after the copy holds it. If the copy fails, the inbox answers `503` and the producer sends the alert again. `false`: the inbox confirms an alert after the local commit and copies it as soon as possible.",
+        doc: "`true`: the inbox confirms an alert only after the copy holds it. If the copy fails, the inbox answers `503` and the sender sends the alert again. `false`: the inbox confirms an alert after the local commit and copies it as soon as possible.",
     },
     Key {
         block: "inbox.cluster",
@@ -1241,12 +1265,12 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
     (
         "group",
         "<id>",
-        "One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A producer sends an alert to a group.",
+        "One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A key sends an alert to a group.",
     ),
     (
-        "producer",
+        "api_key",
         "<name>",
-        "One producer of alerts that has a token: a monitoring tool, a script or a webhook. The block is inside the block `inbox`. The label is the name of the producer: 1 to 64 characters of a-z, 0-9, '-' and '_'.",
+        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the page Keys.",
     ),
     (
         "pdp_client",
@@ -1331,18 +1355,29 @@ pub static LABELED_KEYS: &[Key] = &[
         kind: Kind::Bool,
         presence: Presence::Default("false"),
         when: When::LabeledBlock,
-        doc: "`true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group.",
+        doc: "`true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a key applies to the group.",
     },
     Key {
-        block: "producer",
-        name: "token",
-        kind: Kind::Secret { max_bytes: 1024 },
+        block: "api_key",
+        name: "owner",
+        kind: Kind::Text {
+            expected: "the login of an account of the file (a block `user`)",
+            check: check_login_text,
+        },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The bearer token of the producer. It has at least 32 printable characters. Make it with `portal inbox token`. Two producers must not have the same token.",
+        doc: "The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, and `alert.send` on each group of the key.",
     },
     Key {
-        block: "producer",
+        block: "api_key",
+        name: "secret",
+        kind: Kind::Secret { max_bytes: 64 },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The text of the key: `api_`, 43 characters and 6 characters of checksum, 53 characters in all. Make it with `portal inbox token`. Two keys must not have the same text. A bad form stops the server.",
+    },
+    Key {
+        block: "api_key",
         name: "groups",
         kind: Kind::List {
             expected: "ids of groups that the block `inbox` defines",
@@ -1351,10 +1386,10 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The groups that the producer can send alerts to. The list has at least one group. Each group must exist.",
+        doc: "The groups that the key can send alerts to. The list has at least one group. Each group must exist, and the owner must hold `alert.send` on it.",
     },
     Key {
-        block: "producer",
+        block: "api_key",
         name: "webhook_send_resolved",
         kind: Kind::Bool,
         presence: Presence::Default("false"),
@@ -1398,7 +1433,7 @@ pub fn all_block_names() -> Vec<&'static str> {
 
 /// The blocks with a label that a block with a label holds: `(parent, child)`.
 pub const NESTED_BLOCKS: &[(&str, &str)] =
-    &[("user", "key"), ("inbox", "group"), ("inbox", "producer")];
+    &[("user", "key"), ("inbox", "group"), ("inbox", "api_key")];
 
 /// The blocks without a label that a block without a label holds: `(parent, child)`. The keys of
 /// the child are in the block `parent.child` of the table.
@@ -1613,7 +1648,7 @@ fn check_group_description(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The id of a group and the name of a producer: 1 to 64 characters of a-z, 0-9, '-' and '_'.
+/// The id of a group and the name of an API key: 1 to 64 characters of a-z, 0-9, '-' and '_'.
 pub fn check_inbox_id(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 64
@@ -1624,6 +1659,14 @@ pub fn check_inbox_id(value: &str) -> Result<(), String> {
         return Err("not 1 to 64 characters of a-z, 0-9, '-' and '_'".into());
     }
     Ok(())
+}
+
+/// The login of an account: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'.
+fn check_login_text(value: &str) -> Result<(), String> {
+    match crate::users::normalize_login(value) {
+        Ok(login) if login == value => Ok(()),
+        _ => Err("not 1 to 32 characters of a-z, 0-9, '.', '-' and '_'".into()),
+    }
 }
 
 fn check_peer_address(value: &str) -> Result<(), String> {

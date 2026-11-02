@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::actions::Document;
 use crate::grants::{Grant, ACCESS};
+use crate::keys::KeyKind;
 use crate::limits::{Budget, Item, Limits, Value, Window};
 use crate::portal_actions;
 
@@ -254,10 +255,12 @@ fn covered(owner: Option<&[Grant]>, grant: &Grant) -> bool {
 /// Who holds the grants of a form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
-    /// A key: it holds no action of the service `portal` but `access` (portal 6.5).
-    Key,
-    /// An account: the rights on the keys have their own boxes, so the form gives no grant on the
-    /// service `portal`.
+    /// A key of this kind. It holds `access` on the service `portal` and the actions of the service
+    /// `portal` that its kind lists (portal 6.5). An API key holds no grant on another service: the
+    /// API of the inbox verifies it, and no gate opens for it.
+    Key(KeyKind),
+    /// An account: the portal features are in the editor next to the services, so the form gives
+    /// grants on the service `portal` too.
     Account,
 }
 
@@ -285,10 +288,17 @@ pub fn check_grants(
             grants.push(grant.with_limits(limits));
             continue;
         }
-        if grant.service == portal_actions::SERVICE
-            && (holder == Holder::Account || grant.action != ACCESS)
-        {
-            return Err(BAD_GRANT);
+        if let Holder::Key(kind) = holder {
+            let on_portal = grant.service == portal_actions::SERVICE;
+            if on_portal
+                && grant.action != ACCESS
+                && !portal_actions::key_actions(kind).contains(&grant.action.as_str())
+            {
+                return Err(BAD_GRANT);
+            }
+            if !on_portal && kind == KeyKind::Api {
+                return Err(BAD_GRANT);
+            }
         }
         if !(ctx.service_exists)(&grant.service) && grant.service != portal_actions::SERVICE {
             return Err(BAD_GRANT);
@@ -309,6 +319,13 @@ pub fn check_grants(
                 return Err(BAD_GRANT);
             }
             document.check_grant(&grant).map_err(|_| BAD_GRANT)?;
+            // The nodes of the service `portal` are the groups of the inbox and the kinds of key.
+            if grant.service == portal_actions::SERVICE
+                && !grant.path.is_empty()
+                && !document.resources.iter().any(|r| r.path == grant.path)
+            {
+                return Err(BAD_GRANT);
+            }
             listed = action.limits.clone();
         }
         if let Some(document) = &document {
@@ -339,15 +356,15 @@ pub fn check_grants(
     Ok(grants)
 }
 
-/// Checks a form. A form for a new key gives `old_grants: None`.
-pub fn check(raw: &RawForm, ctx: &Context<'_>) -> Result<KeyForm, &'static str> {
+/// Checks a form for a key of this kind. A form for a new key gives `old_grants: None`.
+pub fn check(raw: &RawForm, ctx: &Context<'_>, kind: KeyKind) -> Result<KeyForm, &'static str> {
     crate::keys::check_name(&raw.name).map_err(|_| BAD_NAME)?;
     let expires_at = if ctx.old_grants.is_none() {
         check_expiry(raw.expires_at.as_deref(), ctx)?
     } else {
         None
     };
-    let mut grants = check_grants(raw, ctx, Holder::Key)?;
+    let mut grants = check_grants(raw, ctx, Holder::Key(kind))?;
     // The rights of the owner cover each grant that the form adds or changes.
     for grant in &grants {
         let unchanged = ctx.old_grants.is_some_and(|old| {
@@ -421,7 +438,101 @@ mod tests {
                 service_exists: &exists,
                 old_grants: old,
             },
+            KeyKind::Mcp,
         )
+    }
+
+    /// The same check for an API key, with the document of the service `portal` and one
+    /// service `datastore`.
+    fn run_api(pairs: &[(&str, &str)], owner: Option<&[Grant]>) -> Result<KeyForm, &'static str> {
+        let raw = read(fields(pairs), false).expect("good fields");
+        let portal = crate::portal_actions::document(&crate::portal_actions::Features {
+            inbox_groups: Some(vec![("infra".to_string(), "Infra".to_string())]),
+            kinds: vec![KeyKind::Api],
+        });
+        let datastore = document();
+        let lookup = move |service: &str| match service {
+            "portal" => Some(Arc::clone(&portal)),
+            "datastore" => Some(Arc::clone(&datastore)),
+            _ => None,
+        };
+        let exists = |service: &str| service == "datastore";
+        check(
+            &raw,
+            &Context {
+                now: NOW,
+                owner_grants: owner,
+                max_lifetime: None,
+                document: &lookup,
+                service_exists: &exists,
+                old_grants: None,
+            },
+            KeyKind::Api,
+        )
+    }
+
+    #[test]
+    fn an_api_key_holds_the_alert_actions_and_nothing_of_the_keys_or_of_other_services() {
+        let owner = grants(&[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:infra",
+            "keys.own.read on service:portal",
+            "inbox.receive on service:portal/inbox_group:infra",
+            "access on service:datastore",
+        ]);
+        let ok = |grant: &str| run_api(&[("name", "n"), ("grant0", grant)], Some(&owner));
+        assert!(ok("alert.send on service:portal/inbox_group:infra").is_ok());
+        assert!(ok("alert.read on service:portal/inbox_group:infra").is_ok());
+        // A budget is on the grant `access` of the service portal.
+        assert!(run_api(
+            &[
+                ("name", "n"),
+                ("grant0", "access on service:portal"),
+                ("grant1", "alert.send on service:portal/inbox_group:infra"),
+                ("limit0.alerts.minute", "5"),
+            ],
+            None
+        )
+        .is_ok());
+        for refused in [
+            "keys.own.read on service:portal",
+            "inbox.receive on service:portal/inbox_group:infra",
+            "phone.read on service:portal",
+            "access on service:datastore",
+            "alert.send on service:portal/inbox_group:missing",
+            "alert.send on service:portal",
+        ] {
+            assert_eq!(ok(refused), Err(BAD_GRANT), "{refused}");
+        }
+        // The owner must cover the grant (portal 4.2).
+        let weak = grants(&["alert.read on service:portal/inbox_group:infra"]);
+        assert_eq!(
+            run_api(
+                &[
+                    ("name", "n"),
+                    ("grant0", "alert.send on service:portal/inbox_group:infra")
+                ],
+                Some(&weak)
+            ),
+            Err(NOT_COVERED)
+        );
+    }
+
+    #[test]
+    fn an_mcp_key_holds_no_action_of_the_service_portal() {
+        let owner = grants(&["alert.send on service:portal/inbox_group:infra"]);
+        assert_eq!(
+            run(
+                &[
+                    ("name", "n"),
+                    ("grant0", "alert.send on service:portal/inbox_group:infra")
+                ],
+                Some(&owner),
+                None,
+                None
+            ),
+            Err(BAD_GRANT)
+        );
     }
 
     fn owner() -> Vec<Grant> {

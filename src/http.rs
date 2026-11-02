@@ -39,7 +39,7 @@ use crate::store::{InsertError, LoginPage, Snapshot, Store, UserRow};
 use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
 use crate::ui;
-use crate::users::{check_new_password, normalize_login, Directory, UserRecord};
+use crate::users::{check_new_password, normalize_login, Directory, KeyOwner, UserRecord};
 use crate::util::{
     blocking, constant_time_eq, html_escape, json_escape, parse_form, path_only,
     percent_decode_form, percent_encode_query_component, typed_login, validate_return_uri,
@@ -50,7 +50,6 @@ const LOGIN_PATH: &str = "/auth/login";
 const LOGOUT_PATH: &str = "/auth/logout";
 const VERIFY_PATH: &str = "/auth/verify";
 const VERIFY_KEY_PATH: &str = "/auth/verify-key";
-const PORTAL_RIGHTS_PATH: &str = "/auth/users/portal-rights";
 const HEALTH_PATH: &str = "/healthz";
 /// The readiness of the instance. With the block `inbox`, the inbox answers (see `crate::inbox`).
 const READY_PATH: &str = "/readyz";
@@ -263,14 +262,11 @@ impl AppState {
             icons: Icons::load(&config.ui.icons_dir),
             policy,
             signer,
-            actions: Arc::new({
-                let registry = actions::Registry::new(config.access.actions_max_age)
-                    .with_bounds(config.access.bounds);
-                match &config.inbox {
-                    Some(inbox) => registry.with_inbox(crate::inbox_actions::document(inbox)),
-                    None => registry,
-                }
-            }),
+            actions: Arc::new(
+                actions::Registry::new(config.access.actions_max_age)
+                    .with_bounds(config.access.bounds)
+                    .with_portal(crate::portal_actions::document(&config.portal_features())),
+            ),
             options: crate::options::Options::new(config.access.actions_timeout)?,
             pdp_clients,
             pdp_stats: pdp::Stats::default(),
@@ -466,12 +462,6 @@ async fn serve_until(
         Arc::clone(&state.discovery),
         move |catalog| {
             let is_complete = catalog.is_complete();
-            // The service `inbox` is a service of the portal itself: it is not in a workload label.
-            let catalog = if publisher.config.inbox.is_some() {
-                catalog.with_internal(crate::inbox_actions::service())
-            } else {
-                catalog
-            };
             *publisher.catalog.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(catalog);
             if is_complete {
                 complete.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -790,8 +780,6 @@ async fn handle_request(
         handle_users_delete(&state, request, &client).await
     } else if method == Method::POST && path == USERS_UPDATE_PATH {
         handle_users_update(&state, request, &client).await
-    } else if method == Method::POST && path == PORTAL_RIGHTS_PATH {
-        handle_portal_rights(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_PATH {
         handle_impersonate(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_END_PATH {
@@ -1122,8 +1110,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
     // The list has only the services that the viewer can open.
     // The discovery problems name workloads, so only the superadmin sees them.
     // The inbox is a feature of the portal, as the keys are: it has no tile. The gear opens its pages.
-    let catalog =
-        Arc::new(current_catalog(state).filtered(|s| s.id != crate::inbox_actions::SERVICE, true));
+    let catalog = current_catalog(state);
     let superadmin = is_superadmin(&viewer);
     let shown = match &viewer.grants {
         Some(grants) => Arc::new(catalog.filtered(|s| may_open(Some(grants), &s.id), superadmin)),
@@ -1200,10 +1187,9 @@ async fn handle_settings(
         inbox: state.config.inbox.is_some(),
         superadmin: true,
     };
-    let catalog = current_catalog(state);
-    // The inbox is a feature of the portal: the pages of the services list the workloads only. The
-    // editors of permissions keep the inbox, with the name "Inbox (portal)".
-    let workloads = catalog.filtered(|s| s.id != crate::inbox_actions::SERVICE, true);
+    // The portal features are not in the catalogue: the pages of the services list the workloads
+    // only.
+    let workloads = current_catalog(state);
     let page = match path {
         ui::settings::SERVICES_PATH => {
             let services = service_grants(state, &workloads);
@@ -1249,7 +1235,7 @@ async fn handle_settings(
         }
         ui::settings::USERS_PATH => {
             let (users, snapshot) = load_admin_data(state).await;
-            let view = users_view(state, &catalog, uri, &users_token, users, snapshot);
+            let view = users_view(state, &workloads, uri, &users_token, users, snapshot);
             ui::users_page(&frame, &view)
         }
         // "Give access" on the page of a service: the form picks an account, and the page of this
@@ -1283,7 +1269,7 @@ async fn handle_settings(
                 .strip_prefix(ui::settings::USER_PATH_PREFIX)
                 .unwrap_or_default();
             let (users, snapshot) = load_admin_data(state).await;
-            match user_view(state, &catalog, uri, &users_token, asked, users, snapshot) {
+            match user_view(state, &workloads, uri, &users_token, asked, users, snapshot) {
                 Some(view) => ui::user_page(&frame, &view),
                 None => return handle_not_found(state, &Method::GET, uri, headers, client),
             }
@@ -1452,6 +1438,7 @@ fn users_view<'a>(
         .collect();
     ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+        allow_creation: state.config.users.allow_creation,
         add_open: query_value(uri, "add").as_deref() == Some("1"),
         mode: state.policy.mode,
         catalog,
@@ -1526,29 +1513,48 @@ fn user_view<'a>(
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
-        keys: key_rights_of(state, &found),
+        features: features_service(state),
+        owned_keys: owned_keys(state, asked),
         user: found?,
         first_day,
         token: users_token,
     })
 }
 
-/// The rights of an account on the keys, for its page. `None`: the portal accepts no key, or the
-/// account is the superadmin.
-fn key_rights_of(
-    state: &AppState,
-    card: &Option<ui::UserCard>,
-) -> Option<ui::settings::KeysRights> {
-    state.config.keys.as_ref()?;
-    let card = card.as_ref().filter(|c| !c.superadmin)?;
-    Some(ui::settings::KeysRights {
-        held: crate::portal_actions::action_names()
-            .into_iter()
-            .filter(|a| crate::portal_actions::holds(&card.grants, a))
-            .map(str::to_string)
+/// The portal features as the editors of permissions offer them: the service `portal` with the
+/// document of the features that the file turns on. `None`: the file turns none on.
+fn features_service(state: &AppState) -> Option<ui::ServiceActions> {
+    let features = state.config.portal_features();
+    if !features.has_keys() && !features.has_inbox() {
+        return None;
+    }
+    Some(feature_actions(crate::portal_actions::document(&features)))
+}
+
+/// The service `portal` for an editor, from a document of its features.
+fn feature_actions(document: Arc<crate::actions::Document>) -> ui::ServiceActions {
+    ui::ServiceActions {
+        id: crate::portal_actions::SERVICE.to_string(),
+        name: "Portal features".to_string(),
+        actions: document
+            .actions
+            .iter()
+            .map(|a| (a.name.clone(), a.description.clone()))
             .collect(),
-        max_key_lifetime: crate::portal_actions::max_key_lifetime(&card.grants),
-    })
+        document,
+        known: true,
+        fetch: false,
+    }
+}
+
+/// The number of keys that an account of the database owns. They go with the account.
+fn owned_keys(state: &AppState, login: &str) -> usize {
+    state
+        .users
+        .keys()
+        .iter()
+        .filter(|key| matches!(&key.owner, KeyOwner::User(owner) if owner == login))
+        .count()
 }
 
 /// The data of the page of one service: who has access. `None`: the catalogue has no such service.
@@ -2574,6 +2580,10 @@ async fn handle_users_add(
     request: Request<Incoming>,
     client: &Client,
 ) -> HttpResponse {
+    // `users.allow_creation = false`: the route does not exist.
+    if !state.config.users.allow_creation {
+        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
+    }
     let headers = request.headers().clone();
     let (viewer, mut form) = match admin_request(state, request, client, "add").await {
         Ok(v) => v,
@@ -2792,19 +2802,18 @@ async fn handle_users_update(
                 }
                 Err(GrantsError::Refused(code)) => return rejected(code),
             };
-        // The form carries every grant that the account holds, but the rights on the keys: the
-        // grants on the service `portal` have their own form. The form replaces the others.
-        let mut next: Vec<Grant> = current
-            .grants
-            .iter()
-            .filter(|g| g.service == crate::portal_actions::SERVICE)
-            .cloned()
-            .chain(ticked)
-            .collect();
+        // The form carries every grant that the account holds, with the grants on the portal
+        // features (the service `portal`). The form replaces them all.
+        let mut next: Vec<Grant> = ticked;
         next.sort();
         next.dedup();
         if next.len() > state.config.users.max_grants {
             return rejected("grant-limit");
+        }
+        // Each action of the portal features needs the actions that it needs (portal 6.3a).
+        if crate::portal_actions::check_user_grants(&state.config.portal_features(), &next).is_err()
+        {
+            return rejected("keys-needs");
         }
         Some(next)
     } else {
@@ -2898,124 +2907,6 @@ async fn handle_users_update(
     } else {
         "user-updated"
     })
-}
-
-/// Sets the rights of an account on the keys: the actions of the service `portal` and the longest
-/// key lifetime (portal 6.1, 6.3, 5.3). The form has one box `p.<action>` for each action.
-async fn handle_portal_rights(
-    state: &Arc<AppState>,
-    request: Request<Incoming>,
-    client: &Client,
-) -> HttpResponse {
-    let headers = request.headers().clone();
-    let (viewer, mut form) = match admin_request(state, request, client, "portal_rights").await {
-        Ok(v) => v,
-        Err(response) => return response,
-    };
-    if let Err(response) = require_superadmin(state, &viewer, "portal_rights") {
-        return response;
-    }
-    if state.config.keys.is_none() {
-        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
-    }
-    let login = form.remove("login").unwrap_or_default();
-    let lifetime = form.remove("max_key_lifetime").unwrap_or_default();
-    let mut actions: Vec<&'static str> = Vec::new();
-    for (name, value) in form.drain() {
-        let known = name.strip_prefix("p.").and_then(|a| {
-            crate::portal_actions::action_names()
-                .into_iter()
-                .find(|n| *n == a)
-        });
-        match (known, value.as_str()) {
-            (Some(action), "1") => actions.push(action),
-            _ => return text_response(StatusCode::BAD_REQUEST, "Bad Request\n"),
-        }
-    }
-    let login = match normalize_login(&login) {
-        Ok(login) => login,
-        Err(_) => return settings_redirect("no-user"),
-    };
-    let rejected = |code: &str| {
-        state.metrics.user_admin("portal_rights", "rejected");
-        user_redirect(&login, code)
-    };
-    let Some(current) = state.users.get(&login) else {
-        return settings_redirect("no-user");
-    };
-    if !state.policy.mode.editable() {
-        return rejected("grants-static");
-    }
-    let max_lifetime = if lifetime.is_empty() {
-        None
-    } else {
-        match lifetime
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| lifetime.parse::<u64>().ok())
-            .flatten()
-            .filter(|n| *n <= 31_536_000)
-        {
-            Some(n) => Some(n),
-            None => return rejected("keys-lifetime"),
-        }
-    };
-    let mut next: Vec<Grant> = current
-        .grants
-        .iter()
-        .filter(|g| g.service != crate::portal_actions::SERVICE || g.action == grants::ACCESS)
-        .cloned()
-        .collect();
-    for action in &actions {
-        let Ok(mut grant) = Grant::new(action, crate::portal_actions::SERVICE) else {
-            return rejected("error");
-        };
-        if *action == crate::portal_actions::KEYS_OWN_USE {
-            if let Some(max) = max_lifetime {
-                let mut limits = crate::limits::Limits::new();
-                if limits
-                    .set(
-                        crate::portal_actions::MAX_KEY_LIFETIME,
-                        crate::limits::Value::Ceiling(max),
-                    )
-                    .is_err()
-                {
-                    return rejected("keys-lifetime");
-                }
-                grant = grant.with_limits(limits);
-            }
-        }
-        next.push(grant);
-    }
-    next.sort();
-    if crate::portal_actions::check_user_grants(&next).is_err() {
-        return rejected("keys-needs");
-    }
-    if next.len() > state.config.users.max_grants {
-        return rejected("grant-limit");
-    }
-    if next == current.grants {
-        return user_redirect(&login, "unchanged");
-    }
-    let store = Arc::clone(&state.store);
-    let (target, stored) = (login.clone(), next.clone());
-    match tokio::task::spawn_blocking(move || store.update_user(&target, None, Some(&stored))).await
-    {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return settings_redirect("no-user"),
-        _ => return rejected("error"),
-    }
-    state.users.update(&login, None, Some(next));
-    audit(
-        state,
-        AuditKind::UserUpdated,
-        Some(login.clone()),
-        Some(state.superadmin_login.clone()),
-        client,
-        &headers,
-    );
-    state.metrics.user_admin("portal_rights", "ok");
-    user_redirect(&login, "user-updated")
 }
 
 /// "Log in as": the session of the superadmin becomes a session of the user. The session is flagged as impersonated.
@@ -3785,7 +3676,6 @@ mod tests {
             LOGOUT_PATH,
             VERIFY_PATH,
             VERIFY_KEY_PATH,
-            PORTAL_RIGHTS_PATH,
             HEALTH_PATH,
             SUCCESS_PATH,
             DENIED_PATH,
