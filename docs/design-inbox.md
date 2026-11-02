@@ -283,7 +283,7 @@ The phones show it as the name of the server: the enrollment answer and the mess
 
 ### 16.4 Deviations
 
-- **The service id was `inbox`.** Batch C removed it: section 17 gives the one scope `portal`.
+- **The service id was `inbox`.** Batch C removed it: section 18 gives the one scope `portal`.
 - **The module `src/inbox_actions.rs`.** Batch C deleted it and moved its constants to `src/portal_actions.rs`.
 - **The label `kind` of the metric of failed authentications.** The metric `portal_inbox_auth_failures_total` already had a label `kind` that names the kind of failure. It is not the kind of a message. The name stays, to keep the meaning of the metric.
 - **The old names in tests.** Two tests need the old names to prove that they are refused. The code builds each name from two parts, so that no copy of the old name stays in the repository.
