@@ -336,7 +336,60 @@ The app has the name **Portal Inbox**. The launcher label, the notification text
 - **The kind of a new key is in the address.** `GET /auth/keys/new?kind=api` shows the form of this kind. A selector with two or more kinds is a small form that asks for the page again. It works without script. The pane of the key and the visual design belong to batch D.
 - **The sixth check of the switches.** A block `key` of a block `user` (an MCP key of the file) stops the start when `keys.mcp` is not `true`. The plan lists five contradictions.
 - **The summary row of a revoked key has no kind.** The list shows the kind chip for the keys that exist only.
-- **The tab Activity stays.** The panel-only file shows the tabs Users, Services and Activity. Batch D merges Activity into Users.
+- **The tab Activity stayed in batch C.** Batch D1 merged it into Users (section 19).
 - **The migration.** The column `kind` is the schema version 7 of SQLite and of PostgreSQL. A key of an earlier version is an MCP key. The plan said "no old data"; a migration is still safe and small.
 - **The grants of a database with the old names.** No migration reads `service:inbox` or the old action names. The seed of a demo database sets the new grants.
 - **The old documents.** The README sections, the documents of `docs/inbox/` and the demo texts have the new names and blocks. Batch F rewrites their prose.
+
+## 19. The settings pages (batch D1 of the rework)
+
+### 19.1 What changed
+
+- **The shell.** The `body` of a settings page has the class `shell`. The header and the row of tabs stay at the top. The element `main` is the one scroller of the page. It has `scrollbar-gutter: stable`. The lists inside a page have no reserved gutter.
+- **Four tabs at most.** The tabs are Users, Services, Keys and Inbox. `Frame::tabs` builds the list from the file: a tab that the file turns off is not in the page. The panel-only file has two tabs. The tab Activity and its page are gone, with their route, their view, their tests and their style.
+- **Users.** The accounts stand on the left. The panels **Sign-ins** and **Recent changes** stand on the right. The sign-in log and the audit events are the data of these panels. The store gives the counts of the chips: `LoginPage.total` and `LoginPage.refused`.
+- **New user.** The button opens `/auth/settings/new-user`. This is the page of an account in create mode. The login and the password stand in the row of tools. The editor of grants is under them. `POST /auth/users/add` accepts the grants of the editor with the field `grants=1`. It makes the account and its grants in one request. A request without `grants=1` makes an account with no grant, as before. A refused try returns to the create page with a code. The route answers 404 when `users.allow_creation` is `false` or the grants are read-only. The form that made accounts on the Users page is gone.
+- **The account page.** One row of tools: log in as, the password (a popover), the activity (a popover), delete (a confirmation in place), two facts, Save. Under it, the groups **Services** and **Portal features** stand side by side. An account of the file has a page too. Its grants have a lock and the page changes nothing.
+- **Services.** The table has a selection by link: `?svc=<id>`. The panel **Opened by** shows who opens the selected service and who does not. The page of one service is gone. Its route answers 404, with no redirect. The route `/auth/settings/give` stays: the plus link of the panel uses it.
+- **Keys and Inbox.** Their content did not change. They work in the new shell and have no Activity tab.
+
+### 19.2 Components for batch D2
+
+The code is in `src/ui/components.rs`. Each function returns HTML and escapes its text. The style is in `web/settings.css`. The script is in `web/settings.js`.
+
+| Part | Function | Markup | Without script |
+|---|---|---|---|
+| Flat icon link | `icon_link` | `a.ib` with `aria-label` and `title` | A link. |
+| Flat icon post | `icon_post` | `form.inline > button.ib` | A form. |
+| Icon with a count | `icon_count_link`, `icon_count` | `a.ib.ib--count`, `span.feat` | A link, or a cell. |
+| Count chips | `chips` | `span.chips > a.chip[.is-on]` with `aria-current` | A link with a query parameter. A chip of zero is absent. |
+| Panel | `zone`, `zone_bare` | `section.zone > .zone__head + .scroll` | A section with its own scroller. |
+| Toolbar | `toolbar` | `.tbar` | A row. |
+| Two columns | `split` | `.split.split--users`, `--services`, `--even`, with `.stackcol` | A grid. It stacks under 1000 px. |
+| Table | none (markup) | `table.grid` with `col.w28` to `col.w180`, `.r`, `tr.is-selected`, `a.rowLink` | A table. `a.rowLink` covers its row. |
+| Popover | `popover` | `details.pop > summary.ib + .pop__menu` | A `details` element. |
+| Confirm in place | `ask` | `details.ask > summary.ib + form.ask__panel` | A `details` element that holds a form. |
+| Bulk action | `bulk_form`, `bulk_box`, `bulk_all_box`, `bulk_button` | `form.bulk`, `input.bulk__box[form]`, `details.bulk__ask[data-bulk]` | A form. The button has no count. |
+
+- **Strength of a confirmation.** `Strength::Light` has one confirm button. `Strength::Firm` asks the person to type the name of the resource. The field has a `pattern`, so the browser blocks a wrong name without script. The account page uses `Firm` when the account has keys.
+- **Side of a confirmation.** `Side::End` opens the question at the left of the cross. `Side::Start` opens it at the right. A button at the end of a toolbar uses `End`.
+- **The bulk action.** The form is empty. The boxes and the button name it with the attribute `form`. With script, the button is absent until a row is ticked. It then shows "Revoke (3)". A click on it asks "Revoke 3 phones?" in the same place. `settings.js` keeps the count.
+- **The editor of grants.** `Place.groups` draws the two groups side by side. The forms of the keys keep the single list.
+- **Icons.** `sprite.svg` has all the icons of the mockups. The page builder inlines the symbols that its markup names.
+
+### 19.3 Deviations from the mockups
+
+- **Dates.** A time is `2026-11-02 01:39`, the form that `settings.js` writes in the time zone of the browser. The mockup shows "Nov 1 02:58".
+- **Labels of the changes.** The panel keeps the labels of the audit kinds ("Permissions changed", "Account added"). The mockup has other words ("User changed"). The audit kinds did not change.
+- **Portal features.** The group uses the editor of grants as batch C made it: a tree of the features and the list of their actions. The mockup draws a matrix for the kinds of key and for the groups of the inbox. The matrix needs new editor data. Batch D2 can add it. The tree sits above the list because the column is narrow.
+- **Request limits.** The row of a service has no fields "Requests". The limit `requests` of `access` shows in the list of the actions of the service, as before.
+- **The count of accounts.** "3 of 64" counts the accounts of the database. The table also lists the superadmin and the accounts of the file.
+- **Opened by.** The panel has no row for the superadmin. A service that no account opens shows "Superadmin only". The accounts that do not open the service have a plus link. The mockup does not draw them.
+- **Services table.** "Actions" counts the actions that the service publishes. The lists of the actions and of the resource types, which were folds in the old table, are gone. The editor of the account shows them. The paths open without sign-in stay as a badge.
+- **Filter and selection.** A chip and a row are links. A click loads the page again. The row has an anchor, so the list keeps its place. No script filters in place.
+- **Firm confirmation.** The mockup has one kind of confirmation. The account page asks for the login before it deletes an account that has keys.
+- **Activity popover.** It also has the latest sessions and the services used. The mockup has three figures.
+- **Hybrid and static mode.** The old banners are gone. A grant of the file has a lock in the editor.
+- **No new user in static mode.** The button is absent in the mode `static`, and when `users.allow_creation` is `false`. The start already refuses the two together. The page checks both.
+- **Narrow windows.** Under 1000 px the panels stack and the page scrolls. A panel is 60 vh high at most.
+- **The bulk action has no page yet.** The Keys and Inbox pages use it in batch D2.

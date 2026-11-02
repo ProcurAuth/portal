@@ -22,7 +22,7 @@ origin=(-H "Origin: $base")
 add_user() {
   local page csrf
   if [ "$(status -b "$admin" "$base/auth/settings/users/$1")" = 200 ]; then return; fi
-  page=$(curl -s -b "$admin" "$base/auth/settings?add=1")
+  page=$(curl -s -b "$admin" "$base/auth/settings/new-user")
   csrf=$(form_csrf "$page" /auth/users/add)
   curl -s -o /dev/null -b "$admin" "${origin[@]}" --data-urlencode "csrf=$csrf" \
     --data-urlencode "login=$1" --data-urlencode "password=$(pw "$1")" "$base/auth/users/add"
