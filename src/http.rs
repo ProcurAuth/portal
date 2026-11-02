@@ -1499,18 +1499,6 @@ fn users_view<'a>(
         catalog,
         services: service_grants(state, catalog),
         users: cards,
-        superadmin: ui::UserCard {
-            login: state.superadmin_login.clone(),
-            grants: Vec::new(),
-            configured: Vec::new(),
-            created_at: None,
-            superadmin: true,
-            file: false,
-            keys: 0,
-            activity: activities
-                .remove(&state.superadmin_login)
-                .unwrap_or_default(),
-        },
         features: features_service(state),
         keys: state.config.keys.is_some(),
         inbox: state.config.inbox.is_some(),

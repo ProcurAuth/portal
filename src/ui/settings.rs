@@ -488,7 +488,6 @@ pub struct UsersView<'a> {
     pub services: Vec<ServiceActions>,
     /// The accounts of the database, then the accounts of the file.
     pub users: Vec<UserCard>,
-    pub superadmin: UserCard,
     /// The portal features with their actions, for the totals of the icons. `None`: the file turns
     /// none on.
     pub features: Option<ServiceActions>,
@@ -579,7 +578,6 @@ fn accounts_table(view: &UsersView) -> String {
         out.push_str(r#"<th scope="col" class="r">Keys</th>"#);
     }
     out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
-    account_row(&mut out, view, &view.superadmin);
     for user in &view.users {
         account_row(&mut out, view, user);
     }
@@ -1751,9 +1749,6 @@ mod tests {
     }
 
     fn view<'a>(catalog: &'a Catalog, data: &'a Data) -> UsersView<'a> {
-        let mut root = card("root", &[]);
-        root.superadmin = true;
-        root.created_at = None;
         UsersView {
             notice: None,
             allow_creation: true,
@@ -1765,7 +1760,6 @@ mod tests {
                 card("bob", &["mixed"]),
                 card("carol", &[]),
             ],
-            superadmin: root,
             features: Some(features()),
             keys: true,
             inbox: true,
@@ -1975,7 +1969,7 @@ mod tests {
             grant("inbox.receive", PORTAL),
         ]);
         let html = users_page(&full_frame(), &v);
-        for login in ["root", "alice", "bob", "carol"] {
+        for login in ["alice", "bob", "carol"] {
             assert!(
                 html.contains(&format!(
                     r#"<a class="rowLink" href="/auth/settings/users/{login}">{login}</a>"#
@@ -1983,8 +1977,10 @@ mod tests {
                 "{login}"
             );
         }
-        assert!(html.contains("Superadmin</span>"));
-        assert!(html.contains(r#"<span class="muted">every</span>"#));
+        assert!(
+            !html.contains("Superadmin</span>"),
+            "the superadmin is not a row of the accounts table"
+        );
         assert!(
             html.contains("2 of 4"),
             "alice opens two of the four services"

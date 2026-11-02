@@ -30,8 +30,7 @@
 .contentTabs {
   display: flex;
   gap: 2px;
-  max-width: var(--page-width);
-  margin: 0 auto;
+  margin: 0;
   padding: 0 24px;
   overflow-x: auto;
   scrollbar-width: none;
@@ -72,8 +71,7 @@
   display: grid;
   align-content: start;
   gap: 12px;
-  max-width: var(--page-width);
-  margin: 0 auto;
+  margin: 0;
   padding: 14px 24px 40px;
   font-size: 13px;
   line-height: 1.4;

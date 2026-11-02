@@ -705,7 +705,6 @@ fn demo_users<'a>(catalog: &'a Catalog, data: &'a DemoData, panel_only: bool) ->
             card("carol", &[], 5, false, false),
             card("dave", &["access on service:infra-notes"], 7, false, true),
         ],
-        superadmin: card("root", &[], 1, true, false),
         features: (!panel_only).then(demo_features),
         keys: !panel_only,
         inbox: !panel_only,
