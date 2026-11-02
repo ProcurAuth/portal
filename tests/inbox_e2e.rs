@@ -4080,10 +4080,20 @@ async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner
     s.add_to_inbox("  group \"crit\" {\n    name = \"Critical\"\n    critical = true\n  }");
     enable_mcp(&s);
     s.start();
-    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
-    let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
-    conn.subscribe("infra").await;
-    conn.subscribe("crit").await;
+
+    // The windows of a budget are fixed windows of the clock. Start the count early in a minute, so
+    // that the window does not end before the test has used it. The test waits first, with an async
+    // sleep, and opens the phone session after the wait: a session that nobody reads for more than
+    // `session_timeout` closes with the code 1001.
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        % 60
+        > 15
+    {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     // The owner of the first key: it may make keys of both kinds, send to two groups, read one, and
     // its budget is 3 alerts each minute.
@@ -4142,17 +4152,10 @@ async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner
     let mcp = make_key(&s, &svc, "mcp", "agent", &[]);
     assert!(mcp.starts_with("mcp_"));
 
-    // The windows of a budget are fixed windows of the clock. Start the count early in a minute, so
-    // that the window does not end before the test has used it.
-    while std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        % 60
-        > 30
-    {
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+    conn.subscribe("crit").await;
     // An allowed group: the alert is made and the phone gets it exactly one time.
     let (st, _, v) = send_with(&s, &ci, "k1", "infra", "from a key");
     assert_eq!(st, 201, "{v}");
