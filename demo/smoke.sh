@@ -49,12 +49,12 @@ check "no key text format: the user route needs a session" 302 "$(status -H 'Aut
 # Keys: the superadmin makes a key, and the key acts through the key route of Traefik.
 admin=$(mktemp)
 check "admin signs in" 303 "$(login admin "$admin")"
-keys_page=$(curl -s -b "$admin" "$base/auth/keys/new")
+keys_page=$(curl -s -b "$admin" "$base/auth/keys/new?kind=mcp")
 csrf=$(printf '%s' "$keys_page" | sed -n 's/.*action="\/auth\/keys\/create"[^>]*><input type="hidden" name="csrf" value="\([^"]*\)".*/\1/p')
 # The editor writes each ticked grant as a field `grant<n>` with its text. The form accepts the same fields from a script.
 g_access=grant0
 g_read=grant1
-created=$(curl -s -b "$admin" -H "Origin: $base" --data-urlencode "csrf=$csrf" --data-urlencode "name=smoke" \
+created=$(curl -s -b "$admin" -H "Origin: $base" --data-urlencode "csrf=$csrf" --data-urlencode "kind=mcp" --data-urlencode "name=smoke" \
   --data-urlencode "expires_at=" --data-urlencode "$g_access=access on service:notes" \
   --data-urlencode "$g_read=notes.read on service:notes" "$base/auth/keys/create")
 key=$(printf '%s' "$created" | sed -n 's/.*id="key-text"[^>]*value="\(mcp_[A-Za-z0-9]*\)".*/\1/p')
@@ -68,8 +68,8 @@ check "key: cannot write (no grant)" 403 "$(status -H "$auth" -H 'Content-Type: 
 check "a key opens no route of persons (files has no key route)" 302 "$(status -H "$auth" "$base/files/")"
 
 # ---- the inbox
-# One port serves the pages, the producers and the phones. Traefik sends `/v1/`, `/api/v1/` and `/api/version`
-# to the portal without ForwardAuth. A producer proves itself with a bearer token or a key. A phone proves
+# One port serves the pages, the senders and the phones. Traefik sends `/v1/`, `/api/v1/` and `/api/version`
+# to the portal without ForwardAuth. A sender proves itself with an API key. A phone proves
 # itself inside the WebSocket.
 check "inbox: a plain GET of /v1/session reaches the inbox (400, not a ForwardAuth redirect)" 400 "$(status "$base/v1/session")"
 check "inbox: a plain GET of /v1/enroll reaches the inbox (400)" 400 "$(status "$base/v1/enroll")"
@@ -78,20 +78,22 @@ check "inbox: a WebSocket upgrade of /v1/session through Traefik gives 101" 101 
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$base/v1/session")"
 check "inbox: /readyz on the port of the pages" 200 "$(status "$base/readyz")"
 check "inbox: /api/version on the port of the pages, no ForwardAuth" 200 "$(status "$base/api/version")"
-token=$(cat .secrets/inbox_producer_token)
+token=$(cat .secrets/inbox_api_key)
 akey=$(cat .secrets/alice_key)
 run=$(date +%s)
 send() { # <token> <idempotency key> <group>: prints the HTTP status
   status -X POST "$base/api/v1/alerts" -H "Authorization: Bearer $1" -H "Idempotency-Key: $2" \
     -H 'Content-Type: application/json' -d "{\"group\":\"$3\",\"title\":\"Smoke test $run\"}"
 }
-check "inbox: alert with the token of the file (infra)" 201 "$(send "$token" "smoke-$run-a" infra)"
+check "inbox: alert with the API key of the file (infra)" 201 "$(send "$token" "smoke-$run-a" infra)"
 check "inbox: the same alert again is a duplicate" 200 "$(send "$token" "smoke-$run-a" infra)"
-check "inbox: alert with the token of the file (critical)" 201 "$(send "$token" "smoke-$run-b" critical)"
-check "inbox: a wrong token" 401 "$(send wrong "smoke-$run-c" infra)"
+check "inbox: alert with the API key of the file (critical)" 201 "$(send "$token" "smoke-$run-b" critical)"
+check "inbox: a wrong key" 401 "$(send wrong "smoke-$run-c" infra)"
 check "inbox: alert with the key of alice (infra)" 201 "$(send "$akey" "smoke-$run-d" infra)"
 check "inbox: the key of alice cannot send to critical" 403 "$(send "$akey" "smoke-$run-e" critical)"
-check "inbox: a key that does not exist" 401 "$(send mcp_000000000000000000000000000000000000000000000000000 "smoke-$run-f" infra)"
+check "inbox: a text that is not a key" 401 "$(send api_000000000000000000000000000000000000000000000000000 "smoke-$run-f" infra)"
+check "inbox: an MCP key is not an API key" 401 "$(send "$key" "smoke-$run-g" infra)"
+check "key edge: an API key is not an MCP key" 401 "$(status -H "Authorization: Bearer $akey" "$api/whoami")"
 
 # The tab Inbox shows the pages that the permissions open. carol has no permission of the inbox.
 carol=$(mktemp)
@@ -100,7 +102,7 @@ inbox=$base/auth/settings/inbox
 check "inbox page: admin opens the overview" 200 "$(status -b "$admin" "$inbox")"
 check "inbox page: admin opens the phones" 200 "$(status -b "$admin" "$inbox/devices")"
 check "inbox page: alice opens the overview (alert.send)" 200 "$(status -b "$alice" "$inbox")"
-check "inbox page: alice cannot open the phones of all (no device.read)" 403 "$(status -b "$alice" "$inbox/devices")"
+check "inbox page: alice cannot open the phones of all (no phone.read)" 403 "$(status -b "$alice" "$inbox/devices")"
 check "inbox page: bob has no overview, the tab opens My phones" 303 "$(status -b "$bob" "$inbox")"
 check "inbox page: bob opens My phones" 200 "$(status -b "$bob" "$inbox/phones")"
 check "inbox page: carol cannot open the overview" 403 "$(status -b "$carol" "$inbox")"

@@ -60,7 +60,7 @@ services:
       - session_secret
       - db_password
       - inbox_server_key
-      - inbox_producer_token
+      - inbox_api_key
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -92,8 +92,8 @@ secrets:
     file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/db_password
   inbox_server_key:
     file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/inbox_server_key
-  inbox_producer_token:
-    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/inbox_producer_token
+  inbox_api_key:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/inbox_api_key
 
 volumes:
   postgres_data: {}

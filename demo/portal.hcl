@@ -11,9 +11,10 @@ authentication {
   superadmin_password_file = "/run/secrets/superadmin_password"
 }
 
-# The grants of every account come from the settings pages. seed.sh sets those of alice and bob.
+# The grants of the accounts of the database come from the settings pages. seed.sh sets those of alice
+# and bob. The block `user` below is an account of the file: it owns the API key of the inbox.
 access {
-  grants_mode = "dynamic"
+  grants_mode = "hybrid"
 }
 
 storage {
@@ -47,15 +48,28 @@ pdp_client "notes" {
   token_file = "/run/secrets/pdp_token_notes"
 }
 
-# Keys: the page /auth/keys and the edge /auth/verify-key.
-keys {}
+# Keys: the page /auth/keys. The kind `mcp` is for agents (the edge /auth/verify-key). The kind `api` is for
+# services and scripts (the API of the inbox).
+keys {
+  mcp = true
+  api = true
+}
+
+# The account of the file that owns the API key "local". A key follows its owner.
+user "local" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+    "alert.send on service:portal/inbox_group:critical",
+  ]
+}
 
 metrics {
   enabled = true
   path    = "/metrics"
 }
 
-# The inbox of the portal. The pages, the producers and the phones use the same port (Traefik, 8088).
+# The inbox of the portal. The pages, the senders and the phones use the same port (Traefik, 8088).
 inbox {
   server_key_file = "/run/secrets/inbox_server_key"
 
@@ -89,10 +103,11 @@ inbox {
     critical    = true
   }
 
-  # One producer with a token. The token is a file that up.sh makes.
-  producer "local" {
-    token_file = "/run/secrets/inbox_producer_token"
-    groups     = ["infra", "critical"]
+  # One API key of the file. The key is a file that up.sh makes.
+  api_key "local" {
+    owner       = "local"
+    secret_file = "/run/secrets/inbox_api_key"
+    groups      = ["infra", "critical"]
   }
 
   # The portal tells the group infra when a service stays unhealthy. 10 seconds is the shortest value.

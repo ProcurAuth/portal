@@ -49,7 +49,7 @@ check "phones: a WebSocket upgrade of /v1/session" 101 "$(code --max-time 2 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$pages/v1/session" || true)"
 
-token=$(cat "$PORTAL_SECRETS_DIR/inbox_producer_token")
+token=$(cat "$PORTAL_SECRETS_DIR/inbox_api_key")
 key="smoke-$(date +%s)"
 body='{"group":"infra","title":"Smoke test"}'
 check "alert with the producer token" 201 "$(code -X POST "$pages/api/v1/alerts" \

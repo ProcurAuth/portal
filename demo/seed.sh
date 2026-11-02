@@ -3,11 +3,11 @@
 # The accounts are database accounts. The grants are the ones of the editor of the settings pages.
 # It is safe to run again: a grant that is already set stays, and the key of alice is made one time.
 #
-#   alice   the grants of the demo on notes, files and wiki; group.subscribe on infra and critical,
-#           alert.send and alert.read on infra; the rights to make and use a key
-#   bob     the grants of the demo on notes and wiki; group.subscribe on infra
+#   alice   the grants of the demo on notes, files and wiki; inbox.receive on infra and critical,
+#           alert.send and alert.read on infra; the rights to make and use the keys of both kinds
+#   bob     the grants of the demo on notes and wiki; inbox.receive on infra
 #   carol   an account without a grant
-#   alice   a key `demo-producer` with alert.send on infra: .secrets/alice_key
+#   alice   an API key `demo-sender` with alert.send on infra: .secrets/alice_key
 set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
@@ -52,18 +52,6 @@ give() {
   esac
 }
 
-# rights <login> <action>...: sets the rights on keys (the section Keys of the page of the account).
-rights() {
-  local login=$1 page csrf args=() a location
-  shift
-  for a in "$@"; do args+=(--data-urlencode "p.$a=1"); done
-  page=$(curl -s -b "$admin" "$base/auth/settings/users/$login")
-  csrf=$(form_csrf "$page" /auth/users/portal-rights)
-  location=$(curl -s -o /dev/null -D - -b "$admin" "${origin[@]}" --data-urlencode "csrf=$csrf" \
-    --data-urlencode "login=$login" "${args[@]}" "$base/auth/users/portal-rights" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
-  echo "seed: rights on keys of $login ($location)"
-}
-
 add_user alice
 add_user bob
 add_user carol
@@ -74,29 +62,34 @@ give alice \
   "notes.delete on service:notes/notebook:work" \
   "access on service:files" \
   "access on service:wiki" \
-  "group.subscribe on service:inbox/group:infra" \
-  "group.subscribe on service:inbox/group:critical" \
-  "alert.send on service:inbox/group:infra" \
-  "alert.read on service:inbox/group:infra"
-rights alice keys.own.read keys.own.create keys.own.revoke keys.own.use
+  "inbox.receive on service:portal/inbox_group:infra" \
+  "inbox.receive on service:portal/inbox_group:critical" \
+  "alert.send on service:portal/inbox_group:infra" \
+  "alert.read on service:portal/inbox_group:infra" \
+  "keys.own.read on service:portal" \
+  "keys.own.revoke on service:portal" \
+  "keys.own.create on service:portal/key_kind:mcp" \
+  "keys.own.use on service:portal/key_kind:mcp" \
+  "keys.own.create on service:portal/key_kind:api" \
+  "keys.own.use on service:portal/key_kind:api"
 give bob \
   "access on service:notes" \
   "notes.read on service:notes/notebook:public" \
   "access on service:wiki" \
-  "group.subscribe on service:inbox/group:infra"
+  "inbox.receive on service:portal/inbox_group:infra"
 
 # The key of alice: made on her page of keys, shown one time, kept in .secrets/alice_key.
 [ "$(login alice "$alice")" = 303 ] || { echo "seed: alice cannot sign in" >&2; exit 1; }
-if [ ! -s .secrets/alice_key ] || ! curl -s -b "$alice" "$base/auth/keys" | grep -q 'demo-producer'; then
-  page=$(curl -s -b "$alice" "$base/auth/keys/new")
+if [ ! -s .secrets/alice_key ] || ! curl -s -b "$alice" "$base/auth/keys" | grep -q 'demo-sender'; then
+  page=$(curl -s -b "$alice" "$base/auth/keys/new?kind=api")
   csrf=$(form_csrf "$page" /auth/keys/create)
-  created=$(curl -s -b "$alice" "${origin[@]}" --data-urlencode "csrf=$csrf" --data-urlencode "name=demo-producer" \
-    --data-urlencode "expires_at=" --data-urlencode "grant0=alert.send on service:inbox/group:infra" \
+  created=$(curl -s -b "$alice" "${origin[@]}" --data-urlencode "csrf=$csrf" --data-urlencode "kind=api" --data-urlencode "name=demo-sender" \
+    --data-urlencode "expires_at=" --data-urlencode "grant0=alert.send on service:portal/inbox_group:infra" \
     "$base/auth/keys/create")
-  key=$(printf '%s' "$created" | sed -n 's/.*id="key-text"[^>]*value="\(mcp_[A-Za-z0-9]*\)".*/\1/p')
+  key=$(printf '%s' "$created" | sed -n 's/.*id="key-text"[^>]*value="\(api_[A-Za-z0-9]*\)".*/\1/p')
   case "$key" in
-    mcp_*) (umask 077; printf '%s' "$key" > .secrets/alice_key); chmod 644 .secrets/alice_key
-           echo "seed: key demo-producer made for alice (.secrets/alice_key)" ;;
+    api_*) (umask 077; printf '%s' "$key" > .secrets/alice_key); chmod 644 .secrets/alice_key
+           echo "seed: key demo-sender made for alice (.secrets/alice_key)" ;;
     *) echo "seed: no key text in the answer" >&2; exit 1 ;;
   esac
 fi

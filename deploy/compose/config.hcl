@@ -17,9 +17,25 @@ authentication {
   superadmin_password_file = "/run/secrets/superadmin_password"
 }
 
-# A new account has no grant. The superadmin gives grants in the settings pages.
+# A new account has no grant. The superadmin gives grants in the settings pages. The mode "hybrid"
+# also reads the blocks `user` of this file: the account "local" owns the API key of the inbox.
 access {
-  grants_mode = "dynamic"
+  grants_mode = "hybrid"
+}
+
+# The kind `api` is on: the API of the inbox accepts API keys (`api_` and 49 characters). The kind
+# `mcp` is off: this stack has no `identity` block and no `pdp` block, which the kind `mcp` needs.
+keys {
+  mcp = false
+  api = true
+}
+
+# An account of the file owns the key. A key follows its owner: it can do only what both can do.
+user "local" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+  ]
 }
 
 # PostgreSQL is required for several instances. It needs a signing key that all instances share.
@@ -53,7 +69,7 @@ inbox {
 
   devices {
     # The public base URL of the portal as a phone reaches it. It is in the enrollment code. The phones use the
-    # port of the pages (4181), like the producers and the webhooks.
+    # port of the pages (4181), like the senders and the webhooks.
     # Change it when the phone is not on this host. An emulator reaches the host at 172.17.0.1:4181.
     public_address        = "127.0.0.1:4181"
     heartbeat_interval    = "20s"
@@ -75,9 +91,10 @@ inbox {
     description = "Test group of the local stack"
   }
 
-  # A producer sends alerts with `Authorization: Bearer <token>`. The token is a file of the init script.
-  producer "local" {
-    token_file = "/run/secrets/inbox_producer_token"
-    groups     = ["infra"]
+  # A sender sends alerts with `Authorization: Bearer <key>`. The key is a file of the init script.
+  api_key "local" {
+    owner       = "local"
+    secret_file = "/run/secrets/inbox_api_key"
+    groups      = ["infra"]
   }
 }

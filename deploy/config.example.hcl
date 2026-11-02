@@ -7,13 +7,13 @@
 # configuration reference in README.md.
 
 server {
-  # The portal: the pages (behind Traefik ForwardAuth where needed), and the inbox: the API for the producers and
+  # The portal: the pages (behind Traefik ForwardAuth where needed), and the inbox: the API for the senders and
   # the webhooks (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no
   # ForwardAuth. The account pages make the enrollment codes.
   listen_address  = "0.0.0.0:4181"
   # The name of this instance. The app shows it as the name of the server.
   name            = "Portal"
-  # Peers whose X-Forwarded-For header the portal trusts, for the pages, the producers and the phones. Empty: none.
+  # Peers whose X-Forwarded-For header the portal trusts, for the pages, the senders and the phones. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
 }
 
@@ -25,6 +25,29 @@ authentication {
 session {
   secret_mode = "provided"
   secret_file = "/run/secrets/session_secret"
+}
+
+# "hybrid": the settings pages give the grants of the accounts of the database, and the blocks `user` of
+# this file give the grants of the accounts of the file. The account "grafana" owns an API key.
+access {
+  grants_mode = "hybrid"
+}
+
+# Keys. The kind `api` is for services, webhooks and scripts: the API of the inbox accepts it. It needs the
+# block `inbox`. The kind `mcp` is for agents: the key edge accepts it. It needs the blocks `identity` and
+# `pdp`, so this example turns it off. A block with no kind on stops the program.
+keys {
+  mcp = false
+  api = true
+}
+
+# The account of the file that owns the API key "grafana". A key follows its owner: it can do only what the
+# key and its owner can both do. The owner needs `keys.own.use` on the kind, and `alert.send` on each group.
+user "grafana" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+  ]
 }
 
 # SQLite. Instead of this block, the block `postgres` below lets several active instances share one database.
@@ -83,9 +106,11 @@ inbox {
     critical    = true   # a limit on alert.send never applies to this group
   }
 
-  # Optional: alert sources. A token is made with `portal inbox token --out FILE`.
-  producer "grafana" {
-    token_file            = "/run/secrets/inbox_grafana_token"
+  # Optional: alert sources. A key is made with `portal inbox token --out FILE`. A key of the file works
+  # when the database is away: the start decides its groups from the grants of its owner.
+  api_key "grafana" {
+    owner                 = "grafana"
+    secret_file           = "/run/secrets/inbox_grafana_key"
     groups                = ["infra"]
     webhook_send_resolved = false
   }

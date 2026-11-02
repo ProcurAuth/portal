@@ -24,11 +24,11 @@ The stack has the portal, PostgreSQL and the inbox. It is for development and te
 
 The portal is on port 4181. This one port serves the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The inbox is a feature of the portal, so it has no port of its own. The admin pages of the inbox are in the portal. No proxy is in front of this stack, so no ForwardAuth applies.
 
-A producer sends an alert with the token in `deploy/compose/secrets/inbox_producer_token`:
+A sender sends an alert with the API key in `deploy/compose/secrets/inbox_api_key`:
 
 ```sh
 curl -fsS -X POST http://127.0.0.1:4181/api/v1/alerts \
-  -H "Authorization: Bearer $(cat deploy/compose/secrets/inbox_producer_token)" \
+  -H "Authorization: Bearer $(cat deploy/compose/secrets/inbox_api_key)" \
   -H "Idempotency-Key: test-1" -H "Content-Type: application/json" \
   -d '{"group":"infra","title":"Test"}'
 ```
@@ -79,7 +79,7 @@ Create the Secret `portal-secret` in the namespace `edge` before the pods start.
 | `db_password` | Password of the role `portal` | The same value as in the database. |
 | `identity_key` | Ed25519 key of the identity tokens | `openssl genpkey -algorithm ed25519` |
 | `inbox_server_key` | Noise key of the inbox server | `portal inbox keygen --out FILE` |
-| `inbox_alerting_token` | Token of the producer `alerting` | `portal inbox token --out FILE` |
+| `inbox_alerting_key` | API key of the block `api_key "alerting"` | `portal inbox token --out FILE` |
 
 Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the configuration.
 
@@ -87,7 +87,7 @@ Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the con
 kubectl -n edge create secret generic portal-secret \
   --from-file=superadmin_login --from-file=superadmin_password --from-file=session_secret \
   --from-file=db_password --from-file=identity_key --from-file=inbox_server_key \
-  --from-file=inbox_alerting_token
+  --from-file=inbox_alerting_key
 ```
 
 ### Configuration
@@ -109,7 +109,7 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 The inbox is a feature of the portal. It has one port and one domain.
 
-- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A producer has no session: it sends a bearer token or a key, and the inbox checks it. Traefik carries a WebSocket upgrade with path routing, so a second port is not needed.
+- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A sender has no session: it sends an API key, and the inbox checks it. Traefik carries a WebSocket upgrade with path routing, so a second port is not needed.
 - **The middleware `portal-inbox-retry`** sends a request again (4 attempts, 100 ms apart at first) when a node is lost and the Service still names its pod. Traefik retries only before the first byte of the answer. An upgrade that got `101` is never sent again. The `ServersTransport` `portal-inbox` has a dial timeout of 1 second, so the retry is quick.
 - **Phones** use `inbox.devices.public_address`. Set it to the public base URL of the portal: `https://portal.example.org`. A path prefix is possible (`https://host/prefix`), but the portal has no base path. The proxy must remove the prefix before it sends the request.
 - **Separate exposure** needs no second port. Restrict `/v1/` by source address or by rate with a Traefik middleware on the route `portal-inbox`. Keep the pages on routes with ForwardAuth.
