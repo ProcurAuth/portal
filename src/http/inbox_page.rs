@@ -58,6 +58,11 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
         id: id.clone(),
         name: inbox.groups[id].name.clone(),
     };
+    // A critical group comes last: the form never starts on it.
+    let ordered = |mut ids: Vec<String>| {
+        ids.sort_by_key(|id| inbox.groups[id].critical);
+        ids
+    };
     let Some(grants) = &viewer.grants else {
         // The superadmin has every right.
         return Some(Held {
@@ -67,7 +72,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
                 revoke: true,
                 connections: true,
                 own_phones: !ids.is_empty(),
-                send: ids.iter().map(choice).collect(),
+                send: ordered(ids.clone()).iter().map(choice).collect(),
             },
             read_groups: None,
             named: None,
@@ -91,7 +96,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
             revoke: devices && at_service(actions::PHONE_REVOKE),
             connections: at_service(actions::PHONE_LOG),
             own_phones: !on(actions::INBOX_RECEIVE).is_empty(),
-            send: send_ids.iter().map(choice).collect(),
+            send: ordered(send_ids.clone()).iter().map(choice).collect(),
         },
         read_groups: Some(read_ids),
         named: Some(named),
@@ -345,7 +350,7 @@ async fn page(
     let Some(inbox) = state.config.inbox.as_ref() else {
         return not_found();
     };
-    let groups: Vec<GroupLine> = inbox
+    let mut groups: Vec<GroupLine> = inbox
         .groups
         .iter()
         .filter(|(id, _)| ctx.held.names(id))
@@ -355,6 +360,8 @@ async fn page(
             critical: g.critical,
         })
         .collect();
+    // The critical groups come last, as in the permission editor.
+    groups.sort_by_key(|g| g.critical);
     let sent = if rights.sent {
         let since_ms = now_ms - query.period.millis();
         let only = ctx.held.read_groups.as_deref();

@@ -361,7 +361,7 @@ The code is in `src/ui/components.rs`. Each function returns HTML and escapes it
 |---|---|---|---|
 | Flat icon link | `icon_link` | `a.ib` with `aria-label` and `title` | A link. |
 | Flat icon post | `icon_post` | `form.inline > button.ib` | A form. |
-| Icon with a count | `icon_count_link`, `icon_count` | `a.ib.ib--count`, `span.feat` | A link, or a cell. |
+| Icon with a count | `icon_count` | `span.feat` | A cell. |
 | Count chips | `chips` | `span.chips > a.chip[.is-on]` with `aria-current` | A link with a query parameter. A chip of zero is absent. |
 | Panel | `zone`, `zone_bare` | `section.zone > .zone__head + .scroll` | A section with its own scroller. |
 | Toolbar | `toolbar` | `.tbar` | A row. |
@@ -381,7 +381,7 @@ The code is in `src/ui/components.rs`. Each function returns HTML and escapes it
 
 - **Dates.** A time is `2026-11-02 01:39`, the form that `settings.js` writes in the time zone of the browser. The mockup shows "Nov 1 02:58".
 - **Labels of the changes.** The panel keeps the labels of the audit kinds ("Permissions changed", "Account added"). The mockup has other words ("User changed"). The audit kinds did not change.
-- **Portal features.** The group uses the editor of grants as batch C made it: a tree of the features and the list of their actions. The mockup draws a matrix for the kinds of key and for the groups of the inbox. The matrix needs new editor data. Batch D2 can add it. The tree sits above the list because the column is narrow.
+- **Portal features.** The group used the editor of grants as batch C made it: a tree of the features and the list of their actions. Batch D2 replaced it with the matrices of the mockup (section 20).
 - **Request limits.** The row of a service has no fields "Requests". The limit `requests` of `access` shows in the list of the actions of the service, as before.
 - **The count of accounts.** "3 of 64" counts the accounts of the database. The table also lists the superadmin and the accounts of the file.
 - **Opened by.** The panel has no row for the superadmin. A service that no account opens shows "Superadmin only". The accounts that do not open the service have a plus link. The mockup does not draw them.
@@ -392,4 +392,45 @@ The code is in `src/ui/components.rs`. Each function returns HTML and escapes it
 - **Hybrid and static mode.** The old banners are gone. A grant of the file has a lock in the editor.
 - **No new user in static mode.** The button is absent in the mode `static`, and when `users.allow_creation` is `false`. The start already refuses the two together. The page checks both.
 - **Narrow windows.** Under 1000 px the panels stack and the page scrolls. A panel is 60 vh high at most.
-- **The bulk action has no page yet.** The Keys and Inbox pages use it in batch D2.
+- **The bulk action has no page yet.** The Keys and Inbox pages use it in batch D2 (section 20).
+
+## 20. The Inbox page, the Keys page and the matrices (batch D2 of the rework)
+
+### 20.1 What changed
+
+- **Inbox.** The tab is one page, `/auth/settings/inbox`, for each account that holds any permission of the inbox. It has the zone **Sent** on the left and the zones **Phones** and **Connections** on the right. The toolbar has the period, the kinds of message, the book icon and **Send alert**. Each part needs its permission and is absent from the page without it. An account that holds only `inbox.receive` has the zone **My phones** and the plus button.
+- **Removed pages.** The overview, the phones, the connections, my phones, the documentation, the page of one alert and the page that shows a code are gone, with their routes, their styles and their tests. Each address under `/auth/settings/inbox` other than the page answers `404`. A `GET` of a form route answers `405`.
+- **Filters are links.** A chip is a link with a query parameter (`p`, `g`, `a`, `ps`, `pp`, `mine`, `cs`, `login`, `open`). The README lists them. The period picker and the row of an alert use links too. Nothing needs script.
+- **Alert in place.** The row of an alert links to `?open=<id>#a-<id>`. The page draws the detail under the row: the phones that do not have the alert, then a few that have it. The close link keeps the place in the list.
+- **Graph.** One new store query counts the alerts for each bucket of time and each group (`alert_counts`, SQLite and PostgreSQL, one test each). The page keeps the groups that the account may read and draws the bars as an inline SVG. The critical groups are on top, in the warning colour.
+- **Code.** The plus button is a form. `POST /auth/settings/inbox/code` answers with the page itself, with the code in a popover that stays open until **Done**. The answer has `Cache-Control: no-store`. With script, **Done** removes the popover. Without script, **Done** is a link to the page.
+- **Bulk revoke.** The form sends one field `id.<id>` for each ticked phone or key, with the value `1`. A form never repeats a name. The route `POST /auth/settings/inbox/revoke` and the route `POST /auth/keys/revoke` revoke each id that the account may revoke. The answer is a redirect with a notice.
+- **Keys.** The list is on the left, with a box and a kind icon in each row. The form of a key is a pane on the right, with four states: closed, new, change and "key made". With the pane closed, the toolbar has **New key**. With the pane open, the toolbar button is absent, and the head of the pane has **Cancel** and the action. `GET /auth/keys/new` and `GET /auth/keys/edit?id=<id>` open the page with the pane. The page of the text of a key is gone: the pane shows the text one time, with **Copy** and **Done**. The pane of an API key has the matrix of the inbox and the budget. The pane of an MCP key has the services only.
+- **Matrices.** The editor of the account and the pane of a key draw the portal features as plain rows and compact matrices: **Keys**, **Key kinds** (with the longest lifetime of each kind), **Inbox** (a row for each group, the columns Receive, Send and Read, and the budget of the alerts) and **Phones**. The data of the editor has two new fields: `needs` for each action of the service `portal`, and `critical` for each node that is a critical group. A feature that the file turns off has no action and no node, so the editor draws nothing for it.
+- **Test.** `an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner` blocked the runtime while it waited for the start of a clock minute. The phone session then closed with the code 1001. The test now waits first, with an async sleep, and opens the phone session after the wait.
+- **Dead code.** The styles `.stats`, `.stat*`, `.pageBack`, the old sub-navigation and the old pages, the unused icons, the function `icon_count_link` and the `allow(dead_code)` of `src/ui/components.rs` are gone.
+
+### 20.2 Components
+
+- `zone` can have a part between its head and its list that does not scroll (`above_html`, for the graph), and a head with no title (the toolbar above it shows the title).
+- `popover_with` makes a popover whose opener is a field (`pick`), a button or an icon.
+- `split_zones` places a main zone and a stack, or one zone alone (`split--solo`).
+- The box of the bulk action is named `<field>.<id>`.
+
+### 20.3 Deviations from the mockups
+
+- **Mine on the phones.** It is a chip with a user icon, as the mockup draws it. The Keys page has the segmented filter Mine and All.
+- **Connections.** The table has no column End. The last column shows the reason, or "open". The end time is in the tooltip. The zone is too narrow for two time columns.
+- **Origin.** A manual alert shows "account": the alert keeps the source `admin`, not the login. The name of a key comes from the directory. A key that was revoked shows "API key".
+- **Sent has a bound.** The list holds the 500 newest alerts of the period, and the count shows `500+` when older ones exist. The state chips and the group counts come from these rows. The graph counts every alert. A shorter period shows the older alerts.
+- **Code popover.** It shows the fingerprint and the end of the code. It does not show the count of open codes: the store has no such query. The popover opens by a new page, not in place.
+- **Send form.** A critical group comes last in the list, so the form never starts on it. One group gives no list. The form has no character counter.
+- **Row of an alert.** A click loads the page again. One detail is open at a time.
+- **Kind of a key in the pane.** With one kind, the title names it ("New MCP key") and no selector shows. A change shows the kind as a fact, not as a disabled control. The selector lists API first. The kind that a new pane starts with is the first kind that the account may make, so a pane for an account that may make both starts on MCP.
+- **Key list.** "Make a key like this one" has no button in a row. The address `?copy=<id>` of the new pane still works. The column "Can use" of an MCP key shows the services and the count of permissions.
+- **Warning mark.** An API key does not need the grant `access`: the mark "no access permission" ignores the service `portal`.
+- **Editor without script.** The matrices need script. Without script, the page lists the grants as text, and the pane of a key has text fields for the grants.
+- **Order.** The kind API comes before the kind MCP, and the critical groups come last, in the matrices.
+- **Budget.** The editor writes the grant `access on service:portal` only when a window has a value. It removes the grant when no window has one.
+- **Narrow windows.** Under 1000 px the zones stack and the page scrolls, as on the other pages.
+

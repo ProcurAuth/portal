@@ -79,6 +79,18 @@ Two kinds of token work at the same time.
 
 Make the text of an API key with `portal inbox token --out FILE` for a block `api_key` of the file. Or make an API key on the page **Keys** of the portal. Give the owner the permission `alert.send` on each group.
 
+Example. The portal is at `https://portal.example.org`.
+
+```sh
+curl -X POST https://portal.example.org/api/v1/alerts \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: deploy-4711" \
+  -d '{"group":"infra","title":"Disk full on db-1"}'
+
+curl -X POST "https://portal.example.org/api/v1/notify/infra?title=Backup%20done" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 The header `Idempotency-Key` is optional. It has 1 to 128 printable ASCII characters. Two requests with the same key make one alert. The second answer is `200` with `"duplicate": true`. A key that two different alerts use gets `409`. Without the header, the inbox derives a key from the content and the minute.
 
 | Status | Use |
@@ -93,7 +105,7 @@ The header `Idempotency-Key` is optional. It has 1 to 128 printable ASCII charac
 
 The code of a `503` tells the cause. `directory_not_ready`: the portal cannot check a key yet. `rights_unavailable`: the count of the budget failed. `replication_unavailable`: the copy to the replica failed. `spool_full`: the memory buffer of the degraded mode is full. An error body has the form `{"error": {"code": "...", "message": "..."}}`.
 
-The page **Documentation** of the tab Inbox shows these routes with the real address and ready recipes.
+The book icon of the tab Inbox opens a popover with the routes, the groups and the header of the key. This document has the long text and the table of the statuses.
 
 ### Alertmanager and Grafana
 
@@ -113,8 +125,8 @@ The portal can send alerts about itself, in process, with the source `portal`. I
 An account makes the code, and the phone uses it one time.
 
 1. Sign in to the portal with the account that owns the phone.
-2. Open the page **My phones** of the tab Inbox. The account needs `inbox.receive` on one group at least.
-3. Press **Make a code**. The page shows the code one time.
+2. Open the tab Inbox. The account needs `inbox.receive` on one group at least.
+3. Press the plus button in the head of the zone **My phones**. The plus button makes the code. A popover shows the code one time. It stays open until you press **Done**.
 4. On the phone, install the app and open **Add a server**.
 5. Type the code, or tap the link `portal-inbox://enroll?...` on the phone.
 6. Compare the fingerprint that the app shows with the fingerprint on the page.
@@ -133,20 +145,20 @@ If the enrollment fails, the app shows one of these texts:
 | Update the app. | The app does not speak protocol 4. |
 | Too many attempts. | The client address sent too many attempts. Wait. |
 
-To remove a phone, open **My phones** and press **Revoke**. An account revokes its own phones only. An account with `phone.revoke` and `phone.read` can revoke any phone on the page **Phones**. The phone gets the close code 4403. It must enroll again.
+To remove a phone, tick its box in the zone **My phones** and press **Revoke (N)**. A question "Revoke N phones?" opens in the same place. An account revokes its own phones only. An account with `phone.revoke` and `phone.read` can revoke any phone of the zone **Phones**. The phone gets the close code 4403. It must enroll again.
 
-## The pages of the tab Inbox
+## The page of the tab Inbox
 
-The pages are under `/auth/settings/inbox`. The tab shows for an account that has a permission of the inbox features. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
+The page is `/auth/settings/inbox`. It has no sub-page. The tab shows for an account that has a permission of the inbox features. The launcher has no tile for the inbox. The gear of the launcher opens the page. The page shows only the parts that the permissions of the account give.
 
-| Page | Needs | Use |
+| Part | Needs | Use |
 |---|---|---|
-| Overview | `alert.read`, `phone.read`, `phone.log` or `alert.send` | The figures of the delivery, the groups, the form **Send an alert**, the last alerts. |
-| Alert | `alert.read` on the group | The delivery of one alert to each phone. |
-| Phones | `phone.read` | All phones, with state, owner and groups. **Revoke** needs `phone.revoke`. |
-| Connections | `phone.log` | The connection log, with a filter on the login. |
-| My phones | `inbox.receive` on one group | The phones of the account, **Make a code** and **Revoke**. |
-| Documentation | any page of the tab | The producer API with the real address. |
+| Zone **Sent** | `alert.read` on one group at least | The alerts of the period, the graph, the chips of the groups and of the states. A row opens its deliveries in place. |
+| Zone **Phones** | `phone.read` | All phones, with state, owner and pending alerts. **Revoke (N)** needs `phone.revoke`. |
+| Zone **My phones** | `inbox.receive` on one group | The phones of the account, the plus button and **Revoke (N)**. |
+| Zone **Connections** | `phone.log` | The connection log, with a search on the login. |
+| **Send alert** | `alert.send` on one group at least | The form of a manual alert. |
+| The book icon | `alert.send` or `alert.read` | The routes, the groups and the header of the key. The section "Send an alert (producers)" has the long text. |
 
 A session that the superadmin opens with **Log in as** can read the pages and make a code. It cannot send an alert and it cannot revoke a phone.
 

@@ -1060,9 +1060,14 @@
         .sort(function (a, b) {
           return (a.path === "key_kind:api" ? 0 : 1) - (b.path === "key_kind:api" ? 0 : 1);
         });
-      var groupNodes = svc.nodes.filter(function (n) {
-        return n.kind === "inbox_group";
-      });
+      // The critical groups come last.
+      var groupNodes = svc.nodes
+        .filter(function (n) {
+          return n.kind === "inbox_group";
+        })
+        .sort(function (a, b) {
+          return (a.critical ? 1 : 0) - (b.critical ? 1 : 0);
+        });
 
       function holds(name) {
         return ticked.has(keyOf(svc.id, name, ""));

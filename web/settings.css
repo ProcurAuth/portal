@@ -1150,6 +1150,10 @@ input.keyText {
   width: 120px;
 }
 
+.grid col.w136 {
+  width: 136px;
+}
+
 .grid col.w152 {
   width: 152px;
 }
@@ -2350,7 +2354,13 @@ input.keyText {
 }
 
 .feat--text {
-  max-width: 100%;
+  display: flex;
+  min-width: 0;
+  margin-right: 0;
+}
+
+.feat__text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

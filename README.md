@@ -350,7 +350,7 @@ The Services settings page lists the rules of every service. The whole exposure 
 A key lets a program call a service for a user. Without the block `keys {}`, the keys are off: each address of the key pages answers 404.
 
 - **Key text:** `mcp_`, 43 base62 characters and 6 characters of CRC32, 53 characters in all. The portal shows the text one time, when it makes the key. It keeps only the SHA-256 digest and the last 4 characters.
-- **Key pages:** `GET /auth/keys` shows the keys. A user with the right `keys.own.create` makes a key on the page `GET /auth/keys/new`, with a name, an expiry date and grants. The grants of a key never go beyond the grants of its owner. The page of a new key has the editor of grants (see "Editor of grants"). The limit fields of a grant stand in the table of the ticked grants. A key has its own page of change, `GET /auth/keys/edit?id=<id>`, with the same editor. A refused form returns to the page of the new key, with the reason in a notice.
+- **Key page:** `GET /auth/keys` is one page. The list of the keys is on the left. It has a kind icon, the chips of the kinds, the filter Mine and All, and a box in each row for **Revoke (N)**. The form of a key is a pane on the right. With the pane closed, the toolbar has **New key**. With the pane open, the toolbar button is absent, and the head of the pane has the title, **Cancel** and the action (**Create** or **Save**). `GET /auth/keys/new` and `GET /auth/keys/edit?id=<id>` are direct links that open the page with the pane in that state. The pane of a new key has a kind selector only when the account may make two kinds or more. The selector is a small GET form: `?kind=` loads the pane again. An API key has the matrix of the inbox and the budget of the alerts. An MCP key has the services only. The account can tick only the rights that the owner holds. A right that the owner lost has a warning mark. The pane shows the text of a new key one time, with a **Copy** button and **Done**. The grants of a key never go beyond the grants of its owner. A refused form returns to the pane of a new key, with the reason in a notice.
 - **Edge:** `GET /auth/verify-key` is the ForwardAuth address for the key routes. It reads only memory. A good key gives status 200 and an identity token. A bad key gives status 401, the header `WWW-Authenticate: Bearer error="invalid_token"` and an empty body.
 - **Rights of the portal:** the service `portal` has 8 actions: `keys.own.read`, `keys.own.create`, `keys.own.edit`, `keys.own.revoke`, `keys.own.use`, `keys.all.read`, `keys.all.revoke` and `users.read`. The ceiling `max_key_lifetime` limits the age of a key.
 - **Limits:** a grant can hold limit values. A ceiling is a value that the service applies. A budget is a count in a window (`second`, `minute`, `hour` or `day`) that the PDP counts. The PDP counts one use for the key and for its owner, and it takes the unit from both counters or from none. When a budget is empty, the PDP answers `false` with the reason `budget_exceeded` and `retry_after`.
@@ -643,8 +643,8 @@ The delivery values have no default. The program stops at start when one of them
 
 A phone enrolls with a one-time code. The code belongs to one account of the portal. The login of the account is the user name of the phone. The phone cannot change it.
 
-1. The account makes a code on the page **My phones** of the tab Inbox. The button **Make a code** sends `POST /auth/settings/inbox/code`. An account that has the permission `inbox.receive` on one group at least can use it. The code is for the login of the session. The form has no login field.
-2. The page shows the code one time: the text `portal-inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The page has the header `Cache-Control: no-store`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
+1. The account makes a code with the plus button of the zone **My phones** (or **Phones**) of the tab Inbox. The button is a form: it sends `POST /auth/settings/inbox/code`. An account that has the permission `inbox.receive` on one group at least can use it. The code is for the login of the session. The form has no login field. This is the only entry point: the page has no second button that makes a code.
+2. The answer is the page of the tab, with the code in a popover that stays open until **Done**. The popover shows the text `portal-inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The answer has the header `Cache-Control: no-store`. A reload of the page does not show the code again. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
 3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `portal-inbox/v1/enroll`. The first message holds the secret and the name of the phone.
 4. The inbox looks for the SHA-256 digest of the secret. A code works one time and lives `inbox.enrollment.code_ttl`. The inbox stores the phone and marks the code as used in one transaction. Then it sends message 2 and closes the connection.
 
@@ -749,24 +749,29 @@ A sender sends alerts with an API key. The header is `Authorization: Bearer <key
 - **A key of the file** is a block `api_key` of the block `inbox`. It names its owner, an account of the file (a block `user`), and its groups. At start, the portal checks the grants of the owner and keeps the groups that the owner may send to. The rights of a file account do not change while the server runs. This decision never reads the directory or the database: a key of the file works when the portal is not ready and when PostgreSQL is away. The page **Keys** does not list it.
 - **A key of the database** is made on the page **Keys** with the kind API. The inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:portal/inbox_group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the inbox answers `503` with the code `directory_not_ready`.
 
-The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The page **Documentation** of the tab Inbox shows them with the real address of the listener, and the recipes for Grafana and Alertmanager.
+The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The book icon of the tab Inbox opens a popover with the routes, the groups and the form of the header. `docs/inbox/README.md` has the long text: the recipes for Grafana and Alertmanager and the table of the HTTP statuses.
 
 ### The tab Inbox
 
-The pages are in the style of the other settings pages. They work without script. The script only gives the Copy button. The routes are under `/auth/settings/inbox`. A page that the account may not open answers `403`. Without the block `inbox`, each route answers `404`. A form is a POST with the `Origin` of the portal, the content type of a form and the field `csrf`. A refused form returns to its page with a notice. A session that "Log in as" opens can read the pages and make a code. It does not send an alert and does not revoke a phone.
+The tab is one page, `/auth/settings/inbox`, with no sub-page. It works without script. The script only gives the Copy button, the close of a popover and the count of the bulk action. The page answers `403` to an account that holds no permission of the inbox. Without the block `inbox`, each route answers `404`. Each other address under the prefix answers `404`: the pages of the first versions (overview, phones, connections, my phones, documentation, one alert, the code) do not exist any more. A form is a POST with the `Origin` of the portal, the content type of a form and the field `csrf`. A refused form returns to the page with a notice. A session that "Log in as" opens can read the page and make a code. It does not send an alert and does not revoke a phone.
 
-| Page | Route | Needs |
-|---|---|---|
-| Overview | `/auth/settings/inbox` | `alert.read`, `phone.read`, `phone.log` or `alert.send`. |
-| Alert | `/auth/settings/inbox/alerts/<id>` | `alert.read` on the group of the alert. |
-| Phones | `/auth/settings/inbox/devices` | `phone.read`. |
-| Connections | `/auth/settings/inbox/connections?login=<login>` | `phone.log`. |
-| My phones | `/auth/settings/inbox/phones` | `inbox.receive` on one group at least. |
-| Documentation | `/auth/settings/inbox/doc` | A page of the tab. |
+Each part of the page needs a permission. A part that the account may not use is not in the page.
 
-- **Overview:** the figures of the delivery (with `device.read`), the groups with their critical mark and the number of phones, the form **Send an alert** and the last alerts. The form lists the groups that the account may send to. A double click sends one alert: the form has a key. The page of an alert shows each delivery: sent, received, expired.
-- **Phones:** the name, the owner, the state (online, offline, unreachable or revoked), the version of the app, the last time seen, the groups and the alerts that wait. **Revoke** needs `device.revoke` and a confirmation.
-- **My phones:** the phones of the account, with **Revoke**, and **Make a code**. The account revokes its own phones and no other.
+| Part | Needs |
+|---|---|
+| Zone **Sent**: the alerts, the graph, the chips | `alert.read` on one group at least. The page shows the groups of the permission only. |
+| Zone **Phones**: all the phones, with their owner | `phone.read`. |
+| Zone **My phones**: the phones of the account | `inbox.receive` on one group at least, and no `phone.read`. |
+| **Revoke (N)** and the boxes | `phone.revoke` with `phone.read`, or a phone of the account. |
+| The plus button | `inbox.receive` on one group at least. |
+| Zone **Connections** | `phone.log`. |
+| **Send alert** | `alert.send` on one group at least. The list holds these groups. |
+| The book icon | `alert.send` or `alert.read`. |
+
+- **Filters:** a chip is a link with a query parameter. A chip with a count of zero is absent. A click on the chip that is on turns it off. The parameters are `p` (the period: `1h`, `6h`, `24h`, `7d`, `30d`; the default is `24h`), `g` (a group), `a` (`ok`, `wait` or `expired`), `ps` (`online`, `unreachable`, `offline` or `revoked`), `pp=1` (phones with pending alerts), `mine=1`, `cs` (`open` or `closed`), `login` (the search of the connections) and `open=<alert id>`. A value that is not valid, an unknown parameter and a repeated parameter give `400`.
+- **Sent:** the list holds the 500 newest alerts of the period. The count shows `500+` when older alerts of the period exist. The graph shows the alerts of the period in 12 to 30 bars, with the alerts of the critical groups on top. A row opens its detail in place with `open=<id>`: the phones that do not have the alert come first, then a few that have it. The chips of Question, Approval and Unanswered are dashed and do nothing: the place is ready for a later step.
+- **Phones:** the state is one icon. **Revoke (N)** shows when a box is ticked. A click asks "Revoke N phones?" in the same place. The form sends the fields `id.<id>` with the value `1`.
+- **Connections:** the newest 200 connections. The search is a form with the method GET.
 
 The JSON calls under `/auth/inbox/api/` of the first versions do not exist any more.
 

@@ -299,7 +299,7 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
         plain.push(parts.join(" - "));
         let _ = write!(
             out,
-            r#"<span class="feat feat--text">{}{}</span>"#,
+            r#"<span class="feat feat--text">{}<span class="feat__text">{}</span></span>"#,
             icon("inbox"),
             html_escape(&parts.join(" · "))
         );
@@ -549,7 +549,7 @@ fn list_zone(view: &KeysView<'_>) -> String {
             body.push_str(r#"<col class="w88">"#);
         }
         body.push_str(
-            r#"<col><col class="w88"><col class="w152"><col class="w28"></colgroup><thead><tr>"#,
+            r#"<col><col class="w136"><col class="w136"><col class="w28"></colgroup><thead><tr>"#,
         );
         if boxes {
             let _ = write!(body, r#"<th scope="col">{}</th>"#, bulk_all_box(&bulk));
@@ -744,7 +744,7 @@ fn form_pane(view: &KeysView<'_>) -> String {
 /// The pane after a creation: the text of the key, one time.
 fn made_pane(key: &NewKey<'_>) -> String {
     format!(
-        r##"<section class="pane" aria-labelledby="key-pane-title">{}<div class="pane__body"><p class="uiBanner uiBanner--inset uiBanner--ok" role="status">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</p></div></section>"##,
+        r##"<section class="pane" aria-labelledby="key-pane-title">{}<div class="pane__body"><p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</span></p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</span></p></div></section>"##,
         pane_head(
             "Key made",
             None,
@@ -767,7 +767,7 @@ pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
     if view.cannot_use {
-        out.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn">Your keys cannot reach a service: you do not have the right keys.own.use.</p>"#);
+        out.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Your keys cannot reach a service: you do not have the right keys.own.use.</span></p>"#);
     }
     let mut tools = String::new();
     if view.can_read_own && view.can_read_all {
