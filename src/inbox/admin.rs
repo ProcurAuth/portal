@@ -1,7 +1,7 @@
-//! What the pages of the Inbox tab need from the inbox: the overview, the alerts, the connection
+//! What the page of the Inbox tab needs from the inbox: the phones, the alerts, the connection
 //! log, the manual send of an alert and the revocation of a phone.
 //!
-//! The portal calls these functions from its own pages (`src/http/inbox_page.rs`), in process. It
+//! The portal calls these functions from its own page (`src/http/inbox_page.rs`), in process. It
 //! checks the rights of the account first: this module does not know who asks.
 
 use hyper::StatusCode;
@@ -12,7 +12,7 @@ pub use super::db::DeliveryView;
 use inbox_core::proto::Kind;
 
 use super::db::NewAlert;
-pub use super::db::{AlertDetail, AlertSummary, ConnectionView, DeviceView};
+pub use super::db::{AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceView};
 use super::hub::LiveInfo;
 use super::log;
 use super::state::App;
@@ -48,29 +48,9 @@ pub struct DeviceRow {
     pub state: DeviceState,
 }
 
-/// One group of the file, with the number of phones that subscribe to it.
-pub struct GroupRow {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub critical: bool,
-    pub subscribed: usize,
-}
-
-/// The overview: the phones, the groups and the counts of the delivery.
-pub struct Overview {
-    pub devices: Vec<DeviceRow>,
-    pub groups: Vec<GroupRow>,
-    pub online: usize,
-    pub enrolled: usize,
-    pub unreachable: usize,
-    pub pending_deliveries: i64,
-    /// The age of the oldest pending delivery, in milliseconds.
-    pub oldest_pending_ms: i64,
-}
-
-pub async fn overview(app: &App) -> Result<Overview, ApiError> {
-    let (devices, (pending, oldest)) = app
+/// The phones with their state.
+pub async fn devices(app: &App) -> Result<Vec<DeviceRow>, ApiError> {
+    let (devices, _) = app
         .db
         .overview(app.delivery_cutoff())
         .await
@@ -78,9 +58,7 @@ pub async fn overview(app: &App) -> Result<Overview, ApiError> {
     let live = app.live_sessions().await;
     let now = now_ms();
     let unreachable_after = app.config.devices.unreachable_after.as_millis() as i64;
-    let (mut online, mut unreachable, mut enrolled) = (0, 0, 0);
-    let mut subscribed: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let rows: Vec<DeviceRow> = devices
+    Ok(devices
         .into_iter()
         .map(|device| {
             let l = live.get(&device.id).cloned();
@@ -97,67 +75,53 @@ pub async fn overview(app: &App) -> Result<Overview, ApiError> {
             } else {
                 DeviceState::Offline
             };
-            match state {
-                DeviceState::Online => online += 1,
-                DeviceState::Unreachable => unreachable += 1,
-                _ => {}
-            }
-            if device.revoked_at.is_none() {
-                enrolled += 1;
-            }
             DeviceRow {
                 device,
                 live: l,
                 state,
             }
         })
-        .collect();
-    for row in rows.iter().filter(|r| r.state != DeviceState::Revoked) {
-        for group in &row.device.subscriptions {
-            *subscribed.entry(group.as_str()).or_default() += 1;
-        }
-    }
-    let groups = app
-        .config
-        .groups
-        .iter()
-        .map(|(id, g)| GroupRow {
-            id: id.clone(),
-            name: g.name.clone(),
-            description: g.description.clone(),
-            critical: g.critical,
-            subscribed: subscribed.get(id.as_str()).copied().unwrap_or(0),
-        })
-        .collect();
-    Ok(Overview {
-        devices: rows,
-        groups,
-        online,
-        enrolled,
-        unreachable,
-        pending_deliveries: pending,
-        oldest_pending_ms: oldest,
-    })
+        .collect())
 }
 
-/// The most recent alerts, newest first, of the groups in `only` (`None`: all the groups).
+/// The most recent alerts since `since_ms`, newest first, of the groups in `only` (`None`: all the
+/// groups). The second value is `true` when the store gave `limit` alerts: older ones can exist.
 pub async fn alerts(
     app: &App,
     limit: u32,
+    since_ms: i64,
     only: Option<&[String]>,
-) -> Result<Vec<AlertSummary>, ApiError> {
+) -> Result<(Vec<AlertSummary>, bool), ApiError> {
+    let limit = limit.clamp(1, 500);
     let list = app
         .db
-        .recent_alerts(limit.clamp(1, 500), 0, app.delivery_cutoff())
+        .recent_alerts(limit, since_ms, app.delivery_cutoff())
         .await
         .map_err(ApiError::storage)?;
-    Ok(match only {
-        Some(groups) => list
-            .into_iter()
-            .filter(|a| groups.contains(&a.group))
-            .collect(),
-        None => list,
-    })
+    let truncated = list.len() >= limit as usize;
+    Ok((
+        match only {
+            Some(groups) => list
+                .into_iter()
+                .filter(|a| groups.contains(&a.group))
+                .collect(),
+            None => list,
+        },
+        truncated,
+    ))
+}
+
+/// The alerts since `since_ms`, counted for each bucket of `bucket_ms` and each group: the data of
+/// the graph. The page keeps the groups that the account may read.
+pub async fn alert_counts(
+    app: &App,
+    since_ms: i64,
+    bucket_ms: i64,
+) -> Result<Vec<AlertCount>, ApiError> {
+    app.db
+        .alert_counts(since_ms, bucket_ms)
+        .await
+        .map_err(ApiError::storage)
 }
 
 /// One alert with its deliveries. `None`: no such alert.

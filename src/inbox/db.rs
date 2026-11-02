@@ -908,6 +908,37 @@ pub fn recent_alerts(
     Ok(alerts)
 }
 
+/// The number of alerts of one group in one bucket of time: the data of the graph of the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertCount {
+    /// The number of the bucket. Bucket 0 starts at `since_ms`.
+    pub bucket: i64,
+    pub group: String,
+    pub count: i64,
+}
+
+/// The alerts created at or after `since_ms`, counted for each bucket of `bucket_ms` and each
+/// group. The result has at most one row for each bucket and group, so it is small. The index of
+/// `created_at` serves the range.
+pub fn alert_counts(
+    conn: &Connection,
+    since_ms: i64,
+    bucket_ms: i64,
+) -> rusqlite::Result<Vec<AlertCount>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT (created_at - ?1) / ?2, group_id, COUNT(*) FROM alerts WHERE created_at >= ?1
+         GROUP BY 1, 2 ORDER BY 1, 2",
+    )?;
+    let rows = stmt.query_map(params![since_ms, bucket_ms.max(1)], |r| {
+        Ok(AlertCount {
+            bucket: r.get(0)?,
+            group: r.get(1)?,
+            count: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Pseudonyms of the non-revoked devices that have not received `alert_id` yet.
 fn missing_users(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare_cached(
@@ -1164,6 +1195,35 @@ mod tests {
             .query_row("SELECT kind FROM alerts WHERE id = 'x'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kind, "alert");
+    }
+
+    #[test]
+    fn the_counts_of_the_graph_group_the_alerts_by_bucket_and_group() {
+        let mut c = mem();
+        for (key, group, at) in [
+            ("a", "infra", 1_000),
+            ("b", "infra", 1_900),
+            ("c", "infra", 2_100),
+            ("d", "other", 2_200),
+            ("e", "infra", 10),
+        ] {
+            let mut alert = alert(key);
+            alert.group = group.into();
+            insert_alert(&mut c, &alert).unwrap();
+            c.execute(
+                "UPDATE alerts SET created_at = ?1 WHERE idempotency_key = ?2",
+                params![at, key],
+            )
+            .unwrap();
+        }
+        // Buckets of 1,000 ms from 1,000: the alert at 10 is before the range.
+        let counts = alert_counts(&c, 1_000, 1_000).unwrap();
+        let text: Vec<(i64, &str, i64)> = counts
+            .iter()
+            .map(|n| (n.bucket, n.group.as_str(), n.count))
+            .collect();
+        assert_eq!(text, vec![(0, "infra", 2), (1, "infra", 1), (1, "other", 1)]);
+        assert!(alert_counts(&c, 100_000, 1_000).unwrap().is_empty());
     }
 
     #[test]

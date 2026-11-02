@@ -1593,6 +1593,31 @@ impl PgStore {
         Ok(alerts)
     }
 
+    /// The alerts created at or after `since_ms`, counted for each bucket and each group.
+    pub async fn alert_counts(
+        &self,
+        since_ms: i64,
+        bucket_ms: i64,
+    ) -> Result<Vec<super::db::AlertCount>, DbError> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT (created_at - $1) / $2, group_id, COUNT(*) FROM alerts WHERE created_at >= $1
+                 GROUP BY 1, 2 ORDER BY 1, 2",
+                &[&since_ms, &bucket_ms.max(1)],
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(rows
+            .iter()
+            .map(|r| super::db::AlertCount {
+                bucket: r.get(0),
+                group: r.get(1),
+                count: r.get(2),
+            })
+            .collect())
+    }
+
     pub async fn alert_detail(
         &self,
         id: &str,
@@ -2304,6 +2329,44 @@ mod tests {
         db.sql("UPDATE enrollment_codes SET expires_at_ms = 1 WHERE login = 'bob' AND used_at_ms IS NULL")
             .await;
         assert_eq!(store.purge(0, 0).await.unwrap().2, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_the_counts_of_the_graph_group_the_alerts_by_bucket_and_group() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        for (key, group, at) in [
+            ("a", "infra", 1_000),
+            ("b", "infra", 1_900),
+            ("c", "infra", 2_100),
+            ("d", "other", 2_200),
+            ("e", "infra", 10),
+        ] {
+            store
+                .insert_alert(&NewAlert {
+                    kind: Kind::Alert,
+                    group: group.into(),
+                    title: "t".into(),
+                    source: "producer:test".into(),
+                    idempotency_key: key.into(),
+                })
+                .await
+                .unwrap();
+            db.sql(&format!(
+                "UPDATE alerts SET created_at = {at} WHERE idempotency_key = '{key}'"
+            ))
+            .await;
+        }
+        let counts = store.alert_counts(1_000, 1_000).await.unwrap();
+        let text: Vec<(i64, &str, i64)> = counts
+            .iter()
+            .map(|n| (n.bucket, n.group.as_str(), n.count))
+            .collect();
+        assert_eq!(text, vec![(0, "infra", 2), (1, "infra", 1), (1, "other", 1)]);
+        assert!(store.alert_counts(100_000, 1_000).await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

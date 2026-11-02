@@ -452,6 +452,22 @@ impl Store {
         }
     }
 
+    /// The alerts created at or after `since_ms`, counted for each bucket of `bucket_ms` and each
+    /// group.
+    pub async fn alert_counts(
+        &self,
+        since_ms: i64,
+        bucket_ms: i64,
+    ) -> Result<Vec<db::AlertCount>, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                db.call(move |c| Ok(db::alert_counts(c, since_ms, bucket_ms)?))
+                    .await
+            }
+            Store::Pg(pg) => pg.guard(pg.alert_counts(since_ms, bucket_ms)).await,
+        }
+    }
+
     pub async fn alert_detail(
         &self,
         id: &str,

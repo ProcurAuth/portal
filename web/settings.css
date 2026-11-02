@@ -2112,3 +2112,415 @@ input.keyText {
 .stat__value--danger {
   color: var(--danger);
 }
+
+/* The Inbox page ---------------------------------------------------------------------------- */
+
+.tbar--inbox {
+  flex-wrap: nowrap;
+}
+
+.bar__kinds {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bar__range {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+/* The opener of the period: a field that shows the value. */
+.pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control);
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+  list-style: none;
+  cursor: pointer;
+}
+
+.pick::-webkit-details-marker {
+  display: none;
+}
+
+.pick:hover {
+  border-color: var(--input-border);
+}
+
+.pick .icon {
+  color: var(--muted);
+}
+
+.pick__value {
+  font-weight: 600;
+}
+
+.pop > summary.button {
+  gap: 6px;
+}
+
+.pop__menu--list {
+  min-width: 100%;
+  padding: 4px;
+}
+
+.pop__menu--pad {
+  padding: 10px;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-compact);
+  padding: 0 8px;
+  border-radius: 4px;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.settings a.menu__item {
+  color: var(--text);
+}
+
+.menu__item:hover {
+  background: var(--border);
+}
+
+.menu__item .check {
+  display: inline-grid;
+  width: 14px;
+  color: var(--accent-text);
+}
+
+/* Chips: a separator, the chip of a later kind, and the chip that is not a control. */
+.chips__sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  margin: 0 4px;
+  background: var(--border-strong);
+}
+
+.settings .chip.chip--future {
+  border-style: dashed;
+  background: transparent;
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.chip:disabled {
+  font: inherit;
+  font-size: 12px;
+}
+
+.chip .st--off {
+  color: var(--muted);
+}
+
+.chip.is-on .st--ok,
+.chip.is-on .st--off {
+  color: inherit;
+}
+
+/* A state of a row is one icon. */
+.st {
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+}
+
+.st .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.st--off {
+  color: var(--muted);
+}
+
+.crit {
+  display: inline-grid;
+  place-items: center;
+  color: var(--warning);
+  vertical-align: -3px;
+}
+
+.crit .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.src {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  color: var(--muted);
+}
+
+.src .icon {
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+
+/* The zone "Sent": the graph does not scroll, the list does. */
+.zone--above {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.chartMini {
+  height: 52px;
+  min-width: 0;
+}
+
+.chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.chart .bar-a {
+  fill: var(--accent-fill);
+}
+
+.chart .bar-c {
+  fill: var(--warning);
+}
+
+.grid tr.is-revoked td {
+  color: var(--muted);
+}
+
+/* The detail of an alert opens under its row. */
+.grid tbody tr.adetail:hover {
+  background: transparent;
+}
+
+.grid .adetail td {
+  height: auto;
+  padding: 4px 8px 8px 22px;
+  overflow: visible;
+  background: var(--raised);
+  white-space: normal;
+}
+
+.adetail__head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.adetail__head b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.grid--deliveries {
+  margin-top: 2px;
+}
+
+.grid--deliveries td,
+.grid--deliveries th {
+  height: 22px;
+}
+
+.grid--deliveries thead th {
+  background: var(--raised);
+}
+
+.adetail__more {
+  margin: 0;
+  padding: 2px 6px;
+  color: var(--muted);
+}
+
+/* The search of the connections: a small field with a magnifier. */
+.searchBox {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  margin: 0;
+}
+
+.searchBox .icon {
+  position: absolute;
+  left: 7px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.searchBox .uiInput {
+  width: 9.5rem;
+  padding-left: 26px;
+}
+
+/* The popovers of the page. */
+.twoCols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.sectionLabel {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.monoLine {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.lrow {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--row-compact);
+  border-bottom: 1px solid var(--border);
+}
+
+.composer {
+  display: grid;
+  gap: 8px;
+  width: 320px;
+}
+
+.composer select.uiInput {
+  width: 100%;
+}
+
+.composer__row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field__label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.facts {
+  display: grid;
+  margin: 0 0 8px;
+}
+
+.facts > div {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr);
+  align-items: center;
+  min-height: var(--row-compact);
+  border-bottom: 1px solid var(--border);
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pop--code {
+  width: 0;
+  height: 0;
+}
+
+.pop--code .pop__menu {
+  top: 32px;
+  display: grid;
+  gap: 8px;
+  width: min(420px, calc(100vw - 48px));
+}
+
+.codeBox {
+  position: relative;
+}
+
+.codeText {
+  display: block;
+  width: 100%;
+  padding: 8px 32px 8px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  resize: none;
+}
+
+.codeBox .ib {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
+.copy .copy__done {
+  display: none;
+}
+
+.copy.is-copied .copy__idle {
+  display: none;
+}
+
+.copy.is-copied .copy__done {
+  display: inline-grid;
+  color: var(--success);
+}
+
+/* The zones of the page: a main zone and a stack, or one narrow zone. */
+.split--inbox {
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr);
+}
+
+.split--one {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.split--solo {
+  max-width: 760px;
+}
+
+.split--one > .zone {
+  align-self: stretch;
+}

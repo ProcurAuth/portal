@@ -1,14 +1,15 @@
-//! The pages of the tab "Inbox" and their forms, under `/auth/settings/inbox`.
+//! The page of the tab "Inbox" and its forms, under `/auth/settings/inbox`.
 //!
-//! The pages need a session. The rights come from the service `portal` (see
+//! The page needs a session. The rights come from the service `portal` (see
 //! [`crate::portal_actions`]): the superadmin has all of them, and any other account has the
 //! permissions that it holds. A page that the account may not open answers 403, and a page of a
-//! block `inbox` that does not exist answers 404. The pages call the inbox in process, with no
+//! block `inbox` that does not exist answers 404. The page calls the inbox in process, with no
 //! HTTP call to itself.
 //!
 //! A form is a POST with the field `csrf` (the token of the purpose `inbox`). It answers with a
 //! redirect to the page that shows the outcome as a code, except the form of an enrollment code:
-//! it answers with the page that shows the code one time, with `Cache-Control: no-store`.
+//! it answers with the page itself, with the code in a popover that shows it one time, with
+//! `Cache-Control: no-store`. Every other address under the prefix answers 404.
 //! A session that "Log in as" opens can read the pages and make a code for the account. It does
 //! not send an alert and does not revoke a phone.
 
@@ -18,16 +19,19 @@ use crate::inbox::admin::{self, DeviceRow};
 use crate::inbox::App as InboxApp;
 use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
-use crate::ui::inbox::{GroupChoice, GroupLine, Rights};
+use crate::ui::inbox::{
+    AlertRow, CodeData, ConnData, DocsData, GroupChoice, GroupLine, InboxView, Origin, PhonesData,
+    Query, Rights, SentData,
+};
 
 pub(super) const PREFIX: &str = ui_inbox::PAGE;
 /// The purpose of the anti-CSRF tokens of the forms of the inbox.
 const INBOX_TOKEN: &str = "inbox";
 /// The largest body of a form of the inbox.
 const MAX_FORM_BYTES: usize = 16 * 1024;
-/// The lines of the last alerts, and of the connection log.
-const ALERTS_SHOWN: u32 = 20;
-const CONNECTIONS_SHOWN: u32 = 100;
+/// The alerts that the zone "Sent" asks for, and the lines of the connection log.
+const ALERTS_SHOWN: u32 = 500;
+const CONNECTIONS_SHOWN: u32 = 200;
 
 /// Whether the path belongs to the pages of the inbox.
 pub(super) fn is_inbox_path(path: &str) -> bool {
@@ -42,6 +46,8 @@ pub(super) struct Held {
     pub ui: Rights,
     /// The groups with `alert.read`. `None`: all the groups (the superadmin).
     read_groups: Option<Vec<String>>,
+    /// The groups that the page names: the groups that the account may read or send to.
+    named: Option<Vec<String>>,
 }
 
 /// The rights of the viewer. `None`: the file has no block `inbox`.
@@ -56,14 +62,15 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
         // The superadmin has every right.
         return Some(Held {
             ui: Rights {
-                overview: true,
-                devices: true,
+                sent: !ids.is_empty(),
+                phones: true,
                 revoke: true,
                 connections: true,
-                phones: true,
+                own_phones: !ids.is_empty(),
                 send: ids.iter().map(choice).collect(),
             },
             read_groups: None,
+            named: None,
         });
     };
     let document = state.actions.declared(actions::SERVICE)?;
@@ -74,17 +81,20 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
     let send_ids = on(actions::ALERT_SEND);
     let read_ids = on(actions::ALERT_READ);
     let devices = at_service(actions::PHONE_READ);
-    let connections = at_service(actions::PHONE_LOG);
+    let mut named: Vec<String> = read_ids.iter().chain(send_ids.iter()).cloned().collect();
+    named.sort();
+    named.dedup();
     Some(Held {
         ui: Rights {
-            overview: !read_ids.is_empty() || devices || connections || !send_ids.is_empty(),
-            devices,
+            sent: !read_ids.is_empty(),
+            phones: devices,
             revoke: devices && at_service(actions::PHONE_REVOKE),
-            connections,
-            phones: !on(actions::INBOX_RECEIVE).is_empty(),
+            connections: at_service(actions::PHONE_LOG),
+            own_phones: !on(actions::INBOX_RECEIVE).is_empty(),
             send: send_ids.iter().map(choice).collect(),
         },
         read_groups: Some(read_ids),
+        named: Some(named),
     })
 }
 
@@ -95,11 +105,10 @@ impl Held {
             .is_none_or(|groups| groups.iter().any(|g| g == group))
     }
 
-    /// Whether the viewer reads the alerts of at least one group.
-    fn reads_alerts(&self) -> bool {
-        self.read_groups
+    fn names(&self, group: &str) -> bool {
+        self.named
             .as_ref()
-            .is_none_or(|groups| !groups.is_empty())
+            .is_none_or(|groups| groups.iter().any(|g| g == group))
     }
 }
 
@@ -230,20 +239,6 @@ fn random_key() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn group_lines(overview: &admin::Overview) -> Vec<GroupLine> {
-    overview
-        .groups
-        .iter()
-        .map(|g| GroupLine {
-            id: g.id.clone(),
-            name: g.name.clone(),
-            description: g.description.clone(),
-            critical: g.critical,
-            subscribed: g.subscribed,
-        })
-        .collect()
-}
-
 fn sorted(mut rows: Vec<DeviceRow>) -> Vec<DeviceRow> {
     rows.sort_by(|a, b| {
         (
@@ -288,175 +283,169 @@ pub(super) async fn handle(
     text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n")
 }
 
+/// The query of the address as pairs, decoded. `None`: a bad encoding or a long value.
+fn query_pairs(uri: &str) -> Option<Vec<(String, String)>> {
+    let Some((_, query)) = uri.split_once('?') else {
+        return Some(Vec::new());
+    };
+    let mut out = Vec::new();
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let name = percent_decode_form(name).ok()?;
+        let value = percent_decode_form(value).ok()?;
+        if name.len() > 16 || value.len() > 200 {
+            return None;
+        }
+        out.push((name, value));
+    }
+    Some(out)
+}
+
 async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpResponse {
-    let rights = &ctx.held.ui;
-    if !rights.any() {
+    // The page has one address. Each other address under the prefix is gone.
+    if !rest.is_empty() {
+        return if matches!(rest, "/send" | "/revoke" | "/code") {
+            text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n")
+        } else {
+            not_found()
+        };
+    }
+    if !ctx.held.ui.any() {
         return forbidden();
     }
-    let notice = query_value(ctx.uri, "s").and_then(|code| ui_inbox::notice_for(&code));
-    if query_value(ctx.uri, "s").is_some() && notice.is_none() {
+    let Some(pairs) = query_pairs(ctx.uri) else {
+        return bad_request();
+    };
+    let Some(query) = Query::parse(&pairs) else {
+        return bad_request();
+    };
+    let code = pairs.iter().find(|(name, _)| name == "s").map(|(_, v)| v);
+    let notice = code.and_then(|code| ui_inbox::notice_for(code));
+    if code.is_some() && notice.is_none() {
         return bad_request();
     }
-    let frame = ctx.frame(state);
-    let html = match rest {
-        "" if !rights.overview => {
-            return redirect_response(StatusCode::SEE_OTHER, ui_inbox::PHONES_PATH)
-        }
-        "" => {
-            let overview = match admin::overview(&ctx.app).await {
-                Ok(overview) => overview,
-                Err(_) => return unavailable(),
-            };
-            let alerts = if ctx.held.reads_alerts() {
-                let only = ctx.held.read_groups.as_deref();
-                match admin::alerts(&ctx.app, ALERTS_SHOWN, only).await {
-                    Ok(list) => Some(list),
-                    Err(_) => return unavailable(),
-                }
-            } else {
-                None
-            };
-            let key = random_key();
-            ui_inbox::overview_page(
-                &frame,
-                rights,
-                &ui_inbox::OverviewView {
-                    notice,
-                    csrf: &ctx.inbox_token,
-                    stats: rights.devices.then_some(ui_inbox::Stats {
-                        enrolled: overview.enrolled,
-                        online: overview.online,
-                        unreachable: overview.unreachable,
-                        pending: overview.pending_deliveries,
-                        oldest_pending_ms: overview.oldest_pending_ms,
-                    }),
-                    groups: group_lines(&overview),
-                    alerts,
-                    idempotency_key: &key,
-                },
-            )
-        }
-        "/devices" => {
-            if !rights.devices {
-                return forbidden();
-            }
-            let overview = match admin::overview(&ctx.app).await {
-                Ok(overview) => overview,
-                Err(_) => return unavailable(),
-            };
-            ui_inbox::devices_page(
-                &frame,
-                rights,
-                &ui_inbox::DevicesView {
-                    notice,
-                    csrf: &ctx.inbox_token,
-                    rows: sorted(overview.devices),
-                    can_revoke: rights.revoke && !ctx.viewer.session.impersonated,
-                    back: ui_inbox::DEVICES_PATH,
-                },
-            )
-        }
-        "/phones" => {
-            if !rights.phones {
-                return forbidden();
-            }
-            let overview = match admin::overview(&ctx.app).await {
-                Ok(overview) => overview,
-                Err(_) => return unavailable(),
-            };
-            let mine: Vec<DeviceRow> = overview
-                .devices
-                .into_iter()
-                .filter(|row| row.device.user_name == ctx.viewer.login)
-                .collect();
-            ui_inbox::phones_page(
-                &frame,
-                rights,
-                &ui_inbox::PhonesView {
-                    devices: ui_inbox::DevicesView {
-                        notice,
-                        csrf: &ctx.inbox_token,
-                        rows: sorted(mine),
-                        can_revoke: !ctx.viewer.session.impersonated,
-                        back: ui_inbox::PHONES_PATH,
-                    },
-                    can_add: true,
-                },
-            )
-        }
-        "/connections" => {
-            if !rights.connections {
-                return forbidden();
-            }
-            let login = query_value_up_to(ctx.uri, "login", 64).unwrap_or_default();
-            let rows = match admin::connections(
-                &ctx.app,
-                CONNECTIONS_SHOWN,
-                (!login.is_empty()).then(|| login.clone()),
-            )
-            .await
-            {
-                Ok(rows) => rows,
-                Err(_) => return unavailable(),
-            };
-            ui_inbox::connections_page(
-                &frame,
-                rights,
-                &ui_inbox::ConnectionsView {
-                    login: &login,
-                    rows,
-                    limit: CONNECTIONS_SHOWN,
-                },
-            )
-        }
-        "/doc" => {
-            let overview = match admin::overview(&ctx.app).await {
-                Ok(overview) => overview,
-                Err(_) => return unavailable(),
-            };
-            let base = ctx.base.clone();
-            ui_inbox::doc_page(
-                &frame,
-                rights,
-                &ui_inbox::DocView {
-                    base,
-                    groups: group_lines(&overview),
-                    keys: state.config.keys.as_ref().is_some_and(|keys| keys.api),
-                    keys_page: keys_tab(state, &ctx.viewer),
-                },
-            )
-        }
-        "/send" | "/revoke" | "/code" => {
-            return text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n")
-        }
-        other => {
-            let Some(id) = other
-                .strip_prefix("/alerts/")
-                .filter(|id| !id.is_empty() && !id.contains('/'))
-            else {
-                return not_found();
-            };
-            let detail = match admin::alert(&ctx.app, id).await {
-                Ok(Some(detail)) => detail,
-                Ok(None) => return not_found(),
-                Err(_) => return unavailable(),
-            };
-            // An alert of a group that the account may not read is not there for the account.
-            if !ctx.held.may_read(&detail.summary.group) {
-                return not_found();
-            }
-            let name = ctx.app.group_name(&detail.summary.group);
-            ui_inbox::alert_page(
-                &frame,
-                &ui_inbox::AlertView {
-                    notice,
-                    detail: &detail,
-                    group_name: &name,
-                },
-            )
-        }
+    page(state, ctx, &query, notice, None).await
+}
+
+/// The name of the sender of an alert that a key of the database made.
+fn key_name(state: &AppState, id: &str) -> Option<String> {
+    state.users.key_by_id(id).map(|key| key.name.clone())
+}
+
+/// Draws the page. `code` is a new enrollment code, shown in its popover.
+async fn page(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    query: &Query,
+    notice: Option<crate::ui::settings::Notice>,
+    code: Option<CodeData<'_>>,
+) -> HttpResponse {
+    let rights = &ctx.held.ui;
+    let now_ms = unix_now() * 1000;
+    let Some(inbox) = state.config.inbox.as_ref() else {
+        return not_found();
     };
-    html_response(StatusCode::OK, html)
+    let groups: Vec<GroupLine> = inbox
+        .groups
+        .iter()
+        .filter(|(id, _)| ctx.held.names(id))
+        .map(|(id, g)| GroupLine {
+            id: id.clone(),
+            name: g.name.clone(),
+            critical: g.critical,
+        })
+        .collect();
+    let sent = if rights.sent {
+        let since_ms = now_ms - query.period.millis();
+        let only = ctx.held.read_groups.as_deref();
+        let (alerts, truncated) = match admin::alerts(&ctx.app, ALERTS_SHOWN, since_ms, only).await {
+            Ok(v) => v,
+            Err(_) => return unavailable(),
+        };
+        let counts = match admin::alert_counts(&ctx.app, since_ms, query.period.bucket_millis()).await
+        {
+            Ok(v) => v,
+            Err(_) => return unavailable(),
+        };
+        let opened = match &query.open {
+            Some(id) => match admin::alert(&ctx.app, id).await {
+                Ok(Some(detail)) if ctx.held.may_read(&detail.summary.group) => Some(detail),
+                Ok(_) => None,
+                Err(_) => return unavailable(),
+            },
+            None => None,
+        };
+        let resolve = |id: &str| key_name(state, id);
+        let alerts = alerts
+            .into_iter()
+            .map(|summary| AlertRow {
+                origin: Origin::of(&summary.source, &resolve),
+                summary,
+            })
+            .collect();
+        Some(SentData {
+            alerts,
+            truncated,
+            counts,
+            since_ms,
+            opened,
+        })
+    } else {
+        None
+    };
+    let phones = if rights.phones || rights.own_phones {
+        let mut rows = match admin::devices(&ctx.app).await {
+            Ok(rows) => rows,
+            Err(_) => return unavailable(),
+        };
+        if !rights.phones {
+            rows.retain(|row| row.device.user_name == ctx.viewer.login);
+        }
+        Some(PhonesData {
+            rows: sorted(rows),
+            revoke_all: rights.revoke,
+            revoke_own: rights.own_phones,
+        })
+    } else {
+        None
+    };
+    let connections = if rights.connections {
+        let login = (!query.login.is_empty()).then(|| query.login.clone());
+        match admin::connections(&ctx.app, CONNECTIONS_SHOWN, login).await {
+            Ok(rows) => Some(ConnData { rows }),
+            Err(_) => return unavailable(),
+        }
+    } else {
+        None
+    };
+    let key = random_key();
+    let view = InboxView {
+        rights,
+        notice,
+        csrf: &ctx.inbox_token,
+        idempotency_key: &key,
+        query,
+        now_ms,
+        login: &ctx.viewer.login,
+        groups: &groups,
+        sent,
+        phones,
+        connections,
+        docs: (rights.sent || !rights.send.is_empty()).then(|| DocsData {
+            base: ctx.base.clone(),
+        }),
+        code,
+        impersonated: ctx.viewer.session.impersonated,
+    };
+    let html = ui_inbox::inbox_page(&ctx.frame(state), &view);
+    let mut response = html_response(StatusCode::OK, html);
+    if view.code.is_some() {
+        response.headers_mut().insert(
+            HeaderName::from_static("cache-control"),
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 
 /// The checks of a POST: the origin, the type of the body, the session, the rights, the body and
@@ -564,7 +553,7 @@ async fn send(
     if ctx.viewer.session.impersonated {
         return forbidden();
     }
-    let back = ui_inbox::OVERVIEW_PATH;
+    let back = ui_inbox::PAGE;
     if !ctx.held.ui.send.iter().any(|g| g.id == group) {
         return back_with(back, "bad_group");
     }
@@ -616,11 +605,13 @@ async fn send(
         "sent"
     };
     if ctx.held.may_read(&group) {
+        // The page opens the new alert in place.
         return redirect_response(
             StatusCode::SEE_OTHER,
             &format!(
-                "{}{}?s={code}",
-                ui_inbox::ALERT_PATH_PREFIX,
+                "{}?s={code}&open={}#a-{}",
+                ui_inbox::PAGE,
+                accepted.alert_id,
                 accepted.alert_id
             ),
         );
@@ -628,56 +619,65 @@ async fn send(
     back_with(back, code)
 }
 
-/// `POST /auth/settings/inbox/revoke`: a phone. The account needs `device.revoke` and
-/// `device.read`, or it owns the phone and holds `group.subscribe` on a group.
+/// `POST /auth/settings/inbox/revoke`: one phone or more. The form names each phone `id.<id>`, or
+/// one phone `id`. The account needs `phone.revoke` and `phone.read`, or it owns the phone and
+/// holds `inbox.receive` on a group. A phone that does not exist and a phone of another account
+/// give the same answer.
 async fn revoke(
     state: &Arc<AppState>,
     ctx: &Context<'_>,
-    mut fields: std::collections::HashMap<String, String>,
+    fields: std::collections::HashMap<String, String>,
 ) -> HttpResponse {
-    let (Some(id), Some(back)) = (fields.remove("id"), fields.remove("back")) else {
-        return bad_request();
-    };
-    if !fields.is_empty() {
+    let mut ids: Vec<String> = Vec::new();
+    for (name, value) in &fields {
+        let id = match name.strip_prefix("id.") {
+            Some(id) if value == "1" => id,
+            None if name == "id" => value.as_str(),
+            _ => return bad_request(),
+        };
+        if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return bad_request();
+        }
+        ids.push(id.to_string());
+    }
+    if ids.is_empty() || ids.len() > 500 {
         return bad_request();
     }
-    let back = match back.as_str() {
-        ui_inbox::DEVICES_PATH => ui_inbox::DEVICES_PATH,
-        ui_inbox::PHONES_PATH => ui_inbox::PHONES_PATH,
-        _ => return bad_request(),
-    };
-    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return bad_request();
-    }
+    ids.sort();
+    ids.dedup();
     if ctx.viewer.session.impersonated {
         return forbidden();
     }
-    let owner = match admin::owner_of(&ctx.app, &id).await {
-        Ok(owner) => owner,
-        Err(_) => return back_with(back, "failed"),
-    };
-    let may = ctx.held.ui.revoke
-        || (ctx.held.ui.phones && owner.as_deref() == Some(ctx.viewer.login.as_str()));
-    // The same answer for a phone that does not exist and for a phone of another account.
-    if owner.is_none() || !may {
-        return back_with(back, "unknown_device");
-    }
-    match admin::revoke(&ctx.app, &id).await {
-        Ok(_) => {
-            log(
-                state,
-                LogLevel::Info,
-                "inbox_admin_revoke",
-                &[("actor", ctx.viewer.login.clone()), ("device", id)],
-            );
-            back_with(back, "revoked")
+    let back = ui_inbox::PAGE;
+    let mut revoked = 0usize;
+    for id in ids {
+        let owner = match admin::owner_of(&ctx.app, &id).await {
+            Ok(owner) => owner,
+            Err(_) => return back_with(back, "failed"),
+        };
+        let may = ctx.held.ui.revoke
+            || (ctx.held.ui.own_phones && owner.as_deref() == Some(ctx.viewer.login.as_str()));
+        if owner.is_none() || !may {
+            continue;
         }
-        Err(_) => back_with(back, "failed"),
+        match admin::revoke(&ctx.app, &id).await {
+            Ok(_) => {
+                revoked += 1;
+                log(
+                    state,
+                    LogLevel::Info,
+                    "inbox_admin_revoke",
+                    &[("actor", ctx.viewer.login.clone()), ("device", id)],
+                );
+            }
+            Err(_) => return back_with(back, "failed"),
+        }
     }
+    back_with(back, if revoked > 0 { "revoked" } else { "unknown_device" })
 }
 
 /// `POST /auth/settings/inbox/code`: a new enrollment code for the account of the session. The
-/// page shows the code one time.
+/// answer is the page, with the code in a popover. The page shows the code one time.
 async fn code(
     state: &Arc<AppState>,
     ctx: &Context<'_>,
@@ -686,7 +686,7 @@ async fn code(
     if !fields.is_empty() {
         return bad_request();
     }
-    if !ctx.held.ui.phones {
+    if !ctx.held.ui.own_phones {
         return forbidden();
     }
     log(
@@ -698,27 +698,23 @@ async fn code(
     let made = state.inbox.create_enrollment_code(&ctx.viewer.login).await;
     match made {
         Some(Ok(code)) => {
-            let frame = ctx.frame(state);
-            let page = ui_inbox::code_page(
-                &frame,
-                &ctx.held.ui,
-                &ui_inbox::CodeView {
+            page(
+                state,
+                ctx,
+                &Query::default(),
+                None,
+                Some(CodeData {
                     code: &code.code,
                     fingerprint: &code.fingerprint,
                     expires_at_ms: code.expires_at_ms,
-                },
-            );
-            let mut response = html_response(StatusCode::OK, page);
-            response.headers_mut().insert(
-                HeaderName::from_static("cache-control"),
-                HeaderValue::from_static("no-store"),
-            );
-            response
+                }),
+            )
+            .await
         }
         Some(Err(e)) if e.status() == StatusCode::TOO_MANY_REQUESTS => {
-            back_with(ui_inbox::PHONES_PATH, "too_many_codes")
+            back_with(ui_inbox::PAGE, "too_many_codes")
         }
-        Some(Err(_)) => back_with(ui_inbox::PHONES_PATH, "failed"),
+        Some(Err(_)) => back_with(ui_inbox::PAGE, "failed"),
         None => not_found(),
     }
 }

@@ -137,18 +137,35 @@ pub struct Zone<'a> {
     pub tools_html: &'a str,
     /// More classes of the panel, with a space before the first: " zone--short". Empty: none.
     pub class: &'a str,
+    /// Markup between the head and the list that does not scroll: a small graph. Empty: none.
+    pub above_html: &'a str,
 }
 
 /// A panel: its head, then `body_html` in a list with its own scroller. The page does not scroll
 /// for a long list: the list does. `body_html` is a table (`grid`) or any markup.
 pub fn zone(z: &Zone, body_html: &str) -> String {
-    let mut out = format!(
-        r#"<section class="zone{}" aria-labelledby="{}"><div class="zone__head"><h2 class="title" id="{}">{}</h2>"#,
-        html_escape(z.class),
-        html_escape(z.id),
-        html_escape(z.id),
-        html_escape(z.title)
-    );
+    let above = if z.above_html.is_empty() {
+        ""
+    } else {
+        " zone--above"
+    };
+    // A panel with no title is named by its id for a screen reader: the toolbar above it shows the
+    // title.
+    let mut out = if z.title.is_empty() {
+        format!(
+            r#"<section class="zone{above}{}" aria-label="{}"><div class="zone__head">"#,
+            html_escape(z.class),
+            html_escape(z.id),
+        )
+    } else {
+        format!(
+            r#"<section class="zone{above}{}" aria-labelledby="{}"><div class="zone__head"><h2 class="title" id="{}">{}</h2>"#,
+            html_escape(z.class),
+            html_escape(z.id),
+            html_escape(z.id),
+            html_escape(z.title)
+        )
+    };
     if !z.count.is_empty() {
         let _ = write!(
             out,
@@ -161,7 +178,8 @@ pub fn zone(z: &Zone, body_html: &str) -> String {
     out.push_str(z.tools_html);
     let _ = write!(
         out,
-        r#"</div><div class="scroll">{body_html}</div></section>"#
+        r#"</div>{}<div class="scroll">{body_html}</div></section>"#,
+        z.above_html
     );
     out
 }
@@ -196,6 +214,22 @@ pub fn split(class: &str, left_html: &str, right_html: &str) -> String {
     )
 }
 
+/// The zones of a page that has a main zone on the left and a stack on the right. `left` is
+/// `None` when the account has no main zone: the stack then has the full width. `class` names the
+/// proportion (`inbox`) or the narrow page of one zone (`solo`).
+pub fn split_zones(class: &str, left: Option<&str>, right: &str) -> String {
+    match (left, right.is_empty()) {
+        (Some(left), false) => split(class, left, right),
+        (Some(left), true) => {
+            format!(r#"<div class="split split--one">{left}</div>"#)
+        }
+        (None, _) => format!(
+            r#"<div class="split split--one split--{}"><div class="stackcol">{right}</div></div>"#,
+            html_escape(class)
+        ),
+    }
+}
+
 /// Where a popover opens: under its button, from the left edge or from the right edge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -208,16 +242,43 @@ pub enum Side {
 ///
 /// It is a `details` element, so it opens without script. The script adds the closing.
 pub fn popover(label: &str, icon_name: &str, side: Side, wide: bool, body_html: &str) -> String {
+    popover_with(
+        label,
+        "ib",
+        &icon(icon_name),
+        side,
+        if wide { " pop__menu--wide" } else { "" },
+        body_html,
+    )
+}
+
+/// A popover whose opener has its own look: `summary_class` is the class of the opener (`ib`,
+/// `pick`, `button button--primary`) and `summary_html` its content. `menu_class` adds classes to
+/// the panel, with a space before the first. `label` names the opener for a screen reader and for
+/// the tooltip. Pass an empty `label` when the content of the opener is a visible word.
+pub fn popover_with(
+    label: &str,
+    summary_class: &str,
+    summary_html: &str,
+    side: Side,
+    menu_class: &str,
+    body_html: &str,
+) -> String {
+    let name = if label.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#" aria-label="{0}" title="{0}""#,
+            html_escape(label)
+        )
+    };
     format!(
-        r#"<details class="pop"><summary class="ib" aria-label="{0}" title="{0}">{1}</summary><div class="pop__menu{2}{3}">{body_html}</div></details>"#,
-        html_escape(label),
-        icon(icon_name),
+        r#"<details class="pop"><summary class="{summary_class}"{name}>{summary_html}</summary><div class="pop__menu{}{menu_class}">{body_html}</div></details>"#,
         if side == Side::End {
             " pop__menu--end"
         } else {
             ""
         },
-        if wide { " pop__menu--wide" } else { "" },
     )
 }
 
@@ -323,7 +384,8 @@ pub struct Bulk<'a> {
     /// The id of the form. The page needs one id for each bulk action.
     pub id: &'a str,
     pub action: &'a str,
-    /// The name of each ticked row in the form.
+    /// The prefix of the name of each ticked row in the form. The box of the row `42` is named
+    /// `<field>.42` and has the value `1`: a form never repeats a name.
     pub field: &'a str,
     /// The hidden fields of the form, with the anti-CSRF token (markup).
     pub fields_html: &'a str,
@@ -348,7 +410,7 @@ pub fn bulk_form(b: &Bulk) -> String {
 /// The checkbox of one row. `label` names the row for a screen reader ("Select Pixel 8").
 pub fn bulk_box(b: &Bulk, value: &str, label: &str) -> String {
     format!(
-        r#"<input class="bulk__box" type="checkbox" form="{}" name="{}" value="{}" aria-label="{}">"#,
+        r#"<input class="bulk__box" type="checkbox" form="{}" name="{}.{}" value="1" aria-label="{}">"#,
         html_escape(b.id),
         html_escape(b.field),
         html_escape(value),
@@ -527,7 +589,7 @@ mod tests {
         assert!(form.contains(r#"id="revoke-phones""#) && form.contains(r#"method="post""#));
         let box_ = bulk_box(&b, "42", "Select Pixel 8");
         assert!(
-            box_.contains(r#"form="revoke-phones" name="id" value="42""#),
+            box_.contains(r#"form="revoke-phones" name="id.42" value="1""#),
             "{box_}"
         );
         assert!(box_.contains(r#"aria-label="Select Pixel 8""#));
@@ -552,6 +614,7 @@ mod tests {
                 chips_html: "",
                 tools_html: "",
                 class: "",
+                above_html: "",
             },
             "<table></table>",
         );

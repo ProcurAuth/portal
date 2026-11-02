@@ -12,12 +12,12 @@ use crate::grants::ACCESS;
 use crate::key_forms::Context;
 use crate::keyauth;
 use crate::keys::KeyKind;
-use crate::limits::{Limits, Value as LimitValue};
 use crate::portal_actions as portal;
 use crate::store::{KeyCaps, KeyListItem, KeyScope, KeyWriteError};
 use crate::ui::grant_editor::{self, EditorData};
 use crate::ui::keys::{
-    self as ui_keys, Cover, EditTarget, GrantLine, KeyLine, KeyState, KeysView, NewKey, Section,
+    self as ui_keys, Cover, EditTarget, GrantLine, KeyLine, KeyState, KeysView, NewKey, Pane,
+    Section,
 };
 use crate::users::KeyOwner;
 
@@ -160,37 +160,6 @@ fn cover_of(owner: Option<&[Grant]>, grant: &Grant) -> Cover {
     }
 }
 
-/// The values of the owner for a grant of a key: the lowest value of each ceiling among the
-/// grants of the owner that cover the node, and the budgets of the grant `access` (portal 4.5b).
-fn owner_limits(owner: Option<&[Grant]>, grant: &Grant) -> Limits {
-    let mut out = Limits::new();
-    let Some(held) = owner else {
-        return out;
-    };
-    for g in held {
-        let relevant = g.action == grant.action
-            && g.service == grant.service
-            && grant.path.starts_with(&g.path);
-        if !relevant {
-            continue;
-        }
-        for (name, value) in g.limits.iter() {
-            match value {
-                LimitValue::Ceiling(_) => {
-                    let mut one = Limits::new();
-                    let _ = one.set(name, value.clone());
-                    out = out.lower(&one);
-                }
-                LimitValue::Budget(_) if out.get(name).is_none() => {
-                    let _ = out.set(name, value.clone());
-                }
-                LimitValue::Budget(_) => {}
-            }
-        }
-    }
-    out
-}
-
 /// The editor of the grants of a form of a key of this kind. The owner can give what the owner
 /// holds, so each service where the owner holds a grant is in the editor. An API key holds the
 /// alert actions of the portal features and no service. An MCP key holds services. `ticked` are the
@@ -251,7 +220,6 @@ fn grant_lines(grants: &[Grant], owner: Option<&[Grant]>) -> Vec<GrantLine> {
         .map(|g| GrantLine {
             grant: g.clone(),
             cover: cover_of(owner, g),
-            owner_values: owner_limits(owner, g),
         })
         .collect()
 }
@@ -410,7 +378,7 @@ fn query_parameters(uri: &str) -> Option<std::collections::HashMap<String, Strin
         let value = percent_decode_form(value).ok()?;
         if !matches!(
             name.as_str(),
-            "section" | "after" | "copy" | "s" | "id" | "kind"
+            "section" | "after" | "copy" | "s" | "id" | "kind" | "k"
         ) || value.len() > 160
         {
             return None;
@@ -440,20 +408,21 @@ fn forbidden() -> HttpResponse {
     text_response(StatusCode::FORBIDDEN, "Forbidden\n")
 }
 
-/// The pages of the keys that `handle_keys` draws.
+/// The states of the page that `handle_keys` draws. The list is always there. The pane is closed,
+/// or it has the form of a new key or of the change of a key.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
-    /// `GET /auth/keys`: the list.
+    /// `GET /auth/keys`: the list, with the pane closed.
     List,
-    /// `GET /auth/keys/new`: the form of a new key.
+    /// `GET /auth/keys/new`: the list, with the form of a new key in the pane.
     New,
-    /// `GET /auth/keys/edit?id=<id>`: the form of the change of a key.
+    /// `GET /auth/keys/edit?id=<id>`: the list, with the form of the change of a key in the pane.
     Edit,
 }
 
-/// `GET /auth/keys` (portal 5.8b), `GET /auth/keys/new`, the page of a new key, and `GET
-/// /auth/keys/edit`, the page of the change of a key. These two pages list no key: each holds the
-/// form, with the editor of the grants that the owner can give.
+/// `GET /auth/keys` (portal 5.8b), `GET /auth/keys/new` and `GET /auth/keys/edit`. The three
+/// addresses draw the same page. The last two open the pane with the form, with the editor of the
+/// grants that the owner can give.
 pub(super) async fn handle_keys(
     state: &Arc<AppState>,
     uri: &str,
@@ -461,8 +430,6 @@ pub(super) async fn handle_keys(
     client: &Client,
     page: Page,
 ) -> HttpResponse {
-    let new = page == Page::New;
-    let form_page = page != Page::List;
     if state.config.keys.is_none() {
         return not_found();
     }
@@ -472,10 +439,37 @@ pub(super) async fn handle_keys(
     let Some(params) = query_parameters(uri) else {
         return bad_request();
     };
+    draw(state, &viewer, params, page, None).await
+}
+
+/// The text of a key that was just made: its name and its text, for the pane of the creation.
+pub(super) struct Made<'a> {
+    pub name: &'a str,
+    pub text: &'a str,
+}
+
+/// Draws the page for a viewer: the list, and the pane for the state `page`. `made` is the key that
+/// the pane shows one time: it replaces the form.
+async fn draw(
+    state: &Arc<AppState>,
+    viewer: &Viewer,
+    params: std::collections::HashMap<String, String>,
+    page: Page,
+    made: Option<Made<'_>>,
+) -> HttpResponse {
+    let new = page == Page::New;
+    let form_page = page != Page::List;
     let section = match params.get("section").map(String::as_str) {
         None | Some("mine") => Section::Mine,
         Some("all") => Section::All,
         Some(_) => return bad_request(),
+    };
+    let kind_filter = match params.get("k").map(String::as_str) {
+        None => None,
+        Some(name) => match KeyKind::from_name(name) {
+            Some(kind) => Some(kind),
+            None => return bad_request(),
+        },
     };
     let after = match params.get("after") {
         None => None,
@@ -502,7 +496,7 @@ pub(super) async fn handle_keys(
             return bad_request();
         }
     }
-    let rights = rights_of(state, &viewer);
+    let rights = rights_of(state, viewer);
     match section {
         Section::Mine if !rights.read_own => return forbidden(),
         Section::All if !rights.read_all => return forbidden(),
@@ -514,11 +508,11 @@ pub(super) async fn handle_keys(
     if page == Page::Edit && (section != Section::Mine || !rights.edit) {
         return forbidden();
     }
-    let Some((logout_token, csrf)) = frame_token(state, &viewer) else {
+    let Some((logout_token, csrf)) = frame_token(state, viewer) else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
     let now = unix_now();
-    let mine = me(state, &viewer);
+    let mine = me(state, viewer);
     let my_grants: Option<Vec<Grant>> = match &mine {
         Me::Superadmin => None,
         Me::Database(login) | Me::File(login) => Some(viewer.grants.clone().unwrap_or_else(|| {
@@ -531,9 +525,7 @@ pub(super) async fn handle_keys(
 
     // The lines: the keys of the file first, by login and then by name, then the pages of the
     // database (portal 5.8).
-    let (lines, next) = if form_page {
-        (Vec::new(), None)
-    } else {
+    let (lines, next) = {
         let mut file_keys: Vec<Arc<crate::users::KeyRecord>> = state
         .users
         .keys()
@@ -696,15 +688,39 @@ pub(super) async fn handle_keys(
     let default_lifetime = state.config.key_limits.default_lifetime.as_secs();
     let first_lifetime = max_lifetime.map_or(default_lifetime, |max| max.min(default_lifetime));
     let editor = kind
-        .filter(|_| form_page && (new || edit.is_some()))
+        .filter(|_| made.is_none() && form_page && (new || edit.is_some()))
         .map(|kind| editor_for(state, kind, my_grants.as_deref(), ticked));
+    let pane = match (&made, edit) {
+        (Some(key), _) => Pane::Made(NewKey {
+            text: key.text,
+            name: key.name,
+            superadmin: matches!(mine, Me::Superadmin),
+        }),
+        (None, Some(target)) => Pane::Edit(target),
+        (None, None) if new => Pane::New,
+        (None, None) => Pane::Closed,
+    };
+    let groups = state
+        .config
+        .inbox
+        .as_ref()
+        .map(|inbox| {
+            inbox
+                .groups
+                .iter()
+                .map(|(id, group)| (id.clone(), group.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let view = KeysView {
         section,
         can_read_own: rights.read_own,
         can_read_all: rights.read_all,
         can_create: rights.create,
         create_kinds: rights.create_kinds.clone(),
-        kind,
+        kind: kind.filter(|_| made.is_none()),
+        kind_filter,
+        groups,
         can_revoke: rights.revoke,
         can_revoke_all: rights.revoke_all,
         cannot_use: rights.cannot_use,
@@ -713,7 +729,7 @@ pub(super) async fn handle_keys(
         next,
         csrf: &csrf,
         editor,
-        edit,
+        pane,
         expires_at: ui_keys::instant_text(now + i64::try_from(first_lifetime).unwrap_or(i64::MAX)),
         max_lifetime,
         copy_name,
@@ -722,15 +738,17 @@ pub(super) async fn handle_keys(
     let frame = ui::Frame {
         logout_token: &logout_token,
         keys: true,
-        inbox: inbox_page::tab_visible(state, &viewer),
-        superadmin: is_superadmin(&viewer),
+        inbox: inbox_page::tab_visible(state, viewer),
+        superadmin: is_superadmin(viewer),
     };
-    let html = if form_page {
-        ui_keys::key_form_page(&frame, &view)
-    } else {
-        ui_keys::keys_page(&frame, &view)
-    };
-    html_response(StatusCode::OK, html)
+    let mut response = html_response(StatusCode::OK, ui_keys::keys_page(&frame, &view));
+    if made.is_some() {
+        response.headers_mut().insert(
+            HeaderName::from_static("cache-control"),
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 
 /// What the three forms have in common: the checks before the body, and the body with the token
@@ -963,29 +981,17 @@ pub(super) async fn handle_keys_create(
             ),
         ],
     );
-    let Some((logout_token, _)) = frame_token(state, &viewer) else {
-        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
-    };
-    let frame = ui::Frame {
-        logout_token: &logout_token,
-        keys: true,
-        inbox: inbox_page::tab_visible(state, &viewer),
-        superadmin: is_superadmin(&viewer),
-    };
-    let page = ui_keys::new_key_page(
-        &frame,
-        &NewKey {
-            text: &text,
+    draw(
+        state,
+        &viewer,
+        std::collections::HashMap::new(),
+        Page::List,
+        Some(Made {
             name: &form.name,
-            superadmin: matches!(mine, Me::Superadmin),
-        },
-    );
-    let mut response = html_response(StatusCode::OK, page);
-    response.headers_mut().insert(
-        HeaderName::from_static("cache-control"),
-        HeaderValue::from_static("no-store"),
-    );
-    response
+            text: &text,
+        }),
+    )
+    .await
 }
 
 /// The key of the user that the form names, when the user can change it: an active key of the
@@ -1103,12 +1109,31 @@ pub(super) async fn handle_keys_revoke(
             Ok(v) => v,
             Err(response) => return response,
         };
-    let (Some(id), Some(section)) = (form.remove("id"), form.remove("section")) else {
+    let Some(section) = form.remove("section") else {
         return bad_request();
     };
-    if !form.is_empty() {
+    // The form names each key `id.<id>` (value `1`), or one key `id`.
+    let mut ids: Vec<String> = Vec::new();
+    for (name, value) in &form {
+        let id = match name.strip_prefix("id.") {
+            Some(id) if value == "1" => id,
+            None if name == "id" => value.as_str(),
+            _ => return bad_request(),
+        };
+        let valid = (1..=64).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+        if !valid {
+            return bad_request();
+        }
+        ids.push(id.to_string());
+    }
+    if ids.is_empty() || ids.len() > 200 {
         return bad_request();
     }
+    ids.sort();
+    ids.dedup();
     let all = match section.as_str() {
         "mine" => false,
         "all" => true,
@@ -1118,13 +1143,6 @@ pub(super) async fn handle_keys_revoke(
     if (all && !rights.revoke_all) || (!all && !rights.revoke) {
         return forbidden();
     }
-    let valid = (1..=64).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
-    if !valid {
-        return bad_request();
-    }
     let mine = me(state, &viewer);
     let back = |code: &str| {
         redirect_response(
@@ -1132,42 +1150,49 @@ pub(super) async fn handle_keys_revoke(
             &format!("{}?section={section}&s={code}", ui_keys::PATH),
         )
     };
-    if state.users.key_by_id(&id).is_some_and(|k| k.is_from_file()) {
-        return back("file_key");
-    }
-    // The owner filter: in the section "Mine" the key must be the key of the user.
-    let owner_filter: Option<Option<&str>> = if all { None } else { Some(owner_login(&mine)) };
-    let now = unix_now();
-    let store = Arc::clone(&state.store);
-    let owned_filter: Option<Option<String>> = owner_filter.map(|o| o.map(str::to_string));
-    let revoked = {
-        let id = id.clone();
-        tokio::task::spawn_blocking(move || {
-            let filter = owned_filter.as_ref().map(|o| o.as_deref());
-            match store.revoke_key(&id, filter, now) {
-                Ok(true) => Ok(true),
-                // A key that is revoked already, with its summary row, gives the same answer.
-                Ok(false) => store.has_key_history(&id, filter),
-                Err(error) => Err(error),
+    let mut code = "revoked";
+    for id in ids {
+        if state.users.key_by_id(&id).is_some_and(|k| k.is_from_file()) {
+            code = "file_key";
+            continue;
+        }
+        // The owner filter: in the section "Mine" the key must be the key of the user.
+        let owner_filter: Option<Option<&str>> = if all { None } else { Some(owner_login(&mine)) };
+        let now = unix_now();
+        let store = Arc::clone(&state.store);
+        let owned_filter: Option<Option<String>> = owner_filter.map(|o| o.map(str::to_string));
+        let revoked = {
+            let id = id.clone();
+            tokio::task::spawn_blocking(move || {
+                let filter = owned_filter.as_ref().map(|o| o.as_deref());
+                match store.revoke_key(&id, filter, now) {
+                    Ok(true) => Ok(true),
+                    // A key that is revoked already, with its summary row, gives the same answer.
+                    Ok(false) => store.has_key_history(&id, filter),
+                    Err(error) => Err(error),
+                }
+            })
+            .await
+        };
+        match revoked {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                code = "unknown_key";
+                continue;
             }
-        })
-        .await
-    };
-    match revoked {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return back("unknown_key"),
-        _ => return text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"),
+            _ => return text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"),
+        }
+        refresh_after_write(state);
+        log(
+            state,
+            LogLevel::Info,
+            "key_revoked",
+            &[
+                ("key", id),
+                ("by", viewer.login.clone()),
+                ("section", section.clone()),
+            ],
+        );
     }
-    refresh_after_write(state);
-    log(
-        state,
-        LogLevel::Info,
-        "key_revoked",
-        &[
-            ("key", id),
-            ("by", viewer.login.clone()),
-            ("section", section.clone()),
-        ],
-    );
-    back("revoked")
+    back(code)
 }

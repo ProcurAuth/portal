@@ -1,27 +1,35 @@
-//! The page "Keys" (portal 5.8): the keys of the user, the keys of all the users, the form of a new
-//! key and the form of a change.
+//! The page "Keys" (portal 5.8): the keys of the user and of all the users on the left, and the
+//! form of a key in a pane on the right.
 //!
-//! A key is shown with its id, its name, its hint, its state, its dates, the time of its last check
-//! and its grants with their limit values. The text of a key is shown one time, in the page that
-//! the creation gives ([`new_key_page`]). The page draws no icon of its own, and it works without
-//! script.
+//! A key has one kind, API or MCP, and the list shows it with an icon. The pane has four states:
+//! closed, a new key, the change of a key, and the text of a key that was just made. The text of a
+//! key shows one time, in the pane of the creation, with `Cache-Control: no-store`. The page works
+//! without script: the kind selector is a small form that asks for the page again, and a bulk
+//! revoke is a form with checkboxes.
+//!
+//! Each action has one entry point. With the pane closed, the toolbar has "New key". With the pane
+//! open, the toolbar button is absent, and the head of the pane has the title, Cancel and the
+//! action.
 
 use std::fmt::Write as _;
 
+use super::components::{
+    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, icon, icon_link, toolbar, zone, Bulk,
+    Chip, Zone,
+};
 use super::grant_editor::{self, EditorData, Place};
-use super::settings::{notice_html, page_shell, part_head, plural, shell, Frame, Notice, Tab};
+use super::settings::{fill_page, notice_html, Frame, Notice, Tab};
 use crate::grants::{Grant, ACCESS};
 use crate::keys::KeyKind;
-use crate::limits::{Limits, Value, Window};
-use crate::util::{format_duration, format_utc_instant, html_escape, time_tag};
+use crate::util::{format_utc_instant, html_escape, time_tag};
 
 /// The address of the page.
 pub const PATH: &str = "/auth/keys";
+/// `GET`: the page with the pane of a new key open.
 pub const NEW_PATH: &str = "/auth/keys/new";
 pub const CREATE_PATH: &str = "/auth/keys/create";
+/// `GET`: the page with the pane of the change of a key open. `POST`: the change.
 pub const EDIT_PATH: &str = "/auth/keys/edit";
-/// `GET`: the page that changes a key. `POST`: the change.
-pub const EDIT_PAGE: &str = "/auth/keys/edit";
 pub const REVOKE_PATH: &str = "/auth/keys/revoke";
 
 /// The sections of the page (portal 5.8).
@@ -86,8 +94,6 @@ pub enum Cover {
 pub struct GrantLine {
     pub grant: Grant,
     pub cover: Cover,
-    /// The values of the owner next to the values of the key (portal 4.5b).
-    pub owner_values: Limits,
 }
 
 /// One line of the page: a key, or the summary row of a revoked key.
@@ -122,10 +128,22 @@ pub struct NewKey<'a> {
     pub superadmin: bool,
 }
 
-/// The key of the page of a change.
+/// The key of the pane of a change.
 pub struct EditTarget {
     pub id: String,
     pub name: String,
+}
+
+/// The state of the pane.
+pub enum Pane<'a> {
+    /// No pane: the list has the full width, and the toolbar has "New key".
+    Closed,
+    /// The form of a new key. The view holds the kind and the editor.
+    New,
+    /// The form of the change of a key.
+    Edit(EditTarget),
+    /// The text of the key that was just made.
+    Made(NewKey<'a>),
 }
 
 /// The data of the page.
@@ -137,8 +155,12 @@ pub struct KeysView<'a> {
     /// The kinds of key that the viewer may make: the kinds that the file turns on and that the
     /// viewer holds `keys.own.create` on. The new-key page has a selector only with two or more.
     pub create_kinds: Vec<KeyKind>,
-    /// The kind of the key that the form makes or changes. `None` on the list.
+    /// The kind of the key that the form makes or changes. `None` with the pane closed.
     pub kind: Option<KeyKind>,
+    /// The filter of the list: only the keys of this kind.
+    pub kind_filter: Option<KeyKind>,
+    /// The names of the groups of the inbox, for the column "Can use".
+    pub groups: Vec<(String, String)>,
     pub can_revoke: bool,
     pub can_revoke_all: bool,
     /// The owner can make keys and cannot use them (portal 5.3b).
@@ -148,10 +170,9 @@ pub struct KeysView<'a> {
     /// The cursor of the next page (portal 5.8b), when there is one.
     pub next: Option<String>,
     pub csrf: &'a str,
-    /// The editor of the grants of the form. `None`: the page has no form.
+    /// The editor of the grants of the form. `None`: the pane has no form.
     pub editor: Option<EditorData>,
-    /// The key that the form changes. `None`: the form makes a new key.
-    pub edit: Option<EditTarget>,
+    pub pane: Pane<'a>,
     /// The first value of the field `expires_at`.
     pub expires_at: String,
     /// The longest lifetime of a key, in seconds (portal 5.3).
@@ -205,144 +226,429 @@ pub fn notice_for(code: &str) -> Option<Notice> {
     Some(Notice { text, ok })
 }
 
-fn window_label(window: Window) -> &'static str {
-    match window {
-        Window::Second => "each second",
-        Window::Minute => "each minute",
-        Window::Hour => "each hour",
-        Window::Day => "each day",
+const KIND_TIP_API: &str = "API key: for services and webhooks";
+const KIND_TIP_MCP: &str = "MCP key: for agents";
+
+fn kind_tip(kind: KeyKind) -> &'static str {
+    match kind {
+        KeyKind::Api => KIND_TIP_API,
+        KeyKind::Mcp => KIND_TIP_MCP,
     }
 }
 
-/// The values of a limit set, as text: `max_rows 100, requests 60 each minute`.
-fn values_text(limits: &Limits) -> String {
-    let mut parts = Vec::new();
-    for (name, value) in limits.iter() {
-        match value {
-            Value::Ceiling(n) => parts.push(format!("{name} {n}")),
-            Value::Budget(budget) => {
-                let items: Vec<String> = budget
-                    .items()
-                    .iter()
-                    .map(|i| format!("{} {}", i.amount, window_label(i.window)))
-                    .collect();
-                parts.push(format!("{name} {}", items.join(", ")));
-            }
-        }
+/// The icon of a kind: a webhook for an API key, a robot for an MCP key.
+fn kind_icon(kind: KeyKind) -> &'static str {
+    match kind {
+        KeyKind::Api => "webhook",
+        KeyKind::Mcp => "robot",
     }
-    parts.join("; ")
 }
 
-/// Whether the value of the key is above the value of the owner, so it has no effect
-/// (portal 4.5b).
-fn above_owner(name: &str, value: &Value, owner: &Limits) -> bool {
-    match (value, owner.get(name)) {
-        (Value::Ceiling(key), Some(Value::Ceiling(owner))) => key > owner,
-        (Value::Budget(key), Some(Value::Budget(owner))) => key
-            .items()
+/// The address of the page with a section and a kind filter.
+fn list_href(section: Section, kind: Option<KeyKind>) -> String {
+    let mut query = Vec::new();
+    if section == Section::All {
+        query.push("section=all".to_string());
+    }
+    if let Some(kind) = kind {
+        query.push(format!("k={}", kind.name()));
+    }
+    if query.is_empty() {
+        PATH.to_string()
+    } else {
+        format!("{PATH}?{}", query.join("&"))
+    }
+}
+
+/// What a key can use, in one short line: the groups of the inbox that it sends to and reads, or
+/// the services of an MCP key. A mark shows a right that the owner lost.
+fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
+    if line.grants.is_empty() {
+        return r#"<span class="muted">nothing</span>"#.to_string();
+    }
+    let portal = crate::portal_actions::SERVICE;
+    let name_of = |path: &str| {
+        let id = path.strip_prefix("inbox_group:").unwrap_or(path);
+        view.groups
             .iter()
-            .any(|i| owner.amount(i.window).is_some_and(|a| i.amount > a)),
-        _ => false,
+            .find(|(g, _)| g == id)
+            .map_or(id.to_string(), |(_, name)| name.clone())
+    };
+    let names = |action: &str| -> Vec<String> {
+        line.grants
+            .iter()
+            .filter(|g| g.grant.service == portal && g.grant.action == action)
+            .map(|g| html_escape(&name_of(&crate::grants::path_text(&g.grant.path))))
+            .collect()
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let send = names(crate::portal_actions::ALERT_SEND);
+    if !send.is_empty() {
+        parts.push(format!("Send {}", send.join(", ")));
     }
+    let read = names(crate::portal_actions::ALERT_READ);
+    if !read.is_empty() {
+        parts.push(format!("Read {}", read.join(", ")));
+    }
+    let mut out = String::new();
+    if !parts.is_empty() {
+        let _ = write!(
+            out,
+            r#"<span class="feat feat--text" title="Inbox">{}{}</span>"#,
+            icon("inbox"),
+            parts.join(" &middot; ")
+        );
+    }
+    let mut services: Vec<&str> = line
+        .grants
+        .iter()
+        .map(|g| g.grant.service.as_str())
+        .filter(|s| *s != portal)
+        .collect();
+    services.sort_unstable();
+    services.dedup();
+    if !services.is_empty() {
+        let count = line
+            .grants
+            .iter()
+            .filter(|g| g.grant.service != portal)
+            .count();
+        let shown: Vec<String> = services.iter().take(3).map(|s| html_escape(s)).collect();
+        let _ = write!(
+            out,
+            r#"<span class="muted">{}{} &middot; {}</span>"#,
+            shown.join(", "),
+            if services.len() > 3 {
+                format!(" +{}", services.len() - 3)
+            } else {
+                String::new()
+            },
+            super::settings::plural(count, "permission", "permissions")
+        );
+    }
+    let lost = line.grants.iter().filter(|g| g.cover == Cover::None).count();
+    if lost > 0 {
+        out.push_str(&super::status_icon(
+            "warn",
+            "alert-triangle",
+            &format!(
+                "{} no effect: the owner does not hold it any more",
+                super::settings::plural(lost, "right has", "rights have")
+            ),
+        ));
+    }
+    if !line.no_access.is_empty() {
+        out.push_str(&super::status_icon(
+            "warn",
+            "alert-triangle",
+            "A service of this key has no access permission",
+        ));
+    }
+    out
 }
 
-fn grant_line(out: &mut String, line: &GrantLine) {
+/// Whether the row has a box: the account may revoke the key.
+fn may_revoke(view: &KeysView<'_>, line: &KeyLine) -> bool {
+    line.revoked_at.is_none()
+        && !line.file
+        && match view.section {
+            Section::Mine => view.can_revoke && !view.impersonated,
+            Section::All => view.can_revoke_all && !view.impersonated,
+        }
+}
+
+fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line: &KeyLine) {
+    // One line: the kind, the name, what the key can use, when it ends, when it was used. The id,
+    // the hint and the creation date are in the tooltip of the name.
+    let hint = match line.kind {
+        Some(kind) if !line.hint.is_empty() => {
+            format!(" Starts with {}{}.", kind.prefix(), line.hint)
+        }
+        _ => String::new(),
+    };
+    let created = if line.file {
+        String::new()
+    } else {
+        format!(" Made {}.", crate::util::format_utc(line.created_at))
+    };
+    let editing = matches!(&view.pane, Pane::Edit(target) if target.id == line.id);
     let _ = write!(
         out,
-        "<li><code>{}</code>",
-        html_escape(&line.grant.to_string())
+        r#"<tr{} data-kind="{}">"#,
+        if editing { r#" class="is-selected""# } else { "" },
+        line.kind.map_or("", KeyKind::name)
     );
-    match line.cover {
-        Cover::Full => {}
-        Cover::Limited => out.push_str(
-            r#" <span class="badge badge--warn" title="Your rights cover only a part of this node.">limited</span>"#,
-        ),
-        Cover::None => out.push_str(
-            r#" <span class="badge badge--warn" title="Your rights do not cover this permission any more.">without effect</span>"#,
-        ),
-    }
-    if !line.grant.limits.is_empty() {
-        out.push_str(r#"<span class="cellNote">"#);
-        for (name, value) in line.grant.limits.iter() {
-            let mut text = values_text(&single(name, value));
-            if above_owner(name, value, &line.owner_values) {
-                let _ = write!(
-                    text,
-                    " (without effect: your value is {})",
-                    values_text(&single_of(name, &line.owner_values))
-                );
+    if boxes {
+        let _ = write!(
+            out,
+            "<td>{}</td>",
+            if may_revoke(view, line) {
+                bulk_box(bulk, &line.id, &format!("Select {}", line.name))
+            } else {
+                String::new()
             }
-            let _ = write!(out, "{} ", html_escape(&text));
-        }
-        out.push_str("</span>");
+        );
     }
-    out.push_str("</li>");
+    let kind_cell = match line.kind {
+        Some(kind) => format!(
+            r#"<span class="kindIcon" role="img" aria-label="{0}" title="{0}">{1}</span>"#,
+            kind_tip(kind),
+            icon(kind_icon(kind))
+        ),
+        None => String::new(),
+    };
+    let state = if line.state == KeyState::Active {
+        String::new()
+    } else {
+        format!(" {}", line.state.icon())
+    };
+    let _ = write!(
+        out,
+        r#"<td>{kind_cell}</td><td title="Id {}.{hint}{created}">{}{}{}"#,
+        html_escape(&line.id),
+        html_escape(&line.name),
+        state,
+        if line.file {
+            r#" <span class="badge" title="Defined in the configuration file">file</span>"#
+        } else {
+            ""
+        }
+    );
+    if let Some(at) = line.revoked_at {
+        let _ = write!(
+            out,
+            r#" <span class="muted">revoked {}</span>"#,
+            time_tag(at, false)
+        );
+    }
+    out.push_str("</td>");
+    if view.section == Section::All {
+        let _ = write!(
+            out,
+            r#"<td class="muted">{}</td>"#,
+            match &line.owner {
+                Some(login) => html_escape(login),
+                None => "superadmin".to_string(),
+            }
+        );
+    }
+    let _ = write!(
+        out,
+        r#"<td>{}</td><td class="r">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
+        can_use(view, line),
+        match line.expires_at {
+            Some(at) => time_tag(at, false),
+            None => r#"<span class="muted">never</span>"#.to_string(),
+        },
+        line.check_count,
+        match line.last_check_at {
+            Some(at) => time_tag(at, false),
+            None => r#"<span class="muted">never</span>"#.to_string(),
+        }
+    );
+    if line.can_change {
+        out.push_str(&icon_link(
+            &format!("{EDIT_PATH}?id={}", line.id),
+            &format!("Edit {}", line.name),
+            "pencil",
+        ));
+    }
+    out.push_str("</td></tr>");
 }
 
-fn single(name: &str, value: &Value) -> Limits {
-    let mut limits = Limits::new();
-    let _ = limits.set(name, value.clone());
-    limits
+fn list_zone(view: &KeysView<'_>) -> String {
+    let lines: Vec<&KeyLine> = view
+        .lines
+        .iter()
+        .filter(|l| view.kind_filter.is_none_or(|k| l.kind == Some(k)))
+        .collect();
+    let count_kind = |kind: KeyKind| view.lines.iter().filter(|l| l.kind == Some(kind)).count();
+    let all_href = list_href(view.section, None);
+    let api_href = list_href(
+        view.section,
+        (view.kind_filter != Some(KeyKind::Api)).then_some(KeyKind::Api),
+    );
+    let mcp_href = list_href(
+        view.section,
+        (view.kind_filter != Some(KeyKind::Mcp)).then_some(KeyKind::Mcp),
+    );
+    let api_label = format!(r#"<span class="st--off">{}</span>"#, icon("webhook"));
+    let mcp_label = format!(r#"<span class="st--off">{}</span>"#, icon("robot"));
+    let chips_html = chips(&[
+        Chip {
+            label_html: "All",
+            name: "",
+            count: view.lines.len(),
+            href: &all_href,
+            on: view.kind_filter.is_none(),
+        },
+        Chip {
+            label_html: &api_label,
+            name: KIND_TIP_API,
+            count: count_kind(KeyKind::Api),
+            href: &api_href,
+            on: view.kind_filter == Some(KeyKind::Api),
+        },
+        Chip {
+            label_html: &mcp_label,
+            name: KIND_TIP_MCP,
+            count: count_kind(KeyKind::Mcp),
+            href: &mcp_href,
+            on: view.kind_filter == Some(KeyKind::Mcp),
+        },
+    ]);
+    let bulk = Bulk {
+        id: "revoke-keys",
+        action: REVOKE_PATH,
+        field: "id",
+        fields_html: &format!(
+            r#"<input type="hidden" name="csrf" value="{}"><input type="hidden" name="section" value="{}">"#,
+            html_escape(view.csrf),
+            view.section.name()
+        ),
+        verb: "Revoke",
+        one: "key",
+        many: "keys",
+        danger: true,
+    };
+    let boxes = view.lines.iter().any(|l| may_revoke(view, l));
+    let tools = if boxes { bulk_button(&bulk) } else { String::new() };
+    let mut body = String::new();
+    if boxes {
+        body.push_str(&bulk_form(&bulk));
+    }
+    if lines.is_empty() {
+        body.push_str(r#"<p class="empty">No key yet.</p>"#);
+    } else {
+        body.push_str(r#"<table class="grid grid--keys"><colgroup>"#);
+        if boxes {
+            body.push_str(r#"<col class="w28">"#);
+        }
+        body.push_str(r#"<col class="w28"><col class="w152">"#);
+        if view.section == Section::All {
+            body.push_str(r#"<col class="w88">"#);
+        }
+        body.push_str(r#"<col><col class="w88"><col class="w152"><col class="w28"></colgroup><thead><tr>"#);
+        if boxes {
+            let _ = write!(body, r#"<th scope="col">{}</th>"#, bulk_all_box(&bulk));
+        }
+        body.push_str(r#"<th scope="col"><span class="visually-hidden">Kind</span></th><th scope="col">Key</th>"#);
+        if view.section == Section::All {
+            body.push_str(r#"<th scope="col">Owner</th>"#);
+        }
+        body.push_str(r#"<th scope="col">Can use</th><th scope="col" class="r">Expires</th><th scope="col" class="r">Last used</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
+        for line in &lines {
+            key_row(&mut body, view, &bulk, boxes, line);
+        }
+        body.push_str("</tbody></table>");
+    }
+    if let Some(cursor) = &view.next {
+        let _ = write!(
+            body,
+            r#"<p class="more"><a href="{PATH}?section={}&amp;after={}">Next keys</a></p>"#,
+            view.section.name(),
+            html_escape(cursor)
+        );
+    }
+    zone(
+        &Zone {
+            id: "keys-list",
+            title: "",
+            count: "",
+            chips_html: &chips_html,
+            tools_html: &tools,
+            class: "",
+            above_html: "",
+        },
+        &body,
+    )
 }
 
-fn single_of(name: &str, from: &Limits) -> Limits {
-    from.get(name)
-        .map(|value| single(name, value))
-        .unwrap_or_default()
+// The pane -------------------------------------------------------------------------------------
+
+/// The head of the pane: the title, Cancel and the action. The action is a button of the form of
+/// the pane, or a link when the pane has no form.
+fn pane_head(title: &str, cancel: Option<&str>, action: &str) -> String {
+    let mut out = format!(
+        r#"<div class="formHead"><h2 class="title" id="key-pane-title">{}</h2><span class="grow"></span>"#,
+        html_escape(title)
+    );
+    if let Some(cancel) = cancel {
+        let _ = write!(out, r#"<a class="button" href="{cancel}">Cancel</a>"#);
+    }
+    out.push_str(action);
+    out.push_str("</div>");
+    out
 }
 
-/// The page of a new key, and the page of the change of a key: a page of its own, with the name,
-/// the expiry date of a new key and the grants.
-pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
-    let edit = view.edit.as_ref();
-    let title = match edit {
-        Some(target) => format!("Change {}", html_escape(&target.name)),
-        None => "New key".to_string(),
+/// The kind of a new key: a selector when the viewer may make two kinds or more, and nothing when
+/// the viewer may make one. The selector is a form with the method GET, so it works without script:
+/// each button is a submit button that names its kind.
+fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
+    let Some(kind) = view.kind else {
+        return String::new();
+    };
+    if editing {
+        // The kind of a key does not change: the pane shows it as a fact.
+        return format!(
+            r#"<div class="field"><span class="field__label">Kind</span><span class="kindTag" title="{}">{}{}</span></div>"#,
+            kind_tip(kind),
+            icon(kind_icon(kind)),
+            kind.label()
+        );
+    }
+    if view.create_kinds.len() < 2 {
+        return String::new();
+    }
+    let mut buttons = String::new();
+    for each in &view.create_kinds {
+        let _ = write!(
+            buttons,
+            r#"<button class="segmented__option{}" type="submit" form="kind-form" name="kind" value="{}" title="{}"{}>{}{}</button>"#,
+            if *each == kind { " is-active" } else { "" },
+            each.name(),
+            kind_tip(*each),
+            if *each == kind { r#" aria-current="true""# } else { "" },
+            icon(kind_icon(*each)),
+            each.label()
+        );
+    }
+    format!(
+        r#"<form id="kind-form" method="get" action="{NEW_PATH}"></form><div class="field"><span class="field__label">Kind</span><div class="segmented" role="group" aria-label="Kind of key">{buttons}</div></div>"#
+    )
+}
+
+fn form_pane(view: &KeysView<'_>) -> String {
+    let edit = match &view.pane {
+        Pane::Edit(target) => Some(target),
+        _ => None,
+    };
+    let kind = view.kind;
+    let title = match (edit, kind) {
+        (Some(_), _) => "Edit key".to_string(),
+        (None, Some(kind)) if view.create_kinds.len() < 2 => format!("New {} key", kind.label()),
+        _ => "New key".to_string(),
     };
     let (action, form_id, submit) = match edit {
         Some(_) => (EDIT_PATH, "key-form", "Save"),
-        None => (CREATE_PATH, "new-key-form", "Create key"),
+        None => (CREATE_PATH, "new-key-form", "Create"),
     };
-    let mut out = String::new();
-    notice_html(&mut out, view.notice);
-    out.push_str(r#"<section class="pagePart" aria-labelledby="key-form-title">"#);
-    // The selector of the kind shows only for a new key, and only when the viewer may make more
-    // than one kind. It is a form that asks for the page again: the form of the key depends on the
-    // kind. Without a second kind, there is no selector.
-    let selector = if edit.is_none() && view.create_kinds.len() > 1 {
-        let options: String = view
-            .create_kinds
-            .iter()
-            .map(|kind| {
-                format!(
-                    r#"<option value="{}"{}>{}</option>"#,
-                    kind.name(),
-                    if Some(*kind) == view.kind {
-                        " selected"
-                    } else {
-                        ""
-                    },
-                    kind.label()
-                )
-            })
-            .collect();
-        format!(
-            r#"<form class="kindChoice" method="get" action="{NEW_PATH}"><label class="uiField__label" for="key-kind">Kind of key</label> <select class="uiInput" id="key-kind" name="kind">{options}</select> <button class="button" type="submit">Show the form</button></form>"#
-        )
-    } else {
-        String::new()
-    };
+    let mut out = String::from(r#"<section class="pane" aria-labelledby="key-pane-title">"#);
+    out.push_str(&pane_head(
+        &title,
+        Some(PATH),
+        &format!(
+            r#"<button class="button button--primary" type="submit" form="{form_id}">{submit}</button>"#
+        ),
+    ));
+    out.push_str(r#"<div class="pane__body">"#);
+    out.push_str(&kind_field_row(view, edit));
     let _ = write!(
         out,
-        r##"<div class="pagePart__head"><a class="pageBack" href="{PATH}" aria-label="Back to the keys" title="Back to the keys"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg></a><h2 class="pagePart__title" id="key-form-title">{title}</h2><div class="part__controls"><a class="button" href="{PATH}">Cancel</a><button class="button button--primary" type="submit" form="{form_id}">{submit}</button></div></div>"##
-    );
-    out.push_str(&selector);
-    let _ = write!(
-        out,
-        r#"<form method="post" action="{action}" id="{form_id}" class="uiForm keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
+        r#"<form method="post" action="{action}" id="{form_id}" class="keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
         html_escape(view.csrf)
     );
-    if let (None, Some(kind)) = (edit, view.kind) {
+    if let (None, Some(kind)) = (edit, kind) {
         let _ = write!(
             out,
             r#"<input type="hidden" name="kind" value="{}">"#,
@@ -362,21 +668,20 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
     };
     let _ = write!(
         out,
-        r#"<div class="keyForm__top"><div class="uiField"><label class="uiField__label" for="key-name">Name</label><input class="uiInput" type="text" id="key-name" name="name" value="{}" maxlength="256" required></div>"#,
+        r#"<div class="keyFields"><div class="field keyFields__name"><label class="field__label" for="key-name">Name</label><input class="uiInput" type="text" id="key-name" name="name" value="{}" maxlength="256" required></div>"#,
         html_escape(name),
     );
     if edit.is_none() {
         let hint = match view.max_lifetime {
             Some(max) => format!(
-                "The longest lifetime is {}. The date is in UTC, for example 2026-11-23T00:00:00Z.",
-                format_duration(i64::try_from(max).unwrap_or(i64::MAX))
+                "The longest lifetime is {}.",
+                crate::util::format_duration(i64::try_from(max).unwrap_or(i64::MAX))
             ),
-            None => "Empty: the key has no expiry date. The date is in UTC, for example 2026-11-23T00:00:00Z."
-                .to_string(),
+            None => "UTC, for example 2026-11-23T00:00:00Z.".to_string(),
         };
         let _ = write!(
             out,
-            r#"<div class="uiField expiry" data-expiry{}><label class="uiField__label" for="key-expires">Expires</label><input class="uiInput" type="text" id="key-expires" name="expires_at" value="{}" size="22"><p class="uiField__hint expiry__hint">{}</p></div>"#,
+            r#"<div class="field expiry" data-expiry{}><label class="field__label" for="key-expires">Expires</label><input class="uiInput" type="text" id="key-expires" name="expires_at" value="{}" size="22"><p class="uiField__hint expiry__hint">{}</p></div>"#,
             view.max_lifetime
                 .map(|max| format!(r#" data-max="{max}""#))
                 .unwrap_or_default(),
@@ -385,7 +690,6 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
         );
     }
     out.push_str("</div>");
-    out.push_str(r#"<h3 class="subTitle">Permissions</h3>"#);
     if let Some(editor) = &view.editor {
         grant_editor::render(
             &mut out,
@@ -394,270 +698,101 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
                 form: None,
                 title: "Permissions of the key",
                 blank_rows: 3,
-                groups: false,
+                groups: true,
             },
         );
     }
-    out.push_str("</form></section>");
-    page_shell(Tab::Keys, frame, &title, &out)
+    out.push_str("</form></div></section>");
+    out
 }
 
-fn key_row(out: &mut String, view: &KeysView<'_>, line: &KeyLine) {
-    // One line: the state and the name, what the key can use, when it ends, when it was used.
-    // The id, the hint and the creation date are in the tooltip of the name.
-    let hint = match line.kind {
-        Some(kind) if !line.hint.is_empty() => {
-            format!(" Starts with {}{}.", kind.prefix(), line.hint)
-        }
-        _ => String::new(),
-    };
-    let created = if line.file {
+/// The row of the kind above the form: a selector, or the fact of the kind. Empty when the viewer
+/// has no choice.
+fn kind_field_row(view: &KeysView<'_>, edit: Option<&EditTarget>) -> String {
+    let field = kind_field(view, edit.is_some());
+    if field.is_empty() {
         String::new()
     } else {
-        format!(" Made {}.", crate::util::format_utc(line.created_at))
-    };
-    let kind_badge = match line.kind {
-        Some(kind) => format!(
-            r#" <span class="badge" data-kind="{}" title="{}">{}</span>"#,
-            kind.name(),
-            match kind {
-                KeyKind::Mcp => "An MCP key: for an agent. The key edge verifies it.",
-                KeyKind::Api => "An API key: for a service. The API of the inbox verifies it.",
-            },
-            kind.label()
+        format!(r#"<div class="kindRow">{field}</div>"#)
+    }
+}
+
+/// The pane after a creation: the text of the key, one time.
+fn made_pane(key: &NewKey<'_>) -> String {
+    format!(
+        r##"<section class="pane" aria-labelledby="key-pane-title">{}<div class="pane__body"><p class="uiBanner uiBanner--inset uiBanner--ok" role="status">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</p></div></section>"##,
+        pane_head(
+            "Key made",
+            None,
+            &format!(r#"<a class="button button--primary" href="{PATH}">Done</a>"#)
         ),
-        None => String::new(),
-    };
-    let _ = write!(
-        out,
-        r#"<tr><th scope="row" data-label="Key">{} <span class="svcRow__name" title="Id {}.{hint}{created}">{}</span>{kind_badge}{}"#,
-        line.state.icon(),
-        html_escape(&line.id),
-        html_escape(&line.name),
-        if line.file {
-            r#" <span class="badge" title="Defined in the configuration file">file</span>"#
-        } else {
-            ""
-        }
-    );
-    if let Some(at) = line.revoked_at {
-        let _ = write!(
-            out,
-            r#" <span class="muted">revoked {}</span>"#,
-            time_tag(at, false)
-        );
-    }
-    out.push_str("</th>");
-    if view.section == Section::All {
-        let _ = write!(
-            out,
-            r#"<td data-label="Owner">{}</td>"#,
-            match &line.owner {
-                Some(login) => html_escape(login),
-                None => "superadmin".to_string(),
-            }
-        );
-    }
-    out.push_str(r#"<td class="foldCell" data-label="Can use">"#);
-    if line.grants.is_empty() {
-        out.push_str(r#"<span class="muted">nothing</span>"#);
-    } else {
-        let mut services: Vec<&str> = line
-            .grants
-            .iter()
-            .map(|g| g.grant.service.as_str())
-            .collect();
-        services.sort_unstable();
-        services.dedup();
-        let shown: Vec<&str> = services.iter().take(3).copied().collect();
-        let _ = write!(
-            out,
-            r#"<details class="fold"><summary>{}{} · {}"#,
-            html_escape(&shown.join(", ")),
-            if services.len() > 3 {
-                format!(" +{}", services.len() - 3)
-            } else {
-                String::new()
-            },
-            plural(line.grants.len(), "permission", "permissions")
-        );
-        if !line.no_access.is_empty() {
-            out.push_str(&super::status_icon(
-                "warn",
-                "alert-triangle",
-                "A service of this key has no access permission",
-            ));
-        }
-        out.push_str(r#"</summary><ul class="grantList">"#);
-        for grant in &line.grants {
-            grant_line(out, grant);
-        }
-        out.push_str("</ul>");
-        for service in &line.no_access {
-            let _ = write!(
-                out,
-                r#"<p class="uiBanner uiBanner--inset uiBanner--info">This key cannot reach this service ({}): it has no access permission.</p>"#,
-                html_escape(service)
-            );
-        }
-        out.push_str("</details>");
-    }
-    out.push_str("</td>");
-    let _ = write!(
-        out,
-        r#"<td class="num" data-label="Expires">{}</td><td class="num" data-label="Last used" title="{} checks">{}</td>"#,
-        match line.expires_at {
-            Some(at) => time_tag(at, false),
-            None => r#"<span class="muted">never</span>"#.to_string(),
-        },
-        line.check_count,
-        match line.last_check_at {
-            Some(at) => time_tag(at, false),
-            None => r#"<span class="muted">never</span>"#.to_string(),
-        }
-    );
-    out.push_str(r#"<td data-label="Actions" class="keyActions">"#);
-    let may_revoke = line.revoked_at.is_none()
-        && !line.file
-        && match view.section {
-            Section::Mine => view.can_revoke && !view.impersonated,
-            Section::All => view.can_revoke_all && !view.impersonated,
-        };
-    if line.can_change {
-        let _ = write!(
-            out,
-            r##"<a class="button button--small keyAction" href="{EDIT_PAGE}?id={}" title="Change this key"><svg class="icon icon--sm" aria-hidden="true"><use href="#i-pencil"/></svg><span class="keyAction__label">Change</span></a>"##,
-            html_escape(&line.id)
-        );
-    }
-    if view.can_create && !line.file && line.revoked_at.is_none() && view.section == Section::Mine {
-        let _ = write!(
-            out,
-            r##"<a class="button button--small keyAction" href="{NEW_PATH}?copy={}" title="Make a key like this one"><svg class="icon icon--sm" aria-hidden="true"><use href="#i-copy"/></svg><span class="keyAction__label">Make a key like this one</span></a>"##,
-            html_escape(&line.id)
-        );
-    }
-    if may_revoke {
-        let _ = write!(
-            out,
-            r##"<form method="post" action="{REVOKE_PATH}"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><input type="hidden" name="section" value="{}"><button class="button button--small keyAction keyAction--danger" type="submit" title="Revoke this key"><svg class="icon icon--sm" aria-hidden="true"><use href="#i-trash"/></svg><span class="keyAction__label">Revoke</span></button></form>"##,
-            html_escape(view.csrf),
-            html_escape(&line.id),
-            view.section.name()
-        );
-    }
-    out.push_str("</td></tr>");
-}
-
-/// The page "Keys".
-pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
-    let mut out = String::new();
-    notice_html(&mut out, view.notice);
-    out.push_str(r#"<section class="pagePart" aria-labelledby="keys-title">"#);
-    let mut sections = String::new();
-    sections.push_str(
-        r#"<div class="segmented segmented--compact" role="group" aria-label="Section">"#,
-    );
-    if view.can_read_own {
-        let _ = write!(
-            sections,
-            r#"<a class="segmented__option{}" href="{PATH}?section=mine"{}>Mine</a>"#,
-            if view.section == Section::Mine {
-                " is-active"
-            } else {
-                ""
-            },
-            if view.section == Section::Mine {
-                r#" aria-current="true""#
-            } else {
-                ""
-            }
-        );
-    }
-    if view.can_read_all {
-        let _ = write!(
-            sections,
-            r#"<a class="segmented__option{}" href="{PATH}?section=all"{}>All</a>"#,
-            if view.section == Section::All {
-                " is-active"
-            } else {
-                ""
-            },
-            if view.section == Section::All {
-                r#" aria-current="true""#
-            } else {
-                ""
-            }
-        );
-    }
-    sections.push_str("</div>");
-    if view.can_create && view.section == Section::Mine && !view.impersonated {
-        let _ = write!(
-            sections,
-            r##" <a class="button button--primary" href="{NEW_PATH}"><svg class="icon icon--sm" aria-hidden="true"><use href="#i-plus"/></svg>New key</a>"##
-        );
-    }
-    part_head(
-        &mut out,
-        "keys-title",
-        "Keys",
-        &plural(view.lines.len(), "line", "lines"),
-        &sections,
-    );
-    out.push_str(r#"<p class="part__lede">A key lets a program act as its owner, with at most the rights of its owner. The portal shows the text of a key one time. Send it in the header <code>Authorization: Bearer</code>.</p>"#);
-    if view.cannot_use {
-        out.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn">Your keys cannot reach a service: you do not have the right keys.own.use.</p>"#);
-    }
-    if view.lines.is_empty() {
-        out.push_str(r#"<div class="uiState uiState--compact"><p class="uiState__body">No key yet.</p></div>"#);
-    } else {
-        let _ = write!(
-            out,
-            r#"<div class="dataTableWrap"><table class="dataTable stack keysTable"><thead><tr><th scope="col">Key</th>{owner}<th scope="col">Can use</th><th scope="col" class="num">Expires</th><th scope="col" class="num">Last used</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody>"#,
-            owner = if view.section == Section::All {
-                r#"<th scope="col">Owner</th>"#
-            } else {
-                ""
-            }
-        );
-        for line in &view.lines {
-            key_row(&mut out, view, line);
-        }
-        out.push_str("</tbody></table></div>");
-    }
-    if let Some(cursor) = &view.next {
-        let _ = write!(
-            out,
-            r#"<p><a class="button" href="{PATH}?section={}&amp;after={}">Next keys</a></p>"#,
-            view.section.name(),
-            html_escape(cursor)
-        );
-    }
-    out.push_str("</section>");
-    page_shell(Tab::Keys, frame, "Keys", &out)
-}
-
-/// The page that shows the text of a new key one time (portal 5.2, 5.8c).
-pub fn new_key_page(frame: &Frame, key: &NewKey<'_>) -> String {
-    let mut out = String::new();
-    out.push_str(r#"<div class="pageCols"><div class="pageCols__main"><section class="pagePart" aria-labelledby="new-key-title">"#);
-    part_head(&mut out, "new-key-title", "The key is made", "", "");
-    let _ = write!(
-        out,
-        r##"<p class="uiBanner uiBanner--inset uiBanner--ok" role="status">The key <strong>{name}</strong> is made. Copy its text now. The portal shows it one time, and it keeps only a digest.</p><div class="uiField"><label class="uiField__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{text}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn">Each request with this key acts as you. Do not put it in a connector that other persons use.{every}</p>"##,
-        name = html_escape(key.name),
-        text = html_escape(key.text),
-        every = if key.superadmin {
+        html_escape(key.name),
+        html_escape(key.text),
+        if key.superadmin {
             " This key can have every right. Give it limits."
         } else {
             ""
         }
-    );
-    let _ = write!(
-        out,
-        r#"<p><a class="button button--primary" href="{PATH}">Back to the keys</a></p></section></div></div>"#
-    );
-    shell(&frame.tabs(), Tab::Keys, frame, "New key", &out, true)
+    )
+}
+
+// The page -------------------------------------------------------------------------------------
+
+/// The page "Keys": the list, and the pane when it is open.
+pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
+    let mut out = String::new();
+    notice_html(&mut out, view.notice);
+    if view.cannot_use {
+        out.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn">Your keys cannot reach a service: you do not have the right keys.own.use.</p>"#);
+    }
+    let mut tools = String::new();
+    if view.can_read_own && view.can_read_all {
+        let item = |section: Section, label: &str| {
+            let on = view.section == section;
+            format!(
+                r#"<a class="segmented__option{}" href="{}"{}>{label}</a>"#,
+                if on { " is-active" } else { "" },
+                list_href(section, None),
+                if on { r#" aria-current="true""# } else { "" },
+            )
+        };
+        let _ = write!(
+            tools,
+            r#"<div class="segmented" role="group" aria-label="Section">{}{}</div>"#,
+            item(Section::Mine, "Mine"),
+            item(Section::All, "All"),
+        );
+    }
+    // One entry point: "New key" shows only while the pane is closed.
+    let closed = matches!(view.pane, Pane::Closed);
+    if closed
+        && view.can_create
+        && !view.create_kinds.is_empty()
+        && view.section == Section::Mine
+        && !view.impersonated
+    {
+        let _ = write!(
+            tools,
+            r#"<a class="button button--primary" href="{NEW_PATH}">{}New key</a>"#,
+            icon("plus")
+        );
+    }
+    out.push_str(&toolbar("Keys", &view.lines.len().to_string(), &tools));
+    let list = list_zone(view);
+    let pane = match &view.pane {
+        Pane::Closed => None,
+        Pane::New | Pane::Edit(_) => Some(form_pane(view)),
+        Pane::Made(key) => Some(made_pane(key)),
+    };
+    match pane {
+        Some(pane) => {
+            let _ = write!(out, r#"<div class="split split--even">{list}{pane}</div>"#);
+        }
+        None => {
+            let _ = write!(out, r#"<div class="split split--one">{list}</div>"#);
+        }
+    }
+    fill_page(Tab::Keys, frame, "Keys", &out)
 }
 
 /// The grant of a new key of this kind that the form offers as a box, from a grant of the owner.

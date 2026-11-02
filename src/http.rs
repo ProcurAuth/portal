@@ -741,7 +741,7 @@ async fn handle_request(
         .await
     } else if method == Method::GET && path == options_page::PATH {
         options_page::handle_options(&state, &uri, request.headers(), &client).await
-    } else if method == Method::GET && path == ui::keys::EDIT_PAGE {
+    } else if method == Method::GET && path == ui::keys::EDIT_PATH {
         keys_page::handle_keys(
             &state,
             &uri,

@@ -222,33 +222,8 @@ fn icon_ids(body: &str) -> Vec<&str> {
 
 /// The page around a tab, for a page that fills the window: its parts are bounded and scroll
 /// inside. `title` names the page for the browser and for the screen reader.
-fn fill_page(tab: Tab, frame: &Frame, title: &str, content: &str) -> String {
+pub(super) fn fill_page(tab: Tab, frame: &Frame, title: &str, content: &str) -> String {
     shell_class(&frame.tabs(), tab, frame, title, content, " settings--fill")
-}
-
-/// A page of the tab `tab` that scrolls as a whole: the tabs of the viewer, then `content`.
-pub(super) fn page_shell(tab: Tab, frame: &Frame, title: &str, content: &str) -> String {
-    shell(&frame.tabs(), tab, frame, title, content, true)
-}
-
-/// The page around the tabs `tabs`, with `tab` as the current one. A user who is not the
-/// superadmin sees the page of the keys only.
-pub(super) fn shell(
-    tabs: &[Tab],
-    tab: Tab,
-    frame: &Frame,
-    title: &str,
-    content: &str,
-    wide: bool,
-) -> String {
-    shell_class(
-        tabs,
-        tab,
-        frame,
-        title,
-        content,
-        if wide { " settings--wide" } else { "" },
-    )
 }
 
 /// The shell of every settings page. The header and the tabs stay at the top. The `main` element
@@ -349,22 +324,6 @@ pub(super) fn notice_html(out: &mut String, notice: Option<Notice>) {
             html_escape(notice.text)
         );
     }
-}
-
-/// The head of a part: the title, a count in muted text, then optional controls at the right. The
-/// pages of the keys and of the inbox use it.
-pub(super) fn part_head(out: &mut String, id: &str, title: &str, count: &str, controls: &str) {
-    let _ = write!(
-        out,
-        r#"<div class="pagePart__head"><h2 class="pagePart__title" id="{id}">{title}</h2>"#
-    );
-    if !count.is_empty() {
-        let _ = write!(out, r#"<span class="pagePart__count">{count}</span>"#);
-    }
-    if !controls.is_empty() {
-        let _ = write!(out, r#"<div class="part__controls">{controls}</div>"#);
-    }
-    out.push_str("</div>");
 }
 
 // The data of the accounts ----------------------------------------------------------------------
@@ -755,6 +714,7 @@ fn signins_zone(view: &UsersView) -> String {
             chips_html: &chip_list,
             tools_html: &tools,
             class: "",
+            above_html: "",
         },
         &body,
     )
@@ -828,6 +788,7 @@ fn changes_zone(view: &UsersView) -> String {
             chips_html: "",
             tools_html: "",
             class: "",
+            above_html: "",
         },
         &body,
     )
@@ -1322,6 +1283,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
             chips_html: &chip_list,
             tools_html: "",
             class: "",
+            above_html: "",
         },
         &table,
     );
@@ -1487,6 +1449,7 @@ fn opened_by_zone(view: &ServicesView, selected: Option<&str>) -> String {
             chips_html: "",
             tools_html: "",
             class: " zone--short",
+            above_html: "",
         },
         &body,
     )
@@ -1534,6 +1497,7 @@ fn checks_zone(view: &ServicesView) -> String {
             chips_html: "",
             tools_html: "",
             class: "",
+            above_html: "",
         },
         &format!(
             r#"<table class="grid grid--checks"><colgroup><col class="w88"><col><col class="w180"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Grant</th><th scope="col">Problem</th></tr></thead><tbody>{rows}</tbody></table>"#

@@ -169,6 +169,16 @@
     if (summary) summary.focus();
   });
 
+  // "Done" in the popover of an enrollment code: the code leaves the page. Without script the link
+  // loads the page again, and the code is gone too.
+  document.addEventListener("click", function (event) {
+    var done = event.target.closest && event.target.closest("[data-code-done]");
+    if (!done) return;
+    event.preventDefault();
+    var pop = done.closest("[data-code-pop]");
+    if (pop) pop.remove();
+  });
+
   function esc(id) {
     return window.CSS && window.CSS.escape ? window.CSS.escape(id) : id;
   }
