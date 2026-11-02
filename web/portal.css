@@ -1,7 +1,7 @@
 /* portal: the stylesheet of every page (launcher, authentication, settings header). The settings pages
    add settings.css; the launcher and the login page never load those rules.
    Components name tokens; only the token blocks below hold colour literals.
-   Surfaces, state colours and the accent follow the graphite system of circular-fi/clickhouse-dash. */
+   Surfaces, state colours and the accent follow the graphite system of ClickHouse Dash. */
 
 :root {
   color-scheme: dark;

@@ -1616,7 +1616,7 @@ mod tests {
                     summary("a1", "infra", "Disk <script>", 3, 0),
                     Origin::Key("ci-deploy".into()),
                 ),
-                row(summary("a2", "crit", "Inbox", 1, 0), Origin::Watch),
+                row(summary("a2", "crit", "Outage", 1, 0), Origin::Watch),
                 row(summary("a3", "infra", "Old", 1, 2), Origin::Account),
             ],
             truncated: false,
@@ -1833,7 +1833,7 @@ mod tests {
         );
         assert!(html.contains(r#"href="/auth/settings/inbox?p=7d&amp;g=infra""#));
         // The filter shows only the alerts of the group.
-        assert!(html.contains(">Inbox<") && !html.contains(">Disk "));
+        assert!(html.contains(">Outage<") && !html.contains(">Disk "));
     }
 
     #[test]
