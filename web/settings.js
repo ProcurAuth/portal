@@ -122,12 +122,109 @@
   });
 })();
 
+/* Popovers (details.pop), confirmations in place (details.ask) and the bulk action (data-bulk). The
+   markup works without this code: a details element opens and closes on its own. The code adds the
+   rest: one panel open at a time, a click outside and the key Escape close it, and the focus goes
+   to the first field of a popover. The bulk action counts the ticked rows and shows its button
+   only while a row is ticked. */
+(function () {
+  "use strict";
+  var PANELS = "details.pop, details.ask";
+
+  function closeAll(except) {
+    var open = document.querySelectorAll(PANELS + "[open]");
+    for (var i = 0; i < open.length; i += 1) {
+      if (open[i] !== except) open[i].removeAttribute("open");
+    }
+  }
+
+  // The event `toggle` does not bubble: listen in the capture phase.
+  document.addEventListener(
+    "toggle",
+    function (event) {
+      var panel = event.target;
+      if (!panel.matches || !panel.matches(PANELS) || !panel.open) return;
+      closeAll(panel);
+      // A popover gives the focus to its first field. A confirmation keeps it on its cross, so
+      // that a second key press cannot confirm. The confirmation of a name asks for the name.
+      var target = panel.classList.contains("pop")
+        ? panel.querySelector("input:not([type=hidden]), select, textarea")
+        : panel.querySelector(".ask__name");
+      if (target) target.focus();
+    },
+    true
+  );
+
+  document.addEventListener("click", function (event) {
+    if (event.target.closest && event.target.closest(PANELS)) return;
+    closeAll(null);
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    var open = document.querySelector(PANELS + "[open]");
+    if (!open) return;
+    open.removeAttribute("open");
+    var summary = open.querySelector("summary");
+    if (summary) summary.focus();
+  });
+
+  function esc(id) {
+    return window.CSS && window.CSS.escape ? window.CSS.escape(id) : id;
+  }
+
+  function boxes(id) {
+    return document.querySelectorAll('input.bulk__box[form="' + esc(id) + '"]');
+  }
+
+  function updateBulk(id) {
+    var list = boxes(id);
+    var n = 0;
+    for (var i = 0; i < list.length; i += 1) if (list[i].checked) n += 1;
+    var control = document.querySelector('[data-bulk="' + esc(id) + '"]');
+    if (control) {
+      control.classList.toggle("has-count", n > 0);
+      control.querySelector("[data-bulk-n]").textContent = n ? "(" + n + ")" : "";
+      control.querySelector("[data-bulk-q]").textContent =
+        control.getAttribute("data-verb") + " " + n + " " +
+        (n === 1 ? control.getAttribute("data-one") : control.getAttribute("data-many")) + "?";
+      if (!n) control.removeAttribute("open");
+    }
+    var all = document.querySelector('[data-bulk-all="' + esc(id) + '"]');
+    if (all) {
+      all.checked = n > 0 && n === list.length;
+      all.indeterminate = n > 0 && n < list.length;
+    }
+  }
+
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (!box.classList) return;
+    if (box.classList.contains("bulk__box")) {
+      updateBulk(box.getAttribute("form"));
+    } else if (box.hasAttribute("data-bulk-all")) {
+      var id = box.getAttribute("data-bulk-all");
+      var list = boxes(id);
+      for (var i = 0; i < list.length; i += 1) list[i].checked = box.checked;
+      updateBulk(id);
+    }
+  });
+
+  var controls = document.querySelectorAll("[data-bulk]");
+  for (var c = 0; c < controls.length; c += 1) updateBulk(controls[c].getAttribute("data-bulk"));
+})();
+
 /* The editor of grants (the forms of the keys and of the accounts). The page holds the actions and
    the tree of each service as a JSON block, and the ticked grants as hidden fields. This code draws
    the editor from the block: the tree of the resources on the left, the actions of the chosen node
    on the right, and the ticked grants under them, grouped by node. After each change it writes the
    hidden fields again, with the names that the server reads: `grant<n>` and
    `limit<n>.<name>[.<window>]`.
+
+   A pane is the tree of one service and its actions. The page of an account (data-layout="groups")
+   has two groups side by side. The group "Services" has one row for each service, and the pane
+   opens under the chosen row. The group "Portal features" has one pane, always open. The forms of
+   the keys have one list: the features are one more row.
 
    A person who gives a grant does not know the resources of a service. When a node can have
    children that the document does not list, the editor asks the portal for them
@@ -169,6 +266,15 @@
     });
   }
 
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
+
+  function groupOf(name) {
+    var dot = name.indexOf(".");
+    return dot > 0 ? name.slice(0, dot) : "";
+  }
+
   function init(root) {
     var script = root.querySelector(".grantEditor__data");
     var fields = root.querySelector(".grantEditor__fields");
@@ -180,13 +286,17 @@
       return;
     }
     // The editor has two parts: the services (the workloads of the launcher) and the portal
-    // features (keys, inbox). The list shows the services first, then the features.
-    var services = data.services.slice();
+    // features (keys, inbox). With the layout "groups" the features have a group of their own.
+    // Without it they are one more row, after the services.
+    var groups = root.dataset.layout === "groups";
+    var rowList = data.services.slice();
+    var featureSvc = null;
     if (data.features) {
       data.features.feature = true;
-      services.push(data.features);
+      if (groups) featureSvc = data.features;
+      else rowList.push(data.features);
     }
-    if (!services.length) {
+    if (!rowList.length && !featureSvc) {
       root.insertBefore(node("div", "uiState uiState--compact", "No service to give access to."), fields);
       return;
     }
@@ -219,29 +329,36 @@
       ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]), locked: true });
     });
 
+    // Save stays grey until a grant changes (CTRL-17). The first state is the baseline.
+    function signature() {
+      return JSON.stringify(
+        sortedTicked()
+          .filter(function (i) {
+            return !i.locked;
+          })
+          .map(function (i) {
+            return [i.service, i.action, i.path, i.limits];
+          })
+      );
+    }
+    var baseline = signature();
+    var saveButtons = document.querySelectorAll("[data-save]");
+    function updateSave() {
+      var dirty = signature() !== baseline;
+      for (var s = 0; s < saveButtons.length; s += 1) saveButtons[s].disabled = !dirty;
+    }
+
     var serviceAt = 0;
     var query = new URLSearchParams(window.location.search);
     var wanted = query.get("service");
     if (wanted) {
-      for (var w = 0; w < services.length; w += 1) if (services[w].id === wanted) serviceAt = w;
+      for (var w = 0; w < rowList.length; w += 1) if (rowList[w].id === wanted) serviceAt = w;
     } else if (ticked.size) {
       var first = ticked.values().next().value;
-      for (var i = 0; i < services.length; i += 1) if (services[i].id === first.service) serviceAt = i;
+      for (var i = 0; i < rowList.length; i += 1) if (rowList[i].id === first.service) serviceAt = i;
     }
     // The service whose permissions are open under its row. -1: none.
-    var expandedAt = services.length === 1 ? 0 : wanted ? serviceAt : -1;
-    var current = "";
-    var opened = new Set([""]);
-    var toggledGroups = new Set();
-    var onlyTicked = false;
-    var trees = {};
-    // What the portal asked for, to ask once: "service|parent|type|query|after".
-    var asked = {};
-    var next = {};
-
-    function service() {
-      return services[serviceAt];
-    }
+    var expandedAt = rowList.length === 1 ? 0 : wanted ? serviceAt : -1;
 
     function owns(serviceId, action, path) {
       if (data.owner === null) return true;
@@ -256,30 +373,13 @@
       return action.types.indexOf(item.kind) >= 0 && (item.only.length === 0 || item.only.indexOf(action.name) >= 0);
     }
 
-    function treeOf(svc) {
-      if (trees[svc.id]) return trees[svc.id];
-      var byPath = {};
-      svc.nodes.forEach(function (n) {
-        byPath[n.path] = n;
-      });
-      var children = {};
-      svc.nodes.forEach(function (n) {
-        if (n.path === "") return;
-        var parent = parentOf(n.path);
-        while (parent !== "" && !byPath[parent]) parent = parentOf(parent);
-        (children[parent] = children[parent] || []).push(n);
-      });
-      trees[svc.id] = { byPath: byPath, children: children };
-      return trees[svc.id];
-    }
-
     function actionOf(svc, name) {
       for (var j = 0; j < svc.actions.length; j += 1) if (svc.actions[j].name === name) return svc.actions[j];
       return null;
     }
 
     function serviceById(id) {
-      for (var j = 0; j < services.length; j += 1) if (services[j].id === id) return services[j];
+      for (var j = 0; j < rowList.length; j += 1) if (rowList[j].id === id) return rowList[j];
       return null;
     }
 
@@ -294,49 +394,6 @@
     function canAsk(svc, item) {
       return !!svc.fetch && !item.leaf && childTypes(svc, item).length > 0;
     }
-
-    // ---- the page of the editor
-    var ui = node("div", "ge");
-    var side = node("div", "ge__side");
-    // The services as a list. Each row has a switch (the grant `access`), what the holder can do in
-    // short words, and a button that opens the permissions of the service under the row.
-    var strip = node("div", "ge__svcList");
-    strip.setAttribute("role", "group");
-    strip.setAttribute("aria-label", "Permissions");
-    var treeSearch = node("input", "uiInput");
-    treeSearch.type = "search";
-    treeSearch.placeholder = "Find a resource";
-    treeSearch.setAttribute("aria-label", "Find a resource");
-    treeSearch.autocomplete = "off";
-    side.appendChild(treeSearch);
-    var treeList = node("ul", "ge__tree");
-    treeList.setAttribute("role", "tree");
-    side.appendChild(treeList);
-    var main = node("div", "ge__main");
-    var bar = node("div", "ge__bar");
-    var title = node("strong", "ge__title");
-    var count = node("span", "pagePart__count");
-    var actSearch = node("input", "uiInput ge__filter");
-    actSearch.type = "search";
-    actSearch.placeholder = "Filter the actions";
-    actSearch.setAttribute("aria-label", "Filter the actions");
-    actSearch.autocomplete = "off";
-    var seg = node("div", "segmented");
-    var allButton = node("button", "segmented__option is-active", "All");
-    var tickedButton = node("button", "segmented__option");
-    allButton.type = tickedButton.type = "button";
-    seg.appendChild(allButton);
-    seg.appendChild(tickedButton);
-    bar.appendChild(title);
-    bar.appendChild(count);
-    bar.appendChild(actSearch);
-    bar.appendChild(seg);
-    var actList = node("div", "ge__list");
-    main.appendChild(bar);
-    main.appendChild(actList);
-    ui.appendChild(side);
-    ui.appendChild(main);
-    root.insertBefore(strip, fields);
 
     // ---- the grants as lines
     function sortedTicked() {
@@ -381,6 +438,7 @@
           }
         });
       });
+      updateSave();
     }
 
     function ownerValue(item, name) {
@@ -402,158 +460,6 @@
       return found;
     }
 
-    function ticksUnder(path) {
-      var n = 0;
-      var id = service().id;
-      ticked.forEach(function (item) {
-        if (item.service !== id) return;
-        if (path === "" || item.path === path || item.path.indexOf(path + "/") === 0) n += 1;
-      });
-      return n;
-    }
-
-    // ---- the children that the service lists (portal 3.1a)
-    function addChildren(svc, parent, type, answer) {
-      var tree = treeOf(svc);
-      answer.items.forEach(function (item) {
-        var path = (parent.path ? parent.path + "/" : "") + type + ":" + encodeId(item.id);
-        if (tree.byPath[path]) {
-          tree.byPath[path].leaf = !item.has_children;
-          return;
-        }
-        svc.nodes.push({
-          path: path,
-          kind: type,
-          label: item.label || item.id,
-          only: [],
-          more: [],
-          leaf: !item.has_children,
-        });
-      });
-      delete trees[svc.id];
-    }
-
-    // Ask for one page of the children of `parent` that have the type `type`. `after` is the cursor
-    // of the previous page. `text` is a search text. The answer adds nodes to the tree.
-    function ask(svc, parent, type, after, text) {
-      var key = [svc.id, parent.path, type, text, after].join("\u0001");
-      if (asked[key]) return;
-      asked[key] = true;
-      var url =
-        "/auth/options?service=" + encodeURIComponent(svc.id) + "&type=" + encodeURIComponent(type) +
-        (parent.path ? "&parent=" + encodeURIComponent(parent.path) : "") +
-        (text ? "&q=" + encodeURIComponent(text) : "") +
-        (after ? "&after=" + encodeURIComponent(after) : "");
-      parent.pending = (parent.pending || 0) + 1;
-      window
-        .fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
-        .then(function (response) {
-          return response.ok ? response.json() : { items: [], next: null, unavailable: true };
-        })
-        .catch(function () {
-          return { items: [], next: null, unavailable: true };
-        })
-        .then(function (answer) {
-          parent.pending -= 1;
-          if (answer.unavailable) parent.unavailable = true;
-          addChildren(svc, parent, type, answer);
-          next[[svc.id, parent.path, type, text].join("\u0001")] = answer.next || null;
-          if (!text) parent.loaded = (parent.loaded || 0) + 1;
-          if (svc === service()) {
-            renderTree();
-            renderActions();
-          }
-        });
-    }
-
-    function loadChildren(svc, item) {
-      if (!canAsk(svc, item)) return;
-      childTypes(svc, item).forEach(function (t) {
-        ask(svc, item, t.name, "", "");
-      });
-    }
-
-    // ---- the tree
-    function renderTree() {
-      var svc = service();
-      var tree = treeOf(svc);
-      var text = treeSearch.value.trim().toLowerCase();
-      var shown = null;
-      if (text) {
-        shown = new Set([""]);
-        svc.nodes.forEach(function (n) {
-          if (n.path.toLowerCase().indexOf(text) >= 0 || n.label.toLowerCase().indexOf(text) >= 0) {
-            var path = n.path;
-            while (path !== "") {
-              shown.add(path);
-              path = parentOf(path);
-            }
-          }
-        });
-      }
-      // The list is drawn again at each choice and at each answer of the service. A row that has the
-      // focus gets it back.
-      var focused = treeList.contains(document.activeElement) ? document.activeElement : null;
-      var focusPath = focused && focused.classList.contains("ge__node") ? focused.dataset.path : null;
-      treeList.textContent = "";
-      function row(item, depth) {
-        var kids = tree.children[item.path] || [];
-        var more = canAsk(svc, item);
-        var isOpen = shown !== null || opened.has(item.path);
-        var li = node("li", "ge__node" + (item.path === current ? " is-selected" : ""));
-        li.setAttribute("role", "treeitem");
-        li.tabIndex = 0;
-        li.dataset.path = item.path;
-        li.style.paddingLeft = 6 + depth * 14 + "px";
-        var twist = node("span", "ge__twist");
-        if (kids.length || more) {
-          twist.dataset.twist = "1";
-          twist.appendChild(icon(isOpen ? "chevron-down" : "chevron-right"));
-        }
-        li.appendChild(twist);
-        li.appendChild(node("span", "ge__nodeName", item.path === "" ? "Whole service" : item.label));
-        if (item.path !== "") li.appendChild(node("span", "ge__kind", item.kind));
-        var n = ticksUnder(item.path);
-        li.appendChild(node("span", "ge__ticks", n ? String(n) : ""));
-        treeList.appendChild(li);
-        if (!isOpen) return;
-        kids.forEach(function (kid) {
-          if (shown === null || shown.has(kid.path)) row(kid, depth + 1);
-        });
-        if (item.pending) {
-          var wait = node("li", "ge__note", "Loading…");
-          wait.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
-          treeList.appendChild(wait);
-        } else if (more) {
-          childTypes(svc, item).forEach(function (t) {
-            var cursor = next[[svc.id, item.path, t.name, ""].join("\u0001")];
-            if (cursor) {
-              var li2 = node("li", "ge__more", "Show more " + t.name);
-              li2.tabIndex = 0;
-              li2.setAttribute("role", "button");
-              li2.dataset.path = item.path;
-              li2.dataset.type = t.name;
-              li2.dataset.after = cursor;
-              li2.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
-              treeList.appendChild(li2);
-            }
-          });
-          if (item.unavailable && !kids.length) {
-            var none = node("li", "ge__note", "The service lists no resource here.");
-            none.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
-            treeList.appendChild(none);
-          }
-        }
-      }
-      row(tree.byPath[""], 0);
-      if (focusPath !== null) {
-        var back = Array.prototype.find.call(treeList.querySelectorAll(".ge__node"), function (el) {
-          return el.dataset.path === focusPath;
-        });
-        if (back) back.focus();
-      }
-    }
-
     // The nearest node above `path` where the same action is ticked: it covers the node. `null`: none.
     function coveredBy(serviceId, action, path) {
       var up = path;
@@ -564,126 +470,14 @@
       return null;
     }
 
-    function groupOf(name) {
-      var dot = name.indexOf(".");
-      return dot > 0 ? name.slice(0, dot) : "";
-    }
-
-    // ---- the actions of the chosen node
-    function renderActions() {
-      var svc = service();
-      var tree = treeOf(svc);
-      var item = tree.byPath[current] || tree.byPath[""];
-      current = item.path;
-      var text = actSearch.value.trim().toLowerCase();
-      var scroll = actList.scrollTop;
-      actList.textContent = "";
-      var rows = svc.actions.filter(function (a) {
-        if (!applies(a, item)) return false;
-        return owns(svc.id, a.name, item.path) || ticked.has(keyOf(svc.id, a.name, item.path));
-      });
-      var available = rows.length;
-      var here = rows.filter(function (a) {
-        return ticked.has(keyOf(svc.id, a.name, item.path));
-      }).length;
-      title.textContent = item.path === "" ? "Whole service" : item.label;
-      count.textContent = here + "/" + available;
-      tickedButton.textContent = "Ticked " + here;
-      rows = rows.filter(function (a) {
-        if (onlyTicked && !ticked.has(keyOf(svc.id, a.name, item.path))) return false;
-        return !text || a.name.toLowerCase().indexOf(text) >= 0 || a.description.toLowerCase().indexOf(text) >= 0;
-      });
-      var groups = [];
-      var byGroup = {};
-      rows.forEach(function (a) {
-        var name = groupOf(a.name);
-        if (!byGroup[name]) {
-          byGroup[name] = [];
-          groups.push(name);
-        }
-        byGroup[name].push(a);
-      });
-      groups.forEach(function (name) {
-        var list = byGroup[name];
-        var ticks = list.filter(function (a) {
-          return ticked.has(keyOf(svc.id, a.name, item.path));
-        }).length;
-        // A long list starts with its groups closed, but the groups that hold a ticked action.
-        var closedByDefault = available > LONG_LIST && ticks === 0;
-        var closed = (closedByDefault !== toggledGroups.has(item.path + "|" + name)) && !text;
-        var header = node("div", "ge__group");
-        header.dataset.group = name;
-        header.tabIndex = 0;
-        header.setAttribute("role", "button");
-        header.setAttribute("aria-expanded", closed ? "false" : "true");
-        header.appendChild(icon(closed ? "chevron-right" : "chevron-down"));
-        var master = node("input");
-        master.type = "checkbox";
-        master.dataset.groupBox = name;
-        master.checked = ticks === list.length;
-        master.indeterminate = ticks > 0 && ticks < list.length;
-        master.setAttribute("aria-label", "Tick every action of " + (name || "the group"));
-        header.appendChild(master);
-        header.appendChild(node("span", "ge__groupName", name || "service"));
-        header.appendChild(node("span", "ge__groupCount", ticks + "/" + list.length));
-        actList.appendChild(header);
-        if (closed) return;
-        list.forEach(function (a) {
-          var isTicked = ticked.has(keyOf(svc.id, a.name, item.path));
-          var line = node("label", "ge__act" + (isTicked ? " is-on" : ""));
-          var box = node("input");
-          box.type = "checkbox";
-          box.checked = isTicked;
-          box.dataset.action = a.name;
-          var held = ticked.get(keyOf(svc.id, a.name, item.path));
-          var via = isTicked ? null : coveredBy(svc.id, a.name, item.path);
-          if (held && held.locked) box.disabled = true;
-          if (via !== null) {
-            box.checked = true;
-            box.disabled = true;
-            line.className += " is-on";
-          }
-          line.appendChild(box);
-          line.appendChild(node("code", "", a.name));
-          var desc = node("span", "ge__desc", a.description);
-          desc.title = a.description;
-          line.appendChild(desc);
-          if (via !== null) {
-            line.appendChild(node("span", "ge__limits", via === "" ? "via the whole service" : "via " + via));
-          } else if (held && held.locked) {
-            var lock = node("span", "statusIcon");
-            lock.title = "This permission comes from the configuration file.";
-            lock.appendChild(icon("lock"));
-            line.appendChild(lock);
-          } else {
-            if (isTicked && !owns(svc.id, a.name, item.path)) {
-              var warn = node("span", "statusIcon statusIcon--warn");
-              warn.title = "Your rights do not cover this permission any more.";
-              warn.appendChild(icon("alert-triangle"));
-              line.appendChild(warn);
-            }
-            if (a.limits.length) {
-              // A ticked action shows its limit fields on its own line: no table is needed.
-              var inline = node("span", isTicked ? "ge__limitsInline" : "ge__limits");
-              if (isTicked) limitFields(inline, held, svc);
-              else
-                inline.textContent = a.limits
-                  .map(function (l) {
-                    return l.name;
-                  })
-                  .join(", ");
-              line.appendChild(inline);
-            }
-          }
-          actList.appendChild(line);
-        });
-      });
-      if (!rows.length) {
-        var empty = node("div", "uiState uiState--compact");
-        empty.appendChild(node("p", "uiState__body", "No action matches."));
-        actList.appendChild(empty);
+    function setGrant(action, path, on, serviceId) {
+      var k = keyOf(serviceId, action, path);
+      if (ticked.has(k) && ticked.get(k).locked) return;
+      if (on) {
+        if (!ticked.has(k)) ticked.set(k, { action: action, service: serviceId, path: path, limits: {} });
+      } else {
+        ticked.delete(k);
       }
-      actList.scrollTop = scroll;
     }
 
     // ---- the limit fields of a ticked action, on the line of the action
@@ -747,21 +541,536 @@
       });
     }
 
-    function plural(n, one, many) {
-      return n + " " + (n === 1 ? one : many);
+    // ---- a pane: the tree of one service on the left and its actions on the right. `list` holds
+    // the services that the pane can show. `stacked`: the tree sits above the actions.
+    function makePane(list, start, stacked) {
+      var at = start;
+      var current = "";
+      var opened = new Set([""]);
+      var toggledGroups = new Set();
+      var onlyTicked = false;
+      var trees = {};
+      // What the portal asked for, to ask once: "service|parent|type|query|after".
+      var asked = {};
+      var next = {};
+
+      function service() {
+        return list[at];
+      }
+
+      function treeOf(svc) {
+        if (trees[svc.id]) return trees[svc.id];
+        var byPath = {};
+        svc.nodes.forEach(function (n) {
+          byPath[n.path] = n;
+        });
+        var children = {};
+        svc.nodes.forEach(function (n) {
+          if (n.path === "") return;
+          var parent = parentOf(n.path);
+          while (parent !== "" && !byPath[parent]) parent = parentOf(parent);
+          (children[parent] = children[parent] || []).push(n);
+        });
+        trees[svc.id] = { byPath: byPath, children: children };
+        return trees[svc.id];
+      }
+
+      function ticksUnder(path) {
+        var n = 0;
+        var id = service().id;
+        ticked.forEach(function (item) {
+          if (item.service !== id) return;
+          if (path === "" || item.path === path || item.path.indexOf(path + "/") === 0) n += 1;
+        });
+        return n;
+      }
+
+      // ---- the page of the pane
+      var ui = node("div", "ge" + (stacked ? " ge--stack" : ""));
+      var side = node("div", "ge__side");
+      var treeSearch = node("input", "uiInput");
+      treeSearch.type = "search";
+      treeSearch.placeholder = "Find a resource";
+      treeSearch.setAttribute("aria-label", "Find a resource");
+      treeSearch.autocomplete = "off";
+      side.appendChild(treeSearch);
+      var treeList = node("ul", "ge__tree");
+      treeList.setAttribute("role", "tree");
+      side.appendChild(treeList);
+      var main = node("div", "ge__main");
+      var bar = node("div", "ge__bar");
+      var title = node("strong", "ge__title");
+      var count = node("span", "pagePart__count");
+      var actSearch = node("input", "uiInput ge__filter");
+      actSearch.type = "search";
+      actSearch.placeholder = "Filter the actions";
+      actSearch.setAttribute("aria-label", "Filter the actions");
+      actSearch.autocomplete = "off";
+      var seg = node("div", "segmented");
+      var allButton = node("button", "segmented__option is-active", "All");
+      var tickedButton = node("button", "segmented__option");
+      allButton.type = tickedButton.type = "button";
+      seg.appendChild(allButton);
+      seg.appendChild(tickedButton);
+      bar.appendChild(title);
+      bar.appendChild(count);
+      bar.appendChild(actSearch);
+      bar.appendChild(seg);
+      var actList = node("div", "ge__list");
+      main.appendChild(bar);
+      main.appendChild(actList);
+      ui.appendChild(side);
+      ui.appendChild(main);
+
+      // ---- the children that the service lists (portal 3.1a)
+      function addChildren(svc, parent, type, answer) {
+        var tree = treeOf(svc);
+        answer.items.forEach(function (item) {
+          var path = (parent.path ? parent.path + "/" : "") + type + ":" + encodeId(item.id);
+          if (tree.byPath[path]) {
+            tree.byPath[path].leaf = !item.has_children;
+            return;
+          }
+          svc.nodes.push({
+            path: path,
+            kind: type,
+            label: item.label || item.id,
+            only: [],
+            more: [],
+            leaf: !item.has_children,
+          });
+        });
+        delete trees[svc.id];
+      }
+
+      // Ask for one page of the children of `parent` that have the type `type`. `after` is the cursor
+      // of the previous page. `text` is a search text. The answer adds nodes to the tree.
+      function ask(svc, parent, type, after, text) {
+        var key = [svc.id, parent.path, type, text, after].join("\u0001");
+        if (asked[key]) return;
+        asked[key] = true;
+        var url =
+          "/auth/options?service=" + encodeURIComponent(svc.id) + "&type=" + encodeURIComponent(type) +
+          (parent.path ? "&parent=" + encodeURIComponent(parent.path) : "") +
+          (text ? "&q=" + encodeURIComponent(text) : "") +
+          (after ? "&after=" + encodeURIComponent(after) : "");
+        parent.pending = (parent.pending || 0) + 1;
+        window
+          .fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
+          .then(function (response) {
+            return response.ok ? response.json() : { items: [], next: null, unavailable: true };
+          })
+          .catch(function () {
+            return { items: [], next: null, unavailable: true };
+          })
+          .then(function (answer) {
+            parent.pending -= 1;
+            if (answer.unavailable) parent.unavailable = true;
+            addChildren(svc, parent, type, answer);
+            next[[svc.id, parent.path, type, text].join("\u0001")] = answer.next || null;
+            if (!text) parent.loaded = (parent.loaded || 0) + 1;
+            if (svc === service()) {
+              renderTree();
+              renderActions();
+            }
+          });
+      }
+
+      function loadChildren(svc, item) {
+        if (!canAsk(svc, item)) return;
+        childTypes(svc, item).forEach(function (t) {
+          ask(svc, item, t.name, "", "");
+        });
+      }
+
+      // ---- the tree
+      function renderTree() {
+        var svc = service();
+        var tree = treeOf(svc);
+        // A short tree needs no search (CTRL-18).
+        treeSearch.hidden = stacked && svc.nodes.length <= 10;
+        var text = treeSearch.value.trim().toLowerCase();
+        var shown = null;
+        if (text) {
+          shown = new Set([""]);
+          svc.nodes.forEach(function (n) {
+            if (n.path.toLowerCase().indexOf(text) >= 0 || n.label.toLowerCase().indexOf(text) >= 0) {
+              var path = n.path;
+              while (path !== "") {
+                shown.add(path);
+                path = parentOf(path);
+              }
+            }
+          });
+        }
+        // The list is drawn again at each choice and at each answer of the service. A row that has the
+        // focus gets it back.
+        var focused = treeList.contains(document.activeElement) ? document.activeElement : null;
+        var focusPath = focused && focused.classList.contains("ge__node") ? focused.dataset.path : null;
+        treeList.textContent = "";
+        function row(item, depth) {
+          var kids = tree.children[item.path] || [];
+          var more = canAsk(svc, item);
+          var isOpen = shown !== null || opened.has(item.path);
+          var li = node("li", "ge__node" + (item.path === current ? " is-selected" : ""));
+          li.setAttribute("role", "treeitem");
+          li.tabIndex = 0;
+          li.dataset.path = item.path;
+          li.style.paddingLeft = 6 + depth * 14 + "px";
+          var twist = node("span", "ge__twist");
+          if (kids.length || more) {
+            twist.dataset.twist = "1";
+            twist.appendChild(icon(isOpen ? "chevron-down" : "chevron-right"));
+          }
+          li.appendChild(twist);
+          li.appendChild(node("span", "ge__nodeName", item.path === "" ? (svc.feature ? "All features" : "Whole service") : item.label));
+          if (item.path !== "") li.appendChild(node("span", "ge__kind", item.kind));
+          var n = ticksUnder(item.path);
+          li.appendChild(node("span", "ge__ticks", n ? String(n) : ""));
+          treeList.appendChild(li);
+          if (!isOpen) return;
+          kids.forEach(function (kid) {
+            if (shown === null || shown.has(kid.path)) row(kid, depth + 1);
+          });
+          if (item.pending) {
+            var wait = node("li", "ge__note", "Loading…");
+            wait.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
+            treeList.appendChild(wait);
+          } else if (more) {
+            childTypes(svc, item).forEach(function (t) {
+              var cursor = next[[svc.id, item.path, t.name, ""].join("\u0001")];
+              if (cursor) {
+                var li2 = node("li", "ge__more", "Show more " + t.name);
+                li2.tabIndex = 0;
+                li2.setAttribute("role", "button");
+                li2.dataset.path = item.path;
+                li2.dataset.type = t.name;
+                li2.dataset.after = cursor;
+                li2.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
+                treeList.appendChild(li2);
+              }
+            });
+            if (item.unavailable && !kids.length) {
+              var none = node("li", "ge__note", "The service lists no resource here.");
+              none.style.paddingLeft = 6 + (depth + 1) * 14 + "px";
+              treeList.appendChild(none);
+            }
+          }
+        }
+        row(tree.byPath[""], 0);
+        if (focusPath !== null) {
+          var back = Array.prototype.find.call(treeList.querySelectorAll(".ge__node"), function (el) {
+            return el.dataset.path === focusPath;
+          });
+          if (back) back.focus();
+        }
+      }
+
+      // ---- the actions of the chosen node
+      function renderActions() {
+        var svc = service();
+        var tree = treeOf(svc);
+        var item = tree.byPath[current] || tree.byPath[""];
+        current = item.path;
+        var text = actSearch.value.trim().toLowerCase();
+        var scroll = actList.scrollTop;
+        actList.textContent = "";
+        var rows = svc.actions.filter(function (a) {
+          if (!applies(a, item)) return false;
+          return owns(svc.id, a.name, item.path) || ticked.has(keyOf(svc.id, a.name, item.path));
+        });
+        var available = rows.length;
+        var here = rows.filter(function (a) {
+          return ticked.has(keyOf(svc.id, a.name, item.path));
+        }).length;
+        title.textContent = item.path === "" ? (svc.feature ? "All features" : "Whole service") : item.label;
+        count.textContent = here + "/" + available;
+        tickedButton.textContent = "Ticked " + here;
+        rows = rows.filter(function (a) {
+          if (onlyTicked && !ticked.has(keyOf(svc.id, a.name, item.path))) return false;
+          return !text || a.name.toLowerCase().indexOf(text) >= 0 || a.description.toLowerCase().indexOf(text) >= 0;
+        });
+        var byGroup = {};
+        var order = [];
+        rows.forEach(function (a) {
+          var name = groupOf(a.name);
+          if (!byGroup[name]) {
+            byGroup[name] = [];
+            order.push(name);
+          }
+          byGroup[name].push(a);
+        });
+        order.forEach(function (name) {
+          var list2 = byGroup[name];
+          var ticks = list2.filter(function (a) {
+            return ticked.has(keyOf(svc.id, a.name, item.path));
+          }).length;
+          // A long list starts with its groups closed, but the groups that hold a ticked action.
+          var closedByDefault = available > LONG_LIST && ticks === 0;
+          var closed = (closedByDefault !== toggledGroups.has(item.path + "|" + name)) && !text;
+          var header = node("div", "ge__group");
+          header.dataset.group = name;
+          header.tabIndex = 0;
+          header.setAttribute("role", "button");
+          header.setAttribute("aria-expanded", closed ? "false" : "true");
+          header.appendChild(icon(closed ? "chevron-right" : "chevron-down"));
+          var master = node("input");
+          master.type = "checkbox";
+          master.dataset.groupBox = name;
+          master.checked = ticks === list2.length;
+          master.indeterminate = ticks > 0 && ticks < list2.length;
+          master.setAttribute("aria-label", "Tick every action of " + (name || "the group"));
+          header.appendChild(master);
+          header.appendChild(node("span", "ge__groupName", name || "service"));
+          header.appendChild(node("span", "ge__groupCount", ticks + "/" + list2.length));
+          actList.appendChild(header);
+          if (closed) return;
+          list2.forEach(function (a) {
+            var isTicked = ticked.has(keyOf(svc.id, a.name, item.path));
+            var line = node("label", "ge__act" + (isTicked ? " is-on" : ""));
+            var box = node("input");
+            box.type = "checkbox";
+            box.checked = isTicked;
+            box.dataset.action = a.name;
+            var held = ticked.get(keyOf(svc.id, a.name, item.path));
+            var via = isTicked ? null : coveredBy(svc.id, a.name, item.path);
+            if (held && held.locked) box.disabled = true;
+            if (via !== null) {
+              box.checked = true;
+              box.disabled = true;
+              line.className += " is-on";
+            }
+            line.appendChild(box);
+            line.appendChild(node("code", "", a.name));
+            var desc = node("span", "ge__desc", a.description);
+            desc.title = a.description;
+            line.appendChild(desc);
+            if (via !== null) {
+              line.appendChild(node("span", "ge__limits", via === "" ? "via the whole service" : "via " + via));
+            } else if (held && held.locked) {
+              var lock = node("span", "statusIcon");
+              lock.title = "This permission comes from the configuration file.";
+              lock.appendChild(icon("lock"));
+              line.appendChild(lock);
+            } else {
+              if (isTicked && !owns(svc.id, a.name, item.path)) {
+                var warn = node("span", "statusIcon statusIcon--warn");
+                warn.title = "Your rights do not cover this permission any more.";
+                warn.appendChild(icon("alert-triangle"));
+                line.appendChild(warn);
+              }
+              if (a.limits.length) {
+                // A ticked action shows its limit fields on its own line: no table is needed.
+                var inline = node("span", isTicked ? "ge__limitsInline" : "ge__limits");
+                if (isTicked) limitFields(inline, held, svc);
+                else
+                  inline.textContent = a.limits
+                    .map(function (l) {
+                      return l.name;
+                    })
+                    .join(", ");
+                line.appendChild(inline);
+              }
+            }
+            actList.appendChild(line);
+          });
+        });
+        if (!rows.length) {
+          var empty = node("div", "uiState uiState--compact");
+          empty.appendChild(node("p", "uiState__body", "No action matches."));
+          actList.appendChild(empty);
+        }
+        actList.scrollTop = scroll;
+      }
+
+      function select(path) {
+        current = path;
+        toggledGroups.clear();
+        var item = treeOf(service()).byPath[path];
+        if (item && canAsk(service(), item)) {
+          opened.add(path);
+          loadChildren(service(), item);
+        }
+      }
+
+      // The pane shows the service number `n` of its list, from its root.
+      function show(n) {
+        at = n;
+        current = "";
+        treeSearch.value = "";
+        actSearch.value = "";
+        select("");
+      }
+
+      // ---- events
+      treeList.addEventListener("click", function (event) {
+        var more = event.target.closest(".ge__more");
+        if (more) {
+          var svc = service();
+          var parent = treeOf(svc).byPath[more.dataset.path];
+          var key = [svc.id, parent.path, more.dataset.type, ""].join("\u0001");
+          ask(svc, parent, more.dataset.type, more.dataset.after, "");
+          delete next[key];
+          renderTree();
+          return;
+        }
+        var li = event.target.closest(".ge__node");
+        if (!li) return;
+        var path = li.dataset.path;
+        if (event.target.closest("[data-twist]")) {
+          if (opened.has(path)) opened.delete(path);
+          else {
+            opened.add(path);
+            var item = treeOf(service()).byPath[path];
+            if (item) loadChildren(service(), item);
+          }
+          current = path;
+          toggledGroups.clear();
+        } else {
+          select(path);
+        }
+        renderTree();
+        renderActions();
+      });
+      // A search asks the service too: the node that is chosen lists its children that match.
+      var searching = null;
+      treeSearch.addEventListener("input", function () {
+        renderTree();
+        window.clearTimeout(searching);
+        searching = window.setTimeout(function () {
+          var text = treeSearch.value.trim();
+          var svc = service();
+          var item = treeOf(svc).byPath[current];
+          if (!text || !item || !canAsk(svc, item)) return;
+          childTypes(svc, item).forEach(function (t) {
+            ask(svc, item, t.name, "", text);
+          });
+        }, 300);
+      });
+      actSearch.addEventListener("input", renderActions);
+      allButton.addEventListener("click", function () {
+        onlyTicked = false;
+        allButton.classList.add("is-active");
+        tickedButton.classList.remove("is-active");
+        renderActions();
+      });
+      tickedButton.addEventListener("click", function () {
+        onlyTicked = true;
+        tickedButton.classList.add("is-active");
+        allButton.classList.remove("is-active");
+        renderActions();
+      });
+      actList.addEventListener("change", function (event) {
+        var box = event.target;
+        if (box.dataset.action) {
+          setGrant(box.dataset.action, current, box.checked, service().id);
+        } else if (box.dataset.groupBox !== undefined) {
+          var group = box.dataset.groupBox;
+          var text = actSearch.value.trim().toLowerCase();
+          var svc = service();
+          var item = treeOf(svc).byPath[current];
+          svc.actions.forEach(function (a) {
+            if (groupOf(a.name) !== group || !applies(a, item)) return;
+            if (!(owns(svc.id, a.name, current) || ticked.has(keyOf(svc.id, a.name, current)))) return;
+            if (text && a.name.toLowerCase().indexOf(text) < 0 && a.description.toLowerCase().indexOf(text) < 0) return;
+            setGrant(a.name, current, box.checked, svc.id);
+          });
+        } else {
+          return;
+        }
+        render();
+      });
+      actList.addEventListener("click", function (event) {
+        var header = event.target.closest(".ge__group");
+        if (!header || event.target.closest("input")) return;
+        var key = current + "|" + header.dataset.group;
+        if (toggledGroups.has(key)) toggledGroups.delete(key);
+        else toggledGroups.add(key);
+        renderActions();
+      });
+      // Keyboard: Enter or Space on a row does what a click does. The list is drawn again after the
+      // action, so the focus goes back to the same row.
+      function pressable(listEl, selector, same) {
+        listEl.addEventListener("keydown", function (event) {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          var row = event.target.closest(selector);
+          if (!row || event.target !== row) return;
+          event.preventDefault();
+          var mark = same(row);
+          row.click();
+          var again = Array.prototype.find.call(listEl.querySelectorAll(selector), function (el) {
+            return same(el) === mark;
+          });
+          if (again) again.focus();
+        });
+      }
+      pressable(treeList, ".ge__node, .ge__more", function (el) {
+        return (el.dataset.type || "") + "|" + el.dataset.path;
+      });
+      pressable(actList, ".ge__group", function (el) {
+        return el.dataset.group;
+      });
+
+      return {
+        ui: ui,
+        service: service,
+        show: show,
+        select: select,
+        draw: function () {
+          renderTree();
+          renderActions();
+        },
+      };
     }
 
-    // The rows of the services: the switch of `access`, a short sentence, the buttons.
+    // ---- the rows of the services: the switch of `access`, a short sentence, the button
+    var services = rowList.length ? makePane(rowList, serviceAt, false) : null;
+    var features = featureSvc ? makePane([featureSvc], 0, true) : null;
+    var strip = node("div", groups ? "ge__groups" : "ge__svcList");
+    strip.setAttribute("role", "group");
+    strip.setAttribute("aria-label", "Permissions");
+    var rowsEl = strip;
+    var servicesCount = node("span", "count");
+    var featuresCount = node("span", "count");
+    if (groups) {
+      if (rowList.length) {
+        var svcGroup = node("section", "ge__grp");
+        var head = node("div", "ge__grpHead");
+        head.appendChild(node("h2", "title", "Services"));
+        head.appendChild(servicesCount);
+        svcGroup.appendChild(head);
+        rowsEl = node("div", "ge__svcList");
+        svcGroup.appendChild(rowsEl);
+        strip.appendChild(svcGroup);
+      }
+      if (featureSvc) {
+        var featGroup = node("section", "ge__grp");
+        var featHead = node("div", "ge__grpHead");
+        featHead.appendChild(node("h2", "title", "Portal features"));
+        featHead.appendChild(featuresCount);
+        featGroup.appendChild(featHead);
+        var featBody = node("div", "ge__featBody");
+        featBody.appendChild(features.ui);
+        featGroup.appendChild(featBody);
+        strip.appendChild(featGroup);
+      }
+    }
+    root.insertBefore(strip, fields);
+
     function renderList() {
-      strip.textContent = "";
+      rowsEl.textContent = "";
       var lastGroup = "";
-      services.forEach(function (svc, at) {
-        var group = svc.feature ? "Portal features" : "Services";
-        if (group !== lastGroup) {
-          strip.appendChild(node("h3", "ge__groupTitle", group));
-          lastGroup = group;
+      var openCount = 0;
+      rowList.forEach(function (svc, at) {
+        if (!groups) {
+          var group = svc.feature ? "Portal features" : "Services";
+          if (group !== lastGroup) {
+            rowsEl.appendChild(node("h3", "ge__groupTitle", group));
+            lastGroup = group;
+          }
         }
         var open = ticked.get(keyOf(svc.id, "access", ""));
+        if (open) openCount += 1;
         var others = 0;
         ticked.forEach(function (item) {
           if (item.service === svc.id && !(item.action === "access" && item.path === "")) others += 1;
@@ -782,7 +1091,7 @@
           head.appendChild(box);
         }
         head.appendChild(node("span", "ge__svcName", svc.name));
-        var info = open ? "Can open" : "Cannot open";
+        var info = open ? (groups ? "Opens" : "Can open") : "Cannot open";
         if (svc.feature) {
           info = others ? plural(others, "permission", "permissions") : "No permission";
         } else if (others) info += " · " + plural(others, "permission", "permissions");
@@ -798,116 +1107,59 @@
           same.title = "Give this key all the permissions that you hold on " + svc.name;
           head.appendChild(same);
         }
-        var toggle = node("button", "button button--small ge__toggle");
+        var toggle = node("button", groups ? "ib ge__toggle" : "button button--small ge__toggle");
         toggle.type = "button";
         toggle.dataset.toggle = String(at);
         toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
         toggle.appendChild(icon(expanded ? "chevron-down" : "chevron-right"));
-        toggle.appendChild(document.createTextNode("Permissions"));
+        if (groups) {
+          toggle.setAttribute("aria-label", "Permissions of " + svc.name);
+          toggle.title = "Permissions of " + svc.name;
+        } else {
+          toggle.appendChild(document.createTextNode("Permissions"));
+        }
         head.appendChild(toggle);
         row.appendChild(head);
         if (expanded) {
           var body = node("div", "ge__svcBody");
-          body.appendChild(ui);
+          body.appendChild(services.ui);
           row.appendChild(body);
         }
-        strip.appendChild(row);
+        rowsEl.appendChild(row);
       });
       if (ticked.size > MAX_GRANTS) {
-        strip.appendChild(
+        rowsEl.appendChild(
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
+      }
+      servicesCount.textContent = "Opens " + openCount + " of " + rowList.length;
+      if (featureSvc) {
+        var rights = new Set();
+        ticked.forEach(function (item) {
+          if (item.service === featureSvc.id && item.action !== "access") rights.add(item.action);
+        });
+        var total = featureSvc.actions.filter(function (a) {
+          return a.name !== "access";
+        }).length;
+        featuresCount.textContent = rights.size + " of " + total + " rights";
       }
     }
 
     function render() {
       renderList();
-      if (expandedAt >= 0) {
-        renderTree();
-        renderActions();
-      }
+      if (services && expandedAt >= 0) services.draw();
+      if (features) features.draw();
       syncFields();
     }
 
-    function setGrant(action, path, on, serviceId) {
-      var id = serviceId || service().id;
-      var k = keyOf(id, action, path);
-      if (ticked.has(k) && ticked.get(k).locked) return;
-      if (on) {
-        if (!ticked.has(k)) ticked.set(k, { action: action, service: id, path: path, limits: {} });
-      } else {
-        ticked.delete(k);
-      }
-    }
-
-    function select(path) {
-      current = path;
-      toggledGroups.clear();
-      var item = treeOf(service()).byPath[path];
-      if (item && canAsk(service(), item)) {
-        opened.add(path);
-        loadChildren(service(), item);
-      }
-    }
-
-    // ---- events
-    treeList.addEventListener("click", function (event) {
-      var more = event.target.closest(".ge__more");
-      if (more) {
-        var svc = service();
-        var parent = treeOf(svc).byPath[more.dataset.path];
-        var key = [svc.id, parent.path, more.dataset.type, ""].join("\u0001");
-        ask(svc, parent, more.dataset.type, more.dataset.after, "");
-        delete next[key];
-        renderTree();
-        return;
-      }
-      var li = event.target.closest(".ge__node");
-      if (!li) return;
-      var path = li.dataset.path;
-      if (event.target.closest("[data-twist]")) {
-        if (opened.has(path)) opened.delete(path);
-        else {
-          opened.add(path);
-          var item = treeOf(service()).byPath[path];
-          if (item) loadChildren(service(), item);
-        }
-        current = path;
-        toggledGroups.clear();
-      } else {
-        select(path);
-      }
-      renderTree();
-      renderActions();
-    });
-    // A search asks the service too: the node that is chosen lists its children that match.
-    var searching = null;
-    treeSearch.addEventListener("input", function () {
-      renderTree();
-      window.clearTimeout(searching);
-      searching = window.setTimeout(function () {
-        var text = treeSearch.value.trim();
-        var svc = service();
-        var item = treeOf(svc).byPath[current];
-        if (!text || !item || !canAsk(svc, item)) return;
-        childTypes(svc, item).forEach(function (t) {
-          ask(svc, item, t.name, "", text);
-        });
-      }, 300);
-    });
-    actSearch.addEventListener("input", renderActions);
     function chooseService(at) {
       if (expandedAt === at) {
         expandedAt = -1;
         render();
         return;
       }
-      serviceAt = at;
       expandedAt = at;
-      current = "";
-      treeSearch.value = "";
-      actSearch.value = "";
-      select("");
+      services.show(at);
       render();
     }
     strip.addEventListener("change", function (event) {
@@ -935,75 +1187,14 @@
       var head = event.target.closest(".ge__svcHead");
       if (head) chooseService(Number(head.parentNode.dataset.at));
     });
-    allButton.addEventListener("click", function () {
-      onlyTicked = false;
-      allButton.classList.add("is-active");
-      tickedButton.classList.remove("is-active");
-      renderActions();
-    });
-    tickedButton.addEventListener("click", function () {
-      onlyTicked = true;
-      tickedButton.classList.add("is-active");
-      allButton.classList.remove("is-active");
-      renderActions();
-    });
-    actList.addEventListener("change", function (event) {
-      var box = event.target;
-      if (box.dataset.action) {
-        setGrant(box.dataset.action, current, box.checked);
-      } else if (box.dataset.groupBox !== undefined) {
-        var group = box.dataset.groupBox;
-        var text = actSearch.value.trim().toLowerCase();
-        var svc = service();
-        var item = treeOf(svc).byPath[current];
-        svc.actions.forEach(function (a) {
-          if (groupOf(a.name) !== group || !applies(a, item)) return;
-          if (!(owns(svc.id, a.name, current) || ticked.has(keyOf(svc.id, a.name, current)))) return;
-          if (text && a.name.toLowerCase().indexOf(text) < 0 && a.description.toLowerCase().indexOf(text) < 0) return;
-          setGrant(a.name, current, box.checked);
-        });
-      } else {
-        return;
-      }
-      render();
-    });
-    actList.addEventListener("click", function (event) {
-      var header = event.target.closest(".ge__group");
-      if (!header || event.target.closest("input")) return;
-      var key = current + "|" + header.dataset.group;
-      if (toggledGroups.has(key)) toggledGroups.delete(key);
-      else toggledGroups.add(key);
-      renderActions();
-    });
-    // Keyboard: Enter or Space on a row does what a click does. The list is drawn again after the
-    // action, so the focus goes back to the same row.
-    function pressable(list, selector, same) {
-      list.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        var row = event.target.closest(selector);
-        if (!row || event.target !== row) return;
-        event.preventDefault();
-        var mark = same(row);
-        row.click();
-        var again = Array.prototype.find.call(list.querySelectorAll(selector), function (el) {
-          return same(el) === mark;
-        });
-        if (again) again.focus();
-      });
-    }
-    pressable(treeList, ".ge__node, .ge__more", function (el) {
-      return (el.dataset.type || "") + "|" + el.dataset.path;
-    });
-    pressable(actList, ".ge__group", function (el) {
-      return el.dataset.group;
-    });
     // "Give access" opens the page of the account with the service chosen. The grant `access` on the
     // whole service starts ticked. Nothing is saved until the person clicks Save.
     if (query.get("give") === "1" && wanted && serviceById(wanted)) {
       var key = keyOf(wanted, "access", "");
       if (!ticked.has(key)) ticked.set(key, { action: "access", service: wanted, path: "", limits: {} });
     }
-    if (expandedAt >= 0) select("");
+    if (services && expandedAt >= 0) services.select("");
+    if (features) features.select("");
     render();
   }
 

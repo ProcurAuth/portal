@@ -87,6 +87,50 @@
   color: var(--accent-text);
 }
 
+/* The shell: the page is as high as the window. The header and the tabs stay at the top, and the
+   `main` element is the one scroller of the page. It reserves the place of its scrollbar, so the
+   content does not move when the bar appears. The lists inside the page have no reserved place. */
+body.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.shell .appHeader {
+  flex: none;
+  width: 100%;
+}
+
+.shell .navRow {
+  flex: none;
+}
+
+.shell .settings {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  padding: 12px 16px 16px 24px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.shell .settings > * {
+  flex: none;
+}
+
+/* A page that fills the window: its last part takes the free height, and its lists scroll inside. */
+.shell .settings--fill > .split,
+.shell .settings--fill > .grantEditor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* The inner scrollers and the browser parts follow the palette. */
 .ge__tree,
 .ge__list,
@@ -170,10 +214,6 @@ code {
   color: var(--muted);
 }
 
-.part--warn {
-  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
-}
-
 .subTitle {
   margin: 4px 0 0;
   color: var(--muted);
@@ -204,96 +244,7 @@ code {
   }
 }
 
-.model {
-  display: grid;
-  gap: 4px 12px;
-  margin: 0;
-}
-
-.model dt {
-  margin-top: 6px;
-  font-weight: 700;
-}
-
-.model dd {
-  margin: 0;
-  color: var(--muted);
-}
-
 /* The way back, the crumbs and the head of an account ------------------------------------- */
-
-.pageBack {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-control);
-  color: var(--muted);
-}
-
-.pageBack:hover {
-  color: var(--text);
-}
-
-.crumbs {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--muted);
-}
-
-.crumbs a {
-  color: var(--muted);
-  text-decoration: none;
-}
-
-.crumbs a:hover {
-  color: var(--text);
-}
-
-.userHead {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-}
-
-.userHead__main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 12px;
-}
-
-.userHead__name {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 20px;
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.facts > div {
-  display: inline-flex;
-  gap: 6px;
-}
-
-.facts dt,
-.facts dd {
-  margin: 0;
-}
-
-.facts dd {
-  color: var(--text);
-}
 
 .danger,
 .num--danger {
@@ -519,18 +470,6 @@ time.when {
   cursor: not-allowed;
 }
 
-.tag {
-  display: inline-flex;
-  align-items: center;
-  height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-compact);
-  background: var(--raised);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
 /* Fields ---------------------------------------------------------------------------------- */
 
 .uiForm {
@@ -626,26 +565,7 @@ input[type="radio"] {
   gap: 8px;
 }
 
-.passwordRow {
-  display: flex;
-  gap: 8px;
-}
-
-.passwordRow input {
-  flex: 1;
-  min-width: 0;
-}
-
 /* Generating needs script; without it the button would do nothing, so it is not shown. */
-.passwordRow .generate {
-  display: none;
-  flex: none;
-}
-
-.js .passwordRow .generate {
-  display: inline-grid;
-  min-width: 7rem;
-}
 
 /* Both labels sit in one cell: the button keeps its size when the result replaces the word. */
 .generate > * {
@@ -749,14 +669,6 @@ input.keyText {
   text-align: left;
 }
 
-.dataTable .groupRow th {
-  height: var(--row-compact);
-  background: var(--raised);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .dataTable td.foldCell {
   overflow: visible;
 }
@@ -783,24 +695,7 @@ input.keyText {
   margin: 4px 0 0;
 }
 
-.fold .chips,
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-
 .svcRow__name {
-  font-weight: 600;
-}
-
-.svcRow__id {
-  color: var(--muted);
-}
-
-.accountLink {
-  color: var(--text);
   font-weight: 600;
 }
 
@@ -853,14 +748,6 @@ input.keyText {
   white-space: nowrap;
 }
 
-.events__what {
-  font-weight: 600;
-}
-
-.events__row--danger .events__what {
-  color: var(--danger);
-}
-
 .inbox {
   display: flex;
   align-items: center;
@@ -869,46 +756,6 @@ input.keyText {
 }
 
 /* Figures ---------------------------------------------------------------------------------- */
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-}
-
-.stat {
-  display: grid;
-  min-width: 0;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--panel);
-}
-
-.stat__label {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.stat__value time.when {
-  white-space: normal;
-}
-
-.stat__value {
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-size: 18px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat__value--danger {
-  color: var(--danger);
-}
 
 .spark {
   display: block;
@@ -931,82 +778,7 @@ input.keyText {
   opacity: 0.35;
 }
 
-.split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-}
-
-@media (min-width: 1100px) {
-  .split {
-    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
-  }
-}
-
-.split__col {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  min-width: 0;
-}
-
 /* The page of an account ------------------------------------------------------------------ */
-
-.addUser {
-  display: grid;
-  gap: 12px;
-}
-
-.addUser__fields {
-  display: grid;
-  grid-template-columns: minmax(0, 16rem) minmax(0, 22rem) auto;
-  align-items: end;
-  gap: 12px 16px;
-}
-
-@media (max-width: 899px) {
-  .addUser__fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.accountRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px 32px;
-}
-
-.accountRow__password {
-  display: flex;
-  flex: 0 1 38rem;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.accountRow__password .uiField {
-  width: min(100%, 24rem);
-}
-
-.accountRow__delete {
-  display: grid;
-}
-
-.dangerRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-}
-
-.dangerRow__title {
-  margin: 0 0 2px;
-  font-size: 13px;
-}
 
 .confirm {
   position: relative;
@@ -1043,83 +815,6 @@ input.keyText {
 .confirm__panel p {
   margin: 0;
   font-size: 12.5px;
-}
-
-.partFold > summary {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 34px;
-  padding: 0 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
-  list-style: none;
-  cursor: pointer;
-}
-
-.partFold > summary::-webkit-details-marker {
-  display: none;
-}
-
-.partFold[open] > summary {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  border-bottom-color: transparent;
-}
-
-.partFold__chevron {
-  flex: none;
-  color: var(--muted);
-}
-
-.partFold[open] .partFold__chevron {
-  transform: rotate(90deg);
-}
-
-.partFold > .pagePart {
-  border-top: 0;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
-.options {
-  display: grid;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.option {
-  display: grid;
-  grid-template-columns: 16px minmax(10rem, 16rem) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px 12px;
-  min-height: var(--row-compact);
-  padding: 0 12px;
-  border-radius: var(--radius-control);
-  cursor: pointer;
-}
-
-.option:hover {
-  background: var(--raised);
-}
-
-.option__name {
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.option__text {
-  color: var(--muted);
-}
-
-.pick {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
 }
 
 /* Keys ------------------------------------------------------------------------------------- */
@@ -1275,9 +970,7 @@ input.keyText {
     flex: 1 1 100%;
   }
 
-  .accountRow__password {
-    flex-wrap: wrap;
-  }
+  
 }
 
 .ge__side,
@@ -1537,4 +1230,879 @@ input.keyText {
 .pagePart__title--data {
   text-transform: none;
   letter-spacing: normal;
+}
+
+/* Components of the settings pages ----------------------------------------------------------
+   The parts that src/ui/components.rs builds. A part has one look on every page. */
+
+[hidden] {
+  display: none !important;
+}
+
+.title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.count {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.r {
+  text-align: right;
+}
+
+.empty {
+  margin: 0;
+  padding: 8px 4px;
+  color: var(--muted);
+}
+
+.lede {
+  margin: 0;
+  color: var(--muted);
+}
+
+.warnText {
+  color: var(--warning);
+}
+
+.st--ok {
+  color: var(--success);
+}
+
+.st--warn {
+  color: var(--warning);
+}
+
+.st--bad {
+  color: var(--danger);
+}
+
+.inline {
+  display: inline-flex;
+  margin: 0;
+}
+
+/* The toolbar of a page, and the head of a panel: one line, the controls at the right. */
+.tbar,
+.zone__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--control);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.zone__head .chips {
+  overflow: hidden;
+}
+
+/* A flat icon button: only the colour changes on hover (CTRL-07, CTRL-13). */
+.ib {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings a.ib {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.ib:hover,
+.settings a.ib:hover {
+  color: var(--text);
+}
+
+.ib--danger:hover,
+.settings a.ib--danger:hover {
+  color: var(--danger);
+}
+
+.ib--count {
+  display: inline-flex;
+  gap: 4px;
+  width: auto;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.ib .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* A chip: a count that filters the table of its panel. A chip is a link. */
+.chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings .chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.settings .chip:hover {
+  color: var(--text);
+}
+
+.settings .chip.is-on {
+  border-color: transparent;
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.chip .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.chip.is-on .st--bad,
+.chip.is-on .st--warn {
+  color: inherit;
+}
+
+/* Two panels side by side. They stack under 1000 px. */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px 20px;
+  min-height: 0;
+}
+
+.split--services {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+}
+
+.split--even {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.stackcol {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.stackcol:has(> :only-child) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* The panel that follows another one takes only what it needs, up to a part of the window. */
+.split--services .stackcol {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: start;
+}
+
+.split--services .stackcol:has(> :only-child) {
+  grid-template-rows: auto;
+}
+
+.zone {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.zone--bare {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.zone--short .scroll {
+  max-height: 36vh;
+}
+
+.scroll {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* A table with one text line for each row. The first column takes the free width. */
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-variant-numeric: tabular-nums;
+}
+
+.grid th,
+.grid td {
+  height: var(--row-compact);
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  font-weight: 400;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom-color: var(--border-strong);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.grid .r {
+  text-align: right;
+}
+
+.grid col.w28 {
+  width: 28px;
+}
+
+.grid col.w48 {
+  width: 48px;
+}
+
+.grid col.w56 {
+  width: 56px;
+}
+
+.grid col.w64 {
+  width: 64px;
+}
+
+.grid col.w80 {
+  width: 80px;
+}
+
+.grid col.w88 {
+  width: 88px;
+}
+
+.grid col.w96 {
+  width: 96px;
+}
+
+.grid col.w108 {
+  width: 108px;
+}
+
+.grid col.w120 {
+  width: 120px;
+}
+
+.grid col.w132 {
+  width: 132px;
+}
+
+.grid col.w160 {
+  width: 160px;
+}
+
+.grid col.w180 {
+  width: 180px;
+}
+
+.grid tbody tr {
+  position: relative;
+}
+
+.grid tbody tr:hover,
+.grid tbody tr.is-selected {
+  background: var(--raised);
+}
+
+.grid tbody tr.is-selected {
+  background: var(--border);
+}
+
+.grid .grid__group th {
+  height: var(--row-compact);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.grid .grid__group:hover {
+  background: transparent;
+}
+
+.grid code {
+  font-size: 12px;
+}
+
+/* A row is a link: the link covers the row, and the row is the click area. */
+.settings .grid a.rowLink {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.rowLink::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+}
+
+.rowLink:focus-visible {
+  outline: none;
+}
+
+.rowLink:focus-visible::after {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: -2px;
+}
+
+.grid--popup {
+  margin-top: 8px;
+}
+
+.grid .statusIcon .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.grid a:not(.rowLink) {
+  text-decoration: none;
+}
+
+.grid a:not(.rowLink):hover {
+  text-decoration: underline;
+}
+
+.feat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 8px;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.feat .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.spark--mini {
+  display: inline-block;
+  flex: none;
+  width: 120px;
+  height: 22px;
+}
+
+.spark--mini .spark__bar {
+  fill: var(--accent-fill);
+  opacity: 0.8;
+}
+
+.spark--mini .spark__bar--today {
+  opacity: 1;
+}
+
+/* A popover: it floats over the page, so it moves nothing. */
+.pop {
+  position: relative;
+  display: inline-block;
+}
+
+.pop > summary,
+.ask > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.pop > summary::-webkit-details-marker,
+.ask > summary::-webkit-details-marker {
+  display: none;
+}
+
+.pop[open] > summary {
+  color: var(--text);
+}
+
+.pop__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.pop__menu--end {
+  right: 0;
+  left: auto;
+}
+
+.pop__menu--wide {
+  width: min(640px, calc(100vw - 48px));
+}
+
+.kvs {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  align-items: center;
+  gap: 2px 16px;
+}
+
+.kvs b {
+  font-weight: 600;
+  text-align: right;
+}
+
+.kvs .spark {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* A confirmation in place: the button turns into a cross, and the question opens at its left,
+   over the row. The page does not move (CTRL-22). */
+.ask {
+  position: relative;
+  display: inline-block;
+}
+
+.ask__close {
+  display: none;
+}
+
+.ask[open] > summary > .ask__open {
+  display: none;
+}
+
+.ask[open] > summary > .ask__close {
+  display: inline-grid;
+}
+
+.ask__panel {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+.ask--start .ask__panel {
+  right: auto;
+  left: calc(100% + 4px);
+}
+
+.ask--danger .ask__panel {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.ask__q {
+  font-size: 12.5px;
+}
+
+.ask .button {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.ask__name {
+  width: 9rem;
+  height: 22px;
+}
+
+/* The bulk action: the button shows the count of the ticked rows, and only while a row is ticked. */
+.bulk {
+  display: none;
+}
+
+.bulk__ask > summary.button {
+  gap: 4px;
+}
+
+.js .bulk__ask:not(.has-count) {
+  display: none;
+}
+
+/* Fields and tools in the row of an account ------------------------------------------------ */
+
+.accountBar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 32px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.accountBar .name {
+  margin: 0 8px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.crumb a {
+  text-decoration: none;
+}
+
+.factLine {
+  display: flex;
+  gap: 20px;
+  margin: 0 0 0 8px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.factLine > div {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.factLine dt,
+.factLine dd {
+  margin: 0;
+}
+
+.factLine dd {
+  color: var(--text);
+}
+
+.pwForm,
+.pwRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pwForm .uiInput {
+  width: 15rem;
+}
+
+.pwRow .uiInput {
+  width: 17rem;
+}
+
+.accountBar__login {
+  width: 11rem;
+}
+
+/* "Generate" needs script; without it the button would do nothing, so it is not shown. */
+.generate {
+  display: none;
+}
+
+.js .generate {
+  display: inline-grid;
+}
+
+/* The editor of grants on the page of an account: two groups side by side ---------------------- */
+
+.grantEditor[data-layout="groups"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ge__groups {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px 28px;
+  min-height: 0;
+}
+
+.ge__groups:has(> .ge__grp:only-child) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ge__grp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ge__grpHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control);
+  border-bottom: 1px solid var(--border);
+}
+
+.ge__groups .ge__svcList,
+.ge__featBody {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.ge__groups .ge__svc {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.ge__groups .ge__svc:not(.is-expanded):hover {
+  border-bottom-color: var(--border);
+}
+
+.ge__groups .ge__svcHead {
+  gap: 10px;
+  padding: 0 4px;
+}
+
+.ge__groups .ge__svcBody {
+  padding: 4px 0 10px;
+  border-top: 0;
+  background: transparent;
+  animation: none;
+}
+
+.ge__groups .ge__svcBody .ge {
+  height: clamp(220px, 38vh, 340px);
+}
+
+.ge__featBody .ge {
+  height: 100%;
+  min-height: 280px;
+}
+
+.ge--stack {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+}
+
+.ge--stack .ge__side {
+  max-height: 168px;
+}
+
+.ge--stack .ge__bar {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.ge--stack .ge__filter {
+  flex: 1 1 8rem;
+  max-width: none;
+  margin-left: 0;
+}
+
+/* The bar of a pane stays on one line: the title and the switch keep their size. */
+.ge__bar .ge__title,
+.ge__bar .segmented {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ge__bar .ge__filter {
+  flex: 1 1 5rem;
+  min-width: 5rem;
+}
+
+.ge__bar .segmented__option {
+  white-space: nowrap;
+}
+
+/* The switch of a service is the grant `access`: a checkbox drawn as a switch. */
+.ge__groups .ge__svcHead input[type="checkbox"] {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  appearance: none;
+  cursor: pointer;
+}
+
+.ge__groups .ge__svcHead input[type="checkbox"]::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  content: "";
+  transition: left 0.12s var(--ease);
+}
+
+.ge__groups .ge__svcHead input[type="checkbox"]:checked {
+  background: var(--accent-fill);
+}
+
+.ge__groups .ge__svcHead input[type="checkbox"]:checked::after {
+  left: 14px;
+  background: var(--on-fill);
+}
+
+.ge__groups .ge__svcHead input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ge__groups .ge__toggle {
+  margin-left: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ge__groups .ge__svcHead input[type="checkbox"]::after {
+    transition: none;
+  }
+}
+
+/* Narrow windows: the side panels move under the main one, and nothing is hidden. The page scrolls. */
+@media (max-width: 999px) {
+  .shell .settings--fill > .split,
+  .shell .settings--fill > .grantEditor {
+    flex: none;
+  }
+
+  .split,
+  .split--services,
+  .split--even {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+
+  .stackcol,
+  .split--services .stackcol {
+    grid-template-rows: none;
+  }
+
+  .scroll {
+    max-height: 60vh;
+  }
+
+  .ge__groups {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+
+  .ge__groups .ge__svcList,
+  .ge__featBody {
+    overflow: visible;
+  }
+}
+
+/* Parts that the pages Keys and Inbox still use (batch D2 reworks these pages) ---------------- */
+
+.pageBack {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-control);
+  color: var(--muted);
+}
+
+.pageBack:hover {
+  color: var(--text);
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.stat {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+}
+
+.stat__label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stat__value time.when {
+  white-space: normal;
+}
+
+.stat__value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat__value--danger {
+  color: var(--danger);
 }
