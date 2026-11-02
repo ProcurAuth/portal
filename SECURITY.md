@@ -99,10 +99,12 @@ With the `pdp` block, the server answers AuthZEN requests on a second listener (
 
 ## Keys
 
-- The portal never stores the text of a key. It stores the SHA-256 digest and the last 4 characters. The text has 43 random base62 characters and a CRC32 check, so a typing error gets no database read.
+- A key has one of two kinds. The prefix gives the kind: `mcp_` for agents, `api_` for services and webhooks. The prefix `whk_` is reserved. The key edge `/auth/verify-key` verifies `mcp_` keys. The API of the Inbox verifies `api_` keys. Each verifier refuses the other kind with `401` and no detail.
+- The portal never stores the text of a key. It stores the SHA-256 digest and the last 4 characters. The text has the prefix, 43 random base62 characters and a CRC-32 check of the prefix and the 43 characters. A typing error or a changed prefix gets no database read.
 - The edge `/auth/verify-key` reads only memory. A refusal gives status 401 with an empty body. The body and the headers never tell which check failed. The log has at most one line each minute for each address and cause.
-- A key never holds an action of the service `portal`, other than `access`. The PDP ignores such a grant.
-- A key never gives more than its owner. The PDP checks both sides at each question, and the lowest ceiling applies.
+- A key holds only the actions of the service `portal` that its kind lists. An MCP key lists none. An API key lists `alert.send` and `alert.read`, and it holds `access on service:portal` for the budget `alerts`. An API key holds no grant on another service. The PDP ignores any other grant.
+- A key never gives more than its owner. This holds for both kinds. The PDP checks both sides at each question, and the lowest ceiling applies. A key also needs `keys.own.use` on its kind. When the owner loses a right, the key loses it at once. When an account is deleted, its keys go with it.
+- The rights to make and to use a key are by kind (`key_kind:mcp` and `key_kind:api`). The switches `keys.mcp` and `keys.api` turn a kind off. A kind that is off has no key edge or no route.
 - A secret of the configuration (password hash, key text) uses only `_env` or `_file`. A secret in clear text stops the start.
 - The portal counts the uses of a budget in the database, with one statement that takes the unit from each counter or from none. A failed count gives status 503, never `true`.
 - A form of the key page has a size limit and at most 4 forms are read at the same time.
@@ -171,7 +173,7 @@ The superadmin can end every session from the page **Users**. The command `porta
 
 ## Plain HTTP
 
-Traefik can serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
+The portal knows nothing about TLS. Traefik terminates TLS, and the portal listeners speak plain HTTP. Traefik can also serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
 
 Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `portal-csrf`). They have no `Secure` attribute.
 
@@ -302,14 +304,15 @@ Measures:
 
 ## Inbox
 
-The inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives its model. These are the invariants.
+The Inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives its model. These are the invariants.
 
 - A phone enrolls with a one-time code of an account of the portal. The code holds the address of the server, the public key of the server and a secret of 128 bits. The secret works one time and expires. The server keeps only its SHA-256 digest.
 - The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
 - The server limits the enrollment attempts for each client address.
-- The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the producers share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
+- The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the senders share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
 - A phone subscribes only to a group for which its account has `inbox.receive`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
-- A producer sends an alert with an API key (`api_`) as a bearer token. The server checks the form of the text (prefix, length, characters, checksum) before any lookup. A key of another kind gets `401` with no detail. The server compares the keys of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
-- The pages of the inbox need a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
-- The key file of the inbox server and the secrets of the `api_key` blocks use only `_env` or `_file`. A secret in clear text stops the start.
-- The portal listener has no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.
+- A sender sends an alert with an API key (`api_`) as a bearer token. The server checks the form of the text (prefix, length, characters, checksum) before any lookup. A key of another kind gets `401` with no detail. The server compares the keys of the file in constant time. A key needs `alert.send` on the group for the key and for its owner. A key of the file decides its groups at start and reads no directory.
+- The page of the Inbox needs a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone. Such a session can make an enrollment code for that account. The owner has not reviewed this point.
+- The key file of the Inbox server and the secrets of the `api_key` blocks use only `_env` or `_file`. A secret in clear text stops the start. The log never holds a key text, a code or a secret.
+- The portal listener has no TLS. An API key travels in clear text on plain HTTP. Use a TLS proxy for the senders.
+- The Android app accepts clear text for each address. It has no network security configuration. This is an open point.

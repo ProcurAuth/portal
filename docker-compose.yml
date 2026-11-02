@@ -5,7 +5,7 @@
 #   docker compose down -v                # stops the stack and deletes the database
 #
 # The portal: http://127.0.0.1:4181/ (the sign-in is /auth/login). One port serves the pages, the API of the
-# inbox for the producers and the webhooks (/api/v1/*), and the phones (/v1/enroll and /v1/session). No proxy is
+# inbox for the senders and the webhooks (/api/v1/*), and the phones (/v1/enroll and /v1/session). No proxy is
 # in front of this stack, so no ForwardAuth applies. The admin pages of the inbox are in the portal, in the tab
 # "Inbox". No other port exists for the inbox.
 #

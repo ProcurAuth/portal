@@ -3,7 +3,7 @@
 # The check needs the files that the configuration names. Make dummy files for a check outside the cluster.
 #
 # Edit these values for your cluster before you apply the manifests:
-#   server.trusted_proxies                                    the pod network (the pages, the producers and the phones)
+#   server.trusted_proxies                                    the pod network (the pages, the senders and the phones)
 #   identity.issuer                                           the base URL of the portal
 #   inbox.devices.public_address                              the public base URL of the portal, as the phones reach it
 #   postgres.host                                             the read-write Service of the database

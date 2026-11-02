@@ -1,7 +1,7 @@
 # Network policies of the portal. The namespace edge denies all ingress by default, and the policies add up. The first
 # two policies are in the cluster files already (same names, same content): applying them twice changes nothing.
 
-# The pages, ForwardAuth, the API of the producers and the phones (WebSocket): port 4181 only, from the Traefik pods and
+# The pages, ForwardAuth, the API of the senders and the phones (WebSocket): port 4181 only, from the Traefik pods and
 # the Prometheus pod. The portal trusts X-Forwarded-For from the pod network, so no other pod may reach this port.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -203,4 +203,4 @@ The roadmap has three steps. Step 1 is this version. The requirements below are 
 
 8.2.7 **FUTURE.** The delivery guarantee MUST hold for each item. The answer is a second guarantee: exactly one answer.
 
-8.2.8 **FUTURE.** The page MUST show the kind chips Question and Approval as active, a panel of open items above the phones when an item waits, and the matrix columns Ask, Request and Decide. The dashed chips of step 1 show the place.
+8.2.8 **FUTURE.** The page MUST show the kind chips Question and Approval as active. It MUST show a panel of open items above the phones when an item waits. The matrix MUST have the columns Ask, Request and Decide. The dashed chips of step 1 show the place.

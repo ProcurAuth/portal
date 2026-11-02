@@ -573,7 +573,7 @@ There are two ways to start it:
 - **Settings page.** Open the tab **Users**. Click the icon **End all sessions** in the toolbar. The question opens in the place of the icon. Click **End**. Your own session ends. The portal sends the browser to the sign-in page. Only the superadmin in its own right can do this. The route is `POST /auth/users/end-sessions`. It needs the anti-CSRF token of the account routes and the field `confirm=end-all-sessions`. A request without the field, or with an extra field, gets 400 and changes nothing. A user, or the superadmin who browses as a user, gets 403.
 - **Command.** Run `portal end-sessions --config FILE`. The command deletes every session in the shared database and exits. It prints the number of sessions that it ended. It needs a `postgres` block in the file. With SQLite the sessions are in the memory of the portal process, and a different process cannot end them. The command then fails and changes nothing. Restart the portal to end the sessions of a SQLite configuration. In K3s, run the command in a portal pod with the file `/etc/portal/config.hcl`.
 
-Each use writes one audit event, `sessions_ended`. The panel **Recent changes** of the Users page shows it as "All sessions ended". The actor is the superadmin login for the page, and `cli` for the command. The history closes each session with the reason `revoked`. The metric `portal_user_admin_total{action="end_sessions"}` counts the page calls. A running instance stops accepting a session of a shared database within 5 seconds, because it caches a session for that time.
+Each use writes one audit event, `sessions_ended`. The panel **Recent changes** of the Users page shows it as "All sessions ended". The actor is the superadmin login for the page, and `cli` for the command. The history closes each session with the reason `revoked`. The metric `portal_user_admin_total{action="end_sessions"}` counts the page calls. An instance of a shared database refuses an ended session within 5 seconds, because it caches a session for that time.
 
 The history is stored in the database (SQLite or PostgreSQL). The program keeps the history for `storage.retention_days` days. The default is 90 days. The history contains these records:
 
@@ -647,7 +647,7 @@ postgres {
 }
 ```
 
-The client is a blocking PostgreSQL client. It uses plain TCP. It has no TLS stack and no C dependency. The connection stays inside the cluster. The server must accept `scram-sha-256` over a non-TLS connection from the pods. At startup, the first connection is retried for about one minute. Then the schema is created or updated under an advisory lock. Several instances that start together are therefore safe. A statement that runs for more than 15 s is cancelled. A broken connection is replaced, and the operation is retried once. This is what a failover of the database looks like.
+The client is a synchronous PostgreSQL client. It uses plain TCP. It has no TLS stack and no C dependency. The connection stays inside the cluster. The server must accept `scram-sha-256` over a non-TLS connection from the pods. At startup, the first connection is retried for about one minute. Then the schema is created or updated under an advisory lock. Several instances that start together are therefore safe. A statement that runs for more than 15 s is cancelled. A broken connection is replaced, and the operation is retried once. This is what a failover of the database looks like.
 
 This is what the instances share, and how:
 

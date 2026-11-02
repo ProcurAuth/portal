@@ -1,10 +1,10 @@
 # Deploy
 
-This directory holds the files that run the portal with the inbox. The portal is one binary. The inbox is a module of it.
+This directory holds the files that run the portal with the Inbox. The portal is one binary. The Inbox is a feature of it.
 
 | Path | Use |
 |---|---|
-| `config.example.hcl` | Annotated configuration of the portal with the inbox. Copy it to make your own file. |
+| `config.example.hcl` | Annotated configuration of the portal with the Inbox. Copy it to make your own file. |
 | `compose/config.hcl` | Configuration of the local Compose stack. |
 | `compose/init-secrets.sh` | Makes the secret files of the Compose stack. |
 | `compose/docker-compose.ha.yml` | Optional. Two instances behind a small proxy. |
@@ -14,7 +14,7 @@ The file `docker-compose.yml` at the root of the repository is the local stack. 
 
 ## Local stack with Compose
 
-The stack has the portal, PostgreSQL and the inbox. It is for development and tests. Docker is the only tool that you need.
+The stack has the portal with the Inbox, and PostgreSQL. It is for development and tests. Docker is the only tool that you need.
 
 1. Build the image: `tools/build.sh image`.
 2. Make the secrets: `deploy/compose/init-secrets.sh`. The script writes six files to `deploy/compose/secrets/`. It never replaces a file.
@@ -22,9 +22,9 @@ The stack has the portal, PostgreSQL and the inbox. It is for development and te
 4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the login and the password in the files `superadmin_login` and `superadmin_password`.
 5. Stop the stack and delete the database: `docker compose down -v`.
 
-The portal is on port 4181. This one port serves the pages, the API of the inbox for the producers and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The inbox is a feature of the portal, so it has no port of its own. The admin pages of the inbox are in the portal. No proxy is in front of this stack, so no ForwardAuth applies.
+The portal is on port 4181. This one port serves the pages, the API of the Inbox for the senders and the webhooks (`/api/v1/*`), and the phones (`/v1/enroll` and `/v1/session`). The Inbox is a feature of the portal, so it has no port of its own. The page of the Inbox is in the portal, in the tab Inbox. The portal knows nothing about TLS. No proxy is in front of this stack, so no ForwardAuth and no TLS apply.
 
-A sender sends an alert with the API key in `deploy/compose/secrets/inbox_api_key`:
+A sender sends an alert with the API key in `deploy/compose/secrets/inbox_api_key`. This key is the block `api_key "local"` of `compose/config.hcl`. Its owner is the account of the file `local`, which holds `alert.send` on the group `infra`:
 
 ```sh
 curl -fsS -X POST http://127.0.0.1:4181/api/v1/alerts \
@@ -33,7 +33,7 @@ curl -fsS -X POST http://127.0.0.1:4181/api/v1/alerts \
   -d '{"group":"infra","title":"Test"}'
 ```
 
-A phone enrolls with a code. An account that is signed in makes the code in the inbox pages. There is no shared device password. The server key in `inbox_server_key` makes each code and each phone valid for this server. Keep a copy of it. A new key invalidates every phone.
+A phone enrolls with a code. An account that is signed in makes the code in the tab Inbox, with the plus button. There is no shared device password. The server key in `inbox_server_key` makes each code and each phone valid for this server. Keep a copy of it. A new key invalidates every phone.
 
 The stack publishes its port on `127.0.0.1`. To reach it from a phone or an emulator on another host, set `PORTAL_BIND=0.0.0.0`. Then set `inbox.devices.public_address` in `compose/config.hcl` to the address that the phone uses. This publishes the pages too: use it for tests only.
 
@@ -54,7 +54,7 @@ The manifests in `k3s/` describe the target. This repository does not apply them
 | File | Content |
 |---|---|
 | `portal.yaml` | Service account, read-only rights, three Services, the Deployment with two replicas, the PodDisruptionBudget. |
-| `ingress.yaml` | IngressRoutes of the pages, of the inbox (phones, producers and webhooks, no ForwardAuth, with a retry), of the launcher and the fallback route. |
+| `ingress.yaml` | IngressRoutes of the pages, of the Inbox (phones, senders and webhooks, no ForwardAuth, with a retry), of the launcher and the fallback route. |
 | `network-policy.yaml` | Policies for the portal pods and the database. |
 | `config.hcl` | Configuration of the portal. Kustomize makes the ConfigMap `portal-config` from it. |
 
@@ -79,7 +79,7 @@ Create the Secret `portal-secret` in the namespace `edge` before the pods start.
 | `db_password` | Password of the role `portal` | The same value as in the database. |
 | `identity_key` | Ed25519 key of the identity tokens | `openssl genpkey -algorithm ed25519` |
 | `inbox_server_key` | Noise key of the inbox server | `portal inbox keygen --out FILE` |
-| `inbox_alerting_key` | API key of the block `api_key "alerting"` | `portal inbox token --out FILE` |
+| `inbox_alerting_key` | API key of the block `api_key "alerting"`. The owner is an account of the file. | `portal inbox token --out FILE` |
 
 Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the configuration.
 
@@ -98,7 +98,7 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 ### Probes and stop
 
-- The inbox opens the port 4181 at once. It serves the routes of the inbox (`/v1/*`, `/api/v1/*`, `/api/version`, `/readyz`) at once, and answers `503` for every other route until the catalogue is complete. An alert and a phone never wait for the catalogue.
+- The portal opens the port 4181 at once when the file has the block `inbox`. It serves the routes of the Inbox (`/v1/*`, `/api/v1/*`, `/api/version`, `/readyz`) at once, and answers `503` for every other route until the catalogue is complete. An alert and a phone never wait for the catalogue.
 - The startup probe reads `/healthz` of the portal and waits up to 5 minutes. It answers `200` when the catalogue is complete.
 - The readiness probe reads `/readyz` of port 4181. It answers `200` `ready`, or `200` `degraded` with PostgreSQL and no primary. It answers `503` at SIGTERM. The Services then stop to send requests. The phones get the close code 1012 at once and connect to another instance.
 - The liveness probe reads `/healthz` of the portal. It never reads the database.
@@ -107,16 +107,16 @@ A new `config.hcl` gives a new name to the ConfigMap. The pods then roll.
 
 ### Network
 
-The inbox is a feature of the portal. It has one port and one domain.
+The Inbox is a feature of the portal. It has one port and one domain.
 
-- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A sender has no session: it sends an API key, and the inbox checks it. Traefik carries a WebSocket upgrade with path routing, so a second port is not needed.
+- **The IngressRoute `portal-inbox`** sends `/v1/*`, `/api/v1/*` and `/api/version` to the Service `portal` without ForwardAuth. A phone has no session: it proves itself with the Noise handshake inside the WebSocket. A sender has no session: it sends an API key, and the Inbox checks it. Traefik carries a WebSocket upgrade with path routing, so a second port is not needed.
 - **The middleware `portal-inbox-retry`** sends a request again (4 attempts, 100 ms apart at first) when a node is lost and the Service still names its pod. Traefik retries only before the first byte of the answer. An upgrade that got `101` is never sent again. The `ServersTransport` `portal-inbox` has a dial timeout of 1 second, so the retry is quick.
 - **Phones** use `inbox.devices.public_address`. Set it to the public base URL of the portal: `https://portal.example.org`. A path prefix is possible (`https://host/prefix`), but the portal has no base path. The proxy must remove the prefix before it sends the request.
 - **Separate exposure** needs no second port. Restrict `/v1/` by source address or by rate with a Traefik middleware on the route `portal-inbox`. Keep the pages on routes with ForwardAuth.
 
-The portal reads the client address from `X-Forwarded-For` for the pages, the producers and the phones. It trusts the header from the networks in `server.trusted_proxies` only. The inbox has no list of its own.
+The portal reads the client address from `X-Forwarded-For` for the pages, the senders and the phones. It trusts the header from the networks in `server.trusted_proxies` only. The Inbox has no list of its own. The portal has no TLS code: Traefik terminates TLS. Use an HTTPS `inbox.devices.public_address`.
 
-The pages of the inbox are under `/auth/settings/inbox` in the portal. ForwardAuth does not protect them. The portal checks the session itself. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
+The page of the Inbox is `/auth/settings/inbox` in the portal. ForwardAuth does not protect it. The portal checks the session itself. The launcher has no tile for the Inbox. The gear of the launcher opens the page.
 
 ### Variant with SQLite
 
@@ -125,4 +125,4 @@ This variant is not in the manifests. Use it only when no PostgreSQL cluster exi
 ## Check the files
 
 - `tools/dev/check-configs.sh` runs `portal check-config` on every configuration in this directory. It uses dummy secrets.
-- `tools/dev/smoke.sh` starts the Compose stack in a temporary directory. It checks the health routes, a producer alert and the metrics. It then deletes the stack.
+- `tools/dev/smoke.sh` starts the Compose stack in a temporary directory. It checks the health routes, an alert that an API key of the file sends, and the metrics. It then deletes the stack.

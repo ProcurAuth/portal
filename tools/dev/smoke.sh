@@ -5,7 +5,7 @@
 # on high ports, checks it, and always deletes the stack and its volumes.
 # Checks:
 #   /healthz, /readyz and /api/version of the portal answer 200
-#   a producer token is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong token is not (401)
+#   an API key of the file is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong key is not (401)
 #   the routes of the phones are on the same port: a plain GET of /v1/session is 400, and an upgrade gives 101
 #   the metrics of the portal show portal_inbox_* series
 #   an account that is not signed in cannot read the admin calls of the inbox (401)
@@ -52,7 +52,7 @@ check "phones: a WebSocket upgrade of /v1/session" 101 "$(code --max-time 2 \
 token=$(cat "$PORTAL_SECRETS_DIR/inbox_api_key")
 key="smoke-$(date +%s)"
 body='{"group":"infra","title":"Smoke test"}'
-check "alert with the producer token" 201 "$(code -X POST "$pages/api/v1/alerts" \
+check "alert with the API key of the file" 201 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
 check "same alert again (idempotent)" 200 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"

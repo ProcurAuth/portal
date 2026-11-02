@@ -5,7 +5,7 @@
 # Run it from the root of the repository: the paths of `extends` and of the volume are relative to the project directory.
 #
 # Both instances share the PostgreSQL database and the secrets. Traefik sends the portal (port 4181: the pages, the
-# API of the producers and the phones) to both. Traefik is the only service that publishes ports. The portal sees the address of the
+# API of the senders and the phones) to both. Traefik is the only service that publishes ports. The portal sees the address of the
 # proxy as the client address, because deploy/compose/config.hcl has no trusted proxy: the limits of each client
 # then count all clients together. Do not use this file as a model for production: see deploy/k3s/.
 name: portal

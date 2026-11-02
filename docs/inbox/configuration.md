@@ -81,7 +81,7 @@ An old name is an unknown name. The program has no alias. `portal check-config` 
 | `limits.max_request_bytes` | `inbox.devices.max_request_bytes` |
 | `storage.path` | `storage.database` of the portal |
 | `telemetry` | None. The metrics are in the Prometheus text of the portal. |
-| Block `producer` | Block `api_key` in the block `inbox`. |
+| The block of the tokens of the earlier version | Block `api_key` in the block `inbox`. |
 | `inbox.devices.trusted_proxies` | `server.trusted_proxies` |
 
 The configuration is not read from the environment, except where the file names a variable with `_env`. The `OTEL_*` variables are never read.

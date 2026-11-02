@@ -6,7 +6,7 @@
 #   session_secret         signing key of the forms (all instances use the same key)
 #   db_password            password of the PostgreSQL user
 #   inbox_server_key       Noise key of the inbox server (portal inbox keygen)
-#   inbox_api_key   bearer token of the producer "local" (portal inbox token)
+#   inbox_api_key   bearer key of the sender "local" (portal inbox token)
 #
 # An existing file is never replaced: delete it to make it again.
 # A new inbox_server_key makes every enrolled phone and every enrollment code invalid: back it up.

@@ -2,7 +2,7 @@
 # (namespace edge). forward-auth calls http://portal.edge.svc.cluster.local:4181/auth/verify and copies the header
 # X-Identity-Token to the request.
 #
-# The inbox is a feature of the portal, with one port and one domain. The producers, the webhooks and the phones use
+# The inbox is a feature of the portal, with one port and one domain. The senders, the webhooks and the phones use
 # the same domain as the pages: the route portal-inbox sends /v1/ (the phones, WebSocket), /api/v1/ and /api/version
 # to the portal without ForwardAuth, because they have no session and prove themselves. The admin pages of the inbox
 # are pages of the portal under /auth/settings/inbox.
@@ -51,8 +51,8 @@ spec:
     idleConnTimeout: 30s
 ---
 # The routes of the inbox: the phones (/v1/enroll and /v1/session, WebSocket upgrades over HTTP/1.1; Traefik carries them
-# with path routing), the API of the producers and the webhooks (Alertmanager, Grafana, scripts), and the version. No
-# ForwardAuth: a phone proves itself with the Noise handshake, a producer sends a token or a key, and the inbox checks
+# with path routing), the API of the senders and the webhooks (Alertmanager, Grafana, scripts), and the version. No
+# ForwardAuth: a phone proves itself with the Noise handshake, a sender sends an API key, and the inbox checks
 # it. No secure-headers middleware: the routes answer with their own headers, and an added header must not touch the
 # upgrade. Without a prefix, the portal serves these paths at the root. A route under a prefix needs a StripPrefix
 # middleware: the portal has no base path.

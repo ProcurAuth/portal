@@ -36,7 +36,7 @@ roleRef:
   kind: ClusterRole
   name: portal-readonly
 ---
-# The portal: the pages, ForwardAuth (/auth/verify) and the inbox: the API for the producers and the webhooks
+# The portal: the pages, ForwardAuth (/auth/verify) and the inbox: the API for the senders and the webhooks
 # (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no ForwardAuth.
 # Traefik routes to this Service.
 apiVersion: v1
@@ -130,7 +130,7 @@ spec:
         - {name: http, containerPort: 4181}
         - {name: pdp, containerPort: 4182}
         - {name: peers, containerPort: 8082}
-        # The inbox opens the port of the portal at once, for the phones and the API of the producers (the other routes
+        # The inbox opens the port of the portal at once, for the phones and the API of the senders (the other routes
         # of the portal answer 503). The portal serves its pages when the directory is loaded, the counter rows
         # exist, the catalogue is complete and the first reads of the action documents ended. /healthz answers 503 until
         # then. This probe waits up to 5 minutes for it. It MUST wait longer than the sum of these times. The other probes

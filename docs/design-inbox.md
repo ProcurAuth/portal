@@ -78,7 +78,7 @@ The owner first let the phones keep a second port. The owner then decided, and t
 - **Stop.** The Inbox sends the close code 1012 to each phone at once. The portal serves 5 more seconds and waits at most 10 seconds for the connections. The Inbox waits for the sessions.
 - **Readiness.** `GET /readyz` gives `200` `ready`, `200` `degraded` with PostgreSQL and no primary, and `503` `draining` after the signal. Without the block `inbox`, the portal answers `200`. `portal healthcheck` reads `/healthz` and the Inbox `/readyz` of the portal port. The startup probe of K3s reads `/healthz`, and its readiness probe reads `/readyz` of the portal port.
 - **Proxy rule.** The proxy must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. The portal owns the prefix `/v1/`. A service that the proxy publishes on the same host must not use a path that starts with `/v1/`.
-- **Behaviours that are lost.** Four items are lost. They are the separate phone port, the relay with its quick retry, the host port of the relay, and the independent list of trusted proxies of the Inbox. The phone port had its own exposure. The phones and the pages now share the host and the TLS certificate. The operator restricts the phones with a rule on the routes of the proxy.
+- **Behaviours that are lost.** Four items are lost. They are the separate phone port, the relay with its quick retry and its host port, and the own list of trusted proxies of the Inbox. The phone port had its own exposure. The phones and the pages now share the host and the TLS certificate. The operator restricts the phones with a rule on the routes of the proxy.
 
 ### 4.2 No knowledge of TLS
 
