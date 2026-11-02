@@ -610,7 +610,7 @@ fn accounts_table(view: &UsersView) -> String {
     if view.keys {
         out.push_str(r#"<col class="w48">"#);
     }
-    out.push_str(r#"<col class="w132"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Services</th>"#);
+    out.push_str(r#"<col class="w152"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Services</th>"#);
     if features {
         out.push_str(r#"<th scope="col">Features</th>"#);
     }
@@ -741,7 +741,7 @@ fn signins_zone(view: &UsersView) -> String {
             }
         );
     } else {
-        body.push_str(r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w132"><col class="w120"><col class="w120"><col></colgroup><thead class="visually-hidden"><tr><th scope="col">Result</th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#);
+        body.push_str(r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w152"><col class="w120"><col class="w120"><col></colgroup><thead class="visually-hidden"><tr><th scope="col">Result</th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#);
         for row in &data.rows {
             login_row(&mut body, row);
         }
@@ -796,7 +796,7 @@ fn changes_zone(view: &UsersView) -> String {
     if view.recent_events.is_empty() {
         body.push_str(r#"<p class="empty">No change recorded yet.</p>"#);
     } else {
-        body.push_str(r#"<table class="grid grid--changes"><colgroup><col class="w132"><col><col class="w180"></colgroup><thead class="visually-hidden"><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By, address</th></tr></thead><tbody>"#);
+        body.push_str(r#"<table class="grid grid--changes"><colgroup><col class="w152"><col><col class="w180"></colgroup><thead class="visually-hidden"><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By, address</th></tr></thead><tbody>"#);
         for event in view.recent_events {
             let account = match &event.login {
                 Some(login) if !login.is_empty() => format!(
@@ -1065,14 +1065,14 @@ fn activity_body(view: &UserView) -> String {
     if activity.recent.is_empty() {
         out.push_str(r#"<p class="empty">No session recorded.</p>"#);
     } else {
-        out.push_str(r#"<table class="grid grid--popup"><colgroup><col class="w132"><col class="w120"><col><col class="w96"><col class="w108"></colgroup><thead><tr><th scope="col">Started</th><th scope="col">Address</th><th scope="col">Browser</th><th scope="col">Duration</th><th scope="col">End</th></tr></thead><tbody>"#);
+        out.push_str(r#"<table class="grid grid--popup"><colgroup><col class="w152"><col class="w120"><col><col class="w96"><col class="w108"></colgroup><thead><tr><th scope="col">Started</th><th scope="col">Address</th><th scope="col">Browser</th><th scope="col">Duration</th><th scope="col">End</th></tr></thead><tbody>"#);
         for session in &activity.recent {
             session_row(&mut out, session);
         }
         out.push_str("</tbody></table>");
     }
     if !activity.services.is_empty() {
-        out.push_str(r#"<table class="grid grid--popup"><colgroup><col><col class="w96"><col class="w132"></colgroup><thead><tr><th scope="col">Service used</th><th scope="col" class="r">Requests</th><th scope="col" class="r">Last use</th></tr></thead><tbody>"#);
+        out.push_str(r#"<table class="grid grid--popup"><colgroup><col><col class="w96"><col class="w152"></colgroup><thead><tr><th scope="col">Service used</th><th scope="col" class="r">Requests</th><th scope="col" class="r">Last use</th></tr></thead><tbody>"#);
         for used in &activity.services {
             service_use_row(&mut out, view.catalog, used);
         }
