@@ -22,6 +22,7 @@ use deadpool_postgres::{
     Manager, ManagerConfig, Object, Pool, PoolError, RecyclingMethod, Runtime,
 };
 use futures_util::StreamExt;
+use inbox_core::proto::Kind;
 use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, NoTls};
 
@@ -144,7 +145,16 @@ CREATE TABLE enrollment_codes (
 CREATE INDEX enrollment_codes_login ON enrollment_codes(login, expires_at_ms);
 CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at_ms);
 "#,
+    r#"
+-- Each message has a kind. Protocol 4 knows one kind: `alert`.
+ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
+"#,
 ];
+
+/// The kind that a stored text names. An unknown text is a storage error.
+fn kind_of(text: String) -> Result<Kind, DbError> {
+    Kind::parse(&text).ok_or_else(|| DbError::Pg(format!("unknown message kind {text:?}")))
+}
 
 /// The database clock, in milliseconds: liveness is judged by one clock, not by the instances' own.
 const DB_NOW: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
@@ -648,9 +658,17 @@ impl PgStore {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         tx.execute(
-            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (source, idempotency_key) DO NOTHING",
-            &[&e.id, &e.group, &e.title, &e.source, &e.key, &e.created_at],
+            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (source, idempotency_key) DO NOTHING",
+            &[
+                &e.id,
+                &e.group,
+                &e.title,
+                &e.source,
+                &e.key,
+                &e.created_at,
+                &e.kind.as_str(),
+            ],
         )
         .await
         .map_err(db_error)?;
@@ -1308,8 +1326,8 @@ impl PgStore {
         let id = random_id();
         let created = tx
             .query_opt(
-                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING id",
                 &[
                     &id,
@@ -1318,6 +1336,7 @@ impl PgStore {
                     &alert.source,
                     &alert.idempotency_key,
                     &now_ms(),
+                    &alert.kind.as_str(),
                 ],
             )
             .await
@@ -1389,7 +1408,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT d.seq, a.id, a.group_id, a.title, a.created_at
+                "SELECT d.seq, a.id, a.group_id, a.title, a.created_at, a.kind
                  FROM deliveries d JOIN alerts a ON a.id = d.alert_id
                  WHERE d.device_id = $1 AND d.received_at IS NULL AND a.created_at >= $3
                  ORDER BY d.seq LIMIT $2",
@@ -1397,16 +1416,18 @@ impl PgStore {
             )
             .await
             .map_err(db_error)?;
-        Ok(rows
-            .iter()
-            .map(|r| PendingDelivery {
-                seq: r.get(0),
-                alert_id: r.get(1),
-                group: r.get(2),
-                title: r.get(3),
-                created_at: r.get(4),
+        rows.iter()
+            .map(|r| {
+                Ok(PendingDelivery {
+                    seq: r.get(0),
+                    alert_id: r.get(1),
+                    group: r.get(2),
+                    title: r.get(3),
+                    created_at: r.get(4),
+                    kind: kind_of(r.get(5))?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     pub async fn mark_sent(&self, seqs: &[i64]) -> Result<(), DbError> {
@@ -1518,9 +1539,10 @@ impl PgStore {
         Ok((r.get(0), r.get(1)))
     }
 
-    fn summary(r: &tokio_postgres::Row) -> AlertSummary {
-        AlertSummary {
+    fn summary(r: &tokio_postgres::Row) -> Result<AlertSummary, DbError> {
+        Ok(AlertSummary {
             id: r.get(0),
+            kind: kind_of(r.get(7))?,
             group: r.get(1),
             title: r.get(2),
             source: r.get(3),
@@ -1529,7 +1551,7 @@ impl PgStore {
             received: r.get(6),
             expired: 0,
             missing: Vec::new(),
-        }
+        })
     }
 
     pub async fn recent_alerts(
@@ -1541,7 +1563,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at)
+                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id
                  WHERE a.created_at >= $2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
                 &[&i64::from(limit), &since_ms],
@@ -1550,9 +1572,8 @@ impl PgStore {
             .map_err(db_error)?;
         let mut alerts: Vec<AlertSummary> = rows
             .iter()
-            .map(Self::summary)
-            .map(|a| super::db::with_expiry(a, cutoff))
-            .collect();
+            .map(|r| Self::summary(r).map(|a| super::db::with_expiry(a, cutoff)))
+            .collect::<Result<_, DbError>>()?;
         let ids: Vec<&str> = alerts.iter().map(|a| a.id.as_str()).collect();
         let missing = c
             .query(
@@ -1580,7 +1601,7 @@ impl PgStore {
         let c = self.client().await?;
         let Some(row) = c
             .query_opt(
-                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at)
+                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id WHERE a.id = $1 GROUP BY a.id",
                 &[&id],
             )
@@ -1589,7 +1610,7 @@ impl PgStore {
         else {
             return Ok(None);
         };
-        let mut summary = super::db::with_expiry(Self::summary(&row), cutoff);
+        let mut summary = super::db::with_expiry(Self::summary(&row)?, cutoff);
         let rows = c
             .query(
                 "SELECT d.device_id, v.name, d.attempts, d.first_sent_at, d.last_sent_at,
@@ -1755,7 +1776,7 @@ pub struct Imported {
 }
 
 impl PgStore {
-    /// Copies a SQLite database (a Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
+    /// Copies a SQLite database (an Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
     /// transaction: devices, subscriptions, alerts, deliveries, the connection log and the enrollment codes. Refuses a database
     /// that is not empty.
     pub async fn import_sqlite(&self, path: &Path) -> Result<Imported, String> {
@@ -1763,7 +1784,7 @@ impl PgStore {
         let lite = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
         // A file of the portal keeps the version of the inbox in its own table. A file of the old
-        // standalone inbox keeps it in `PRAGMA user_version`.
+        // standalone alert server keeps it in `PRAGMA user_version`.
         let own_table: i64 = lite
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'inbox_schema_version'",
@@ -1858,7 +1879,9 @@ impl PgStore {
         }
 
         let mut stmt = lite
-            .prepare("SELECT id, group_id, title, source, idempotency_key, created_at FROM alerts")
+            .prepare(
+                "SELECT id, group_id, title, source, idempotency_key, created_at, kind FROM alerts",
+            )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
@@ -1870,9 +1893,12 @@ impl PgStore {
                 r.get(4).unwrap(),
                 r.get(5).unwrap(),
             );
+            let kind: String = r.get(6).unwrap();
+            let kind = Kind::parse(&kind)
+                .ok_or_else(|| format!("alert {id} has the unknown message kind {kind:?}"))?;
             tx.execute(
-                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-                &[&id, &group, &title, &source, &key, &at],
+                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[&id, &group, &title, &source, &key, &at, &kind.as_str()],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -2296,6 +2322,16 @@ mod tests {
                 super::super::db::insert_code(c, &[1; 32], "alice", now, 10 * MINUTE_MS, 5)?;
                 super::super::db::insert_code(c, &[2; 32], "alice", now, 10 * MINUTE_MS, 5)?;
                 super::super::db::redeem_code(c, &[1; 32], now, 10, "phone", &[7; 32], "ip")?;
+                super::super::db::insert_alert(
+                    c,
+                    &NewAlert {
+                        kind: Kind::Alert,
+                        group: "infra".into(),
+                        title: "disk full".into(),
+                        source: "admin".into(),
+                        idempotency_key: "k".into(),
+                    },
+                )?;
                 Ok(())
             })
             .await
@@ -2306,6 +2342,10 @@ mod tests {
         let store = db.store().await;
         let imported = store.import_sqlite(&path).await.unwrap();
         assert_eq!((imported.devices, imported.enrollment_codes), (1, 2));
+        // The kind of the message comes with the alert.
+        let alerts = store.recent_alerts(10, 0, 0).await.unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, Kind::Alert);
         // The used code stays used. The other code still works.
         assert_eq!(
             redeem(&store, [1; 32], 1).await,

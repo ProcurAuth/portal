@@ -9,8 +9,8 @@
 
 mod accounts;
 mod hcl;
-pub mod keys;
 mod inbox;
+pub mod keys;
 mod resolve;
 
 use std::collections::BTreeMap;
@@ -24,7 +24,7 @@ use crate::grants::{Grant, Mode};
 #[allow(unused_imports)] // some of these types serve only the module `inbox`
 pub use inbox::{
     ClusterConfig, DevicesConfig, GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig,
-    PortalAlertsConfig, ProducerConfig, ReplicaConfig, MIN_TOKEN_LEN,
+    ProducerConfig, ReplicaConfig, WatchConfig, MIN_TOKEN_LEN,
 };
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};
@@ -208,6 +208,8 @@ pub struct DiscoveryConfig {
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub listen_address: SocketAddr,
+    /// The name of this instance. The phones show it as the name of the server.
+    pub name: String,
     pub workers: usize,
     pub max_body_bytes: usize,
     pub max_connections: usize,
@@ -454,6 +456,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
                 .text("server", "listen_address")?
                 .parse::<SocketAddr>()
                 .map_err(|e| format!("internal error: server.listen_address: {e}"))?,
+            name: r.text("server", "name")?,
             workers: r.count("server", "workers")?,
             max_body_bytes: r.size("server", "max_body_bytes")?,
             max_connections: r.count("server", "max_connections")?,

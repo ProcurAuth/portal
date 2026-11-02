@@ -93,6 +93,8 @@ pub struct HttpLimits {
 
 pub struct App {
     pub config: InboxConfig,
+    /// The name of the instance (`server.name`). The phones show it as the name of the server.
+    pub server_name: String,
     pub secrets: Secrets,
     pub db: Store,
     pub replica: Replica,

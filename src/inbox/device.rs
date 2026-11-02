@@ -207,7 +207,7 @@ async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
     let accept = EnrollAccept {
         protocol: PROTOCOL_VERSION,
         device_id: device_id.clone(),
-        server_name: app.config.name.clone(),
+        server_name: app.server_name.clone(),
         user_name: login.clone(),
     };
     let reply = match responder.finish(&accept) {
@@ -324,7 +324,7 @@ async fn run_session(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
 
     let accept = SessionAccept {
         protocol: PROTOCOL_VERSION,
-        server_name: app.config.name.clone(),
+        server_name: app.server_name.clone(),
     };
     let accept = serde_json::to_vec(&accept).expect("serializes");
     let Ok((mut session, m2)) = responder.finish(&accept) else {
@@ -372,8 +372,8 @@ async fn established(
     let wake = Arc::new(Notify::new());
     let last_seen = Arc::new(AtomicI64::new(now_ms()));
     let resub = Arc::new(AtomicBool::new(false));
-    let app_version = inbox_core::enroll::validate_device_name(&app_version)
-        .unwrap_or_else(|_| "unknown".into());
+    let app_version =
+        inbox_core::enroll::validate_device_name(&app_version).unwrap_or_else(|_| "unknown".into());
     let connected_at = now_ms();
     app.hub.register(
         &device_id,
@@ -511,7 +511,7 @@ async fn deliver(
         }
     }
     let welcome = ServerMsg::Welcome {
-        server_name: app.config.name.clone(),
+        server_name: app.server_name.clone(),
         groups,
         subscriptions,
         heartbeat_interval_ms: cfg.heartbeat_interval.as_millis() as u64,
@@ -744,6 +744,7 @@ async fn flush_deliveries(
         }
         let msg = ServerMsg::Alert(AlertMsg {
             alert_id: p.alert_id,
+            kind: p.kind,
             group_name: app.group_name(&p.group),
             group: p.group,
             title: p.title,

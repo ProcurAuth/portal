@@ -5946,8 +5946,8 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
 
 mod inbox_rights_tests {
     use super::*;
-    use crate::keyauth::Cause;
     use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
+    use crate::keyauth::Cause;
     use crate::store::KeyRow;
 
     fn inbox_node(backend: &Backend) -> (Node, std::sync::Arc<dyn Authorizer>) {

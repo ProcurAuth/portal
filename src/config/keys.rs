@@ -229,7 +229,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ("logging", "The log."),
     (
         "inbox",
-        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.portal_alerts` are optional. The blocks `group \"<id>\"` and `producer \"<name>\"` are inside this block.",
+        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group \"<id>\"` and `producer \"<name>\"` are inside this block.",
     ),
     (
         "inbox.devices",
@@ -252,7 +252,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "This block is optional and is inside the block `inbox`. If it is present, the instances copy to each other the alerts that they accept while PostgreSQL has no writable primary. The block needs the block `postgres`.",
     ),
     (
-        "inbox.portal_alerts",
+        "inbox.watch",
         "This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group: when a service of the launcher is unhealthy, and when sign-ins fail in a burst. Without this block, the portal sends no alert about itself.",
     ),
 ];
@@ -270,6 +270,17 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Required,
         when: When::Always,
         doc: "The address and the port that the server listens on.",
+    },
+    Key {
+        block: "server",
+        name: "name",
+        kind: Kind::Text {
+            expected: "1 to 64 bytes, not blank, no control character",
+            check: check_server_name,
+        },
+        presence: Presence::Default("Portal"),
+        when: When::Always,
+        doc: "The name of this instance. The phones show it as the name of the server, and the welcome message uses it.",
     },
     Key {
         block: "server",
@@ -935,17 +946,6 @@ pub static KEYS: &[Key] = &[
     },
     Key {
         block: "inbox",
-        name: "name",
-        kind: Kind::Text {
-            expected: "1 to 64 bytes, not blank",
-            check: check_inbox_name,
-        },
-        presence: Presence::Default("Inbox"),
-        when: When::Always,
-        doc: "The name that the phones show for this server.",
-    },
-    Key {
-        block: "inbox",
         name: "server_key",
         kind: Kind::Secret { max_bytes: 4096 },
         presence: Presence::Required,
@@ -1158,7 +1158,7 @@ pub static KEYS: &[Key] = &[
         doc: "The names that list the instances, for example a headless Service, with the port of `inbox.cluster.listen`. The inbox asks each address that the names resolve to who it is. It skips its own address. The list has at least one name.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "group",
         kind: Kind::Text {
             expected: "the id of a block `group` of the block `inbox`",
@@ -1169,15 +1169,15 @@ pub static KEYS: &[Key] = &[
         doc: "The group that receives the alerts of the portal. It must be the label of a block `group` of the block `inbox`.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "service_unhealthy",
         kind: Kind::Bool,
         presence: Presence::Default("true"),
         when: When::Always,
-        doc: "`true`: the portal sends an alert when a service of the launcher stays unhealthy for `inbox.portal_alerts.unhealthy_after`. A service is unhealthy when its tile shows `down` or `unhealthy`. A service with no health check is never unhealthy.",
+        doc: "`true`: the portal sends an alert when a service of the launcher stays unhealthy for `inbox.watch.unhealthy_after`. A service is unhealthy when its tile shows `down` or `unhealthy`. A service with no health check is never unhealthy.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "unhealthy_after",
         kind: Kind::Duration { min: secs(10), max: secs(DAY) },
         presence: Presence::Default("2m"),
@@ -1185,15 +1185,15 @@ pub static KEYS: &[Key] = &[
         doc: "How long a service stays unhealthy before the alert. A service that is healthy or starting in this time does not raise the alert.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "sign_in_burst",
         kind: Kind::Bool,
         presence: Presence::Default("true"),
         when: When::Always,
-        doc: "`true`: the portal sends an alert when `inbox.portal_alerts.sign_in_failures` sign-ins are refused in the window `inbox.portal_alerts.sign_in_window`. A wrong password, an unknown login and a sign-in that a limiter blocks count. Each instance counts the refusals that it sees.",
+        doc: "`true`: the portal sends an alert when `inbox.watch.sign_in_failures` sign-ins are refused in the window `inbox.watch.sign_in_window`. A wrong password, an unknown login and a sign-in that a limiter blocks count. Each instance counts the refusals that it sees.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "sign_in_failures",
         kind: Kind::Int { min: 2, max: 10000 },
         presence: Presence::Default("10"),
@@ -1201,15 +1201,15 @@ pub static KEYS: &[Key] = &[
         doc: "The number of refused sign-ins in the window that raises the alert.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "sign_in_window",
         kind: Kind::Duration { min: secs(10), max: secs(DAY) },
         presence: Presence::Default("5m"),
         when: When::Always,
-        doc: "The window of `inbox.portal_alerts.sign_in_failures`. It slides: the portal counts the refusals of the last window.",
+        doc: "The window of `inbox.watch.sign_in_failures`. It slides: the portal counts the refusals of the last window.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "repeat_after",
         kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
         presence: Presence::Default("1h"),
@@ -1217,7 +1217,7 @@ pub static KEYS: &[Key] = &[
         doc: "The shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. The alerts of this time have one shared identity, so two instances send one alert.",
     },
     Key {
-        block: "inbox.portal_alerts",
+        block: "inbox.watch",
         name: "recovered",
         kind: Kind::Bool,
         presence: Presence::Default("true"),
@@ -1408,7 +1408,7 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "storage"),
     ("inbox", "replica"),
     ("inbox", "cluster"),
-    ("inbox", "portal_alerts"),
+    ("inbox", "watch"),
 ];
 
 /// The name of each block with a label at the top of the file, for the closed list of the parser.
@@ -1438,7 +1438,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox" | "inbox.devices" | "inbox.enrollment" | "inbox.storage" => Some("inbox"),
         "inbox.replica" => Some("inbox.replica"),
         "inbox.cluster" => Some("inbox.cluster"),
-        "inbox.portal_alerts" => Some("inbox.portal_alerts"),
+        "inbox.watch" => Some("inbox.watch"),
         _ => None,
     }
 }
@@ -1592,7 +1592,7 @@ fn check_public_address(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_inbox_name(value: &str) -> Result<(), String> {
+fn check_server_name(value: &str) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > 64 || value.chars().any(char::is_control) {
         return Err("not 1 to 64 bytes, or blank, or with a control character".into());
     }

@@ -1,13 +1,15 @@
 //! The metrics of the inbox, in the Prometheus text format.
 //!
 //! The portal serves them at its metrics endpoint, after its own metrics. The names are the names
-//! that the inbox has always exported: `inbox_<noun>_<unit|total>`. A metric never depends on an
+//! that the inbox has always exported: `portal_inbox_<noun>_<unit|total>`. A metric never depends on an
 //! export: if nothing scrapes the endpoint, the inbox keeps delivering alerts.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::sync::Mutex;
+
+use inbox_core::proto::Kind;
 
 use super::replica::Stats as ReplicaStats;
 use super::util::now_ms;
@@ -39,6 +41,28 @@ impl Labeled {
     }
 }
 
+/// A counter with the labels `source` and `kind`.
+#[derive(Default)]
+struct Kinded(Mutex<BTreeMap<(&'static str, &'static str), u64>>);
+
+impl Kinded {
+    fn add(&self, source: &'static str, kind: Kind) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry((source, kind.as_str()))
+            .or_insert(0) += 1;
+    }
+
+    fn render(&self, out: &mut String, name: &str, help: &str) {
+        header(out, name, help, "counter");
+        for ((source, kind), count) in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            let _ = writeln!(out, "{name}{{source=\"{source}\",kind=\"{kind}\"}} {count}");
+        }
+    }
+}
+
 #[derive(Default)]
 struct Histogram {
     /// The count of the observations at or below each bound, not cumulative.
@@ -50,9 +74,9 @@ struct Histogram {
 /// The metrics of the inbox. Each method is one event.
 #[derive(Default)]
 pub struct InboxMetrics {
-    alerts_accepted: Labeled,
-    alerts_duplicate: Labeled,
-    alerts_spooled: Labeled,
+    alerts_accepted: Kinded,
+    alerts_duplicate: Kinded,
+    alerts_spooled: Kinded,
     auth_failures: Labeled,
     session_closes: Labeled,
     deliveries_created: AtomicU64,
@@ -76,16 +100,16 @@ pub struct InboxMetrics {
 }
 
 impl InboxMetrics {
-    pub fn alert_accepted(&self, source: &'static str) {
-        self.alerts_accepted.add(source, 1);
+    pub fn alert_accepted(&self, source: &'static str, kind: Kind) {
+        self.alerts_accepted.add(source, kind);
     }
 
-    pub fn alert_duplicate(&self, source: &'static str) {
-        self.alerts_duplicate.add(source, 1);
+    pub fn alert_duplicate(&self, source: &'static str, kind: Kind) {
+        self.alerts_duplicate.add(source, kind);
     }
 
-    pub fn alert_spooled(&self, source: &'static str) {
-        self.alerts_spooled.add(source, 1);
+    pub fn alert_spooled(&self, source: &'static str, kind: Kind) {
+        self.alerts_spooled.add(source, kind);
     }
 
     pub fn auth_failure(&self, kind: &'static str) {
@@ -144,117 +168,114 @@ impl InboxMetrics {
         let mut out = String::new();
         self.alerts_accepted.render(
             &mut out,
-            "inbox_alerts_accepted_total",
-            "Alerts durably accepted, by source kind",
-            "source",
+            "portal_inbox_alerts_accepted_total",
+            "Messages durably accepted, by source kind and message kind",
         );
         self.alerts_duplicate.render(
             &mut out,
-            "inbox_alerts_duplicate_total",
-            "Alert submissions deduplicated by idempotency key",
-            "source",
+            "portal_inbox_alerts_duplicate_total",
+            "Message submissions deduplicated by idempotency key, by source kind and message kind",
         );
         counter(
             &mut out,
-            "inbox_deliveries_created_total",
+            "portal_inbox_deliveries_created_total",
             "Per-device delivery rows created by fan-out",
             self.deliveries_created.load(Relaxed),
         );
         counter(
             &mut out,
-            "inbox_deliveries_sent_total",
+            "portal_inbox_deliveries_sent_total",
             "Alert frames sent to devices, including retransmissions",
             self.deliveries_sent.load(Relaxed),
         );
         counter(
             &mut out,
-            "inbox_delivery_receipts_total",
+            "portal_inbox_delivery_receipts_total",
             "Delivery receipts sent by devices",
             self.receipts.load(Relaxed),
         );
         self.render_latency(&mut out);
         self.auth_failures.render(
             &mut out,
-            "inbox_auth_failures_total",
+            "portal_inbox_auth_failures_total",
             "Failed authentications, by kind",
             "kind",
         );
         counter(
             &mut out,
-            "inbox_enrollments_total",
+            "portal_inbox_enrollments_total",
             "Devices enrolled",
             self.enrollments.load(Relaxed),
         );
         gauge(
             &mut out,
-            "inbox_device_sessions",
+            "portal_inbox_device_sessions",
             "Established device sessions",
             self.sessions.load(Relaxed),
         );
         self.session_closes.render(
             &mut out,
-            "inbox_device_session_closes_total",
+            "portal_inbox_device_session_closes_total",
             "Device sessions closed, by reason",
             "reason",
         );
         counter(
             &mut out,
-            "inbox_replica_sync_failures_total",
+            "portal_inbox_replica_sync_failures_total",
             "Writes that could not be copied to the replica before the answer",
             self.replica_sync_failures.load(Relaxed),
         );
         self.alerts_spooled.render(
             &mut out,
-            "inbox_alerts_spooled_total",
-            "Alerts accepted without the database, by source kind",
-            "source",
+            "portal_inbox_alerts_spooled_total",
+            "Messages accepted without the database, by source kind and message kind",
         );
         counter(
             &mut out,
-            "inbox_spool_rejected_total",
+            "portal_inbox_spool_rejected_total",
             "Alerts refused because the spool was full",
             self.spool_rejected.load(Relaxed),
         );
         gauge(
             &mut out,
-            "inbox_deliveries_pending",
+            "portal_inbox_deliveries_pending",
             "Deliveries to non-revoked devices not yet received",
             self.pending_deliveries.load(Relaxed),
         );
         gauge_f64(
             &mut out,
-            "inbox_oldest_pending_delivery_seconds",
+            "portal_inbox_oldest_pending_delivery_seconds",
             "Age of the oldest alert still waiting for a device",
             self.oldest_pending_ms.load(Relaxed) as f64 / 1000.0,
         );
         gauge(
             &mut out,
-            "inbox_devices_unreachable",
+            "portal_inbox_devices_unreachable",
             "Subscribed devices not seen within inbox.devices.unreachable_after",
             self.unreachable_devices.load(Relaxed),
         );
         gauge(
             &mut out,
-            "inbox_storage_degraded",
+            "portal_inbox_storage_degraded",
             "1 while the database has no usable primary and alerts are held in memory",
             self.storage_degraded.load(Relaxed),
         );
         gauge(
             &mut out,
-            "inbox_spool_alerts",
+            "portal_inbox_spool_alerts",
             "Alerts accepted without the database and not yet written to it",
             self.spool_alerts.load(Relaxed),
         );
         gauge(
             &mut out,
-            "inbox_devices_enrolled",
+            "portal_inbox_devices_enrolled",
             "Non-revoked enrolled devices",
             self.enrolled_devices.load(Relaxed),
         );
         if let Some(stats) = replica {
             gauge(
                 &mut out,
-                "inbox_replica_epoch",
+                "portal_inbox_replica_epoch",
                 "Epoch of the replica lease owned by this instance",
                 stats.epoch.load(Relaxed) as i64,
             );
@@ -262,20 +283,20 @@ impl InboxMetrics {
             if at > 0 {
                 gauge_f64(
                     &mut out,
-                    "inbox_replica_last_snapshot_age_seconds",
+                    "portal_inbox_replica_last_snapshot_age_seconds",
                     "Age of the newest snapshot in the shared directory",
                     (now_ms() - at) as f64 / 1000.0,
                 );
             }
             counter(
                 &mut out,
-                "inbox_replica_snapshots_total",
+                "portal_inbox_replica_snapshots_total",
                 "Snapshots published to the shared directory",
                 stats.snapshots.load(Relaxed),
             );
             counter(
                 &mut out,
-                "inbox_replica_snapshot_failures_total",
+                "portal_inbox_replica_snapshot_failures_total",
                 "Snapshots that failed",
                 stats.failures.load(Relaxed),
             );
@@ -284,7 +305,7 @@ impl InboxMetrics {
     }
 
     fn render_latency(&self, out: &mut String) {
-        let name = "inbox_delivery_latency_seconds";
+        let name = "portal_inbox_delivery_latency_seconds";
         header(
             out,
             name,
@@ -329,8 +350,8 @@ mod tests {
     #[test]
     fn the_text_has_every_metric_of_the_documentation() {
         let metrics = InboxMetrics::default();
-        metrics.alert_accepted("producer");
-        metrics.alert_accepted("producer");
+        metrics.alert_accepted("producer", Kind::Alert);
+        metrics.alert_accepted("producer", Kind::Alert);
         metrics.auth_failure("device_key");
         metrics.delivery_latency(0.2);
         metrics.delivery_latency(7000.0);
@@ -338,23 +359,23 @@ mod tests {
         metrics.oldest_pending_ms.store(1500, Relaxed);
         let text = metrics.render(None);
         for expected in [
-            "inbox_alerts_accepted_total{source=\"producer\"} 2",
-            "inbox_auth_failures_total{kind=\"device_key\"} 1",
-            "inbox_devices_unreachable 2",
-            "inbox_oldest_pending_delivery_seconds 1.5",
-            "inbox_delivery_latency_seconds_bucket{le=\"0.25\"} 1",
-            "inbox_delivery_latency_seconds_bucket{le=\"+Inf\"} 2",
-            "inbox_delivery_latency_seconds_count 2",
-            "# TYPE inbox_storage_degraded gauge",
-            "# TYPE inbox_spool_alerts gauge",
-            "inbox_deliveries_pending 0",
-            "inbox_device_sessions 0",
+            "portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\"} 2",
+            "portal_inbox_auth_failures_total{kind=\"device_key\"} 1",
+            "portal_inbox_devices_unreachable 2",
+            "portal_inbox_oldest_pending_delivery_seconds 1.5",
+            "portal_inbox_delivery_latency_seconds_bucket{le=\"0.25\"} 1",
+            "portal_inbox_delivery_latency_seconds_bucket{le=\"+Inf\"} 2",
+            "portal_inbox_delivery_latency_seconds_count 2",
+            "# TYPE portal_inbox_storage_degraded gauge",
+            "# TYPE portal_inbox_spool_alerts gauge",
+            "portal_inbox_deliveries_pending 0",
+            "portal_inbox_device_sessions 0",
         ] {
             assert!(text.contains(expected), "{expected}\n{text}");
         }
         assert!(
-            !text.contains("inbox_replica_epoch")
-                && !text.contains("inbox_replica_snapshots_total"),
+            !text.contains("portal_inbox_replica_epoch")
+                && !text.contains("portal_inbox_replica_snapshots_total"),
             "no replica metrics without a replica"
         );
     }
@@ -365,7 +386,10 @@ mod tests {
         let stats = ReplicaStats::default();
         stats.epoch.store(3, Relaxed);
         let text = metrics.render(Some(&stats));
-        assert!(text.contains("inbox_replica_epoch 3"), "{text}");
-        assert!(text.contains("inbox_replica_snapshots_total 0"), "{text}");
+        assert!(text.contains("portal_inbox_replica_epoch 3"), "{text}");
+        assert!(
+            text.contains("portal_inbox_replica_snapshots_total 0"),
+            "{text}"
+        );
     }
 }

@@ -133,6 +133,8 @@ pub struct Init {
     replica: Replica,
     replica_stats: Option<Arc<replica::Stats>>,
     http: HttpLimits,
+    /// The name of the instance (`server.name`). The phones show it as the name of the server.
+    server_name: String,
 }
 
 enum StoreInit {
@@ -211,6 +213,7 @@ impl Booted {
             replica: replica_handle,
             replica_stats,
             http,
+            server_name: config.server.name.clone(),
         };
         Ok((
             init,
@@ -299,7 +302,7 @@ impl Slot {
 
     /// Sends an alert that the portal makes about itself (source `portal`). The result is `true`
     /// when the inbox already had the key. `Err` tells why the inbox did not accept the alert.
-    pub async fn send_portal_alert(
+    pub async fn send_watch_alert(
         &self,
         group: &str,
         title: String,
@@ -332,6 +335,7 @@ impl Slot {
             replica,
             replica_stats,
             http,
+            server_name,
         } = init;
         let db = match store {
             StoreInit::Sqlite(db) => Store::Sqlite(db),
@@ -404,6 +408,7 @@ impl Slot {
             sockets: Default::default(),
             session_budget,
             authorizer: std::sync::OnceLock::new(),
+            server_name,
             config,
         });
         tasks::spawn_background(Arc::clone(&app));

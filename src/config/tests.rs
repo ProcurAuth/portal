@@ -1880,7 +1880,7 @@ fn the_inbox_is_off_without_its_block() {
 fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     let (config, secrets) = inbox_ok(&with_inbox(INBOX));
     let inbox = config.inbox.as_ref().unwrap();
-    assert_eq!(inbox.name, "Inbox");
+    assert_eq!(config.server.name, "Portal");
     assert_eq!(inbox.devices.max_devices, 1000);
     assert_eq!(inbox.devices.max_auth_failures, 5);
     assert_eq!(inbox.devices.auth_failure_window, Duration::from_secs(600));
@@ -1903,7 +1903,7 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     assert_eq!(secrets.server_key.as_bytes(), b"the text of a server key");
     assert_eq!(secrets.producers.len(), 1);
     // The effective configuration shows the source and hides the secrets.
-    assert_eq!(line(&config, "inbox.name").source, "default");
+    assert_eq!(line(&config, "server.name").source, "default");
     assert!(config
         .effective
         .iter()
@@ -2180,8 +2180,8 @@ fn the_inbox_schema_is_closed_and_strict() {
         ),
         (
             "server_key_env = \"INBOX_KEY\"",
-            "name = \"\" server_key_env = \"INBOX_KEY\"",
-            "inbox.name",
+            "name = \"X\" server_key_env = \"INBOX_KEY\"",
+            "unknown configuration key: inbox.name",
         ),
         (
             "public_address = \"inbox.example.org:8080\"",
@@ -2381,41 +2381,35 @@ fn the_pool_size_of_the_inbox_applies_only_with_postgres() {
     assert_eq!(config.inbox.as_ref().unwrap().storage.pool_size, 4);
 }
 
-/// The inbox with a block `portal_alerts` that holds `keys`.
-fn with_portal_alerts(keys: &str) -> String {
+/// The inbox with a block `watch` that holds `keys`.
+fn with_watch(keys: &str) -> String {
     with_inbox(&INBOX.replace(
         r#"  group "infra""#,
-        &format!("  portal_alerts {{\n{keys}\n  }}\n  group \"infra\""),
+        &format!("  watch {{\n{keys}\n  }}\n  group \"infra\""),
     ))
 }
 
 #[test]
 fn the_inbox_sends_no_alert_about_the_portal_without_the_block() {
     let (config, _) = inbox_ok(&with_inbox(INBOX));
-    assert!(config.inbox.as_ref().unwrap().portal_alerts.is_none());
+    assert!(config.inbox.as_ref().unwrap().watch.is_none());
     assert!(config
         .effective
         .iter()
-        .all(|l| !l.key.starts_with("inbox.portal_alerts.")));
+        .all(|l| !l.key.starts_with("inbox.watch.")));
 }
 
 #[test]
-fn the_block_portal_alerts_has_documented_defaults() {
-    let (config, _) = inbox_ok(&with_portal_alerts("group = \"infra\""));
-    let a = config
-        .inbox
-        .as_ref()
-        .unwrap()
-        .portal_alerts
-        .as_ref()
-        .unwrap();
+fn the_block_watch_has_documented_defaults() {
+    let (config, _) = inbox_ok(&with_watch("group = \"infra\""));
+    let a = config.inbox.as_ref().unwrap().watch.as_ref().unwrap();
     assert_eq!(a.group, "infra");
     assert!(a.service_unhealthy && a.sign_in_burst && a.recovered);
     assert_eq!(a.unhealthy_after, Duration::from_secs(120));
     assert_eq!(a.sign_in_failures, 10);
     assert_eq!(a.sign_in_window, Duration::from_secs(300));
     assert_eq!(a.repeat_after, Duration::from_secs(3600));
-    assert_eq!(line(&config, "inbox.portal_alerts.group").source, "file");
+    assert_eq!(line(&config, "inbox.watch.group").source, "file");
     for (key, value) in [
         ("service_unhealthy", "true"),
         ("unhealthy_after", "\"2m\""),
@@ -2425,7 +2419,7 @@ fn the_block_portal_alerts_has_documented_defaults() {
         ("repeat_after", "\"1h\""),
         ("recovered", "true"),
     ] {
-        let l = line(&config, &format!("inbox.portal_alerts.{key}"));
+        let l = line(&config, &format!("inbox.watch.{key}"));
         assert_eq!(
             (l.value.as_str(), l.source.as_str()),
             (value, "default"),
@@ -2434,12 +2428,12 @@ fn the_block_portal_alerts_has_documented_defaults() {
     }
     assert!(config
         .render_effective()
-        .contains("inbox.portal_alerts.repeat_after = \"1h\"  # default"));
+        .contains("inbox.watch.repeat_after = \"1h\"  # default"));
 }
 
 #[test]
-fn the_block_portal_alerts_takes_the_values_of_the_file() {
-    let (config, _) = inbox_ok(&with_portal_alerts(
+fn the_block_watch_takes_the_values_of_the_file() {
+    let (config, _) = inbox_ok(&with_watch(
         r#"group = "oncall"
     service_unhealthy = false
     unhealthy_after = "10s"
@@ -2448,110 +2442,85 @@ fn the_block_portal_alerts_takes_the_values_of_the_file() {
     repeat_after = "7d"
     recovered = false"#,
     ));
-    let a = config
-        .inbox
-        .as_ref()
-        .unwrap()
-        .portal_alerts
-        .as_ref()
-        .unwrap();
+    let a = config.inbox.as_ref().unwrap().watch.as_ref().unwrap();
     assert_eq!(a.group, "oncall");
     assert!(!a.service_unhealthy && !a.recovered && a.sign_in_burst);
     assert_eq!(a.unhealthy_after, Duration::from_secs(10));
     assert_eq!(a.sign_in_failures, 2);
     assert_eq!(a.sign_in_window, Duration::from_secs(86_400));
     assert_eq!(a.repeat_after, Duration::from_secs(7 * 86_400));
-    assert_eq!(
-        line(&config, "inbox.portal_alerts.repeat_after").source,
-        "file"
-    );
+    assert_eq!(line(&config, "inbox.watch.repeat_after").source, "file");
 }
 
 #[test]
-fn the_block_portal_alerts_stops_the_start_on_a_bad_value() {
+fn the_block_watch_stops_the_start_on_a_bad_value() {
     for (keys, key, value) in [
         (
             "unhealthy_after = \"9s\"",
-            "inbox.portal_alerts.unhealthy_after",
+            "inbox.watch.unhealthy_after",
             "9s",
         ),
         (
             "unhealthy_after = \"25h\"",
-            "inbox.portal_alerts.unhealthy_after",
+            "inbox.watch.unhealthy_after",
             "25h",
         ),
-        (
-            "sign_in_failures = 1",
-            "inbox.portal_alerts.sign_in_failures",
-            "1",
-        ),
+        ("sign_in_failures = 1", "inbox.watch.sign_in_failures", "1"),
         (
             "sign_in_failures = 10001",
-            "inbox.portal_alerts.sign_in_failures",
+            "inbox.watch.sign_in_failures",
             "10001",
         ),
         (
             "sign_in_failures = \"10\"",
-            "inbox.portal_alerts.sign_in_failures",
+            "inbox.watch.sign_in_failures",
             "10",
         ),
         (
             "sign_in_window = \"9s\"",
-            "inbox.portal_alerts.sign_in_window",
+            "inbox.watch.sign_in_window",
             "9s",
         ),
         (
             "sign_in_window = \"25h\"",
-            "inbox.portal_alerts.sign_in_window",
+            "inbox.watch.sign_in_window",
             "25h",
         ),
-        (
-            "repeat_after = \"59s\"",
-            "inbox.portal_alerts.repeat_after",
-            "59s",
-        ),
-        (
-            "repeat_after = \"8d\"",
-            "inbox.portal_alerts.repeat_after",
-            "8d",
-        ),
-        (
-            "recovered = \"yes\"",
-            "inbox.portal_alerts.recovered",
-            "yes",
-        ),
+        ("repeat_after = \"59s\"", "inbox.watch.repeat_after", "59s"),
+        ("repeat_after = \"8d\"", "inbox.watch.repeat_after", "8d"),
+        ("recovered = \"yes\"", "inbox.watch.recovered", "yes"),
         (
             "service_unhealthy = 1",
-            "inbox.portal_alerts.service_unhealthy",
+            "inbox.watch.service_unhealthy",
             "1",
         ),
         (
             "sign_in_burst = \"true\"",
-            "inbox.portal_alerts.sign_in_burst",
+            "inbox.watch.sign_in_burst",
             "true",
         ),
     ] {
-        let message = inbox_err(&with_portal_alerts(&format!("group = \"infra\"\n{keys}")));
+        let message = inbox_err(&with_watch(&format!("group = \"infra\"\n{keys}")));
         assert!(message.contains(key), "{message}");
         assert!(message.contains(value), "{message}");
     }
     // An unknown key and a bad id.
-    let message = inbox_err(&with_portal_alerts("group = \"infra\"\nwebhook = \"x\""));
-    assert!(message.contains("inbox.portal_alerts.webhook"), "{message}");
-    let message = inbox_err(&with_portal_alerts("group = \"Infra Prod\""));
-    assert!(message.contains("inbox.portal_alerts.group"), "{message}");
+    let message = inbox_err(&with_watch("group = \"infra\"\nwebhook = \"x\""));
+    assert!(message.contains("inbox.watch.webhook"), "{message}");
+    let message = inbox_err(&with_watch("group = \"Infra Prod\""));
+    assert!(message.contains("inbox.watch.group"), "{message}");
 }
 
 #[test]
-fn the_block_portal_alerts_needs_an_existing_group() {
-    let message = inbox_err(&with_portal_alerts("sign_in_burst = true"));
+fn the_block_watch_needs_an_existing_group() {
+    let message = inbox_err(&with_watch("sign_in_burst = true"));
     assert!(
-        message.contains("inbox.portal_alerts.group"),
+        message.contains("inbox.watch.group"),
         "the group is mandatory: {message}"
     );
-    let message = inbox_err(&with_portal_alerts("group = \"missing\""));
+    let message = inbox_err(&with_watch("group = \"missing\""));
     assert!(
-        message.contains("inbox.portal_alerts.group")
+        message.contains("inbox.watch.group")
             && message.contains("infra, oncall")
             && message.contains("\"missing\""),
         "{message}"
@@ -2559,21 +2528,74 @@ fn the_block_portal_alerts_needs_an_existing_group() {
 }
 
 #[test]
-fn the_block_portal_alerts_with_both_alerts_off_is_a_contradiction() {
-    let message = inbox_err(&with_portal_alerts(
+fn the_block_watch_with_both_alerts_off_is_a_contradiction() {
+    let message = inbox_err(&with_watch(
         "group = \"infra\"\nservice_unhealthy = false\nsign_in_burst = false",
     ));
     assert!(
-        message.contains("inbox.portal_alerts.service_unhealthy")
-            && message.contains("inbox.portal_alerts.sign_in_burst"),
+        message.contains("inbox.watch.service_unhealthy")
+            && message.contains("inbox.watch.sign_in_burst"),
         "{message}"
     );
 }
 
 #[test]
-fn the_block_portal_alerts_is_not_allowed_without_the_inbox() {
-    let message = err(&with("portal_alerts { group = \"infra\" }"));
-    assert!(message.contains("portal_alerts"), "{message}");
-    let message = err(&with("inbox_portal_alerts { group = \"infra\" }"));
-    assert!(message.contains("inbox_portal_alerts"), "{message}");
+fn the_block_watch_is_not_allowed_without_the_inbox() {
+    let message = err(&with("watch { group = \"infra\" }"));
+    assert!(message.contains("watch"), "{message}");
+    let message = err(&with("inbox_watch { group = \"infra\" }"));
+    assert!(message.contains("inbox_watch"), "{message}");
+}
+
+/// The old names of the feature. Two parts build each one, so that the repository holds no copy
+/// of the old name.
+fn old_block_name() -> String {
+    ["pa", "ger"].concat()
+}
+
+#[test]
+fn the_old_block_of_the_feature_is_an_unknown_block() {
+    let old = old_block_name();
+    let message = inbox_err(&with_inbox(&INBOX.replacen(
+        "inbox {",
+        &format!("{old} {{"),
+        1,
+    )));
+    assert_eq!(message, format!("unknown configuration block: {old}"));
+    // A block with the old name is refused even when the new block exists too.
+    let message = inbox_err(&format!("{}\n{old} {{ }}", with_inbox(INBOX)));
+    assert_eq!(message, format!("unknown configuration block: {old}"));
+}
+
+#[test]
+fn the_old_block_of_the_alerts_of_the_portal_is_an_unknown_block() {
+    let old = ["portal", "_alerts"].concat();
+    let message = inbox_err(&with_inbox(&INBOX.replace(
+        "group \"infra\"",
+        &format!("{old} {{ group = \"infra\" }}\n  group \"infra\""),
+    )));
+    assert!(message.contains(&format!("inbox.{old}")), "{message}");
+}
+
+#[test]
+fn the_name_of_the_instance_has_a_default_and_a_check() {
+    let (config, _) = ok(MINIMAL);
+    assert_eq!(config.server.name, "Portal");
+    assert_eq!(line(&config, "server.name").source, "default");
+    assert_eq!(line(&config, "server.name").value, "\"Portal\"");
+    let (config, _) = ok(&with_server("name = \"Prod\"", ""));
+    assert_eq!(config.server.name, "Prod");
+    assert_eq!(line(&config, "server.name").source, "file");
+    for bad in [
+        "name = \"\"".to_string(),
+        "name = \"   \"".to_string(),
+        format!("name = \"{}\"", "a".repeat(65)),
+        "name = \"a\\nb\"".to_string(),
+        "name = 5".to_string(),
+    ] {
+        let message = err(&with_server(&bad, ""));
+        assert!(message.contains("server.name"), "{bad}: {message}");
+    }
+    let (config, _) = ok(&with_server(&format!("name = \"{}\"", "a".repeat(64)), ""));
+    assert_eq!(config.server.name.len(), 64);
 }

@@ -9,9 +9,9 @@ use std::sync::Weak;
 
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
-use crate::keyauth::{self, Cause};
 use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
 use crate::inbox_actions as actions;
+use crate::keyauth::{self, Cause};
 
 /// The age after which the inbox does not trust the directory of a shared database, when the
 /// file has no block `keys` to say it.

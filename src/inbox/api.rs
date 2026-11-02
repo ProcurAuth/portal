@@ -7,7 +7,7 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderMap, AUTHORIZATION};
 use hyper::{Request, StatusCode};
 use inbox_core::noise::MAX_PLAINTEXT;
-use inbox_core::proto::{AlertMsg, ServerMsg, MAX_TITLE_CHARS};
+use inbox_core::proto::{AlertMsg, Kind, ServerMsg, MAX_TITLE_CHARS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -134,6 +134,7 @@ pub async fn accept_alert(
     // The encoded alert must fit in one encrypted frame, whatever the escaping.
     let probe = ServerMsg::Alert(AlertMsg {
         alert_id: "0".repeat(32),
+        kind: alert.kind,
         group: alert.group.clone(),
         group_name: app.group_name(&alert.group),
         title: alert.title.clone(),
@@ -163,7 +164,7 @@ pub async fn accept_alert(
         InsertOutcome::Created {
             alert_id, devices, ..
         } => {
-            app.metrics.alert_accepted(source_kind);
+            app.metrics.alert_accepted(source_kind, alert.kind);
             app.metrics.deliveries_created(devices.len() as u64);
             log::info!(event = "alert_accepted", alert.id = %alert_id, targets = devices.len());
             if devices.is_empty() {
@@ -178,7 +179,7 @@ pub async fn accept_alert(
             })
         }
         InsertOutcome::Duplicate { alert_id, devices } => {
-            app.metrics.alert_duplicate(source_kind);
+            app.metrics.alert_duplicate(source_kind, alert.kind);
             // A retry after a failed copy must not be acknowledged before the copy exists.
             replicate(app).await?;
             app.hub.wake(&devices);
@@ -216,7 +217,7 @@ async fn accept_without_database(
         if known.group != alert.group || known.title != alert.title {
             return Err(conflict());
         }
-        app.metrics.alert_duplicate(source_kind);
+        app.metrics.alert_duplicate(source_kind, alert.kind);
         let targets = pg.cached_targets(&alert.group).len();
         return Ok(Accepted {
             alert_id: known.id,
@@ -228,6 +229,7 @@ async fn accept_without_database(
     let id = spool::alert_id(&alert.source, &alert.idempotency_key);
     let (entry, duplicate) = match pg.spool().accept(
         id,
+        alert.kind,
         alert.group,
         alert.title,
         alert.source,
@@ -236,8 +238,8 @@ async fn accept_without_database(
         devices,
     ) {
         Spooled::Created(entry) => {
-            app.metrics.alert_accepted(source_kind);
-            app.metrics.alert_spooled(source_kind);
+            app.metrics.alert_accepted(source_kind, entry.kind);
+            app.metrics.alert_spooled(source_kind, entry.kind);
             app.metrics
                 .deliveries_created(entry.deliveries.len() as u64);
             log::warn!(
@@ -248,7 +250,7 @@ async fn accept_without_database(
             (entry, false)
         }
         Spooled::Duplicate(entry) => {
-            app.metrics.alert_duplicate(source_kind);
+            app.metrics.alert_duplicate(source_kind, entry.kind);
             (entry, true)
         }
         Spooled::Conflict => return Err(conflict()),
@@ -570,6 +572,7 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
     let accepted = accept_alert(
         app,
         NewAlert {
+            kind: Kind::Alert,
             group: req.group,
             title: req.title,
             source: format!("producer:{}", who.name()),
@@ -690,6 +693,7 @@ async fn alertmanager_inner(
         let accepted = accept_alert(
             app,
             NewAlert {
+                kind: Kind::Alert,
                 group: group.to_string(),
                 title: truncate_chars(&title, MAX_TITLE_CHARS),
                 source: format!("webhook:{}", who.name()),
@@ -757,6 +761,7 @@ async fn notify_inner(
     let accepted = accept_alert(
         app,
         NewAlert {
+            kind: Kind::Alert,
             group: group.to_string(),
             title,
             source: format!("notify:{}", who.name()),

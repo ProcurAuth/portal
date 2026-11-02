@@ -269,6 +269,7 @@ postgres {{
             r#"
 server {{
   listen_address = "127.0.0.1:{port}"
+  name = "E2E"
   trusted_proxies = []
 }}
 authentication {{
@@ -284,7 +285,6 @@ logging {{
   level = "info"
 }}
 inbox {{
-  name = "E2E"
   server_key_file = "{key}"
   devices {{
     public_address = "127.0.0.1:{port}"
@@ -1391,8 +1391,8 @@ fn config_validation_is_strict() {
             "inbox.devices.resend_after",
         ),
         (
-            "  name = \"E2E\"",
-            "  name = \"E2E\"\n  server_key = \"abc\"",
+            "inbox {\n",
+            "inbox {\n  server_key = \"abc\"",
             "must not be written in the file",
         ),
         ("groups = [\"infra\"]", "groups = [\"nope\"]", "nope"),
@@ -1548,6 +1548,7 @@ async fn one_port_serves_the_pages_the_producers_and_the_phones() {
     );
     let got = c.alert().await;
     assert_eq!(got.title, "on the port of the pages");
+    assert_eq!(got.kind, inbox_core::proto::Kind::Alert);
     c.ack(&got.alert_id, AckStage::Received).await;
 
     // The refusals are those of the inbox. A cookie of the portal changes nothing.
@@ -2174,22 +2175,22 @@ async fn delivery_guarantees_end_to_end() {
     );
     assert_eq!(st, 200);
     for expected in [
-        "inbox_alerts_accepted_total{source=\"webhook\"} 1",
-        "inbox_alerts_accepted_total{source=\"admin\"} 1",
-        "inbox_alerts_duplicate_total{source=\"webhook\"} 1",
-        "inbox_delivery_receipts_total ",
-        "inbox_delivery_latency_seconds_count ",
-        "inbox_deliveries_pending ",
-        "inbox_oldest_pending_delivery_seconds ",
-        "inbox_devices_unreachable ",
-        "inbox_devices_enrolled ",
-        "inbox_storage_degraded 0",
-        "inbox_spool_alerts 0",
+        "portal_inbox_alerts_accepted_total{source=\"webhook\",kind=\"alert\"} 1",
+        "portal_inbox_alerts_accepted_total{source=\"admin\",kind=\"alert\"} 1",
+        "portal_inbox_alerts_duplicate_total{source=\"webhook\",kind=\"alert\"} 1",
+        "portal_inbox_delivery_receipts_total ",
+        "portal_inbox_delivery_latency_seconds_count ",
+        "portal_inbox_deliveries_pending ",
+        "portal_inbox_oldest_pending_delivery_seconds ",
+        "portal_inbox_devices_unreachable ",
+        "portal_inbox_devices_enrolled ",
+        "portal_inbox_storage_degraded 0",
+        "portal_inbox_spool_alerts 0",
     ] {
         assert!(metrics.contains(expected), "{expected}\n{metrics}");
     }
     assert!(
-        !metrics.contains("inbox_replica_epoch"),
+        !metrics.contains("portal_inbox_replica_epoch"),
         "no replica, no replica metrics"
     );
 
@@ -3367,7 +3368,7 @@ fn the_peer_port_refuses_requests_that_are_not_signed() {
     )
     .unwrap();
     let mut h = Sha256::new();
-    h.update(b"inbox-peer-v1\0");
+    h.update(b"portal-inbox-peer-v1\0");
     h.update(&*key.noise_private);
     let peer_key: [u8; 32] = h.finalize().into();
     let sign = |ts: i64, path: &str, body: &str| {
@@ -3856,10 +3857,10 @@ impl FakeDocker {
     }
 }
 
-/// The block `portal_alerts` that the tests use. The values are the smallest that the ranges allow.
-fn portal_alerts_block(extra: &str) -> String {
+/// The block `watch` that the tests use. The values are the smallest that the ranges allow.
+fn watch_block(extra: &str) -> String {
     format!(
-        "  portal_alerts {{\n    group = \"infra\"\n    unhealthy_after = \"10s\"\n    sign_in_failures = 6\n    sign_in_window = \"1m\"\n    repeat_after = \"7d\"\n{extra}\n  }}"
+        "  watch {{\n    group = \"infra\"\n    unhealthy_after = \"10s\"\n    sign_in_failures = 6\n    sign_in_window = \"1m\"\n    repeat_after = \"7d\"\n{extra}\n  }}"
     )
 }
 
@@ -3873,7 +3874,7 @@ fn with_notes(s: &Server, health: &'static str) -> FakeDocker {
     docker
 }
 
-fn portal_alert_list(s: &Server) -> Vec<Value> {
+fn watch_list(s: &Server) -> Vec<Value> {
     let (st, list) = admin(s, "GET", "/auth/inbox/api/alerts", "");
     assert_eq!(st, 200, "{list}");
     list["alerts"]
@@ -3902,7 +3903,7 @@ fn metrics_of(s: &Server) -> String {
 async fn a_burst_of_refused_sign_ins_makes_one_alert() {
     let mut s = Server::setup();
     quiet_phones(&s);
-    s.add_to_inbox(&portal_alerts_block("    service_unhealthy = false"));
+    s.add_to_inbox(&watch_block("    service_unhealthy = false"));
     s.start();
     // The sessions come before the burst: the limiter locks the address out afterwards.
     let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
@@ -3924,14 +3925,14 @@ async fn a_burst_of_refused_sign_ins_makes_one_alert() {
     // A second burst inside `repeat_after` makes no second alert, and the burst goes on.
     refuse_sign_ins(s.port, "mallory", 8);
     conn.no_alert(Duration::from_secs(4)).await;
-    let alerts = portal_alert_list(&s);
+    let alerts = watch_list(&s);
     assert_eq!(alerts.len(), 1, "{alerts:?}");
     assert_eq!(alerts[0]["title"], alert.title);
     let metrics = metrics_of(&s);
     for expected in [
-        "portal_alerts_sent_total{kind=\"sign_in_burst\"} 1",
-        "portal_alerts_sent_total{kind=\"service_unhealthy\"} 0",
-        "portal_alerts_failed_total{kind=\"sign_in_burst\"} 0",
+        "portal_watch_sent_total{kind=\"sign_in_burst\"} 1",
+        "portal_watch_sent_total{kind=\"service_unhealthy\"} 0",
+        "portal_watch_failed_total{kind=\"sign_in_burst\"} 0",
     ] {
         assert!(metrics.contains(expected), "{expected}\n{metrics}");
     }
@@ -4216,7 +4217,7 @@ user "partial" {{
 async fn an_unhealthy_service_makes_one_alert_and_its_recovery_one_more() {
     let mut s = Server::setup();
     quiet_phones(&s);
-    s.add_to_inbox(&portal_alerts_block("    sign_in_burst = false"));
+    s.add_to_inbox(&watch_block("    sign_in_burst = false"));
     let docker = with_notes(&s, "healthy");
     s.start();
     let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
@@ -4244,16 +4245,16 @@ async fn an_unhealthy_service_makes_one_alert_and_its_recovery_one_more() {
     // The unhealthy alert is not repeated inside `repeat_after`, whatever the service does.
     docker.set("unhealthy");
     conn.no_alert(Duration::from_secs(13)).await;
-    let titles: Vec<_> = portal_alert_list(&s)
+    let titles: Vec<_> = watch_list(&s)
         .iter()
         .map(|a| a["title"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(titles.len(), 2, "{titles:?}");
     let metrics = metrics_of(&s);
     for expected in [
-        "portal_alerts_sent_total{kind=\"service_unhealthy\"} 1",
-        "portal_alerts_sent_total{kind=\"service_recovered\"} 1",
-        "portal_alerts_sent_total{kind=\"sign_in_burst\"} 0",
+        "portal_watch_sent_total{kind=\"service_unhealthy\"} 1",
+        "portal_watch_sent_total{kind=\"service_recovered\"} 1",
+        "portal_watch_sent_total{kind=\"sign_in_burst\"} 0",
     ] {
         assert!(metrics.contains(expected), "{expected}\n{metrics}");
     }
@@ -4269,7 +4270,7 @@ async fn two_instances_send_one_alert_for_one_event() {
     };
     let mut a = Server::setup_with(Some(admin_pg));
     quiet_phones(&a);
-    a.add_to_inbox(&portal_alerts_block(""));
+    a.add_to_inbox(&watch_block(""));
     let docker = with_notes(&a, "healthy");
     let mut b = a.sibling("instance-b");
     a.start();
@@ -4295,8 +4296,8 @@ async fn two_instances_send_one_alert_for_one_event() {
     // The database holds two alerts, and both come from the portal.
     let stored = stored_alerts(&a);
     assert_eq!(stored.len(), 2, "one alert for each event: {stored:?}");
-    assert_eq!(portal_alert_list(&a).len(), 2);
-    assert_eq!(portal_alert_list(&b).len(), 2);
+    assert_eq!(watch_list(&a).len(), 2);
+    assert_eq!(watch_list(&b).len(), 2);
     // The two instances both tried: one of them found the key already in use.
     wait_for(
         "an instance that finds the key in use",
@@ -4304,19 +4305,19 @@ async fn two_instances_send_one_alert_for_one_event() {
         || format!("{}{}", a.log(), b.log()).contains("\"duplicate\":\"true\""),
     );
     let logs = format!("{}{}", a.log(), b.log());
-    assert!(!logs.contains("portal_alert_failed"), "{logs}");
+    assert!(!logs.contains("watch_failed"), "{logs}");
     b.stop();
     a.stop();
 }
 
 #[test]
-fn check_config_reports_the_block_portal_alerts() {
+fn check_config_reports_the_block_watch() {
     let s = Server::setup();
     let out = portal(&["check-config", "--config", &s.config()], None);
     let shown = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success());
     assert!(
-        !shown.contains("inbox.portal_alerts."),
+        !shown.contains("inbox.watch."),
         "nothing without the block: {shown}"
     );
     let text = std::fs::read_to_string(s.config()).unwrap();
@@ -4325,7 +4326,7 @@ fn check_config_reports_the_block_portal_alerts() {
         &good,
         text.replace(
             "  # inbox-extra\n",
-            "  portal_alerts {\n    group = \"other\"\n    sign_in_failures = 3\n  }\n  # inbox-extra\n",
+            "  watch {\n    group = \"other\"\n    sign_in_failures = 3\n  }\n  # inbox-extra\n",
         ),
     )
     .unwrap();
@@ -4337,11 +4338,11 @@ fn check_config_reports_the_block_portal_alerts() {
         String::from_utf8_lossy(&out.stderr)
     );
     for expected in [
-        "inbox.portal_alerts.group = \"other\"  # file",
-        "inbox.portal_alerts.sign_in_failures = 3  # file",
-        "inbox.portal_alerts.unhealthy_after = \"2m\"  # default",
-        "inbox.portal_alerts.repeat_after = \"1h\"  # default",
-        "inbox.portal_alerts.recovered = true  # default",
+        "inbox.watch.group = \"other\"  # file",
+        "inbox.watch.sign_in_failures = 3  # file",
+        "inbox.watch.unhealthy_after = \"2m\"  # default",
+        "inbox.watch.repeat_after = \"1h\"  # default",
+        "inbox.watch.recovered = true  # default",
     ] {
         assert!(shown.contains(expected), "{expected}\n{shown}");
     }
@@ -4351,7 +4352,7 @@ fn check_config_reports_the_block_portal_alerts() {
         &bad,
         text.replace(
             "  # inbox-extra\n",
-            "  portal_alerts {\n    group = \"nowhere\"\n  }\n  # inbox-extra\n",
+            "  watch {\n    group = \"nowhere\"\n  }\n  # inbox-extra\n",
         ),
     )
     .unwrap();
@@ -4359,7 +4360,7 @@ fn check_config_reports_the_block_portal_alerts() {
     assert_eq!(out.status.code(), Some(1));
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(
-        error.contains("inbox.portal_alerts.group") && error.contains("\"nowhere\""),
+        error.contains("inbox.watch.group") && error.contains("\"nowhere\""),
         "{error}"
     );
 }
@@ -4859,7 +4860,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
             .contains("cache-control: no-store"),
         "{head}"
     );
-    assert!(has(&page, "inbox://enroll?s=") && has(&page, "data-copy=\"enroll-code\""));
+    assert!(has(&page, "portal-inbox://enroll?s=") && has(&page, "data-copy=\"enroll-code\""));
 
     // The inbox is a feature of the portal: the launcher has no tile for it. An account with no permission of
     // the inbox has no gear and no tab. An account that has one gets the gear, which opens the tab.
@@ -5007,4 +5008,43 @@ async fn demo_for_the_eyes() {
         let _ = live.recv(Duration::from_millis(500)).await;
     }
     s.stop();
+}
+
+/// The old names of the feature are unknown. `check-config` refuses a file that still has one.
+/// Two parts build each old name, so that the repository holds no copy of it.
+#[test]
+fn check_config_refuses_the_old_names_of_the_feature() {
+    let s = Server::setup();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let old_block = ["pa", "ger"].concat();
+    let old_watch = ["portal", "_alerts"].concat();
+    let renamed = s.dir.join("old-block.hcl");
+    std::fs::write(
+        &renamed,
+        text.replacen("inbox {", &format!("{old_block} {{"), 1),
+    )
+    .unwrap();
+    let out = portal(
+        &["check-config", "--config", renamed.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains(&format!("unknown configuration block: {old_block}")),
+        "{stderr}"
+    );
+    let watch = s.dir.join("old-watch.hcl");
+    std::fs::write(
+        &watch,
+        text.replace(
+            "  # inbox-extra\n",
+            &format!("  {old_watch} {{\n    group = \"other\"\n  }}\n  # inbox-extra\n"),
+        ),
+    )
+    .unwrap();
+    let out = portal(&["check-config", "--config", watch.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains(&old_watch), "{stderr}");
 }

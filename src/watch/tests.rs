@@ -12,8 +12,8 @@ fn svc(id: &str, seen: Seen) -> Observed {
     }
 }
 
-fn config() -> PortalAlertsConfig {
-    PortalAlertsConfig {
+fn config() -> WatchConfig {
+    WatchConfig {
         group: "infra".into(),
         service_unhealthy: true,
         unhealthy_after: S(120),
@@ -463,8 +463,8 @@ fn the_metrics_have_a_series_for_each_kind() {
     stats.failed(Kind::ServiceUnhealthy);
     stats.failed(Kind::ServiceUnhealthy);
     let text = stats.render(true);
-    assert!(text.contains("portal_alerts_sent_total{kind=\"sign_in_burst\"} 1"));
-    assert!(text.contains("portal_alerts_sent_total{kind=\"service_unhealthy\"} 0"));
-    assert!(text.contains("portal_alerts_sent_total{kind=\"service_recovered\"} 0"));
-    assert!(text.contains("portal_alerts_failed_total{kind=\"service_unhealthy\"} 2"));
+    assert!(text.contains("portal_watch_sent_total{kind=\"sign_in_burst\"} 1"));
+    assert!(text.contains("portal_watch_sent_total{kind=\"service_unhealthy\"} 0"));
+    assert!(text.contains("portal_watch_sent_total{kind=\"service_recovered\"} 0"));
+    assert!(text.contains("portal_watch_failed_total{kind=\"service_unhealthy\"} 2"));
 }

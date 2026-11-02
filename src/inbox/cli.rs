@@ -106,7 +106,7 @@ fn import_sqlite(config_path: &std::path::Path, from: &std::path::Path) -> Resul
     let inbox = config
         .inbox
         .as_ref()
-        .ok_or("--config must contain a inbox block")?;
+        .ok_or("--config must contain an inbox block")?;
     let StorageBackend::Postgres(pg) = &config.storage.backend else {
         return Err("--config must contain a postgres block".into());
     };

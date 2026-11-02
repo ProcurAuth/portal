@@ -20,7 +20,7 @@ use super::state::App;
 /// A code that an account just made.
 #[derive(Debug, Serialize)]
 pub struct NewCode {
-    /// The text of the code: `inbox://enroll?s=...&k=...&c=...`. It is a secret until its first use.
+    /// The text of the code: `portal-inbox://enroll?s=...&k=...&c=...`. It is a secret until its first use.
     pub code: String,
     /// The end of the life of the code, in Unix milliseconds.
     pub expires_at_ms: i64,

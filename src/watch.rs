@@ -1,7 +1,7 @@
 //! The alerts that the portal sends about itself: a service of the launcher that stays
 //! unhealthy, and a burst of refused sign-ins.
 //!
-//! The block `inbox.portal_alerts` turns this on. Without the block, nothing runs.
+//! The block `inbox.watch` turns this on. Without the block, nothing runs.
 //!
 //! Two small state machines decide when an alert is due. They read a clock that the caller gives,
 //! so a test can move the time. The [`Engine`] joins them to the configuration, and it builds the
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{Health, RuntimeHealth, Service};
-use crate::config::PortalAlertsConfig;
+use crate::config::WatchConfig;
 use crate::http::AppState;
 use crate::inbox::log;
 
@@ -74,7 +74,7 @@ impl Kind {
     }
 }
 
-/// The counters `portal_alerts_sent_total` and `portal_alerts_failed_total`.
+/// The counters `portal_watch_sent_total` and `portal_watch_failed_total`.
 #[derive(Default)]
 pub struct Stats {
     sent: [AtomicU64; 3],
@@ -90,7 +90,7 @@ impl Stats {
         self.failed[kind.index()].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The Prometheus text. It is empty when the block `inbox.portal_alerts` is absent.
+    /// The Prometheus text. It is empty when the block `inbox.watch` is absent.
     pub fn render(&self, enabled: bool) -> String {
         if !enabled {
             return String::new();
@@ -98,12 +98,12 @@ impl Stats {
         let mut out = String::new();
         for (name, help, counters) in [
             (
-                "portal_alerts_sent_total",
+                "portal_watch_sent_total",
                 "Alerts about the portal that the inbox accepted, by kind.",
                 &self.sent,
             ),
             (
-                "portal_alerts_failed_total",
+                "portal_watch_failed_total",
                 "Alerts about the portal that the inbox did not accept, by kind. The portal tries again.",
                 &self.failed,
             ),
@@ -328,14 +328,14 @@ pub struct Outgoing {
 
 /// The two detectors, the configuration and the memory of the counter.
 pub struct Engine {
-    config: PortalAlertsConfig,
+    config: WatchConfig,
     health: HealthDetector,
     burst: BurstDetector,
     seen_refusals: u64,
 }
 
 impl Engine {
-    pub fn new(config: PortalAlertsConfig) -> Engine {
+    pub fn new(config: WatchConfig) -> Engine {
         Engine {
             health: HealthDetector::new(
                 config.unhealthy_after,
@@ -430,7 +430,7 @@ fn one_line(name: &str, fallback: &str) -> String {
 /// The title of an alert: one line of plain English. It holds no login, no address and no
 /// password. It holds only values of the configuration and the name of a service, so each
 /// instance builds the same title for the same key.
-pub fn title(due: &Due, config: &PortalAlertsConfig) -> String {
+pub fn title(due: &Due, config: &WatchConfig) -> String {
     match due.kind {
         Kind::ServiceUnhealthy => format!(
             "Service {} is unhealthy for {}",
@@ -494,19 +494,19 @@ fn unix_secs() -> u64 {
 }
 
 /// The background task. It ends when the portal stops. It returns at once without the block
-/// `inbox.portal_alerts`.
+/// `inbox.watch`.
 pub async fn run(state: Arc<AppState>) {
     let Some(config) = state
         .config
         .inbox
         .as_ref()
-        .and_then(|inbox| inbox.portal_alerts.clone())
+        .and_then(|inbox| inbox.watch.clone())
     else {
         return;
     };
     let group = config.group.clone();
     log::info!(
-        event = "portal_alerts_started",
+        event = "watch_started",
         group = %group,
         service_unhealthy = config.service_unhealthy,
         sign_in_burst = config.sign_in_burst,
@@ -536,7 +536,7 @@ pub async fn run(state: Arc<AppState>) {
                 SEND_LIMIT,
                 state
                     .inbox
-                    .send_portal_alert(&group, outgoing.title.clone(), outgoing.key.clone()),
+                    .send_watch_alert(&group, outgoing.title.clone(), outgoing.key.clone()),
             )
             .await
             .unwrap_or_else(|_| Err("the inbox did not answer in time".into()));
@@ -545,7 +545,7 @@ pub async fn run(state: Arc<AppState>) {
                     state.alerts.sent(kind);
                     engine.confirm(&outgoing, started.elapsed());
                     log::info!(
-                        event = "portal_alert_sent",
+                        event = "watch_sent",
                         kind = kind.label(),
                         subject = %outgoing.due.subject,
                         duplicate,
@@ -555,7 +555,7 @@ pub async fn run(state: Arc<AppState>) {
                     state.alerts.failed(kind);
                     retry_not_before = Some(Instant::now() + RETRY_AFTER);
                     log::error!(
-                        event = "portal_alert_failed",
+                        event = "watch_failed",
                         kind = kind.label(),
                         subject = %outgoing.due.subject,
                         error = %error,

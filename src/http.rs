@@ -170,7 +170,7 @@ pub struct AppState {
     /// so that an alert never waits for the catalogue. Every other route answers 503 until then.
     pub serving: std::sync::atomic::AtomicBool,
     /// The counters of the alerts that the portal sends about itself.
-    pub alerts: crate::portal_alerts::Stats,
+    pub alerts: crate::watch::Stats,
     pub ensured_counters: std::sync::Mutex<
         std::collections::HashSet<(crate::decision::CounterOwner, crate::grants::CounterId)>,
     >,
@@ -282,7 +282,7 @@ impl AppState {
             stop: crate::shutdown::Stop::default(),
             inbox: crate::inbox::Slot::default(),
             serving: std::sync::atomic::AtomicBool::new(false),
-            alerts: crate::portal_alerts::Stats::default(),
+            alerts: crate::watch::Stats::default(),
             ensured_counters: std::sync::Mutex::new(ensured),
             sessions,
             users,
@@ -518,7 +518,7 @@ async fn serve_until(
         None => None,
     };
     // The alerts of the portal about itself. The task ends at once without the block.
-    accepting.push(tokio::spawn(crate::portal_alerts::run(Arc::clone(&state))));
+    accepting.push(tokio::spawn(crate::watch::run(Arc::clone(&state))));
     if let Some(listener) = pdp_listener {
         accepting.push(tokio::spawn(pdp::serve(Arc::clone(&state), listener)));
     }
@@ -889,7 +889,7 @@ fn handle_metrics(state: &AppState) -> HttpResponse {
                 .config
                 .inbox
                 .as_ref()
-                .is_some_and(|p| p.portal_alerts.is_some()),
+                .is_some_and(|p| p.watch.is_some()),
         ),
     );
     if state.config.pdp.is_some() {
@@ -3749,10 +3749,10 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
 }
 
 mod edge;
-mod keys_page;
-mod options_page;
 mod inbox_page;
 mod inbox_rights;
+mod keys_page;
+mod options_page;
 mod pdp;
 
 #[cfg(test)]

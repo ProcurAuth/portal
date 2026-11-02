@@ -57,7 +57,7 @@ pub struct PeerAuth {
 impl PeerAuth {
     pub fn new(server_key: &ServerKey) -> PeerAuth {
         let mut h = Sha256::new();
-        h.update(b"inbox-peer-v1\0");
+        h.update(b"portal-inbox-peer-v1\0");
         h.update(&*server_key.noise_private);
         PeerAuth {
             key: h.finalize().into(),

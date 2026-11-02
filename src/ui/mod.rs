@@ -13,8 +13,8 @@
 //! and [`demo_page`] (synthetic data for `portal render-demo`).
 
 pub mod grant_editor;
-pub mod keys;
 pub mod inbox;
+pub mod keys;
 pub mod settings;
 
 use std::fmt::Write as _;

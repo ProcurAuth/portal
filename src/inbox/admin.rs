@@ -9,6 +9,8 @@ use hyper::StatusCode;
 use super::api::{accept_alert, Accepted, ApiError};
 #[cfg(test)]
 pub use super::db::DeliveryView;
+use inbox_core::proto::Kind;
+
 use super::db::NewAlert;
 pub use super::db::{AlertDetail, AlertSummary, ConnectionView, DeviceView};
 use super::hub::LiveInfo;
@@ -200,6 +202,7 @@ pub async fn send_alert(
     accept_alert(
         app,
         NewAlert {
+            kind: Kind::Alert,
             group,
             title,
             source: "admin".into(),

@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
+use inbox_core::proto::Kind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -31,7 +32,7 @@ const MAX_DB_ACKS: usize = 10_000;
 /// digits as a random id.
 pub fn alert_id(source: &str, idempotency_key: &str) -> String {
     let mut h = Sha256::new();
-    h.update(b"inbox-alert-v1\0");
+    h.update(b"portal-inbox-alert-v1\0");
     h.update(source.as_bytes());
     h.update(b"\0");
     h.update(idempotency_key.as_bytes());
@@ -49,6 +50,7 @@ pub struct WireDelivery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireAlert {
     pub id: String,
+    pub kind: Kind,
     pub group: String,
     pub title: String,
     pub source: String,
@@ -71,6 +73,7 @@ pub struct Delivery {
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: String,
+    pub kind: Kind,
     pub group: String,
     pub title: String,
     pub source: String,
@@ -85,6 +88,7 @@ impl Entry {
     pub fn wire(&self) -> WireAlert {
         WireAlert {
             id: self.id.clone(),
+            kind: self.kind,
             group: self.group.clone(),
             title: self.title.clone(),
             source: self.source.clone(),
@@ -209,6 +213,7 @@ impl Spool {
     pub fn accept(
         &self,
         id: String,
+        kind: Kind,
         group: String,
         title: String,
         source: String,
@@ -230,6 +235,7 @@ impl Spool {
         }
         let entry = Entry {
             id,
+            kind,
             group,
             title,
             source,
@@ -287,6 +293,7 @@ impl Spool {
         }
         let entry = Entry {
             id: wire.id,
+            kind: wire.kind,
             group: wire.group,
             title: wire.title,
             source: wire.source,
@@ -322,6 +329,7 @@ impl Spool {
                 out.push(PendingDelivery {
                     seq: d.seq,
                     alert_id: e.id.clone(),
+                    kind: e.kind,
                     group: e.group.clone(),
                     title: e.title.clone(),
                     created_at: e.created_at,
@@ -470,6 +478,7 @@ mod tests {
     fn accept(s: &Spool, key: &str, title: &str, devices: &[&str]) -> Accepted {
         s.accept(
             alert_id("producer:ci", key),
+            Kind::Alert,
             "infra".into(),
             title.into(),
             "producer:ci".into(),
@@ -563,6 +572,7 @@ mod tests {
         let s = Spool::default();
         let wire = WireAlert {
             id: alert_id("producer:ci", "k"),
+            kind: Kind::Alert,
             group: "infra".into(),
             title: "t".into(),
             source: "producer:ci".into(),

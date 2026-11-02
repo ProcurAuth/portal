@@ -5,6 +5,8 @@
 use hyper::StatusCode;
 
 use super::api::{accept_alert, ApiError};
+use inbox_core::proto::Kind;
+
 use super::db::NewAlert;
 use super::log;
 use super::state::App;
@@ -25,6 +27,7 @@ pub async fn send_alert(
     let result = accept_alert(
         app,
         NewAlert {
+            kind: Kind::Alert,
             group: group.to_string(),
             title,
             source: SOURCE.into(),
@@ -36,7 +39,7 @@ pub async fn send_alert(
     match result {
         Ok(accepted) => Ok(accepted.duplicate),
         Err(e) if e.status() == StatusCode::CONFLICT => {
-            log::warn!(event = "portal_alert_key_in_use", error = %e.summary());
+            log::warn!(event = "watch_key_in_use", error = %e.summary());
             Ok(true)
         }
         Err(e) => Err(e),

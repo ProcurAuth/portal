@@ -16,8 +16,6 @@ use super::{Config, StorageBackend};
 /// The values of the block `inbox`.
 #[derive(Clone, Debug)]
 pub struct InboxConfig {
-    /// The name that the phones show.
-    pub name: String,
     pub devices: DevicesConfig,
     pub enrollment: EnrollmentConfig,
     pub storage: InboxStorageConfig,
@@ -25,8 +23,8 @@ pub struct InboxConfig {
     pub replica: Option<ReplicaConfig>,
     /// `None` without the block `inbox.cluster`.
     pub cluster: Option<ClusterConfig>,
-    /// `None` without the block `inbox.portal_alerts`.
-    pub portal_alerts: Option<PortalAlertsConfig>,
+    /// `None` without the block `inbox.watch`.
+    pub watch: Option<WatchConfig>,
     /// The blocks `group`, by id.
     pub groups: BTreeMap<String, GroupConfig>,
     /// The blocks `producer`, by name.
@@ -86,9 +84,9 @@ pub struct ClusterConfig {
     pub peers: Vec<String>,
 }
 
-/// The block `inbox.portal_alerts`: the alerts that the portal sends about itself.
+/// The block `inbox.watch`: the alerts that the portal sends about itself.
 #[derive(Clone, Debug)]
-pub struct PortalAlertsConfig {
+pub struct WatchConfig {
     /// The id of the group that receives the alerts. It is a block `group`.
     pub group: String,
     pub service_unhealthy: bool,
@@ -193,16 +191,16 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         None
     };
 
-    let portal_alerts = if r.has_block("inbox.portal_alerts") {
-        Some(PortalAlertsConfig {
-            group: r.text("inbox.portal_alerts", "group")?,
-            service_unhealthy: r.bool("inbox.portal_alerts", "service_unhealthy")?,
-            unhealthy_after: r.duration("inbox.portal_alerts", "unhealthy_after")?,
-            sign_in_burst: r.bool("inbox.portal_alerts", "sign_in_burst")?,
-            sign_in_failures: small(r, "inbox.portal_alerts", "sign_in_failures")?,
-            sign_in_window: r.duration("inbox.portal_alerts", "sign_in_window")?,
-            repeat_after: r.duration("inbox.portal_alerts", "repeat_after")?,
-            recovered: r.bool("inbox.portal_alerts", "recovered")?,
+    let watch = if r.has_block("inbox.watch") {
+        Some(WatchConfig {
+            group: r.text("inbox.watch", "group")?,
+            service_unhealthy: r.bool("inbox.watch", "service_unhealthy")?,
+            unhealthy_after: r.duration("inbox.watch", "unhealthy_after")?,
+            sign_in_burst: r.bool("inbox.watch", "sign_in_burst")?,
+            sign_in_failures: small(r, "inbox.watch", "sign_in_failures")?,
+            sign_in_window: r.duration("inbox.watch", "sign_in_window")?,
+            repeat_after: r.duration("inbox.watch", "repeat_after")?,
+            recovered: r.bool("inbox.watch", "recovered")?,
         })
     } else {
         None
@@ -266,13 +264,12 @@ pub fn build(r: &mut Resolved) -> Result<Option<(InboxConfig, InboxSecrets)>, St
         producers: tokens,
     };
     let config = InboxConfig {
-        name: r.text("inbox", "name")?,
         devices,
         enrollment,
         storage,
         replica,
         cluster,
-        portal_alerts,
+        watch,
         groups,
         producers,
     };
@@ -312,17 +309,17 @@ fn check_values(c: &InboxConfig) -> Result<(), String> {
             show_duration(s.delivery_ttl)
         ));
     }
-    if let Some(alerts) = &c.portal_alerts {
+    if let Some(alerts) = &c.watch {
         if !c.groups.contains_key(&alerts.group) {
             let ids: Vec<&str> = c.groups.keys().map(String::as_str).collect();
             return Err(format!(
-                "invalid inbox.portal_alerts.group: expected the id of a block group of the block inbox ({}), got {:?}",
+                "invalid inbox.watch.group: expected the id of a block group of the block inbox ({}), got {:?}",
                 ids.join(", "),
                 alerts.group
             ));
         }
         if !alerts.service_unhealthy && !alerts.sign_in_burst {
-            return Err("inbox.portal_alerts sends nothing: inbox.portal_alerts.service_unhealthy and inbox.portal_alerts.sign_in_burst are both false; set one of them to true, or remove the block".into());
+            return Err("inbox.watch sends nothing: inbox.watch.service_unhealthy and inbox.watch.sign_in_burst are both false; set one of them to true, or remove the block".into());
         }
     }
     Ok(())

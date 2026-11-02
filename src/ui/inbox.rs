@@ -319,8 +319,9 @@ pub fn overview_page(frame: &Frame, rights: &Rights, view: &OverviewView<'_>) ->
 fn alert_row(out: &mut String, groups: &[GroupLine], alert: &AlertSummary) {
     let _ = write!(
         out,
-        r#"<tr data-alert="{id}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td class="narrowHide" data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num narrowHide{danger}" data-label="Expired">{expired}</td></tr>"#,
+        r#"<tr data-alert="{id}" data-kind="{kind}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td class="num" data-label="When">{when}</td><td class="narrowHide" data-label="Group">{name}</td><td data-label="Title"><a href="{ALERT_PATH_PREFIX}{id}">{title}</a></td><td class="num" data-label="Received">{received} of {targets}</td><td class="num narrowHide{danger}" data-label="Expired">{expired}</td></tr>"#,
         id = html_escape(&alert.id),
+        kind = alert.kind.as_str(),
         group = html_escape(&alert.group),
         source = html_escape(&alert.source),
         when = when(alert.created_at),
@@ -580,7 +581,7 @@ pub fn phones_page(frame: &Frame, rights: &Rights, view: &PhonesView<'_>) -> Str
         part_head(&mut out, "add-title", "Add a phone", "", "");
         let _ = write!(
             out,
-            r#"<p class="part__lede">The code works one time. Type it in the app Inbox on the phone, or open the link on the phone. The portal shows the code one time.</p><form method="post" action="{CODE_PATH}" class="uiForm"><input type="hidden" name="csrf" value="{}"><div class="formActions"><button class="button button--primary" type="submit">Make a code</button></div></form></section>"#,
+            r#"<p class="part__lede">The code works one time. Type it in the app Portal Inbox on the phone, or open the link on the phone. The portal shows the code one time.</p><form method="post" action="{CODE_PATH}" class="uiForm"><input type="hidden" name="csrf" value="{}"><div class="formActions"><button class="button button--primary" type="submit">Make a code</button></div></form></section>"#,
             html_escape(view.devices.csrf),
         );
     }
@@ -861,6 +862,7 @@ mod tests {
     fn alert(id: &str, group: &str, title: &str) -> AlertSummary {
         AlertSummary {
             id: id.into(),
+            kind: inbox_core::proto::Kind::Alert,
             group: group.into(),
             title: title.into(),
             source: "admin".into(),
@@ -998,13 +1000,13 @@ mod tests {
             &frame(),
             &rights(false),
             &CodeView {
-                code: "inbox://enroll?s=h%3A1&k=a&c=b",
+                code: "portal-inbox://enroll?s=h%3A1&k=a&c=b",
                 fingerprint: "0a1b2c3d",
                 expires_at_ms: 1_700_000_000_000,
             },
         );
-        assert!(html.contains(r#"value="inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
-        assert!(html.contains(r#"href="inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
+        assert!(html.contains(r#"value="portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
+        assert!(html.contains(r#"href="portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
         assert!(html.contains(r#"data-copy="enroll-code""#));
         assert!(html.contains("0a1b2c3d"));
         assert!(html.contains("one time"));

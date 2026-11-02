@@ -13,6 +13,8 @@ mod grants;
 mod http;
 mod icons;
 mod identity;
+mod inbox;
+mod inbox_actions;
 mod key_forms;
 mod keyauth;
 mod keys;
@@ -20,10 +22,7 @@ mod keys_metrics;
 mod limits;
 mod metrics;
 mod options;
-mod inbox;
-mod inbox_actions;
 mod portal_actions;
-mod portal_alerts;
 mod rate_limit;
 mod session;
 mod shutdown;
@@ -35,6 +34,7 @@ mod transport;
 mod ui;
 mod users;
 mod util;
+mod watch;
 
 use std::env;
 use std::io::{self, Read};
@@ -148,7 +148,7 @@ fn real_main() -> Result<(), String> {
                         }
                     } => {}
                     _ = async {
-                        // Only a inbox with a replica has the flag of the signals.
+                        // Only an inbox with a replica has the flag of the signals.
                         match &terminated_now {
                             Some(flag) => {
                                 while !flag.load(Ordering::SeqCst) {
@@ -456,7 +456,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
     if !(prefix.starts_with(b"HTTP/1.1 200 ") || prefix.starts_with(b"HTTP/1.0 200 ")) {
         return Err("healthcheck returned a non-200 response".into());
     }
-    // With a inbox, the inbox must be ready too: `/readyz` of the same port.
+    // With an inbox, the inbox must be ready too: `/readyz` of the same port.
     if config.inbox.is_some() {
         inbox::cli::healthcheck(listen).map_err(|e| format!("inbox healthcheck failed: {e}"))?;
     }

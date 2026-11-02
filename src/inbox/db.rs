@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use inbox_core::proto::Kind;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
@@ -177,6 +178,10 @@ CREATE TABLE enrollment_codes (
 ) STRICT;
 CREATE INDEX enrollment_codes_login ON enrollment_codes(login, expires_at_ms);
 CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at_ms);
+"#,
+    r#"
+-- Each message has a kind. Protocol 4 knows one kind: `alert`.
+ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
 "#,
 ];
 
@@ -608,6 +613,7 @@ pub fn prune_subscriptions(conn: &Connection, groups: &[String]) -> rusqlite::Re
 
 #[derive(Clone)]
 pub struct NewAlert {
+    pub kind: Kind,
     pub group: String,
     pub title: String,
     pub source: String,
@@ -658,15 +664,16 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let id = random_id();
     let now = now_ms();
     tx.execute(
-        "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO alerts (id, kind, group_id, title, source, idempotency_key, created_at)
+         VALUES (?1, ?7, ?2, ?3, ?4, ?5, ?6)",
         params![
             id,
             alert.group,
             alert.title,
             alert.source,
             alert.idempotency_key,
-            now
+            now,
+            alert.kind.as_str()
         ],
     )?;
     tx.execute(
@@ -697,6 +704,7 @@ fn delivery_devices(conn: &Connection, alert_id: &str) -> rusqlite::Result<Vec<S
 pub struct PendingDelivery {
     pub seq: i64,
     pub alert_id: String,
+    pub kind: Kind,
     pub group: String,
     pub title: String,
     pub created_at: i64,
@@ -711,7 +719,7 @@ pub fn pending_deliveries(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT d.seq, a.id, a.group_id, a.title, a.created_at
+        "SELECT d.seq, a.id, a.group_id, a.title, a.created_at, a.kind
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
@@ -723,9 +731,22 @@ pub fn pending_deliveries(
             group: r.get(2)?,
             title: r.get(3)?,
             created_at: r.get(4)?,
+            kind: kind_column(r, 5)?,
         })
     })?;
     rows.collect()
+}
+
+/// Reads a column that holds the kind of a message. An unknown text is a conversion error.
+fn kind_column(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Kind> {
+    let text: String = r.get(index)?;
+    Kind::parse(&text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            format!("unknown message kind {text:?}").into(),
+        )
+    })
 }
 
 pub fn mark_sent(conn: &mut Connection, seqs: &[i64]) -> rusqlite::Result<()> {
@@ -834,6 +855,7 @@ pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<Devi
 #[derive(Debug, Serialize)]
 pub struct AlertSummary {
     pub id: String,
+    pub kind: Kind,
     pub group: String,
     pub title: String,
     pub source: String,
@@ -847,7 +869,7 @@ pub struct AlertSummary {
 }
 
 const ALERT_SUMMARY: &str = "SELECT a.id, a.group_id, a.title, a.source, a.created_at,
-        COUNT(d.seq), COUNT(d.received_at)
+        COUNT(d.seq), COUNT(d.received_at), a.kind
      FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id";
 
 fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
@@ -859,6 +881,7 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
         created_at: r.get(4)?,
         targets: r.get(5)?,
         received: r.get(6)?,
+        kind: kind_column(r, 7)?,
         expired: 0,
         missing: Vec::new(),
     })
@@ -1087,6 +1110,7 @@ mod tests {
 
     fn alert(key: &str) -> NewAlert {
         NewAlert {
+            kind: Kind::Alert,
             group: "infra".into(),
             title: "t".into(),
             source: "producer:test".into(),
@@ -1112,6 +1136,46 @@ mod tests {
         let p = pending_deliveries(&c, &a, 10, 0).unwrap();
         assert_eq!(p.len(), 1);
         assert!(pending_deliveries(&c, &b, 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_alert_has_the_kind_alert_in_the_table_and_in_the_rows() {
+        let mut c = mem();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
+        insert_alert(&mut c, &alert("k")).unwrap();
+        let stored: String = c
+            .query_row("SELECT kind FROM alerts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, "alert");
+        assert_eq!(
+            pending_deliveries(&c, &a, 10, 0).unwrap()[0].kind,
+            Kind::Alert
+        );
+        assert_eq!(recent_alerts(&c, 10, 0, 0).unwrap()[0].kind, Kind::Alert);
+        // The column has the default `alert`.
+        c.execute(
+            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
+             VALUES ('x', 'infra', 't', 's', 'k2', 1)",
+            [],
+        )
+        .unwrap();
+        let kind: String = c
+            .query_row("SELECT kind FROM alerts WHERE id = 'x'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "alert");
+    }
+
+    #[test]
+    fn a_row_with_an_unknown_kind_is_an_error_and_not_a_message() {
+        let mut c = mem();
+        let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
+        set_subscription(&c, &a, "infra").unwrap();
+        insert_alert(&mut c, &alert("k")).unwrap();
+        c.execute("UPDATE alerts SET kind = 'question'", [])
+            .unwrap();
+        assert!(pending_deliveries(&c, &a, 10, 0).is_err());
+        assert!(recent_alerts(&c, 10, 0, 0).is_err());
     }
 
     #[test]
