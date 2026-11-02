@@ -292,10 +292,10 @@ pub struct LoginPage {
     pub matching: u32,
     /// Zero-based. The value is brought back into range.
     pub page: u32,
-    pub attempts_24h: u32,
-    pub failed_24h: u32,
-    /// Distinct addresses behind the failed attempts of the last 24 hours.
-    pub addresses_24h: u32,
+    /// Every attempt that the log holds, and the refused ones among them. The figures do not
+    /// depend on the filter: they are the counts of the chips of the Users page.
+    pub total: u32,
+    pub refused: u32,
 }
 
 impl LoginPage {
@@ -323,8 +323,6 @@ pub struct Snapshot {
     /// Every real connection, all accounts.
     pub days: Vec<DayStat>,
     pub recent_events: Vec<AuditRow>,
-    /// Failed logins on a name that does not exist. The typed names are in the sign-in log.
-    pub unknown_failures_30d: u32,
     /// Unix time of the first day drawn.
     pub first_day: i64,
 }
@@ -689,13 +687,8 @@ impl Store {
 
     /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
     /// A page past the end is brought back to the last page.
-    pub fn login_attempts(
-        &self,
-        now: i64,
-        page: u32,
-        only_failed: bool,
-    ) -> Result<LoginPage, String> {
-        backend!(self.login_attempts(now, page, only_failed))
+    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
+        backend!(self.login_attempts(page, only_failed))
     }
 
     /// Everything the Users page shows. `accounts` is `(login, is_superadmin)`.
@@ -1886,7 +1879,6 @@ mod tests {
                 2,
                 "all accounts, real connections only"
             );
-            assert_eq!(snap.unknown_failures_30d, 1);
             assert_eq!(snap.recent_events.len(), 2);
             assert_eq!(snap.first_day, day - 29 * DAY);
         });
@@ -1943,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_attempts_are_listed_newest_first_with_the_figures_of_the_last_day() {
+    fn sign_in_attempts_are_listed_newest_first_with_the_figures_of_the_chips() {
         each_backend(|backend| {
             let store = backend.fresh();
             store
@@ -1958,23 +1950,20 @@ mod tests {
                     ..Batch::default()
                 })
                 .unwrap();
-            let all = store.login_attempts(NOW, 0, false).unwrap();
+            let all = store.login_attempts(0, false).unwrap();
             assert_eq!(all.matching, 5);
             assert_eq!(all.rows[0].ts, NOW - 300, "newest first");
             assert!(all.rows[0].success && all.rows[0].known);
             assert_eq!(all.rows[2].login, "admin");
             assert!(!all.rows[2].known);
             assert_eq!(all.rows[2].ip.as_deref(), Some("203.0.113.7"));
-            assert_eq!(
-                (all.attempts_24h, all.failed_24h, all.addresses_24h),
-                (4, 3, 2),
-                "the attempt of three days ago is out of the figures, two addresses failed"
-            );
-            let failed = store.login_attempts(NOW, 0, true).unwrap();
+            assert_eq!((all.total, all.refused), (5, 3));
+            let failed = store.login_attempts(0, true).unwrap();
             assert_eq!(failed.matching, 3);
             assert!(failed.rows.iter().all(|row| !row.success));
             assert_eq!(
-                failed.attempts_24h, 4,
+                (failed.total, failed.refused),
+                (5, 3),
                 "the figures do not depend on the filter"
             );
         });
@@ -1992,7 +1981,7 @@ mod tests {
                 })
                 .unwrap();
             store.insert_user(&user("alice", &[])).unwrap();
-            let page = store.login_attempts(NOW, 0, false).unwrap();
+            let page = store.login_attempts(0, false).unwrap();
             assert_eq!(page.rows[0].login, nasty);
             assert_eq!(
                 store.load_users().unwrap().len(),
@@ -2015,22 +2004,22 @@ mod tests {
                     ..Batch::default()
                 })
                 .unwrap();
-            let first = store.login_attempts(NOW, 0, false).unwrap();
+            let first = store.login_attempts(0, false).unwrap();
             assert_eq!(
                 (first.rows.len() as i64, first.pages()),
                 (LOGIN_PAGE_SIZE, 2)
             );
-            let second = store.login_attempts(NOW, 1, false).unwrap();
+            let second = store.login_attempts(1, false).unwrap();
             assert_eq!(second.rows.len(), 5);
             assert_eq!(
                 second.rows[0].ts,
                 NOW - 1_000 + 4,
                 "continues where the first page stopped"
             );
-            let beyond = store.login_attempts(NOW, 99, false).unwrap();
+            let beyond = store.login_attempts(99, false).unwrap();
             assert_eq!(beyond.page, 1);
             assert_eq!(beyond.rows.len(), 5);
-            let empty = backend.fresh().login_attempts(NOW, 7, false).unwrap();
+            let empty = backend.fresh().login_attempts(7, false).unwrap();
             assert_eq!((empty.page, empty.pages(), empty.rows.len()), (0, 1, 0));
         });
     }
@@ -2049,7 +2038,7 @@ mod tests {
                 })
                 .unwrap();
             store.prune(500).unwrap();
-            let page = store.login_attempts(1_000, 0, false).unwrap();
+            let page = store.login_attempts(0, false).unwrap();
             assert_eq!(page.matching, 1);
             assert_eq!(page.rows[0].login, "new");
 
@@ -2062,7 +2051,7 @@ mod tests {
             };
             store.apply(&flood(0, MAX_LOGIN_ROWS - 10)).unwrap();
             store.apply(&flood(MAX_LOGIN_ROWS, 30)).unwrap();
-            let page = store.login_attempts(NOW, 0, false).unwrap();
+            let page = store.login_attempts(0, false).unwrap();
             assert_eq!(
                 i64::from(page.matching),
                 MAX_LOGIN_ROWS,
@@ -2616,8 +2605,8 @@ mod tests {
         assert!(copied_keys.version > 0);
         assert_eq!(target.key_history().unwrap(), source.key_history().unwrap());
         assert_eq!(
-            target.login_attempts(NOW, 0, false).unwrap(),
-            source.login_attempts(NOW, 0, false).unwrap()
+            target.login_attempts(0, false).unwrap(),
+            source.login_attempts(0, false).unwrap()
         );
         let accounts = [("alice".to_string(), false), ("root".to_string(), true)];
         let (copied, original) = (
@@ -2626,7 +2615,6 @@ mod tests {
         );
         assert_eq!(copied.accounts[0], original.accounts[0]);
         assert_eq!(copied.recent_events, original.recent_events);
-        assert_eq!(copied.unknown_failures_30d, original.unknown_failures_30d);
         // The superadmin's session was open. Sessions do not move. So, the session ends where it was last seen.
         let root = &copied.accounts[1].recent[0];
         assert_eq!(root.end_reason.as_deref(), Some("restart"));
@@ -2681,7 +2669,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(target.load_users().unwrap().len(), 3);
-        assert_eq!(target.login_attempts(800, 0, false).unwrap().matching, 3);
+        assert_eq!(target.login_attempts(0, false).unwrap().matching, 3);
         assert_eq!(target.count("audit_events"), 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

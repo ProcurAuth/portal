@@ -640,12 +640,7 @@ impl Sqlite {
 
     /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
     /// A page past the end is brought back to the last page.
-    pub fn login_attempts(
-        &self,
-        now: i64,
-        page: u32,
-        only_failed: bool,
-    ) -> Result<LoginPage, String> {
+    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
         let conn = self.conn();
         let matching: i64 = conn
             .query_row(
@@ -686,18 +681,15 @@ impl Sqlite {
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        let (attempts, failed, addresses): (i64, i64, i64) = conn
+        let (total, refused): (i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(success = 0), 0),
-                        COUNT(DISTINCT CASE WHEN success = 0 THEN ip END)
-                   FROM login_attempts WHERE ts >= ?1",
-                [now - DAY],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                "SELECT COUNT(*), COALESCE(SUM(success = 0), 0) FROM login_attempts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(db)?;
-        result.attempts_24h = attempts as u32;
-        result.failed_24h = failed as u32;
-        result.addresses_24h = addresses as u32;
+        result.total = total as u32;
+        result.refused = refused as u32;
         Ok(result)
     }
 
@@ -795,14 +787,6 @@ impl Sqlite {
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        let unknown: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM audit_events WHERE kind = 'login_failed' AND login IS NULL AND ts >= ?1",
-                [first_day],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
-        snapshot.unknown_failures_30d = unknown as u32;
         Ok(snapshot)
     }
 }
@@ -1041,8 +1025,6 @@ impl Sqlite {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const NOW: i64 = 1_000_000;
 
     fn user(login: &str, services: &[&str]) -> UserRow {
         UserRow {
@@ -1362,7 +1344,7 @@ mod tests {
         .unwrap();
         let store = Sqlite::init(conn).unwrap();
         assert_eq!(store.load_users().unwrap().len(), 1, "what was there stays");
-        assert_eq!(store.login_attempts(NOW, 0, false).unwrap().matching, 0);
+        assert_eq!(store.login_attempts(0, false).unwrap().matching, 0);
         assert_eq!(version(&store), SCHEMA_VERSION);
         assert!(has_table(&store, "user_grants"));
     }

@@ -842,12 +842,7 @@ impl Pg {
 
     // History: reads --------------------------------------------------------------------------
 
-    pub fn login_attempts(
-        &self,
-        now: i64,
-        page: u32,
-        only_failed: bool,
-    ) -> Result<LoginPage, String> {
+    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
         self.run(|c| {
             let matching: i64 = c
                 .query_one(
@@ -882,14 +877,11 @@ impl Pg {
                 })
                 .collect();
             let figures = c.query_one(
-                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT success),
-                        COUNT(DISTINCT CASE WHEN NOT success THEN ip END)
-                   FROM login_attempts WHERE ts >= $1",
-                &[&(now - DAY)],
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT success) FROM login_attempts",
+                &[],
             )?;
-            result.attempts_24h = figures.get::<_, i64>(0) as u32;
-            result.failed_24h = figures.get::<_, i64>(1) as u32;
-            result.addresses_24h = figures.get::<_, i64>(2) as u32;
+            result.total = figures.get::<_, i64>(0) as u32;
+            result.refused = figures.get::<_, i64>(1) as u32;
             Ok(result)
         })
     }
@@ -974,13 +966,6 @@ impl Pg {
                     ip: row.get(4),
                 })
                 .collect();
-            let unknown: i64 = c
-                .query_one(
-                    "SELECT COUNT(*) FROM audit_events WHERE kind = 'login_failed' AND login IS NULL AND ts >= $1",
-                    &[&first_day],
-                )?
-                .get(0);
-            snapshot.unknown_failures_30d = unknown as u32;
             Ok(snapshot)
         })
     }
