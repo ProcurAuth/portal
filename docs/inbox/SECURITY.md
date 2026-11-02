@@ -10,7 +10,7 @@ The security model of the portal is in the root `SECURITY.md`. This page gives t
 - **Code.** The secret works one time and expires (`inbox.enrollment.code_ttl`). The server keeps only its SHA-256 digest. The page that shows the code has the header `Cache-Control: no-store`.
 - **Limits.** The server limits the enrollment attempts for each client address (`inbox.devices.max_auth_failures` in `inbox.devices.auth_failure_window`). It closes a connection that sends no message in 10 seconds.
 - **Sessions.** A session is Noise IK between the key of the phone and the pinned key of the server. Each phone can be revoked. A revoked phone gets the close code 4403.
-- **Rights.** The permissions of the service `inbox` decide who sends, who reads and who revokes. A phone subscribes only to the groups for which its account has `group.subscribe`.
+- **Rights.** The permissions of the portal features decide who sends, who reads and who revokes. A phone subscribes only to the groups for which its account has `inbox.receive`.
 - **Producers.** The inbox compares the tokens of the file in constant time. A key of the portal needs `alert.send` on the group for the key and for its owner.
 - **Pages.** The pages need a session of the portal. A form needs an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
 - **No password.** The shared device password, OPAQUE and the admin front without a password do not exist.

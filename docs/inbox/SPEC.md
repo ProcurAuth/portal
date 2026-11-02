@@ -41,9 +41,9 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 
 3.2.1 A phone MUST enroll with a one-time code that an account of the portal makes. The login of the account is the user name of the phone. The phone MUST NOT change it.
 
-3.2.2 The account MUST have the permission `group.subscribe` on at least one group to make a code.
+3.2.2 The account MUST have the permission `inbox.receive` on at least one group to make a code.
 
-3.2.3 A phone MUST subscribe only to a group for which its account has `group.subscribe`. When the account loses the permission, the inbox MUST remove the subscription and tell the phone.
+3.2.3 A phone MUST subscribe only to a group for which its account has `inbox.receive`. When the account loses the permission, the inbox MUST remove the subscription and tell the phone.
 
 3.2.4 For each group, the user chooses an action on the phone: `alarm`, `ring` or `notify`. The server MUST NOT know this choice.
 
@@ -51,11 +51,11 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 
 3.2.6 One app MAY enroll in several servers. It keeps one connection and its own subscriptions for each server.
 
-3.2.7 A person MUST be able to revoke a phone. An account revokes its own phones. An account with `device.revoke` and `device.read` revokes any phone.
+3.2.7 A person MUST be able to revoke a phone. An account revokes its own phones. An account with `phone.revoke` and `phone.read` revokes any phone.
 
 ### 3.3 Producers
 
-3.3.1 A producer MUST send an alert with a bearer token. Two kinds of token work at the same time: a token of the file (a block `producer`), and a key of the portal.
+3.3.1 A producer MUST send an alert with an API key (the prefix `api_`) as a bearer token. Two sources of API key work at the same time: a key of the file (a block `api_key`), and a key of the database. Any other prefix, and a bad checksum, MUST get `401` before any lookup.
 
 3.3.2 A token of the file MUST NOT depend on the state of the portal. It works when the portal is not ready.
 
@@ -69,7 +69,7 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 
 ### 3.4 Pages
 
-3.4.1 The pages of the inbox are in the tab Inbox of the settings of the portal. They need a session of the portal and the permissions of the service `inbox`.
+3.4.1 The pages of the inbox are in the tab Inbox of the settings of the portal. They need a session of the portal and the permissions of the portal features.
 
 3.4.2 The pages MUST work without script. The script only gives a Copy button.
 

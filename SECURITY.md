@@ -308,8 +308,8 @@ The inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives it
 - The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
 - The server limits the enrollment attempts for each client address.
 - The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the producers share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
-- A phone subscribes only to a group for which its account has `group.subscribe`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
-- A producer sends an alert with a bearer token. The server compares the tokens of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
+- A phone subscribes only to a group for which its account has `inbox.receive`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
+- A producer sends an alert with an API key (`api_`) as a bearer token. The server checks the form of the text (prefix, length, characters, checksum) before any lookup. A key of another kind gets `401` with no detail. The server compares the keys of the file in constant time. A key needs `alert.send` on the group for the key and for its owner.
 - The pages of the inbox need a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone.
-- The key file of the inbox server and the producer tokens use only `_env` or `_file`. A secret in clear text stops the start.
+- The key file of the inbox server and the secrets of the `api_key` blocks use only `_env` or `_file`. A secret in clear text stops the start.
 - The portal listener has no TLS. A producer token travels in clear text on plain HTTP. Use a TLS proxy for the producers.

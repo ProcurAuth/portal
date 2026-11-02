@@ -10,7 +10,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 
 - The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it. With it, the producers, the webhooks and the phones use `server.listen_address`, the port of the pages. The inbox has no listener for them. `inbox.devices.public_address` is the public base URL of the portal as the phones reach it. The portal has no base path: a proxy under a prefix removes the prefix.
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
-- The blocks `group "<id>"` and `producer "<name>"` can occur more than once.
+- The blocks `group "<id>"` and `api_key "<name>"` can occur more than once.
 - The inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
 
 ## Delivery values have no default

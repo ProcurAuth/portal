@@ -127,7 +127,7 @@ The messages `set_user_name` and `user_name` do not exist in protocol 4. The ser
 | `alert` | `alert_id` (hex, 128 random bits), `kind`, `group`, `group_name`, `title` (one line, at most 128 characters), `created_at_ms` |
 | `subscriptions` | `subscriptions[]`, sent after each change. The server also sends it when the account loses the permission for a group: the server removes the subscription, and the message tells the phone. |
 | `pong` | `nonce` |
-| `error` | `code`, `message`. The codes are `unknown_group`, `forbidden_group` and `unavailable`. `unknown_group`: the group does not exist. `forbidden_group`: the account has no permission `group.subscribe` on the group, and `message` is the group. `unavailable`: the storage or the rights are not ready, so send the message again later. |
+| `error` | `code`, `message`. The codes are `unknown_group`, `forbidden_group` and `unavailable`. `unknown_group`: the group does not exist. `forbidden_group`: the account has no permission `inbox.receive` on the group, and `message` is the group. `unavailable`: the storage or the rights are not ready, so send the message again later. |
 
 ### The kind of a message
 
@@ -138,7 +138,7 @@ The version number of the protocol stays 4, because no phone is deployed.
 
 ### Rights of the account
 
-A phone subscribes only to a group for which its account has the permission `group.subscribe` of the service `inbox` of the portal. This adds no message and no version: protocol 4 stays as it is.
+A phone subscribes only to a group for which its account has the permission `inbox.receive` of the portal features. This adds no message and no version: protocol 4 stays as it is.
 
 - The `welcome` lists only the groups that the account may subscribe to.
 - `subscribe` to another group gets the error `forbidden_group`. Sometimes the portal cannot tell the rights, because its directory is not ready or is old. Then the error is `unavailable`, and the phone can send the message again.

@@ -283,9 +283,33 @@ The phones show it as the name of the server: the enrollment answer and the mess
 
 ### 16.4 Deviations
 
-- **The service id is `inbox`.** The permission model of the inbox still has its own internal service. Its id was the old name, so the plain rename gives the id `inbox`. Batch C replaces it with one internal scope `portal`.
-- **The module `src/inbox_actions.rs`.** The file holds the action document of the service `inbox`. Batch C deletes it and moves its constants.
+- **The service id was `inbox`.** Batch C removed it: section 17 gives the one scope `portal`.
+- **The module `src/inbox_actions.rs`.** Batch C deleted it and moved its constants to `src/portal_actions.rs`.
 - **The label `kind` of the metric of failed authentications.** The metric `portal_inbox_auth_failures_total` already had a label `kind` that names the kind of failure. It is not the kind of a message. The name stays, to keep the meaning of the metric.
 - **The old names in tests.** Two tests need the old names to prove that they are refused. The code builds each name from two parts, so that no copy of the old name stays in the repository.
 - **The commits.** The commits split the mechanical rename by area. An intermediate commit can fail to build, because the rename crosses the areas. The last commit builds and passes the tests.
 - **The Android build.** The package, the application id, the scheme and the library name changed. The labels, the strings and the themes only had a plain replacement. Batch E reviews them.
+
+## 17. One scope, two kinds of key, switches (batch C of the rework)
+
+### 17.1 What changed
+
+- **One scope.** The service `portal` holds the actions of the keys and of the inbox. The service `inbox` is gone. The resource types are `key_kind` (nodes `mcp` and `api`) and `inbox_group` (the groups of the file). The document follows the file: a feature that is off has no action and no node.
+- **New names.** `inbox.receive`, `alert.send`, `alert.read`, `phone.read`, `phone.revoke` and `phone.log`. The budget `alerts` is on `access on service:portal`.
+- **Two kinds of key.** The prefix gives the kind: `mcp_` for the key edge, `api_` for the API of the inbox. `whk_` is reserved. The CRC-32 covers the prefix. A verifier refuses a bad text before any lookup, then a key of the other kind. Both are 401 with no detail.
+- **Keys of the file.** A block `api_key` of the block `inbox` replaces the block `producer`. It names an owner that is an account of the file.
+- **Switches.** `keys.mcp`, `keys.api` and `users.allow_creation`, with five contradictions that stop the start.
+- **The editor.** The data of the editor has the parts `services` and `features`. The route `/auth/users/portal-rights` is gone: the grants of the features post to `/auth/users/update`.
+
+### 17.2 Deviations
+
+- **A file key decides its groups at start.** The key follows its owner, a file account. The rights of a file account do not change while the server runs. The start keeps only the groups that the owner may send to, and the check of the key reads no directory and no database. The delivery path keeps the property of the earlier tokens: a key of the file works when the portal is not ready and when PostgreSQL is away. A file key has no budget, as the earlier tokens had none.
+- **A file key is not in the page Keys.** The file is its only source. The page lists the keys of the database and the MCP keys of the file.
+- **An API key holds no grant on a service.** The form and the save refuse it. The key has the alert actions and the grant `access on service:portal` for the budget. An MCP key holds no action of the portal.
+- **The kind of a new key is in the address.** `GET /auth/keys/new?kind=api` shows the form of this kind. A selector with two or more kinds is a small form that asks for the page again. It works without script. The pane of the key and the visual design belong to batch D.
+- **The sixth check of the switches.** A block `key` of a block `user` (an MCP key of the file) stops the start when `keys.mcp` is not `true`. The plan lists five contradictions.
+- **The summary row of a revoked key has no kind.** The list shows the kind chip for the keys that exist only.
+- **The tab Activity stays.** The panel-only file shows the tabs Users, Services and Activity. Batch D merges Activity into Users.
+- **The migration.** The column `kind` is the schema version 7 of SQLite and of PostgreSQL. A key of an earlier version is an MCP key. The plan said "no old data"; a migration is still safe and small.
+- **The grants of a database with the old names.** No migration reads `service:inbox` or the old action names. The seed of a demo database sets the new grants.
+- **The old documents.** The README sections, the documents of `docs/inbox/` and the demo texts have the new names and blocks. Batch F rewrites their prose.
