@@ -814,3 +814,230 @@ pub fn is_offered(kind: KeyKind, grant: &Grant) -> bool {
 pub fn instant_text(unix: i64) -> String {
     format_utc_instant(unix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grants::Grant;
+
+    fn frame() -> Frame<'static> {
+        Frame {
+            logout_token: "out",
+            keys: true,
+            inbox: true,
+            superadmin: false,
+        }
+    }
+
+    fn line(id: &str, name: &str, kind: KeyKind, grants: &[(&str, Cover)]) -> KeyLine {
+        KeyLine {
+            id: id.into(),
+            owner: Some("alice".into()),
+            name: name.into(),
+            hint: "AbCd".into(),
+            kind: Some(kind),
+            state: KeyState::Active,
+            file: false,
+            created_at: 1_700_000_000,
+            expires_at: None,
+            last_check_at: None,
+            check_count: 0,
+            revoked_at: None,
+            grants: grants
+                .iter()
+                .map(|(text, cover)| GrantLine {
+                    grant: Grant::parse(text).unwrap(),
+                    cover: *cover,
+                })
+                .collect(),
+            no_access: Vec::new(),
+            can_change: true,
+        }
+    }
+
+    fn view(pane: Pane<'static>, kinds: &[KeyKind]) -> KeysView<'static> {
+        KeysView {
+            section: Section::Mine,
+            can_read_own: true,
+            can_read_all: true,
+            can_create: !kinds.is_empty(),
+            create_kinds: kinds.to_vec(),
+            kind: kinds.first().copied(),
+            kind_filter: None,
+            groups: vec![("infra".into(), "Infra <b>".into()), ("db".into(), "Database".into())],
+            can_revoke: true,
+            can_revoke_all: false,
+            cannot_use: false,
+            notice: None,
+            lines: vec![
+                line(
+                    "k1",
+                    "ci <deploy>",
+                    KeyKind::Api,
+                    &[
+                        ("alert.send on service:portal/inbox_group:infra", Cover::Full),
+                        ("alert.send on service:portal/inbox_group:db", Cover::None),
+                        ("alert.read on service:portal/inbox_group:infra", Cover::Full),
+                    ],
+                ),
+                line(
+                    "k2",
+                    "agent",
+                    KeyKind::Mcp,
+                    &[("access on service:notes", Cover::Full), ("notes.read on service:notes", Cover::Full)],
+                ),
+            ],
+            next: None,
+            csrf: "tok<",
+            editor: None,
+            pane,
+            expires_at: "2026-12-01T00:00:00Z".into(),
+            max_lifetime: None,
+            copy_name: String::new(),
+            impersonated: false,
+        }
+    }
+
+    const BOTH: [KeyKind; 2] = [KeyKind::Mcp, KeyKind::Api];
+
+    fn page(view: &KeysView) -> String {
+        keys_page(&frame(), view)
+    }
+
+    #[test]
+    fn the_entry_point_is_the_toolbar_button_or_the_pane_action_and_never_both() {
+        let closed = page(&view(Pane::Closed, &BOTH));
+        assert!(closed.contains(r#"<a class="button button--primary" href="/auth/keys/new">"#));
+        assert!(!closed.contains(r#"class="pane""#) && !closed.contains(">Create</button>"));
+        for pane in [
+            Pane::New,
+            Pane::Edit(EditTarget {
+                id: "k1".into(),
+                name: "ci".into(),
+            }),
+        ] {
+            let mut open = view(pane, &BOTH);
+            open.kind = Some(KeyKind::Api);
+            let html = page(&open);
+            assert!(!html.contains("New key</a>"), "{html}");
+            assert!(!html.contains(r#"href="/auth/keys/new""#));
+            assert!(html.contains(">Cancel</a>") && html.contains(r#"type="submit" form=""#));
+            assert!(html.contains(">Create</button>") || html.contains(">Save</button>"));
+        }
+        // Made: the pane has "Done" and the toolbar has no button.
+        let made = page(&view(
+            Pane::Made(NewKey {
+                text: "api_secret<",
+                name: "ci",
+                superadmin: false,
+            }),
+            &BOTH,
+        ));
+        assert!(!made.contains("New key</a>") && made.contains(r#"href="/auth/keys">Done</a>"#));
+        assert!(!made.contains(">Create</button>") && !made.contains(">Cancel</a>"));
+    }
+
+    #[test]
+    fn the_kind_selector_shows_with_two_kinds_and_only_then() {
+        let mut two = view(Pane::New, &BOTH);
+        two.kind = Some(KeyKind::Mcp);
+        let html = page(&two);
+        assert!(html.contains(r#"<form id="kind-form" method="get" action="/auth/keys/new"></form>"#));
+        assert!(html.contains(r#"form="kind-form" name="kind" value="api""#));
+        assert!(html.contains(r#"form="kind-form" name="kind" value="mcp""#));
+        // The API kind comes first.
+        assert!(
+            html.find(r#"name="kind" value="api""#).unwrap()
+                < html.find(r#"name="kind" value="mcp""#).unwrap()
+        );
+        assert!(html.contains(">New key<") || html.contains("New key</h2>"));
+        for one in [[KeyKind::Mcp], [KeyKind::Api]] {
+            let mut single = view(Pane::New, &one);
+            single.kind = Some(one[0]);
+            let html = page(&single);
+            assert!(!html.contains("kind-form"), "{html}");
+            assert!(html.contains(&format!("New {} key", one[0].label())));
+            // The kind is a hidden field of the form.
+            assert!(html.contains(&format!(r#"<input type="hidden" name="kind" value="{}">"#, one[0].name())));
+        }
+        // With no kind to make, there is no "New key" and no pane.
+        let none = page(&view(Pane::Closed, &[]));
+        assert!(!none.contains("New key") && !none.contains("/auth/keys/new"));
+    }
+
+    #[test]
+    fn the_change_of_a_key_shows_its_kind_as_a_fact_and_not_as_a_choice() {
+        let mut edit = view(
+            Pane::Edit(EditTarget {
+                id: "k1".into(),
+                name: "ci <deploy>".into(),
+            }),
+            &BOTH,
+        );
+        edit.kind = Some(KeyKind::Api);
+        let html = page(&edit);
+        assert!(html.contains(r#"<span class="kindTag""#) && !html.contains("kind-form"));
+        assert!(html.contains(r#"<input type="hidden" name="id" value="k1">"#));
+        assert!(html.contains(r#"action="/auth/keys/edit""#) && html.contains(">Save</button>"));
+        assert!(html.contains(r#"value="ci &lt;deploy&gt;""#));
+        assert!(!html.contains(r#"name="expires_at""#), "a key keeps its expiry date");
+        // The row of the key is selected.
+        assert!(html.contains(r#"<tr class="is-selected" data-kind="api">"#));
+    }
+
+    #[test]
+    fn a_key_made_shows_its_text_one_time_with_a_copy_button() {
+        let html = page(&view(
+            Pane::Made(NewKey {
+                text: "api_secret<",
+                name: "ci <1>",
+                superadmin: true,
+            }),
+            &BOTH,
+        ));
+        assert!(html.contains(r#"id="key-text" type="text" readonly value="api_secret&lt;""#));
+        assert!(html.contains(r#"data-copy="key-text""#));
+        assert!(html.contains("<strong>ci &lt;1&gt;</strong>") && html.contains("acts as you"));
+        assert!(html.contains("This key can have every right"));
+        assert!(!html.contains("new-key-form"), "the pane has no form any more");
+    }
+
+    #[test]
+    fn the_list_has_kind_icons_kind_chips_and_a_bulk_revoke_and_no_button_in_a_row() {
+        let html = page(&view(Pane::Closed, &BOTH));
+        assert!(html.contains("#i-webhook") && html.contains("#i-robot"));
+        assert!(html.contains(r#"aria-label="API key: for services and webhooks""#));
+        assert!(html.contains(r#"href="/auth/keys?k=api""#) && html.contains(r#"href="/auth/keys?k=mcp""#));
+        assert!(html.contains(r#"<form id="revoke-keys" class="bulk" method="post" action="/auth/keys/revoke">"#));
+        assert!(html.contains(r#"name="section" value="mine""#));
+        assert!(html.contains(r#"name="id.k1" value="1""#) && html.contains(r#"name="id.k2" value="1""#));
+        assert!(html.contains("Revoke the ticked keys?"));
+        assert!(!html.contains("Make a key like this one") && !html.contains("keyAction"));
+        // The columns, with the groups of the inbox named and escaped.
+        assert!(html.contains("Send Infra &lt;b&gt;, Database &middot; Read Infra &lt;b&gt;") || html.contains("Send Infra &lt;b&gt;, Database · Read Infra &lt;b&gt;"), "{html}");
+        assert!(html.contains("notes · 2 permissions"));
+        assert!(html.contains(r#"href="/auth/keys/edit?id=k1""#) && html.contains(r#"aria-label="Edit ci &lt;deploy&gt;""#));
+        // A right that the owner lost shows the mark.
+        assert!(html.contains("1 right has no effect"));
+        // The filter keeps one kind.
+        let mut api = view(Pane::Closed, &BOTH);
+        api.kind_filter = Some(KeyKind::Api);
+        let html = page(&api);
+        assert!(html.contains(">ci &lt;deploy&gt;<") && !html.contains(">agent<"));
+        assert!(html.contains(r#"class="chip is-on" href="/auth/keys?k=api""#) || html.contains(r#"class="chip is-on" href="/auth/keys""#));
+        // No box and no bulk button without the right to revoke.
+        let mut quiet = view(Pane::Closed, &BOTH);
+        quiet.can_revoke = false;
+        let html = page(&quiet);
+        assert!(!html.contains("revoke-keys") && !html.contains("bulk__box"));
+    }
+
+    #[test]
+    fn the_pane_has_no_inline_style_and_no_inline_script() {
+        for pane in [Pane::Closed, Pane::New] {
+            let html = page(&view(pane, &BOTH));
+            assert!(!html.contains(" style=") && !html.contains("<style"));
+            assert!(!html.contains("<script>"));
+        }
+    }
+}

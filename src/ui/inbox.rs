@@ -1432,3 +1432,563 @@ pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     ));
     super::settings::fill_page(Tab::Inbox, frame, "Inbox", &out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inbox::admin::{DeliveryView, DeviceView};
+
+    const NOW: i64 = 1_700_000_000_000;
+
+    fn frame() -> Frame<'static> {
+        Frame {
+            logout_token: "out",
+            keys: true,
+            inbox: true,
+            superadmin: false,
+        }
+    }
+
+    fn choice(id: &str, name: &str) -> GroupChoice {
+        GroupChoice {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn all_rights() -> Rights {
+        Rights {
+            sent: true,
+            phones: true,
+            revoke: true,
+            connections: true,
+            own_phones: true,
+            send: vec![choice("infra", "Infra <b>"), choice("crit", "Critical")],
+        }
+    }
+
+    /// The account that holds `inbox.receive` only.
+    fn receive_rights() -> Rights {
+        Rights {
+            own_phones: true,
+            ..Rights::default()
+        }
+    }
+
+    fn groups() -> Vec<GroupLine> {
+        vec![
+            GroupLine {
+                id: "infra".into(),
+                name: "Infra <b>".into(),
+                critical: false,
+            },
+            GroupLine {
+                id: "crit".into(),
+                name: "Critical".into(),
+                critical: true,
+            },
+        ]
+    }
+
+    fn summary(id: &str, group: &str, title: &str, received: i64, expired: i64) -> AlertSummary {
+        AlertSummary {
+            id: id.into(),
+            kind: inbox_core::proto::Kind::Alert,
+            group: group.into(),
+            title: title.into(),
+            source: "producer:ci".into(),
+            created_at: NOW - 60_000,
+            targets: 3,
+            received,
+            expired,
+            missing: Vec::new(),
+        }
+    }
+
+    fn row(summary: AlertSummary, origin: Origin) -> AlertRow {
+        AlertRow { summary, origin }
+    }
+
+    fn device(id: &str, name: &str, login: &str, state: DeviceState, pending: i64) -> DeviceRow {
+        DeviceRow {
+            device: DeviceView {
+                id: id.into(),
+                name: name.into(),
+                user_name: login.into(),
+                enrolled_at: 1_000,
+                enrolled_ip: "127.0.0.1".into(),
+                app_version: Some("5.0.0".into()),
+                last_connected_at: Some(NOW - 1_000),
+                last_seen_at: Some(NOW - 18 * 60_000),
+                last_ip: None,
+                revoked_at: (state == DeviceState::Revoked).then_some(4_000),
+                subscriptions: vec!["infra".into()],
+                pending,
+            },
+            live: None,
+            state,
+        }
+    }
+
+    fn sent(opened: Option<AlertDetail>) -> SentData {
+        SentData {
+            alerts: vec![
+                row(
+                    summary("a1", "infra", "Disk <script>", 3, 0),
+                    Origin::Key("ci-deploy".into()),
+                ),
+                row(summary("a2", "crit", "Inbox", 1, 0), Origin::Watch),
+                row(summary("a3", "infra", "Old", 1, 2), Origin::Account),
+            ],
+            truncated: false,
+            counts: vec![
+                AlertCount {
+                    bucket: 23,
+                    group: "infra".into(),
+                    count: 4,
+                },
+                AlertCount {
+                    bucket: 23,
+                    group: "crit".into(),
+                    count: 1,
+                },
+            ],
+            since_ms: NOW - Period::Day.millis(),
+            opened,
+        }
+    }
+
+    fn phones() -> PhonesData {
+        PhonesData {
+            rows: vec![
+                device("d1", "Pixel <1>", "alice", DeviceState::Online, 0),
+                device("d2", "Galaxy", "bob", DeviceState::Unreachable, 2),
+                device("d3", "Old", "bob", DeviceState::Revoked, 0),
+            ],
+            revoke_all: true,
+            revoke_own: true,
+        }
+    }
+
+    fn conns() -> ConnData {
+        ConnData {
+            rows: vec![
+                ConnectionView {
+                    device_id: "d1".into(),
+                    device_name: "Pixel".into(),
+                    user_name: "alice".into(),
+                    ip: "10.0.0.1".into(),
+                    app_version: "5".into(),
+                    connected_at: NOW - 5_000,
+                    disconnected_at: None,
+                    close_reason: None,
+                },
+                ConnectionView {
+                    device_id: "d2".into(),
+                    device_name: "Galaxy".into(),
+                    user_name: "bob".into(),
+                    ip: "10.0.0.2".into(),
+                    app_version: "5".into(),
+                    connected_at: NOW - 50_000,
+                    disconnected_at: Some(NOW - 10_000),
+                    close_reason: Some("heartbeat timeout".into()),
+                },
+            ],
+        }
+    }
+
+    fn full_view<'a>(rights: &'a Rights, query: &'a Query, groups: &'a [GroupLine]) -> InboxView<'a> {
+        InboxView {
+            rights,
+            notice: None,
+            csrf: "tok<",
+            idempotency_key: "k1",
+            query,
+            now_ms: NOW,
+            login: "alice",
+            groups,
+            sent: Some(sent(None)),
+            phones: Some(phones()),
+            connections: Some(conns()),
+            docs: Some(DocsData {
+                base: "https://portal.example.org".into(),
+            }),
+            code: None,
+            impersonated: false,
+        }
+    }
+
+    fn page(view: &InboxView) -> String {
+        inbox_page(&frame(), view)
+    }
+
+    #[test]
+    fn the_page_has_every_part_for_an_account_with_every_right() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        for part in [
+            r#"id="sent-title""#,
+            r#"id="phones-title""#,
+            r#"id="connections-title""#,
+            "Send alert",
+            r#"aria-label="Documentation for senders""#,
+            r#"aria-label="Add a phone""#,
+        ] {
+            assert!(html.contains(part), "{part}");
+        }
+        // The text of a group and of a title is escaped.
+        assert!(html.contains("Infra &lt;b&gt;") && !html.contains("Infra <b>"));
+        assert!(html.contains("Disk &lt;script&gt;") && !html.contains("<script>"));
+        assert!(html.contains("Pixel &lt;1&gt;"));
+        // The page is one page: no sub-navigation and no link to an alert page.
+        assert!(!html.contains("/auth/settings/inbox/alerts/"));
+        assert!(!html.contains("segmented--compact"));
+        assert_eq!(html.matches(r#"class="contentTabs__tab"#).count(), 2);
+    }
+
+    #[test]
+    fn an_account_that_receives_only_has_its_phones_and_the_plus_button() {
+        let (rights, query, groups) = (receive_rights(), Query::default(), groups());
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = None;
+        view.connections = None;
+        view.docs = None;
+        view.phones = Some(PhonesData {
+            rows: vec![device("d1", "Mine", "alice", DeviceState::Offline, 0)],
+            revoke_all: false,
+            revoke_own: true,
+        });
+        let html = page(&view);
+        assert!(html.contains(r#"id="phones-title">My phones<"#), "{html}");
+        assert!(html.contains(r#"aria-label="Add a phone""#));
+        // Each part that the permissions do not give is absent, not grey.
+        for absent in [
+            r#"id="sent-title""#,
+            r#"id="connections-title""#,
+            "Send alert",
+            "Documentation for senders",
+            r#"class="tbar"#,
+            "Period",
+            "<th scope=\"col\">Owner</th>",
+            "My phones</span>",
+            "chart",
+        ] {
+            assert!(!html.contains(absent), "{absent}");
+        }
+        assert!(html.contains("split--solo"));
+    }
+
+    #[test]
+    fn an_account_with_only_the_send_right_has_the_toolbar_and_nothing_else() {
+        let rights = Rights {
+            send: vec![choice("infra", "Infra")],
+            ..Rights::default()
+        };
+        let (query, groups) = (Query::default(), groups());
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = None;
+        view.phones = None;
+        view.connections = None;
+        let html = page(&view);
+        assert!(html.contains("Send alert") && html.contains("Documentation for senders"));
+        assert!(!html.contains(r#"id="sent-title""#) && !html.contains("Period"));
+        assert!(!html.contains(r#"id="phones-title""#));
+        assert!(!html.contains(r#"aria-label="Add a phone""#));
+    }
+
+    #[test]
+    fn the_send_form_lists_only_the_groups_that_the_account_may_send_to() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"action="/auth/settings/inbox/send""#));
+        assert!(html.contains(r#"<option value="infra">Infra &lt;b&gt;</option>"#));
+        assert!(html.contains(r#"<option value="crit">Critical</option>"#));
+        assert!(html.contains(r#"name="key" value="k1""#));
+        assert!(html.contains(r#"name="csrf" value="tok&lt;""#));
+        // One group is no choice: no select.
+        let one = Rights {
+            send: vec![choice("infra", "Infra")],
+            ..all_rights()
+        };
+        let html = page(&full_view(&one, &query, &groups));
+        assert!(!html.contains("<select"), "{html}");
+        assert!(html.contains(r#"<input type="hidden" name="group" value="infra">"#));
+        // A session of "Log in as" sends nothing: the button is absent.
+        let mut view = full_view(&rights, &query, &groups);
+        view.impersonated = true;
+        let html = page(&view);
+        assert!(!html.contains("Send alert") && !html.contains("revoke-phones"));
+        assert!(html.contains(r#"aria-label="Add a phone""#));
+    }
+
+    #[test]
+    fn a_chip_is_a_link_with_a_query_parameter_and_a_chip_of_zero_is_absent() {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query::default();
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"href="/auth/settings/inbox?g=crit""#), "{html}");
+        assert!(html.contains(r#"href="/auth/settings/inbox?a=expired""#));
+        assert!(html.contains(r#"href="/auth/settings/inbox?ps=revoked""#));
+        assert!(html.contains(r#"href="/auth/settings/inbox?pp=1""#));
+        assert!(html.contains(r#"href="/auth/settings/inbox?mine=1""#));
+        assert!(html.contains(r#"href="/auth/settings/inbox?cs=open""#));
+        // No phone is offline: the chip is absent.
+        assert!(!html.contains("ps=offline"));
+        // A chip that is on turns the filter off, and keeps the others.
+        let query = Query {
+            group: Some("crit".into()),
+            period: Period::Week,
+            ..Query::default()
+        };
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"class="chip is-on" href="/auth/settings/inbox?p=7d""#), "{html}");
+        assert!(html.contains(r#"href="/auth/settings/inbox?p=7d&amp;g=infra""#));
+        // The filter shows only the alerts of the group.
+        assert!(html.contains(">Inbox<") && !html.contains(">Disk "));
+    }
+
+    #[test]
+    fn the_kinds_of_a_later_step_are_dashed_chips_with_no_behaviour() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert_eq!(html.matches("chip chip--future").count(), 3, "{html}");
+        assert!(html.contains("Questions: not enabled"));
+        assert!(html.contains("Approvals: not enabled"));
+        assert!(html.contains("Unanswered: not enabled"));
+        assert_eq!(html.matches("chip--future\" type=\"button\" disabled").count(), 3);
+    }
+
+    #[test]
+    fn the_phones_have_boxes_and_one_bulk_button_and_no_button_in_a_row() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"<form id="revoke-phones" class="bulk" method="post" action="/auth/settings/inbox/revoke">"#));
+        assert!(html.contains(r#"name="id.d1" value="1""#));
+        assert!(html.contains(r#"name="id.d2" value="1""#));
+        assert!(!html.contains(r#"name="id.d3""#), "a revoked phone has no box");
+        assert!(html.contains(r#"data-bulk="revoke-phones""#));
+        assert!(html.contains("Revoke the ticked phones?"));
+        assert_eq!(html.matches("data-bulk=\"revoke-phones\"").count(), 1);
+        assert!(!html.contains("Confirm: revoke"));
+        // Without the right to revoke and without phones of its own: no box, no button.
+        let mut view = full_view(&rights, &query, &groups);
+        view.phones = Some(PhonesData {
+            revoke_all: false,
+            revoke_own: false,
+            ..phones()
+        });
+        let html = page(&view);
+        assert!(!html.contains("revoke-phones") && !html.contains("bulk__box"));
+        // An account with its own phones only may revoke these and no other.
+        let mut view = full_view(&rights, &query, &groups);
+        view.phones = Some(PhonesData {
+            revoke_all: false,
+            revoke_own: true,
+            ..phones()
+        });
+        let html = page(&view);
+        assert!(html.contains(r#"name="id.d1""#) && !html.contains(r#"name="id.d2""#));
+    }
+
+    #[test]
+    fn a_row_opens_its_detail_in_place_with_a_close_link() {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query::default();
+        let html = page(&full_view(&rights, &query, &groups));
+        // The link of a row opens it, and keeps its place in the list with an anchor.
+        assert!(html.contains(r##"href="/auth/settings/inbox?open=a1#a-a1""##), "{html}");
+        assert!(!html.contains("data-detail"));
+        let detail = AlertDetail {
+            summary: summary("a1", "infra", "Disk", 1, 0),
+            deliveries: vec![
+                DeliveryView {
+                    device_id: "d1".into(),
+                    device_name: "Pixel".into(),
+                    user_name: "alice".into(),
+                    attempts: 1,
+                    first_sent_at: Some(NOW),
+                    last_sent_at: None,
+                    received_at: Some(NOW + 1_000),
+                    expired: false,
+                    device_revoked: false,
+                },
+                DeliveryView {
+                    device_id: "d2".into(),
+                    device_name: "Galaxy".into(),
+                    user_name: "bob".into(),
+                    attempts: 3,
+                    first_sent_at: Some(NOW),
+                    last_sent_at: Some(NOW),
+                    received_at: None,
+                    expired: true,
+                    device_revoked: false,
+                },
+            ],
+        };
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = Some(sent(Some(detail)));
+        let open = Query {
+            open: Some("a1".into()),
+            ..Query::default()
+        };
+        view.query = &open;
+        let html = page(&view);
+        assert!(html.contains(r#"<tr class="adetail" data-detail="a1">"#), "{html}");
+        assert!(html.contains(r#"data-device="d2""#) && html.contains("Expired: the phone never got it"));
+        assert!(html.contains(r##"aria-label="Close the detail""##));
+        assert!(html.contains(r##"href="/auth/settings/inbox#a-a1""##), "close keeps the place");
+        assert_eq!(html.matches("data-detail=").count(), 1);
+        assert!(html.contains("Sent by</b> key ci-deploy") || html.contains("Sent by</b> an account") || html.contains("Sent by</b>"));
+    }
+
+    #[test]
+    fn the_period_picker_is_a_popover_of_links() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"<summary class="pick" aria-label="Period" title="Period">"#), "{html}");
+        for period in ["p=1h", "p=6h", "p=7d", "p=30d"] {
+            assert!(html.contains(&format!("href=\"/auth/settings/inbox?{period}\"")), "{period}");
+        }
+        assert!(html.contains("Last 24 h") && html.contains(r#"aria-current="true""#));
+    }
+
+    #[test]
+    fn the_connections_have_a_search_form_that_keeps_the_filters() {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query {
+            login: "al\"ice".into(),
+            conn: Some(ConnState::Open),
+            period: Period::Hour,
+            ..Query::default()
+        };
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"<form class="searchBox" method="get" action="/auth/settings/inbox" role="search">"#));
+        assert!(html.contains(r#"name="cs" value="open""#) && html.contains(r#"name="p" value="1h""#));
+        assert!(html.contains(r#"value="al&quot;ice""#));
+        assert!(html.contains(r#"data-reason="""#));
+        // The filter "open" keeps the open connection only.
+        assert!(html.contains(r#"<tr data-login="alice""#) && !html.contains(r#"<tr data-login="bob""#));
+    }
+
+    #[test]
+    fn the_plus_button_is_a_form_and_the_code_shows_in_a_popover_with_a_done_link() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        // The plus button makes the code. There is no second button that makes one.
+        assert!(html.contains(r#"<form class="inline" method="post" action="/auth/settings/inbox/code">"#));
+        assert_eq!(html.matches("Make a code").count(), 0);
+        assert!(!html.contains("data-code-pop"));
+        let mut view = full_view(&rights, &query, &groups);
+        view.code = Some(CodeData {
+            code: "portal-inbox://enroll?s=h%3A1&k=a&c=b",
+            fingerprint: "0a1b2c3d",
+            expires_at_ms: NOW,
+        });
+        let html = page(&view);
+        assert!(html.contains("data-code-pop"));
+        assert!(html.contains(r#"id="enroll-code""#) && html.contains(">portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b</textarea>"));
+        assert!(html.contains(r#"href="portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
+        assert!(html.contains(r#"data-copy="enroll-code""#));
+        assert!(html.contains("<code>0a1b2c3d</code>"));
+        assert!(html.contains(r#"<a class="button" href="/auth/settings/inbox" data-code-done>Done</a>"#));
+        assert!(html.contains("2023-11-14"));
+        // The popover is not inside a scroller: it sits in the head of the zone.
+        let head = html.find(r#"id="phones-title""#).unwrap();
+        let pop = html.find("data-code-pop").unwrap();
+        let scroll = html[head..].find(r#"<div class="scroll">"#).unwrap() + head;
+        assert!(pop < scroll);
+    }
+
+    #[test]
+    fn the_graph_counts_each_bar_and_puts_the_critical_groups_on_top() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains(r#"<svg class="chart" viewBox="0 0 240 52""#), "{html}");
+        assert!(html.contains("4 alerts</title>") && html.contains("1 critical</title>"));
+        assert!(html.contains("5 in total"));
+        // The group filter keeps one group in the graph.
+        let query = Query {
+            group: Some("crit".into()),
+            ..Query::default()
+        };
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains("1 in total") && !html.contains("4 alerts</title>"));
+        // Each period has 12 to 30 bars.
+        for period in Period::ALL {
+            let bars = period.millis() / period.bucket_millis();
+            assert!((12..=30).contains(&bars), "{period:?}: {bars}");
+        }
+    }
+
+    #[test]
+    fn the_origin_comes_from_the_source_of_the_alert() {
+        let resolve = |id: &str| (id == "k1").then(|| "ci-deploy".to_string());
+        assert_eq!(Origin::of("portal", &resolve), Origin::Watch);
+        assert_eq!(Origin::of("admin", &resolve), Origin::Account);
+        assert_eq!(Origin::of("producer:local", &resolve), Origin::Key("local".into()));
+        assert_eq!(Origin::of("webhook:key:k1", &resolve), Origin::Key("ci-deploy".into()));
+        assert_eq!(Origin::of("notify:key:gone", &resolve), Origin::Key("API key".into()));
+    }
+
+    #[test]
+    fn the_query_is_strict_and_the_address_leaves_out_the_defaults() {
+        let pairs = |text: &str| -> Vec<(String, String)> {
+            text.split('&')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let (a, b) = p.split_once('=').unwrap();
+                    (a.to_string(), b.to_string())
+                })
+                .collect()
+        };
+        let query = Query::parse(&pairs("p=7d&g=infra&a=wait&ps=online&pp=1&mine=1&cs=closed&login=bob&s=sent")).unwrap();
+        assert_eq!(query.period, Period::Week);
+        assert_eq!(query.alert, Some(AlertState::Pending));
+        assert_eq!(
+            query.href(|_| {}),
+            "/auth/settings/inbox?p=7d&g=infra&a=wait&ps=online&pp=1&mine=1&cs=closed&login=bob"
+        );
+        assert_eq!(Query::default().href(|_| {}), PAGE);
+        for bad in [
+            "p=2d", "x=1", "a=what", "ps=gone", "pp=0", "cs=maybe", "open=zz", "g=", "p=1h&p=6h",
+        ] {
+            assert!(Query::parse(&pairs(bad)).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_page_uses_no_inline_style_and_no_inline_script() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let mut view = full_view(&rights, &query, &groups);
+        view.notice = notice_for("sent");
+        view.code = Some(CodeData {
+            code: "portal-inbox://x",
+            fingerprint: "ab",
+            expires_at_ms: NOW,
+        });
+        let html = page(&view);
+        assert!(!html.contains(" style="), "{html}");
+        assert!(!html.contains("<style") && !html.contains("onclick"));
+        assert!(!html.contains("<script>"), "the scripts have a src");
+    }
+
+    #[test]
+    fn each_notice_code_has_a_text_and_an_unknown_code_has_none() {
+        for code in [
+            "sent",
+            "duplicate",
+            "revoked",
+            "no_title",
+            "bad_title",
+            "bad_group",
+            "unknown_device",
+            "too_many_codes",
+            "limited",
+            "failed",
+        ] {
+            assert!(notice_for(code).is_some(), "{code}");
+        }
+        assert!(notice_for("<script>").is_none());
+        assert!(notice_for("sent").unwrap().ok && !notice_for("failed").unwrap().ok);
+    }
+}

@@ -817,15 +817,11 @@ fn delete_account(s: &Server, login: &str) {
     s.accounts.lock().unwrap().remove(login);
 }
 
-/// The token of the forms of the inbox, from a page of the tab. The overview has the form that sends
-/// an alert, and the page "My phones" has the form that makes a code.
+/// The token of the forms of the inbox, from the page of the tab. The page has the form that sends
+/// an alert, or the form of the plus button that makes a code, by the rights of the account.
 fn inbox_csrf(port: u16, cookie: &str) -> String {
     let host = format!("127.0.0.1:{port}");
-    for path in [
-        "/auth/settings/inbox",
-        "/auth/settings/inbox/phones",
-        "/auth/settings/inbox/devices",
-    ] {
+    for path in ["/auth/settings/inbox"] {
         let (st, _, page) = http_full(
             port,
             &host,
@@ -931,10 +927,10 @@ fn location(head: &str) -> String {
         .to_string()
 }
 
-/// An account makes an enrollment code on the page "My phones", as its owner does before he types it on
-/// the phone. The answer is the status and a JSON object of the page: `code`, `fingerprint` and
-/// `expires_at_ms` for a code (status 200), or `notice` for the refusal that the redirect names
-/// (status 303).
+/// An account makes an enrollment code with the plus button of the zone of its phones, as its owner
+/// does before he types it on the phone. The answer is the status and a JSON object of the page:
+/// `code`, `fingerprint` and `expires_at_ms` for a code (status 200), or `notice` for the refusal
+/// that the redirect names (status 303).
 fn make_code(s: &Server, login: &str) -> (u16, Value) {
     let session = s.account(login);
     let (st, head, page) = inbox_form(s, &session.cookie, "/auth/settings/inbox/code", "");
@@ -943,24 +939,35 @@ fn make_code(s: &Server, login: &str) -> (u16, Value) {
         let notice = loc.split("s=").nth(1).unwrap_or_default().to_string();
         return (st, json!({ "notice": notice, "body": page }));
     }
+    // The answer is the page, with the code in a popover: a text area with the id `enroll-code`.
     let field = page
         .find("id=\"enroll-code\"")
-        .expect("the code page has the field of the code");
+        .expect("the answer has the field of the code");
     let tag_start = page[..field].rfind('<').unwrap();
-    let tag = &page[tag_start..field + page[field..].find('>').unwrap()];
+    let tag_end = field + page[field..].find('>').unwrap();
+    let tag = &page[tag_start..tag_end];
+    let code = unescape(page[tag_end + 1..].split("</textarea>").next().unwrap());
     let fingerprint = page
-        .split("fingerprint <code>")
+        .split("<dt>Server key</dt><dd><code>")
         .nth(1)
         .and_then(|t| t.split("</code>").next())
         .unwrap_or_default();
     (
         st,
         json!({
-            "code": attr(tag, "value").unwrap(),
+            "code": code,
             "fingerprint": fingerprint,
             "expires_at_ms": attr(tag, "data-expires-ms").and_then(|v| v.parse::<i64>().ok()),
         }),
     )
+}
+
+/// The text of the enrollment code in the answer of the plus button: the page, with the code in the
+/// text area `enroll-code`.
+fn code_in(page: &str) -> String {
+    let field = page.find("id=\"enroll-code\"").expect("the field of the code");
+    let tag_end = field + page[field..].find('>').unwrap();
+    unescape(page[tag_end + 1..].split("</textarea>").next().unwrap())
 }
 
 /// The text of a new code of an account.
@@ -1195,11 +1202,11 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     match (method, route) {
         ("GET", "/auth/inbox/api/overview") => {
-            let (st, page) = inbox_page(s, "/auth/settings/inbox/devices");
+            let (st, page) = inbox_page(s, "/auth/settings/inbox");
             if st != 200 {
                 return (st, Value::Null);
             }
-            let devices: Vec<Value> = rows(&page, "data-device")
+            let devices: Vec<Value> = rows(&page, "data-groups")
                 .iter()
                 .map(|tag| {
                     let state = attr(tag, "data-state").unwrap();
@@ -1263,10 +1270,7 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                 .split('&')
                 .find_map(|p| p.strip_prefix("user="))
                 .unwrap_or_default();
-            let (st, page) = inbox_page(
-                s,
-                &format!("/auth/settings/inbox/connections?login={login}"),
-            );
+            let (st, page) = inbox_page(s, &format!("/auth/settings/inbox?login={login}"));
             if st != 200 {
                 return (st, Value::Null);
             }
@@ -1297,8 +1301,9 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                 return (st, json!({ "body": text }));
             }
             let id = loc
-                .strip_prefix("/auth/settings/inbox/alerts/")
-                .and_then(|r| r.split('?').next())
+                .split("open=")
+                .nth(1)
+                .and_then(|r| r.split(['&', '#']).next())
                 .unwrap_or_default();
             let status = if loc.contains("s=sent") {
                 201
@@ -1317,7 +1322,7 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                 s,
                 &session.cookie,
                 "/auth/settings/inbox/revoke",
-                &format!("id={id}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices"),
+                &format!("id.{id}=1"),
             );
             if st != 303 {
                 return (st, json!({ "body": text }));
@@ -2017,7 +2022,7 @@ async fn delivery_guarantees_end_to_end() {
     // the anti-CSRF token. The JSON admin API of the first versions is gone.
     let ap = s.port;
     let host = format!("127.0.0.1:{ap}");
-    for path in ["/auth/settings/inbox", "/auth/settings/inbox/devices"] {
+    for path in ["/auth/settings/inbox", "/auth/settings/inbox?open=none"] {
         let (st, head, _) = http_full(ap, &host, "GET", path, &[], "");
         assert_eq!(st, 303, "no session, no page");
         assert!(location(&head).starts_with("/auth/login"), "{head}");
@@ -2117,14 +2122,11 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(st, 201, "{v}");
     let (st, page) = inbox_page(
         &s,
-        &format!(
-            "/auth/settings/inbox/alerts/{}",
-            v["alert_id"].as_str().unwrap()
-        ),
+        &format!("/auth/settings/inbox?open={}", v["alert_id"].as_str().unwrap()),
     );
     assert_eq!(st, 200);
     assert!(
-        page.contains("0 phones"),
+        page.contains("Received</b> 0 of 0"),
         "no phone subscribes to the group: {page}"
     );
     // The same key sends nothing a second time.
@@ -2175,16 +2177,18 @@ async fn delivery_guarantees_end_to_end() {
     let (_, v) = admin(&s, "GET", "/auth/inbox/api/alerts?limit=2", "");
     assert_eq!(v["alerts"].as_array().unwrap().len(), 2);
     assert_eq!(v["alerts"][0]["id"], all[0]["id"], "newest first");
-    // The page of one alert shows its deliveries.
+    // The row of an alert opens in place and shows its deliveries. There is no page of one alert.
     let (st, page) = inbox_page(
         &s,
-        &format!(
-            "/auth/settings/inbox/alerts/{}",
-            all[0]["id"].as_str().unwrap()
-        ),
+        &format!("/auth/settings/inbox?open={}", all[0]["id"].as_str().unwrap()),
     );
     assert_eq!(st, 200, "{page}");
-    assert!(page.contains("Received"), "{page}");
+    assert!(page.contains("data-detail="), "{page}");
+    let (st, _) = inbox_page(
+        &s,
+        &format!("/auth/settings/inbox/alerts/{}", all[0]["id"].as_str().unwrap()),
+    );
+    assert_eq!(st, 404, "the page of one alert is gone");
     let (st, _) = admin(&s, "POST", "/auth/inbox/api/login/start", "{}");
     assert_eq!(st, 404, "no login endpoint any more");
 
@@ -3629,14 +3633,19 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     assert_eq!(users, ["bob", "root"]);
     // A plain account with a right to subscribe has the page of its phones and no admin page.
     let bob_session = s.account("bob");
-    let (st, _) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox/phones");
+    let (st, page) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200);
+    assert!(page.contains(r#"id="phones-title">My phones<"#), "{page}");
+    for absent in [r#"id="sent-title""#, r#"id="connections-title""#, "Send alert"] {
+        assert!(!page.contains(absent), "{absent}");
+    }
     for path in [
         "/auth/settings/inbox/devices",
         "/auth/settings/inbox/connections",
+        "/auth/settings/inbox/phones",
     ] {
         let (st, _) = inbox_page_as(&s, &bob_session.cookie, path);
-        assert_eq!(st, 403, "{path}");
+        assert_eq!(st, 404, "{path}: the page is gone");
     }
 
     // The secret is not in the log. The database keeps its SHA-256 digest only.
@@ -4770,15 +4779,13 @@ user "fred" {{
     // An account of the file has its permissions from the file: it opens the page of its phones,
     // makes a code, and its phone sees the group of its permission only.
     let fred = sign_in_as(s.port, "fred", ACCOUNT_PASSWORD);
-    let (st, page) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/phones");
+    let (st, page) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
-    let (st, _) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox/devices");
-    assert_eq!(st, 403);
+    assert!(has(&page, r#"id="phones-title">My phones<"#), "{page}");
+    assert!(!has(&page, r#"id="sent-title""#) && !has(&page, r#"id="connections-title""#));
     let (st, _, page) = inbox_form(&s, &fred.cookie, "/auth/settings/inbox/code", "");
     assert_eq!(st, 200, "{page}");
-    let marker = "id=\"enroll-code\" type=\"text\" readonly value=\"";
-    let start = page.find(marker).unwrap() + marker.len();
-    let code = unescape(page[start..].split('"').next().unwrap());
+    let code = code_in(&page);
     let phone = enroll_code(&code, "phone-fred").await.unwrap();
     assert_eq!(phone.user_name, "fred");
     let (mut cf, welcome) = Conn::open(s.port, &phone).await.unwrap();
@@ -4827,13 +4834,18 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     );
     let (st, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
-    assert!(has(&page, "Send an alert"));
-    assert!(has(&page, r#"<option value="infra">Infra</option>"#));
+    assert!(has(&page, "Send alert"));
+    // One group is no choice: the form has no list.
+    assert!(has(&page, r#"<input type="hidden" name="group" value="infra">"#));
     assert!(
-        !has(&page, r#"<option value="other">"#),
+        !has(&page, r#"<option value="other">"#) && !has(&page, "value=\"other\""),
         "only the groups that the account may send to"
     );
-    assert!(has(&page, "Last alerts"));
+    assert!(has(&page, r#"id="sent-title""#));
+    assert!(
+        !has(&page, r#"id="phones-title""#) && !has(&page, r#"id="connections-title""#),
+        "no phone right: no phone zone"
+    );
     assert!(has(
         &page,
         r#"class="contentTabs__tab is-active" aria-current="page" href="/auth/settings/inbox">Inbox"#
@@ -4842,20 +4854,19 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         !has(&page, "/auth/settings/services"),
         "a plain account has not the tabs of the superadmin"
     );
+    // The old pages are gone: they answer 404 for each account.
     for path in [
         "/auth/settings/inbox/devices",
         "/auth/settings/inbox/connections",
         "/auth/settings/inbox/phones",
+        "/auth/settings/inbox/doc",
     ] {
         let (st, _) = inbox_page_as(&s, &pia.cookie, path);
-        assert_eq!(st, 403, "{path}");
+        assert_eq!(st, 404, "{path}");
     }
-    let (st, doc) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox/doc");
-    assert_eq!(st, 200);
-    assert!(
-        has(&doc, &format!("http://127.0.0.1:{}/api/v1/alerts", s.port)),
-        "{doc}"
-    );
+    // The documentation is a popover of the page. It shows the address that the request shows.
+    assert!(has(&page, "POST /api/v1/alerts"));
+    assert!(has(&page, &format!("http://127.0.0.1:{}", s.port)), "{page}");
     // The form refuses a group that the account may not send to, and sends to the others.
     let (st, head, _) = inbox_form(
         &s,
@@ -4890,12 +4901,13 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert_eq!(st, 303);
     let sent = location(&head);
     assert!(
-        sent.starts_with("/auth/settings/inbox/alerts/") && sent.contains("s=sent"),
-        "{sent}"
+        sent.starts_with("/auth/settings/inbox?s=sent&open="),
+        "the page opens the new alert in place: {sent}"
     );
-    let (st, page) = inbox_page_as(&s, &pia.cookie, &sent);
+    let (st, page) = inbox_page_as(&s, &pia.cookie, sent.split('#').next().unwrap());
     assert_eq!(st, 200, "{page}");
     assert!(has(&page, "Disk full") && has(&page, "The alert is sent."));
+    assert!(has(&page, "data-detail="), "the row is open: {page}");
     // The alert of a group that the account may not read is not there for it.
     let (st, _) = admin(
         &s,
@@ -4906,12 +4918,16 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert_eq!(st, 201);
     let (_, all) = admin(&s, "GET", "/auth/inbox/api/alerts", "");
     let other_id = all["alerts"][0]["id"].as_str().unwrap().to_string();
-    let (st, _) = inbox_page_as(
+    let (st, page) = inbox_page_as(
         &s,
         &pia.cookie,
-        &format!("/auth/settings/inbox/alerts/{other_id}"),
+        &format!("/auth/settings/inbox?open={other_id}"),
     );
-    assert_eq!(st, 404);
+    assert_eq!(st, 200);
+    assert!(
+        !has(&page, "data-detail=") && !has(&page, "secret"),
+        "the detail of an alert of an unreadable group does not open"
+    );
     let (_, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
     assert!(
         !has(&page, "secret"),
@@ -4932,28 +4948,19 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     ca.subscribe("infra").await;
     let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
-    assert!(!has(&page, "Send an alert"));
+    assert!(!has(&page, "Send alert"));
     assert!(
-        !has(&page, "Last alerts"),
-        "no alert.read: no list of alerts"
+        !has(&page, r#"id="sent-title""#),
+        "no alert.read: no zone of alerts"
     );
-    assert!(has(&page, "Alerts waiting"), "phone.read gives the figures");
-    let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox/devices");
-    assert_eq!(st, 200);
-    assert!(has(&page, "phone-alice") && has(&page, "Confirm: revoke phone-alice"));
+    assert!(has(&page, r#"id="phones-title">Phones<"#) && has(&page, r#"id="connections-title""#));
+    assert!(has(&page, "phone-alice") && has(&page, &format!(r#"name="id.{}" value="1""#, alice.device_id)));
+    assert!(has(&page, "data-bulk=\"revoke-phones\""));
     assert!(has(&page, r#"data-state="online""#));
-    let (st, page) = inbox_page_as(
-        &s,
-        &owen.cookie,
-        "/auth/settings/inbox/connections?login=alice",
-    );
+    let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox?login=alice");
     assert_eq!(st, 200);
     assert!(has(&page, r#"data-login="alice""#) && has(&page, r#"value="alice""#));
-    let (st, page) = inbox_page_as(
-        &s,
-        &owen.cookie,
-        "/auth/settings/inbox/connections?login=nobody",
-    );
+    let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox?login=nobody");
     assert_eq!(st, 200);
     assert!(has(&page, "No connection in the log."));
     // The operator revokes the phone of another account.
@@ -4961,10 +4968,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &owen.cookie,
         "/auth/settings/inbox/revoke",
-        &format!(
-            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices",
-            alice.device_id
-        ),
+        &format!("id.{}=1", alice.device_id),
     );
     assert_eq!(st, 303, "{text}");
     assert!(location(&head).contains("s=revoked"), "{head}");
@@ -4975,17 +4979,14 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     // A reader without phone.revoke sees no button, and a forced request changes nothing.
     let rita = s.account_with("rita", &["phone.read on service:portal"]);
     let bob = enroll_as(&s, "phone-bob", "bob").await.unwrap();
-    let (_, page) = inbox_page_as(&s, &rita.cookie, "/auth/settings/inbox/devices");
-    assert!(has(&page, "phone-bob") && !has(&page, "Confirm: revoke"));
+    let (_, page) = inbox_page_as(&s, &rita.cookie, "/auth/settings/inbox");
+    assert!(has(&page, "phone-bob") && !has(&page, "bulk__box") && !has(&page, "revoke-phones"));
     // The page has no form, so the account has no token: the request fails on the token.
     let (st, _, _) = inbox_form(
         &s,
         &rita.cookie,
         "/auth/settings/inbox/revoke",
-        &format!(
-            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fdevices",
-            bob.device_id
-        ),
+        &format!("id.{}=1", bob.device_id),
     );
     assert_eq!(st, 403);
     assert!(
@@ -4995,19 +4996,19 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
 
     // My phones: an account revokes its own phone and no other.
     let bob_session = s.account("bob");
-    let (st, page) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox/phones");
+    let (st, page) = inbox_page_as(&s, &bob_session.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200);
     assert!(has(&page, "phone-bob") && !has(&page, "phone-alice"));
-    assert!(has(&page, "Confirm: revoke phone-bob") && has(&page, "Make a code"));
+    assert!(
+        has(&page, &format!(r#"name="id.{}" value="1""#, bob.device_id))
+            && has(&page, r#"aria-label="Add a phone""#)
+    );
     let carol = enroll_as(&s, "phone-carol", "carol").await.unwrap();
     let (_, head, _) = inbox_form(
         &s,
         &bob_session.cookie,
         "/auth/settings/inbox/revoke",
-        &format!(
-            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fphones",
-            carol.device_id
-        ),
+        &format!("id.{}=1", carol.device_id),
     );
     assert!(location(&head).contains("s=unknown_device"), "{head}");
     assert!(Conn::open(port, &carol).await.is_ok());
@@ -5015,10 +5016,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &bob_session.cookie,
         "/auth/settings/inbox/revoke",
-        &format!(
-            "id={}&back=%2Fauth%2Fsettings%2Finbox%2Fphones",
-            bob.device_id
-        ),
+        &format!("id.{}=1", bob.device_id),
     );
     assert!(location(&head).contains("s=revoked"), "{head}");
     assert_eq!(

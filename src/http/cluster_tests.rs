@@ -5031,7 +5031,8 @@ fn get_key_page(node: &Node, session: &str, what: &str) -> Reply {
 
 /// The text of a key in a page: its prefix and 49 characters.
 fn key_text_in(body: &str) -> Option<String> {
-    let start = body.find("mcp_").or_else(|| body.find("api_"))?;
+    let marker = r#"id="key-text" type="text" readonly value=""#;
+    let start = body.find(marker)? + marker.len();
     let text: String = body[start..].chars().take(53).collect();
     (text.len() == 53 && crate::keys::check_format(&text).is_ok()).then_some(text)
 }
@@ -5101,10 +5102,8 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         assert!(page.body.contains(r#"href="/auth/keys/new""#));
         assert!(page.body.contains("No key yet"));
         assert!(
-            !page
-                .body
-                .contains("<form method=\"post\" action=\"/auth/keys/create\""),
-            "the form of a new key is a page of its own"
+            !page.body.contains(r#"action="/auth/keys/create""#),
+            "the pane is closed: it has no form"
         );
         let form = get_new_key(&node, &alice, "");
         assert_eq!(form.status, 200, "{}", form.body);
@@ -5118,7 +5117,17 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             "no box for an action of the portal"
         );
         assert!(form.body.contains(r#"action="/auth/keys/create""#));
-        assert!(!form.body.contains("No key yet"), "the page lists no key");
+        assert!(
+            form.body.contains("No key yet"),
+            "the list stays beside the pane"
+        );
+        // One entry point: with the pane open, the toolbar has no "New key".
+        assert!(
+            !form.body.contains(r#"href="/auth/keys/new""#) && !form.body.contains("New key</a>"),
+            "{}",
+            form.body
+        );
+        assert!(form.body.contains(r#"<button class="button button--primary" type="submit" form="new-key-form">Create</button>"#));
 
         // Make a key: the answer shows the text one time.
         let created = keys_post(
@@ -5156,7 +5165,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             "the hint"
         );
         assert!(!page.body.contains(&text), "the text is shown one time");
-        assert!(page.body.contains("max_rows 100"));
+        assert!(page.body.contains("db · 2 permissions"));
         let key = node
             .state
             .users
@@ -6655,7 +6664,7 @@ mod kinds_tests {
             );
             assert!(page.body.contains("Delete dave and 1 key?"));
             let all = get_keys(&node, &root, "?section=all");
-            assert!(all.body.contains(">one</span>") && all.body.contains(">three</span>"));
+            assert!(all.body.contains(">one</td>") && all.body.contains(">three</td>"));
             let deleted = post(&node, &root, USERS_DELETE_PATH, USERS_TOKEN, "login=carol");
             assert_eq!(deleted.status, 303);
             node.state.users.refresh(&node.state.store).unwrap();
@@ -6707,7 +6716,10 @@ mod kinds_tests {
             assert!(list.body.contains(r#"href="/auth/keys/new""#), "the entry");
             let form = get_new_key(&node, &alice, "");
             assert_eq!(form.status, 200);
-            assert!(!form.body.contains("<select"), "one kind only: no selector");
+            assert!(
+                !form.body.contains("kind-form") && !form.body.contains(r#"name="kind" value="api""#),
+                "one kind only: no selector"
+            );
             assert!(form
                 .body
                 .contains(r#"<input type="hidden" name="kind" value="mcp">"#));
@@ -6747,13 +6759,20 @@ mod kinds_tests {
                     "access on service:db",
                 ],
             );
+            // The selector is a small GET form: each kind is a submit button that names it.
             let form = get_new_key(&node, &alice, "");
-            assert!(form.body.contains("<select"));
-            assert!(form.body.contains(r#"<option value="mcp" selected>"#));
-            assert!(form.body.contains(r#"<option value="api">"#));
+            assert!(form.body.contains(r#"<form id="kind-form" method="get" action="/auth/keys/new">"#));
+            assert!(form.body.contains(
+                r#"<button class="segmented__option is-active" type="submit" form="kind-form" name="kind" value="mcp""#
+            ));
+            assert!(form
+                .body
+                .contains(r#"<button class="segmented__option" type="submit" form="kind-form" name="kind" value="api""#));
             let api = get_new_key(&node, &alice, "?kind=api");
             assert_eq!(api.status, 200);
-            assert!(api.body.contains(r#"<option value="api" selected>"#));
+            assert!(api.body.contains(
+                r#"<button class="segmented__option is-active" type="submit" form="kind-form" name="kind" value="api""#
+            ));
             assert!(api
                 .body
                 .contains(r#"<input type="hidden" name="kind" value="api">"#));
