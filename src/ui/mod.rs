@@ -565,6 +565,7 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
                 document: std::sync::Arc::new(document),
                 known: true,
                 fetch: false,
+                critical: Vec::new(),
             }
         })
         .collect()
@@ -612,6 +613,7 @@ fn demo_features() -> ServiceActions {
         document,
         known: true,
         fetch: false,
+        critical: Vec::new(),
     }
 }
 

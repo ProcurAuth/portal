@@ -2524,3 +2524,309 @@ input.keyText {
 .split--one > .zone {
   align-self: stretch;
 }
+
+/* The portal features of the editor: plain rows and compact matrices -------------------------- */
+
+.featBox {
+  display: block;
+}
+
+.sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--row-compact);
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.featBox > .sub:first-child {
+  margin-top: 0;
+}
+
+.sub .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.sub__note {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.sub__note--warn {
+  margin-left: 8px;
+  color: var(--warning);
+}
+
+.sub .sub__note + .sub__note {
+  margin-left: 8px;
+}
+
+.frow {
+  display: grid;
+  grid-template-columns: 16px minmax(7.5rem, 9.5rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-compact);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.frow.is-locked {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.frow.is-on {
+  background: var(--raised);
+}
+
+.frow code,
+.frow .desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frow .desc {
+  color: var(--muted);
+}
+
+.matrix {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 64px;
+  align-items: center;
+}
+
+.matrix--3 {
+  grid-template-columns: minmax(0, 1fr) 64px 64px 64px;
+}
+
+.matrix > * {
+  display: flex;
+  align-items: center;
+  min-height: var(--row-compact);
+  border-bottom: 1px solid var(--border);
+}
+
+.matrix .mh {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.matrix .mh .icon {
+  margin-right: 3px;
+}
+
+.matrix .mc {
+  justify-content: center;
+  gap: 6px;
+}
+
+.matrix .mname {
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.matrix label.mc {
+  cursor: pointer;
+}
+
+.matrix .mc:has(input:disabled) {
+  opacity: 0.35;
+}
+
+.matrix label.mc.is-lost {
+  color: var(--warning);
+  opacity: 1;
+}
+
+.matrix .mc .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.limitRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.limitRow .label {
+  font-weight: 600;
+}
+
+.limitRow.is-off {
+  color: var(--muted);
+}
+
+.u {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.unit {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.num-input {
+  width: 4.2rem;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
+  background: var(--inset);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.num-input:focus {
+  border-color: var(--accent-fill);
+  outline: 2px solid var(--accent-tint);
+  outline-offset: 0;
+}
+
+.num-input:disabled {
+  opacity: 0.4;
+}
+
+.num-input--s {
+  width: 3.1rem;
+}
+
+/* The Keys page: the pane of the key form ------------------------------------------------- */
+
+.pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.pane__body {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+}
+
+.formHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control);
+}
+
+.kindRow {
+  display: flex;
+}
+
+.segmented__option .icon {
+  margin-right: 5px;
+}
+
+.kindTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: var(--control);
+  color: var(--muted);
+}
+
+.keyForm {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.keyFields {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+}
+
+.keyFields__name {
+  flex: 1 1 12rem;
+  max-width: 20rem;
+}
+
+.keyFields .expiry {
+  flex: 1 1 auto;
+}
+
+.kindIcon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.kindIcon .icon,
+.grid thead th .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.feat--text {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.more {
+  margin: 0;
+  padding: 6px;
+}
+
+.settings .empty {
+  max-width: none;
+  text-align: left;
+}
+
+.settings a.segmented__option {
+  color: var(--muted);
+}
+
+.settings a.segmented__option:hover,
+.settings a.segmented__option.is-active {
+  color: var(--text);
+}
+
+/* The editor in the pane of a key: its parts have their own height, and the pane scrolls. */
+.pane .grantEditor[data-layout="groups"] {
+  display: block;
+}
+
+.pane .ge__groups {
+  grid-template-rows: none;
+}
+
+.pane .ge__featBody,
+.pane .ge__groups .ge__svcList {
+  overflow: visible;
+}

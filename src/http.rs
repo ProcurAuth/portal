@@ -1418,6 +1418,7 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
                 fetch: state.signer.is_some()
                     && state.config.identity.is_some()
                     && service.actions_url.is_some(),
+                critical: Vec::new(),
             }
         })
         .collect()
@@ -1614,11 +1615,30 @@ fn features_service(state: &AppState) -> Option<ui::ServiceActions> {
     if !features.has_keys() && !features.has_inbox() {
         return None;
     }
-    Some(feature_actions(crate::portal_actions::document(&features)))
+    Some(feature_actions(
+        state,
+        crate::portal_actions::document(&features),
+    ))
 }
 
 /// The service `portal` for an editor, from a document of its features.
-fn feature_actions(document: Arc<crate::actions::Document>) -> ui::ServiceActions {
+fn feature_actions(
+    state: &AppState,
+    document: Arc<crate::actions::Document>,
+) -> ui::ServiceActions {
+    let critical = state
+        .config
+        .inbox
+        .as_ref()
+        .map(|inbox| {
+            inbox
+                .groups
+                .iter()
+                .filter(|(_, group)| group.critical)
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     ui::ServiceActions {
         id: crate::portal_actions::SERVICE.to_string(),
         name: "Portal features".to_string(),
@@ -1630,6 +1650,7 @@ fn feature_actions(document: Arc<crate::actions::Document>) -> ui::ServiceAction
         document,
         known: true,
         fetch: false,
+        critical,
     }
 }
 

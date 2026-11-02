@@ -26,6 +26,9 @@ pub struct EditorAction {
     /// The types of the nodes where the action applies, below the service.
     pub types: Vec<String>,
     pub limits: Vec<Input>,
+    /// The actions that this action needs (portal 6.3): it counts only when the account holds
+    /// them. Only the actions of the service `portal` have any.
+    pub needs: Vec<String>,
 }
 
 /// One node of the tree of a service.
@@ -39,6 +42,8 @@ pub struct EditorNode {
     pub only: Vec<String>,
     /// Actions that apply here although their type does not list this node.
     pub more: Vec<String>,
+    /// The node is a critical group of the inbox: a limit never counts its alerts.
+    pub critical: bool,
 }
 
 /// The actions and the tree of one service.
@@ -72,7 +77,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +151,7 @@ fn service_json(service: &EditorService) -> serde_json::Value {
                 "whole": a.whole,
                 "types": a.types,
                 "limits": a.limits.iter().map(input_json).collect::<Vec<_>>(),
+                "needs": a.needs,
             })
         })
         .collect();
@@ -159,6 +165,7 @@ fn service_json(service: &EditorService) -> serde_json::Value {
                 "label": n.label,
                 "only": n.only,
                 "more": n.more,
+                "critical": n.critical,
             })
         })
         .collect();
@@ -305,6 +312,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             whole: true,
             types: Vec::new(),
             limits: access_limits,
+            needs: Vec::new(),
         });
     }
     let mut nodes = vec![EditorNode {
@@ -317,6 +325,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
         },
         only: Vec::new(),
         more: Vec::new(),
+        critical: false,
     }];
     for (name, description) in &service.actions {
         let found = service.document.actions.iter().find(|a| a.name == *name);
@@ -330,6 +339,14 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             whole,
             types,
             limits: service.document.limit_inputs(name),
+            needs: if portal {
+                crate::portal_actions::needs(name)
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
     }
     for node in &service.document.resources {
@@ -339,6 +356,10 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             label: node.label.clone(),
             only: node.actions.clone(),
             more: Vec::new(),
+            critical: portal
+                && node.path.len() == 1
+                && node.path[0].kind == crate::portal_actions::INBOX_GROUP
+                && service.critical.iter().any(|id| *id == node.path[0].id),
         });
     }
     EditorService {
@@ -383,6 +404,7 @@ fn bare_service(id: &str, name: &str) -> EditorService {
             label: "Whole service".to_string(),
             only: Vec::new(),
             more: Vec::new(),
+            critical: false,
         }],
         types: Vec::new(),
         fetch: false,
@@ -442,6 +464,7 @@ impl EditorData {
                 whole: false,
                 types: Vec::new(),
                 limits: Vec::new(),
+                needs: Vec::new(),
             });
         }
         let path = grant.path_text();
@@ -454,6 +477,7 @@ impl EditorData {
                     label: path,
                     only: Vec::new(),
                     more: Vec::new(),
+                    critical: false,
                 });
                 service.nodes.len() - 1
             }
@@ -554,6 +578,7 @@ mod tests {
                     whole: true,
                     types: vec!["host".into()],
                     limits: Vec::new(),
+                    needs: Vec::new(),
                 }],
                 nodes: vec![EditorNode {
                     path: "host:prod".into(),
@@ -561,6 +586,7 @@ mod tests {
                     label: "Prod".into(),
                     only: Vec::new(),
                     more: Vec::new(),
+                    critical: false,
                 }],
                 types: Vec::new(),
                 fetch: false,

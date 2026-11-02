@@ -361,6 +361,8 @@ pub struct ServiceActions {
     /// The portal can ask the service for the children of a node (portal 3.1a): the service has
     /// an address for its documents, and the portal makes identity tokens.
     pub fetch: bool,
+    /// The ids of the groups of the inbox that are critical. Only the service `portal` has any.
+    pub critical: Vec<String>,
 }
 
 impl ServiceActions {
@@ -1644,6 +1646,7 @@ mod tests {
             document: Default::default(),
             known: true,
             fetch: false,
+            critical: Vec::new(),
         };
         let grafana = crate::actions::parse("infra-grafana", GRAFANA.as_bytes()).unwrap();
         vec![
@@ -1658,6 +1661,7 @@ mod tests {
                 document: std::sync::Arc::new(grafana),
                 known: true,
                 fetch: false,
+                critical: Vec::new(),
             },
             plain("infra-notes", "Notes"),
             plain("infra-typo", "Typo"),
@@ -1696,6 +1700,7 @@ mod tests {
             document,
             known: true,
             fetch: false,
+            critical: Vec::new(),
         }
     }
 

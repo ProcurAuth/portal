@@ -176,7 +176,8 @@ fn editor_for(
     } else {
         Vec::new()
     };
-    let features = portal::key_document(&state.config.portal_features(), kind).map(feature_actions);
+    let features = portal::key_document(&state.config.portal_features(), kind)
+        .map(|document| feature_actions(state, document));
     grant_editor::build(
         &services,
         features.as_ref(),
@@ -229,6 +230,8 @@ fn without_access(grants: &[Grant]) -> Vec<String> {
     let mut out: Vec<String> = grants
         .iter()
         .filter(|g| g.action != ACCESS || !g.path.is_empty())
+        // The portal features need no grant `access`: it only carries a budget.
+        .filter(|g| g.service != portal::SERVICE)
         .filter(|g| {
             !grants
                 .iter()

@@ -1033,13 +1033,340 @@
       };
     }
 
+    // ---- the portal features: plain rows and compact matrices. The document of the service
+    // `portal` has actions on the service (the keys, the phones), actions on a kind of key
+    // (`key_kind`) and actions on a group of the inbox (`inbox_group`). Only what the document
+    // holds is drawn: a feature that the file turns off has no row and no column.
+    var KEY_ROWS = ["keys.own.read", "keys.own.edit", "keys.own.revoke", "users.read", "keys.all.read", "keys.all.revoke"];
+    var PHONE_ROWS = ["phone.read", "phone.revoke", "phone.log"];
+    var INBOX_COLUMNS = [
+      ["inbox.receive", "Receive", "Receive the alerts of the group on the phones", ""],
+      ["alert.send", "Send", "Send alerts to the group", "send"],
+      ["alert.read", "Read", "See the alerts of the group and their delivery", ""],
+    ];
+    var DAY = 86400;
+
+    function makeFeatures(svc) {
+      var ui = node("div", "featBox");
+      var actions = {};
+      svc.actions.forEach(function (a) {
+        actions[a.name] = a;
+      });
+      // The API kind comes first.
+      var kinds = svc.nodes
+        .filter(function (n) {
+          return n.kind === "key_kind";
+        })
+        .sort(function (a, b) {
+          return (a.path === "key_kind:api" ? 0 : 1) - (b.path === "key_kind:api" ? 0 : 1);
+        });
+      var groupNodes = svc.nodes.filter(function (n) {
+        return n.kind === "inbox_group";
+      });
+
+      function holds(name) {
+        return ticked.has(keyOf(svc.id, name, ""));
+      }
+      function needsMet(name) {
+        var a = actions[name];
+        return !a || (a.needs || []).every(holds);
+      }
+      function isLocked(action, path) {
+        var item = ticked.get(keyOf(svc.id, action, path));
+        return !!(item && item.locked);
+      }
+      // An action that needs this one goes when this one goes (CTRL-38).
+      function dropDependents(name) {
+        svc.actions.forEach(function (a) {
+          if ((a.needs || []).indexOf(name) < 0) return;
+          Array.from(ticked.values()).forEach(function (item) {
+            if (item.service === svc.id && item.action === a.name && !item.locked) ticked.delete(keyOf(svc.id, a.name, item.path));
+          });
+          dropDependents(a.name);
+        });
+      }
+
+      function sub(iconName, label) {
+        var head = node("div", "sub");
+        head.appendChild(icon(iconName, "icon--sm"));
+        head.appendChild(node("span", "", label));
+        return head;
+      }
+
+      // One cell: a box for one action on one node.
+      function cell(action, path, label, tip) {
+        var key = keyOf(svc.id, action, path);
+        var on = ticked.has(key);
+        var owned = owns(svc.id, action, path);
+        var lost = on && !owned && data.owner !== null;
+        var box = node("input");
+        box.type = "checkbox";
+        box.checked = on;
+        box.dataset.cellAction = action;
+        box.dataset.cellPath = path;
+        box.setAttribute("aria-label", label);
+        box.disabled = isLocked(action, path) || (!on && (!owned || !needsMet(action)));
+        var wrap = node("label", "mc" + (lost ? " is-lost" : ""));
+        if (tip) wrap.title = tip;
+        if (lost) wrap.title = "Without effect: the owner does not hold this permission any more.";
+        else if (!on && !owned) wrap.title = "Your account does not hold this permission.";
+        else if (!on && !needsMet(action)) wrap.title = "Needs " + actions[action].needs.join(", ") + ".";
+        wrap.appendChild(box);
+        if (lost) wrap.appendChild(icon("alert-triangle"));
+        else if (isLocked(action, path)) wrap.appendChild(icon("lock"));
+        return wrap;
+      }
+
+      // A row of the service: a box, the name of the action and its description.
+      function flatRow(name) {
+        var a = actions[name];
+        var on = holds(name);
+        var owned = owns(svc.id, name, "");
+        var locked = !on && !needsMet(name);
+        var row = node("label", "frow" + (on ? " is-on" : "") + (locked ? " is-locked" : ""));
+        var box = node("input");
+        box.type = "checkbox";
+        box.checked = on;
+        box.dataset.cellAction = name;
+        box.dataset.cellPath = "";
+        box.disabled = isLocked(name, "") || (!on && (!owned || locked));
+        box.setAttribute("aria-label", name);
+        row.appendChild(box);
+        row.appendChild(node("code", "", name));
+        var desc = node("span", "desc", a.description);
+        desc.title = locked ? "Needs " + a.needs.join(", ") + ". " + a.description : a.description;
+        row.appendChild(desc);
+        if (on && !owned && data.owner !== null) {
+          var warn = node("span", "statusIcon statusIcon--warn");
+          warn.title = "Your rights do not cover this permission any more.";
+          warn.appendChild(icon("alert-triangle"));
+          row.appendChild(warn);
+        } else if (isLocked(name, "")) {
+          var lock = node("span", "statusIcon");
+          lock.title = "This permission comes from the configuration file.";
+          lock.appendChild(icon("lock"));
+          row.appendChild(lock);
+        }
+        return row;
+      }
+
+      function flatSection(iconName, label, names) {
+        var present = names.filter(function (n) {
+          return actions[n];
+        });
+        if (!present.length) return;
+        ui.appendChild(sub(iconName, label));
+        present.forEach(function (n) {
+          ui.appendChild(flatRow(n));
+        });
+      }
+
+      // The matrix of the kinds of key: the rows are "Make a key" and "Use the keys".
+      function kindMatrix() {
+        if (!kinds.length || !(actions["keys.own.create"] || actions["keys.own.use"])) return;
+        ui.appendChild(sub("key", "Key kinds"));
+        var table = node("div", "matrix matrix--" + kinds.length);
+        table.appendChild(node("div", "mh", "Right"));
+        kinds.forEach(function (n) {
+          var head = node("div", "mh mc");
+          head.appendChild(icon(n.path === "key_kind:api" ? "webhook" : "robot", "icon--sm"));
+          head.appendChild(node("span", "", n.label.replace(/ keys$/, "")));
+          table.appendChild(head);
+        });
+        [["keys.own.create", "Make a key"], ["keys.own.use", "Use the keys"]].forEach(function (def) {
+          if (!actions[def[0]]) return;
+          table.appendChild(node("div", "mname", def[1]));
+          kinds.forEach(function (n) {
+            table.appendChild(cell(def[0], n.path, def[1] + ": " + n.label, actions[def[0]].description));
+          });
+        });
+        ui.appendChild(table);
+        // The longest lifetime of a key of each kind: a ceiling on `keys.own.use`.
+        if (actions["keys.own.use"] && actions["keys.own.use"].limits.length) {
+          var row = node("div", "limitRow");
+          row.appendChild(node("span", "label", "Longest key lifetime"));
+          kinds.forEach(function (n) {
+            var item = ticked.get(keyOf(svc.id, "keys.own.use", n.path));
+            var unit = node("span", "u");
+            unit.appendChild(node("span", "unit", n.label.replace(/ keys$/, "")));
+            var input = node("input", "num-input num-input--s");
+            input.type = "text";
+            input.inputMode = "numeric";
+            input.disabled = !item || !!item.locked;
+            input.setAttribute("aria-label", "Longest lifetime of a " + n.label.replace(/ keys$/, "") + " key, in days");
+            var seconds = item && typeof item.limits.max_key_lifetime === "string" ? item.limits.max_key_lifetime : "";
+            input.value = seconds !== "" && !isNaN(Number(seconds)) ? String(Math.round((Number(seconds) / DAY) * 100) / 100) : seconds;
+            input.addEventListener("input", function () {
+              var held = ticked.get(keyOf(svc.id, "keys.own.use", n.path));
+              if (!held) return;
+              var text = input.value.trim();
+              held.limits.max_key_lifetime = text === "" || isNaN(Number(text)) ? text : String(Math.round(Number(text) * DAY));
+              syncFields();
+            });
+            unit.appendChild(input);
+            unit.appendChild(node("span", "unit", "days"));
+            row.appendChild(unit);
+          });
+          ui.appendChild(row);
+        }
+      }
+
+      // The matrix of the inbox: a row for each group and a column for each action.
+      function inboxMatrix() {
+        var columns = INBOX_COLUMNS.filter(function (c) {
+          return actions[c[0]];
+        });
+        if (!groupNodes.length || !columns.length) return;
+        var head = sub("inbox", "Inbox");
+        var lostCount = 0;
+        columns.forEach(function (c) {
+          groupNodes.forEach(function (g) {
+            var on = ticked.has(keyOf(svc.id, c[0], g.path));
+            if (on && !owns(svc.id, c[0], g.path) && data.owner !== null) lostCount += 1;
+          });
+        });
+        if (lostCount) head.appendChild(node("span", "sub__note sub__note--warn", plural(lostCount, "right has", "rights have") + " no effect"));
+        var sending = groupNodes.filter(function (g) {
+          return ticked.has(keyOf(svc.id, "alert.send", g.path));
+        });
+        var skipped = sending.filter(function (g) {
+          return g.critical;
+        });
+        var counted = sending.length - skipped.length;
+        if (actions["alert.send"]) {
+          if (sending.length && !counted) head.appendChild(node("span", "sub__note", "No limit applies: critical groups only"));
+          else if (skipped.length)
+            head.appendChild(
+              node("span", "sub__note", "Not counted: " + skipped.map(function (g) { return g.label; }).join(", ") + " (critical)")
+            );
+        }
+        ui.appendChild(head);
+        var table = node("div", "matrix matrix--" + columns.length);
+        table.appendChild(node("div", "mh", "Group"));
+        columns.forEach(function (c) {
+          var th = node("label", "mh mc");
+          var avail = groupNodes.filter(function (g) {
+            return owns(svc.id, c[0], g.path) || ticked.has(keyOf(svc.id, c[0], g.path));
+          });
+          var onCount = avail.filter(function (g) {
+            return ticked.has(keyOf(svc.id, c[0], g.path));
+          }).length;
+          var all = node("input");
+          all.type = "checkbox";
+          all.checked = avail.length > 0 && onCount === avail.length;
+          all.indeterminate = onCount > 0 && onCount < avail.length;
+          all.disabled = !avail.length || !needsMet(c[0]);
+          all.dataset.columnAction = c[0];
+          all.setAttribute("aria-label", "Tick " + c[1] + " for every group");
+          th.title = c[2];
+          th.appendChild(all);
+          th.appendChild(node("span", "", c[1]));
+          table.appendChild(th);
+        });
+        groupNodes.forEach(function (g) {
+          var name = node("div", "mname");
+          name.appendChild(node("span", "", g.label));
+          if (g.critical) {
+            var crit = node("span", "crit");
+            crit.title = "Critical group: its alerts always ring, and no limit counts them.";
+            crit.appendChild(icon("bell-ringing"));
+            name.appendChild(crit);
+          }
+          table.appendChild(name);
+          columns.forEach(function (c) {
+            table.appendChild(cell(c[0], g.path, c[1] + " " + g.label, ""));
+          });
+        });
+        ui.appendChild(table);
+        // The budget of the alerts (portal 15.3): one value for the account, on `access`.
+        if (actions.access && actions.access.limits.length && actions["alert.send"]) {
+          var item = ticked.get(keyOf(svc.id, "access", ""));
+          var budget = item && item.limits.alerts && typeof item.limits.alerts === "object" ? item.limits.alerts : {};
+          var has = WINDOWS.some(function (w) {
+            return budget[w[0]];
+          });
+          var off = !counted && !has;
+          var row = node("div", "limitRow" + (off ? " is-off" : ""));
+          row.appendChild(node("span", "label", "Alerts sent"));
+          WINDOWS.forEach(function (w) {
+            var unit = node("span", "u");
+            var input = node("input", "num-input num-input--s");
+            input.type = "text";
+            input.inputMode = "numeric";
+            input.value = budget[w[0]] || "";
+            input.disabled = off || !!(item && item.locked);
+            input.setAttribute("aria-label", "Alerts sent for each " + w[0]);
+            input.addEventListener("input", function () {
+              var k = keyOf(svc.id, "access", "");
+              var held = ticked.get(k);
+              if (!held) {
+                held = { action: "access", service: svc.id, path: "", limits: {} };
+                ticked.set(k, held);
+              }
+              if (typeof held.limits.alerts !== "object") held.limits.alerts = {};
+              held.limits.alerts[w[0]] = input.value.trim();
+              // The grant `access` of the portal has no use but the budget: no value, no grant.
+              var any = WINDOWS.some(function (x) {
+                return held.limits.alerts[x[0]];
+              });
+              if (!any && !held.locked) ticked.delete(k);
+              syncFields();
+            });
+            unit.appendChild(input);
+            unit.appendChild(node("span", "unit", w[1]));
+            row.appendChild(unit);
+          });
+          ui.appendChild(row);
+        }
+      }
+
+      function draw() {
+        var focus = ui.contains(document.activeElement) ? document.activeElement : null;
+        var again = focus && focus.dataset ? [focus.dataset.cellAction, focus.dataset.cellPath, focus.dataset.columnAction] : null;
+        ui.textContent = "";
+        flatSection("key", "Keys", KEY_ROWS);
+        kindMatrix();
+        inboxMatrix();
+        flatSection("device-mobile", "Phones", PHONE_ROWS);
+        if (again) {
+          var boxes = ui.querySelectorAll("input[type=checkbox]");
+          for (var b = 0; b < boxes.length; b += 1) {
+            var d = boxes[b].dataset;
+            if (d.cellAction === again[0] && d.cellPath === again[1] && d.columnAction === again[2] && !boxes[b].disabled) {
+              boxes[b].focus();
+              break;
+            }
+          }
+        }
+      }
+
+      ui.addEventListener("change", function (event) {
+        var box = event.target;
+        if (box.dataset.cellAction !== undefined) {
+          setGrant(box.dataset.cellAction, box.dataset.cellPath, box.checked, svc.id);
+          if (!box.checked && box.dataset.cellPath === "") dropDependents(box.dataset.cellAction);
+        } else if (box.dataset.columnAction !== undefined) {
+          groupNodes.forEach(function (g) {
+            var action = box.dataset.columnAction;
+            if (box.checked && owns(svc.id, action, g.path)) setGrant(action, g.path, true, svc.id);
+            else if (!box.checked) setGrant(action, g.path, false, svc.id);
+          });
+        } else {
+          return;
+        }
+        render();
+      });
+
+      return { ui: ui, draw: draw };
+    }
+
     // ---- the rows of the services: the switch of `access`, a short sentence, the button
     var services = rowList.length ? makePane(rowList, serviceAt, false) : null;
-    var features = featureSvc ? makePane([featureSvc], 0, true) : null;
+    var features = featureSvc ? makeFeatures(featureSvc) : null;
     var strip = node("div", groups ? "ge__groups" : "ge__svcList");
     strip.setAttribute("role", "group");
     strip.setAttribute("aria-label", "Permissions");
-    var rowsEl = strip;
+    var rowsEl = groups ? node("div") : strip;
     var servicesCount = node("span", "count");
     var featuresCount = node("span", "count");
     if (groups) {
@@ -1144,14 +1471,18 @@
       }
       servicesCount.textContent = "Opens " + openCount + " of " + rowList.length;
       if (featureSvc) {
-        var rights = new Set();
+        var held = 0;
         ticked.forEach(function (item) {
-          if (item.service === featureSvc.id && item.action !== "access") rights.add(item.action);
+          if (item.service === featureSvc.id && item.action !== "access") held += 1;
         });
-        var total = featureSvc.actions.filter(function (a) {
-          return a.name !== "access";
-        }).length;
-        featuresCount.textContent = rights.size + " of " + total + " rights";
+        var total = 0;
+        featureSvc.actions.forEach(function (a) {
+          if (a.name === "access") return;
+          total += featureSvc.nodes.filter(function (n) {
+            return applies(a, n);
+          }).length;
+        });
+        featuresCount.textContent = held + " of " + total + " rights";
       }
     }
 
@@ -1204,7 +1535,6 @@
       if (!ticked.has(key)) ticked.set(key, { action: "access", service: wanted, path: "", limits: {} });
     }
     if (services && expandedAt >= 0) services.select("");
-    if (features) features.select("");
     render();
   }
 

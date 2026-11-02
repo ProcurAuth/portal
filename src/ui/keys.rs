@@ -262,9 +262,9 @@ fn list_href(section: Section, kind: Option<KeyKind>) -> String {
 
 /// What a key can use, in one short line: the groups of the inbox that it sends to and reads, or
 /// the services of an MCP key. A mark shows a right that the owner lost.
-fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
+fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
     if line.grants.is_empty() {
-        return r#"<span class="muted">nothing</span>"#.to_string();
+        return (r#"<span class="muted">nothing</span>"#.to_string(), String::new());
     }
     let portal = crate::portal_actions::SERVICE;
     let name_of = |path: &str| {
@@ -278,7 +278,7 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
         line.grants
             .iter()
             .filter(|g| g.grant.service == portal && g.grant.action == action)
-            .map(|g| html_escape(&name_of(&crate::grants::path_text(&g.grant.path))))
+            .map(|g| name_of(&crate::grants::path_text(&g.grant.path)))
             .collect()
     };
     let mut parts: Vec<String> = Vec::new();
@@ -291,12 +291,14 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
         parts.push(format!("Read {}", read.join(", ")));
     }
     let mut out = String::new();
+    let mut plain: Vec<String> = Vec::new();
     if !parts.is_empty() {
+        plain.push(parts.join(" - "));
         let _ = write!(
             out,
-            r#"<span class="feat feat--text" title="Inbox">{}{}</span>"#,
+            r#"<span class="feat feat--text">{}{}</span>"#,
             icon("inbox"),
-            parts.join(" &middot; ")
+            html_escape(&parts.join(" · "))
         );
     }
     let mut services: Vec<&str> = line
@@ -313,10 +315,9 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
             .iter()
             .filter(|g| g.grant.service != portal)
             .count();
-        let shown: Vec<String> = services.iter().take(3).map(|s| html_escape(s)).collect();
-        let _ = write!(
-            out,
-            r#"<span class="muted">{}{} &middot; {}</span>"#,
+        let shown: Vec<&str> = services.iter().take(3).copied().collect();
+        let text = format!(
+            "{}{} · {}",
             shown.join(", "),
             if services.len() > 3 {
                 format!(" +{}", services.len() - 3)
@@ -325,6 +326,8 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
             },
             super::settings::plural(count, "permission", "permissions")
         );
+        plain.push(text.clone());
+        let _ = write!(out, r#"<span class="muted">{}</span>"#, html_escape(&text));
     }
     let lost = line.grants.iter().filter(|g| g.cover == Cover::None).count();
     if lost > 0 {
@@ -344,7 +347,7 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> String {
             "A service of this key has no access permission",
         ));
     }
-    out
+    (out, plain.join("; "))
 }
 
 /// Whether the row has a box: the account may revoke the key.
@@ -432,10 +435,12 @@ fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line
             }
         );
     }
+    let (can_use_html, can_use_text) = can_use(view, line);
     let _ = write!(
         out,
-        r#"<td>{}</td><td class="r">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
-        can_use(view, line),
+        r#"<td title="{}">{}</td><td class="r">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
+        html_escape(&can_use_text),
+        can_use_html,
         match line.expires_at {
             Some(at) => time_tag(at, false),
             None => r#"<span class="muted">never</span>"#.to_string(),
@@ -601,7 +606,9 @@ fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
         return String::new();
     }
     let mut buttons = String::new();
-    for each in &view.create_kinds {
+    let mut kinds = view.create_kinds.clone();
+    kinds.sort_by_key(|k| *k != KeyKind::Api);
+    for each in &kinds {
         let _ = write!(
             buttons,
             r#"<button class="segmented__option{}" type="submit" form="kind-form" name="kind" value="{}" title="{}"{}>{}{}</button>"#,
@@ -614,7 +621,7 @@ fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
         );
     }
     format!(
-        r#"<form id="kind-form" method="get" action="{NEW_PATH}"></form><div class="field"><span class="field__label">Kind</span><div class="segmented" role="group" aria-label="Kind of key">{buttons}</div></div>"#
+        r#"<div class="field"><span class="field__label">Kind</span><div class="segmented" role="group" aria-label="Kind of key">{buttons}</div></div>"#
     )
 }
 
@@ -642,7 +649,13 @@ fn form_pane(view: &KeysView<'_>) -> String {
         ),
     ));
     out.push_str(r#"<div class="pane__body">"#);
-    out.push_str(&kind_field_row(view, edit));
+    if edit.is_none() && view.create_kinds.len() > 1 {
+        // The selector is a form of its own: the buttons name it with the attribute `form`.
+        let _ = write!(
+            out,
+            r#"<form id="kind-form" method="get" action="{NEW_PATH}"></form>"#
+        );
+    }
     let _ = write!(
         out,
         r#"<form method="post" action="{action}" id="{form_id}" class="keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
@@ -671,6 +684,7 @@ fn form_pane(view: &KeysView<'_>) -> String {
         r#"<div class="keyFields"><div class="field keyFields__name"><label class="field__label" for="key-name">Name</label><input class="uiInput" type="text" id="key-name" name="name" value="{}" maxlength="256" required></div>"#,
         html_escape(name),
     );
+    out.push_str(&kind_field(view, edit.is_some()));
     if edit.is_none() {
         let hint = match view.max_lifetime {
             Some(max) => format!(
@@ -704,17 +718,6 @@ fn form_pane(view: &KeysView<'_>) -> String {
     }
     out.push_str("</form></div></section>");
     out
-}
-
-/// The row of the kind above the form: a selector, or the fact of the kind. Empty when the viewer
-/// has no choice.
-fn kind_field_row(view: &KeysView<'_>, edit: Option<&EditTarget>) -> String {
-    let field = kind_field(view, edit.is_some());
-    if field.is_empty() {
-        String::new()
-    } else {
-        format!(r#"<div class="kindRow">{field}</div>"#)
-    }
 }
 
 /// The pane after a creation: the text of the key, one time.
