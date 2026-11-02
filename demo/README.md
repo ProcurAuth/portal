@@ -41,7 +41,7 @@ All accounts are database accounts. `seed.sh` sets their grants through the page
 | `bob` | `access` on notes and wiki. Read of the notebook `public` only. In the inbox: `inbox.receive` on `infra`. |
 | `carol` | No grant. |
 
-The superadmin can add users and change grants in the settings page. The superadmin can also make keys on the page `/auth/keys`. The button **New key** opens the page `/auth/keys/new`. It has a selector for the kind of key: MCP for agents, API for services. The service **ClickHouse Dash** looks like ChDash: three hosts, their databases (listed by the service, page by page) and the actions of ChDash. The service **Big database** publishes 424 actions and 220 resources. Use it to try the editor of grants and the tables with a large action document.
+The superadmin can add users and change grants in the settings page. The superadmin can also make keys on the page `/auth/keys`. The button **New key** opens a pane on the right of the list. The pane has a selector for the kind of key: API for services, MCP for agents. The service **ClickHouse Dash** looks like ChDash: three hosts, their databases (listed by the service, page by page) and the actions of ChDash. The service **Big database** publishes 424 actions and 220 resources. Use it to try the editor of grants and the tables with a large action document.
 
 ## Seed
 
@@ -79,7 +79,7 @@ This test needs `/dev/kvm`. The emulator is an Android 14 image in Docker. Its s
 
 1. Build the APK with a signing key that is only for this test. Run `tools/android/build-apk.sh` with the variables `INBOX_KEYSTORE`, `INBOX_KEYSTORE_PASSWORD`, `INBOX_KEY_ALIAS` and `INBOX_KEY_PASSWORD` set. Make the keystore with `keytool -genkeypair`. Do not use the keystore of a release.
 2. Run `tools/android/emulator.sh start dist/portal-inbox-<version>.apk`. Wait until it prints the address of the screen.
-3. Sign in as `alice`. Open **Inbox**, then **My phones**, then press **Make a code**. The page shows the code one time.
+3. Sign in as `alice`. Open **Inbox**, then press the plus button of the zone **My phones**. A popover shows the code one time. It stays open until you press **Done**.
 4. Open the link of the code in the emulator: `docker exec inbox-emulator adb shell am start -a android.intent.action.VIEW -d '<link>'`. The app opens the form with the code filled in. Compare the fingerprint with the page.
 5. Type a name for the phone and press **Connect**. In the app, subscribe to the groups.
 6. Send alerts from a terminal (see above). The phone shows each alert one time.

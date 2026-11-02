@@ -95,21 +95,21 @@ check "inbox: a text that is not a key" 401 "$(send api_000000000000000000000000
 check "inbox: an MCP key is not an API key" 401 "$(send "$key" "smoke-$run-g" infra)"
 check "key edge: an API key is not an MCP key" 401 "$(status -H "Authorization: Bearer $akey" "$api/whoami")"
 
-# The tab Inbox shows the pages that the permissions open. carol has no permission of the inbox.
+# The tab Inbox is one page. Each part shows only if the permissions give it. carol has no permission of the inbox.
 carol=$(mktemp)
 check "carol signs in" 303 "$(login carol "$carol")"
 inbox=$base/auth/settings/inbox
-check "inbox page: admin opens the overview" 200 "$(status -b "$admin" "$inbox")"
-check "inbox page: admin opens the phones" 200 "$(status -b "$admin" "$inbox/devices")"
-check "inbox page: alice opens the overview (alert.send)" 200 "$(status -b "$alice" "$inbox")"
-check "inbox page: alice cannot open the phones of all (no phone.read)" 403 "$(status -b "$alice" "$inbox/devices")"
-check "inbox page: bob has no overview, the tab opens My phones" 303 "$(status -b "$bob" "$inbox")"
-check "inbox page: bob opens My phones" 200 "$(status -b "$bob" "$inbox/phones")"
-check "inbox page: carol cannot open the overview" 403 "$(status -b "$carol" "$inbox")"
-check "inbox page: carol cannot open My phones" 403 "$(status -b "$carol" "$inbox/phones")"
+check "inbox page: admin opens the page" 200 "$(status -b "$admin" "$inbox")"
+check "inbox page: alice opens the page (alert.send)" 200 "$(status -b "$alice" "$inbox")"
+check "inbox page: bob opens the page (inbox.receive)" 200 "$(status -b "$bob" "$inbox")"
+check "inbox page: carol cannot open the page" 403 "$(status -b "$carol" "$inbox")"
+page=$(curl -s -b "$bob" "$inbox")
+case "$page" in *'id="phones-title">My phones<'*) echo "ok    inbox page: bob has the zone My phones" ;; *) echo "FAIL  inbox page: bob has no zone My phones"; fail=1 ;; esac
+case "$page" in *'id="sent-title"'* | *'id="connections-title"'*) echo "FAIL  inbox page: bob sees a zone that he may not use"; fail=1 ;; *) echo "ok    inbox page: the zones of bob are the zones of his permissions" ;; esac
+check "the page of the phones of the first versions is gone" 404 "$(status -b "$admin" "$inbox/devices")"
+check "the page of one alert of the first versions is gone" 404 "$(status -b "$admin" "$inbox/alerts/0")"
 
-# An enrollment code: the page of the account makes it and shows it one time.
-page=$(curl -s -b "$bob" "$inbox/phones")
+# An enrollment code: the plus button makes it, and the answer shows it one time.
 csrf=$(form_csrf "$page" /auth/settings/inbox/code)
 answer=$(curl -s -b "$bob" -H "Origin: $base" --data-urlencode "csrf=$csrf" "$inbox/code")
 case "$answer" in

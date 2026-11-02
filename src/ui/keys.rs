@@ -354,7 +354,10 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
             "A service of this key has no access permission",
         ));
     }
-    (out, plain.join("; "))
+    (
+        format!(r#"<span class="canuse">{out}</span>"#),
+        plain.join("; "),
+    )
 }
 
 /// Whether the row has a box: the account may revoke the key.

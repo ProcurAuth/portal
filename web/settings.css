@@ -2355,8 +2355,28 @@ input.keyText {
 
 .feat--text {
   display: flex;
+  flex: 0 1 auto;
   min-width: 0;
   margin-right: 0;
+}
+
+/* What a key can use, in one line: the text gives way to the marks. */
+.canuse {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.canuse > .muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canuse > .statusIcon {
+  flex: none;
 }
 
 .feat__text {

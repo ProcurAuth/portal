@@ -5143,6 +5143,17 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             created.body.contains("acts as you"),
             "the warning of portal 5.2"
         );
+        // The text of the key is in the pane of the page, with Copy and Done. The list is there too.
+        assert!(created.body.contains(r#"data-copy="key-text""#));
+        assert!(created.body.contains(r#"href="/auth/keys">Done</a>"#));
+        assert!(
+            !created.body.contains("New key</a>") && !created.body.contains(">Create</button>"),
+            "one entry point: the pane shows the key, the toolbar has no New key"
+        );
+        assert!(
+            created.body.contains("nightly report"),
+            "the list shows the new key"
+        );
         // The key works at the edge, with the grants that the form gave.
         let edge = |text: &str| {
             send(
@@ -5316,6 +5327,60 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         assert_eq!(
             missing.location(),
             Some("/auth/keys?section=mine&s=unknown_key")
+        );
+
+        // The bulk form revokes each ticked key: the fields are `id.<id>`.
+        let mut ids = Vec::new();
+        for name in ["bulk one", "bulk two"] {
+            let made = keys_post(
+                &node,
+                &alice,
+                "create",
+                &format!(
+                    "name={}&expires_at=&grant0=access+on+service%3Adb",
+                    name.replace(' ', "+")
+                ),
+            );
+            assert_eq!(made.status, 200, "{}", made.body);
+            let id = node
+                .state
+                .users
+                .keys()
+                .into_iter()
+                .find(|k| k.name == name)
+                .unwrap()
+                .id
+                .clone();
+            ids.push(id);
+        }
+        let list = get_keys(&node, &alice, "");
+        for id in &ids {
+            assert!(
+                list.body.contains(&format!(r#"name="id.{id}" value="1""#)),
+                "{}",
+                list.body
+            );
+        }
+        assert!(list.body.contains(r#"data-bulk="revoke-keys""#));
+        let bulk = keys_post_raw(
+            &node,
+            &alice,
+            "revoke",
+            &format!("id.{}=1&id.{}=1&section=mine", ids[0], ids[1]),
+        );
+        assert_eq!(bulk.location(), Some("/auth/keys?section=mine&s=revoked"));
+        node.state.users.refresh(&node.state.store).unwrap();
+        assert!(ids
+            .iter()
+            .all(|id| node.state.users.key_by_id(id).is_none()));
+        // A bad field, and no id at all, are bad requests.
+        assert_eq!(
+            keys_post_raw(&node, &alice, "revoke", "section=mine").status,
+            400
+        );
+        assert_eq!(
+            keys_post_raw(&node, &alice, "revoke", "id.x=2&section=mine").status,
+            400
         );
     });
 }
