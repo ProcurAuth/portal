@@ -353,7 +353,12 @@ impl Query {
     }
 
     /// A filter chip: the address that turns the filter on, or off when it is on already.
-    fn toggle(&self, on: bool, set: impl FnOnce(&mut Query), clear: impl FnOnce(&mut Query)) -> String {
+    fn toggle(
+        &self,
+        on: bool,
+        set: impl FnOnce(&mut Query),
+        clear: impl FnOnce(&mut Query),
+    ) -> String {
         self.href(|q| if on { clear(q) } else { set(q) })
     }
 }
@@ -523,7 +528,11 @@ fn origin_cell(origin: &Origin) -> String {
             "account".to_string(),
             "Sent by an account".to_string(),
         ),
-        Origin::Key(name) => ("webhook", name.clone(), format!("Sent by the API key {name}")),
+        Origin::Key(name) => (
+            "webhook",
+            name.clone(),
+            format!("Sent by the API key {name}"),
+        ),
     };
     format!(
         r#"<span class="src" title="{}">{}{}</span>"#,
@@ -713,7 +722,9 @@ fn graph(view: &InboxView, sent: &SentData) -> String {
         if view.query.group.as_deref().is_some_and(|g| g != group.id) {
             continue;
         }
-        let at = usize::try_from(n.bucket).unwrap_or(usize::MAX).min(bars - 1);
+        let at = usize::try_from(n.bucket)
+            .unwrap_or(usize::MAX)
+            .min(bars - 1);
         if group.critical {
             critical[at] += n.count;
         } else {
@@ -791,8 +802,13 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             .filter(|a| AlertState::of(&a.summary) == state)
             .count()
     };
-    let group_count =
-        |id: &str| sent.alerts.iter().filter(in_state).filter(|a| a.summary.group == id).count();
+    let group_count = |id: &str| {
+        sent.alerts
+            .iter()
+            .filter(in_state)
+            .filter(|a| a.summary.group == id)
+            .count()
+    };
     let total = sent.alerts.iter().filter(in_group).filter(in_state).count();
 
     let all_href = query.href(|q| q.group = None);
@@ -835,9 +851,24 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         });
     }
     let state_defs = [
-        (AlertState::Received, "circle-check", "st--ok", "Received by all phones"),
-        (AlertState::Pending, "clock", "st--warn", "Pending: some phones have not received it"),
-        (AlertState::Expired, "alert-triangle", "st--bad", "Expired: some phones never received it"),
+        (
+            AlertState::Received,
+            "circle-check",
+            "st--ok",
+            "Received by all phones",
+        ),
+        (
+            AlertState::Pending,
+            "clock",
+            "st--warn",
+            "Pending: some phones have not received it",
+        ),
+        (
+            AlertState::Expired,
+            "alert-triangle",
+            "st--bad",
+            "Expired: some phones never received it",
+        ),
     ];
     let state_labels: Vec<String> = state_defs
         .iter()
@@ -938,7 +969,11 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
             String::new()
         },
         href = html_escape(&href),
-        expanded = if open { r#" aria-expanded="true""# } else { r#" aria-expanded="false""# },
+        expanded = if open {
+            r#" aria-expanded="true""#
+        } else {
+            r#" aria-expanded="false""#
+        },
         origin = origin_cell(&row.origin),
     );
     if open {
@@ -949,7 +984,13 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
 }
 
 /// The deliveries of the opened alert: the phones that do not have it first, then a few that do.
-fn detail_row(out: &mut String, view: &InboxView, detail: &AlertDetail, close: &str, origin: &Origin) {
+fn detail_row(
+    out: &mut String,
+    view: &InboxView,
+    detail: &AlertDetail,
+    close: &str,
+    origin: &Origin,
+) {
     const WAITING_SHOWN: usize = 30;
     const RECEIVED_SHOWN: usize = 3;
     let a = &detail.summary;
@@ -986,7 +1027,11 @@ fn detail_row(out: &mut String, view: &InboxView, detail: &AlertDetail, close: &
             } else if d.device_revoked {
                 st("st--off", "device-mobile-off", "Phone revoked")
             } else if d.expired {
-                st("st--bad", "alert-triangle", "Expired: the phone never got it")
+                st(
+                    "st--bad",
+                    "alert-triangle",
+                    "Expired: the phone never got it",
+                )
             } else if d.attempts > 0 {
                 st("st--warn", "clock", "Sent, not confirmed")
             } else {
@@ -1057,9 +1102,19 @@ fn phones_zone(view: &InboxView, data: &PhonesData) -> String {
 
     let defs = [
         (DeviceState::Online, "device-mobile", "st--ok", "Online"),
-        (DeviceState::Unreachable, "device-mobile", "st--warn", "Unreachable"),
+        (
+            DeviceState::Unreachable,
+            "device-mobile",
+            "st--warn",
+            "Unreachable",
+        ),
         (DeviceState::Offline, "device-mobile", "st--off", "Offline"),
-        (DeviceState::Revoked, "device-mobile-off", "st--off", "Revoked"),
+        (
+            DeviceState::Revoked,
+            "device-mobile-off",
+            "st--off",
+            "Revoked",
+        ),
     ];
     let labels: Vec<String> = defs
         .iter()
@@ -1173,7 +1228,9 @@ fn phones_zone(view: &InboxView, data: &PhonesData) -> String {
         if all {
             body.push_str(r#"<col class="w88">"#);
         }
-        body.push_str(r#"<col class="w56"><col class="w56"><col class="w28"></colgroup><thead><tr>"#);
+        body.push_str(
+            r#"<col class="w56"><col class="w56"><col class="w28"></colgroup><thead><tr>"#,
+        );
         if any_box {
             let _ = write!(body, r#"<th scope="col">{}</th>"#, bulk_all_box(&bulk));
         }
@@ -1215,16 +1272,16 @@ fn phone_row(
     box_here: bool,
 ) {
     let d = &row.device;
-    let seen = row
-        .live
-        .as_ref()
-        .map(|l| l.last_seen_at)
-        .or(d.last_seen_at);
+    let seen = row.live.as_ref().map(|l| l.last_seen_at).or(d.last_seen_at);
     let revoked = row.state == DeviceState::Revoked;
     let _ = write!(
         out,
         r#"<tr{class} data-device="{id}" data-name="{name}" data-login="{login}" data-state="{state}" data-pending="{pending}" data-groups="{groups}">"#,
-        class = if revoked { r#" class="is-revoked""# } else { "" },
+        class = if revoked {
+            r#" class="is-revoked""#
+        } else {
+            ""
+        },
         groups = html_escape(&d.subscriptions.join(",")),
         id = html_escape(&d.id),
         name = html_escape(&d.name),
@@ -1257,23 +1314,38 @@ fn phone_row(
         html_escape(&d.name),
     );
     if owner {
-        let _ = write!(out, r#"<td class="muted">{}</td>"#, html_escape(&d.user_name));
+        let _ = write!(
+            out,
+            r#"<td class="muted">{}</td>"#,
+            html_escape(&d.user_name)
+        );
     }
     let version = d.app_version.as_deref().filter(|v| !v.is_empty());
     let _ = write!(
         out,
         r#"<td class="muted">{}</td><td class="r muted"{}>{}</td><td class="r num{}"{}>{}</td></tr>"#,
         version.map_or("-".to_string(), html_escape),
-        seen.map(|ms| format!(r#" title="{}""#, html_escape(&format!("{} UTC", crate::util::format_utc(ms / 1000)))))
-            .unwrap_or_default(),
+        seen.map(|ms| format!(
+            r#" title="{}""#,
+            html_escape(&format!("{} UTC", crate::util::format_utc(ms / 1000)))
+        ))
+        .unwrap_or_default(),
         seen.map_or("-".to_string(), |ms| age(view.now_ms, ms)),
-        if d.pending > 0 && !revoked { " st--warn" } else { " muted" },
+        if d.pending > 0 && !revoked {
+            " st--warn"
+        } else {
+            " muted"
+        },
         if d.pending > 0 {
             format!(r#" title="Alerts pending: {}""#, d.pending)
         } else {
             String::new()
         },
-        if d.pending > 0 && !revoked { d.pending.to_string() } else { "-".to_string() },
+        if d.pending > 0 && !revoked {
+            d.pending.to_string()
+        } else {
+            "-".to_string()
+        },
     );
 }
 
@@ -1299,12 +1371,16 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
         .rows
         .iter()
         .filter(|c| {
-            query.conn.is_none_or(|s| {
-                (s == ConnState::Open) == c.disconnected_at.is_none()
-            })
+            query
+                .conn
+                .is_none_or(|s| (s == ConnState::Open) == c.disconnected_at.is_none())
         })
         .collect();
-    let open = data.rows.iter().filter(|c| c.disconnected_at.is_none()).count();
+    let open = data
+        .rows
+        .iter()
+        .filter(|c| c.disconnected_at.is_none())
+        .count();
     let open_label = format!(r#"<span class="st--ok">{}</span>"#, icon("point"));
     let closed_label = format!(r#"<span class="st--off">{}</span>"#, icon("x"));
     let all_href = query.href(|q| q.conn = None);
@@ -1382,7 +1458,10 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
                 app = html_escape(&c.app_version),
                 end_title = c
                     .disconnected_at
-                    .map(|ms| format!(r#" title="Ended {} UTC""#, crate::util::format_utc(ms / 1000)))
+                    .map(|ms| format!(
+                        r#" title="Ended {} UTC""#,
+                        crate::util::format_utc(ms / 1000)
+                    ))
                     .unwrap_or_default(),
                 end = match (c.disconnected_at, reason) {
                     (None, _) => "open".to_string(),
@@ -1597,7 +1676,11 @@ mod tests {
         }
     }
 
-    fn full_view<'a>(rights: &'a Rights, query: &'a Query, groups: &'a [GroupLine]) -> InboxView<'a> {
+    fn full_view<'a>(
+        rights: &'a Rights,
+        query: &'a Query,
+        groups: &'a [GroupLine],
+    ) -> InboxView<'a> {
         InboxView {
             rights,
             notice: None,
@@ -1726,7 +1809,10 @@ mod tests {
         let (rights, groups) = (all_rights(), groups());
         let query = Query::default();
         let html = page(&full_view(&rights, &query, &groups));
-        assert!(html.contains(r#"href="/auth/settings/inbox?g=crit""#), "{html}");
+        assert!(
+            html.contains(r#"href="/auth/settings/inbox?g=crit""#),
+            "{html}"
+        );
         assert!(html.contains(r#"href="/auth/settings/inbox?a=expired""#));
         assert!(html.contains(r#"href="/auth/settings/inbox?ps=revoked""#));
         assert!(html.contains(r#"href="/auth/settings/inbox?pp=1""#));
@@ -1741,7 +1827,10 @@ mod tests {
             ..Query::default()
         };
         let html = page(&full_view(&rights, &query, &groups));
-        assert!(html.contains(r#"class="chip is-on" href="/auth/settings/inbox?p=7d""#), "{html}");
+        assert!(
+            html.contains(r#"class="chip is-on" href="/auth/settings/inbox?p=7d""#),
+            "{html}"
+        );
         assert!(html.contains(r#"href="/auth/settings/inbox?p=7d&amp;g=infra""#));
         // The filter shows only the alerts of the group.
         assert!(html.contains(">Inbox<") && !html.contains(">Disk "));
@@ -1755,7 +1844,11 @@ mod tests {
         assert!(html.contains("Questions: not enabled"));
         assert!(html.contains("Approvals: not enabled"));
         assert!(html.contains("Unanswered: not enabled"));
-        assert_eq!(html.matches("chip--future\" type=\"button\" disabled").count(), 3);
+        assert_eq!(
+            html.matches("chip--future\" type=\"button\" disabled")
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -1765,7 +1858,10 @@ mod tests {
         assert!(html.contains(r#"<form id="revoke-phones" class="bulk" method="post" action="/auth/settings/inbox/revoke">"#));
         assert!(html.contains(r#"name="id.d1" value="1""#));
         assert!(html.contains(r#"name="id.d2" value="1""#));
-        assert!(!html.contains(r#"name="id.d3""#), "a revoked phone has no box");
+        assert!(
+            !html.contains(r#"name="id.d3""#),
+            "a revoked phone has no box"
+        );
         assert!(html.contains(r#"data-bulk="revoke-phones""#));
         assert!(html.contains("Revoke the ticked phones?"));
         assert_eq!(html.matches("data-bulk=\"revoke-phones\"").count(), 1);
@@ -1796,7 +1892,10 @@ mod tests {
         let query = Query::default();
         let html = page(&full_view(&rights, &query, &groups));
         // The link of a row opens it, and keeps its place in the list with an anchor.
-        assert!(html.contains(r##"href="/auth/settings/inbox?open=a1#a-a1""##), "{html}");
+        assert!(
+            html.contains(r##"href="/auth/settings/inbox?open=a1#a-a1""##),
+            "{html}"
+        );
         assert!(!html.contains("data-detail"));
         let detail = AlertDetail {
             summary: summary("a1", "infra", "Disk", 1, 0),
@@ -1833,21 +1932,40 @@ mod tests {
         };
         view.query = &open;
         let html = page(&view);
-        assert!(html.contains(r#"<tr class="adetail" data-detail="a1">"#), "{html}");
-        assert!(html.contains(r#"data-device="d2""#) && html.contains("Expired: the phone never got it"));
+        assert!(
+            html.contains(r#"<tr class="adetail" data-detail="a1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-device="d2""#)
+                && html.contains("Expired: the phone never got it")
+        );
         assert!(html.contains(r##"aria-label="Close the detail""##));
-        assert!(html.contains(r##"href="/auth/settings/inbox#a-a1""##), "close keeps the place");
+        assert!(
+            html.contains(r##"href="/auth/settings/inbox#a-a1""##),
+            "close keeps the place"
+        );
         assert_eq!(html.matches("data-detail=").count(), 1);
-        assert!(html.contains("Sent by</b> key ci-deploy") || html.contains("Sent by</b> an account") || html.contains("Sent by</b>"));
+        assert!(
+            html.contains("Sent by</b> key ci-deploy")
+                || html.contains("Sent by</b> an account")
+                || html.contains("Sent by</b>")
+        );
     }
 
     #[test]
     fn the_period_picker_is_a_popover_of_links() {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
-        assert!(html.contains(r#"<summary class="pick" aria-label="Period" title="Period">"#), "{html}");
+        assert!(
+            html.contains(r#"<summary class="pick" aria-label="Period" title="Period">"#),
+            "{html}"
+        );
         for period in ["p=1h", "p=6h", "p=7d", "p=30d"] {
-            assert!(html.contains(&format!("href=\"/auth/settings/inbox?{period}\"")), "{period}");
+            assert!(
+                html.contains(&format!("href=\"/auth/settings/inbox?{period}\"")),
+                "{period}"
+            );
         }
         assert!(html.contains("Last 24 h") && html.contains(r#"aria-current="true""#));
     }
@@ -1862,12 +1980,18 @@ mod tests {
             ..Query::default()
         };
         let html = page(&full_view(&rights, &query, &groups));
-        assert!(html.contains(r#"<form class="searchBox" method="get" action="/auth/settings/inbox" role="search">"#));
-        assert!(html.contains(r#"name="cs" value="open""#) && html.contains(r#"name="p" value="1h""#));
+        assert!(html.contains(
+            r#"<form class="searchBox" method="get" action="/auth/settings/inbox" role="search">"#
+        ));
+        assert!(
+            html.contains(r#"name="cs" value="open""#) && html.contains(r#"name="p" value="1h""#)
+        );
         assert!(html.contains(r#"value="al&quot;ice""#));
         assert!(html.contains(r#"data-reason="""#));
         // The filter "open" keeps the open connection only.
-        assert!(html.contains(r#"<tr data-login="alice""#) && !html.contains(r#"<tr data-login="bob""#));
+        assert!(
+            html.contains(r#"<tr data-login="alice""#) && !html.contains(r#"<tr data-login="bob""#)
+        );
     }
 
     #[test]
@@ -1875,7 +1999,8 @@ mod tests {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
         // The plus button makes the code. There is no second button that makes one.
-        assert!(html.contains(r#"<form class="inline" method="post" action="/auth/settings/inbox/code">"#));
+        assert!(html
+            .contains(r#"<form class="inline" method="post" action="/auth/settings/inbox/code">"#));
         assert_eq!(html.matches("Make a code").count(), 0);
         assert!(!html.contains("data-code-pop"));
         let mut view = full_view(&rights, &query, &groups);
@@ -1886,11 +2011,15 @@ mod tests {
         });
         let html = page(&view);
         assert!(html.contains("data-code-pop"));
-        assert!(html.contains(r#"id="enroll-code""#) && html.contains(">portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b</textarea>"));
+        assert!(
+            html.contains(r#"id="enroll-code""#)
+                && html.contains(">portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b</textarea>")
+        );
         assert!(html.contains(r#"href="portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
         assert!(html.contains(r#"data-copy="enroll-code""#));
         assert!(html.contains("<code>0a1b2c3d</code>"));
-        assert!(html.contains(r#"<a class="button" href="/auth/settings/inbox" data-code-done>Done</a>"#));
+        assert!(html
+            .contains(r#"<a class="button" href="/auth/settings/inbox" data-code-done>Done</a>"#));
         assert!(html.contains("2023-11-14"));
         // The popover is not inside a scroller: it sits in the head of the zone.
         let head = html.find(r#"id="phones-title""#).unwrap();
@@ -1903,7 +2032,10 @@ mod tests {
     fn the_graph_counts_each_bar_and_puts_the_critical_groups_on_top() {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
-        assert!(html.contains(r#"<svg class="chart" viewBox="0 0 240 52""#), "{html}");
+        assert!(
+            html.contains(r#"<svg class="chart" viewBox="0 0 240 52""#),
+            "{html}"
+        );
         assert!(html.contains("4 alerts</title>") && html.contains("1 critical</title>"));
         assert!(html.contains("5 in total"));
         // The group filter keeps one group in the graph.
@@ -1925,9 +2057,18 @@ mod tests {
         let resolve = |id: &str| (id == "k1").then(|| "ci-deploy".to_string());
         assert_eq!(Origin::of("portal", &resolve), Origin::Watch);
         assert_eq!(Origin::of("admin", &resolve), Origin::Account);
-        assert_eq!(Origin::of("producer:local", &resolve), Origin::Key("local".into()));
-        assert_eq!(Origin::of("webhook:key:k1", &resolve), Origin::Key("ci-deploy".into()));
-        assert_eq!(Origin::of("notify:key:gone", &resolve), Origin::Key("API key".into()));
+        assert_eq!(
+            Origin::of("producer:local", &resolve),
+            Origin::Key("local".into())
+        );
+        assert_eq!(
+            Origin::of("webhook:key:k1", &resolve),
+            Origin::Key("ci-deploy".into())
+        );
+        assert_eq!(
+            Origin::of("notify:key:gone", &resolve),
+            Origin::Key("API key".into())
+        );
     }
 
     #[test]
@@ -1941,7 +2082,10 @@ mod tests {
                 })
                 .collect()
         };
-        let query = Query::parse(&pairs("p=7d&g=infra&a=wait&ps=online&pp=1&mine=1&cs=closed&login=bob&s=sent")).unwrap();
+        let query = Query::parse(&pairs(
+            "p=7d&g=infra&a=wait&ps=online&pp=1&mine=1&cs=closed&login=bob&s=sent",
+        ))
+        .unwrap();
         assert_eq!(query.period, Period::Week);
         assert_eq!(query.alert, Some(AlertState::Pending));
         assert_eq!(
@@ -1950,7 +2094,15 @@ mod tests {
         );
         assert_eq!(Query::default().href(|_| {}), PAGE);
         for bad in [
-            "p=2d", "x=1", "a=what", "ps=gone", "pp=0", "cs=maybe", "open=zz", "g=", "p=1h&p=6h",
+            "p=2d",
+            "x=1",
+            "a=what",
+            "ps=gone",
+            "pp=0",
+            "cs=maybe",
+            "open=zz",
+            "g=",
+            "p=1h&p=6h",
         ] {
             assert!(Query::parse(&pairs(bad)).is_none(), "{bad}");
         }

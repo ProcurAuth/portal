@@ -134,7 +134,6 @@ body.shell {
 /* The inner scrollers and the browser parts follow the palette. */
 .ge__tree,
 .ge__list,
-.dataTableWrap,
 .contentTabs {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
@@ -166,7 +165,6 @@ code {
 
 /* A part: a panel with a small upper-case title, a count and its own controls ---------------- */
 
-.pagePart,
 .side {
   display: grid;
   align-content: start;
@@ -178,76 +176,9 @@ code {
   background: var(--panel);
 }
 
-.pagePart__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 10px;
-  min-height: var(--control);
-  min-width: 0;
-}
-
-.pagePart__title {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.pagePart__count {
-  color: var(--muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.part__controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-}
-
-.part__lede {
-  margin: 0;
-  max-width: 100ch;
-  color: var(--muted);
-}
-
-.subTitle {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.pageCols {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.pageCols__main,
-.pageCols__side {
-  display: grid;
-  align-content: start;
-  gap: 16px;
-  min-width: 0;
-}
-
-@media (min-width: 1100px) {
-  .pageCols {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
-  }
-}
-
 /* The way back, the crumbs and the head of an account ------------------------------------- */
 
-.danger,
-.num--danger {
+.danger {
   color: var(--danger);
   font-weight: 600;
 }
@@ -277,13 +208,6 @@ code {
 
 .uiBanner a {
   color: inherit;
-}
-
-.uiBanner--info {
-  border-color: var(--border);
-  background: var(--raised);
-  color: var(--muted);
-  font-weight: 400;
 }
 
 .uiBanner--warn {
@@ -386,9 +310,7 @@ time.when {
 }
 
 .badge.badge--warn,
-.badge.badge--error,
-.badge.badge--danger,
-.badge.badge--ok {
+.badge.badge--danger {
   border-color: transparent;
 }
 
@@ -398,29 +320,12 @@ time.when {
   color: var(--warning);
 }
 
-.badge.badge--error,
 .badge.badge--danger {
   background: var(--danger-bg);
   color: var(--danger);
 }
 
-.badge.badge--ok {
-  background: var(--success-bg);
-  color: var(--success);
-}
-
 /* The head of a form that needs a button far from the top of a long page stays in view. */
-.pagePart__head:has(> #access-title),
-.pagePart__head:has(> #key-form-title) {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  margin: -12px -12px 0;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  border-radius: var(--radius-card) var(--radius-card) 0 0;
-  background: var(--panel);
-}
 
 .button:disabled,
 .button[aria-disabled="true"] {
@@ -471,28 +376,6 @@ time.when {
 }
 
 /* Fields ---------------------------------------------------------------------------------- */
-
-.uiForm {
-  display: grid;
-  gap: 12px;
-  min-width: 0;
-}
-
-.uiField {
-  display: grid;
-  align-content: start;
-  gap: 4px;
-  min-width: 0;
-}
-
-.uiField--narrow {
-  max-width: 16rem;
-}
-
-.uiField__label {
-  font-size: 12px;
-  font-weight: 700;
-}
 
 .uiField__hint {
   margin: 0;
@@ -558,13 +441,6 @@ input[type="radio"] {
   accent-color: var(--accent-fill);
 }
 
-.formActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
 /* Generating needs script; without it the button would do nothing, so it is not shown. */
 
 /* Both labels sit in one cell: the button keeps its size when the result replaces the word. */
@@ -619,133 +495,12 @@ input.keyText {
 
 /* Tables: one line for each row ------------------------------------------------------------ */
 
-.dataTableWrap {
-  position: relative;
-  max-width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-compact);
-  background: var(--inset);
-}
-
-.dataTable {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.dataTable th,
-.dataTable td {
-  height: var(--row);
-  padding: 0 10px;
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-  vertical-align: middle;
-  white-space: nowrap;
-}
-
-.dataTable thead th {
-  background: var(--raised);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.dataTable tbody th {
-  font-weight: 600;
-}
-
-.dataTable tbody tr:last-child > * {
-  border-bottom: 0;
-}
-
-.dataTable .num {
-  text-align: right;
-}
-
-.dataTable th.num:first-child,
-.dataTable td.num:first-child {
-  text-align: left;
-}
-
-.dataTable td.foldCell {
-  overflow: visible;
-}
-
-.dataTable tbody > tr:has(.fold[open]) > * {
-  height: auto;
-  padding-block: 8px;
-  vertical-align: top;
-}
-
-.fold > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--accent-text);
-  cursor: pointer;
-}
-
-.fold[open] {
-  white-space: normal;
-}
-
-.fold p {
-  margin: 4px 0 0;
-}
-
-.svcRow__name {
-  font-weight: 600;
-}
-
-.cellNote {
-  color: var(--muted);
-}
-
 .grantList {
   display: grid;
   gap: 2px;
   margin: 4px 0;
   padding: 0;
   list-style: none;
-}
-
-.keyActions {
-  text-align: right;
-  white-space: nowrap;
-}
-
-.keyActions form {
-  display: inline;
-}
-
-.keyAction {
-  min-width: 28px;
-  padding: 0 6px;
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-}
-
-.keyAction:hover {
-  border-color: transparent;
-  color: var(--text);
-}
-
-.keyAction--danger,
-.keyAction--danger:hover {
-  color: var(--danger);
-}
-
-.keyAction__label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 
 .inbox {
@@ -780,57 +535,9 @@ input.keyText {
 
 /* The page of an account ------------------------------------------------------------------ */
 
-.confirm {
-  position: relative;
-}
-
-.confirm > summary {
-  width: fit-content;
-  list-style: none;
-  cursor: pointer;
-}
-
-.confirm > summary::-webkit-details-marker {
-  display: none;
-}
-
 /* The confirmation opens over the page, so the content under it does not move. */
-.confirm__panel {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 5;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  width: 22rem;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
-  border-radius: var(--radius-card);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-
-.confirm__panel p {
-  margin: 0;
-  font-size: 12.5px;
-}
 
 /* Keys ------------------------------------------------------------------------------------- */
-
-.keyForm__top {
-  display: grid;
-  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
-  align-items: start;
-  gap: 12px 16px;
-}
-
-@media (max-width: 899px) {
-  .keyForm__top {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 
 .expiry__row {
   display: flex;
@@ -936,9 +643,6 @@ input.keyText {
 
 @media (max-width: 640px) {
   /* A table of the inbox keeps its main columns and its action on a narrow screen. */
-  .narrowHide {
-    display: none;
-  }
 
   .ge__svcHead {
     flex-wrap: wrap;
@@ -954,10 +658,6 @@ input.keyText {
 
   .ge__toggle {
     margin-left: auto;
-  }
-
-  .pagePart__head {
-    row-gap: 8px;
   }
 
   .ge__bar {
@@ -1156,80 +856,10 @@ input.keyText {
   }
 }
 
-.formActions--end {
-  align-items: flex-end;
-}
-
 .ge__node:focus-visible,
 .ge__more:focus-visible,
 .ge__group:focus-visible {
   outline-offset: -2px;
-}
-
-/* The inbox pages --------------------------------------------------------------------------- */
-
-.sendForm__row,
-.filterForm {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 10px;
-}
-
-.sendForm__row > .uiField:nth-child(2) {
-  flex: 1 1 22rem;
-}
-
-.filterForm {
-  margin-bottom: 8px;
-}
-
-.docCode {
-  margin: 0 0 12px;
-  padding: 10px 12px;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-compact);
-  background: var(--inset);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-}
-
-.docCode code {
-  padding: 0;
-  background: none;
-}
-
-.docList {
-  margin: 0 0 12px;
-  padding-left: 1.2em;
-}
-
-.docList li + li {
-  margin-top: 6px;
-}
-
-.docs {
-  display: grid;
-  gap: 8px;
-  max-width: 64rem;
-}
-
-.docs p,
-.docs ul,
-.docs .subTitle,
-.docs .dataTableWrap {
-  margin: 0;
-}
-
-.docs .subTitle {
-  margin-top: 10px;
-}
-
-/* A title that comes from outside keeps its letters: no capitals, no letter spacing. */
-.pagePart__title--data {
-  text-transform: none;
-  letter-spacing: normal;
 }
 
 /* Components of the settings pages ----------------------------------------------------------
@@ -1269,11 +899,6 @@ input.keyText {
 .empty {
   margin: 0;
   padding: 8px 4px;
-  color: var(--muted);
-}
-
-.lede {
-  margin: 0;
   color: var(--muted);
 }
 
@@ -1342,14 +967,6 @@ input.keyText {
 .ib--danger:hover,
 .settings a.ib--danger:hover {
   color: var(--danger);
-}
-
-.ib--count {
-  display: inline-flex;
-  gap: 4px;
-  width: auto;
-  padding: 0 6px;
-  font-size: 12px;
 }
 
 .ib .icon {
@@ -2058,61 +1675,6 @@ input.keyText {
   }
 }
 
-/* Parts that the pages Keys and Inbox still use (batch D2 reworks these pages) ---------------- */
-
-.pageBack {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--radius-control);
-  color: var(--muted);
-}
-
-.pageBack:hover {
-  color: var(--text);
-}
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-}
-
-.stat {
-  display: grid;
-  min-width: 0;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--panel);
-}
-
-.stat__label {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.stat__value time.when {
-  white-space: normal;
-}
-
-.stat__value {
-  margin: 0;
-  overflow-wrap: anywhere;
-  font-size: 18px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat__value--danger {
-  color: var(--danger);
-}
-
 /* The Inbox page ---------------------------------------------------------------------------- */
 
 .tbar--inbox {
@@ -2739,10 +2301,6 @@ input.keyText {
   align-items: center;
   gap: 10px;
   min-height: var(--control);
-}
-
-.kindRow {
-  display: flex;
 }
 
 .segmented__option .icon {

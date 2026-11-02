@@ -17,9 +17,7 @@
 //! the function escapes it. The parameters that end with `_html` are the exception: they hold
 //! markup that the caller built.
 //!
-//! The pieces that only the pages of batch D2 use (bulk action, icon with a count as a button) have
-//! no caller in the first pages. Their tests are in this file.
-#![allow(dead_code)]
+//! The tests of the parts are in this file.
 
 use std::fmt::Write as _;
 
@@ -49,17 +47,6 @@ pub fn icon_post(action: &str, label: &str, name: &str, fields_html: &str) -> St
     format!(
         r#"<form class="inline" method="post" action="{}">{fields_html}<button class="ib" type="submit" aria-label="{}" title="{}">{}</button></form>"#,
         html_escape(action),
-        html_escape(label),
-        html_escape(label),
-        icon(name)
-    )
-}
-
-/// An icon with a count, as a link: a button of a toolbar. `label` names it ("Phones: 3").
-pub fn icon_count_link(href: &str, label: &str, name: &str, count: usize) -> String {
-    format!(
-        r#"<a class="ib ib--count" href="{}" aria-label="{}" title="{}">{}<span class="num">{count}</span></a>"#,
-        html_escape(href),
         html_escape(label),
         html_escape(label),
         icon(name)
@@ -267,10 +254,7 @@ pub fn popover_with(
     let name = if label.is_empty() {
         String::new()
     } else {
-        format!(
-            r#" aria-label="{0}" title="{0}""#,
-            html_escape(label)
-        )
+        format!(r#" aria-label="{0}" title="{0}""#, html_escape(label))
     };
     format!(
         r#"<details class="pop"><summary class="{summary_class}"{name}>{summary_html}</summary><div class="pop__menu{}{menu_class}">{body_html}</div></details>"#,

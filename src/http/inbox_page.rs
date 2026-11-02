@@ -358,15 +358,16 @@ async fn page(
     let sent = if rights.sent {
         let since_ms = now_ms - query.period.millis();
         let only = ctx.held.read_groups.as_deref();
-        let (alerts, truncated) = match admin::alerts(&ctx.app, ALERTS_SHOWN, since_ms, only).await {
-            Ok(v) => v,
-            Err(_) => return unavailable(),
-        };
-        let counts = match admin::alert_counts(&ctx.app, since_ms, query.period.bucket_millis()).await
+        let (alerts, truncated) = match admin::alerts(&ctx.app, ALERTS_SHOWN, since_ms, only).await
         {
             Ok(v) => v,
             Err(_) => return unavailable(),
         };
+        let counts =
+            match admin::alert_counts(&ctx.app, since_ms, query.period.bucket_millis()).await {
+                Ok(v) => v,
+                Err(_) => return unavailable(),
+            };
         let opened = match &query.open {
             Some(id) => match admin::alert(&ctx.app, id).await {
                 Ok(Some(detail)) if ctx.held.may_read(&detail.summary.group) => Some(detail),
@@ -673,7 +674,14 @@ async fn revoke(
             Err(_) => return back_with(back, "failed"),
         }
     }
-    back_with(back, if revoked > 0 { "revoked" } else { "unknown_device" })
+    back_with(
+        back,
+        if revoked > 0 {
+            "revoked"
+        } else {
+            "unknown_device"
+        },
+    )
 }
 
 /// `POST /auth/settings/inbox/code`: a new enrollment code for the account of the session. The

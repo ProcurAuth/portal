@@ -1222,7 +1222,10 @@ mod tests {
             .iter()
             .map(|n| (n.bucket, n.group.as_str(), n.count))
             .collect();
-        assert_eq!(text, vec![(0, "infra", 2), (1, "infra", 1), (1, "other", 1)]);
+        assert_eq!(
+            text,
+            vec![(0, "infra", 2), (1, "infra", 1), (1, "other", 1)]
+        );
         assert!(alert_counts(&c, 100_000, 1_000).unwrap().is_empty());
     }
 

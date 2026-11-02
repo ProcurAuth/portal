@@ -621,4 +621,120 @@ mod tests {
         assert!(!out.contains(r#"name="grant3""#));
         assert!(out.contains("<noscript>"));
     }
+
+    /// The service `portal` for an editor, with a critical group and both kinds of key.
+    fn portal_service() -> ServiceActions {
+        let features = crate::portal_actions::Features {
+            inbox_groups: Some(vec![
+                ("infra".into(), "Infra".into()),
+                ("crit".into(), "Critical".into()),
+            ]),
+            kinds: vec![crate::keys::KeyKind::Mcp, crate::keys::KeyKind::Api],
+        };
+        let document = crate::portal_actions::document(&features);
+        ServiceActions {
+            id: crate::portal_actions::SERVICE.into(),
+            name: "Portal features".into(),
+            actions: document
+                .actions
+                .iter()
+                .map(|a| (a.name.clone(), a.description.clone()))
+                .collect(),
+            document,
+            known: true,
+            fetch: false,
+            critical: vec!["crit".into()],
+        }
+    }
+
+    fn features_json(data: &EditorData) -> serde_json::Value {
+        let mut out = String::new();
+        render(&mut out, data, PLACE);
+        let block = &out[out.find("application/json").unwrap()..];
+        let block = &block[block.find('>').unwrap() + 1..];
+        let block = block[..block.find("</script>").unwrap()].replace("\\u003c", "<");
+        serde_json::from_str::<serde_json::Value>(&block).unwrap()["features"].clone()
+    }
+
+    #[test]
+    fn the_data_of_the_features_has_the_nodes_the_critical_mark_and_the_needs_for_the_matrices() {
+        let service = portal_service();
+        let data = build(&[], Some(&service), None, |_| true, Vec::new(), true);
+        let features = features_json(&data);
+        let nodes: Vec<(&str, bool)> = features["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| {
+                (
+                    n["path"].as_str().unwrap(),
+                    n["critical"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        // The kinds of key and the groups of the inbox are nodes. Only the group `crit` is critical.
+        assert!(
+            nodes.contains(&("key_kind:api", false)) && nodes.contains(&("key_kind:mcp", false))
+        );
+        assert!(nodes.contains(&("inbox_group:infra", false)));
+        assert!(nodes.contains(&("inbox_group:crit", true)), "{nodes:?}");
+        let action = |name: &str| {
+            features["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        // The types of the actions decide the matrix of each one.
+        assert_eq!(
+            action("keys.own.create")["types"],
+            serde_json::json!(["key_kind"])
+        );
+        assert_eq!(
+            action("alert.send")["types"],
+            serde_json::json!(["inbox_group"])
+        );
+        assert_eq!(
+            action("phone.revoke")["needs"],
+            serde_json::json!(["phone.read"])
+        );
+        assert_eq!(
+            action("keys.own.edit")["needs"],
+            serde_json::json!(["keys.own.read"])
+        );
+        // The ceiling of the lifetime and the budget of the alerts are the limits of two actions.
+        assert_eq!(
+            action("keys.own.use")["limits"][0]["name"],
+            "max_key_lifetime"
+        );
+        assert_eq!(action("access")["limits"][0]["name"], "alerts");
+        assert_eq!(action("access")["limits"][0]["budget"], true);
+    }
+
+    #[test]
+    fn a_feature_that_the_file_turns_off_has_no_action_and_no_node() {
+        let mut service = portal_service();
+        let features = crate::portal_actions::Features {
+            inbox_groups: None,
+            kinds: vec![crate::keys::KeyKind::Mcp],
+        };
+        service.document = crate::portal_actions::document(&features);
+        service.actions = service
+            .document
+            .actions
+            .iter()
+            .map(|a| (a.name.clone(), a.description.clone()))
+            .collect();
+        let data = build(&[], Some(&service), None, |_| true, Vec::new(), true);
+        let features = features_json(&data);
+        let text = features.to_string();
+        assert!(
+            !text.contains("alert.send")
+                && !text.contains("phone.read")
+                && !text.contains("inbox_group")
+        );
+        assert!(text.contains("key_kind:mcp") && !text.contains("key_kind:api"));
+    }
 }

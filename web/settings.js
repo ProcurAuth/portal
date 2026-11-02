@@ -610,7 +610,7 @@
       var main = node("div", "ge__main");
       var bar = node("div", "ge__bar");
       var title = node("strong", "ge__title");
-      var count = node("span", "pagePart__count");
+      var count = node("span", "count");
       var actSearch = node("input", "uiInput ge__filter");
       actSearch.type = "search";
       actSearch.placeholder = "Filter the actions";

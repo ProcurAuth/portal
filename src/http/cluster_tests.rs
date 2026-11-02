@@ -6717,7 +6717,8 @@ mod kinds_tests {
             let form = get_new_key(&node, &alice, "");
             assert_eq!(form.status, 200);
             assert!(
-                !form.body.contains("kind-form") && !form.body.contains(r#"name="kind" value="api""#),
+                !form.body.contains("kind-form")
+                    && !form.body.contains(r#"name="kind" value="api""#),
                 "one kind only: no selector"
             );
             assert!(form
@@ -6761,7 +6762,9 @@ mod kinds_tests {
             );
             // The selector is a small GET form: each kind is a submit button that names it.
             let form = get_new_key(&node, &alice, "");
-            assert!(form.body.contains(r#"<form id="kind-form" method="get" action="/auth/keys/new">"#));
+            assert!(form
+                .body
+                .contains(r#"<form id="kind-form" method="get" action="/auth/keys/new">"#));
             assert!(form.body.contains(
                 r#"<button class="segmented__option is-active" type="submit" form="kind-form" name="kind" value="mcp""#
             ));
