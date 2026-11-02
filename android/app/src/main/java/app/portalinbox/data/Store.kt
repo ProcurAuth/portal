@@ -27,6 +27,8 @@ data class Alert(
     val alertId: String,
     val group: String,
     val groupName: String,
+    /** The kind of the message: `alert` today. See [Kind]. */
+    val kind: String,
     /** Single line, at most 128 characters on the server. */
     val title: String,
     val createdAtMs: Long,
@@ -54,7 +56,7 @@ data class Alert(
  * level.
  */
 class Store private constructor(private val appContext: Context) :
-    SQLiteOpenHelper(appContext, "inbox.db", null, 6) {
+    SQLiteOpenHelper(appContext, "inbox.db", null, 7) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -121,6 +123,7 @@ class Store private constructor(private val appContext: Context) :
                 alert_id TEXT NOT NULL,
                 group_id TEXT NOT NULL,
                 group_name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'alert',
                 title TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
                 received_at_ms INTEGER NOT NULL,
@@ -137,7 +140,9 @@ class Store private constructor(private val appContext: Context) :
         // v6: protocol 4. Every stored server was enrolled with protocol 3 (a shared password,
         // a pseudonym of the person) and cannot connect any more. Its groups, levels and
         // alerts go with it. The person gets a one-time notice and enrolls again with a code.
-        if (oldVersion < 6) {
+        // v7: the column `kind` of the table `alerts`. No phone holds data yet, so the upgrade
+        // uses the same removal and creates the tables again.
+        if (oldVersion < 7) {
             val removed = db.rawQuery("SELECT COUNT(*) FROM servers", null)
                 .use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
             for (table in listOf("alerts", "outbox", "subscriptions", "groups", "servers")) {
@@ -278,6 +283,7 @@ class Store private constructor(private val appContext: Context) :
             put("alert_id", a.alertId)
             put("group_id", a.group)
             put("group_name", a.groupName)
+            put("kind", a.kind)
             put("title", a.title)
             put("created_at_ms", a.createdAtMs)
             put("received_at_ms", a.receivedAtMs)
@@ -308,9 +314,9 @@ class Store private constructor(private val appContext: Context) :
                     add(
                         Alert(
                             c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getString(4),
-                            c.getLong(5), c.getLong(6), c.getString(7), c.getInt(8) != 0,
-                            if (c.isNull(9)) null else c.getLong(9),
+                            c.getString(5), c.getLong(6), c.getLong(7), c.getString(8), c.getInt(9) != 0,
                             if (c.isNull(10)) null else c.getLong(10),
+                            if (c.isNull(11)) null else c.getLong(11),
                         )
                     )
                 }
@@ -318,7 +324,7 @@ class Store private constructor(private val appContext: Context) :
         }
 
     private val alertColumns =
-        "server_id, alert_id, group_id, group_name, title, created_at_ms, received_at_ms, action, notified, acked_at_ms, read_at_ms"
+        "server_id, alert_id, group_id, group_name, kind, title, created_at_ms, received_at_ms, action, notified, acked_at_ms, read_at_ms"
 
     fun alert(serverId: Long, alertId: String): Alert? = readAlerts(
         "SELECT $alertColumns FROM alerts WHERE server_id = ? AND alert_id = ?",

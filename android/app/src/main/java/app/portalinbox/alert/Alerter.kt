@@ -22,6 +22,7 @@ import android.provider.Settings
 import android.util.Log
 import app.portalinbox.R
 import app.portalinbox.data.Alert
+import app.portalinbox.data.Kind
 import app.portalinbox.data.Store
 import app.portalinbox.service.Registry
 import app.portalinbox.ui.AlarmActivity
@@ -52,35 +53,35 @@ object Alerter {
 
     fun createChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val alarm = NotificationChannel(CH_ALARM, "Alarms", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Critical alerts: ring until you stop them, even in silent mode"
+        val alarm = NotificationChannel(CH_ALARM, context.getString(R.string.ch_alarm_name), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.getString(R.string.ch_alarm_desc)
             setSound(null, null) // played by AlarmPlayer on the alarm stream
             enableVibration(false) // vibration handled by AlarmPlayer
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val active = NotificationChannel(CH_ALARM_ACTIVE, "Alarm on screen", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "Ringing alarm already open full screen"
+        val active = NotificationChannel(CH_ALARM_ACTIVE, context.getString(R.string.ch_alarm_active_name), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.ch_alarm_active_desc)
             setSound(null, null)
             enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val ring = NotificationChannel(CH_RING, "Rings", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "One sound, even in silent or vibrate mode"
+        val ring = NotificationChannel(CH_RING, context.getString(R.string.ch_ring_name), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.getString(R.string.ch_ring_desc)
             setSound(null, null)
             enableVibration(false)
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        val notify = NotificationChannel(CH_NOTIFY, "Notifications", NotificationManager.IMPORTANCE_DEFAULT).apply {
-            description = "Standard notifications, following the phone sound mode"
+        val notify = NotificationChannel(CH_NOTIFY, context.getString(R.string.ch_notify_name), NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = context.getString(R.string.ch_notify_desc)
         }
-        val status = NotificationChannel(CH_STATUS, "Connection status", NotificationManager.IMPORTANCE_MIN).apply {
-            description = "Permanent notification of the Inbox service"
+        val status = NotificationChannel(CH_STATUS, context.getString(R.string.ch_status_name), NotificationManager.IMPORTANCE_MIN).apply {
+            description = context.getString(R.string.ch_status_desc)
             setShowBadge(false)
         }
-        val warning = NotificationChannel(CH_WARNING, "Connection lost", NotificationManager.IMPORTANCE_HIGH).apply {
-            description = "Warns when Inbox can no longer receive alerts"
+        val warning = NotificationChannel(CH_WARNING, context.getString(R.string.ch_warning_name), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.getString(R.string.ch_warning_desc)
         }
         nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning))
     }
@@ -121,7 +122,9 @@ object Alerter {
 
     private fun post(context: Context, a: Alert, direct: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val body = context.getString(R.string.alert_in_group, a.groupName)
+        val body = context.getString(
+            if (a.kind == Kind.ALERT) R.string.alert_in_group else R.string.message_in_group, a.groupName
+        )
         // Tapping the notification opens the alert in the app, which marks it read.
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),

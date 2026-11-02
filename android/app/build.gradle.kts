@@ -63,4 +63,7 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // The unit tests run on the JVM. The Android `org.json` is a stub there: use the real library.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

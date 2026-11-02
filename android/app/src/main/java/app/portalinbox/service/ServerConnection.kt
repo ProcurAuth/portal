@@ -7,6 +7,7 @@ import app.portalinbox.R
 import app.portalinbox.alert.Alerter
 import app.portalinbox.core.Native
 import app.portalinbox.data.Alert
+import app.portalinbox.data.AlertFrame
 import app.portalinbox.data.Group
 import app.portalinbox.data.KeyVault
 import app.portalinbox.data.Store
@@ -408,15 +409,17 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     }
 
     private fun onAlert(msg: JSONObject) {
+        val frame = AlertFrame.parse(msg)
         val alert = Alert(
             serverId = serverId,
-            alertId = msg.getString("alert_id"),
-            group = msg.getString("group"),
-            groupName = msg.getString("group_name"),
-            title = msg.getString("title"),
-            createdAtMs = msg.getLong("created_at_ms"),
+            alertId = frame.alertId,
+            group = frame.group,
+            groupName = frame.groupName,
+            kind = frame.kind,
+            title = frame.title,
+            createdAtMs = frame.createdAtMs,
             receivedAtMs = System.currentTimeMillis(),
-            action = localAction(msg.getString("group")),
+            action = localAction(frame.group),
             notified = false,
             stoppedAtMs = null,
             readAtMs = null,

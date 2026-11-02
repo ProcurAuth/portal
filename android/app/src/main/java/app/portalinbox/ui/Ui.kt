@@ -17,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import app.portalinbox.R
+import app.portalinbox.data.Kind
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -266,6 +267,13 @@ fun Context.actionStyle(action: String?): ActionStyle = when (action) {
     "ring" -> ActionStyle(R.drawable.ic_bell_ring, color(R.color.warning), color(R.color.warning_soft), getString(R.string.action_ring), "RING")
     "notify" -> ActionStyle(R.drawable.ic_bell, color(R.color.info), color(R.color.info_soft), getString(R.string.action_notify), "NOTIF")
     else -> ActionStyle(R.drawable.ic_bell_outline, color(R.color.text_muted), color(R.color.bg_hover), getString(R.string.action_off), "OFF")
+}
+
+/** The words for a kind. A kind that this version does not know shows as a generic message. */
+fun Context.kindLabel(kind: String): String = when {
+    kind == Kind.ALERT -> getString(R.string.kind_alert)
+    kind == Kind.UNKNOWN -> getString(R.string.kind_other)
+    else -> getString(R.string.kind_other_named, kind)
 }
 
 /** "just now", "5 min ago", "3 h ago", "yesterday", "4 d ago". */

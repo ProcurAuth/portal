@@ -137,7 +137,7 @@ class InboxService : Service() {
         )
         return Notification.Builder(this, Alerter.CH_STATUS)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Inbox")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setOngoing(true)

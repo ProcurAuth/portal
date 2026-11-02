@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Inbox</string>
+    <string name="app_name">Portal Inbox</string>
 
     <!-- Navigation -->
     <string name="nav_open">Open menu</string>
     <string name="nav_back">Back</string>
-    <string name="nav_alerts">Alerts</string>
+    <string name="nav_inbox">Inbox</string>
     <string name="nav_servers">Servers</string>
     <string name="nav_settings">Settings</string>
     <string name="drawer_servers_none">No server</string>
@@ -30,21 +30,22 @@
 
     <!-- Alerts (home) -->
     <string name="alerts_no_server_title">No server</string>
-    <string name="alerts_no_server_body">Add an Inbox server to start receiving alerts.</string>
+    <string name="alerts_no_server_body">Add a server to start receiving alerts.</string>
     <string name="alerts_add_server">Add a server</string>
     <string name="alerts_see_more">See more</string>
     <string name="alerts_show_read">Show read</string>
-    <string name="alerts_none">No alerts</string>
+    <string name="alerts_none">No messages</string>
     <string name="alerts_mark_all">Mark all as read</string>
     <string name="alert_mark_read">Mark as read</string>
     <string name="marked_read">Marked as read</string>
     <string name="swipe_read">Read</string>
     <string name="alert_in_group">Alert in %1$s</string>
+    <string name="message_in_group">Message in %1$s</string>
     <string name="alert_stop">Stop alarm</string>
     <string name="alert_close">Close</string>
-    <string name="alert_permissions_missing">Missing permissions: a critical alert might not ring.</string>
+    <string name="alert_permissions_missing">Permissions are missing. A critical alert may not ring.</string>
     <string name="alert_permissions_fix">Fix</string>
-    <string name="alert_overlay_missing">A group is set to Alarm, but Inbox cannot draw over other apps: the alarm will not open full screen while the phone is in use.</string>
+    <string name="alert_overlay_missing">A group is set to Alarm, but the app cannot show over other apps. An alarm will not open full screen while you use the phone.</string>
     <string name="alert_overlay_fix">Allow</string>
 
     <!-- Levels (local to this phone) -->
@@ -68,12 +69,12 @@
     <string name="server_account">Account</string>
     <string name="server_account_help">The server assigns this login. It cannot be changed here.</string>
     <string name="server_groups">Groups</string>
-    <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the phone\'s sound mode, Ring sounds even in silent mode, Alarm opens full screen until you stop it.</string>
+    <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the sound mode of the phone. Ring sounds even in silent mode. Alarm stays on screen until you stop it.</string>
     <string name="server_groups_subscribed">Followed: %1$d/%2$d</string>
     <string name="server_groups_none">Groups appear after the first connection.</string>
     <string name="server_remove">Delete server</string>
     <string name="server_remove_title">Delete %1$s?</string>
-    <string name="server_remove_body">This phone will stop receiving its alerts. A new enrollment code is needed to add it again.</string>
+    <string name="server_remove_body">This phone stops receiving messages from this server. To add it again, you need a new enrollment code.</string>
     <string name="server_remove_confirm">Delete</string>
     <string name="server_removed">Server deleted</string>
     <string name="cancel">Cancel</string>
@@ -83,21 +84,21 @@
     <string name="add_title">Add a server</string>
     <string name="add_code">Enrollment code</string>
     <string name="add_code_hint">portal-inbox://enroll?s=…&amp;k=…&amp;c=…</string>
-    <string name="add_code_help">Paste the code or the link that your account shows in the tab Inbox.</string>
+    <string name="add_code_help">Paste the code or the link from the Inbox tab of the portal.</string>
     <string name="add_code_missing">Enter the enrollment code.</string>
     <string name="add_check_title">Check the server</string>
-    <string name="add_check_help">Compare the address and the fingerprint with the values that your administrator gave you.</string>
+    <string name="add_check_help">Compare the address and the fingerprint with the values from your administrator.</string>
     <string name="add_check_fingerprint">Key fingerprint</string>
     <string name="add_device_name">Name of this device</string>
-    <string name="add_device_name_help">Visible to the administrator in the web interface.</string>
-    <string name="add_security_note">The code pins the key of the server. The phone trusts no other key for this server, even over unencrypted http. The secret of the code works one time.</string>
+    <string name="add_device_name_help">The portal shows this name in its web interface.</string>
+    <string name="add_security_note">The code pins the key of the server. The phone trusts no other key for this server. The secret of the code works one time.</string>
     <string name="add_connect">Connect</string>
     <string name="add_connecting">Connecting…</string>
     <string name="add_error">Error: %1$s</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
-    <string name="settings_limit">Alerts shown</string>
+    <string name="settings_limit">Messages shown</string>
     <string name="settings_window">Maximum age</string>
     <string name="settings_theme">Theme</string>
     <string name="saved">Saved</string>
@@ -105,15 +106,15 @@
     <string name="theme_light">Light</string>
     <string name="theme_dark">Dark</string>
     <string name="perm_notifications">Notifications</string>
-    <string name="perm_notifications_why">Required to show alerts.</string>
+    <string name="perm_notifications_why">Needed to show messages and alerts.</string>
     <string name="perm_full_screen">Full-screen alarms</string>
-    <string name="perm_full_screen_why">Shows the alarm over the lock screen.</string>
+    <string name="perm_full_screen_why">Shows an alarm over the lock screen.</string>
     <string name="perm_battery">Ignore battery optimization</string>
-    <string name="perm_battery_why">Otherwise Android may stop Inbox in the background.</string>
+    <string name="perm_battery_why">Without it, Android can stop the app in the background.</string>
     <string name="perm_dnd">Do Not Disturb access</string>
-    <string name="perm_dnd_why">Leaves silent or vibrate mode during an alarm.</string>
+    <string name="perm_dnd_why">Lets an alarm sound in silent or vibrate mode.</string>
     <string name="perm_overlay">Display over other apps</string>
-    <string name="perm_overlay_why">Lets an Alarm open Inbox full screen even while the phone is in use.</string>
+    <string name="perm_overlay_why">Lets an alarm open full screen while you use the phone.</string>
     <string name="perm_grant">Allow</string>
 
     <!-- Metadata keys (dense key / value rows) -->
@@ -123,7 +124,11 @@
     <string name="meta_sent">Sent</string>
     <string name="meta_received">Received</string>
     <string name="meta_read">Read</string>
-    <string name="meta_alert_id">Alert ID</string>
+    <string name="meta_kind">Kind</string>
+    <string name="meta_message_id">ID</string>
+    <string name="kind_alert">Alert</string>
+    <string name="kind_other">Message</string>
+    <string name="kind_other_named">Message (%1$s)</string>
     <string name="meta_state">State</string>
     <string name="meta_address">Address</string>
     <string name="meta_device">Device</string>
@@ -138,37 +143,51 @@
     <string name="alarm_all_stopped">Stopping silences every ringing alarm.</string>
     <string name="alarm_stop_description">Stop the alarm. Slide out of the circle or long press.</string>
 
+    <!-- Notification channels -->
+    <string name="ch_alarm_name">Alarms</string>
+    <string name="ch_alarm_desc">Critical alerts. They ring until you stop them, even in silent mode.</string>
+    <string name="ch_alarm_active_name">Alarm on screen</string>
+    <string name="ch_alarm_active_desc">A ringing alarm that is already open full screen.</string>
+    <string name="ch_ring_name">Rings</string>
+    <string name="ch_ring_desc">One sound, even in silent or vibrate mode.</string>
+    <string name="ch_notify_name">Notifications</string>
+    <string name="ch_notify_desc">Standard notifications. They follow the sound mode of the phone.</string>
+    <string name="ch_status_name">Connection status</string>
+    <string name="ch_status_desc">Permanent notification of the Portal Inbox service.</string>
+    <string name="ch_warning_name">Connection lost</string>
+    <string name="ch_warning_desc">Warns when the app cannot receive messages.</string>
+
     <!-- Service notifications -->
     <string name="svc_starting">Starting…</string>
     <string name="svc_no_server">No server configured</string>
     <string name="svc_connecting">%1$s: connecting…</string>
     <string name="svc_disconnected">%1$s: disconnected %2$s</string>
     <string name="svc_reenroll">%1$s: re-enrollment required</string>
-    <string name="svc_warning_title">Alerts not received: %1$s</string>
-    <string name="svc_warning_text">Inbox is no longer connected to this server</string>
-    <string name="svc_warning_big">Inbox can no longer receive alerts from %1$s. %2$s</string>
+    <string name="svc_warning_title">Not connected: %1$s</string>
+    <string name="svc_warning_text">The app is no longer connected to this server.</string>
+    <string name="svc_warning_big">The app cannot receive messages from %1$s. %2$s</string>
 
     <!-- Enrollment errors -->
-    <string name="err_unreachable">Server not reachable (check address / network)</string>
+    <string name="err_unreachable">Cannot reach the server. Check the address and the network.</string>
     <string name="err_closed">The server closed the connection (%1$d)</string>
     <string name="err_lost">Connection lost: %1$s</string>
     <string name="err_no_answer">The server does not answer</string>
     <string name="err_rate_limited">Too many attempts. Try again later.</string>
-    <string name="err_protocol">Incompatible version with this server: %1$s</string>
-    <string name="err_internal">Internal server error</string>
+    <string name="err_protocol">Incompatible protocol: %1$s</string>
+    <string name="err_internal">Internal error</string>
     <string name="err_code_invalid">This is not a valid enrollment code.</string>
     <string name="err_code_refused">The code is not valid. Ask for a new one.</string>
-    <string name="err_update_app">This server needs a newer version of the app. Update the app.</string>
+    <string name="err_update_app">This server needs a newer version. Update the app.</string>
     <string name="err_server_key">The answer does not come from the server of the code. Nothing was stored.</string>
-    <string name="err_device_name">Invalid device name (1 to 64 characters, no control characters)</string>
+    <string name="err_device_name">The device name is not valid. Use 1 to 64 characters, with no control character.</string>
     <string name="enroll_again_notice">The servers of the previous version were removed. Enroll again with a code.</string>
     <string name="err_unknown">Unknown error</string>
 
-    <!-- 0.9.0 -->
+    <!-- Other -->
     <string name="undo">Undo</string>
     <plurals name="marked_read_n">
-        <item quantity="one">%d alert marked as read</item>
-        <item quantity="other">%d alerts marked as read</item>
+        <item quantity="one">%d message marked as read</item>
+        <item quantity="other">%d messages marked as read</item>
     </plurals>
     <string name="alerts_no_group">%1$s: no group followed</string>
     <string name="alerts_choose_groups">Choose groups</string>
@@ -177,8 +196,8 @@
     <string name="a11y_expanded">Expanded</string>
     <string name="a11y_collapsed">Collapsed</string>
     <string name="server_details">Connection details</string>
-    <string name="settings_limit_less">Show fewer alerts</string>
-    <string name="settings_limit_more">Show more alerts</string>
+    <string name="settings_limit_less">Show fewer messages</string>
+    <string name="settings_limit_more">Show more messages</string>
     <string name="status_reconnecting">Reconnecting…</string>
     <string name="add_device_name_missing">Enter a name for this device.</string>
     <string name="alarm_sent">sent</string>

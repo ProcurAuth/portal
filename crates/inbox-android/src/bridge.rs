@@ -225,6 +225,37 @@ mod tests {
         assert!(session_encrypt(&conn, b"x").is_err(), "session dead after bad frame");
     }
 
+    /// The bridge moves bytes. It does not read the frame, so the field `kind` reaches Kotlin
+    /// as the server wrote it, also a kind that this version does not know.
+    #[test]
+    fn the_field_kind_of_an_alert_frame_reaches_kotlin_unchanged() {
+        let key = ServerKey::generate().unwrap();
+        let (h, m1) = enroll_start(&code_text(&key), "Pixel", "1").unwrap();
+        let (resp, device_public, _) = EnrollResponder::start(&key.noise_private, &m1).unwrap();
+        let m2 = resp
+            .finish(&EnrollAccept {
+                protocol: PROTOCOL_VERSION,
+                device_id: "0123456789abcdef0123456789abcdef".into(),
+                server_name: "Prod".into(),
+                user_name: "alice".into(),
+            })
+            .unwrap();
+        let done = enroll_finish(&h, &m2);
+        let sk = b64::decode(done["done"]["device_private_key"].as_str().unwrap()).unwrap();
+        let (conn, msg1) = session_start(&sk, &key.noise_public, b"{}").unwrap();
+        let (resp, remote, _) = Responder::start(&key.noise_private, &msg1).unwrap();
+        assert_eq!(remote, device_public);
+        let (mut srv, msg2) = resp.finish(b"accept").unwrap();
+        session_finish(&conn, &msg2).unwrap();
+        for kind in ["alert", "question"] {
+            let frame = format!(
+                r#"{{"t":"alert","alert_id":"ab","kind":"{kind}","group":"g","group_name":"G","title":"x","created_at_ms":1}}"#
+            );
+            let ct = srv.encrypt(frame.as_bytes()).unwrap();
+            assert_eq!(session_decrypt(&conn, &ct).unwrap(), frame.as_bytes());
+        }
+    }
+
     #[test]
     fn bad_input_reports_error_codes() {
         let key = ServerKey::generate().unwrap();

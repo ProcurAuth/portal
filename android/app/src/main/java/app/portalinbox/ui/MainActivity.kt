@@ -243,7 +243,7 @@ class MainActivity : BaseActivity() {
         val servers = Store.get(this).servers()
         val o = overall(servers)
         title = when (screen) {
-            Screen.ALERTS -> getString(R.string.app_name)
+            Screen.ALERTS -> getString(R.string.nav_inbox)
             Screen.SERVERS -> getString(R.string.servers_title)
             Screen.SETTINGS -> getString(R.string.settings_title)
         }
@@ -314,7 +314,7 @@ class MainActivity : BaseActivity() {
             }
             items.addView(row, lp().margins(this, b = 2))
         }
-        item(Screen.ALERTS, R.drawable.ic_bell, R.string.nav_alerts)
+        item(Screen.ALERTS, R.drawable.ic_bell, R.string.nav_inbox)
         item(Screen.SERVERS, R.drawable.ic_server, R.string.nav_servers)
         item(Screen.SETTINGS, R.drawable.ic_settings, R.string.nav_settings)
         if (unread > 0) {
@@ -538,14 +538,15 @@ class MainActivity : BaseActivity() {
             listOf(
                 getString(R.string.meta_server) to serverName,
                 getString(R.string.meta_group) to a.groupName,
+                getString(R.string.meta_kind) to kindLabel(a.kind),
                 getString(R.string.meta_action) to style.code,
                 getString(R.string.meta_sent) to formatTime(a.createdAtMs),
                 getString(R.string.meta_received) to formatTime(a.receivedAtMs) + if (late > 60_000) "  (+${formatDuration(late)})" else "",
                 getString(R.string.meta_read) to formatTime(a.readAtMs ?: System.currentTimeMillis()),
-                getString(R.string.meta_alert_id) to a.alertId,
+                getString(R.string.meta_message_id) to a.alertId,
             ).forEachIndexed { i, (k, v) ->
                 if (i > 0) meta.addView(divider())
-                meta.addView(kv(k, v, if (i == 2) style.fg else color(R.color.text)))
+                meta.addView(kv(k, v, if (i == 3) style.fg else color(R.color.text)))
             }
             sheet.addView(meta, lp().margins(this, t = 14))
             sheet.addView(button(getString(R.string.alert_close), ButtonKind.SECONDARY) { dialog.dismiss() }, lp().margins(this, t = 14, b = 10))
