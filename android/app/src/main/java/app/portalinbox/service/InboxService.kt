@@ -1,4 +1,4 @@
-package app.inbox.service
+package app.portalinbox.service
 
 import android.app.AlarmManager
 import android.app.Notification
@@ -17,12 +17,12 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import app.inbox.R
-import app.inbox.alert.AlarmPlayer
-import app.inbox.alert.Alerter
-import app.inbox.data.Store
-import app.inbox.ui.MainActivity
-import app.inbox.ui.formatSince
+import app.portalinbox.R
+import app.portalinbox.alert.AlarmPlayer
+import app.portalinbox.alert.Alerter
+import app.portalinbox.data.Store
+import app.portalinbox.ui.MainActivity
+import app.portalinbox.ui.formatSince
 
 /**
  * Foreground service holding one persistent session per enrolled server. It is

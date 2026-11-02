@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -21,15 +21,15 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
-import app.inbox.BuildConfig
-import app.inbox.R
-import app.inbox.alert.Alerter
-import app.inbox.data.Alert
-import app.inbox.data.Server
-import app.inbox.data.Store
-import app.inbox.service.LinkState
-import app.inbox.service.InboxService
-import app.inbox.service.Registry
+import app.portalinbox.BuildConfig
+import app.portalinbox.R
+import app.portalinbox.alert.Alerter
+import app.portalinbox.data.Alert
+import app.portalinbox.data.Server
+import app.portalinbox.data.Store
+import app.portalinbox.service.LinkState
+import app.portalinbox.service.InboxService
+import app.portalinbox.service.Registry
 
 /** Home: latest alerts, plus the Servers and Settings screens behind the menu. */
 class MainActivity : BaseActivity() {
@@ -41,7 +41,7 @@ class MainActivity : BaseActivity() {
         /** Opens the home screen on one alert (from its notification); opening marks it read. */
         fun openAlert(context: android.content.Context, serverId: Long, alertId: String): Intent =
             Intent(context, MainActivity::class.java)
-                .setAction("app.inbox.OPEN_ALERT:$serverId:$alertId")
+                .setAction("app.portalinbox.OPEN_ALERT:$serverId:$alertId")
                 .putExtra(EXTRA_SERVER, serverId)
                 .putExtra(EXTRA_ALERT, alertId)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)

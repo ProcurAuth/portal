@@ -1,7 +1,7 @@
-package app.inbox
+package app.portalinbox
 
 import android.app.Application
-import app.inbox.alert.Alerter
+import app.portalinbox.alert.Alerter
 
 class InboxApp : Application() {
     override fun onCreate() {

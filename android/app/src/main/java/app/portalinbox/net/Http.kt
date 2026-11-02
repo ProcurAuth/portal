@@ -1,4 +1,4 @@
-package app.inbox.net
+package app.portalinbox.net
 
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit

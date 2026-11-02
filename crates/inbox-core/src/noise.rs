@@ -19,9 +19,9 @@ use crate::error::{Error, Result};
 
 pub const NOISE_PARAMS: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// Prologue of `/v1/session`.
-pub const SESSION_PROLOGUE: &[u8] = b"inbox/v1/session";
+pub const SESSION_PROLOGUE: &[u8] = b"portal-inbox/v1/session";
 /// Prologue of `/v1/enroll`.
-pub const ENROLL_PROLOGUE: &[u8] = b"inbox/v1/enroll";
+pub const ENROLL_PROLOGUE: &[u8] = b"portal-inbox/v1/enroll";
 
 /// Largest Noise message; one WebSocket frame carries exactly one.
 pub const MAX_MESSAGE: usize = 65535;

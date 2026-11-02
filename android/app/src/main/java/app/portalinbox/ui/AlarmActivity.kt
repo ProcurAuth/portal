@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.app.Activity
 import android.content.Context
@@ -21,9 +21,9 @@ import android.widget.FrameLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.window.OnBackInvokedDispatcher
-import app.inbox.R
-import app.inbox.alert.Alerter
-import app.inbox.data.Store
+import app.portalinbox.R
+import app.portalinbox.alert.Alerter
+import app.portalinbox.data.Store
 
 /**
  * Full-screen alarm, over the lock screen, until it is stopped on the phone.

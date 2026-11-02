@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.app.Activity
 import android.content.Context
@@ -41,8 +41,8 @@ object Prefs {
 
     /** True once after an update removed servers of an older protocol (see `Store.onUpgrade`). */
     fun takeEnrollAgain(c: Context): Boolean {
-        val set = prefs(c).getBoolean(app.inbox.data.Store.PREF_ENROLL_AGAIN, false)
-        if (set) prefs(c).edit().remove(app.inbox.data.Store.PREF_ENROLL_AGAIN).apply()
+        val set = prefs(c).getBoolean(app.portalinbox.data.Store.PREF_ENROLL_AGAIN, false)
+        if (set) prefs(c).edit().remove(app.portalinbox.data.Store.PREF_ENROLL_AGAIN).apply()
         return set
     }
 }

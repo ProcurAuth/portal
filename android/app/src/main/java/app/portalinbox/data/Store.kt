@@ -1,4 +1,4 @@
-package app.inbox.data
+package app.portalinbox.data
 
 import android.content.ContentValues
 import android.content.Context

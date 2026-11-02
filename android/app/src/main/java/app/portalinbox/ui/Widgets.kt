@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.app.Activity
 import android.app.Dialog
@@ -19,7 +19,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import app.inbox.R
+import app.portalinbox.R
 import kotlin.math.abs
 
 /**

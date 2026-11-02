@@ -1,4 +1,4 @@
-package app.inbox.core
+package app.portalinbox.core
 
 /**
  * JNI bindings to `inbox-core` (crates/inbox-android).
@@ -12,7 +12,7 @@ object Native {
     }
 
     /**
-     * Reads an enrollment code (text or `inbox://enroll?...` link).
+     * Reads an enrollment code (text or `portal-inbox://enroll?...` link).
      * Returns `{"code": {"address", "server_public_key" (base64), "fingerprint"}}` or
      * `{"error": {"code", "message"}}`. The secret of the code stays in Rust.
      */

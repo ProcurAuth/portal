@@ -1,12 +1,12 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.os.Bundle
 import android.widget.LinearLayout
-import app.inbox.R
-import app.inbox.data.Store
-import app.inbox.service.LinkState
-import app.inbox.service.InboxService
-import app.inbox.service.Registry
+import app.portalinbox.R
+import app.portalinbox.data.Store
+import app.portalinbox.service.LinkState
+import app.portalinbox.service.InboxService
+import app.portalinbox.service.Registry
 
 /** One server: status, account login, and what each group does on this phone. */
 class ServerActivity : BaseActivity() {
@@ -237,7 +237,7 @@ class ServerActivity : BaseActivity() {
     /** Closes the connection, silences and clears its notifications, deletes its local data and keys. */
     private fun remove() {
         Registry.connections.remove(serverId)?.stop()
-        app.inbox.alert.Alerter.forgetServer(this, serverId)
+        app.portalinbox.alert.Alerter.forgetServer(this, serverId)
         Store.get(this).deleteServer(serverId)
         Registry.forget(serverId)
         InboxService.start(this)

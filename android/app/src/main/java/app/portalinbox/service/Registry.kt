@@ -1,4 +1,4 @@
-package app.inbox.service
+package app.portalinbox.service
 
 import android.os.Handler
 import android.os.Looper

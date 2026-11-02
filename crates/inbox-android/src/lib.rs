@@ -1,4 +1,4 @@
-//! JNI bridge for `app.inbox.core.Native`.
+//! JNI bridge for `app.portalinbox.core.Native`.
 //!
 //! Every entry point catches panics (the Android build uses `panic = "unwind"`)
 //! and turns them, like misuse, into a Java `IllegalStateException`. Expected
@@ -73,7 +73,7 @@ fn conn_ref<'a>(h: jlong) -> Result<&'a Conn, String> {
 
 /// Reads an enrollment code. Returns `{"code": {...}}` or `{"error": {...}}`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_enrollParse<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_enrollParse<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     code: JString<'l>,
@@ -86,7 +86,7 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollParse<'l>(
 
 /// Returns `{"handle": <long>, "send": "<message 1, standard base64>"}` or `{"error": {...}}`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_enrollStart<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_enrollStart<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     code: JString<'l>,
@@ -111,7 +111,7 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollStart<'l>(
 /// Consumes Noise message 2. Returns `{"done": {...}}` or `{"error": {...}}`.
 /// The result holds the device private key: Kotlin must seal it at once.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_enrollFinish<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_enrollFinish<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -126,7 +126,7 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollFinish<'l>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_enrollFree<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_enrollFree<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -144,7 +144,7 @@ pub extern "system" fn Java_app_inbox_core_Native_enrollFree<'l>(
 
 /// Starts the Noise handshake. Returns the handle; message 1 via `sessionMessage1`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_sessionStart<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_sessionStart<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     device_private: JByteArray<'l>,
@@ -168,7 +168,7 @@ pub extern "system" fn Java_app_inbox_core_Native_sessionStart<'l>(
 /// Consumes handshake message 2, returns the accept payload (JSON bytes).
 /// Throws if the server is not the pinned one.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_sessionFinish<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_sessionFinish<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -183,7 +183,7 @@ pub extern "system" fn Java_app_inbox_core_Native_sessionFinish<'l>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_sessionEncrypt<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_sessionEncrypt<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -198,7 +198,7 @@ pub extern "system" fn Java_app_inbox_core_Native_sessionEncrypt<'l>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_sessionDecrypt<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_sessionDecrypt<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -213,7 +213,7 @@ pub extern "system" fn Java_app_inbox_core_Native_sessionDecrypt<'l>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_sessionFree<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_sessionFree<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     handle: jlong,
@@ -229,9 +229,41 @@ pub extern "system" fn Java_app_inbox_core_Native_sessionFree<'l>(
 
 /// Library and protocol versions, for the about screen.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_inbox_core_Native_protocolVersion<'l>(
+pub extern "system" fn Java_app_portalinbox_core_Native_protocolVersion<'l>(
     _env: JNIEnv<'l>,
     _class: JClass<'l>,
 ) -> jni::sys::jint {
     inbox_core::PROTOCOL_VERSION as jni::sys::jint
+}
+
+#[cfg(test)]
+mod tests {
+    /// The JNI names come from the package of the Kotlin class. A name that does not match makes
+    /// the app crash when it loads the library. This test reads `Native.kt` and checks each
+    /// `external fun` against the exported symbols of this file.
+    #[test]
+    fn each_native_function_of_the_app_has_its_jni_symbol() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let kotlin = std::fs::read_to_string(
+            root.join("../../android/app/src/main/java/app/portalinbox/core/Native.kt"),
+        )
+        .expect("Native.kt");
+        assert!(kotlin.contains("package app.portalinbox.core\n"));
+        let source = std::fs::read_to_string(root.join("src/lib.rs")).expect("lib.rs");
+        let names: Vec<&str> = kotlin
+            .lines()
+            .filter_map(|l| l.split("external fun ").nth(1))
+            .filter_map(|l| l.split('(').next())
+            .collect();
+        assert_eq!(names.len(), 10, "{names:?}");
+        for name in names {
+            let symbol = format!("fn Java_app_portalinbox_core_Native_{name}<");
+            assert!(source.contains(&symbol), "{symbol}");
+        }
+        let exported = source
+            .lines()
+            .filter(|l| l.starts_with("pub extern \"system\" fn Java_app_portalinbox_core_Native_"))
+            .count();
+        assert_eq!(exported, 10, "each exported symbol has the package of the app");
+    }
 }

@@ -1,9 +1,9 @@
-package app.inbox.net
+package app.portalinbox.net
 
 import android.content.Context
-import app.inbox.BuildConfig
-import app.inbox.R
-import app.inbox.core.Native
+import app.portalinbox.BuildConfig
+import app.portalinbox.R
+import app.portalinbox.core.Native
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket

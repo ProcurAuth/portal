@@ -1,4 +1,4 @@
-package app.inbox.data
+package app.portalinbox.data
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -13,7 +13,7 @@ import javax.crypto.spec.GCMParameterSpec
  * Android Keystore. The stored blob is useless off this phone.
  */
 object KeyVault {
-    private const val ALIAS = "inbox-device-keys-v1"
+    private const val ALIAS = "portal-inbox-device-keys-v1"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
 
     @Synchronized

@@ -1,17 +1,17 @@
-package app.inbox.service
+package app.portalinbox.service
 
 import android.content.Context
 import android.util.Log
-import app.inbox.BuildConfig
-import app.inbox.R
-import app.inbox.alert.Alerter
-import app.inbox.core.Native
-import app.inbox.data.Alert
-import app.inbox.data.Group
-import app.inbox.data.KeyVault
-import app.inbox.data.Store
-import app.inbox.net.Http
-import app.inbox.net.ServerAddress
+import app.portalinbox.BuildConfig
+import app.portalinbox.R
+import app.portalinbox.alert.Alerter
+import app.portalinbox.core.Native
+import app.portalinbox.data.Alert
+import app.portalinbox.data.Group
+import app.portalinbox.data.KeyVault
+import app.portalinbox.data.Store
+import app.portalinbox.net.Http
+import app.portalinbox.net.ServerAddress
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -185,7 +185,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private class SessionEnd(val retryAfterMs: Long, message: String) : Exception(message)
 
     /** Runs one session. Returns how long to wait before reconnecting. */
-    private fun runSession(server: app.inbox.data.Server): Long {
+    private fun runSession(server: app.portalinbox.data.Server): Long {
         events.clear()
         pingSentAt.clear()
         val address = ServerAddress.parse(server.address) ?: run {

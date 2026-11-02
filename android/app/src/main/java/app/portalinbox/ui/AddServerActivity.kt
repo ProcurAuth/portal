@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -12,17 +12,17 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import app.inbox.R
-import app.inbox.data.KeyVault
-import app.inbox.data.Store
-import app.inbox.net.EnrollField
-import app.inbox.net.Enroller
-import app.inbox.net.EnrollmentError
-import app.inbox.service.InboxService
+import app.portalinbox.R
+import app.portalinbox.data.KeyVault
+import app.portalinbox.data.Store
+import app.portalinbox.net.EnrollField
+import app.portalinbox.net.Enroller
+import app.portalinbox.net.EnrollmentError
+import app.portalinbox.service.InboxService
 
 /**
  * Enrolls this phone with a one-time enrollment code made by an account of the portal.
- * The code is typed or pasted here. A tapped `inbox://enroll?...` link opens this
+ * The code is typed or pasted here. A tapped `portal-inbox://enroll?...` link opens this
  * screen with the code filled in. The screen shows the server address and a short
  * fingerprint of the server key that the code pins, so the person can check them.
  */
@@ -96,10 +96,10 @@ class AddServerActivity : BaseActivity() {
         prefill(intent)
     }
 
-    /** `inbox://enroll?...`: fills the code. The person still checks the server and taps Connect. */
+    /** `portal-inbox://enroll?...`: fills the code. The person still checks the server and taps Connect. */
     private fun prefill(intent: Intent?) {
         val data = intent?.data ?: return
-        if (data.scheme != "inbox" || data.host != "enroll") return
+        if (data.scheme != "portal-inbox" || data.host != "enroll") return
         code.setText(data.toString())
         clearErrors()
         if (refreshCheck()) {

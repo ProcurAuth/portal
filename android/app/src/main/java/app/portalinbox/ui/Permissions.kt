@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.Manifest
 import android.app.Activity
@@ -9,7 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
-import app.inbox.R
+import app.portalinbox.R
 
 /** One system permission Inbox needs to ring reliably. */
 data class Permission(

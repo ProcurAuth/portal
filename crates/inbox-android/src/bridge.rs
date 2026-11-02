@@ -229,7 +229,7 @@ mod tests {
     fn bad_input_reports_error_codes() {
         let key = ServerKey::generate().unwrap();
         let text = code_text(&key);
-        assert_eq!(enroll_parse("inbox://add?url=x")["error"]["code"], "bad_code");
+        assert_eq!(enroll_parse("portal-inbox://add?url=x")["error"]["code"], "bad_code");
         let err = enroll_start("junk", "Pixel", "1").err().expect("bad code refused");
         assert_eq!(error_json(&err)["error"]["code"], "bad_code");
         let err = enroll_start(&text, "  ", "1").err().expect("empty name refused");

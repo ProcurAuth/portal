@@ -10,6 +10,34 @@ use crate::b64::serde_bytes;
 /// Maximum length of an alert title, in characters.
 pub const MAX_TITLE_CHARS: usize = 128;
 
+/// The kind of a message. Protocol 4 knows one kind: `alert`.
+///
+/// The field `kind` is in each alert frame and in the stored alert. A later protocol
+/// version can add kinds. Until then, a parser MUST reject any other value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// One way: a sender tells people. The device sends only a delivery receipt.
+    Alert,
+}
+
+impl Kind {
+    /// The text of the kind, as the wire and the database hold it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Alert => "alert",
+        }
+    }
+
+    /// The kind that a text names. `None` for each text that is not a known kind.
+    pub fn parse(text: &str) -> Option<Kind> {
+        match text {
+            "alert" => Some(Kind::Alert),
+            _ => None,
+        }
+    }
+}
+
 /// Delivery receipt sent by a device.
 ///
 /// Alerts are one-way: there is no human acknowledgement. The only thing a device
@@ -100,6 +128,8 @@ pub struct GroupInfo {
 pub struct AlertMsg {
     /// Globally unique (128 random bits, hex). The device deduplicates on it.
     pub alert_id: String,
+    /// The kind of the message. Only `alert` is valid.
+    pub kind: Kind,
     pub group: String,
     pub group_name: String,
     /// One line, at most [`MAX_TITLE_CHARS`] characters.
@@ -188,13 +218,14 @@ mod tests {
         );
         let a = ServerMsg::Alert(AlertMsg {
             alert_id: "ab".into(),
+            kind: Kind::Alert,
             group: "g".into(),
             group_name: "G".into(),
             title: "disk full".into(),
             created_at_ms: 1,
         });
         let s = serde_json::to_string(&a).unwrap();
-        assert!(s.starts_with(r#"{"t":"alert","alert_id":"ab""#), "{s}");
+        assert!(s.starts_with(r#"{"t":"alert","alert_id":"ab","kind":"alert","group":"g""#), "{s}");
         let back: ServerMsg = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, ServerMsg::Alert(ref x) if x.title == "disk full"));
         assert!(!s.contains("action"), "the server never knows alert levels");
@@ -204,6 +235,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_kind_of_an_alert_is_alert_and_nothing_else() {
+        let frame = |kind: &str| {
+            format!(
+                r#"{{"t":"alert","alert_id":"ab","kind":{kind},"group":"g","group_name":"G","title":"x","created_at_ms":1}}"#
+            )
+        };
+        assert!(serde_json::from_str::<ServerMsg>(&frame(r#""alert""#)).is_ok());
+        for bad in [r#""question""#, r#""approval""#, r#""Alert""#, r#""""#, "null", "1"] {
+            assert!(serde_json::from_str::<ServerMsg>(&frame(bad)).is_err(), "{bad}");
+        }
+        // The field is mandatory.
+        let none = r#"{"t":"alert","alert_id":"ab","group":"g","group_name":"G","title":"x","created_at_ms":1}"#;
+        assert!(serde_json::from_str::<ServerMsg>(none).is_err());
+        assert_eq!(Kind::parse("alert"), Some(Kind::Alert));
+        assert_eq!(Kind::parse("question"), None);
+        assert_eq!(Kind::Alert.as_str(), "alert");
     }
 
     #[test]

@@ -820,6 +820,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "inbox-android"
+version = "5.0.0"
+dependencies = [
+ "inbox-core",
+ "jni 0.21.1",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
+name = "inbox-core"
+version = "5.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "zeroize",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1050,29 +1073,6 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "inbox-android"
-version = "5.0.0"
-dependencies = [
- "jni 0.21.1",
- "inbox-core",
- "serde_json",
- "zeroize",
-]
-
-[[package]]
-name = "inbox-core"
-version = "5.0.0"
-dependencies = [
- "base64 0.22.1",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "snow",
- "zeroize",
-]
 
 [[package]]
 name = "parking_lot"

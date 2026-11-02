@@ -32,11 +32,11 @@ pub const MAX_ADDRESS: usize = 512;
 /// Upper bound on the application version, in bytes.
 pub const MAX_APP_VERSION: usize = 64;
 
-const SCHEME: &str = "inbox://enroll?";
+const SCHEME: &str = "portal-inbox://enroll?";
 
 /// What the person types or taps to enroll a phone.
 ///
-/// Text form: `inbox://enroll?s=<address>&k=<server key>&c=<secret>`. The address
+/// Text form: `portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>`. The address
 /// is percent-encoded. The key and the secret are base64url without padding.
 #[derive(Clone, PartialEq, Eq)]
 pub struct EnrollCode {
@@ -296,16 +296,14 @@ mod tests {
     fn code_round_trip() {
         let code = code_for(&[9u8; 32]);
         let text = code.encode();
-        assert!(
-            text.starts_with(
-                "inbox://enroll?s=https%3A%2F%2Finbox.example.com%3A8443%2Fprefix&k="
-            )
-        );
+        assert!(text.starts_with(
+            "portal-inbox://enroll?s=https%3A%2F%2Finbox.example.com%3A8443%2Fprefix&k="
+        ));
         assert_eq!(EnrollCode::parse(&text).unwrap(), code);
         assert_eq!(EnrollCode::parse(&format!("  {text}\n")).unwrap(), code);
         // Key order in the query does not matter.
         let mixed = format!(
-            "inbox://enroll?c={}&s=host%3A80&k={}",
+            "portal-inbox://enroll?c={}&s=host%3A80&k={}",
             b64::encode_url(&code.secret),
             b64::encode_url(&code.server_public_key)
         );
@@ -323,10 +321,10 @@ mod tests {
         let c = b64::encode_url(&[7u8; 16]);
         let bad = [
             String::new(),
-            "inbox://enroll".to_string(),
-            "inbox://enroll?".to_string(),
-            good.replace("inbox://", "https://"),
-            good.replace("inbox://enroll", "inbox://add"),
+            "portal-inbox://enroll".to_string(),
+            "portal-inbox://enroll?".to_string(),
+            good.replace("portal-inbox://", "https://"),
+            good.replace("portal-inbox://enroll", "portal-inbox://add"),
             good.to_uppercase(),
             format!("{good}&x=1"),
             format!("{good}&s=other"),
@@ -334,29 +332,29 @@ mod tests {
             format!("{good}&c={c}"),
             format!("{good}#frag"),
             format!("{good}&"),
-            format!("inbox://enroll?k={k}&c={c}"),
-            format!("inbox://enroll?s=host&c={c}"),
-            format!("inbox://enroll?s=host&k={k}"),
-            format!("inbox://enroll?s=&k={k}&c={c}"),
-            format!("inbox://enroll?s=host&k={}&c={c}", b64::encode_url(&[9u8; 31])),
-            format!("inbox://enroll?s=host&k={k}&c={}", b64::encode_url(&[7u8; 17])),
-            format!("inbox://enroll?s=host&k={k}=&c={c}"),
-            format!("inbox://enroll?s=host&k={k}&c={c}="),
-            format!("inbox://enroll?s=host&k=+{}&c={c}", &k[1..]),
-            format!("inbox://enroll?s=host&k=!!&c={c}"),
-            format!("inbox://enroll?s=ho%zzst&k={k}&c={c}"),
-            format!("inbox://enroll?s=ho%2&k={k}&c={c}"),
-            format!("inbox://enroll?s=ho%FFst&k={k}&c={c}"),
-            format!("inbox://enroll?s=ho%20st&k={k}&c={c}"),
-            format!("inbox://enroll?s=ho%00st&k={k}&c={c}"),
-            format!("inbox://enroll?s={}&k={k}&c={c}", "a".repeat(MAX_ADDRESS + 1)),
-            format!("inbox://enroll?s=host&&k={k}&c={c}"),
+            format!("portal-inbox://enroll?k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=host&c={c}"),
+            format!("portal-inbox://enroll?s=host&k={k}"),
+            format!("portal-inbox://enroll?s=&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=host&k={}&c={c}", b64::encode_url(&[9u8; 31])),
+            format!("portal-inbox://enroll?s=host&k={k}&c={}", b64::encode_url(&[7u8; 17])),
+            format!("portal-inbox://enroll?s=host&k={k}=&c={c}"),
+            format!("portal-inbox://enroll?s=host&k={k}&c={c}="),
+            format!("portal-inbox://enroll?s=host&k=+{}&c={c}", &k[1..]),
+            format!("portal-inbox://enroll?s=host&k=!!&c={c}"),
+            format!("portal-inbox://enroll?s=ho%zzst&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=ho%2&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=ho%FFst&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=ho%20st&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s=ho%00st&k={k}&c={c}"),
+            format!("portal-inbox://enroll?s={}&k={k}&c={c}", "a".repeat(MAX_ADDRESS + 1)),
+            format!("portal-inbox://enroll?s=host&&k={k}&c={c}"),
         ];
         for text in bad {
             assert!(EnrollCode::parse(&text).is_err(), "must be refused: {text}");
         }
         // A last base64 character with non-zero trailing bits is not canonical.
-        let loose = format!("inbox://enroll?s=host&k={k}&c={}", "A".repeat(21) + "B");
+        let loose = format!("portal-inbox://enroll?s=host&k={k}&c={}", "A".repeat(21) + "B");
         assert!(EnrollCode::parse(&loose).is_err());
     }
 

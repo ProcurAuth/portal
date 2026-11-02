@@ -41,7 +41,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- inbox://enroll?s=<address>&k=<server key>&c=<secret>: opens the form with the enrollment code filled in. -->
+        <!-- portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>: opens the form with the enrollment code filled in. -->
         <activity
             android:name=".ui.AddServerActivity"
             android:exported="true"
@@ -51,7 +51,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="inbox" android:host="enroll" />
+                <data android:scheme="portal-inbox" android:host="enroll" />
             </intent-filter>
         </activity>
         <activity
@@ -64,7 +64,7 @@
             android:excludeFromRecents="true"
             android:launchMode="singleTask"
             android:showWhenLocked="true"
-            android:taskAffinity="app.inbox.alarm"
+            android:taskAffinity="app.portalinbox.alarm"
             android:theme="@style/Theme.Inbox.Alarm"
             android:turnScreenOn="true" />
 

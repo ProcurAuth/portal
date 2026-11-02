@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.content.Context
 import android.content.res.ColorStateList
@@ -16,7 +16,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import app.inbox.R
+import app.portalinbox.R
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

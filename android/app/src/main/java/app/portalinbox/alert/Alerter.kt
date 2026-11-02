@@ -1,4 +1,4 @@
-package app.inbox.alert
+package app.portalinbox.alert
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -20,12 +20,12 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
-import app.inbox.R
-import app.inbox.data.Alert
-import app.inbox.data.Store
-import app.inbox.service.Registry
-import app.inbox.ui.AlarmActivity
-import app.inbox.ui.MainActivity
+import app.portalinbox.R
+import app.portalinbox.data.Alert
+import app.portalinbox.data.Store
+import app.portalinbox.service.Registry
+import app.portalinbox.ui.AlarmActivity
+import app.portalinbox.ui.MainActivity
 
 /**
  * Turns a stored alert into what the subscriber asked for:
@@ -249,7 +249,7 @@ object Alerter {
             if (a.action == "alarm" && a.stoppedAtMs == null) AlarmPlayer.stop(context, serverId, a.alertId)
             nm.cancel(tag(a), ALERT_NOTIFICATION_ID)
         }
-        nm.cancel(app.inbox.service.InboxService.WARNING_BASE_ID + serverId.toInt())
+        nm.cancel(app.portalinbox.service.InboxService.WARNING_BASE_ID + serverId.toInt())
     }
 
     /** Stops every alarm still ringing on this phone (local only). */

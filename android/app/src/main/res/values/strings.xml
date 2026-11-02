@@ -30,7 +30,7 @@
 
     <!-- Alerts (home) -->
     <string name="alerts_no_server_title">No server</string>
-    <string name="alerts_no_server_body">Add a Inbox server to start receiving alerts.</string>
+    <string name="alerts_no_server_body">Add an Inbox server to start receiving alerts.</string>
     <string name="alerts_add_server">Add a server</string>
     <string name="alerts_see_more">See more</string>
     <string name="alerts_show_read">Show read</string>
@@ -82,7 +82,7 @@
     <!-- Add server -->
     <string name="add_title">Add a server</string>
     <string name="add_code">Enrollment code</string>
-    <string name="add_code_hint">inbox://enroll?s=…&amp;k=…&amp;c=…</string>
+    <string name="add_code_hint">portal-inbox://enroll?s=…&amp;k=…&amp;c=…</string>
     <string name="add_code_help">Paste the code or the link that your account shows in the tab Inbox.</string>
     <string name="add_code_missing">Enter the enrollment code.</string>
     <string name="add_check_title">Check the server</string>

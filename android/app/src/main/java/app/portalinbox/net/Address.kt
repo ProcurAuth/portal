@@ -1,4 +1,4 @@
-package app.inbox.net
+package app.portalinbox.net
 
 import java.net.URI
 

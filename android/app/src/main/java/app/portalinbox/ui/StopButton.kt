@@ -1,4 +1,4 @@
-package app.inbox.ui
+package app.portalinbox.ui
 
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
@@ -14,7 +14,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.animation.LinearInterpolator
 import android.view.animation.OvershootInterpolator
-import app.inbox.R
+import app.portalinbox.R
 import kotlin.math.hypot
 import kotlin.math.min
 

@@ -13,12 +13,12 @@ fun env(name: String): String =
     System.getenv(name)?.takeIf { it.isNotBlank() } ?: error("$name is required to sign the release APK")
 
 android {
-    namespace = "app.inbox"
+    namespace = "app.portalinbox"
     compileSdk = 35
     buildToolsVersion = "35.0.0"
 
     defaultConfig {
-        applicationId = "app.inbox"
+        applicationId = "app.portalinbox"
         minSdk = 26
         targetSdk = 35
         versionCode = versionParts[0] * 10000 + versionParts[1] * 100 + versionParts[2]
