@@ -985,8 +985,8 @@ mod tests {
         assert!(html.contains(r#"form="kind-form" name="kind" value="mcp""#));
         // The API kind comes first.
         assert!(
-            html.find(r#"name="kind" value="api""#).unwrap()
-                < html.find(r#"name="kind" value="mcp""#).unwrap()
+            html.find(r#"form="kind-form" name="kind" value="api""#).unwrap()
+                < html.find(r#"form="kind-form" name="kind" value="mcp""#).unwrap()
         );
         assert!(html.contains(">New key<") || html.contains("New key</h2>"));
         for one in [[KeyKind::Mcp], [KeyKind::Api]] {
