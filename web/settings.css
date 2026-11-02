@@ -1573,6 +1573,10 @@ input.keyText {
   font-size: 12px;
 }
 
+.grid input[type="checkbox"] {
+  vertical-align: middle;
+}
+
 /* A row is a link: the link covers the row, and the row is the click area. */
 .settings .grid a.rowLink {
   color: var(--text);
