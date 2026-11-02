@@ -443,7 +443,7 @@ A service declares itself with labels (Docker Compose container labels) or annot
 | Label | Use |
 |---|---|
 | `portal.enabled` | `true` lists the service. `false` hides it. A `portal.name` also lists it. |
-| `portal.id` | The id of the service. It is the audience of its identity tokens and the resource id of its grants. The default is the slug of the group and the name. The ids `portal` and `inbox` are reserved. |
+| `portal.id` | The id of the service. It is the audience of its identity tokens and the resource id of its grants. The default is the slug of the group and the name. The id `portal` is reserved for the internal scope of the portal features. |
 | `portal.name` | The display name. |
 | `portal.group` | The group of the row. The default is `Other`. |
 | `portal.href` | Mandatory. A path or an http(s) URL. The service owns the longest path prefix. |
