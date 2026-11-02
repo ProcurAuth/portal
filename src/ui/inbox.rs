@@ -136,11 +136,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         "failed" => ("The inbox could not do this. Try again.", false),
         _ => return None,
     };
-    Some(Notice {
-        text,
-        ok,
-        add_form: false,
-    })
+    Some(Notice { text, ok })
 }
 
 /// The head of a page of the tab: the title, a count, and the switch between the sections.

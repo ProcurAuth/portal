@@ -274,9 +274,8 @@ fn real_main() -> Result<(), String> {
                 _ => icons::Icons::empty(),
             };
             let name = args.next().unwrap_or_else(|| "launcher".into());
-            let page = ui::demo_page(&name, &icons).ok_or_else(|| {
-                format!("unknown page {name}: launcher, users, user, access, services, service or logins")
-            })?;
+            let page = ui::demo_page(&name, &icons)
+                .ok_or_else(|| format!("unknown page {name}: {}", ui::DEMO_PAGES.join(", ")))?;
             print!("{page}");
             Ok(())
         }
@@ -464,7 +463,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|users|user|services|service|logins] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|users|users-panel-only|user|new-user|services|services-panel-only|services-empty] > page.html\n  portal version",
         release_version()
     );
 }

@@ -703,7 +703,7 @@ fn users_csrf(s: &Server) -> String {
         s.port,
         &host,
         "GET",
-        "/auth/settings?add=1",
+        "/auth/settings/new-user",
         &[("Cookie", admin.cookie.clone())],
         "",
     );
@@ -711,7 +711,7 @@ fn users_csrf(s: &Server) -> String {
     // The token of the form that adds an account. The page has other forms with other tokens.
     let form = page
         .find("id=\"add-user\"")
-        .expect("the users page has the add form");
+        .expect("the page New user has the form");
     let marker = "name=\"csrf\" value=\"";
     let start = form + page[form..].find(marker).expect("the form has a token") + marker.len();
     page[start..].split('"').next().unwrap().to_string()
@@ -5070,12 +5070,18 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         !has(&home, r#"href="/auth/settings/inbox""#),
         "no tile of the inbox"
     );
-    // The superadmin sees the five tabs at most and the permission editor shows the groups by name.
+    // The superadmin sees four tabs at most and the permission editor shows the groups by name.
     // The test servers have the block keys (the kind api), so the tab Keys shows.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
-    for tab in ["Users", "Services", "Activity", "Keys", "Inbox"] {
+    for tab in ["Users", "Services", "Keys", "Inbox"] {
         assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
     }
+    assert!(!has(&page, ">Activity</a>"), "the tab Activity is gone");
+    assert_eq!(
+        page.matches(r#"class="contentTabs__tab"#).count(),
+        4,
+        "four tabs"
+    );
     // The inbox is a feature of the portal, as the keys are: the Services page does not list it, and
     // it has no page of a service. The editor of permissions shows it in the group "Portal features".
     let (st, services) = inbox_page(&s, "/auth/settings/services");

@@ -3065,7 +3065,10 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
         let settings = page(&first, &root, "/auth/settings");
         assert_eq!(settings.status, 200);
         assert!(settings.body.contains(END_SESSIONS_PATH), "the form");
-        assert!(settings.body.contains("Confirm: end all sessions"));
+        assert!(settings.body.contains(r#"aria-label="End all sessions""#));
+        assert!(settings
+            .body
+            .contains(r#"name="confirm" value="end-all-sessions""#));
         // A user does not see the page and cannot use the route.
         assert_eq!(
             post(
@@ -3139,7 +3142,7 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
         let again = sign_in(&first, "root", PASSWORD);
         let _ = sign_in(&first, "carol", "a-long-password-1");
         wait_until(Duration::from_secs(10), || {
-            page(&first, &again, "/auth/settings/logins")
+            page(&first, &again, "/auth/settings")
                 .body
                 .contains("All sessions ended")
         });
@@ -5643,11 +5646,28 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
         "",
     );
     assert_eq!(users.status, 200);
-    assert!(users.body.contains("From the configuration file"));
     assert!(
-        users.body.contains("carol")
-            && users.body.contains("dave")
-            && users.body.contains("keys only")
+        users.body.contains(
+            r#"href="/auth/settings/users/carol">carol</a> <span class="badge">file</span>"#
+        ) && users.body.contains(
+            r#"href="/auth/settings/users/dave">dave</a> <span class="badge">file</span>"#
+        ),
+        "the accounts of the file stand in the table with their badge"
+    );
+    // The page of an account of the file shows its grants and changes nothing.
+    let page_of = send(
+        node.port,
+        "GET",
+        "/auth/settings/users/carol",
+        &[("Cookie", &format!("{}={root}", session_cookie_name(&node)))],
+        "",
+    );
+    assert_eq!(page_of.status, 200);
+    assert!(
+        !page_of.body.contains("/auth/users/update")
+            && !page_of.body.contains("/auth/users/delete"),
+        "{}",
+        page_of.body
     );
     // The PDP knows the key of the file and its owner.
     let reply = pdp(
@@ -6908,15 +6928,21 @@ mod kinds_tests {
         let with_add = send(
             node.port,
             "GET",
-            "/auth/settings?add=1",
+            "/auth/settings/new-user",
             &[("Cookie", &cookie)],
             "",
         );
-        let new_user = users.body.contains("/auth/users/add")
-            || users.body.contains("New user")
-            || with_add.body.contains("/auth/users/add")
-            || with_add.body.contains("id=\"add-user\"")
-            || with_add.body.contains("New user");
+        // The button is in the page, and the page of the creation exists. Both or none.
+        let new_user = users.body.contains("New user") || with_add.status == 200;
+        assert_eq!(
+            users.body.contains("New user"),
+            with_add.status == 200,
+            "the button and the route agree"
+        );
+        assert!(
+            users.status != 200 || !users.body.contains("id=\"add-user\""),
+            "the form that made accounts is not in the Users page"
+        );
         let account = send(
             node.port,
             "GET",
@@ -7108,6 +7134,176 @@ mod kinds_tests {
                 "{:?}",
                 saved.location()
             );
+        });
+    }
+
+    #[test]
+    fn the_users_page_of_a_panel_only_file_has_no_column_of_a_feature_and_no_way_to_create() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, false, None, false, false);
+            let root = sign_in(&node, "root", PASSWORD);
+            let users = page(&node, &root, "/auth/settings");
+            assert_eq!(users.status, 200, "{}", users.body);
+            for gone in [
+                "Features</th>",
+                "Keys</th>",
+                "New user",
+                "/auth/settings/new-user",
+                "Create user",
+                r#"class="feat""#,
+            ] {
+                assert!(!users.body.contains(gone), "{gone}");
+            }
+            // The panels are there: accounts, sign-ins and recent changes.
+            for part in ["Accounts", "Sign-ins", "Recent changes", "Last sign-in"] {
+                assert!(users.body.contains(part), "{part}");
+            }
+            let nav = users.body.split("<main").next().unwrap();
+            assert_eq!(nav.matches("contentTabs__tab").count(), 2, "two tabs");
+            assert!(!nav.contains("/auth/keys") && !nav.contains("/auth/settings/inbox"));
+            // The route of the creation answers 404, and the old routes are gone.
+            for path in [
+                "/auth/settings/new-user",
+                "/auth/settings/logins",
+                "/auth/settings/services/db",
+            ] {
+                assert_eq!(page(&node, &root, path).status, 404, "{path}");
+            }
+            assert_eq!(
+                page(&node, &root, "/auth/settings?add=1")
+                    .body
+                    .matches("add-user")
+                    .count(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn with_everything_on_the_users_page_has_the_columns_the_button_and_the_create_page() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, true, Some("api = true"), true, true);
+            let root = sign_in(&node, "root", PASSWORD);
+            let users = page(&node, &root, "/auth/settings");
+            assert_eq!(users.status, 200);
+            for part in [
+                "Features</th>",
+                "Keys</th>",
+                "New user",
+                "/auth/settings/new-user",
+            ] {
+                assert!(users.body.contains(part), "{part}");
+            }
+            let nav = users.body.split("<main").next().unwrap();
+            assert_eq!(nav.matches("contentTabs__tab").count(), 4, "four tabs");
+            let create = page(&node, &root, "/auth/settings/new-user");
+            assert_eq!(create.status, 200, "{}", create.body);
+            assert!(create.body.contains(r#"id="add-user""#));
+            assert!(create.body.contains(r#"data-layout="groups""#));
+            assert!(create.body.contains(">Create</button>"));
+        });
+    }
+
+    #[test]
+    fn the_create_page_makes_the_account_with_its_grants_in_one_request() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, true, Some("api = true"), true, true);
+            let root = sign_in(&node, "root", PASSWORD);
+            let made = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=zed&password=a-long-password-9&grants=1&grant0=keys.own.read+on+service%3Aportal&grant1=inbox.receive+on+service%3Aportal%2Finbox_group%3Ainfra",
+            );
+            assert_eq!(made.status, 303);
+            assert_eq!(
+                made.location(),
+                Some("/auth/settings/users/zed?s=user-added")
+            );
+            let zed = node.state.users.get("zed").unwrap();
+            assert_eq!(zed.grants.len(), 2, "{:?}", zed.grants);
+            let stored = node.state.store.load_users().unwrap();
+            assert!(stored
+                .iter()
+                .any(|u| u.login == "zed" && u.grants.len() == 2));
+            // A grant that the documents do not know: the account is not made, and the page says so.
+            let refused = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=yan&password=a-long-password-9&grants=1&grant0=inbox.receive+on+service%3Aportal%2Finbox_group%3Anope",
+            );
+            assert_eq!(refused.status, 303);
+            assert_eq!(
+                refused.location(),
+                Some("/auth/settings/new-user?s=unknown-grant")
+            );
+            assert!(node.state.users.get("yan").is_none());
+            // An action that needs another one: refused too.
+            let needs = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=xav&password=a-long-password-9&grants=1&grant0=keys.own.edit+on+service%3Aportal",
+            );
+            assert_eq!(
+                needs.location(),
+                Some("/auth/settings/new-user?s=keys-needs")
+            );
+            // A refused login comes back to the create page, with the notice.
+            let weak = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=wil&password=short",
+            );
+            assert_eq!(
+                weak.location(),
+                Some("/auth/settings/new-user?s=weak-password")
+            );
+            // A field of the grants without the flag `grants` is a bad request.
+            let bad = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=vic&password=a-long-password-9&grant0=keys.own.read+on+service%3Aportal",
+            );
+            assert_eq!(bad.status, 400);
+            assert!(node.state.users.get("vic").is_none());
+            let notice = page(&node, &root, "/auth/settings/new-user?s=exists");
+            assert!(notice.body.contains("That login already exists."));
+        });
+    }
+
+    #[test]
+    fn the_services_page_selects_a_service_with_a_query_parameter() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, false, None, false, true);
+            let root = sign_in(&node, "root", PASSWORD);
+            let first = page(&node, &root, "/auth/settings/services");
+            assert_eq!(first.status, 200, "{}", first.body);
+            assert!(first.body.contains(r#"aria-labelledby="opened-title""#));
+            let db = page(&node, &root, "/auth/settings/services?svc=db");
+            assert!(
+                db.body.contains(r#"<span class="count">Db</span>"#),
+                "{}",
+                db.body
+            );
+            assert!(db.body.contains(r#"aria-current="true">Db</a>"#));
+            // Alice has `access` on the service db: she is in the panel, and the others are not.
+            assert!(db
+                .body
+                .contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
+            let other = page(&node, &root, "/auth/settings/services?svc=%3Cnope%3E");
+            assert_eq!(other.status, 200);
+            assert!(!other.body.contains("<nope>"));
+            // The old page of one service is gone.
+            assert_eq!(page(&node, &root, "/auth/settings/services/db").status, 404);
         });
     }
 }

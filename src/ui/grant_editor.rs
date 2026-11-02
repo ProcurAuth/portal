@@ -84,6 +84,9 @@ pub struct Place {
     /// The number of text fields for a grant in a browser without script. The forms of the keys
     /// have them.
     pub blank_rows: usize,
+    /// Draw the portal features as a group beside the services, always open (the page of an
+    /// account). Without it, the features are one more row of the list (the forms of the keys).
+    pub groups: bool,
 }
 
 /// A limit value for the script: `{"c":100}` for a ceiling, `{"b":{"minute":60}}` for a budget.
@@ -237,8 +240,13 @@ fn hidden_fields(out: &mut String, data: &EditorData, form: Option<&str>) {
 pub fn render(out: &mut String, data: &EditorData, place: Place) {
     let _ = write!(
         out,
-        r#"<div class="grantEditor" data-title="{}"{}><script type="application/json" class="grantEditor__data">{}</script><div class="grantEditor__fields">"#,
+        r#"<div class="grantEditor" data-title="{}"{}{}><script type="application/json" class="grantEditor__data">{}</script><div class="grantEditor__fields">"#,
         html_escape(place.title),
+        if place.groups {
+            r#" data-layout="groups""#
+        } else {
+            ""
+        },
         place
             .form
             .map(|id| format!(r#" data-form="{id}""#))
@@ -248,6 +256,18 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
     hidden_fields(out, data, place.form);
     out.push_str(ICONS);
     out.push_str("</div>");
+    if place.groups {
+        // Without script the page cannot draw the editor. It lists the grants as text.
+        out.push_str(r#"<noscript><ul class="grantList">"#);
+        for grant in data.ticked.iter().chain(data.locked.iter()) {
+            let _ = write!(
+                out,
+                "<li><code>{}</code></li>",
+                html_escape(&grant.to_string())
+            );
+        }
+        out.push_str("</ul></noscript>");
+    }
     if place.blank_rows > 0 {
         out.push_str("<noscript><div class=\"grantRows\">");
         for k in 0..place.blank_rows {
@@ -520,6 +540,7 @@ mod tests {
         form: None,
         title: "Permissions of the key",
         blank_rows: 2,
+        groups: false,
     };
 
     fn data() -> EditorData {

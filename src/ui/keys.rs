@@ -202,11 +202,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         _ => return None,
     };
-    Some(Notice {
-        text,
-        ok,
-        add_form: false,
-    })
+    Some(Notice { text, ok })
 }
 
 fn window_label(window: Window) -> &'static str {
@@ -398,6 +394,7 @@ pub fn key_form_page(frame: &Frame, view: &KeysView<'_>) -> String {
                 form: None,
                 title: "Permissions of the key",
                 blank_rows: 3,
+                groups: false,
             },
         );
     }

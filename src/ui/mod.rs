@@ -12,6 +12,7 @@
 //! of [`settings`], the embedded assets ([`CSS`], [`SETTINGS_CSS`], [`THEME_JS`], [`SETTINGS_JS`]),
 //! and [`demo_page`] (synthetic data for `portal render-demo`).
 
+pub mod components;
 pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
@@ -23,8 +24,8 @@ use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Servic
 use crate::icons::Icons;
 use crate::util::html_escape;
 pub use settings::{
-    logins_page, notice_for, service_page, services_page, user_page, users_page, Frame, LoginsView,
-    ServiceActions, ServiceView, ServicesView, UserCard, UserView, UsersView,
+    new_user_page, notice_for, services_page, user_page, users_page, Frame, Holder, NewUserView,
+    ServiceActions, ServicesView, UserCard, UserView, UsersView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -131,9 +132,20 @@ pub fn denied_page(text: &str, viewer: &str, logout_token: &str) -> String {
 /// A complete page. `head` holds the extra stylesheet of a page that has one. `icons` names the
 /// sprite symbols that the page draws.
 fn document(title: &str, head: &str, icons: &[&str], body: &str) -> String {
+    document_class(title, head, icons, "", body)
+}
+
+/// The same, with a class on the `body` element. The settings pages use `shell`: the page is as
+/// high as the window, and only its `main` element scrolls.
+fn document_class(title: &str, head: &str, icons: &[&str], class: &str, body: &str) -> String {
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css">{head}<script src="/auth/assets/theme.js"></script></head><body>{}{body}</body></html>"#,
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css">{head}<script src="/auth/assets/theme.js"></script></head><body{}>{}{body}</body></html>"#,
         html_escape(title),
+        if class.is_empty() {
+            String::new()
+        } else {
+            format!(r#" class="{class}""#)
+        },
         sprite(icons),
     )
 }
@@ -558,18 +570,64 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
         .collect()
 }
 
-/// Synthetic accounts and history for `portal render-demo`.
-fn demo_users(catalog: &Catalog) -> UsersView<'_> {
+/// Synthetic accounts and history for `portal render-demo`. The data that the view borrows is in
+/// `DemoData`.
+struct DemoData {
+    logins: crate::store::LoginPage,
+    days: Vec<crate::store::DayStat>,
+    events: Vec<crate::store::AuditRow>,
+}
+
+impl DemoData {
+    fn new() -> Self {
+        Self {
+            logins: demo_logins(),
+            days: demo_days(3),
+            events: demo_events(),
+        }
+    }
+}
+
+/// The features of the portal in the demo: the keys of both kinds and three groups of the inbox.
+fn demo_features() -> ServiceActions {
+    use crate::keys::KeyKind;
+    use crate::portal_actions::{document, Features};
+    let features = Features {
+        inbox_groups: Some(vec![
+            ("infra".into(), "Infra".into()),
+            ("database".into(), "Database".into()),
+            ("oncall".into(), "On call".into()),
+        ]),
+        kinds: vec![KeyKind::Api, KeyKind::Mcp],
+    };
+    let document = document(&features);
+    ServiceActions {
+        id: crate::portal_actions::SERVICE.into(),
+        name: "Portal features".into(),
+        actions: document
+            .actions
+            .iter()
+            .map(|a| (a.name.clone(), a.description.clone()))
+            .collect(),
+        document,
+        known: true,
+        fetch: false,
+    }
+}
+
+fn demo_users<'a>(catalog: &'a Catalog, data: &'a DemoData, panel_only: bool) -> UsersView<'a> {
     use crate::store::{AccountActivity, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
     let days = demo_days;
-    let card = |login: &str, grants: &[&str], seed: u32, superadmin: bool| {
+    let card = |login: &str, grants: &[&str], seed: u32, superadmin: bool, file: bool| {
         UserCard {
         login: login.into(),
         grants: grants.iter().map(|g| crate::grants::Grant::parse(g).unwrap()).collect(),
-        configured: Vec::new(),
-        created_at: (!superadmin).then_some(now - 20 * 86_400),
+        configured: if file { grants.iter().map(|g| crate::grants::Grant::parse(g).unwrap()).collect() } else { Vec::new() },
+        created_at: (!superadmin && !file).then_some(now - 20 * 86_400),
         superadmin,
+        file,
+        keys: if superadmin { 0 } else { seed as usize % 3 },
         activity: AccountActivity {
             login: login.into(),
             days: days(seed),
@@ -598,37 +656,63 @@ fn demo_users(catalog: &Catalog) -> UsersView<'_> {
                 ServiceUse { service_id: "monitoring-grafana".into(), hits: 96, last_at: now - 5_000 },
             ],
             sessions_30d: 18,
-            failed_30d: 1,
+            failed_30d: u32::from(login == "root"),
             last_login: Some(now - 3_600),
         },
     }
     };
+    let portal = |grants: &[&str]| -> Vec<String> {
+        if panel_only {
+            Vec::new()
+        } else {
+            grants.iter().map(|g| g.to_string()).collect()
+        }
+    };
+    let alice_portal = portal(&[
+        "keys.own.read on service:portal",
+        "keys.own.edit on service:portal",
+        "inbox.receive on service:portal/inbox_group:infra",
+        "alert.send on service:portal/inbox_group:infra",
+    ]);
+    let mut alice_grants: Vec<&str> = vec![
+        "access on service:infra-notes",
+        "access on service:data-clickhouse-dash",
+        "query.run.read on service:data-clickhouse-dash",
+        "query.run.write on service:data-clickhouse-dash/host:local/database:analytics",
+    ];
+    alice_grants.extend(alice_portal.iter().map(String::as_str));
     UsersView {
         notice: None,
-        allow_creation: true,
-        add_open: false,
+        allow_creation: !panel_only,
         mode: crate::grants::Mode::Dynamic,
         catalog,
         services: demo_services(catalog),
         users: vec![
+            card("alice", &alice_grants, 2, false, false),
             card(
-                "alice",
+                "bob",
                 &[
-                    "access on service:infra-notes",
                     "access on service:data-clickhouse-dash",
-                    "query.run.read on service:data-clickhouse-dash",
-                    "query.run.write on service:data-clickhouse-dash/host:local/database:analytics",
+                    "query.run.read on service:data-clickhouse-dash/host:lyon",
+                    "access on service:monitoring-grafana",
                 ],
-                2,
+                4,
+                false,
                 false,
             ),
-            card("bob", &["access on service:monitoring-grafana"], 4, false),
+            card("carol", &[], 5, false, false),
+            card("dave", &["access on service:infra-notes"], 7, false, true),
         ],
-        superadmin: card("root", &[], 1, true),
-        unknown_failures_30d: 3,
-        file_accounts: Vec::new(),
+        superadmin: card("root", &[], 1, true, false),
+        features: (!panel_only).then(demo_features),
+        keys: !panel_only,
+        inbox: !panel_only,
         max_users: 64,
         token: "demo",
+        logins: &data.logins,
+        only_refused: false,
+        days: &data.days,
+        recent_events: &data.events,
     }
 }
 
@@ -643,12 +727,6 @@ fn demo_days(seed: u32) -> Vec<crate::store::DayStat> {
             }
         })
         .collect()
-}
-
-/// The first day of the demo graphs.
-fn demo_first_day() -> i64 {
-    let now = 1_791_623_502_i64;
-    now - now.rem_euclid(86_400) - 29 * 86_400
 }
 
 /// Synthetic audit events for `portal render-demo`.
@@ -696,22 +774,46 @@ fn demo_logins() -> crate::store::LoginPage {
             row(9_000, "alice", true, true, "192.168.1.31", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"),
         ],
         matching: 6,
-        attempts_24h: 6,
-        failed_24h: 4,
-        addresses_24h: 2,
+        total: 6,
+        refused: 4,
         ..LoginPage::default()
     }
 }
+
+/// The pages of `portal render-demo`.
+pub const DEMO_PAGES: [&str; 8] = [
+    "launcher",
+    "users",
+    "users-panel-only",
+    "user",
+    "new-user",
+    "services",
+    "services-panel-only",
+    "services-empty",
+];
 
 /// A page of `portal render-demo`. The page is the launcher or one settings page, with synthetic data.
 /// The function returns `None` for a name that is not a page.
 pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
     let catalog = demo_catalog();
+    let data = DemoData::new();
+    let panel_only = name.ends_with("panel-only");
     let frame = Frame {
         logout_token: "demo",
-        keys: true,
-        inbox: true,
+        keys: !panel_only,
+        inbox: !panel_only,
         superadmin: true,
+    };
+    let holders = |users: &UsersView| -> Vec<Holder> {
+        users
+            .users
+            .iter()
+            .map(|u| Holder {
+                login: u.login.clone(),
+                grants: u.grants.clone(),
+                file: u.file,
+            })
+            .collect()
     };
     Some(match name {
         "launcher" => home_page(
@@ -726,9 +828,11 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 settings: Some("/auth/settings"),
             },
         ),
-        "users" => users_page(&frame, &demo_users(&catalog)),
+        "users" | "users-panel-only" => {
+            users_page(&frame, &demo_users(&catalog, &data, panel_only))
+        }
         "user" => {
-            let mut users = demo_users(&catalog);
+            let mut users = demo_users(&catalog, &data, false);
             user_page(
                 &frame,
                 &UserView {
@@ -737,43 +841,27 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     catalog: &catalog,
                     services: std::mem::take(&mut users.services),
                     user: users.users.remove(0),
-                    first_day: demo_first_day(),
                     token: "demo",
-                    features: None,
-                    owned_keys: 0,
+                    features: users.features.take(),
+                    owned_keys: 2,
                 },
             )
         }
-        "service" => {
-            let mut users = demo_users(&catalog);
-            let service = users
-                .services
-                .iter()
-                .find(|s| s.id == "data-clickhouse-dash")
-                .cloned()
-                .unwrap_or_else(|| users.services[0].clone());
-            let holders = users
-                .users
-                .iter()
-                .map(|u| (u.login.clone(), u.grants.clone()))
-                .collect();
-            users.services.clear();
-            service_page(
+        "new-user" => {
+            let mut users = demo_users(&catalog, &data, false);
+            new_user_page(
                 &frame,
-                &ServiceView {
-                    mode: users.mode,
-                    service,
-                    holders,
+                &NewUserView {
+                    notice: None,
+                    services: std::mem::take(&mut users.services),
+                    features: users.features.take(),
+                    token: "demo",
                 },
             )
         }
-        "services" => {
-            let users = demo_users(&catalog);
-            let holders: Vec<(String, Vec<crate::grants::Grant>)> = users
-                .users
-                .iter()
-                .map(|u| (u.login.clone(), u.grants.clone()))
-                .collect();
+        "services" | "services-panel-only" => {
+            let users = demo_users(&catalog, &data, panel_only);
+            let holders = holders(&users);
             services_page(
                 &frame,
                 &ServicesView {
@@ -785,20 +873,27 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                         "http://s3-browser:8080/.well-known/procurauth/actions gave the status 500"
                             .into(),
                     )],
+                    mode: users.mode,
+                    selected: None,
+                    only_check: false,
                 },
             )
         }
-        "logins" => logins_page(
-            &frame,
-            &LoginsView {
-                page: &demo_logins(),
-                only_failed: false,
-                retention_days: 90,
-                days: &demo_days(3),
-                first_day: demo_first_day(),
-                recent_events: &demo_events(),
-            },
-        ),
+        "services-empty" => {
+            let empty = Catalog::build(Vec::new(), Vec::new());
+            services_page(
+                &frame,
+                &ServicesView {
+                    catalog: &empty,
+                    services: &[],
+                    holders: &[],
+                    problems: Vec::new(),
+                    mode: crate::grants::Mode::Dynamic,
+                    selected: None,
+                    only_check: false,
+                },
+            )
+        }
         _ => return None,
     })
 }
@@ -923,18 +1018,33 @@ mod tests {
         ] {
             assert!(!page.contains("<symbol") && !page.contains("class=\"sprite\""));
         }
-        let settings = demo_page("users", &Icons::empty()).unwrap();
-        assert_eq!(
-            settings.matches("<symbol ").count(),
-            5,
-            "the header icons and the back arrow"
-        );
-        assert!(settings.contains(r#"<symbol id="i-arrow-left""#));
+        // A settings page inlines the symbols that it draws, and no other.
+        for name in DEMO_PAGES.iter().filter(|n| **n != "launcher") {
+            let settings = demo_page(name, &Icons::empty()).unwrap();
+            let inlined: Vec<&str> = settings
+                .match_indices(r#"<symbol id=""#)
+                .map(|(at, m)| settings[at + m.len()..].split('"').next().unwrap())
+                .collect();
+            assert!(inlined.contains(&"i-arrow-left"), "{name}: the back arrow");
+            for id in &inlined {
+                assert!(
+                    settings.contains(&format!(r##"href="#{id}""##)),
+                    "{name}: {id} is inlined and not drawn"
+                );
+            }
+            for (at, m) in settings.match_indices(r##"href="#i-"##) {
+                let id = settings[at + m.len() - 2..].split('"').next().unwrap();
+                assert!(
+                    inlined.contains(&id),
+                    "{name}: {id} is drawn and not inlined"
+                );
+            }
+        }
     }
 
     #[test]
     fn every_demo_page_renders_and_an_unknown_one_does_not() {
-        for name in ["launcher", "users", "user", "services", "service", "logins"] {
+        for name in DEMO_PAGES {
             let page = demo_page(name, &Icons::empty()).unwrap();
             assert!(page.starts_with("<!doctype html>"), "{name}");
         }
@@ -943,17 +1053,21 @@ mod tests {
             demo_page("roles", &Icons::empty()).is_none(),
             "the page does not exist"
         );
+        for gone in ["logins", "service"] {
+            assert!(
+                demo_page(gone, &Icons::empty()).is_none(),
+                "the page {gone} is removed"
+            );
+        }
         let services = demo_page("services", &Icons::empty()).unwrap();
         assert!(
             services.contains("statusIcon--warn"),
             "a demo service has a problem"
         );
+        let users = demo_page("users", &Icons::empty()).unwrap();
         assert!(
-            services.contains("query.run.write") && services.contains("<code>access</code> only")
-        );
-        let logins = demo_page("logins", &Icons::empty()).unwrap();
-        assert!(
-            logins.contains("&#39;; DROP TABLE users; --") && !logins.contains("<script>alert")
+            users.contains("&#39;; DROP TABLE users; --") && !users.contains("<script>alert"),
+            "what a visitor typed is text"
         );
     }
 

@@ -35,7 +35,7 @@ use crate::keyauth;
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
 use crate::session::{Binding, NewSession, Principal, Session, SessionIssueError, SessionStore};
-use crate::store::{InsertError, LoginPage, Snapshot, Store, UserRow};
+use crate::store::{AccountActivity, InsertError, LoginPage, Snapshot, Store, UserRow};
 use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
 use crate::ui;
@@ -1150,10 +1150,9 @@ fn is_settings_path(path: &str) -> bool {
         path,
         ui::settings::USERS_PATH
             | ui::settings::SERVICES_PATH
-            | ui::settings::LOGINS_PATH
+            | ui::settings::NEW_USER_PATH
             | ui::settings::GIVE_PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
-        || path.starts_with(ui::settings::SERVICE_PATH_PREFIX)
 }
 
 /// One page of the settings. The route of the page is its tab. The portal checks the session itself.
@@ -1193,15 +1192,7 @@ async fn handle_settings(
     let page = match path {
         ui::settings::SERVICES_PATH => {
             let services = service_grants(state, &workloads);
-            let holders: Vec<(String, Vec<Grant>)> = state
-                .users
-                .list()
-                .into_iter()
-                .map(|(login, record)| {
-                    let grants = state.policy.effective(&login, &record.grants);
-                    (login, grants)
-                })
-                .collect();
+            let holders = holders_of(state);
             ui::services_page(
                 &frame,
                 &ui::ServicesView {
@@ -1209,37 +1200,46 @@ async fn handle_settings(
                     services: &services,
                     holders: &holders,
                     problems: state.actions.problems(),
-                },
-            )
-        }
-        ui::settings::LOGINS_PATH => {
-            let (_, snapshot) = load_admin_data(state).await;
-            let only_failed = query_value(uri, "r").as_deref() == Some("failed");
-            let asked = query_value(uri, "p")
-                .and_then(|p| p.parse::<u32>().ok())
-                .unwrap_or(1)
-                .max(1)
-                - 1;
-            let data = load_login_page(state, asked, only_failed).await;
-            ui::logins_page(
-                &frame,
-                &ui::LoginsView {
-                    page: &data,
-                    only_failed,
-                    retention_days: state.config.storage.retention_days,
-                    days: &snapshot.days,
-                    first_day: snapshot.first_day,
-                    recent_events: &snapshot.recent_events,
+                    mode: state.policy.mode,
+                    selected: query_value_up_to(uri, "svc", grants::MAX_SERVICE_CHARS * 4),
+                    only_check: query_value(uri, "f").as_deref() == Some("check"),
                 },
             )
         }
         ui::settings::USERS_PATH => {
             let (users, snapshot) = load_admin_data(state).await;
-            let view = users_view(state, &workloads, uri, &users_token, users, snapshot);
+            let only_refused = query_value(uri, "r").as_deref() == Some("failed");
+            let logins = load_login_page(state, only_refused).await;
+            let view = users_view(
+                state,
+                &workloads,
+                uri,
+                &users_token,
+                users,
+                &snapshot,
+                &logins,
+                only_refused,
+            );
             ui::users_page(&frame, &view)
         }
-        // "Give access" on the page of a service: the form picks an account, and the page of this
-        // account opens with the service chosen in the editor of grants.
+        // "New user": the page of an account in create mode. The route does not exist when the file
+        // forbids the creation or the grants are read-only.
+        ui::settings::NEW_USER_PATH => {
+            if !state.config.users.allow_creation || !state.policy.mode.editable() {
+                return handle_not_found(state, &Method::GET, uri, headers, client);
+            }
+            ui::new_user_page(
+                &frame,
+                &ui::NewUserView {
+                    notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+                    services: service_grants(state, &workloads),
+                    features: features_service(state),
+                    token: &users_token,
+                },
+            )
+        }
+        // "Give access" in the panel "Opened by": the page of the account opens with the service
+        // chosen in the editor of grants.
         ui::settings::GIVE_PATH => {
             let login = query_value(uri, "user");
             let service = query_value_up_to(uri, "service", grants::MAX_SERVICE_CHARS * 4);
@@ -1253,23 +1253,21 @@ async fn handle_settings(
                 _ => return handle_not_found(state, &Method::GET, uri, headers, client),
             }
         }
-        _ if path.starts_with(ui::settings::SERVICE_PATH_PREFIX) => {
-            let asked = path
-                .strip_prefix(ui::settings::SERVICE_PATH_PREFIX)
-                .and_then(|id| percent_decode_form(id).ok())
-                .unwrap_or_default();
-            match service_view(state, &workloads, &asked) {
-                Some(view) => ui::service_page(&frame, &view),
-                None => return handle_not_found(state, &Method::GET, uri, headers, client),
-            }
-        }
         _ => {
             // The page of one account: the login must be an account or the superadmin.
             let asked = path
                 .strip_prefix(ui::settings::USER_PATH_PREFIX)
                 .unwrap_or_default();
             let (users, snapshot) = load_admin_data(state).await;
-            match user_view(state, &workloads, uri, &users_token, asked, users, snapshot) {
+            match user_view(
+                state,
+                &workloads,
+                uri,
+                &users_token,
+                asked,
+                users,
+                &snapshot,
+            ) {
                 Some(view) => ui::user_page(&frame, &view),
                 None => return handle_not_found(state, &Method::GET, uri, headers, client),
             }
@@ -1278,11 +1276,11 @@ async fn handle_settings(
     html_response(StatusCode::OK, page)
 }
 
-/// One page of the sign-in log. If the database cannot be read, the page is empty and the logs get one line.
-async fn load_login_page(state: &Arc<AppState>, page: u32, only_failed: bool) -> LoginPage {
+/// The newest sign-ins, and the figures of the chips. If the database cannot be read, the panel
+/// is empty and the logs get one line.
+async fn load_login_page(state: &Arc<AppState>, only_failed: bool) -> LoginPage {
     let store = Arc::clone(&state.store);
-    let now = unix_now();
-    match tokio::task::spawn_blocking(move || store.login_attempts(now, page, only_failed)).await {
+    match tokio::task::spawn_blocking(move || store.login_attempts(0, only_failed)).await {
         Ok(Ok(data)) => data,
         Ok(Err(error)) => {
             log(
@@ -1304,6 +1302,15 @@ async fn load_admin_data(state: &Arc<AppState>) -> (Vec<(String, UserRecord)>, S
         .iter()
         .map(|(login, _)| (login.clone(), false))
         .collect();
+    // The accounts of the file sign in too: the Users page shows their history.
+    accounts.extend(
+        state
+            .config
+            .access
+            .accounts
+            .keys()
+            .map(|login| (login.clone(), false)),
+    );
     accounts.push((state.superadmin_login.clone(), true));
     let now = unix_now();
     let store = Arc::clone(&state.store);
@@ -1416,30 +1423,77 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
         .collect()
 }
 
+/// The history of each account of a snapshot, by login.
+fn activities_of(snapshot: &Snapshot) -> std::collections::HashMap<String, AccountActivity> {
+    snapshot
+        .accounts
+        .iter()
+        .map(|activity| (activity.login.clone(), activity.clone()))
+        .collect()
+}
+
+/// The number of keys of each account of the database. One pass over the keys.
+fn key_counts(state: &AppState) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for key in state.users.keys() {
+        if let KeyOwner::User(owner) = &key.owner {
+            *counts.entry(owner.clone()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// The card of an account of the file. The pages show it and change none of it.
+fn file_card(
+    state: &AppState,
+    login: &str,
+    account: &crate::config::FileAccount,
+    activity: Option<AccountActivity>,
+) -> ui::UserCard {
+    ui::UserCard {
+        activity: activity.unwrap_or_default(),
+        grants: account.grants.clone(),
+        configured: state.policy.configured(login).to_vec(),
+        login: login.to_string(),
+        created_at: None,
+        superadmin: false,
+        file: true,
+        keys: account.keys.len(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn users_view<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
     uri: &str,
     users_token: &'a str,
     users: Vec<(String, UserRecord)>,
-    snapshot: Snapshot,
+    snapshot: &'a Snapshot,
+    logins: &'a LoginPage,
+    only_refused: bool,
 ) -> ui::UsersView<'a> {
-    let mut activities = snapshot.accounts.into_iter();
-    let cards = users
+    let mut activities = activities_of(snapshot);
+    let counts = key_counts(state);
+    let mut cards: Vec<ui::UserCard> = users
         .into_iter()
         .map(|(login, record)| ui::UserCard {
-            activity: activities.next().unwrap_or_default(),
+            activity: activities.remove(&login).unwrap_or_default(),
             grants: state.policy.effective(&login, &record.grants),
             configured: state.policy.configured(&login).to_vec(),
+            keys: counts.get(&login).copied().unwrap_or(0),
             login,
             created_at: Some(record.created_at),
             superadmin: false,
+            file: false,
         })
         .collect();
+    for (login, account) in &state.config.access.accounts {
+        cards.push(file_card(state, login, account, activities.remove(login)));
+    }
     ui::UsersView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
         allow_creation: state.config.users.allow_creation,
-        add_open: query_value(uri, "add").as_deref() == Some("1"),
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
@@ -1450,23 +1504,21 @@ fn users_view<'a>(
             configured: Vec::new(),
             created_at: None,
             superadmin: true,
-            activity: activities.next().unwrap_or_default(),
+            file: false,
+            keys: 0,
+            activity: activities
+                .remove(&state.superadmin_login)
+                .unwrap_or_default(),
         },
-        unknown_failures_30d: snapshot.unknown_failures_30d,
-        file_accounts: state
-            .config
-            .access
-            .accounts
-            .iter()
-            .map(|(login, account)| ui::settings::FileAccountCard {
-                login: login.clone(),
-                password: account.password_hash.is_some(),
-                grants: account.grants.len(),
-                keys: account.keys.len(),
-            })
-            .collect(),
+        features: features_service(state),
+        keys: state.config.keys.is_some(),
+        inbox: state.config.inbox.is_some(),
         max_users: state.config.users.max_users,
         token: users_token,
+        logins,
+        only_refused,
+        days: &snapshot.days,
+        recent_events: &snapshot.recent_events,
     }
 }
 
@@ -1479,23 +1531,27 @@ fn user_view<'a>(
     users_token: &'a str,
     asked: &str,
     users: Vec<(String, UserRecord)>,
-    snapshot: Snapshot,
+    snapshot: &Snapshot,
 ) -> Option<ui::UserView<'a>> {
-    let first_day = snapshot.first_day;
-    // The snapshot keeps the order of the accounts, then the superadmin last.
-    let mut activities = snapshot.accounts.into_iter();
+    let mut activities = activities_of(snapshot);
     let mut found = None;
     for (login, record) in users {
-        let activity = activities.next().unwrap_or_default();
         if login == asked {
             found = Some(ui::UserCard {
-                activity,
+                activity: activities.remove(&login).unwrap_or_default(),
                 grants: state.policy.effective(&login, &record.grants),
                 configured: state.policy.configured(&login).to_vec(),
+                keys: owned_keys(state, &login),
                 login,
                 created_at: Some(record.created_at),
                 superadmin: false,
+                file: false,
             });
+        }
+    }
+    if found.is_none() {
+        if let Some(account) = state.config.access.accounts.get(asked) {
+            found = Some(file_card(state, asked, account, activities.remove(asked)));
         }
     }
     if found.is_none() && asked == state.superadmin_login {
@@ -1505,20 +1561,50 @@ fn user_view<'a>(
             configured: Vec::new(),
             created_at: None,
             superadmin: true,
-            activity: activities.next().unwrap_or_default(),
+            file: false,
+            keys: 0,
+            activity: activities.remove(asked).unwrap_or_default(),
         });
     }
+    let user = found?;
     Some(ui::UserView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
         features: features_service(state),
-        owned_keys: owned_keys(state, asked),
-        user: found?,
-        first_day,
+        owned_keys: user.keys,
+        user,
         token: users_token,
     })
+}
+
+/// Every account with the grants that apply to it: the accounts of the database, then those of
+/// the file.
+fn holders_of(state: &AppState) -> Vec<ui::Holder> {
+    let mut holders: Vec<ui::Holder> = state
+        .users
+        .list()
+        .into_iter()
+        .map(|(login, record)| ui::Holder {
+            grants: state.policy.effective(&login, &record.grants),
+            login,
+            file: false,
+        })
+        .collect();
+    holders.extend(
+        state
+            .config
+            .access
+            .accounts
+            .iter()
+            .map(|(login, account)| ui::Holder {
+                login: login.clone(),
+                grants: account.grants.clone(),
+                file: true,
+            }),
+    );
+    holders
 }
 
 /// The portal features as the editors of permissions offer them: the service `portal` with the
@@ -1555,27 +1641,6 @@ fn owned_keys(state: &AppState, login: &str) -> usize {
         .iter()
         .filter(|key| matches!(&key.owner, KeyOwner::User(owner) if owner == login))
         .count()
-}
-
-/// The data of the page of one service: who has access. `None`: the catalogue has no such service.
-fn service_view(state: &AppState, catalog: &Catalog, asked: &str) -> Option<ui::ServiceView> {
-    let service = service_grants(state, catalog)
-        .into_iter()
-        .find(|s| s.id == asked)?;
-    let holders = state
-        .users
-        .list()
-        .into_iter()
-        .map(|(login, record)| {
-            let grants = state.policy.effective(&login, &record.grants);
-            (login, grants)
-        })
-        .collect();
-    Some(ui::ServiceView {
-        mode: state.policy.mode,
-        service,
-        holders,
-    })
 }
 
 /// One decoded query parameter that is short. The portal ignores anything else.
@@ -2484,6 +2549,14 @@ fn settings_redirect(code: &str) -> HttpResponse {
     )
 }
 
+/// The response returns to the page "New user", with the outcome of a refused add.
+fn new_user_redirect(code: &str) -> HttpResponse {
+    redirect_response(
+        StatusCode::SEE_OTHER,
+        &format!("{}?s={code}", ui::settings::NEW_USER_PATH),
+    )
+}
+
 /// The response returns to the page of the account `login`, with the outcome of the action. The
 /// login is the login as the server keeps it: it needs no encoding in a path.
 fn user_redirect(login: &str, code: &str) -> HttpResponse {
@@ -2595,14 +2668,17 @@ async fn handle_users_add(
 
     let login = form.remove("login").unwrap_or_default();
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
-    // The form has the login and the password only. The grants have their own page.
-    if !form.is_empty() {
+    // The page "New user" sends the grants of the editor with the login and the password. A form
+    // without `grants` has the login and the password only: the account then has no grant.
+    let with_grants = form.remove("grants").as_deref() == Some("1");
+    let fields = std::mem::take(&mut form);
+    if !with_grants && !fields.is_empty() {
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
 
     let rejected = |code: &str| {
         state.metrics.user_admin("add", "rejected");
-        settings_redirect(code)
+        new_user_redirect(code)
     };
     let login = match normalize_login(&login) {
         Ok(login) => login,
@@ -2614,6 +2690,29 @@ async fn handle_users_add(
     if let Err(code) = check_new_password(&password, state.config.security.max_password_bytes) {
         return rejected(code);
     }
+    let grants = if with_grants {
+        let mut ticked = match account_grants(state, fields, None, "unknown-grant") {
+            Ok(grants) => grants,
+            Err(GrantsError::Bad) => {
+                return text_response(StatusCode::BAD_REQUEST, "Bad Request\n")
+            }
+            Err(GrantsError::Refused(code)) => return rejected(code),
+        };
+        ticked.sort();
+        ticked.dedup();
+        if ticked.len() > state.config.users.max_grants {
+            return rejected("grant-limit");
+        }
+        // Each action of the portal features needs the actions that it needs (portal 6.3a).
+        if crate::portal_actions::check_user_grants(&state.config.portal_features(), &ticked)
+            .is_err()
+        {
+            return rejected("keys-needs");
+        }
+        ticked
+    } else {
+        Vec::new()
+    };
     // The file holds this login: an account comes from one source (portal 3.4a).
     if state.users.get(&login).is_some() || state.config.access.accounts.contains_key(&login) {
         return rejected("exists");
@@ -2639,7 +2738,7 @@ async fn handle_users_add(
     let row = UserRow {
         login: login.clone(),
         password_hash: password_hash.clone(),
-        grants: Vec::new(),
+        grants: grants.clone(),
         created_at: unix_now(),
     };
     let store = Arc::clone(&state.store);
@@ -2663,7 +2762,7 @@ async fn handle_users_add(
         login.clone(),
         UserRecord {
             password_hash,
-            grants: Vec::new(),
+            grants,
             created_at,
         },
     );
@@ -3698,7 +3797,6 @@ mod tests {
             options_page::PATH,
             ui::settings::USERS_PATH,
             ui::settings::SERVICES_PATH,
-            ui::settings::LOGINS_PATH,
             ui::settings::INBOX_PATH,
             "/metrics",
         ];
