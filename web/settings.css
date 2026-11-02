@@ -1846,8 +1846,10 @@ input.keyText {
   width: 11rem;
 }
 
-/* "Generate" needs script; without it the button would do nothing, so it is not shown. */
-.generate {
+/* "Generate" and "Save" need script: the editor of grants is drawn by the script, so without it a
+   Save would send the grants as they are. Without script these two are not shown. */
+.generate,
+:root:not(.js) [data-save] {
   display: none;
 }
 
