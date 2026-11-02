@@ -6,7 +6,7 @@ The order of the work was: 1 this design; 2 the merged repository and the builds
 
 ## 1. Goal
 
-The portal and Inbox become one binary, `portal` (version 5.0.0). One account gives one identity and one set of permissions for the launcher, the keys and the inbox.
+The portal and the earlier standalone alert server become one binary, `portal` (version 5.0.0). One account gives one identity and one set of permissions for the launcher, the keys and the inbox.
 
 ## 2. Decisions of the owner
 
@@ -14,17 +14,17 @@ The third column gives the answers and the changes that the work made later.
 
 | # | Decision | Later answer or change |
 |---|---|---|
-| D1 | One binary. Inbox becomes the module `inbox`. | Step 3 moved the code to `src/inbox/`. |
+| D1 | One binary. The alert server becomes the module `inbox`. | Step 3 moved the code to `src/inbox/`. |
 | D2 | In production, PostgreSQL and at least two active instances. SQLite stays for development. The standby replica of SQLite stays. | See section 8. |
 | D3 | A producer is a key of the portal or a token of the file. Both work at the same time. | Section 6 gives the order of the checks. This is an exception to 11.2 of the portal specification, and the register records it. |
 | D4 | A phone enrolls through an account of the portal. The pseudonym is the login. The shared password is gone. | Step 5 made protocol 4 (section 5). An account needs `group.subscribe` to make a code. |
 | D5 | The service `inbox` has the resource `group:<id>`. Its actions are `group.subscribe`, `alert.send`, `alert.read`, `device.read`, `device.revoke` and `connection.read`. | Section 6. |
 | D6 | A limit can apply to `alert.send`. A group marked `critical` never has a limit. | The limit is the budget `alerts`. Section 6. |
 | D7 | The admin front has no mode without a password. The pages are in the style of the portal, in the tab "Inbox". | Section 7. The JSON admin API is gone. |
-| D8 | The code lives in the private repository `portal`. The history of Inbox is kept. The repository Inbox is archived at the end. | The history is in the git log. The archive is not done yet. |
-| D9 | All HTTP code uses hyper. Inbox is written again on it. | Step 3. |
+| D8 | The code lives in the private repository `portal`. The history of the standalone project is kept. The standalone repository is archived at the end. | The history is in the git log. The archive is not done yet. |
+| D9 | All HTTP code uses hyper. The alert server is written again on it. | Step 3. |
 | D10 | The configuration follows the global rules. The delivery values have no default. | Section 9. |
-| D11 | The binary has a listener `devices`. The DaemonSet `inbox-edge` relays it. | Changed on 2026-11-01 by the owner, in two steps. First the API of the producers moved to the port of the pages. Then everything of the inbox moved to the port of the portal: no phone listener and no relay exist. See section 4 and section 15. |
+| D11 | The binary has a listener `devices`. A relay DaemonSet publishes it. | Changed on 2026-11-01 by the owner, in two steps. First the API of the producers moved to the port of the pages. Then everything of the inbox moved to the port of the portal: no phone listener and no relay exist. See section 4 and section 15. |
 | D12 | The portal sends an alert when a service is unhealthy and when sign-ins fail in a burst. | Step 6. Section 10. |
 | D13 | Tests use the emulator. No physical phone. | `tools/android/emulator.sh`. |
 
@@ -33,9 +33,9 @@ The third column gives the answers and the changes that the work made later.
 - The root package `portal` is the binary. The code of the inbox is in `src/inbox/`.
 - `crates/inbox-core` holds the protocol and the cryptography of the phones, with no I/O. The server and the app share it.
 - `crates/inbox-android` is the JNI bridge. `android/` is the app.
-- `crates/inbox-server` is gone. `docker/Dockerfile.inbox`, `deploy/inbox/` and the Inbox image are gone too.
+- The crate of the standalone server is gone. Its Dockerfile, its deploy directory and its image are gone too.
 - `docker/Dockerfile` builds the one image. `deploy/` holds the Compose files and the K3s manifests of the merged product.
-- The history of Inbox is in the git log of the repository.
+- The history of the standalone project is in the git log of the repository.
 
 ## 4. Network
 
@@ -55,13 +55,13 @@ The portal listener has two budgets of connections. The pages and the API use `s
 
 ### 5.1 Enrollment
 
-Enrollment uses one secret of 128 bits that an account makes in the tab "Inbox". The text code holds the server address, the public key of the server and the secret. The deep link `inbox://enroll?s=<address>&k=<key>&c=<secret>` holds the same text.
+Enrollment uses one secret of 128 bits that an account makes in the tab "Inbox". The text code holds the server address, the public key of the server and the secret. The deep link `portal-inbox://enroll?s=<address>&k=<key>&c=<secret>` holds the same text.
 
 1. The phone starts Noise IK with the pinned key of the server. It sends the secret and its name in the first payload.
 2. The server checks the digest of the secret. A secret works one time and lives `inbox.enrollment.code_ttl`.
 3. The server stores the key of the phone and links it to the account. The phone then uses the normal session.
 
-The pinned key replaces OPAQUE. The crate `opaque-ke` leaves the build. The earlier design note used `inbox://enroll#<code>`. The query form is the contract.
+The pinned key replaces OPAQUE. The crate `opaque-ke` leaves the build. The earlier design note used `portal-inbox://enroll#<code>`. The query form is the contract.
 
 ### 5.2 Server choices (step 5)
 
@@ -76,7 +76,7 @@ The pinned key replaces OPAQUE. The crate `opaque-ke` leaves the build. The earl
 - **Call for the codes.** Step 4 replaced the JSON call `POST /auth/inbox/api/enrollment-codes` with the button **Make a code** of the page **My phones** (`POST /auth/settings/inbox/code`). The function that makes the code is the same. A session that the superadmin opened as another account makes a code for that account.
 - **Deletion of an account.** The portal calls the inbox before it deletes the account. If the inbox fails, the account stays. A device that enrolls while the account is deleted either finds its code gone or is revoked afterwards. The call needs the inbox only when the block `inbox` exists. File accounts cannot be deleted, so they never reach this call.
 - **Copies.** `portal inbox import-sqlite` and the snapshot of the replica carry the table `enrollment_codes`.
-- **Old files.** The command `import-sqlite` accepts only a file at the current version of the inbox chain. A file of the standalone Inbox is older, so the command refuses it. The owner has no phone in use, so no migration exists.
+- **Old files.** The command `import-sqlite` accepts only a file at the current version of the inbox chain. A file of the standalone alert server is older, so the command refuses it. The owner has no phone in use, so no migration exists.
 
 ## 6. Rights
 
@@ -118,7 +118,7 @@ The inbox is the second internal service of the portal, after the service `porta
 - **Dedupe of the form.** The form of an alert carries a random key. A double click sends one alert. The source of the alert is `admin`.
 - **Tests.** The end-to-end tests read the pages. The rows of the tables carry `data-*` attributes for them (`data-device`, `data-state`, `data-alert`, `data-reason` and others). The tests of the first steps that read the JSON overview now read the page **Phones**. The filter `since_ms` of the old alert list is gone, and so is the field `live.ip`.
 - **Accounts of the tests.** A database account has no permission of the inbox at the start. The tests give `group.subscribe` on the two groups of the test server.
-- **Lost with the old front.** The embedded front, the single page of Inbox and the page `/doc` are gone. The page **Documentation** replaces `/doc`.
+- **Lost with the old front.** The embedded front, the single page of the standalone server and the page `/doc` are gone. The page **Documentation** replaces `/doc`.
 
 ## 8. Storage
 
@@ -126,15 +126,15 @@ The inbox is the second internal service of the portal, after the service `porta
 - **One database.** The inbox uses the SQLite file or the PostgreSQL database of the portal. It has no `postgres` block. `inbox.storage.pool_size` (default 8) sets its own pool.
 - **Table names.** The tables of the inbox keep their old names: `devices`, `subscriptions`, `alerts`, `deliveries`, `connections`, `enrollment_codes` and, with PostgreSQL, `instances`. They do not collide with the tables of the portal. A rename would change every query of the delivery path for no gain.
 - **Clients.** The inbox keeps its asynchronous PostgreSQL client (`tokio-postgres` and `deadpool-postgres`) and its SQLite writer thread. The portal keeps its synchronous client. One connection of the inbox listens for `NOTIFY`.
-- **Old files.** An old SQLite file of the standalone inbox cannot open in place: its `PRAGMA user_version` is the version of the old chain. `portal inbox import-sqlite` copies a file at the current inbox version into an empty PostgreSQL database. The command also reads a SQLite file of the portal. There is no copy from SQLite to SQLite.
+- **Old files.** An old SQLite file of the standalone alert server cannot open in place: its `PRAGMA user_version` is the version of the old chain. `portal inbox import-sqlite` copies a file at the current inbox version into an empty PostgreSQL database. The command also reads a SQLite file of the portal. There is no copy from SQLite to SQLite.
 - **Replica.** The snapshot is a copy of the whole SQLite file. It holds the tables of the portal too. A standby instance that takes over gets the accounts and the keys of the portal with the data of the inbox. An alert, an enrollment and a revocation wait for the snapshot when `sync_alerts` is true.
 - **Database of K3s.** The K3s configuration uses the database `portal`. A database `inbox` that exists can stay unused.
 
 ## 9. Configuration
 
-The block `inbox` joins the file of the portal. It holds these items: the name, the key file of the server, the groups and the token producers. It also holds the blocks `devices`, `enrollment` and `storage`. The optional blocks are `replica`, `cluster` and `portal_alerts`. The delivery values (`heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention`, `connection_log_retention`) are mandatory and have no default. Every other key has a documented default, accepts `_env` and `_file` where it is a secret, and shows in `--print-config`. The README has the generated reference.
+The block `inbox` joins the file of the portal. It holds these items: the key file of the server, the groups and the token producers. It also holds the blocks `devices`, `enrollment` and `storage`. The optional blocks are `replica`, `cluster` and `watch`. The delivery values (`heartbeat_interval`, `session_timeout`, `resend_after`, `max_inflight`, `unreachable_after`, `offline_warning_after`, `delivery_ttl`, `alert_retention`, `connection_log_retention`) are mandatory and have no default. Every other key has a documented default, accepts `_env` and `_file` where it is a secret, and shows in `--print-config`. The README has the generated reference.
 
-- **Blocks without a label.** The HCL parser accepts blocks without a label inside the block `inbox` (`devices`, `enrollment`, `storage`, `replica`, `cluster`, `portal_alerts`). It still refuses nested blocks everywhere else.
+- **Blocks without a label.** The HCL parser accepts blocks without a label inside the block `inbox` (`devices`, `enrollment`, `storage`, `replica`, `cluster`, `watch`). It still refuses nested blocks everywhere else.
 - **Secrets.** `server_key_file` and `token_file` are secrets: each accepts `_file` and `_env`. The program does not trim the value. A key file that `portal inbox keygen` made has one final line end, and the program removes it.
 - **Keys of the old server.** `server.shutdown_grace`, `logging.format`, the block `telemetry`, the block `admin` and `limits.max_request_bytes` do not exist any more. The shutdown of the portal replaces `shutdown_grace`. The JSON log of the portal replaces the log format. `inbox.devices.max_request_bytes` replaces `limits.max_request_bytes`. `inbox.devices.max_auth_failures` and `inbox.devices.auth_failure_window` replace the block `security`. The portal key `server.trusted_proxies` gives the client address for the inbox. (The first version of the merge had `inbox.devices.trusted_proxies`. Section 15 removed it.)
 - **Defaults.** Only the delivery values have no default. The block `inbox.replica` has defaults. `sync_alerts` has the safe default `true`.
@@ -144,10 +144,10 @@ The block `inbox` joins the file of the portal. It holds these items: the name, 
 
 Decision D12 gives the scope. Step 6 made these choices where the owner left them open.
 
-- **Block.** `inbox.portal_alerts` is optional. Without it, nothing runs and the metrics have no series. Its keys and defaults are in the README: `group` (mandatory), `service_unhealthy`, `unhealthy_after` (`2m`), `sign_in_burst`, `sign_in_failures` (10), `sign_in_window` (`5m`), `repeat_after` (`1h`) and `recovered`.
+- **Block.** `inbox.watch` is optional. Without it, nothing runs and the metrics have no series. Its keys and defaults are in the README: `group` (mandatory), `service_unhealthy`, `unhealthy_after` (`2m`), `sign_in_burst`, `sign_in_failures` (10), `sign_in_window` (`5m`), `repeat_after` (`1h`) and `recovered`.
 - **Checks at start.** `group` must be the label of a block `group`. The message names the key, the groups that exist and the value. The start also stops when `service_unhealthy` and `sign_in_burst` are both `false`: the block would send nothing.
 - **Internal sender.** The task calls `accept_alert` of the inbox directly with the source `portal`. The path is the path of an API alert. It has one transaction, the idempotency key, the copy of the replica and the spool of the degraded mode. There is no token and no HTTP request. The source `portal` does not collide with `producer:<name>`, `webhook:<name>`, `notify:<name>` or `admin`.
-- **Detectors.** Two small state machines in `src/portal_alerts.rs` decide. They take a monotonic time from the caller, so a test moves the clock. A task reads the catalogue and the counter of refused sign-ins once each second. The durations use the monotonic clock, so a jump of the wall clock does not start or stop an alert.
+- **Detectors.** Two small state machines in `src/watch.rs` decide. They take a monotonic time from the caller, so a test moves the clock. A task reads the catalogue and the counter of refused sign-ins once each second. The durations use the monotonic clock, so a jump of the wall clock does not start or stop an alert.
 - **State of a service.** The rules are the rules of the tile: `down` and `unhealthy` are unhealthy, `starting` is not unhealthy, and a service with no state is never unhealthy. A service that starts, or that has no state, breaks the unhealthy time. The owner did not say this. The reason is that a restart must not look like an outage.
 - **Recovery.** The portal sends `healthy again` only after it sent an unhealthy alert, and only once. A service that only starts again does not count as healthy. A service that leaves the catalogue is forgotten with no alert.
 - **Sign-in burst.** The task reads the sum of three counters that exist. They count a wrong password or unknown login, a refusal by the limiter of the address, and a refusal by the global limiter. The sign-in path has no new code. After an alert, the count restarts from zero. The same refusals never give a second alert when `repeat_after` is shorter than `sign_in_window`.
@@ -156,8 +156,8 @@ Decision D12 gives the scope. Step 6 made these choices where the owner left the
 - **Limits of the key.** Two instances that read one event on two sides of a bucket limit send two alerts. A wall clock that goes back can give a key that the inbox already used, and the inbox then drops the alert as a duplicate.
 - **Per instance.** Each instance counts the refused sign-ins that it sees. A burst that is spread on several instances can stay under the threshold on each of them. A shared counter would need a table and a write for each refusal. The owner can ask for it later.
 - **Memory.** The state of the detectors is in memory. A restart forgets it. The portal then waits `unhealthy_after` again, and the key stops a second alert in the same bucket. It does not send `healthy again` for an alert of an earlier process.
-- **Failure.** If the inbox refuses an alert or does not answer in 20 seconds, the portal logs `portal_alert_failed`. It counts the failure in `portal_alerts_failed_total{kind}`. It tries again after 10 seconds. The detectors keep the alert due until the inbox accepts it. The login path and the launcher do not wait for the task. The task never panics on a send error.
-- **Metrics.** `portal_alerts_sent_total{kind}` counts the alerts that the inbox accepted. A duplicate that another instance already stored counts as sent, and the log event `portal_alert_sent` has the field `duplicate`.
+- **Failure.** If the inbox refuses an alert or does not answer in 20 seconds, the portal logs `watch_failed`. It counts the failure in `portal_watch_failed_total{kind}`. It tries again after 10 seconds. The detectors keep the alert due until the inbox accepts it. The login path and the launcher do not wait for the task. The task never panics on a send error.
+- **Metrics.** `portal_watch_sent_total{kind}` counts the alerts that the inbox accepted. A duplicate that another instance already stored counts as sent, and the log event `watch_sent` has the field `duplicate`.
 - **Start.** The task starts after the portal has a complete catalogue, in the same list as the listeners, and it ends with them.
 - **Test.** The end-to-end tests use a fake Docker socket for the unhealthy service. The smallest `unhealthy_after` is `10s`, so these tests take about one minute each. The test with two instances needs PostgreSQL (`INBOX_TEST_PG`).
 - **Not in this version.** An alert when a key comes near its budget.
@@ -180,10 +180,10 @@ The commands are in the section "Build and release" of the README. The files are
 - **One image.** `docker/Dockerfile` builds on `rust:1.98-alpine3.24`. Alpine is musl, so the build needs no target and no cross compiler. The packages `musl-dev gcc make perl binutils` are enough for SQLite and for `aws-lc-sys`. CMake is not needed. There is no `rust-toolchain.toml`. The Dockerfile builds natively for each architecture. A `buildx` build for another architecture runs the compiler under QEMU or on a native builder.
 - **Layers.** A layer holds the dependencies only. It uses the manifests and stub sources. A change of the sources rebuilds the crates of the repository, not the dependencies. `RUSTFLAGS` has only `--remap-path-prefix`. An explicit `crt-static` would break the proc macros on a musl host.
 - **Runtime.** The image has `/tmp` (mode 1777) and `/var/lib/portal` (owner 10001). The process writes nowhere else. The image has no icon library. The pages show initials when `ui.icons_dir` is absent. A deployment that wants the icons mounts the library at `/icons`.
-- **Inbox image removed.** `docker/Dockerfile.inbox` and its ignore file are gone. A root `.dockerignore` limits the context to `src`, `crates`, `web` and the manifests. `docker/Dockerfile` copies `crates/`, because the portal depends on `inbox-core`.
+- **Image of the standalone server removed.** Its Dockerfile and its ignore file are gone. A root `.dockerignore` limits the context to `src`, `crates`, `web` and the manifests. `docker/Dockerfile` copies `crates/`, because the portal depends on `inbox-core`.
 - **Compose.** `docker-compose.yml` at the root has the portal and PostgreSQL. It builds the image when it is absent. The secrets are files in a directory that `deploy/compose/init-secrets.sh` makes (`PORTAL_SECRETS_DIR` changes the directory). The script uses the image for `portal inbox keygen` and `portal inbox token`. There is no shared device password and no credential file. The file `.env.example` is gone, because the stack has no environment secrets.
 - **Two instances.** `deploy/compose/docker-compose.ha.yml` adds a second instance and Traefik. It is a test aid. It needs no new image.
-- **K3s.** `deploy/k3s/` has one Deployment with two replicas in the namespace `edge`, where the portal runs in the homelab. The inbox has no namespace of its own any more. The Services are `portal`, `portal-pdp` and `portal-peers`. The IngressRoute `portal-inbox` sends `/v1/`, `/api/v1/` and `/api/version` to the Service `portal` without ForwardAuth, with a retry middleware. The relay `inbox-edge` and its host port 8087 do not exist any more. The startup probe reads `/healthz`, and the readiness probe reads `/readyz` of the portal port.
+- **K3s.** `deploy/k3s/` has one Deployment with two replicas in the namespace `edge`, where the portal runs in the homelab. The inbox has no namespace of its own any more. The Services are `portal`, `portal-pdp` and `portal-peers`. The IngressRoute `portal-inbox` sends `/v1/`, `/api/v1/` and `/api/version` to the Service `portal` without ForwardAuth, with a retry middleware. The relay and its host port 8087 do not exist any more. The startup probe reads `/healthz`, and the readiness probe reads `/readyz` of the portal port.
 - **CI.** `ci.yml` has four jobs: the policy, the Rust checks, the image with the configuration files and the Compose smoke test, and the Android compile check. `release.yml` replaces both release workflows. It builds each architecture on a native runner. It has no step that touches a registry.
 - **Version of the release.** A tag `vX.Y.Z` starts the release. The old manual start with an independent version is gone.
 - **No push.** No command and no workflow pushes an image to a registry. A release holds binaries, the signed APK and `SHA256SUMS`.
@@ -196,7 +196,7 @@ The first plan had one chain of migrations, one admin front without a password, 
 |---|---|
 | Two independent chains of migrations, not one. The first plan said "schema 7 adds the inbox tables". | 8 |
 | The tables of the inbox keep their old names. | 8 |
-| An old SQLite file of the standalone inbox cannot open in place. | 8 |
+| An old SQLite file of the standalone alert server cannot open in place. | 8 |
 | The snapshot of the replica holds the tables of the portal too. | 8 |
 | The inbox keeps its asynchronous PostgreSQL client. | 8 |
 | The HCL parser accepts labelless blocks inside `inbox`. | 9 |
@@ -228,7 +228,7 @@ The first plan had one chain of migrations, one admin front without a password, 
 - **Shared counter of refused sign-ins.** Each instance counts alone. A burst spread on several instances can stay under the threshold.
 - **Alert near a budget.** A key that comes near its budget raises no alert in this version.
 - **Physical phone.** The tests use the emulator only. The owner chose no physical phone.
-- **Archive of Inbox.** D8 says that the repository Inbox is archived at the end. This is not done.
+- **Archive of the standalone project.** D8 says that the standalone repository is archived at the end. This is not done.
 - **Old comments.** The comments of the moved code are not rewritten in Simplified Technical English.
 
 ## 15. One port for the inbox (2026-11-01)
@@ -238,7 +238,7 @@ The owner gave this instruction: "`/api/v1/alerts` must be on the same port, 808
 What changed:
 
 - **Routes.** The listener of the portal (`server.listen_address`) serves `GET /v1/enroll` and `GET /v1/session` (WebSocket upgrade over hyper, same code as before), `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}`, `POST /api/v1/notify/{group}`, `POST /api/v1/webhooks/alertmanager/{group}`, `GET /api/version` and `GET /readyz`. The authentication, the refusals and the limits did not change. The function `inbox::serve` answers the paths that `inbox::owns` names: the prefixes `/v1/` and `/api/v1/`, `/readyz` and `/api/version`. The portal checks these paths before every other route, so no handler of the portal shadows them, and the inbox does not shadow a route of the portal. A unit test checks every route constant of the portal against `owns`. A path under `/v1/` that the inbox does not know gets 404, and a non-GET request to a route of the phones gets 405. The portal applies no session, no CSRF check, no origin check, no security header and no cookie to these routes, so the upgrade answer is a plain 101. The connection of the portal uses `with_upgrades`, so a WebSocket can leave the connection task.
-- **Removed.** The phone listener and its accept loop, the key `inbox.devices.listen` and its cap logic, `/healthz` of the phone port, the DaemonSet `inbox-edge` (`edge.yaml`, `edge-dynamic.yaml`), its host port 8087, the Service `portal-devices` and the policies of the relay, the publication of the phone port in Compose (root file, HA file), the publication `8089` and `172.17.0.1:8089` of the demo, and the port 8080 of the Dockerfile `EXPOSE`. A file that still has `inbox.devices.listen` stops at start with the error "unknown configuration key: inbox.devices.listen". There is no alias.
+- **Removed.** The phone listener and its accept loop, the key `inbox.devices.listen` and its cap logic, `/healthz` of the phone port, the relay DaemonSet (`edge.yaml`, `edge-dynamic.yaml`), its host port 8087, the Service `portal-devices` and the policies of the relay, the publication of the phone port in Compose (root file, HA file), the publication `8089` and `172.17.0.1:8089` of the demo, and the port 8080 of the Dockerfile `EXPOSE`. A file that still has `inbox.devices.listen` stops at start with the error "unknown configuration key: inbox.devices.listen". There is no alias.
 - **Public address.** `inbox.devices.public_address` is the public base URL of the portal as the phones reach it: `http(s)://host[:port][/prefix]`. The `s` of the enrollment code holds it unchanged. The rules of the value did not change.
 - **Prefix.** The portal has no base path key: it matches its routes at the root and assumes that the proxy removes a prefix before it sends the request. The app keeps the prefix of the address and appends `/v1/enroll` or `/v1/session` (`Address.kt`). A portal that is published under a prefix therefore works when the proxy removes the prefix (the Traefik middleware `StripPrefix`). Without a prefix, nothing is needed. The documents say so, and the shipped files use no prefix.
 - **Connection budget.** The pages and the API keep `server.max_connections`. A connection holds one permit of this budget while it is a page connection. When it upgrades to a phone session, the connection task ends and the permit goes back. The phone session has taken a permit of the session budget before the answer 101. The session budget is `server.max_connections` plus two times `inbox.devices.max_devices`. This is the cap formula of the old phone listener. The first term covers the phones that do not finish the handshake. The second term covers one live session and one session that the server did not detect as lost, for each phone. A phone that cannot get a permit gets the HTTP status 503 with `Retry-After: 5`, before the upgrade. The reason for 503 and not for the close code 4429: no WebSocket exists for a refused phone, so a flood of refused attempts costs no session and no frame work, and Traefik does not retry an answer. The refusal by rate limit keeps the close code 4429 after the upgrade, as before. A permit goes back when the session ends, also when the upgrade fails.
@@ -251,4 +251,41 @@ What changed:
 - **Android.** No change.
 - **Proxy rule.** The proxy must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. The portal owns the prefix `/v1/`: a service that the proxy publishes on the same host must not use a path that starts with `/v1/`.
 
-Behaviours that are lost: the separate phone port and its separate exposure (a firewall rule on a port), the relay `inbox-edge` with its quick retry (Traefik carries the retry now), the host port 8087, and the independent list of trusted proxies of the inbox. The phones and the pages now share the host and the TLS certificate. The operator restricts the phones with a rule on the routes of the proxy.
+Behaviours that are lost: the separate phone port and its separate exposure (a firewall rule on a port), the relay with its quick retry (Traefik carries the retry now), the host port 8087, and the independent list of trusted proxies of the inbox. The phones and the pages now share the host and the TLS certificate. The operator restricts the phones with a rule on the routes of the proxy.
+
+## 16. Rename to Inbox (batches A and B of the rework)
+
+The feature has the name Inbox. The old names are gone from the code, the files, the configuration and the documents. The history of the repository keeps them. This section records the choices and the deviations of the first two batches of the rework. The plan is in `demo/design-proposals/rework/REWORK-PLAN.md`.
+
+### 16.1 What changed
+
+- **Code.** The module is `src/inbox`. The crates are `crates/inbox-core` and `crates/inbox-android`. The library is `libinbox_android.so`.
+- **Kotlin package.** The package is `app.portalinbox`. The JNI symbols are `Java_app_portalinbox_core_Native_*`. A unit test of `inbox-android` compares each `external fun` of `Native.kt` with the exported symbols. A name that does not match crashes the app at load.
+- **Protocol constants.** The Noise prologues are `portal-inbox/v1/session` and `portal-inbox/v1/enroll`. The hash of the cluster peers uses `portal-inbox-peer-v1`. The deep link is `portal-inbox://enroll?...`. The protocol version stays 4.
+- **Configuration.** The block is `inbox`. The block `inbox.watch` replaces the block of the alerts of the portal. The key `name` of the block does not exist. The key `server.name` replaces it.
+- **Metrics.** The prefix is `portal_inbox_`. The metrics of the portal about itself are `portal_watch_sent_total` and `portal_watch_failed_total`.
+- **Command line and paths.** The command is `portal inbox ...`. The pages are under `/auth/settings/inbox`. There is no redirect.
+- **Names of deployment.** The secrets, the variables, the objects of Compose, K3s and Traefik, and the variables of the Android build use the name `inbox`. The table `inbox_schema_version` replaces the old version table. The code makes no migration.
+- **No alias.** An old name is an unknown name. `check-config` refuses a file with the old block or the old sub-block. Tests cover both cases.
+
+### 16.2 The field `kind`
+
+Each alert frame has the field `kind`. The value is `alert`. The core parser refuses any other value and a frame without the field.
+The table `alerts` has the column `kind`, with the default `alert`. It is the last migration of the chain, for SQLite and for PostgreSQL.
+The command `import-sqlite` copies the column. The snapshot of the replica copies the whole file, so it carries it too.
+The admin rows have the field `kind`, and the table of alerts has the attribute `data-kind`.
+The metrics `portal_inbox_alerts_accepted_total`, `portal_inbox_alerts_duplicate_total` and `portal_inbox_alerts_spooled_total` have the label `kind`.
+
+### 16.3 The name of the instance
+
+The key `server.name` has the default `"Portal"`. It has 1 to 64 bytes, is not blank and has no control character.
+The phones show it as the name of the server: the enrollment answer and the message `welcome` hold it. No page shows it yet.
+
+### 16.4 Deviations
+
+- **The service id is `inbox`.** The permission model of the inbox still has its own internal service. Its id was the old name, so the plain rename gives the id `inbox`. Batch C replaces it with one internal scope `portal`.
+- **The module `src/inbox_actions.rs`.** The file holds the action document of the service `inbox`. Batch C deletes it and moves its constants.
+- **The label `kind` of the metric of failed authentications.** The metric `portal_inbox_auth_failures_total` already had a label `kind` that names the kind of failure. It is not the kind of a message. The name stays, to keep the meaning of the metric.
+- **The old names in tests.** Two tests need the old names to prove that they are refused. The code builds each name from two parts, so that no copy of the old name stays in the repository.
+- **The commits.** The commits split the mechanical rename by area. An intermediate commit can fail to build, because the rename crosses the areas. The last commit builds and passes the tests.
+- **The Android build.** The package, the application id, the scheme and the library name changed. The labels, the strings and the themes only had a plain replacement. Batch E reviews them.

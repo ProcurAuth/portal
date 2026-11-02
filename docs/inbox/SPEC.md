@@ -1,6 +1,6 @@
 # Inbox specification
 
-This document states what the inbox does and why. The inbox is a module of the portal. The code is the reference for details. The design of the merge is in [`../design-inbox-merge.md`](../design-inbox-merge.md).
+This document states what the inbox does and why. The inbox is a module of the portal. The code is the reference for details. The design of the merge is in [`../design-inbox.md`](../design-inbox.md).
 
 The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8174.
 
@@ -16,7 +16,7 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 
 | In scope | Out of scope |
 |---|---|
-| The module `inbox` of the binary `portal`. | A standalone inbox binary. |
+| The module `inbox` of the binary `portal`. | A standalone alert server binary. |
 | The Android app. It only receives alerts. | iOS. It cannot keep a connection in the background without the push service of Apple. |
 | The producer API, the webhooks for Alertmanager and Grafana, and the pages of the tab Inbox. | A push service of a third party (Firebase or Apple). |
 | Alerts of the portal about itself. | An acknowledgement of an alert by a person. An escalation between persons. |
@@ -34,6 +34,8 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 3.1.3 The producer decides the group. The subscriber decides the reaction of the phone, group by group.
 
 3.1.4 An alert has no human acknowledgement. The phone sends only an automatic receipt after it stores the alert. Without the receipt, the server cannot send the alert again, and the guarantee of delivery fails.
+
+3.1.5 Each alert MUST have a kind. The only kind is `alert`. The wire frame and the stored alert carry it in the field `kind`. A parser MUST refuse any other value.
 
 ### 3.2 Phones
 
@@ -77,7 +79,7 @@ The words MUST, MUST NOT, SHOULD and MAY are the key words of RFC 2119 and RFC 8
 
 ### 3.5 Alerts of the portal
 
-3.5.1 The portal MAY send an alert in three cases. A service is unhealthy. A service is healthy again. Refused sign-ins come in a burst. The block `inbox.portal_alerts` turns this on.
+3.5.1 The portal MAY send an alert in three cases. A service is unhealthy. A service is healthy again. Refused sign-ins come in a burst. The block `inbox.watch` turns this on.
 
 3.5.2 These alerts MUST use the path of an alert of the API. This gives one transaction, the idempotency key and the copy to the replica.
 
@@ -145,7 +147,7 @@ The details are in [`SECURITY.md`](SECURITY.md) and [`protocol.md`](protocol.md)
 
 6.4 The protocol and the cryptography of the phones are in the crate `inbox-core`, with no I/O. The server and the app share it. The cryptography exists once.
 
-6.5 The metrics of the inbox have the prefix `inbox_`. They are in the Prometheus text of the portal. The log is the JSON log of the portal.
+6.5 The metrics of the inbox have the prefix `portal_inbox_`. They are in the Prometheus text of the portal. The log is the JSON log of the portal.
 
 6.6 The build uses Docker only. There is one static musl image. No command publishes an image to a registry. A release holds binaries, the signed APK and `SHA256SUMS`.
 

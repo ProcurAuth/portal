@@ -43,7 +43,7 @@ The repository has these parts:
 |---|---|
 | `src/` | The binary `portal`. The code of the inbox is in `src/inbox/`. |
 | `crates/inbox-core` | The protocol and the cryptography of the phones, with no I/O. The server and the app share it. |
-| `crates/inbox-android`, `android/` | The JNI bridge and the Android app (name Inbox, package `app.inbox`). |
+| `crates/inbox-android`, `android/` | The JNI bridge and the Android app (name Inbox, package `app.portalinbox`). |
 | `web/` | The style sheets and the script of the pages. |
 | `deploy/`, `docker-compose.yml`, `docker/` | The Compose stack, the K3s manifests and the Dockerfile. |
 | `demo/` | A local demo with Traefik and three example services. |
@@ -594,7 +594,6 @@ The inbox is a feature of the portal. It runs in the same process and in the sam
 
 ```hcl
 inbox {
-  name            = "Inbox"                           # default
   server_key_file = "/run/secrets/inbox_server_key"   # or: server_key_env
 
   devices {
@@ -638,8 +637,8 @@ The delivery values have no default. The program stops at start when one of them
 A phone enrolls with a one-time code. The code belongs to one account of the portal. The login of the account is the user name of the phone. The phone cannot change it.
 
 1. The account makes a code on the page **My phones** of the tab Inbox. The button **Make a code** sends `POST /auth/settings/inbox/code`. An account that has the permission `group.subscribe` on one group at least can use it. The code is for the login of the session. The form has no login field.
-2. The page shows the code one time: the text `inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The page has the header `Cache-Control: no-store`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
-3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `inbox/v1/enroll`. The first message holds the secret and the name of the phone.
+2. The page shows the code one time: the text `portal-inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The page has the header `Cache-Control: no-store`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
+3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `portal-inbox/v1/enroll`. The first message holds the secret and the name of the phone.
 4. The inbox looks for the SHA-256 digest of the secret. A code works one time and lives `inbox.enrollment.code_ttl`. The inbox stores the phone and marks the code as used in one transaction. Then it sends message 2 and closes the connection.
 
 The inbox keeps only the digest of the secret. An account has at most `inbox.enrollment.max_active_per_account` codes that are not used and not expired. The inbox refuses another code, and the page tells the person.
@@ -689,7 +688,7 @@ The inbox and the portal have two independent chains of migrations. The portal k
 
 With PostgreSQL, any number of instances can run. They share the phones, the alerts and the sessions through the database, `LISTEN` and `NOTIFY`. If the database has no writable primary, the inbox goes on: it accepts alerts in memory, it delivers them to the phones that are connected, and it writes them when the database is back. With the block `inbox.cluster`, the instances copy these alerts to each other before the producer gets its answer.
 
-With SQLite, the block `inbox.replica` copies the whole file to a shared directory. The copy holds the tables of the portal too. An instance that owns the lease serves. A standby instance waits for the lease before it opens the file. It restores the newest copy that passes the consistency check. An instance that loses its lease stops the whole process. The metrics `inbox_replica_*` show the state of the copy.
+With SQLite, the block `inbox.replica` copies the whole file to a shared directory. The copy holds the tables of the portal too. An instance that owns the lease serves. A standby instance waits for the lease before it opens the file. It restores the newest copy that passes the consistency check. An instance that loses its lease stops the whole process. The metrics `portal_inbox_replica_*` show the state of the copy.
 
 ### Commands
 
@@ -697,7 +696,7 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 |---|---|
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the token of a producer. |
-| `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the inbox. A file of the standalone Inbox before the merge has an older schema, so the command refuses it. |
+| `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the inbox. A file of the standalone alert server before the merge has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the portal port. |
 
 ### Rights of the service `inbox`
@@ -749,16 +748,16 @@ The JSON calls under `/auth/inbox/api/` of the first versions do not exist any m
 
 ### Metrics
 
-The metrics of the inbox are in the Prometheus text of the portal, at `metrics.path`. They have the names `inbox_*`. The gauges `inbox_devices_unreachable`, `inbox_oldest_pending_delivery_seconds`, `inbox_replica_last_snapshot_age_seconds` and `inbox_storage_degraded` are the ones to alert on. The inbox has no OTLP export. The log of the inbox is in the JSON lines of the portal, with the field `event`.
+The metrics of the inbox are in the Prometheus text of the portal, at `metrics.path`. They have the names `portal_inbox_*`. The gauges `portal_inbox_devices_unreachable`, `portal_inbox_oldest_pending_delivery_seconds`, `portal_inbox_replica_last_snapshot_age_seconds` and `portal_inbox_storage_degraded` are the ones to alert on. The inbox has no OTLP export. The log of the inbox is in the JSON lines of the portal, with the field `event`.
 
 ### Alerts of the portal
 
-The portal can send an alert about itself. This is optional. It needs the block `inbox.portal_alerts`. Without this block, the portal sends no alert about itself.
+The portal can send an alert about itself. This is optional. It needs the block `inbox.watch`. Without this block, the portal sends no alert about itself.
 
 ```hcl
 inbox {
   # ...
-  portal_alerts {
+  watch {
     group             = "infra"   # required: the id of a block group
     service_unhealthy = true      # default
     unhealthy_after   = "2m"      # default
@@ -784,9 +783,9 @@ The portal gives the alert to the inbox inside the process. There is no HTTP req
 
 With several instances, each instance detects the same event. The idempotency key has only shared facts: `portal:unhealthy:<service id>:<bucket>`, `portal:recovered:<service id>:<bucket>` and `portal:burst:<bucket>`. The bucket is the Unix time divided by `repeat_after`. The inbox accepts one alert for one key, so the phones get one alert. Two instances can read one event on two sides of a bucket limit. The phones then get a second alert. Each instance counts only the refused sign-ins that it sees.
 
-The detectors run in a background task. They never block the sign-in or the launcher. The sign-in path only adds to a counter that already exists. If the inbox refuses an alert, the portal logs the event `portal_alert_failed`. It tries again after 10 seconds. If the portal restarts, it forgets what it sent. The key stops a second alert in the same bucket. The portal does not send `healthy again` for an alert that an earlier process sent.
+The detectors run in a background task. They never block the sign-in or the launcher. The sign-in path only adds to a counter that already exists. If the inbox refuses an alert, the portal logs the event `watch_failed`. It tries again after 10 seconds. If the portal restarts, it forgets what it sent. The key stops a second alert in the same bucket. The portal does not send `healthy again` for an alert that an earlier process sent.
 
-The metrics `portal_alerts_sent_total{kind}` and `portal_alerts_failed_total{kind}` count the alerts, with the kinds `service_unhealthy`, `service_recovered` and `sign_in_burst`. A key that comes near its budget does not raise an alert in this version.
+The metrics `portal_watch_sent_total{kind}` and `portal_watch_failed_total{kind}` count the alerts, with the kinds `service_unhealthy`, `service_recovered` and `sign_in_burst`. A key that comes near its budget does not raise an alert in this version.
 
 ### Stop
 
@@ -801,6 +800,7 @@ See "Quick start" for the Compose stack and `demo/README.md` for the demo with T
 ```hcl
 server {
   listen_address     = "0.0.0.0:4181"
+  name               = "Portal"                       # default; the app shows it as the name of the server
   workers            = 4
   max_body_bytes     = "32KiB"
   max_connections    = 1024
@@ -950,6 +950,7 @@ The HTTP server.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `listen_address` | text: an IP address and a port, such as 0.0.0.0:4181 | required | The address and the port that the server listens on. |
+| `name` | text: 1 to 64 bytes, not blank, no control character | `"Portal"` | The name of this instance. The phones show it as the name of the server, and the welcome message uses it. |
 | `workers` | number, 1 to 64 | `4` | The number of worker threads. |
 | `max_body_bytes` | size, 1KiB to 1MiB | `"32KiB"` | The largest request body that the server reads. The form of a user holds one field for each grant that it shows. |
 | `max_connections` | number, 1 to 100000 | `1024` | The largest number of open TCP connections of the pages and the API. A connection that upgrades to a phone session gives its permit back and takes a permit of the session budget: `server.max_connections` plus two times `inbox.devices.max_devices`. This budget exists only with the block `inbox`. |
@@ -1128,11 +1129,10 @@ The log.
 
 #### Block `inbox`
 
-This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.portal_alerts` are optional. The blocks `group "<id>"` and `producer "<name>"` are inside this block.
+This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group "<id>"` and `producer "<name>"` are inside this block.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `name` | text: 1 to 64 bytes, not blank | `"Inbox"` | The name that the phones show for this server. |
 | `server_key` | secret: give `server_key_env` (a variable name) or `server_key_file` (an absolute path), not both | required | The key of the server for the phones. Make it one time with `portal inbox keygen`. A new key makes each enrolled phone and each enrollment code invalid. Back it up. |
 
 #### Block `inbox.devices`
@@ -1194,18 +1194,18 @@ This block is optional and is inside the block `inbox`. If it is present, the in
 | `listen` | text: an IP address and a port, such as 0.0.0.0:8082 | required | The address and the port where this instance receives the requests of the other instances. Only the pods of the service can reach this port. |
 | `peers` | list of at most 16 quoted strings: names with a port such as "inbox-peers.apps.svc.cluster.local:8082" | required | The names that list the instances, for example a headless Service, with the port of `inbox.cluster.listen`. The inbox asks each address that the names resolve to who it is. It skips its own address. The list has at least one name. |
 
-#### Block `inbox.portal_alerts`
+#### Block `inbox.watch`
 
 This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group: when a service of the launcher is unhealthy, and when sign-ins fail in a burst. Without this block, the portal sends no alert about itself.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `group` | text: the id of a block `group` of the block `inbox` | required | The group that receives the alerts of the portal. It must be the label of a block `group` of the block `inbox`. |
-| `service_unhealthy` | `true` or `false` | `true` | `true`: the portal sends an alert when a service of the launcher stays unhealthy for `inbox.portal_alerts.unhealthy_after`. A service is unhealthy when its tile shows `down` or `unhealthy`. A service with no health check is never unhealthy. |
+| `service_unhealthy` | `true` or `false` | `true` | `true`: the portal sends an alert when a service of the launcher stays unhealthy for `inbox.watch.unhealthy_after`. A service is unhealthy when its tile shows `down` or `unhealthy`. A service with no health check is never unhealthy. |
 | `unhealthy_after` | duration, 10s to 1d | `"2m"` | How long a service stays unhealthy before the alert. A service that is healthy or starting in this time does not raise the alert. |
-| `sign_in_burst` | `true` or `false` | `true` | `true`: the portal sends an alert when `inbox.portal_alerts.sign_in_failures` sign-ins are refused in the window `inbox.portal_alerts.sign_in_window`. A wrong password, an unknown login and a sign-in that a limiter blocks count. Each instance counts the refusals that it sees. |
+| `sign_in_burst` | `true` or `false` | `true` | `true`: the portal sends an alert when `inbox.watch.sign_in_failures` sign-ins are refused in the window `inbox.watch.sign_in_window`. A wrong password, an unknown login and a sign-in that a limiter blocks count. Each instance counts the refusals that it sees. |
 | `sign_in_failures` | number, 2 to 10000 | `10` | The number of refused sign-ins in the window that raises the alert. |
-| `sign_in_window` | duration, 10s to 1d | `"5m"` | The window of `inbox.portal_alerts.sign_in_failures`. It slides: the portal counts the refusals of the last window. |
+| `sign_in_window` | duration, 10s to 1d | `"5m"` | The window of `inbox.watch.sign_in_failures`. It slides: the portal counts the refusals of the last window. |
 | `repeat_after` | duration, 1m to 7d | `"1h"` | The shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. The alerts of this time have one shared identity, so two instances send one alert. |
 | `recovered` | `true` or `false` | `true` | `true`: the portal sends a short alert when a service is healthy again after the portal sent an alert about it. |
 
@@ -1322,7 +1322,7 @@ Only failed password checks use the failure budgets. A successful authentication
 
 ## Prometheus
 
-When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime. The inbox adds the metrics `inbox_*`, and the alerts of the portal add `portal_alerts_*` (see "Operations").
+When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime. The inbox adds the metrics `portal_inbox_*`, and the alerts of the portal add `watch_*` (see "Operations").
 
 Do not put client IPs, raw URIs, passwords, cookies or return targets into metric labels.
 
@@ -1397,7 +1397,7 @@ Everything is built in Docker. The host needs Docker with BuildKit, POSIX `sh` a
 |---|---|
 | `tools/build.sh server` | `dist/portal_<version>_linux_<arch>`: a static musl binary, checked for dynamic links. |
 | `tools/build.sh image` | The local images `portal:<version>` and `portal:local`. |
-| `tools/build.sh apk` | `dist/inbox-<version>.apk`, signed. See `tools/android/build-apk.sh` for the signing variables. |
+| `tools/build.sh apk` | `dist/portal-inbox-<version>.apk`, signed. See `tools/android/build-apk.sh` for the signing variables. |
 | `tools/build.sh dist` | `dist/portal_<version>_linux_<arch>.tar.gz` and `dist/SHA256SUMS`. The archives are reproducible. |
 | `tools/build.sh all` | The four commands above. |
 
@@ -1428,22 +1428,22 @@ Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in b
 
 | Metric | Use |
 |---|---|
-| **`inbox_oldest_pending_delivery_seconds`** | Age of the oldest alert that still waits for a phone. |
-| **`inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |
-| **`inbox_storage_degraded`** | 1 while the database has no writable primary and the inbox holds alerts in memory. |
-| **`inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
-| `inbox_alerts_accepted_total{source}` | Alerts accepted, by source: `producer`, `webhook`, `notify`, `admin`, `portal`. |
-| `inbox_alerts_duplicate_total{source}` | Submissions that the idempotency key merged. |
-| `inbox_deliveries_created_total`, `inbox_deliveries_sent_total`, `inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
-| `inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
-| `inbox_deliveries_pending` | Deliveries that wait for a phone. |
-| `inbox_devices_enrolled`, `inbox_device_sessions` | Phones that are not revoked, and connected sessions. |
-| `inbox_device_session_closes_total{reason}` | Session ends, by reason. |
-| `inbox_auth_failures_total{kind}` | Failed authentications. |
-| `inbox_enrollments_total` | Phones enrolled. |
-| `inbox_alerts_spooled_total{source}`, `inbox_spool_alerts`, `inbox_spool_rejected_total` | The spool of the degraded mode. |
-| `inbox_replica_epoch`, `inbox_replica_snapshots_total`, `inbox_replica_snapshot_failures_total`, `inbox_replica_sync_failures_total` | The replica (with `inbox.replica` only). |
-| `portal_alerts_sent_total{kind}`, `portal_alerts_failed_total{kind}` | Alerts of the portal about itself, by kind: `service_unhealthy`, `service_recovered`, `sign_in_burst`. |
+| **`portal_inbox_oldest_pending_delivery_seconds`** | Age of the oldest alert that still waits for a phone. |
+| **`portal_inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |
+| **`portal_inbox_storage_degraded`** | 1 while the database has no writable primary and the inbox holds alerts in memory. |
+| **`portal_inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
+| `portal_inbox_alerts_accepted_total{source,kind}` | Messages accepted, by source and by kind (`alert`). The source is `producer`, `webhook`, `notify`, `admin`, `portal`. |
+| `portal_inbox_alerts_duplicate_total{source,kind}` | Submissions that the idempotency key merged. |
+| `portal_inbox_deliveries_created_total`, `portal_inbox_deliveries_sent_total`, `portal_inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
+| `portal_inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
+| `portal_inbox_deliveries_pending` | Deliveries that wait for a phone. |
+| `portal_inbox_devices_enrolled`, `portal_inbox_device_sessions` | Phones that are not revoked, and connected sessions. |
+| `portal_inbox_device_session_closes_total{reason}` | Session ends, by reason. |
+| `portal_inbox_auth_failures_total{kind}` | Failed authentications. |
+| `portal_inbox_enrollments_total` | Phones enrolled. |
+| `portal_inbox_alerts_spooled_total{source,kind}`, `portal_inbox_spool_alerts`, `portal_inbox_spool_rejected_total` | The spool of the degraded mode. |
+| `portal_inbox_replica_epoch`, `portal_inbox_replica_snapshots_total`, `portal_inbox_replica_snapshot_failures_total`, `portal_inbox_replica_sync_failures_total` | The replica (with `inbox.replica` only). |
+| `portal_watch_sent_total{kind}`, `portal_watch_failed_total{kind}` | Alerts of the portal about itself, by kind: `service_unhealthy`, `service_recovered`, `sign_in_burst`. |
 | `portal_directory_age_seconds` | Time since the database last answered a read of the directory. It grows when the refresh fails. |
 
 The other `portal_*` metrics are in the sections "Prometheus" and "Several instances". The example `examples/prometheus.yml` shows a scrape job.
@@ -1460,8 +1460,8 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 
 - The inbox is new. Without the block `inbox`, nothing changes for the portal.
 - An account that has no permission `group.subscribe` loses its subscriptions at the first check that has a directory. Give the permission before you turn the inbox on for the people that use it.
-- A phone of the standalone Inbox (protocol 3) cannot connect. It gets the close code 4426. Each phone must enroll again with a code.
-- The standalone Inbox files `deploy/inbox/` and the image `inbox` do not exist. See `deploy/README.md`.
+- A phone of the standalone alert server (protocol 3) cannot connect. It gets the close code 4426. Each phone must enroll again with a code.
+- The standalone alert server files (its deploy directory and its image) do not exist. See `deploy/README.md`.
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
 

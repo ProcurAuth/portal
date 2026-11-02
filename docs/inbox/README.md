@@ -30,7 +30,7 @@ Each subscribed phone gets each alert, and shows it one time. This holds also wh
 5. The inbox keeps an alert for a phone until `inbox.storage.delivery_ttl`. After this time, the delivery expires, and the pages show it as expired.
 6. The inbox deletes the history after `inbox.storage.alert_retention`.
 
-A gap in coverage is visible. A subscribed phone that the inbox does not see for `inbox.devices.unreachable_after` is `unreachable` in the pages and in the metric `inbox_devices_unreachable`. The app shows its connection state all the time. It warns the user after `inbox.devices.offline_warning_after`.
+A gap in coverage is visible. A subscribed phone that the inbox does not see for `inbox.devices.unreachable_after` is `unreachable` in the pages and in the metric `portal_inbox_devices_unreachable`. The app shows its connection state all the time. It warns the user after `inbox.devices.offline_warning_after`.
 
 If two instances or a retry send the same alert, the idempotency key makes one alert. A lost receipt can cause a second send to a phone. The app ignores the second copy, so the user sees one alert.
 
@@ -106,7 +106,7 @@ The inbox ignores the notifications `resolved`. A producer of the file can set `
 
 ### Alerts of the portal
 
-The portal can send alerts about itself, in process, with the source `portal`. It needs the block `inbox.portal_alerts`. The alerts are: a service is unhealthy, a service is healthy again, and a burst of refused sign-ins. The root `README.md` describes them.
+The portal can send alerts about itself, in process, with the source `portal`. It needs the block `inbox.watch`. The alerts are: a service is unhealthy, a service is healthy again, and a burst of refused sign-ins. The root `README.md` describes them.
 
 ## Enroll a phone
 
@@ -116,7 +116,7 @@ An account makes the code, and the phone uses it one time.
 2. Open the page **My phones** of the tab Inbox. The account needs `group.subscribe` on one group at least.
 3. Press **Make a code**. The page shows the code one time.
 4. On the phone, install the app and open **Add a server**.
-5. Type the code, or tap the link `inbox://enroll?...` on the phone.
+5. Type the code, or tap the link `portal-inbox://enroll?...` on the phone.
 6. Compare the fingerprint that the app shows with the fingerprint on the page.
 7. Confirm. The app connects, enrolls and shows the groups.
 8. Choose a group and an action for each group that the app lists.
@@ -181,7 +181,7 @@ A person cannot change the login of a phone. The app shows it read-only. The sou
 No physical phone is needed for the tests of the app. `tools/android/emulator.sh` runs an Android 14 emulator in Docker. It needs `/dev/kvm`.
 
 1. Build the app: `tools/build.sh apk`. The script `tools/android/build-apk.sh` lists the variables for the key of the APK.
-2. Start the emulator: `tools/android/emulator.sh start`. The script installs `dist/inbox-<version>.apk`, grants the permissions and prints the address of the screen. Open <http://localhost:6080> in a browser.
+2. Start the emulator: `tools/android/emulator.sh start`. The script installs `dist/portal-inbox-<version>.apk`, grants the permissions and prints the address of the screen. Open <http://localhost:6080> in a browser.
 3. Start the stack (see `deploy/README.md`). Publish the port of the portal to the network: `PORTAL_BIND=0.0.0.0`.
 4. Set `inbox.devices.public_address` to `172.17.0.1:<port>`. This address is the host as the emulator sees it through the Docker bridge.
 5. Make a code on the page "My phones". Open its link on the phone: `adb shell am start -a android.intent.action.VIEW -d '<link>'`.
@@ -206,7 +206,7 @@ The block names a directory that every instance shares. It must be a volume of p
 
 An instance that starts waits until the lease is released or has not changed for `lease_ttl`. It takes the next epoch. It restores the newest snapshot that passes `PRAGMA quick_check`. Then it serves. An instance that loses its lease stops the whole process. The orchestrator starts it again as a standby.
 
-With `sync_alerts = true`, the inbox confirms an alert only after the snapshot that holds it exists. A producer that gets no answer sends the alert again, and the idempotency key makes one alert. If the shared directory fails, the producer gets `503 replication_unavailable`. With `sync_alerts = false`, the inbox confirms after the local commit, and a failed copy is only logged (`inbox_replica_sync_failures_total`).
+With `sync_alerts = true`, the inbox confirms an alert only after the snapshot that holds it exists. A producer that gets no answer sends the alert again, and the idempotency key makes one alert. If the shared directory fails, the producer gets `503 replication_unavailable`. With `sync_alerts = false`, the inbox confirms after the local commit, and a failed copy is only logged (`portal_inbox_replica_sync_failures_total`).
 
 Receipts and last-seen times travel with the next snapshot. After a takeover, a phone can get an alert again when its receipt was lost. The app ignores it.
 
@@ -228,7 +228,7 @@ To move from SQLite to PostgreSQL, stop the SQLite instance. Run `portal inbox i
 
 A PostgreSQL failover takes seconds to minutes. In this time, the instances still accept alerts and still deliver them. The phones keep their sessions. `/readyz` answers `200 degraded`.
 
-- Each call to the database has a limit of 2 seconds. When a call fails, the instance switches to memory. A probe checks each second for a writable primary. The log has `storage_degraded` and `storage_recovered`. The gauges `inbox_storage_degraded` and `inbox_spool_alerts` show the state.
+- Each call to the database has a limit of 2 seconds. When a call fails, the instance switches to memory. A probe checks each second for a writable primary. The log has `storage_degraded` and `storage_recovered`. The gauges `portal_inbox_storage_degraded` and `portal_inbox_spool_alerts` show the state.
 - The inbox validates an alert as usual and keeps it in a spool. The spool holds 10 000 alerts at most. When it is full, the producer gets `503 spool_full` and sends the alert again. The spool holds one delivery for each phone that is subscribed. The id of the alert comes from the source and the idempotency key. Two instances that accept the same alert make the same id.
 - With the block `inbox.cluster`, the inbox copies the alert to the other instances before it answers the producer. The alert then survives the loss of the instance that accepted it. The log has `spool_unreplicated` when no other instance had the copy.
 - When the primary is back, each instance writes its spool, oldest first. The write ignores an alert that exists (`ON CONFLICT DO NOTHING`). A crash in the middle gives one alert row and one delivery row for each phone.

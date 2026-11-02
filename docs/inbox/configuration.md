@@ -9,7 +9,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 ## Where the blocks go
 
 - The block `inbox` is optional. Without it, the portal has no inbox and opens no port for it. With it, the producers, the webhooks and the phones use `server.listen_address`, the port of the pages. The inbox has no listener for them. `inbox.devices.public_address` is the public base URL of the portal as the phones reach it. The portal has no base path: a proxy under a prefix removes the prefix.
-- Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `portal_alerts` are optional.
+- Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
 - The blocks `group "<id>"` and `producer "<name>"` can occur more than once.
 - The inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
 
@@ -30,7 +30,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.storage.pool_size` applies only with the block `postgres`.
 - `inbox.replica` needs SQLite. It must not be present with the block `postgres`. Its `dir` must not be the directory of `storage.database`.
 - `inbox.cluster` needs the block `postgres`.
-- `inbox.portal_alerts.group` must be the label of a block `group`. The block must send at least one kind of alert.
+- `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
 - Each `producer` names groups that exist, and has a token of 32 characters at least. Two producers must not share a token.
 
 ## Secrets
@@ -43,14 +43,14 @@ Two keys that contradict each other stop the program at start. The message names
 
 ## Default values of the optional keys
 
-The optional keys have documented defaults. Examples: `inbox.name` is `"Inbox"`, `inbox.devices.max_devices` is 1000, `inbox.enrollment.code_ttl` is `"10m"`, and `inbox.storage.pool_size` is 8. The reference has the full list.
+The optional keys have documented defaults. Examples: `server.name` is `"Portal"`, `inbox.devices.max_devices` is 1000, `inbox.enrollment.code_ttl` is `"10m"`, and `inbox.storage.pool_size` is 8. The reference has the full list.
 
-## Keys of the standalone Inbox that no longer exist
+## Keys of the standalone alert server that no longer exist
 
 | Old key | Now |
 |---|---|
 | `server.listen` | None. The producers and the phones use `server.listen_address` of the portal. |
-| `server.name` | `inbox.name` |
+| `server.name` | `server.name` of the portal. The key is the name of the instance, and the phones show it. |
 | `server.admin_listen` | None. The pages are in the portal. |
 | `server.trusted_proxies` | `server.trusted_proxies` of the portal. The inbox has no list of its own. The routes of the phones use it too. |
 | `server.shutdown_grace` | None. The shutdown of the portal applies. |

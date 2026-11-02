@@ -28,7 +28,7 @@ The public key is derived. If the file is replaced, every device and every code 
 The code is one text. It is also a deep link that the app opens.
 
 ```text
-inbox://enroll?s=<address>&k=<server key>&c=<secret>
+portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>
 ```
 
 | Key | Value |
@@ -48,7 +48,7 @@ inbox://enroll?s=<address>&k=<server key>&c=<secret>
 
 ## Enrollment: `GET /v1/enroll` (WebSocket, binary frames)
 
-`Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue `inbox/v1/enroll`. Each binary frame
+`Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue `portal-inbox/v1/enroll`. Each binary frame
 carries one Noise message (65535 bytes at most). The device static key is new. The
 phone makes it for this enrollment. The remote static key is the key `k` of the code.
 
@@ -95,7 +95,7 @@ Security properties:
 
 ## Session: `GET /v1/session` (WebSocket, binary frames)
 
-`Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue `inbox/v1/session`. Each WebSocket
+`Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue `portal-inbox/v1/session`. Each WebSocket
 binary frame carries exactly one Noise message (at most 65535 bytes).
 
 1. Device to server, Noise message 1 that holds
@@ -124,10 +124,17 @@ The messages `set_user_name` and `user_name` do not exist in protocol 4. The ser
 | `t` | Fields |
 |---|---|
 | `welcome` | `server_name`, `groups[] {id,name,description}` (only the groups that the account may subscribe to), `subscriptions[]` (group ids), `heartbeat_interval_ms`, `offline_warning_after_ms`, `server_time_ms`, `user_name` (login of the account, read-only) |
-| `alert` | `alert_id` (hex, 128 random bits), `group`, `group_name`, `title` (one line, at most 128 characters), `created_at_ms` |
+| `alert` | `alert_id` (hex, 128 random bits), `kind`, `group`, `group_name`, `title` (one line, at most 128 characters), `created_at_ms` |
 | `subscriptions` | `subscriptions[]`, sent after each change. The server also sends it when the account loses the permission for a group: the server removes the subscription, and the message tells the phone. |
 | `pong` | `nonce` |
 | `error` | `code`, `message`. The codes are `unknown_group`, `forbidden_group` and `unavailable`. `unknown_group`: the group does not exist. `forbidden_group`: the account has no permission `group.subscribe` on the group, and `message` is the group. `unavailable`: the storage or the rights are not ready, so send the message again later. |
+
+### The kind of a message
+
+Each alert frame has the field `kind`. Protocol 4 has one kind: `alert`. The field is mandatory.
+The core parser refuses any other value, and a frame without the field.
+A later protocol version can add kinds. The server stores the kind in the column `kind` of the table `alerts`. The default of the column is `alert`.
+The version number of the protocol stays 4, because no phone is deployed.
 
 ### Rights of the account
 
@@ -170,8 +177,8 @@ A phone subscribes only to a group for which its account has the permission `gro
 
 These choices fill the gaps of the specification. Change them only with a new protocol version.
 
-1. **Query form.** The link is `inbox://enroll?s=..&k=..&c=..`. The earlier design note
-   used `inbox://enroll#<code>`. The query form is the contract.
+1. **Query form.** The link is `portal-inbox://enroll?s=..&k=..&c=..`. The earlier design note
+   used `portal-inbox://enroll#<code>`. The query form is the contract.
 2. **Strict code.** The parser is strict. The scheme and the key names are case sensitive.
    Base64url padding is an error. Bits at the end that are not zero are an error.
 3. **Order of keys.** The order of `s`, `k` and `c` in the query is free.

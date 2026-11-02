@@ -32,4 +32,4 @@ The security model of the portal is in the root `SECURITY.md`. This page gives t
 - Send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. A phone and a webhook have no session. Add a retry middleware that retries only when the server does not answer.
 - Keep `inbox.cluster.listen` on the private network of the pods.
 - Do not publish the port of the portal to the internet without a proxy that you control. Let the proxy send only `/v1/`, `/api/v1/` and `/api/version` to the internet, and keep the pages behind ForwardAuth. A phone session uses a budget of connections that is separate from the pages.
-- Alert on `inbox_devices_unreachable`, `inbox_oldest_pending_delivery_seconds`, `inbox_storage_degraded` and `inbox_replica_last_snapshot_age_seconds`.
+- Alert on `portal_inbox_devices_unreachable`, `portal_inbox_oldest_pending_delivery_seconds`, `portal_inbox_storage_degraded` and `portal_inbox_replica_last_snapshot_age_seconds`.
