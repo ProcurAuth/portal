@@ -289,3 +289,30 @@ The phones show it as the name of the server: the enrollment answer and the mess
 - **The old names in tests.** Two tests need the old names to prove that they are refused. The code builds each name from two parts, so that no copy of the old name stays in the repository.
 - **The commits.** The commits split the mechanical rename by area. An intermediate commit can fail to build, because the rename crosses the areas. The last commit builds and passes the tests.
 - **The Android build.** The package, the application id, the scheme and the library name changed. The labels, the strings and the themes only had a plain replacement. Batch E reviews them.
+
+## 17. The Android app in the rework (batch E)
+
+The app has the name **Portal Inbox**. The launcher label, the notification texts and the strings use this name. The application id stays `app.portalinbox`. The name of the app or of the id does not hold any older name.
+
+### 17.1 The field `kind` in the app
+
+- **Frame.** `AlertFrame.parse` reads the alert frame. The field `kind` never makes the parser fail. A valid name (`[a-z][a-z0-9_]{0,31}`) stays as it is. A missing value, a value that is not a string and a bad name become `unknown`. The other fields of the delivery fail as before.
+- **Database.** The table `alerts` has the column `kind`, with the default `alert`. The version of the database is 7. The upgrade uses the same removal and creation of the tables as version 6, because no phone holds data.
+- **Display.** A message of the kind `alert` shows as before. Any other kind shows as a generic message: the notification text is "Message in <group>", and the detail sheet has the row Kind ("Message" or "Message (<kind>)"). The app never drops a message because of its kind.
+- **No change of delivery.** The app stores the message, sends the receipt, removes duplicates and shows it as before. The level of the group (Off, Notification, Ring, Alarm) applies to a message of any kind.
+- **Strict core.** The core crate still refuses a kind other than `alert`, for the server and for the tests of the core. The app reads the frame in Kotlin after the core decrypts it. The core does not read the frame. A later protocol version changes the core and the app together.
+
+### 17.2 Strings and names
+
+- The top bar and the first menu item of the app say "Inbox". The lists say "messages". The words "alert" and "alarm" stay where the item is an alert or an alarm.
+- The names of the notification channels and their descriptions are in `strings.xml`.
+- The server name (`server.name` of the portal, field `server_name`) shows in the server list, on the server screen, in the alarm screen, in the detail sheet and in the notifications of the connection.
+- The login is read-only.
+- There is no screen "About" or "Help": the app has none.
+
+### 17.3 Deviations
+
+- **No TLS code.** The app accepts an `http://` or an `https://` base URL. For `https://` it uses the trust store of the phone. The app has no certificate handling. The manifest keeps `usesCleartextTraffic="true"`: the portal is often on a private network over plain HTTP.
+- **The files `.kotlin/errors`.** Three log files of the Kotlin compiler were tracked by mistake. They are removed from the index and ignored.
+- **Gradle unit tests.** The module had no unit test. The tests are under `android/app/src/test`. They run on the JVM with the real `org.json` library. `tools/android/build-apk.sh` runs them (`testReleaseUnitTest`).
+- **Check in the emulator.** The release APK was built with a throwaway key and run in the Android 14 emulator (`tools/android/emulator.sh`) against a portal container built from this tree. The deep link opened the form with the address and the fingerprint. A malformed link gave "This is not a valid enrollment code." A used code gave "The code is not valid. Ask for a new one." The enrollment, the subscription to two groups, one notification for an alert that the producer sent two times, and an alarm all worked. The phone showed the server name.

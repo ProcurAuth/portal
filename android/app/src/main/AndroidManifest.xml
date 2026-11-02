@@ -74,7 +74,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Self-hosted inbox: keeps a persistent encrypted connection to the user's own alert server so that life-critical alerts are delivered without any third-party push service." />
+                android:value="Keeps an encrypted connection to the portal of the user, so that messages and alerts arrive without a third-party push service." />
         </service>
 
         <receiver

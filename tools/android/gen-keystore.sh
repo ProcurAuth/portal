@@ -17,7 +17,7 @@ pw=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 docker run --rm -u "$(id -u):$(id -g)" -v "$root/secrets:/out" inbox-android \
   keytool -genkeypair -noprompt -keystore /out/android-release.jks -storetype PKCS12 \
     -alias inbox -keyalg RSA -keysize 4096 -validity 10000 \
-    -storepass "$pw" -keypass "$pw" -dname "CN=Inbox, O=Inbox"
+    -storepass "$pw" -keypass "$pw" -dname "CN=Portal Inbox"
 umask 077
 cat > "$envf" <<EOT
 INBOX_KEYSTORE=$jks

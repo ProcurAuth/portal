@@ -15,6 +15,7 @@ import android.widget.TextView
 import app.portalinbox.R
 import app.portalinbox.data.KeyVault
 import app.portalinbox.data.Store
+import app.portalinbox.net.DeepLink
 import app.portalinbox.net.EnrollField
 import app.portalinbox.net.Enroller
 import app.portalinbox.net.EnrollmentError
@@ -99,7 +100,7 @@ class AddServerActivity : BaseActivity() {
     /** `portal-inbox://enroll?...`: fills the code. The person still checks the server and taps Connect. */
     private fun prefill(intent: Intent?) {
         val data = intent?.data ?: return
-        if (data.scheme != "portal-inbox" || data.host != "enroll") return
+        if (!DeepLink.isEnroll(data.scheme, data.host)) return
         code.setText(data.toString())
         clearErrors()
         if (refreshCheck()) {

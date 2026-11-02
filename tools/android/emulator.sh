@@ -8,11 +8,12 @@
 #   tools/android/emulator.sh stop          remove the emulator
 #
 # Requires /dev/kvm. The emulator reaches the host through the Docker bridge
-# gateway (printed by `start`, usually 172.17.0.1): set `inbox.devices.public_address`
-# to <gateway>:<port> of an inbox published on the host, make an enrollment code on the
-# page "My phones", and open the link `portal-inbox://enroll?...` on the phone (for example
-# `adb shell am start -a android.intent.action.VIEW -d '<link>'`). The host network is not used: the
-# emulator's virtual display would clash with the desktop's X server.
+# gateway (printed by `start`, usually 172.17.0.1). Set `inbox.devices.public_address` of
+# the portal to http://<gateway>:<port>, with the port published on the host. Make an
+# enrollment code in the tab Inbox of the portal. Open its link `portal-inbox://enroll?...`
+# on the phone, for example with
+# `adb shell am start -a android.intent.action.VIEW -d '<link>'`. The host network is not
+# used: the virtual display of the emulator would clash with the X server of the desktop.
 set -eu
 
 IMAGE="budtmo/docker-android:emulator_14.0@sha256:1bffbbed5d530284dd355eb73e863411b4a761bc55a00fa1e49fe4a013b6b24a"
@@ -69,7 +70,7 @@ case "${1:-}" in
     echo
     echo "Emulator screen: http://localhost:$WEB_PORT"
     gateway=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
-    echo "The host is $gateway for the phone. Make an enrollment code on the page \"My phones\", then open its link on the phone."
+    echo "The host is $gateway for the phone. Make an enrollment code in the tab Inbox of the portal, then open its link on the phone."
     ;;
   install)
     apk_path "${2:-}"
@@ -84,7 +85,7 @@ case "${1:-}" in
     docker rm -f "$NAME" >/dev/null && echo "emulator removed"
     ;;
   *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
