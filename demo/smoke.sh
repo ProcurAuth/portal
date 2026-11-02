@@ -76,7 +76,7 @@ check "inbox: a plain GET of /v1/enroll reaches the inbox (400)" 400 "$(status "
 check "inbox: a WebSocket upgrade of /v1/session through Traefik gives 101" 101 \
   "$(status --max-time 2 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$base/v1/session")"
-check "inbox: /readyz on the port of the pages" 200 "$(status "$base/readyz")"
+check "inbox: /readyz of the portal listener" 200 "$(status "http://127.0.0.1:8091/readyz")"
 check "inbox: /api/version on the port of the pages, no ForwardAuth" 200 "$(status "$base/api/version")"
 token=$(cat .secrets/inbox_api_key)
 akey=$(cat .secrets/alice_key)

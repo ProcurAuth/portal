@@ -106,7 +106,7 @@ services:
       traefik.http.routers.notes-user.middlewares: portal-user@file
       traefik.http.routers.notes-user.service: notes
       # The keys: a request with `Authorization: Bearer mcp_...` on the API.
-      traefik.http.routers.notes-key.rule: PathPrefix(`/notes/api/`) && HeaderRegexp(`Authorization`, `^Bearer mcp_`)
+      traefik.http.routers.notes-key.rule: PathPrefix(`/notes/api/`) && HeaderRegexp(`Authorization`, `^Bearer (mcp|api|whk)_`)
       traefik.http.routers.notes-key.entrypoints: web
       traefik.http.routers.notes-key.priority: "200"
       traefik.http.routers.notes-key.middlewares: portal-key-chain@file
