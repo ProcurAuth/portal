@@ -164,7 +164,8 @@ pub fn build(r: &Resolved, rules: &Rules) -> Result<BTreeMap<String, FileAccount
                 portal_actions::KEYS_OWN_CREATE
             ));
         }
-        portal_actions::check_user_grants(&grants).map_err(|e| format!("user {login:?}: {e}"))?;
+        // The grants on the service portal follow the document of the features that the file
+        // turns on. The caller checks them when the whole configuration exists.
         let password_hash = match block.secret_bytes("password_hash") {
             None => None,
             Some(bytes) => {
@@ -185,7 +186,7 @@ pub fn build(r: &Resolved, rules: &Rules) -> Result<BTreeMap<String, FileAccount
         };
         if !block.children.is_empty() && !rules.keys_enabled {
             return Err(format!(
-                "user {login:?}: a block key needs the block keys; without it, no key is accepted"
+                "user {login:?}: a block key holds an MCP key and needs the block keys with keys.mcp = true; without it, no MCP key is accepted"
             ));
         }
         if block.children.len() > rules.max_keys_per_user {
@@ -230,7 +231,7 @@ fn file_key(
             grants.len()
         )));
     }
-    portal_actions::check_key_grants(&grants).map_err(|e| here(&e))?;
+    portal_actions::check_key_grants(crate::keys::KeyKind::Mcp, &grants).map_err(|e| here(&e))?;
     let digest = match (block.has_secret("key"), block.has_secret("key_sha256")) {
         (true, true) => {
             return Err(here(
@@ -247,11 +248,16 @@ fn file_key(
             let bytes = block.secret_bytes("key").unwrap_or_default();
             let text = std::str::from_utf8(bytes)
                 .map_err(|_| here(&format!("{path}.key: the value is not valid UTF-8 ({source}; the value is hidden)")))?;
-            crate::keys::check_format(text).map_err(|reason| {
+            let kind = crate::keys::check_format(text).map_err(|reason| {
                 here(&format!(
                     "{path}.key: the text of a key is mcp_, 43 characters and 6 characters of checksum, 53 characters in all ({reason:?}; {source}; the value is hidden)"
                 ))
             })?;
+            if kind != crate::keys::KeyKind::Mcp {
+                return Err(here(&format!(
+                    "{path}.key: a block key holds an MCP key, with the prefix mcp_: the key of a service is a block api_key in the block inbox ({source}; the value is hidden)"
+                )));
+            }
             crate::keys::digest(text)
         }
         (false, true) => {

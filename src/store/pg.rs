@@ -238,6 +238,12 @@ CREATE TABLE directory_version (
 );
 INSERT INTO directory_version (id, version) VALUES (1, 0);
 ",
+    "
+-- Version 7: the kind of a key (portal 5.1). The kind is the prefix of the text of the key: mcp for an
+-- agent, api for a service. A key that exists before this version is an MCP key: no other kind
+-- existed.
+ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
+",
 ];
 
 /// The grants of the rows of `user_grants`: action, resource type, resource id, resource path and
@@ -1186,8 +1192,8 @@ impl Pg {
                 };
                 tx.execute(
                     "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                       last_check_at, check_count)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                                       last_check_at, check_count, kind)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                     &[
                         &key.id,
                         &owner_id,
@@ -1198,6 +1204,7 @@ impl Pg {
                         &key.expires_at,
                         &key.last_check_at,
                         &key.check_count,
+                        &key.kind.name(),
                     ],
                 )?;
                 keys::insert_key_grants(&mut tx, &key.id, &key.grants)?;
@@ -1550,7 +1557,7 @@ mod tests {
         let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
             unreachable!()
         };
-        assert_eq!(SCHEMA.len(), 6);
+        assert_eq!(SCHEMA.len(), 7);
         let config = fresh.pool.config.clone();
         let mut admin = config.connect(NoTls).unwrap();
         // This database was made by the portal before version 6: the tables and the column did
@@ -1634,6 +1641,40 @@ mod tests {
         }
         // A second start finds nothing to do.
         assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn the_migration_to_version_seven_adds_the_kind_of_a_key_and_its_keys_are_mcp_keys() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // This database was made by the portal before version 7: the column `kind` did not exist.
+        admin
+            .batch_execute(
+                "INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+                 INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+                   VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
+                 ALTER TABLE keys DROP COLUMN kind;
+                 DELETE FROM schema_migrations WHERE version > 6;",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let keys = migrated.load_directory().unwrap().keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].kind,
+            crate::keys::KeyKind::Mcp,
+            "no other kind existed"
+        );
+        let bad = admin.batch_execute("UPDATE keys SET kind = 'whk'");
+        assert!(bad.is_err(), "the kind whk is reserved");
     }
 
     #[test]

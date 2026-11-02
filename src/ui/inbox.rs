@@ -11,9 +11,11 @@ use std::fmt::Write as _;
 
 use super::settings::{notice_html, page_shell, part_head, plural, Frame, Notice, Tab};
 use crate::inbox::admin::{AlertDetail, AlertSummary, ConnectionView, DeviceRow, DeviceState};
-use crate::inbox_actions::PAGE;
 use crate::util::{html_escape, time_tag};
 
+/// The page of the inbox in the settings. The gear of the launcher links to it for an account that
+/// is not the superadmin.
+pub const PAGE: &str = "/auth/settings/inbox";
 pub const OVERVIEW_PATH: &str = PAGE;
 pub const DEVICES_PATH: &str = "/auth/settings/inbox/devices";
 pub const CONNECTIONS_PATH: &str = "/auth/settings/inbox/connections";
@@ -685,7 +687,7 @@ pub struct DocView {
     /// The address of the portal, with the scheme. The producers use the port of the pages.
     pub base: String,
     pub groups: Vec<GroupLine>,
-    /// The portal accepts keys: a key can be a producer.
+    /// The kind `api` is on: an API key can send alerts.
     pub keys: bool,
     /// The account may make a key.
     pub keys_page: bool,
@@ -707,21 +709,21 @@ pub fn doc_page(frame: &Frame, rights: &Rights, view: &DocView) -> String {
         out,
         r#"<div class="docs"><p class="part__lede">A producer is a program that sends alerts: a script, Grafana, Alertmanager or any tool that sends an HTTP request. The inbox takes each alert, keeps it, and sends it to each phone that subscribes to the group. A phone shows the alert one time.</p>
 <h3 class="subTitle">Address</h3>
-<p>The producers send their requests to the portal, at this address. It is the address of the pages. The phones use another port, which has no API of the producers.</p>
+<p>The senders send their requests to the portal, at this address. It is the address of the pages and of the phones.</p>
 <p><code>{base}</code></p>
 <h3 class="subTitle">Who can send</h3>
-<p>A request has the header <code>Authorization: Bearer &lt;token&gt;</code>. A tool that cannot set a header can use the query <code>?token=&lt;token&gt;</code>. A token in an address can reach a log of a proxy: use the header when you can. Two kinds of token work at the same time.</p>
-<ul class="docList"><li>A <strong>token of the file</strong> is the value of a block <code>producer</code> in the configuration. The block lists the groups of the token.</li>"#
+<p>A request has the header <code>Authorization: Bearer &lt;key&gt;</code>. The key is an API key: its text starts with <code>api_</code>. A tool that cannot set a header can use the query <code>?token=&lt;key&gt;</code>. A key in an address can reach a log of a proxy: use the header when you can. A key of another kind gets <code>401</code>.</p>
+<ul class="docList"><li>A <strong>key of the file</strong> is a block <code>api_key</code> in the configuration. The block names its owner, an account of the file, and lists the groups of the key.</li>"#
     );
     if view.keys {
         out.push_str(
-            r#"<li>A <strong>key of the portal</strong> starts with <code>mcp_</code>. The key needs the permission <code>alert.send</code> on the group, and the permission of its owner too. The permission can have a limit of alerts in a time window. A critical group has no limit. A key sends no notification of the type resolved.</li>"#,
+            r#"<li>A <strong>key of the portal</strong> starts with <code>api_</code>. The key needs the permission <code>alert.send</code> on the group, and the permission of its owner too. The permission can have a limit of alerts in a time window. A critical group has no limit. A key sends no notification of the type resolved.</li>"#,
         );
     }
     out.push_str("</ul>");
     if view.keys && view.keys_page {
         out.push_str(
-            r#"<p>Make a key on the page <a href="/auth/keys">Keys</a>. Add the permission <code>alert.send</code> of the service inbox for each group.</p>"#,
+            r#"<p>Make a key of the kind API on the page <a href="/auth/keys">Keys</a>. Give it the permission <code>alert.send</code> on each group.</p>"#,
         );
     }
     out.push_str(r#"<h3 class="subTitle">Groups</h3>"#);
@@ -760,7 +762,7 @@ pub fn doc_page(frame: &Frame, rights: &Rights, view: &DocView) -> String {
 <pre class="docCode"><code>curl -X POST "{base}/api/v1/notify/infra?title=Backup%20done" \
   -H "Authorization: Bearer $TOKEN"</code></pre>
 <h3 class="subTitle">Alertmanager</h3>
-<p>Add a receiver. Each firing alert of the payload makes one alert. A repeat of the same alert makes no second alert. Alerts of the type resolved are not sent unless the producer has <code>webhook_send_resolved = true</code>.</p>
+<p>Add a receiver. Each firing alert of the payload makes one alert. A repeat of the same alert makes no second alert. Alerts of the type resolved are not sent unless the block <code>api_key</code> has <code>webhook_send_resolved = true</code>.</p>
 <pre class="docCode"><code>receivers:
   - name: inbox
     webhook_configs:
@@ -773,14 +775,14 @@ pub fn doc_page(frame: &Frame, rights: &Rights, view: &DocView) -> String {
 <h3 class="subTitle">Grafana</h3>
 <p>Add a contact point of the type Webhook. Set the URL to the Alertmanager path of the group, the method to POST, and the authorization header to <code>Bearer</code> with the token. Grafana sends the same payload as Alertmanager.</p>
 <h3 class="subTitle">Status of an alert</h3>
-<p><code>GET {base}/api/v1/alerts/&lt;alert_id&gt;</code> gives the delivery status of an alert, for a producer that escalates in another tool. The token must have the permission <code>alert.read</code> on the group of the alert, or the group in its block.</p>
+<p><code>GET {base}/api/v1/alerts/&lt;alert_id&gt;</code> gives the delivery status of an alert, for a producer that escalates in another tool. The key must have the permission <code>alert.read</code> on the group of the alert, or the group in its block.</p>
 <h3 class="subTitle">Errors</h3>
 <div class="dataTableWrap"><table class="dataTable"><thead><tr><th scope="col">Status</th><th scope="col">Meaning</th></tr></thead><tbody>
-<tr><td><code>401</code></td><td>The token is missing or not valid.</td></tr>
-<tr><td><code>403</code></td><td>The token has no permission to send to this group. The body names the group.</td></tr>
+<tr><td><code>401</code></td><td>The key is missing or not valid, or it is not an API key.</td></tr>
+<tr><td><code>403</code></td><td>The key has no permission to send to this group. The body names the group.</td></tr>
 <tr><td><code>422</code></td><td>The group does not exist, or the title is empty.</td></tr>
 <tr><td><code>429</code></td><td>The limit of alerts of the key is reached. The header <code>Retry-After</code> gives the seconds to wait.</td></tr>
-<tr><td><code>503</code></td><td>The inbox cannot take the alert now (the storage is away), or the portal cannot check a key yet (<code>directory_not_ready</code>). Send the request again. A token of the file works when the portal is not ready.</td></tr>
+<tr><td><code>503</code></td><td>The inbox cannot take the alert now (the storage is away), or the portal cannot check a key yet (<code>directory_not_ready</code>). Send the request again. A key of the file works when the portal is not ready.</td></tr>
 </tbody></table></div>
 </div></section>"#
     );
@@ -1092,7 +1094,7 @@ mod tests {
         assert!(html.contains("https://inbox.example.org:8080/api/v1/alerts"));
         assert!(html.contains("/api/v1/notify/infra"));
         assert!(html.contains("/api/v1/webhooks/alertmanager/infra"));
-        assert!(html.contains("<code>mcp_</code>"));
+        assert!(html.contains("<strong>key of the portal</strong> starts with <code>api_</code>"));
         assert!(html.contains("never (critical)"));
         assert!(html.contains(r#"href="/auth/keys""#));
         let no_keys = Frame {
@@ -1100,7 +1102,7 @@ mod tests {
             ..frame()
         };
         let html = doc_page(&no_keys, &rights(true), &view(false));
-        assert!(!html.contains("mcp_"));
+        assert!(!html.contains("key of the portal"));
         assert!(!html.contains(r#"href="/auth/keys""#));
     }
 

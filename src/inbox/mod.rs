@@ -425,7 +425,7 @@ impl Slot {
             event = "inbox_started",
             public_address = %app.config.devices.public_address,
             groups = app.groups.len(),
-            producers = app.secrets.producers.len(),
+            api_keys = app.secrets.file_keys.len(),
             replica = app.config.replica.is_some(),
             cluster = app.cluster.enabled(),
             storage = if app.db.is_shared() { "postgres" } else { "sqlite" },

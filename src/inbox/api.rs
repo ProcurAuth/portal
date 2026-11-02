@@ -17,7 +17,7 @@ use super::http::{json, read_body, Resp};
 use super::log;
 use super::rights::{Decision, KeyCheck};
 use super::spool::{self, Accepted as Spooled};
-use super::state::{App, Producer};
+use super::state::{App, FileKey};
 use super::util::{hex, is_hex_id, now_ms, truncate_chars};
 use crate::util::parse_form;
 
@@ -333,9 +333,9 @@ impl ProducerQuery {
     }
 }
 
-/// Who sends an alert: a producer of the file, or a key of the portal.
+/// Who sends an alert: a key of the file, or a key of the database.
 enum Sender<'a> {
-    Producer(&'a Producer),
+    FileKey(&'a FileKey),
     Key { id: String },
 }
 
@@ -343,25 +343,26 @@ impl Sender<'_> {
     /// The name of the sender in the source of an alert.
     fn name(&self) -> String {
         match self {
-            Sender::Producer(p) => p.name.clone(),
+            Sender::FileKey(p) => p.name.clone(),
             Sender::Key { id } => format!("key:{id}"),
         }
     }
 
-    /// Whether a notification "resolved" of a webhook becomes an alert. A key never sends them.
+    /// Whether a notification "resolved" of a webhook becomes an alert. A key of the database never
+    /// sends them.
     fn sends_resolved(&self) -> bool {
         match self {
-            Sender::Producer(p) => p.webhook_send_resolved,
+            Sender::FileKey(p) => p.webhook_send_resolved,
             Sender::Key { .. } => false,
         }
     }
 }
 
-/// The text of a key of the portal starts with this prefix.
-const KEY_PREFIX: &str = "mcp_";
-
-/// Finds who sends. The token of a producer of the file comes first: it never depends on the
-/// portal. A token that is not one of them can be a key of the portal.
+/// Finds who sends. The API of the inbox verifies the keys of the kind `api` only (portal 8.3a).
+/// The text gets its form checked first: the prefix, the length, the characters and the checksum,
+/// before any lookup. A key of another kind gets the same answer as a text with a bad form: 401
+/// with no detail. A key of the file comes next: it never depends on the portal. A key that is not
+/// one of them can be a key of the database.
 fn sender<'a>(
     app: &'a App,
     headers: &HeaderMap,
@@ -388,16 +389,23 @@ fn sender<'a>(
         )
     };
     let token = token.ok_or_else(unauthorized)?;
-    if let Some(p) = app.producer_for_token(token) {
-        return Ok(Sender::Producer(p));
+    match crate::keys::check_format(token) {
+        Ok(crate::keys::KeyKind::Api) => {}
+        Ok(_) => {
+            app.metrics.auth_failure("producer_kind");
+            return Err(unauthorized());
+        }
+        Err(_) => {
+            app.metrics.auth_failure("producer_token");
+            return Err(unauthorized());
+        }
+    }
+    if let Some(p) = app.file_key_for_token(token) {
+        return Ok(Sender::FileKey(p));
     }
     let Some(authorizer) = app.authorizer() else {
-        // Before the portal gives the authorizer, a key cannot be checked.
-        if token.starts_with(KEY_PREFIX) {
-            return Err(not_ready());
-        }
-        app.metrics.auth_failure("producer_token");
-        return Err(unauthorized());
+        // Before the portal gives the authorizer, a key of the database cannot be checked.
+        return Err(not_ready());
     };
     match authorizer.check_key(token) {
         KeyCheck::Valid { key_id } => Ok(Sender::Key { id: key_id }),
@@ -413,8 +421,9 @@ fn sender<'a>(
     }
 }
 
-/// Lets the sender do `action` on the group. A producer of the file needs the group in its list.
-/// A key needs the decision of the portal. For `alert.send` the decision counts one use, except for
+/// Lets the sender do `action` on the group. A key of the file needs the group in its list: the
+/// start kept only the groups that its owner may send to. A key of the database needs the decision
+/// of the portal. For `alert.send` the decision counts one use, except for
 /// a critical group: a critical group never has a limit.
 fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Result<(), ApiError> {
     let refused = || {
@@ -425,7 +434,7 @@ fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Resul
         )
     };
     match sender {
-        Sender::Producer(p) => {
+        Sender::FileKey(p) => {
             if p.groups.iter().any(|g| g == group) {
                 Ok(())
             } else {
@@ -440,7 +449,7 @@ fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Resul
                     "the portal cannot check keys yet, retry in a moment",
                 ));
             };
-            let count_use = action == crate::inbox_actions::ALERT_SEND && !app.is_critical(group);
+            let count_use = action == crate::portal_actions::ALERT_SEND && !app.is_critical(group);
             match authorizer.decide(id, action, group, count_use) {
                 Decision::Allowed => Ok(()),
                 Decision::Refused {
@@ -567,7 +576,7 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
     } = read_call(app, request).await?;
     let who = sender(app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
-    authorize(app, &who, crate::inbox_actions::ALERT_SEND, &req.group)?;
+    authorize(app, &who, crate::portal_actions::ALERT_SEND, &req.group)?;
     let key = idempotency_key(&headers, &[&req.group, &req.title])?;
     let accepted = accept_alert(
         app,
@@ -610,7 +619,7 @@ async fn get_alert_inner(
     if let Err(error) = authorize(
         app,
         &who,
-        crate::inbox_actions::ALERT_READ,
+        crate::portal_actions::ALERT_READ,
         &detail.summary.group,
     ) {
         return Err(if error.status() == StatusCode::FORBIDDEN {
@@ -646,7 +655,7 @@ async fn alertmanager_inner(
         body,
     } = read_call(app, request).await?;
     let who = sender(app, &headers, &query)?;
-    authorize(app, &who, crate::inbox_actions::ALERT_SEND, group)?;
+    authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?;
     let payload: Value = parse_json(&body)?;
     let alerts = payload
         .get("alerts")
@@ -735,7 +744,7 @@ async fn notify_inner(
         body,
     } = read_call(app, request).await?;
     let who = sender(app, &headers, &query)?;
-    authorize(app, &who, crate::inbox_actions::ALERT_SEND, group)?;
+    authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?;
     let header_title = headers
         .get("x-title")
         .and_then(|v| v.to_str().ok())

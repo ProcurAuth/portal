@@ -211,6 +211,8 @@ struct Custom {
     wait_complete: bool,
     /// `users.max_users`.
     max_users: usize,
+    /// `users.allow_creation`. The mode `static` needs `false`.
+    allow_creation: bool,
     /// More environment variables of the configuration.
     env: Vec<(String, String)>,
     /// The stop of the server, in place of SIGTERM. The server stops when it gets a value.
@@ -227,6 +229,7 @@ impl Default for Custom {
             session_secret: "0123456789abcdef0123456789abcdef",
             wait_complete: true,
             max_users: 10,
+            allow_creation: true,
             env: Vec::new(),
             stop: None,
         }
@@ -249,6 +252,7 @@ fn start_custom(
         session_secret,
         wait_complete,
         max_users,
+        allow_creation,
         env,
         stop,
     } = custom;
@@ -260,7 +264,7 @@ fn start_custom(
           superadmin_login_env    = "PORTAL_TEST_LOGIN"
           superadmin_password_env = "PORTAL_TEST_PASSWORD"
         }}
-        users {{ max_users = {max_users} }}
+        users {{ max_users = {max_users} allow_creation = {allow_creation} }}
         session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
         discovery {{ {discovery} }}
         {extra}
@@ -874,6 +878,29 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
     });
 }
 
+/// An account of the database that exists before the mode is `static`: the create route does not
+/// exist in this mode, so the test puts the row in the database.
+fn insert_account(node: &Node, login: &str, password: &str) {
+    let hash = password_hash(password);
+    node.state
+        .store
+        .insert_user(&crate::store::UserRow {
+            login: login.to_string(),
+            password_hash: hash.clone(),
+            grants: Vec::new(),
+            created_at: 1,
+        })
+        .unwrap();
+    node.state.users.insert(
+        login.to_string(),
+        UserRecord {
+            password_hash: hash,
+            grants: Vec::new(),
+            created_at: 1,
+        },
+    );
+}
+
 #[test]
 fn in_the_static_mode_only_the_configuration_gives_grants() {
     let node = start_custom(
@@ -881,6 +908,7 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
         None,
         Custom {
             env: vec![("FRED_HASH".into(), password_hash("a-long-password-2"))],
+            allow_creation: false,
             ..Custom::default()
         },
         r#"access { grants_mode = "static" }
@@ -888,13 +916,7 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
     );
     publish_catalog(&node, &[]);
     let root = sign_in(&node, "root", PASSWORD);
-    post(
-        &node,
-        &root,
-        USERS_ADD_PATH,
-        USERS_TOKEN,
-        "login=alice&password=a-long-password-1",
-    );
+    insert_account(&node, "alice", "a-long-password-1");
     let reply = post(
         &node,
         &root,
@@ -2384,9 +2406,13 @@ fn a_grant_that_the_whole_service_covers_is_dropped_and_a_host_stays_when_the_wh
 
 #[test]
 fn in_the_static_mode_a_save_cannot_give_access() {
-    let node = start_with(
+    let node = start_custom(
         Arc::new(Backend::Sqlite.fresh()),
         None,
+        Custom {
+            allow_creation: false,
+            ..Custom::default()
+        },
         r#"access { grants_mode = "static" }"#,
     );
     publish_catalog(&node, &[]);
@@ -2398,10 +2424,8 @@ fn in_the_static_mode_a_save_cannot_give_access() {
         USERS_TOKEN,
         "login=alice&password=a-long-password-1",
     );
-    assert_eq!(
-        add.location(),
-        Some("/auth/settings/users/alice?s=user-added")
-    );
+    assert_eq!(add.status, 404, "the create route does not exist");
+    insert_account(&node, "alice", "a-long-password-1");
     assert_eq!(
         post(
             &node,
@@ -3185,7 +3209,7 @@ fn add_alice(node: &Node, extra: &[Grant]) {
         Grant::from_path_text("data.read", "db", "host:prod")
             .unwrap()
             .with_limits(limits(r#"{"max_rows":5000}"#)),
-        Grant::parse("keys.own.use on service:portal").unwrap(),
+        Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap(),
         Grant::parse("keys.own.read on service:portal").unwrap(),
     ];
     grants.extend(extra.iter().cloned());
@@ -3209,6 +3233,7 @@ fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, grants: Vec<Gra
         .store
         .insert_key(
             &crate::store::KeyRow {
+                kind: crate::keys::KeyKind::Mcp,
                 id: id.into(),
                 owner: owner.map(Into::into),
                 name: format!("key {id}"),
@@ -3400,7 +3425,7 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
         // The value 0 of `max_key_lifetime` refuses each key (portal 5.3a).
         let zero: Vec<Grant> = without_use
             .into_iter()
-            .chain([Grant::parse("keys.own.use on service:portal")
+            .chain([Grant::parse("keys.own.use on service:portal/key_kind:mcp")
                 .unwrap()
                 .with_limits(limits(r#"{"max_key_lifetime":0}"#))])
             .collect();
@@ -3414,7 +3439,7 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
         let high: Vec<Grant> = zero
             .into_iter()
             .filter(|g| g.action != "keys.own.use")
-            .chain([Grant::parse("keys.own.use on service:portal")
+            .chain([Grant::parse("keys.own.use on service:portal/key_kind:mcp")
                 .unwrap()
                 .with_limits(limits(r#"{"max_key_lifetime":3600}"#))])
             .collect();
@@ -3800,7 +3825,7 @@ mod conformance_d {
         {
             let mut grants = grants_of(subject);
             // The portal lets a person use keys only with this right (portal 5.3b).
-            grants.push(Grant::parse("keys.own.use on service:portal").unwrap());
+            grants.push(Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap());
             grants.sort();
             store
                 .insert_user(&crate::store::UserRow {
@@ -3828,6 +3853,7 @@ mod conformance_d {
             store
                 .insert_key(
                     &crate::store::KeyRow {
+                        kind: crate::keys::KeyKind::Mcp,
                         id: local.to_string(),
                         owner: Some(owner.to_string()),
                         name: local.to_string(),
@@ -4539,18 +4565,21 @@ mod conformance_e {
                 password_hash: "h".into(),
                 grants: vec![
                     Grant::parse("access on service:probe").unwrap(),
-                    Grant::parse("keys.own.use on service:portal").unwrap(),
+                    Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap(),
                 ],
                 created_at: 1,
             })
             .unwrap();
         let make = |key_id: &str, byte: u8, grants: Vec<Grant>| -> String {
-            let text = crate::keys::generate().unwrap().to_string();
+            let text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+                .unwrap()
+                .to_string();
             let _ = byte;
             node.state
                 .store
                 .insert_key(
                     &crate::store::KeyRow {
+                        kind: crate::keys::KeyKind::Mcp,
                         id: key_id.into(),
                         owner: Some("ana".into()),
                         name: key_id.into(),
@@ -4574,7 +4603,9 @@ mod conformance_e {
         );
         let no_access = make("4d2e8f6a10b37c95", 2, Vec::new());
         node.state.users.refresh(&node.state.store).unwrap();
-        let unknown = crate::keys::generate().unwrap().to_string();
+        let unknown = crate::keys::generate(crate::keys::KeyKind::Mcp)
+            .unwrap()
+            .to_string();
         let token_header = node.state.config.identity.as_ref().unwrap().header.clone();
         let variables: Vec<(String, String)> = vec![
             ("valid_key_text".into(), valid),
@@ -4736,12 +4767,15 @@ fn the_rounds_write_the_key_checks_prune_the_old_keys_and_make_the_rows_of_a_new
                 .unwrap()
                 .with_limits(limits(r#"{"requests":[{"amount":3,"window":"minute"}]}"#))],
         );
-        let text = crate::keys::generate().unwrap().to_string();
+        let text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+            .unwrap()
+            .to_string();
         let grants = vec![Grant::parse("access on service:db").unwrap()];
         node.state
             .store
             .insert_key(
                 &crate::store::KeyRow {
+                    kind: crate::keys::KeyKind::Mcp,
                     id: "c0ffee0000000001".into(),
                     owner: Some("alice".into()),
                     name: "checked".into(),
@@ -4992,14 +5026,26 @@ fn get_key_page(node: &Node, session: &str, what: &str) -> Reply {
     )
 }
 
-/// The text of a key in a page: `mcp_` and 49 characters.
+/// The text of a key in a page: its prefix and 49 characters.
 fn key_text_in(body: &str) -> Option<String> {
-    let start = body.find("mcp_")?;
+    let start = body.find("mcp_").or_else(|| body.find("api_"))?;
     let text: String = body[start..].chars().take(53).collect();
     (text.len() == 53 && crate::keys::check_format(&text).is_ok()).then_some(text)
 }
 
+/// A form of the page Keys. The form of a new key carries the kind: the helper gives `mcp` when the
+/// fields name none (see `keys_post_raw`).
 fn keys_post(node: &Node, session: &str, action: &str, fields: &str) -> Reply {
+    let fields = if action == "create" && !fields.contains("kind=") {
+        format!("kind=mcp&{fields}")
+    } else {
+        fields.to_string()
+    };
+    keys_post_raw(node, session, action, &fields)
+}
+
+/// A form of the page Keys, with exactly these fields.
+fn keys_post_raw(node: &Node, session: &str, action: &str, fields: &str) -> Reply {
     post(
         node,
         session,
@@ -5028,14 +5074,14 @@ fn keys_user(backend: &Backend, extra_keys_block: &str) -> (Node, u16, String) {
         crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
     );
     let rights: Vec<Grant> = [
-        "keys.own.read",
-        "keys.own.create",
-        "keys.own.edit",
-        "keys.own.revoke",
-        "keys.own.use",
+        "keys.own.read on service:portal",
+        "keys.own.create on service:portal/key_kind:mcp",
+        "keys.own.edit on service:portal",
+        "keys.own.revoke on service:portal",
+        "keys.own.use on service:portal/key_kind:mcp",
     ]
     .iter()
-    .map(|a| Grant::parse(&format!("{a} on service:portal")).unwrap())
+    .map(|text| Grant::parse(text).unwrap())
     .collect();
     add_alice(&node, &rights);
     let session = sign_in(&node, "alice", PASSWORD);
@@ -5181,7 +5227,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             assert_eq!(reply.status, 303, "{fields}: {}", reply.body);
             assert_eq!(
                 reply.location(),
-                Some(format!("/auth/keys/new?s={code}").as_str()),
+                Some(format!("/auth/keys/new?kind=mcp&s={code}").as_str()),
                 "{fields}"
             );
         }
@@ -5325,7 +5371,10 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
             "create",
             "name=two&grant0=access+on+service%3Adb",
         );
-        assert_eq!(second.location(), Some("/auth/keys/new?s=too_many_keys"));
+        assert_eq!(
+            second.location(),
+            Some("/auth/keys/new?kind=mcp&s=too_many_keys")
+        );
         // A user without the rights.
         node.state
             .store
@@ -5466,7 +5515,9 @@ fn the_page_of_the_keys_does_not_exist_without_the_block_keys() {
 #[test]
 fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
     let pdp_port = free_port();
-    let key_text = crate::keys::generate().unwrap().to_string();
+    let key_text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
     let node = start_custom(
         Arc::new(Backend::Sqlite.fresh()),
         None,
@@ -5490,7 +5541,7 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
                 "data.read on service:db/host:prod",
                 "keys.own.read on service:portal",
                 "keys.own.revoke on service:portal",
-                "keys.own.use on service:portal",
+                "keys.own.use on service:portal/key_kind:mcp",
               ]
               key "nightly report" {{
                 key_env = "CAROL_KEY"
@@ -5620,7 +5671,9 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
 
 #[test]
 fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database_both_hold() {
-    let key_text = crate::keys::generate().unwrap().to_string();
+    let key_text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
     let vars = |extra: &[(&str, &str)]| {
         let mut all: Vec<(String, String)> = [
             ("PORTAL_TEST_LOGIN", "root"),
@@ -5707,6 +5760,7 @@ fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database
         })
         .unwrap();
     let mut row = crate::store::KeyRow {
+        kind: crate::keys::KeyKind::Mcp,
         id: id.clone(),
         owner: Some("erin".into()),
         name: "other".into(),
@@ -5739,6 +5793,16 @@ fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database
 
 // The rights on the keys and the limit values, in the pages of the superadmin -----------------------
 
+/// The JSON block of the editor in a page.
+fn editor_json(body: &str) -> serde_json::Value {
+    let start = body
+        .find(r#"class="grantEditor__data">"#)
+        .expect("the page has an editor")
+        + r#"class="grantEditor__data">"#.len();
+    let end = start + body[start..].find("</script>").unwrap();
+    serde_json::from_str(&body[start..end]).unwrap()
+}
+
 #[test]
 fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
     each_backend(|backend| {
@@ -5760,6 +5824,18 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
             "",
         );
         assert_eq!(page.status, 200);
+        // The editor has two parts: the services, and the portal features with the keys. There
+        // is no pseudo service and no separate form for the rights on the keys.
+        let editor = editor_json(&page.body);
+        assert!(editor["services"].is_array() && editor["features"].is_object());
+        let features = &editor["features"];
+        assert_eq!(features["id"], "portal");
+        let names: Vec<&str> = features["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
         for action in [
             "keys.own.read",
             "keys.own.create",
@@ -5767,40 +5843,87 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
             "keys.all.revoke",
             "users.read",
         ] {
-            assert!(
-                page.body.contains(&format!("name=\"p.{action}\"")),
-                "{action}"
-            );
+            assert!(names.contains(&action), "{action}");
         }
-        // An action that needs another action is locked until the account holds it (portal 6.3a).
-        assert!(page.body.contains("Needs <code>keys.own.read</code>"));
+        assert!(
+            !names.contains(&"alert.send") && !names.contains(&"inbox.receive"),
+            "the inbox is off: its actions are not in the editor"
+        );
+        let nodes: Vec<&str> = features["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(nodes, ["", "key_kind:mcp"], "the kind api is off");
+        assert!(editor["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != "portal"));
+        assert!(!page.body.contains("name=\"p.keys.own.read\""));
+        assert!(!page.body.contains("/auth/users/portal-rights"));
+        let gone = post(
+            &node,
+            &root,
+            "/auth/users/portal-rights",
+            USERS_TOKEN,
+            "login=alice&p.keys.own.read=1",
+        );
+        assert_eq!(
+            gone.status, 404,
+            "the form of the rights on the keys is gone"
+        );
+        let read = "grant0=keys.own.read+on+service%3Aportal";
+        let create = "grant1=keys.own.create+on+service%3Aportal%2Fkey_kind%3Amcp";
+        let usage = "grant2=keys.own.use+on+service%3Aportal%2Fkey_kind%3Amcp";
         let rights = |fields: &str| {
             post(
                 &node,
                 &root,
-                "/auth/users/portal-rights",
+                USERS_UPDATE_PATH,
                 USERS_TOKEN,
-                &format!("login=alice&{fields}"),
+                &format!("login=alice&grants=1&{fields}"),
             )
         };
-        let refused = rights("p.keys.own.create=1");
+        let refused = rights(create);
         assert!(
             refused.location().unwrap().ends_with("?s=keys-needs"),
             "{:?}",
             refused.location()
         );
-        assert!(rights("p.keys.nothing=1").status == 400);
-        assert!(rights("max_key_lifetime=abc")
+        assert!(rights("grant0=keys.own.nothing+on+service%3Aportal")
             .location()
             .unwrap()
-            .ends_with("keys-lifetime"));
-        assert!(rights("max_key_lifetime=31536001")
-            .location()
-            .unwrap()
-            .ends_with("keys-lifetime"));
-        let ok = rights(
-            "p.keys.own.read=1&p.keys.own.create=1&p.keys.own.use=1&max_key_lifetime=2592000",
-        );
+            .ends_with("edit-unknown-grant"));
+        // A service-level grant of an action of a node, a node that does not exist, a kind that is off.
+        for bad in [
+            "grant0=keys.own.use+on+service%3Aportal",
+            "grant0=keys.own.use+on+service%3Aportal%2Fkey_kind%3Aapi",
+            "grant0=keys.own.use+on+service%3Aportal%2Fkey_kind%3Awhk",
+        ] {
+            assert!(
+                rights(bad)
+                    .location()
+                    .unwrap()
+                    .ends_with("edit-unknown-grant"),
+                "{bad}"
+            );
+        }
+        for bad in ["abc", "31536001"] {
+            assert!(
+                rights(&format!(
+                    "{read}&{create}&{usage}&limit2.max_key_lifetime={bad}"
+                ))
+                .location()
+                .unwrap()
+                .ends_with("bad-limits"),
+                "{bad}"
+            );
+        }
+        let ok = rights(&format!(
+            "{read}&{create}&{usage}&limit2.max_key_lifetime=2592000"
+        ));
         assert!(
             ok.location().unwrap().ends_with("?s=user-updated"),
             "{:?}",
@@ -5810,17 +5933,20 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
         assert_eq!(alice.len(), 3);
         let used = alice.iter().find(|g| g.action == "keys.own.use").unwrap();
         assert_eq!(used.limits.to_json(), r#"{"max_key_lifetime":2592000}"#);
+        assert_eq!(used.path_text(), "key_kind:mcp");
         // The same rights again: nothing changes. Remove one that another one needs: refused.
-        assert!(rights(
-            "p.keys.own.read=1&p.keys.own.create=1&p.keys.own.use=1&max_key_lifetime=2592000"
-        )
+        assert!(rights(&format!(
+            "{read}&{create}&{usage}&limit2.max_key_lifetime=2592000"
+        ))
         .location()
         .unwrap()
         .ends_with("unchanged"));
-        assert!(rights("p.keys.own.create=1&p.keys.own.use=1")
-            .location()
-            .unwrap()
-            .ends_with("keys-needs"));
+        assert!(rights(&format!(
+            "grant0=keys.own.create+on+service%3Aportal%2Fkey_kind%3Amcp&{usage}"
+        ))
+        .location()
+        .unwrap()
+        .ends_with("keys-needs"));
         // Alice reads her page of the keys now, and the new key needs an expiry date.
         let alice_session = sign_in(&node, "alice", "a-long-password-1");
         assert_eq!(get_keys(&node, &alice_session, "").status, 200);
@@ -5920,8 +6046,8 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
         assert!(held
             .iter()
             .any(|g| g.action == "data.read" && g.limits.to_json() == r#"{"max_rows":100}"#));
-        // The rights on the keys stay: the editor does not carry them.
-        assert!(held.iter().any(|g| g.action == "keys.own.use"));
+        // A save replaces every grant, the portal features included: the editor carries them.
+        assert!(!held.iter().any(|g| g.action == "keys.own.use"));
         // The values reach the PDP at the next round of the directory.
         crate::sync::run_round(&node.state, 1);
         assert!(
@@ -5950,7 +6076,7 @@ mod inbox_rights_tests {
     use crate::keyauth::Cause;
     use crate::store::KeyRow;
 
-    fn inbox_node(backend: &Backend) -> (Node, std::sync::Arc<dyn Authorizer>) {
+    pub(super) fn inbox_node(backend: &Backend) -> (Node, std::sync::Arc<dyn Authorizer>) {
         let pdp_port = free_port();
         let server_key = inbox_core::server_key::ServerKey::generate()
             .unwrap()
@@ -5966,7 +6092,7 @@ mod inbox_rights_tests {
             &format!(
                 r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
                 pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}
-                keys {{}}
+                keys {{ api = true }}
                 inbox {{
                   server_key_env = "INBOX_TEST_KEY"
                   devices {{
@@ -5994,7 +6120,7 @@ mod inbox_rights_tests {
         (node, authorizer)
     }
 
-    fn add_account(node: &Node, login: &str, grants: &[&str]) {
+    pub(super) fn add_account(node: &Node, login: &str, grants: &[&str]) {
         let mut grants: Vec<Grant> = grants.iter().map(|g| Grant::parse(g).unwrap()).collect();
         grants.sort();
         node.state
@@ -6010,8 +6136,13 @@ mod inbox_rights_tests {
     }
 
     /// A key with a real text. The result is the text and the id.
-    fn add_real_key(node: &Node, owner: Option<&str>, grants: &[&str]) -> (String, String) {
-        let text = crate::keys::generate().unwrap().to_string();
+    pub(super) fn add_real_key(
+        node: &Node,
+        kind: crate::keys::KeyKind,
+        owner: Option<&str>,
+        grants: &[&str],
+    ) -> (String, String) {
+        let text = crate::keys::generate(kind).unwrap().to_string();
         let digest = crate::keys::digest(&text);
         let id: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         let mut grants: Vec<Grant> = grants.iter().map(|g| Grant::parse(g).unwrap()).collect();
@@ -6020,6 +6151,7 @@ mod inbox_rights_tests {
             .store
             .insert_key(
                 &KeyRow {
+                    kind,
                     id: id.clone(),
                     owner: owner.map(Into::into),
                     name: format!("key {id}"),
@@ -6049,16 +6181,16 @@ mod inbox_rights_tests {
             add_account(
                 &node,
                 "alice",
-                &["group.subscribe on service:inbox/group:infra"],
+                &["inbox.receive on service:portal/inbox_group:infra"],
             );
             add_account(&node, "bob", &[]);
             add_account(
                 &node,
                 "carol",
                 &[
-                    "group.subscribe on service:inbox/group:infra",
-                    "group.subscribe on service:inbox/group:oncall",
-                    "alert.send on service:inbox/group:oncall",
+                    "inbox.receive on service:portal/inbox_group:infra",
+                    "inbox.receive on service:portal/inbox_group:oncall",
+                    "alert.send on service:portal/inbox_group:oncall",
                 ],
             );
             assert_eq!(authorizer.subscribable("alice"), groups(&["infra"]));
@@ -6080,7 +6212,7 @@ mod inbox_rights_tests {
                 "alice",
                 None,
                 Some(vec![Grant::parse(
-                    "group.subscribe on service:inbox/group:oncall",
+                    "inbox.receive on service:portal/inbox_group:oncall",
                 )
                 .unwrap()]),
             );
@@ -6107,29 +6239,37 @@ mod inbox_rights_tests {
                 &node,
                 "alice",
                 &[
-                    "keys.own.use on service:portal",
-                    "alert.send on service:inbox/group:infra",
+                    "keys.own.use on service:portal/key_kind:api",
+                    "alert.send on service:portal/inbox_group:infra",
                 ],
             );
             let (text, id) = add_real_key(
                 &node,
+                crate::keys::KeyKind::Api,
                 Some("alice"),
-                &["alert.send on service:inbox/group:infra"],
+                &["alert.send on service:portal/inbox_group:infra"],
             );
             assert_eq!(authorizer.check_key(&text), KeyCheck::Valid { key_id: id });
             assert_eq!(
                 authorizer.check_key("a token of the file"),
                 KeyCheck::NotAKey
             );
-            assert_eq!(authorizer.check_key("mcp_short"), KeyCheck::NotAKey);
-            let ghost = crate::keys::generate().unwrap().to_string();
+            assert_eq!(authorizer.check_key("api_short"), KeyCheck::NotAKey);
+            let ghost = crate::keys::generate(crate::keys::KeyKind::Api)
+                .unwrap()
+                .to_string();
             assert_eq!(authorizer.check_key(&ghost), KeyCheck::Invalid);
             // An owner without keys.own.use: the key is not valid.
-            add_account(&node, "bob", &["alert.send on service:inbox/group:infra"]);
+            add_account(
+                &node,
+                "bob",
+                &["alert.send on service:portal/inbox_group:infra"],
+            );
             let (no_use, _) = add_real_key(
                 &node,
+                crate::keys::KeyKind::Api,
                 Some("bob"),
-                &["alert.send on service:inbox/group:infra"],
+                &["alert.send on service:portal/inbox_group:infra"],
             );
             assert_eq!(authorizer.check_key(&no_use), KeyCheck::Invalid);
             assert!(node
@@ -6153,12 +6293,12 @@ mod inbox_rights_tests {
             let (node, authorizer) = inbox_node(backend);
             // The owner has a budget of 2 each minute on the service inbox.
             let mut owner = vec![
-                Grant::new("access", "inbox")
+                Grant::new("access", "portal")
                     .unwrap()
                     .with_limits(limits(r#"{"alerts":[{"amount":2,"window":"minute"}]}"#)),
-                Grant::parse("keys.own.use on service:portal").unwrap(),
-                Grant::parse("alert.send on service:inbox/group:infra").unwrap(),
-                Grant::parse("alert.send on service:inbox/group:oncall").unwrap(),
+                Grant::parse("keys.own.use on service:portal/key_kind:api").unwrap(),
+                Grant::parse("alert.send on service:portal/inbox_group:infra").unwrap(),
+                Grant::parse("alert.send on service:portal/inbox_group:oncall").unwrap(),
             ];
             owner.sort();
             node.state
@@ -6173,10 +6313,11 @@ mod inbox_rights_tests {
             node.state.users.refresh(&node.state.store).unwrap();
             let (_, id) = add_real_key(
                 &node,
+                crate::keys::KeyKind::Api,
                 Some("alice"),
                 &[
-                    "alert.send on service:inbox/group:infra",
-                    "alert.send on service:inbox/group:oncall",
+                    "alert.send on service:portal/inbox_group:infra",
+                    "alert.send on service:portal/inbox_group:oncall",
                 ],
             );
             let refused = |decision: Decision| matches!(decision, Decision::Refused { .. });
@@ -6228,14 +6369,745 @@ mod inbox_rights_tests {
                 }
             );
             // The superadmin as the owner: no limit, no counter.
-            let (_, root_key) =
-                add_real_key(&node, None, &["alert.send on service:inbox/group:infra"]);
+            let (_, root_key) = add_real_key(
+                &node,
+                crate::keys::KeyKind::Api,
+                None,
+                &["alert.send on service:portal/inbox_group:infra"],
+            );
             for _ in 0..5 {
                 assert_eq!(
                     authorizer.decide(&root_key, "alert.send", "infra", true),
                     Decision::Allowed
                 );
             }
+        });
+    }
+}
+
+// The kinds of key, the verifier of each kind, and the switches -----------------------------------
+
+mod kinds_tests {
+    use super::inbox_rights_tests::{add_account, add_real_key, inbox_node};
+    use super::*;
+    use crate::inbox::rights::{Decision, KeyCheck};
+    use crate::keys::KeyKind;
+
+    const EDGE_URI: &str = "/db/x";
+
+    fn edge(node: &Node, text: &str) -> Reply {
+        send(
+            node.port,
+            "GET",
+            "/auth/verify-key",
+            &[
+                ("Authorization", &format!("Bearer {text}")),
+                ("X-Forwarded-Uri", EDGE_URI),
+            ],
+            "",
+        )
+    }
+
+    fn failed(node: &Node, cause: crate::keyauth::Cause) -> u64 {
+        node.state
+            .key_stats
+            .counts()
+            .iter()
+            .find(|(name, _)| *name == cause.as_str())
+            .map_or(0, |(_, n)| *n)
+    }
+
+    /// The text of the key with a prefix of the same length and the same other characters.
+    fn with_prefix(text: &str, prefix: &str) -> String {
+        format!("{prefix}{}", &text[4..])
+    }
+
+    #[test]
+    fn an_api_key_at_the_key_edge_is_refused_and_an_mcp_key_works_there() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            publish_catalog(&node, &[]);
+            add_account(
+                &node,
+                "alice",
+                &[
+                    "access on service:db",
+                    "keys.own.use on service:portal/key_kind:mcp",
+                    "keys.own.use on service:portal/key_kind:api",
+                    "alert.send on service:portal/inbox_group:infra",
+                ],
+            );
+            let (mcp, _) = add_real_key(
+                &node,
+                KeyKind::Mcp,
+                Some("alice"),
+                &["access on service:db"],
+            );
+            let (api, api_id) = add_real_key(
+                &node,
+                KeyKind::Api,
+                Some("alice"),
+                &["alert.send on service:portal/inbox_group:infra"],
+            );
+            assert_eq!(
+                edge(&node, &mcp).status,
+                204,
+                "the kind that the edge serves"
+            );
+            let wrong_before = failed(&node, crate::keyauth::Cause::WrongKind);
+            let reply = edge(&node, &api);
+            assert_eq!(reply.status, 401);
+            assert!(reply.body.is_empty(), "no detail: {}", reply.body);
+            assert_eq!(
+                failed(&node, crate::keyauth::Cause::WrongKind),
+                wrong_before + 1
+            );
+            // The other verifier: the inbox serves the kind api, and an MCP text is no key for it.
+            assert_eq!(authorizer.check_key(&mcp), KeyCheck::NotAKey);
+            assert_eq!(
+                authorizer.check_key(&api),
+                KeyCheck::Valid {
+                    key_id: api_id.clone()
+                }
+            );
+            // The directory holds the kind: an api key never gets a token at the edge.
+            assert_eq!(
+                node.state.users.key_by_id(&api_id).unwrap().kind,
+                KeyKind::Api
+            );
+        });
+    }
+
+    #[test]
+    fn a_reserved_prefix_a_bad_checksum_and_a_changed_prefix_are_refused_before_any_lookup() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            publish_catalog(&node, &[]);
+            add_account(
+                &node,
+                "alice",
+                &[
+                    "access on service:db",
+                    "keys.own.use on service:portal/key_kind:mcp",
+                    "keys.own.use on service:portal/key_kind:api",
+                ],
+            );
+            let (mcp, _) = add_real_key(
+                &node,
+                KeyKind::Mcp,
+                Some("alice"),
+                &["access on service:db"],
+            );
+            let (api, _) = add_real_key(&node, KeyKind::Api, Some("alice"), &[]);
+            let unknown_before = failed(&node, crate::keyauth::Cause::UnknownKey);
+            let format_before = failed(&node, crate::keyauth::Cause::BadFormat);
+            let mut bad_sum = mcp.clone();
+            let last = bad_sum.pop().unwrap();
+            bad_sum.push(if last == 'a' { 'b' } else { 'a' });
+            let refused = [
+                // The reserved prefix, whatever the checksum says.
+                with_prefix(&mcp, "whk_"),
+                // A changed prefix of a good key: the checksum covers the prefix.
+                with_prefix(&mcp, "api_"),
+                with_prefix(&api, "mcp_"),
+                bad_sum,
+                "mcp_short".to_string(),
+                "Bearer".to_string(),
+            ];
+            for text in &refused {
+                assert_eq!(edge(&node, text).status, 401, "{text}");
+                assert_eq!(authorizer.check_key(text), KeyCheck::NotAKey, "{text}");
+            }
+            assert_eq!(
+                failed(&node, crate::keyauth::Cause::UnknownKey),
+                unknown_before,
+                "no lookup happened"
+            );
+            assert_eq!(
+                failed(&node, crate::keyauth::Cause::BadFormat),
+                format_before + refused.len() as u64
+            );
+            // A key with a good form that nobody has is a lookup that finds nothing.
+            let ghost = crate::keys::generate(KeyKind::Mcp).unwrap().to_string();
+            assert_eq!(edge(&node, &ghost).status, 401);
+            assert_eq!(
+                failed(&node, crate::keyauth::Cause::UnknownKey),
+                unknown_before + 1
+            );
+        });
+    }
+
+    #[test]
+    fn the_owner_loses_a_right_and_the_key_loses_it_at_once() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            let send = "alert.send on service:portal/inbox_group:infra";
+            let usage = "keys.own.use on service:portal/key_kind:api";
+            add_account(&node, "alice", &[usage, send]);
+            let (_, id) = add_real_key(&node, KeyKind::Api, Some("alice"), &[send]);
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Allowed
+            );
+            let grants = |texts: &[&str]| -> Option<Vec<Grant>> {
+                Some(texts.iter().map(|t| Grant::parse(t).unwrap()).collect())
+            };
+            // The owner loses the permission on the group: the key loses it with no wait.
+            node.state.users.update("alice", None, grants(&[usage]));
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Refused {
+                    reason: "no_permission"
+                }
+            );
+            // The owner gets it again: the key has it again.
+            node.state
+                .users
+                .update("alice", None, grants(&[usage, send]));
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Allowed
+            );
+            // The owner loses the right to use the keys of the kind: the key is not valid.
+            node.state.users.update("alice", None, grants(&[send]));
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Refused {
+                    reason: "key_not_valid"
+                }
+            );
+            // The right to use the keys of the other kind does not count.
+            node.state.users.update(
+                "alice",
+                None,
+                grants(&[send, "keys.own.use on service:portal/key_kind:mcp"]),
+            );
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", false),
+                Decision::Refused {
+                    reason: "key_not_valid"
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn a_deleted_account_loses_its_keys_and_the_tab_no_longer_lists_them() {
+        each_backend(|backend| {
+            let (node, _) = inbox_node(backend);
+            publish_catalog(&node, &[]);
+            let usage = "keys.own.use on service:portal/key_kind:api";
+            add_account(&node, "carol", &[usage]);
+            add_account(&node, "dave", &[usage]);
+            let mut carol_keys = Vec::new();
+            for name in ["one", "two", "three"] {
+                let (_, id) = add_real_key(&node, KeyKind::Api, Some("carol"), &[]);
+                node.state.store.execute_raw(&format!(
+                    "UPDATE keys SET name = '{name}' WHERE id = '{id}'"
+                ));
+                carol_keys.push(id);
+            }
+            let (_, dave_key) = add_real_key(&node, KeyKind::Api, Some("dave"), &[]);
+            node.state.users.refresh(&node.state.store).unwrap();
+            let root = sign_in(&node, "root", PASSWORD);
+            let cookie = format!("{}={root}", session_cookie_name(&node));
+            // The page of the account names the keys that go with it.
+            let page = send(
+                node.port,
+                "GET",
+                "/auth/settings/users/carol",
+                &[("Cookie", &cookie)],
+                "",
+            );
+            assert_eq!(page.status, 200);
+            assert!(
+                page.body.contains("Delete carol and 3 keys?"),
+                "{}",
+                &page.body[page.body.find("Delete carol").unwrap_or(0)..]
+                    [..300.min(page.body.len())]
+            );
+            let page = send(
+                node.port,
+                "GET",
+                "/auth/settings/users/dave",
+                &[("Cookie", &cookie)],
+                "",
+            );
+            assert!(page.body.contains("Delete dave and 1 key?"));
+            let all = get_keys(&node, &root, "?section=all");
+            assert!(all.body.contains(">one</span>") && all.body.contains(">three</span>"));
+            let deleted = post(&node, &root, USERS_DELETE_PATH, USERS_TOKEN, "login=carol");
+            assert_eq!(deleted.status, 303);
+            node.state.users.refresh(&node.state.store).unwrap();
+            let left = node.state.users.keys();
+            assert_eq!(left.len(), 1, "only the key of dave stays");
+            assert_eq!(left[0].id, dave_key);
+            // The pane of a key of the deleted owner closes: the page of a change answers as for a
+            // key that does not exist.
+            for id in &carol_keys {
+                let pane = get_key_page(&node, &root, &format!("edit?id={id}"));
+                assert_eq!(pane.location(), Some("/auth/keys?s=unknown_key"));
+            }
+            let all = get_keys(&node, &root, "?section=all");
+            assert_eq!(all.status, 200);
+            for name in ["one", "two", "three"] {
+                assert!(
+                    !all.body.contains(&format!(">{name}</span>")),
+                    "the key {name} is gone"
+                );
+            }
+            assert!(!all.body.contains("<td data-label=\"Owner\">carol"));
+        });
+    }
+
+    /// A node with both kinds on and an account with the rights that the test gives.
+    fn kinds_node(backend: &Backend, rights: &[&str]) -> (Node, String) {
+        let (node, _) = inbox_node(backend);
+        publish_catalog(&node, &[]);
+        let mut all = vec!["keys.own.read on service:portal"];
+        all.extend_from_slice(rights);
+        add_account(&node, "alice", &all);
+        let session = sign_in(&node, "alice", PASSWORD);
+        (node, session)
+    }
+
+    #[test]
+    fn with_the_right_to_make_mcp_keys_only_there_is_no_selector_and_no_api_key() {
+        each_backend(|backend| {
+            let (node, alice) = kinds_node(
+                backend,
+                &[
+                    "keys.own.create on service:portal/key_kind:mcp",
+                    "keys.own.use on service:portal/key_kind:mcp",
+                    "keys.own.use on service:portal/key_kind:api",
+                    "access on service:db",
+                ],
+            );
+            let list = get_keys(&node, &alice, "");
+            assert!(list.body.contains(r#"href="/auth/keys/new""#), "the entry");
+            let form = get_new_key(&node, &alice, "");
+            assert_eq!(form.status, 200);
+            assert!(!form.body.contains("<select"), "one kind only: no selector");
+            assert!(form
+                .body
+                .contains(r#"<input type="hidden" name="kind" value="mcp">"#));
+            // The form of the other kind is a bad request, and a forced create is refused.
+            assert_eq!(get_new_key(&node, &alice, "?kind=api").status, 400);
+            assert_eq!(get_new_key(&node, &alice, "?kind=whk").status, 400);
+            let forced = keys_post_raw(&node, &alice, "create", "kind=api&name=sneaky");
+            assert_eq!(forced.status, 403);
+            let reserved = keys_post_raw(&node, &alice, "create", "kind=whk&name=sneaky");
+            assert_eq!(reserved.status, 400);
+            let missing = keys_post_raw(&node, &alice, "create", "name=sneaky");
+            assert_eq!(missing.status, 400);
+            assert!(node.state.users.keys().is_empty());
+            let made = keys_post(
+                &node,
+                &alice,
+                "create",
+                "name=agent&grant0=access+on+service%3Adb",
+            );
+            assert_eq!(made.status, 200, "{}", made.body);
+            let text = key_text_in(&made.body).unwrap();
+            assert!(text.starts_with("mcp_"));
+        });
+    }
+
+    #[test]
+    fn with_both_kinds_the_form_has_a_selector_and_each_kind_has_its_own_form() {
+        each_backend(|backend| {
+            let (node, alice) = kinds_node(
+                backend,
+                &[
+                    "keys.own.create on service:portal/key_kind:mcp",
+                    "keys.own.create on service:portal/key_kind:api",
+                    "keys.own.use on service:portal/key_kind:mcp",
+                    "keys.own.use on service:portal/key_kind:api",
+                    "alert.send on service:portal/inbox_group:infra",
+                    "access on service:db",
+                ],
+            );
+            let form = get_new_key(&node, &alice, "");
+            assert!(form.body.contains("<select"));
+            assert!(form.body.contains(r#"<option value="mcp" selected>"#));
+            assert!(form.body.contains(r#"<option value="api">"#));
+            let api = get_new_key(&node, &alice, "?kind=api");
+            assert_eq!(api.status, 200);
+            assert!(api.body.contains(r#"<option value="api" selected>"#));
+            assert!(api
+                .body
+                .contains(r#"<input type="hidden" name="kind" value="api">"#));
+            // The form of an API key holds the alert actions and no service.
+            let editor = editor_json(&api.body);
+            assert!(editor["services"].as_array().unwrap().is_empty());
+            let names: Vec<&str> = editor["features"]["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["access", "alert.send", "alert.read"]);
+            // The form of an MCP key holds the services and no portal feature.
+            let mcp = get_new_key(&node, &alice, "?kind=mcp");
+            let editor = editor_json(&mcp.body);
+            assert!(editor["features"].is_null());
+            assert!(!editor["services"].as_array().unwrap().is_empty());
+            // An API key: the alert action is a grant of the portal. A service is refused.
+            let made = keys_post_raw(
+                &node,
+                &alice,
+                "create",
+                "kind=api&name=grafana&grant0=alert.send+on+service%3Aportal%2Finbox_group%3Ainfra",
+            );
+            assert_eq!(made.status, 200, "{}", made.body);
+            let text = key_text_in(&made.body).unwrap();
+            assert!(text.starts_with("api_"));
+            let refused = keys_post_raw(
+                &node,
+                &alice,
+                "create",
+                "kind=api&name=bad&grant0=access+on+service%3Adb",
+            );
+            assert_eq!(
+                refused.location(),
+                Some("/auth/keys/new?kind=api&s=bad_grant")
+            );
+            let refused = keys_post_raw(
+                &node,
+                &alice,
+                "create",
+                "kind=mcp&name=bad&grant0=alert.send+on+service%3Aportal%2Finbox_group%3Ainfra",
+            );
+            assert_eq!(
+                refused.location(),
+                Some("/auth/keys/new?kind=mcp&s=bad_grant")
+            );
+            let list = get_keys(&node, &alice, "");
+            assert!(list.body.contains(r#"data-kind="api""#));
+        });
+    }
+
+    #[test]
+    fn without_a_right_to_make_a_key_there_is_no_new_key_entry() {
+        each_backend(|backend| {
+            let (node, alice) =
+                kinds_node(backend, &["keys.own.use on service:portal/key_kind:mcp"]);
+            let list = get_keys(&node, &alice, "");
+            assert_eq!(list.status, 200);
+            assert!(!list.body.contains("New key"));
+            assert!(!list.body.contains("/auth/keys/new"));
+            assert_eq!(get_new_key(&node, &alice, "").status, 403);
+            // A kind that the file turns off is not a kind to make, whatever the grants say.
+            let (node, alice) = kinds_node(
+                backend,
+                &[
+                    "keys.own.create on service:portal/key_kind:api",
+                    "keys.own.use on service:portal/key_kind:api",
+                ],
+            );
+            assert!(get_keys(&node, &alice, "").body.contains("/auth/keys/new"));
+        });
+    }
+
+    /// A node for the matrix of the switches.
+    fn matrix_node(
+        backend: &Backend,
+        identity_pdp: bool,
+        keys: Option<&str>,
+        inbox: bool,
+        allow_creation: bool,
+    ) -> Node {
+        let pdp_port = free_port();
+        let server_key = inbox_core::server_key::ServerKey::generate()
+            .unwrap()
+            .encode()
+            .to_string();
+        let identity = if identity_pdp {
+            format!(
+                r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+                pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true }}"#
+            )
+        } else {
+            String::new()
+        };
+        let keys = keys.map(|k| format!("keys {{ {k} }}")).unwrap_or_default();
+        let inbox = if inbox {
+            r#"inbox {
+                server_key_env = "INBOX_TEST_KEY"
+                devices {
+                  public_address = "127.0.0.1:4181"
+                  heartbeat_interval = "20s"
+                  session_timeout = "60s"
+                  resend_after = "15s"
+                  max_inflight = 32
+                  unreachable_after = "2m"
+                  offline_warning_after = "3m"
+                }
+                storage {
+                  delivery_ttl = "7d"
+                  alert_retention = "30d"
+                  connection_log_retention = "90d"
+                }
+                group "infra" { name = "Infra" }
+              }"#
+        } else {
+            ""
+        };
+        let node = start_custom(
+            Arc::new(backend.fresh()),
+            None,
+            Custom {
+                allow_creation,
+                env: vec![("INBOX_TEST_KEY".into(), server_key)],
+                ..Custom::default()
+            },
+            &format!("{identity}\n{keys}\n{inbox}"),
+        );
+        publish_catalog(&node, &[]);
+        add_account(&node, "alice", &["access on service:db"]);
+        node
+    }
+
+    /// What the page of the users and the page of an account show, and which routes answer.
+    struct Seen {
+        tabs: Vec<&'static str>,
+        new_user: bool,
+        features: Option<Vec<String>>,
+        nodes: Vec<String>,
+        create_route: u16,
+        keys_routes: [u16; 2],
+        /// The routes of the inbox answer as a path that nobody owns: the page of the tab, the
+        /// version and the API of the senders.
+        inbox_routes_absent: bool,
+        inbox_page: u16,
+        edge: u16,
+    }
+
+    fn look(node: &Node) -> Seen {
+        let root = sign_in(node, "root", PASSWORD);
+        let cookie = format!("{}={root}", session_cookie_name(node));
+        let users = send(
+            node.port,
+            "GET",
+            "/auth/settings",
+            &[("Cookie", &cookie)],
+            "",
+        );
+        assert_eq!(users.status, 200, "{}", users.body);
+        let mut tabs = Vec::new();
+        for (path, name) in [
+            ("/auth/settings", "users"),
+            ("/auth/settings/services", "services"),
+            ("/auth/keys", "keys"),
+            ("/auth/settings/inbox", "inbox"),
+        ] {
+            if users.body.contains(&format!(r#"href="{path}""#)) {
+                tabs.push(name);
+            }
+        }
+        let with_add = send(
+            node.port,
+            "GET",
+            "/auth/settings?add=1",
+            &[("Cookie", &cookie)],
+            "",
+        );
+        let new_user = users.body.contains("/auth/users/add")
+            || users.body.contains("New user")
+            || with_add.body.contains("/auth/users/add")
+            || with_add.body.contains("id=\"add-user\"")
+            || with_add.body.contains("New user");
+        let account = send(
+            node.port,
+            "GET",
+            "/auth/settings/users/alice",
+            &[("Cookie", &cookie)],
+            "",
+        );
+        assert_eq!(account.status, 200);
+        let editor = editor_json(&account.body);
+        let features = editor["features"].as_object().map(|f| {
+            f["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        });
+        let nodes = editor["features"]["nodes"]
+            .as_array()
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .map(|n| n["path"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let create = post(
+            node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=zed&password=a-long-password-9",
+        );
+        let get = |path: &str| send(node.port, "GET", path, &[("Cookie", &cookie)], "").status;
+        let edge = send(
+            node.port,
+            "GET",
+            "/auth/verify-key",
+            &[
+                (
+                    "Authorization",
+                    &format!(
+                        "Bearer {}",
+                        crate::keys::generate(KeyKind::Mcp).unwrap().as_str()
+                    ),
+                ),
+                ("X-Forwarded-Uri", EDGE_URI),
+            ],
+            "",
+        )
+        .status;
+        Seen {
+            tabs,
+            new_user,
+            features,
+            nodes,
+            create_route: create.status,
+            keys_routes: [get("/auth/keys"), get("/auth/keys/new")],
+            inbox_routes_absent: send(node.port, "GET", "/api/version", &[], "").status
+                == send(node.port, "GET", "/api/nothing-here", &[], "").status
+                && send(node.port, "POST", "/api/v1/alerts", &[], "{}").status
+                    == send(node.port, "POST", "/api/nothing-here", &[], "{}").status
+                && send(node.port, "POST", "/v1/enroll", &[], "{}").status
+                    == send(node.port, "POST", "/nothing-here", &[], "{}").status,
+            inbox_page: get("/auth/settings/inbox"),
+            edge,
+        }
+    }
+
+    fn names(list: &Option<Vec<String>>) -> Vec<&str> {
+        list.iter().flatten().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn panel_only_shows_two_tabs_no_new_user_and_no_feature_of_the_portal() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, false, None, false, false);
+            let seen = look(&node);
+            assert_eq!(seen.tabs, ["users", "services"]);
+            assert!(!seen.new_user, "no entry that makes an account");
+            assert_eq!(seen.create_route, 404);
+            assert!(seen.features.is_none(), "no part for the portal features");
+            assert_eq!(seen.keys_routes, [404, 404]);
+            assert!(seen.inbox_routes_absent);
+            assert_eq!(seen.inbox_page, 404);
+            assert_eq!(seen.edge, 401, "no key is accepted");
+        });
+    }
+
+    #[test]
+    fn panel_and_keys_has_the_keys_tab_one_kind_and_no_inbox() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, true, Some(""), false, true);
+            let seen = look(&node);
+            assert_eq!(seen.tabs, ["users", "services", "keys"]);
+            assert!(seen.new_user);
+            let features = names(&seen.features);
+            assert!(features.contains(&"keys.own.read") && features.contains(&"keys.own.create"));
+            assert!(!features
+                .iter()
+                .any(|a| ["alert.send", "inbox.receive", "phone.read"].contains(a)));
+            assert_eq!(seen.nodes, ["", "key_kind:mcp"], "one kind");
+            assert_eq!(seen.keys_routes[0], 200);
+            assert!(seen.inbox_routes_absent);
+            assert_eq!(seen.inbox_page, 404);
+            // The new-key form has no selector: one kind is possible.
+            let alice = {
+                node.state.users.update(
+                    "alice",
+                    None,
+                    Some(vec![
+                        Grant::parse("keys.own.read on service:portal").unwrap(),
+                        Grant::parse("keys.own.create on service:portal/key_kind:mcp").unwrap(),
+                    ]),
+                );
+                sign_in(&node, "alice", PASSWORD)
+            };
+            let form = get_new_key(&node, &alice, "");
+            assert_eq!(form.status, 200, "{}", form.body);
+            assert!(!form.body.contains("<select"));
+        });
+    }
+
+    #[test]
+    fn panel_and_inbox_has_the_inbox_tab_and_no_key_of_any_kind() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, false, None, true, true);
+            let seen = look(&node);
+            assert_eq!(seen.tabs, ["users", "services", "inbox"]);
+            let features = names(&seen.features);
+            assert!(features.contains(&"inbox.receive") && features.contains(&"alert.send"));
+            assert!(
+                !features
+                    .iter()
+                    .any(|a| a.starts_with("keys.") || *a == "users.read"),
+                "{features:?}"
+            );
+            assert_eq!(seen.nodes, ["", "inbox_group:infra"], "no kind of key");
+            assert_eq!(seen.keys_routes, [404, 404]);
+            assert_eq!(seen.edge, 401);
+        });
+    }
+
+    #[test]
+    fn all_on_has_the_four_tabs_and_both_kinds() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, true, Some("api = true"), true, true);
+            let seen = look(&node);
+            assert_eq!(seen.tabs, ["users", "services", "keys", "inbox"]);
+            assert!(seen.new_user);
+            assert_ne!(seen.create_route, 404);
+            let features = names(&seen.features);
+            for action in [
+                "keys.own.create",
+                "alert.send",
+                "inbox.receive",
+                "phone.read",
+            ] {
+                assert!(features.contains(&action), "{action}");
+            }
+            assert_eq!(
+                seen.nodes,
+                ["", "key_kind:mcp", "key_kind:api", "inbox_group:infra"]
+            );
+            assert_eq!(seen.keys_routes[0], 200);
+        });
+    }
+
+    #[test]
+    fn no_creation_leaves_all_the_tabs_and_removes_only_the_creation_of_users() {
+        each_backend(|backend| {
+            let node = matrix_node(backend, true, Some("api = true"), true, false);
+            let seen = look(&node);
+            assert_eq!(seen.tabs, ["users", "services", "keys", "inbox"]);
+            assert!(!seen.new_user, "no button, no form, no entry in the page");
+            assert_eq!(seen.create_route, 404);
+            // The accounts that exist stay editable, as the mode of the grants says.
+            let root = sign_in(&node, "root", PASSWORD);
+            let saved = post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                "login=alice&grants=1&grant0=access+on+service%3Adb&grant1=keys.own.read+on+service%3Aportal",
+            );
+            assert_eq!(saved.status, 303);
+            assert!(
+                saved.location().unwrap().ends_with("?s=user-updated"),
+                "{:?}",
+                saved.location()
+            );
         });
     }
 }

@@ -920,11 +920,16 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outc
         Err(Cause::DirectoryTooOld) => return Outcome::deny(TOO_OLD, None),
         Err(_) => return Outcome::deny("the key is not valid", Some(UNKNOWN_SUBJECT)),
     };
-    // A key never holds an action of the service `portal` (portal 6.5): the PDP ignores one.
+    // A key holds only the actions of the service `portal` that its kind lists (portal 6.5): the PDP
+    // ignores any other.
     let key_grants: Vec<Grant> = key
         .grants
         .iter()
-        .filter(|g| g.service != crate::portal_actions::SERVICE || g.action == ACCESS)
+        .filter(|g| {
+            g.service != crate::portal_actions::SERVICE
+                || g.action == ACCESS
+                || crate::portal_actions::key_actions(key.kind).contains(&g.action.as_str())
+        })
         .cloned()
         .collect();
     let owner_grants: std::sync::Arc<[Grant]>;

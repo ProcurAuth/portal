@@ -1,7 +1,7 @@
 //! The pages of the tab "Inbox" and their forms, under `/auth/settings/inbox`.
 //!
-//! The pages need a session. The rights come from the service `inbox` (see
-//! [`crate::inbox_actions`]): the superadmin has all of them, and any other account has the
+//! The pages need a session. The rights come from the service `portal` (see
+//! [`crate::portal_actions`]): the superadmin has all of them, and any other account has the
 //! permissions that it holds. A page that the account may not open answers 403, and a page of a
 //! block `inbox` that does not exist answers 404. The pages call the inbox in process, with no
 //! HTTP call to itself.
@@ -16,12 +16,11 @@ use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
 use crate::inbox::admin::{self, DeviceRow};
 use crate::inbox::App as InboxApp;
-use crate::inbox_actions as actions;
-use crate::portal_actions as portal;
+use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
 use crate::ui::inbox::{GroupChoice, GroupLine, Rights};
 
-pub(super) const PREFIX: &str = actions::PAGE;
+pub(super) const PREFIX: &str = ui_inbox::PAGE;
 /// The purpose of the anti-CSRF tokens of the forms of the inbox.
 const INBOX_TOKEN: &str = "inbox";
 /// The largest body of a form of the inbox.
@@ -38,7 +37,7 @@ pub(super) fn is_inbox_path(path: &str) -> bool {
             .is_some_and(|r| r.starts_with('/'))
 }
 
-/// What an account holds in the service `inbox`.
+/// What an account holds in the inbox features of the service `portal`.
 pub(super) struct Held {
     pub ui: Rights,
     /// The groups with `alert.read`. `None`: all the groups (the superadmin).
@@ -74,15 +73,15 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
     let at_service = |action: &str| actions::allows(&document, login, grants, action, None);
     let send_ids = on(actions::ALERT_SEND);
     let read_ids = on(actions::ALERT_READ);
-    let devices = at_service(actions::DEVICE_READ);
-    let connections = at_service(actions::CONNECTION_READ);
+    let devices = at_service(actions::PHONE_READ);
+    let connections = at_service(actions::PHONE_LOG);
     Some(Held {
         ui: Rights {
             overview: !read_ids.is_empty() || devices || connections || !send_ids.is_empty(),
             devices,
-            revoke: devices && at_service(actions::DEVICE_REVOKE),
+            revoke: devices && at_service(actions::PHONE_REVOKE),
             connections,
-            phones: !on(actions::GROUP_SUBSCRIBE).is_empty(),
+            phones: !on(actions::INBOX_RECEIVE).is_empty(),
             send: send_ids.iter().map(choice).collect(),
         },
         read_groups: Some(read_ids),
@@ -117,8 +116,8 @@ fn keys_tab(state: &AppState, viewer: &Viewer) -> bool {
     match &viewer.grants {
         None => true,
         Some(grants) => {
-            portal::effective(grants, portal::KEYS_OWN_READ)
-                || portal::effective(grants, portal::KEYS_ALL_READ)
+            actions::effective(grants, actions::KEYS_OWN_READ)
+                || actions::effective(grants, actions::KEYS_ALL_READ)
         }
     }
 }
@@ -422,7 +421,7 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
                 &ui_inbox::DocView {
                     base,
                     groups: group_lines(&overview),
-                    keys: state.config.keys.is_some(),
+                    keys: state.config.keys.as_ref().is_some_and(|keys| keys.api),
                     keys_page: keys_tab(state, &ctx.viewer),
                 },
             )

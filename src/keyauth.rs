@@ -25,6 +25,8 @@ pub enum Cause {
     NoKey,
     /// The text has not the form of a key.
     BadFormat,
+    /// The text is a good key of the other kind: this verifier serves one kind only (portal 8.3a).
+    WrongKind,
     /// The directory holds no key with this digest.
     UnknownKey,
     /// The key is expired.
@@ -33,7 +35,7 @@ pub enum Cause {
     KeyTooOld,
     /// The owner of the key does not exist.
     OwnerUnknown,
-    /// The owner does not have `keys.own.use`.
+    /// The owner does not have `keys.own.use` on the kind of the key.
     OwnerCannotUseKeys,
     /// No service owns the path of the request.
     NoService,
@@ -41,7 +43,7 @@ pub enum Cause {
     BadForwardedHeader,
     /// The decision for `access` on the service is `false`.
     NoAccess,
-    /// The configuration has no block `keys`.
+    /// The configuration has no block `keys`, or it turns the kind of the key off.
     KeysDisabled,
     /// The last good read of the directory is older than `keys.directory_max_age`.
     DirectoryTooOld,
@@ -50,9 +52,10 @@ pub enum Cause {
 }
 
 impl Cause {
-    pub const ALL: [Cause; 13] = [
+    pub const ALL: [Cause; 14] = [
         Cause::NoKey,
         Cause::BadFormat,
+        Cause::WrongKind,
         Cause::UnknownKey,
         Cause::Expired,
         Cause::KeyTooOld,
@@ -71,6 +74,7 @@ impl Cause {
         match self {
             Cause::NoKey => "no_key",
             Cause::BadFormat => "bad_format",
+            Cause::WrongKind => "wrong_kind",
             Cause::UnknownKey => "unknown_key",
             Cause::Expired => "expired",
             Cause::KeyTooOld => "key_too_old",
@@ -164,10 +168,17 @@ pub fn directory_too_old(state: &AppState) -> bool {
 }
 
 /// Finds the owner of a key and checks the state of the key and of the owner at `now` (Unix
-/// seconds): the key is not expired, the owner exists and has `keys.own.use`, and the key is not
-/// older than the `max_key_lifetime` of the owner (portal 8.3, 9.3).
+/// seconds): the kind of the key is on, the key is not expired, the owner exists and has
+/// `keys.own.use` on the kind of the key, and the key is not older than the `max_key_lifetime` of
+/// the owner for this kind (portal 8.3, 9.3).
 pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Principal, Cause> {
-    if state.config.keys.is_none() {
+    // The kind of the key must be on (`keys.mcp`, `keys.api`).
+    if !state
+        .config
+        .keys
+        .as_ref()
+        .is_some_and(|keys| keys.kinds().contains(&key.kind))
+    {
         return Err(Cause::KeysDisabled);
     }
     if directory_too_old(state) {
@@ -181,7 +192,7 @@ pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Princ
         // key is never too old and can have no expiry date (portal 8.3).
         KeyOwner::Superadmin => OwnerSide::Superadmin,
         KeyOwner::User(login) | KeyOwner::File(login) => {
-            // The rights of the key come from the grants of the service `portal` only.
+            // The right to use the keys comes from the grants of the service `portal` only.
             let (grants, from_file) = person_grants_on(state, login, portal_actions::SERVICE)
                 .ok_or(Cause::OwnerUnknown)?;
             // A key of the file follows its account of the file, and a key of the database its
@@ -189,10 +200,10 @@ pub fn resolve(state: &AppState, key: &Arc<KeyRecord>, now: i64) -> Result<Princ
             if from_file != key.is_from_file() {
                 return Err(Cause::OwnerUnknown);
             }
-            if !portal_actions::effective(&grants, portal_actions::KEYS_OWN_USE) {
+            if !portal_actions::effective_kind(&grants, portal_actions::KEYS_OWN_USE, key.kind) {
                 return Err(Cause::OwnerCannotUseKeys);
             }
-            if key.too_old(now, portal_actions::max_key_lifetime(&grants)) {
+            if key.too_old(now, portal_actions::max_key_lifetime(&grants, key.kind)) {
                 return Err(Cause::KeyTooOld);
             }
             OwnerSide::Person {
@@ -403,6 +414,7 @@ mod tests {
 
     fn key(id: &str, file: bool) -> KeyRecord {
         KeyRecord {
+            kind: crate::keys::KeyKind::Mcp,
             id: id.into(),
             owner: if file {
                 KeyOwner::File("carol".into())
@@ -426,6 +438,7 @@ mod tests {
             [
                 "no_key",
                 "bad_format",
+                "wrong_kind",
                 "unknown_key",
                 "expired",
                 "key_too_old",

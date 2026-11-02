@@ -114,6 +114,8 @@ pub struct KeyRow {
     pub expires_at: Option<i64>,
     pub last_check_at: Option<i64>,
     pub check_count: i64,
+    /// The kind of the key: the prefix of its text (portal 5.1).
+    pub kind: crate::keys::KeyKind,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
@@ -172,6 +174,8 @@ pub struct KeyListItem {
     pub check_count: i64,
     /// `Some`: the key is revoked, and this is its summary row.
     pub revoked_at: Option<i64>,
+    /// The kind of a key that exists. `None` for a revoked key: its summary row has no kind.
+    pub kind: Option<crate::keys::KeyKind>,
     /// The grants of a key that exists. Empty for a revoked key.
     pub grants: Vec<Grant>,
 }
@@ -953,6 +957,7 @@ mod tests {
         ];
         grants.sort();
         KeyRow {
+            kind: crate::keys::KeyKind::Mcp,
             id: id.into(),
             owner: owner.map(Into::into),
             name: format!("key {id}"),

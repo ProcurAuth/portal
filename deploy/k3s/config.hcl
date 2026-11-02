@@ -7,7 +7,7 @@
 #   identity.issuer                                           the base URL of the portal
 #   inbox.devices.public_address                              the public base URL of the portal, as the phones reach it
 #   postgres.host                                             the read-write Service of the database
-#   the blocks group and producer                             your alert groups and sources
+#   the blocks group and api_key                              your alert groups and sources
 
 server {
   listen_address  = "0.0.0.0:4181"
@@ -22,8 +22,25 @@ authentication {
   superadmin_password_file = "/run/secrets/superadmin_password"
 }
 
+# "hybrid": the settings pages give the grants of the accounts of the database, and the blocks `user`
+# of this file give the grants of the accounts of the file. The account "alerting" owns an API key.
 access {
-  grants_mode = "dynamic"
+  grants_mode = "hybrid"
+}
+
+# Both kinds of key are on. The kind `mcp` needs the blocks `identity` and `pdp` below. The kind `api`
+# needs the block `inbox` below.
+keys {
+  mcp = true
+  api = true
+}
+
+# The account of the file that owns the API key "alerting". A key follows its owner.
+user "alerting" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+  ]
 }
 
 # The identity token that /auth/verify gives to the service that a user opens.
@@ -114,10 +131,12 @@ inbox {
     description = "Outages of the infrastructure"
   }
 
-  # Alert sources: Alertmanager, Grafana, scripts. Make a token with `portal inbox token --out FILE`.
-  producer "alerting" {
-    token_file = "/run/secrets/inbox_alerting_token"
-    groups     = ["infra"]
+  # Alert sources: Alertmanager, Grafana, scripts. Make a key with `portal inbox token --out FILE`.
+  # The key follows its owner, an account of the file (the block `user` above).
+  api_key "alerting" {
+    owner       = "alerting"
+    secret_file = "/run/secrets/inbox_alerting_key"
+    groups      = ["infra"]
   }
 
   # The portal alerts about itself when a service stays unhealthy or when sign-ins fail in a burst.

@@ -31,7 +31,7 @@ fi
 # The Noise key of the inbox server and the token of the producer. A new key invalidates every phone.
 inbox() { docker run --rm --network none -u "$(id -u):$(id -g)" -v "$PWD/$secrets:/out" local/portal:demo inbox "$@"; }
 [ -f "$secrets/inbox_server_key" ] || inbox keygen --out /out/inbox_server_key > /dev/null
-[ -f "$secrets/inbox_producer_token" ] || inbox token --out /out/inbox_producer_token > /dev/null
+[ -f "$secrets/inbox_api_key" ] || inbox token --out /out/inbox_api_key > /dev/null
 {
   echo "URL:        http://localhost:8088/"
   echo "superadmin: admin / $(cat "$secrets/superadmin_password")"

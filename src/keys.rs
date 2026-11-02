@@ -1,10 +1,13 @@
 //! The text of a key, its digest, its hint and its id (portal 5.1, 4.7).
 //!
-//! The text of a key is `mcp_`, then 43 random characters from `a-z`, `A-Z` and `0-9`, then 6
-//! characters: the CRC-32 (the CRC-32 of zlib) of the 43 characters, in base62. The base62 digits
-//! are `0-9`, then `A-Z`, then `a-z`, with the most significant digit first. The text has 53
-//! characters. The edge refuses a text with a bad prefix, a bad length, a bad character or a bad
-//! checksum before it hashes the text (portal 8.3).
+//! The text of a key is a prefix, then 43 random characters from `a-z`, `A-Z` and `0-9`, then 6
+//! characters: the CRC-32 (the CRC-32 of zlib) of the prefix and the 43 characters, in base62. The
+//! base62 digits are `0-9`, then `A-Z`, then `a-z`, with the most significant digit first. The
+//! text has 53 characters. The prefix gives the kind of the key: `mcp_` for an agent, verified at
+//! the key edge, and `api_` for a service, verified by the API of the inbox. The prefix `whk_` is
+//! reserved: it is an unknown prefix. A verifier refuses a text with a bad prefix, a bad length, a
+//! bad character or a bad checksum before it hashes the text, and then it refuses a key of the
+//! other kind (portal 5.1, 8.3).
 //!
 //! The portal shows the text one time. It keeps only the SHA-256 digest and a hint of at most 4 of
 //! the 43 random characters. A standalone key of a service has 47 characters, not 53 (portal
@@ -17,14 +20,65 @@
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// The prefix of the text of a key.
-pub const PREFIX: &str = "mcp_";
+/// The number of characters of a prefix: three letters and `_`.
+pub const PREFIX_CHARS: usize = 4;
 /// The number of random characters.
 pub const RANDOM_CHARS: usize = 43;
 /// The number of characters of the checksum.
 pub const CHECKSUM_CHARS: usize = 6;
 /// The length of the text of a key.
-pub const TEXT_CHARS: usize = PREFIX.len() + RANDOM_CHARS + CHECKSUM_CHARS;
+pub const TEXT_CHARS: usize = PREFIX_CHARS + RANDOM_CHARS + CHECKSUM_CHARS;
+
+/// The kind of a key (portal 5.1). One key has one kind, and the kind decides who verifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum KeyKind {
+    /// An agent. The key edge verifies it (`/auth/verify-key`).
+    Mcp,
+    /// A service, a webhook or a script. The API of the inbox verifies it, in process.
+    Api,
+}
+
+impl KeyKind {
+    /// Every kind, in the order of the pages.
+    pub const ALL: [KeyKind; 2] = [KeyKind::Mcp, KeyKind::Api];
+
+    /// The prefix of the text of a key of this kind.
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            KeyKind::Mcp => "mcp_",
+            KeyKind::Api => "api_",
+        }
+    }
+
+    /// The name of the kind: the id of the node `key_kind:<name>` and the value of the column
+    /// `kind` of the database.
+    pub const fn name(self) -> &'static str {
+        match self {
+            KeyKind::Mcp => "mcp",
+            KeyKind::Api => "api",
+        }
+    }
+
+    /// The label that the pages show.
+    pub const fn label(self) -> &'static str {
+        match self {
+            KeyKind::Mcp => "MCP",
+            KeyKind::Api => "API",
+        }
+    }
+
+    /// The kind with this name. `None`: no such kind.
+    pub fn from_name(name: &str) -> Option<KeyKind> {
+        KeyKind::ALL.into_iter().find(|k| k.name() == name)
+    }
+
+    /// The kind of a text with this prefix. `whk_` is reserved and gives `None`.
+    fn from_text(text: &str) -> Option<KeyKind> {
+        KeyKind::ALL
+            .into_iter()
+            .find(|k| text.starts_with(k.prefix()))
+    }
+}
 /// The number of characters of a hint.
 pub const HINT_CHARS: usize = 4;
 /// The number of characters of the id of a key of the database.
@@ -39,13 +93,13 @@ const RANDOM_LIMIT: u8 = 248; // 4 * 62: a byte from this value up is not used, 
 /// Why a text is not the text of a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatError {
-    /// The text does not start with `mcp_`.
+    /// The text does not start with the prefix of a kind (`mcp_` or `api_`).
     Prefix,
     /// The text does not have 53 characters.
     Length,
     /// A character is not in `a-z`, `A-Z` or `0-9`.
     Character,
-    /// The checksum does not match the 43 random characters.
+    /// The checksum does not match the prefix and the 43 random characters.
     Checksum,
 }
 
@@ -73,13 +127,14 @@ fn base62_6(mut value: u32) -> [u8; CHECKSUM_CHARS] {
     out
 }
 
-/// The checksum characters of 43 random characters.
-fn checksum(random: &[u8]) -> [u8; CHECKSUM_CHARS] {
-    base62_6(crc32(random))
+/// The checksum characters of the prefix and the 43 random characters.
+fn checksum(covered: &[u8]) -> [u8; CHECKSUM_CHARS] {
+    base62_6(crc32(covered))
 }
 
-/// A new text of a key. The 43 random characters come from the random generator of the system.
-pub fn generate() -> Result<Zeroizing<String>, String> {
+/// A new text of a key of this kind. The 43 random characters come from the random generator of
+/// the system.
+pub fn generate(kind: KeyKind) -> Result<Zeroizing<String>, String> {
     let mut random = Zeroizing::new([0u8; RANDOM_CHARS]);
     let mut filled = 0;
     while filled < RANDOM_CHARS {
@@ -93,29 +148,34 @@ pub fn generate() -> Result<Zeroizing<String>, String> {
         }
     }
     let mut text = Zeroizing::new(String::with_capacity(TEXT_CHARS));
-    text.push_str(PREFIX);
+    text.push_str(kind.prefix());
     text.extend(random.iter().map(|b| char::from(*b)));
-    text.extend(checksum(&random[..]).iter().map(|b| char::from(*b)));
+    let sum = checksum(text.as_bytes());
+    text.extend(sum.iter().map(|b| char::from(*b)));
     Ok(text)
 }
 
 /// Checks the form of a text: the prefix, the length, the characters and the checksum. It does
-/// not hash the text.
-pub fn check_format(text: &str) -> Result<(), FormatError> {
-    let Some(rest) = text.strip_prefix(PREFIX) else {
+/// not hash the text, and it does not look at a database. The answer is the kind of the key. The
+/// verifier then checks that the kind is the kind that it serves.
+pub fn check_format(text: &str) -> Result<KeyKind, FormatError> {
+    let Some(kind) = KeyKind::from_text(text) else {
         return Err(FormatError::Prefix);
     };
     if text.len() != TEXT_CHARS {
         return Err(FormatError::Length);
     }
-    if !rest.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    if !text.as_bytes()[PREFIX_CHARS..]
+        .iter()
+        .all(u8::is_ascii_alphanumeric)
+    {
         return Err(FormatError::Character);
     }
-    let (random, given) = rest.as_bytes().split_at(RANDOM_CHARS);
-    if checksum(random).as_slice() != given {
+    let (covered, given) = text.as_bytes().split_at(PREFIX_CHARS + RANDOM_CHARS);
+    if checksum(covered).as_slice() != given {
         return Err(FormatError::Checksum);
     }
-    Ok(())
+    Ok(kind)
 }
 
 /// The SHA-256 digest of the text of a key. The portal keeps this value and never the text.
@@ -126,8 +186,8 @@ pub fn digest(text: &str) -> [u8; 32] {
 /// The hint of a key: the first 4 of its 43 random characters. A text with a bad form gives an
 /// empty hint.
 pub fn hint(text: &str) -> String {
-    text.strip_prefix(PREFIX)
-        .map(|rest| rest.chars().take(HINT_CHARS).collect())
+    KeyKind::from_text(text)
+        .map(|_| text.chars().skip(PREFIX_CHARS).take(HINT_CHARS).collect())
         .unwrap_or_default()
 }
 
@@ -198,38 +258,61 @@ mod tests {
     }
 
     #[test]
-    fn a_generated_text_has_the_form_of_5_1() {
-        let text = generate().unwrap();
-        assert_eq!(text.len(), 53);
-        assert!(text.starts_with("mcp_"));
-        assert_eq!(check_format(&text), Ok(()));
-        assert!(text[4..].bytes().all(|b| b.is_ascii_alphanumeric()));
-        let other = generate().unwrap();
-        assert_ne!(*text, *other, "two texts are never equal");
-        // The checksum covers the 43 characters.
-        let mut random = text[4..47].to_string();
+    fn a_generated_text_has_the_form_of_5_1_for_each_kind() {
+        for kind in KeyKind::ALL {
+            let text = generate(kind).unwrap();
+            assert_eq!(text.len(), 53);
+            assert!(text.starts_with(kind.prefix()));
+            assert_eq!(check_format(&text), Ok(kind));
+            assert!(text[4..].bytes().all(|b| b.is_ascii_alphanumeric()));
+            let other = generate(kind).unwrap();
+            assert_ne!(*text, *other, "two texts are never equal");
+            // The checksum covers the prefix and the 43 characters.
+            assert_eq!(
+                text[47..].as_bytes(),
+                checksum(text[..47].as_bytes()),
+                "the last 6 characters"
+            );
+            let mut covered = text[..47].to_string();
+            covered.replace_range(10..11, if &covered[10..11] == "a" { "b" } else { "a" });
+            assert_ne!(
+                checksum(covered.as_bytes()).as_slice(),
+                text[47..].as_bytes()
+            );
+        }
+        assert_ne!(KeyKind::Mcp.prefix(), KeyKind::Api.prefix());
+    }
+
+    #[test]
+    fn a_changed_prefix_fails_the_checksum() {
+        let api = generate(KeyKind::Api).unwrap();
+        let as_mcp = api.replacen("api_", "mcp_", 1);
+        assert_eq!(check_format(&as_mcp), Err(FormatError::Checksum));
+        let mcp = generate(KeyKind::Mcp).unwrap();
         assert_eq!(
-            text[47..].as_bytes(),
-            checksum(random.as_bytes()),
-            "the last 6 characters"
-        );
-        random.replace_range(0..1, if random.starts_with('a') { "b" } else { "a" });
-        assert_ne!(
-            checksum(random.as_bytes()).as_slice(),
-            text[47..].as_bytes()
+            check_format(&mcp.replacen("mcp_", "api_", 1)),
+            Err(FormatError::Checksum)
         );
     }
 
     #[test]
+    fn the_reserved_prefix_and_an_unknown_prefix_are_unknown() {
+        let good = generate(KeyKind::Mcp).unwrap();
+        for prefix in ["whk_", "mcq_", "API_", "key_"] {
+            let text = good.replacen("mcp_", prefix, 1);
+            assert_eq!(check_format(&text), Err(FormatError::Prefix), "{prefix}");
+        }
+        assert_eq!(KeyKind::from_name("whk"), None);
+        assert_eq!(KeyKind::from_name("api"), Some(KeyKind::Api));
+        assert_eq!(KeyKind::from_name("mcp"), Some(KeyKind::Mcp));
+    }
+
+    #[test]
     fn a_text_with_a_bad_form_is_refused_with_its_cause() {
-        let good = generate().unwrap();
-        assert_eq!(check_format(&good), Ok(()));
+        let good = generate(KeyKind::Mcp).unwrap();
+        assert_eq!(check_format(&good), Ok(KeyKind::Mcp));
         assert_eq!(check_format(""), Err(FormatError::Prefix));
         assert_eq!(check_format("Bearer x"), Err(FormatError::Prefix));
-        assert_eq!(
-            check_format(&good.replacen("mcp_", "mcq_", 1)),
-            Err(FormatError::Prefix)
-        );
         assert_eq!(check_format(&good[..52]), Err(FormatError::Length));
         assert_eq!(
             check_format(&format!("{}a", *good)),
@@ -250,12 +333,13 @@ mod tests {
 
     #[test]
     fn the_digest_the_hint_and_the_ids_follow_the_paragraphs() {
-        let text = generate().unwrap();
+        let text = generate(KeyKind::Api).unwrap();
         assert_eq!(
             digest(&text),
             <[u8; 32]>::from(Sha256::digest(text.as_bytes()))
         );
         assert_eq!(hint(&text), text[4..8]);
+        assert_eq!(hint("whk_abcdefgh"), "");
         assert_eq!(hint("nothing"), "");
         let id = new_id().unwrap();
         assert_eq!(id.len(), 16);

@@ -1162,6 +1162,13 @@ input.keyText {
   gap: 8px;
 }
 
+.ge__groupTitle {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .ge__svc {
   overflow: hidden;
   border: 1px solid var(--border);

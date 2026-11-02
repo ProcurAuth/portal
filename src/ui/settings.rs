@@ -50,7 +50,7 @@ pub const LOGINS_PATH: &str = "/auth/settings/logins";
 /// The page of the keys (portal 5.8a).
 pub const KEYS_PATH: &str = "/auth/keys";
 /// The page of the inbox: the first page of the tab "Inbox".
-pub const INBOX_PATH: &str = crate::inbox_actions::PAGE;
+pub const INBOX_PATH: &str = crate::ui::inbox::PAGE;
 
 /// The path of the page of one account. A login has only `a-z`, `0-9`, `.`, `-` and `_`, so the
 /// path needs no encoding. The caller escapes the path for HTML all the same.
@@ -90,7 +90,7 @@ pub enum Tab {
     Logins,
     /// The page of the keys (portal 5.8). Each user who can read keys sees it.
     Keys,
-    /// The pages of the inbox. Each user with a right of the service `inbox` sees it.
+    /// The pages of the inbox. Each user with a right of the inbox features sees it.
     Inbox,
 }
 
@@ -438,6 +438,9 @@ impl ServiceActions {
 /// The data of the Users page: the table of the accounts and the add form.
 pub struct UsersView<'a> {
     pub notice: Option<Notice>,
+    /// `users.allow_creation`. `false`: the page has no button, no form and no entry that makes an
+    /// account.
+    pub allow_creation: bool,
     /// The add form is open: the address asks for it, or the last add was refused.
     pub add_open: bool,
     /// Where the grants come from.
@@ -481,7 +484,11 @@ fn summary(catalog: &Catalog, services: &[ServiceActions], user: &UserCard) -> S
         .flat_map(|group| group.services.iter())
         .filter(|service| holds(&user.grants, ACCESS, &service.id))
         .count();
-    let below = user.grants.iter().filter(|g| !g.path.is_empty()).count();
+    let below = user
+        .grants
+        .iter()
+        .filter(|g| !g.path.is_empty() && g.service != PORTAL)
+        .count();
     let to_check = user
         .grants
         .iter()
@@ -501,7 +508,8 @@ fn summary(catalog: &Catalog, services: &[ServiceActions], user: &UserCard) -> S
 pub fn users_page(frame: &Frame, view: &UsersView) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
-    let add_open = view.add_open || view.notice.is_some_and(|n| n.add_form);
+    let add_open =
+        view.allow_creation && (view.add_open || view.notice.is_some_and(|n| n.add_form));
     if add_open {
         // The add form is the whole page: the other accounts are not shown while it is open.
         out.push_str(r#"<section class="pagePart" aria-labelledby="accounts-title">"#);
@@ -526,10 +534,12 @@ pub fn users_page(frame: &Frame, view: &UsersView) -> String {
             plural(failed as usize, "refused sign-in", "refused sign-ins"),
         );
     }
-    let _ = write!(
-        controls,
-        r##"<a class="button button--primary" href="{USERS_PATH}?add=1#add-user">New user</a>"##
-    );
+    if view.allow_creation {
+        let _ = write!(
+            controls,
+            r##"<a class="button button--primary" href="{USERS_PATH}?add=1#add-user">New user</a>"##
+        );
+    }
     part_head(
         &mut out,
         "accounts-title",
@@ -572,7 +582,12 @@ fn summary_text(user: &UserCard, s: &Summary) -> String {
     let actions = user
         .grants
         .iter()
-        .filter(|g| g.action != ACCESS && g.path.is_empty())
+        .filter(|g| g.action != ACCESS && g.path.is_empty() && g.service != PORTAL)
+        .count();
+    let features = user
+        .grants
+        .iter()
+        .filter(|g| g.service == PORTAL && g.action != ACCESS)
         .count();
     let mut parts = vec![format!(
         "<strong>{}</strong>",
@@ -585,6 +600,12 @@ fn summary_text(user: &UserCard, s: &Summary) -> String {
         parts.push(format!(
             "{} on resources",
             plural(s.below, "permission", "permissions")
+        ));
+    }
+    if features > 0 {
+        parts.push(format!(
+            "{} of the portal",
+            plural(features, "permission", "permissions")
         ));
     }
     parts.join(", ")
@@ -690,18 +711,16 @@ pub struct UserView<'a> {
     pub first_day: i64,
     /// The anti-CSRF token of the administration forms.
     pub token: &'a str,
-    /// The rights of the account on the keys. `None`: the portal accepts no key.
-    pub keys: Option<KeysRights>,
+    /// The portal features that the editor offers: the keys and the inbox. `None`: the file turns
+    /// none on.
+    pub features: Option<ServiceActions>,
+    /// The number of keys that the account owns. The confirmation of the delete names them: they go
+    /// with the account.
+    pub owned_keys: usize,
 }
 
-/// The rights of the service `portal` that an account holds (portal 6.1).
-#[derive(Clone, Debug, Default)]
-pub struct KeysRights {
-    /// The actions of the service `portal` that the account holds.
-    pub held: Vec<String>,
-    /// The longest lifetime of a key, in seconds, from the value of `keys.own.use`.
-    pub max_key_lifetime: Option<u64>,
-}
+/// The id of the service `portal`.
+const PORTAL: &str = crate::portal_actions::SERVICE;
 
 pub fn user_page(frame: &Frame, view: &UserView) -> String {
     let user = &view.user;
@@ -719,79 +738,8 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
     // deletion on one row. The activity is folded, as it is read less often.
     access_part(&mut out, view);
     account_part(&mut out, view);
-    keys_rights_part(&mut out, view);
     activity_fold(&mut out, view);
     page(Tab::Users, frame, &user.login, &out, true)
-}
-
-/// The rights of the account on the keys (portal 6.1, 6.3): one box for each action of the service
-/// `portal`. A box is locked until the account holds the action that it needs (portal 6.3a).
-fn keys_rights_part(out: &mut String, view: &UserView) {
-    let Some(rights) = &view.keys else {
-        return;
-    };
-    let editable = view.mode.editable();
-    let user = &view.user;
-    let total = crate::portal_actions::document().actions.len();
-    let _ = write!(
-        out,
-        r##"<details class="partFold" id="keys-rights"><summary class="partFold__head"><svg class="icon icon--sm partFold__chevron" aria-hidden="true"><use href="#i-chevron-right"/></svg><h2 class="pagePart__title" id="keys-rights-title">Keys</h2><span class="pagePart__count">{} of {total} rights</span></summary><div class="pagePart"><p class="part__lede">What this account can do with keys. A key never has more than its owner.</p>"##,
-        rights.held.len()
-    );
-    if editable {
-        let _ = write!(
-            out,
-            r#"<form class="editor" method="post" action="/auth/users/portal-rights"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}">"#,
-            html_escape(view.token),
-            html_escape(&user.login)
-        );
-    }
-    out.push_str(r#"<ul class="options">"#);
-    let document = crate::portal_actions::document();
-    for action in &document.actions {
-        let held = rights.held.contains(&action.name);
-        let needs = crate::portal_actions::needs(&action.name);
-        let missing: Vec<&&str> = needs
-            .iter()
-            .filter(|need| !rights.held.iter().any(|h| h == **need))
-            .collect();
-        let locked = !missing.is_empty() && !held;
-        let _ = write!(
-            out,
-            r#"<li><label class="option{}"><input type="checkbox" name="p.{}" value="1"{}{}><span class="option__name"><code>{}</code></span><span class="option__text">{}{}</span></label></li>"#,
-            if held { " is-on" } else { "" },
-            html_escape(&action.name),
-            if held { " checked" } else { "" },
-            if !editable || locked { " disabled" } else { "" },
-            html_escape(&action.name),
-            html_escape(&action.description),
-            if locked {
-                format!(
-                    r#" <span class="muted">Needs {}.</span>"#,
-                    missing
-                        .iter()
-                        .map(|m| format!("<code>{m}</code>"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                String::new()
-            },
-        );
-    }
-    out.push_str("</ul>");
-    if editable {
-        let value = rights
-            .max_key_lifetime
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        let _ = write!(
-            out,
-            r#"<div class="formActions formActions--end"><div class="uiField uiField--narrow"><label class="uiField__label" for="max-key-lifetime">Longest key lifetime, in seconds</label><input class="uiInput" id="max-key-lifetime" name="max_key_lifetime" type="text" inputmode="numeric" value="{}" size="10" placeholder="No limit" title="0 to 31536000. Empty: no limit."></div><button class="button button--primary" type="submit">Save the rights on keys</button></div></form>"#,
-            html_escape(&value)
-        );
-    }
-    out.push_str("</div></details>");
 }
 
 /// The head of the page of an account: the way back to the list, the login, its badges, one line
@@ -883,30 +831,33 @@ fn access_part(out: &mut String, view: &UserView) {
             html_escape(&user.login),
         );
     }
-    if view.services.is_empty() {
+    if view.services.is_empty() && view.features.is_none() {
         out.push_str(r#"<div class="uiState uiState--compact"><p class="uiState__body">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p></div>"#);
     } else {
         // The editor shows every grant that the account holds, also a grant that the document of
         // the service does not name now. The grants of the configuration file are locked.
-        let shown: Vec<&Grant> = user
-            .grants
-            .iter()
-            .filter(|g| g.service != crate::portal_actions::SERVICE)
-            .collect();
+        let shown: Vec<&Grant> = user.grants.iter().collect();
         let fixed = |g: &Grant| !editable || user.configured.iter().any(|c| c.same_node(g));
         let stored: Vec<Grant> = shown
             .iter()
             .filter(|g| !fixed(g))
             .map(|g| (*g).clone())
             .collect();
-        let mut data = grant_editor::build(&view.services, None, |_| true, stored, true);
+        let mut data = grant_editor::build(
+            &view.services,
+            view.features.as_ref(),
+            None,
+            |_| true,
+            stored,
+            true,
+        );
         data.locked = shown
             .iter()
             .filter(|g| fixed(g))
             .map(|g| (*g).clone())
             .collect();
-        for grant in &data.locked {
-            grant_editor::keep(&mut data.services, grant);
+        for grant in data.locked.clone() {
+            data.keep(&grant);
         }
         grant_editor::render(
             out,
@@ -1108,6 +1059,15 @@ fn activity_body(out: &mut String, view: &UserView) {
     out.push_str("</div></div>");
 }
 
+/// The keys that go with an account: " and 3 keys". Empty without a key.
+fn keys_clause(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => " and 1 key".to_string(),
+        n => format!(" and {n} keys"),
+    }
+}
+
 /// The password and the deletion of the account, on one row.
 fn account_part(out: &mut String, view: &UserView) {
     let token = html_escape(view.token);
@@ -1127,7 +1087,8 @@ fn account_part(out: &mut String, view: &UserView) {
     );
     let _ = write!(
         out,
-        r#"<button class="button" type="submit" title="The sessions of this account end at once">Change password</button></form><div class="accountRow__delete"><details class="confirm"><summary class="button button--quiet-danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>Its sessions end at once. Its history stays until it expires. This cannot be undone.</p><button class="button button--danger" type="submit">Confirm: delete {login}</button></form></details></div></div></section>"#
+        r#"<button class="button" type="submit" title="The sessions of this account end at once">Change password</button></form><div class="accountRow__delete"><details class="confirm"><summary class="button button--quiet-danger">Delete {login}</summary><form class="confirm__panel" method="post" action="/auth/users/delete"><input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}"><p>Delete {login}{keys}? Its sessions end at once. Its history stays until it expires. This cannot be undone.</p><button class="button button--danger" type="submit">Confirm: delete {login}{keys}</button></form></details></div></div></section>"#,
+        keys = keys_clause(view.owned_keys),
     );
 }
 
@@ -1826,6 +1787,7 @@ mod tests {
         root.created_at = None;
         UsersView {
             notice: None,
+            allow_creation: true,
             add_open: false,
             mode: Mode::Dynamic,
             catalog,
@@ -1852,7 +1814,8 @@ mod tests {
             user,
             first_day: 1_788_000_000,
             token: "tok<en",
-            keys: None,
+            features: None,
+            owned_keys: 0,
         }
     }
 

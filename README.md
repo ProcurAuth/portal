@@ -31,11 +31,11 @@ The data lives in one database. By default it is one SQLite file. The SQLite lib
 
 | Listener | Key | Use | Who reaches it |
 |---|---|---|---|
-| Portal | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz`, `/readyz` and `/metrics`. With the block `inbox`, also the inbox: the API for the producers and the webhooks (`/api/v1/*`, `/api/version`) and the routes of the phones (`/v1/enroll`, `/v1/session`). | Traefik and Prometheus. Traefik sends `/v1/`, `/api/v1/` and `/api/version` to it without ForwardAuth. |
+| Portal | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz`, `/readyz` and `/metrics`. With the block `inbox`, also the inbox: the API for the senders and the webhooks (`/api/v1/*`, `/api/version`) and the routes of the phones (`/v1/enroll`, `/v1/session`). | Traefik and Prometheus. Traefik sends `/v1/`, `/api/v1/` and `/api/version` to it without ForwardAuth. |
 | PDP | `pdp.listen_address` | The AuthZEN decisions. Optional. | The services only. Do not route it through Traefik. |
 | Cluster | `inbox.cluster.listen` | Copies of alerts between instances. Optional. | The pods of the service only. |
 
-The inbox is a feature of the portal. The pages, the producers, the webhooks and the phones use one port. The two routes of the phones are HTTP upgrade requests. The content is Noise-encrypted inside WebSocket frames. A reverse proxy carries them with path routing, so a separate exposure, connection budget and retry need no second port. The metrics of the portal and of the inbox are in one Prometheus text at `metrics.path` of the portal listener.
+The inbox is a feature of the portal. The pages, the senders, the webhooks and the phones use one port. The two routes of the phones are HTTP upgrade requests. The content is Noise-encrypted inside WebSocket frames. A reverse proxy carries them with path routing, so a separate exposure, connection budget and retry need no second port. The metrics of the portal and of the inbox are in one Prometheus text at `metrics.path` of the portal listener.
 
 The repository has these parts:
 
@@ -60,7 +60,7 @@ Docker is the only tool that you need.
 4. Open `http://127.0.0.1:4181/auth/login`. Sign in with the files `superadmin_login` and `superadmin_password` in `deploy/compose/secrets/`.
 5. Stop the stack and delete its database: `docker compose down -v`.
 
-The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181 serves the pages, the API of the producers and the phones. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
+The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181 serves the pages, the API of the senders and the phones. [`deploy/README.md`](deploy/README.md) describes it, the variant with two instances and the K3s manifests. [`demo/README.md`](demo/README.md) describes the demo with Traefik, services and keys. [`docs/inbox/README.md`](docs/inbox/README.md) describes the inbox and the test with the Android emulator.
 
 ## Security model
 
@@ -69,7 +69,7 @@ The stack has the portal with the inbox, and PostgreSQL. The portal on port 4181
 - **Sessions.** A session is an opaque random token. The server keeps only its SHA-256 digest. The session is bound to the client address and the browser.
 - **Gate.** A new user has no permission. The gate checks the forwarded path in every way that a proxy can interpret it. It lets a request pass only if every interpretation is allowed.
 - **Keys.** A key never gets more than its owner. The portal keeps only the digest of the key text.
-- **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A producer proves itself with a bearer token. The permissions of the service `inbox` decide who sends, reads and revokes.
+- **Inbox.** A phone enrolls with a one-time code of an account. The session is Noise IK to a key that the phone pinned. A sender proves itself with an API key. The permissions of the portal features decide who sends, reads and revokes.
 - **Configuration.** The file is the only source. A secret comes only from `_env` or `_file`. An unknown key stops the program at start.
 - **Code.** The project code has no `unsafe` Rust. The binary is static.
 
@@ -590,7 +590,7 @@ The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data 
 
 The portal can run the inbox. The inbox sends alerts to phones. It makes sure that each phone shows each alert one time. The inbox starts when the file has a block `inbox`. Without this block, the portal has no inbox and opens no port for it.
 
-The inbox is a feature of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a token of the file do not need a session of the portal. The inbox delivers alerts when the rest of the portal is not ready. The rights of the service `inbox` come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
+The inbox is a feature of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a key of the file do not need a session of the portal. The inbox delivers alerts when the rest of the portal is not ready. The rights of the portal features come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The specification is in `docs/inbox/`.
 
 ```hcl
 inbox {
@@ -623,10 +623,21 @@ inbox {
     critical    = false                                # default; true: no limit on alert.send
   }
 
-  producer "grafana" {
-    token_file = "/run/secrets/inbox_grafana_token"    # or: token_env
-    groups     = ["infra"]
+  api_key "grafana" {
+    owner       = "grafana"                            # an account of the file: a block user
+    secret_file = "/run/secrets/inbox_grafana_key"     # or: secret_env
+    groups      = ["infra"]
   }
+}
+
+# An API key needs the kind api, and an account of the file as its owner.
+access { grants_mode = "hybrid" }
+keys   { mcp = false  api = true }
+user "grafana" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+  ]
 }
 ```
 
@@ -636,7 +647,7 @@ The delivery values have no default. The program stops at start when one of them
 
 A phone enrolls with a one-time code. The code belongs to one account of the portal. The login of the account is the user name of the phone. The phone cannot change it.
 
-1. The account makes a code on the page **My phones** of the tab Inbox. The button **Make a code** sends `POST /auth/settings/inbox/code`. An account that has the permission `group.subscribe` on one group at least can use it. The code is for the login of the session. The form has no login field.
+1. The account makes a code on the page **My phones** of the tab Inbox. The button **Make a code** sends `POST /auth/settings/inbox/code`. An account that has the permission `inbox.receive` on one group at least can use it. The code is for the login of the session. The form has no login field.
 2. The page shows the code one time: the text `portal-inbox://enroll?s=...&k=...&c=...`, a link that opens the app, a Copy button, the fingerprint and the end of the code. The page has the header `Cache-Control: no-store`. The code holds the key `inbox.devices.public_address` (`s`), the public key of the server (`k`) and a secret of 128 bits (`c`). The fingerprint is the first 8 hexadecimal characters of the SHA-256 digest of the public key.
 3. The person types the code in the app, or taps it as a link. The app pins the key `k`. It connects to `GET /v1/enroll` and runs one Noise IK handshake with the prologue `portal-inbox/v1/enroll`. The first message holds the secret and the name of the phone.
 4. The inbox looks for the SHA-256 digest of the secret. A code works one time and lives `inbox.enrollment.code_ttl`. The inbox stores the phone and marks the code as used in one transaction. Then it sends message 2 and closes the connection.
@@ -649,7 +660,7 @@ When the superadmin deletes an account, the inbox revokes the phones of the acco
 
 ### Listeners
 
-The inbox is a feature of the portal, so it has no listener for the producers or the phones. The listener of the portal, `server.listen_address`, serves the pages and all the routes of the inbox. The portal gives the paths `/v1/`, `/api/v1/`, `/readyz` and `/api/version` to the inbox and to no other handler, before every other route. A path under these prefixes that the inbox does not know gets `404`. These routes need no session of the portal and set no cookie. The portal applies no CSRF check, no origin check and no security header to them. A proxy must send them to the portal without ForwardAuth (see "Reverse proxy").
+The inbox is a feature of the portal, so it has no listener for the senders or the phones. The listener of the portal, `server.listen_address`, serves the pages and all the routes of the inbox. The portal gives the paths `/v1/`, `/api/v1/`, `/readyz` and `/api/version` to the inbox and to no other handler, before every other route. A path under these prefixes that the inbox does not know gets `404`. These routes need no session of the portal and set no cookie. The portal applies no CSRF check, no origin check and no security header to them. A proxy must send them to the portal without ForwardAuth (see "Reverse proxy").
 
 **The routes of the phones** use the Noise handshake inside the WebSocket. A phone proves itself with it.
 
@@ -658,12 +669,12 @@ The inbox is a feature of the portal, so it has no listener for the producers or
 | `GET /v1/enroll` | WebSocket: enrollment of a phone with a one-time code. |
 | `GET /v1/session` | WebSocket: the session of an enrolled phone. |
 
-**The API of the producers** needs a bearer token or a key.
+**The API of the senders** needs an API key (the kind `api`).
 
 | Route | Use |
 |---|---|
-| `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Producer API with a bearer token. |
-| `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks with a bearer token. |
+| `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Sender API with an API key. |
+| `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks with an API key. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. |
 
 `GET /healthz` of the portal is a route of the portal. `/readyz` answers `200` with PostgreSQL, also when the database has no writable primary (`degraded`). With SQLite it answers `503` when the file does not answer. After SIGTERM it answers `503` with `draining`. The cluster then removes the instance from its Service. `portal healthcheck` checks `/healthz` and the inbox `/readyz` of the portal port. `portal inbox healthcheck --config FILE` checks the inbox only.
@@ -678,7 +689,7 @@ With the block `inbox.cluster`, the inbox has a second listener for the other in
 
 ### Reverse proxy
 
-Traefik must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. A phone, an Alertmanager and a script have no session. In Traefik, use a router with the rule ``PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)``, a high priority, the service of the portal and the middleware `retry` (4 attempts, initial interval 100 ms). Traefik retries a request only when the server did not answer at all. It never repeats a request after the first byte of the answer, so an upgrade that got `101` is not repeated. The files `demo/docker-compose.yml` (labels), `demo/traefik-dynamic.yml` and `deploy/k3s/ingress.yaml` (IngressRoute `portal-inbox`) show it. To restrict the phones by source address or by rate, add a middleware to this router. When no proxy is in front, the pages, the producers and the phones share the port of the portal directly. Do not route a path `/v1/` of another service to the same host: the portal owns this prefix.
+Traefik must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. A phone, an Alertmanager and a script have no session. In Traefik, use a router with the rule ``PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)``, a high priority, the service of the portal and the middleware `retry` (4 attempts, initial interval 100 ms). Traefik retries a request only when the server did not answer at all. It never repeats a request after the first byte of the answer, so an upgrade that got `101` is not repeated. The files `demo/docker-compose.yml` (labels), `demo/traefik-dynamic.yml` and `deploy/k3s/ingress.yaml` (IngressRoute `portal-inbox`) show it. To restrict the phones by source address or by rate, add a middleware to this router. When no proxy is in front, the pages, the senders and the phones share the port of the portal directly. Do not route a path `/v1/` of another service to the same host: the portal owns this prefix.
 
 ### Storage
 
@@ -686,7 +697,7 @@ The inbox uses the database of the portal. With SQLite, it uses the same file. W
 
 The inbox and the portal have two independent chains of migrations. The portal keeps its version in `PRAGMA user_version` (SQLite) or in `schema_migrations` (PostgreSQL). The inbox keeps its version in the table `inbox_schema_version`. Each chain refuses a schema that is newer than its binary. The tables of the inbox are `devices`, `subscriptions`, `alerts`, `deliveries`, `connections`, `enrollment_codes` and, with PostgreSQL, `instances`.
 
-With PostgreSQL, any number of instances can run. They share the phones, the alerts and the sessions through the database, `LISTEN` and `NOTIFY`. If the database has no writable primary, the inbox goes on: it accepts alerts in memory, it delivers them to the phones that are connected, and it writes them when the database is back. With the block `inbox.cluster`, the instances copy these alerts to each other before the producer gets its answer.
+With PostgreSQL, any number of instances can run. They share the phones, the alerts and the sessions through the database, `LISTEN` and `NOTIFY`. If the database has no writable primary, the inbox goes on: it accepts alerts in memory, it delivers them to the phones that are connected, and it writes them when the database is back. With the block `inbox.cluster`, the instances copy these alerts to each other before the sender gets its answer.
 
 With SQLite, the block `inbox.replica` copies the whole file to a shared directory. The copy holds the tables of the portal too. An instance that owns the lease serves. A standby instance waits for the lease before it opens the file. It restores the newest copy that passes the consistency check. An instance that loses its lease stops the whole process. The metrics `portal_inbox_replica_*` show the state of the copy.
 
@@ -695,35 +706,52 @@ With SQLite, the block `inbox.replica` copies the whole file to a shared directo
 | Command | Use |
 |---|---|
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
-| `portal inbox token --out FILE` | Makes the token of a producer. |
+| `portal inbox token --out FILE` | Makes the text of an API key (`api_`, 43 characters and 6 characters of checksum). The file never gets overwritten. |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the inbox. A file of the standalone alert server before the merge has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the portal port. |
 
-### Rights of the service `inbox`
+### Rights of the inbox (the service `portal`)
 
-The service `inbox` is the second service of the portal itself, after the service `portal`. The code holds its action document. It is a service of the catalogue with the id `inbox`: no workload can take this id. The launcher and the page **Services** do not list it, as for the service `portal`. It shows in the editor of permissions of the accounts and of the keys, with the name "Inbox (portal)". The editor lists each group of the file as the node `group:<id>`, with the name of the group, so nobody types an id.
+The inbox is a feature of the portal, and the portal has one internal scope for its features: the service `portal`. The code holds its action document. The scope has two features. The keys are in it when the file has the block `keys`. The inbox is in it when the file has the block `inbox`. The settings pages show the scope as the group **Portal features**, apart from the group **Services** (the workloads of the launcher). The launcher and the page **Services** never list it. The editor lists each group of the file as the node `inbox_group:<id>`, with the name of the group, so nobody types an id.
 
 | Action | Applies to | Gives |
 |---|---|---|
-| `group.subscribe` | `group` | The phones of the account can subscribe to the group. |
-| `alert.send` | `group` | Send an alert to the group (the form, the API with a key). It has the budget `alerts`. |
-| `alert.read` | `group` | See the alerts of the group and their delivery. |
-| `device.read` | the service | See all the phones. |
-| `device.revoke` | the service | Revoke any phone. It needs `device.read`. |
-| `connection.read` | the service | See the connection log. |
+| `inbox.receive` | `inbox_group` | The phones of the account can subscribe to the group, for all the kinds of message. |
+| `alert.send` | `inbox_group` | Send an alert to the group (the form, the API with a key). It has the budget `alerts`. |
+| `alert.read` | `inbox_group` | See the alerts of the group and their delivery. |
+| `phone.read` | the service | See all the phones. |
+| `phone.revoke` | the service | Revoke any phone. It needs `phone.read`. |
+| `phone.log` | the service | See the connection log. |
 
-The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
+The text of a grant is, for example, `alert.send on service:portal/inbox_group:infra`. The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
 
-- **Limit.** The action `alert.send` lists the budget `alerts`: a count of alerts in a window of a second, a minute, an hour or a day. The value is on the permission `access on service:inbox`, as for each other service. The portal counts one use for each request of a key and each send of the form, for the key and for its owner. A request that an `Idempotency-Key` repeats is a use too. A webhook with many alerts is one use. A budget that has no room gives `429` with `Retry-After`. The name of a budget cannot start with `max_`, so the budget has the name `alerts`.
+- **Limit.** The action `alert.send` lists the budget `alerts`: a count of alerts in a window of a second, a minute, an hour or a day. The value is on the permission `access on service:portal`, as for each other service. For this service, `access` opens no path: it carries the budget only. The portal counts one use for each request of a key and each send of the form, for the key and for its owner. A request that an `Idempotency-Key` repeats is a use too. A webhook with many alerts is one use. A budget that has no room gives `429` with `Retry-After`. The name of a budget cannot start with `max_`, so the budget has the name `alerts`.
 - **Critical groups.** A group with `critical = true` never counts a use. A limit never stops an alert to this group.
-- **Phones.** A phone subscribes to a group only when its account has `group.subscribe` on the group. The message `welcome` lists these groups. A `subscribe` to another group gets the error `forbidden_group`. When an account loses the permission, the inbox removes the subscription and tells the phone with the message `subscriptions`. The inbox checks this when the directory of the portal changes, not for each alert. The inbox never removes a subscription when it does not know: a directory that is not ready, old or empty, and an account that the directory does not know change nothing. An alert that exists stays deliverable. The accounts of the file (blocks `user`) and the superadmin follow the same rules.
+- **Phones.** A phone subscribes to a group only when its account has `inbox.receive` on the group. The message `welcome` lists these groups. A `subscribe` to another group gets the error `forbidden_group`. When an account loses the permission, the inbox removes the subscription and tells the phone with the message `subscriptions`. The inbox checks this when the directory of the portal changes, not for each alert. The inbox never removes a subscription when it does not know: a directory that is not ready, old or empty, and an account that the directory does not know change nothing. An alert that exists stays deliverable. The accounts of the file (blocks `user`) and the superadmin follow the same rules.
+- **No block `inbox`.** The file has no inbox actions, no tab Inbox, no route of the inbox, no phone endpoint and no `api_` kind. A grant that names an inbox action stops the start.
 
-### Producers
+### Keys and senders
 
-A producer sends alerts with a bearer token. The header is `Authorization: Bearer <token>`. The query `?token=<token>` works for the tools that cannot set a header. Two kinds of token work at the same time.
+A key has one kind, and the prefix of its text gives the kind. The kind decides who verifies the key.
 
-- **A token of the file** is the value of a block `producer`. The block lists its groups. This token never depends on the state of the portal: it works when the portal is not ready.
-- **A key of the portal** starts with `mcp_`. The inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:inbox/group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the inbox answers `503` with the code `directory_not_ready`.
+| Prefix | Kind | Used by | Verified by | At the other verifier |
+|---|---|---|---|---|
+| `mcp_` | MCP key | Agents | The key edge, `/auth/verify-key` | Refused: `401`, no detail |
+| `api_` | API key | Services, webhooks, Grafana-style callers | In process, by the API of the inbox on the portal port | Refused: `401`, no detail |
+| `whk_` | Reserved | Nobody | Nobody | Refused as an unknown prefix |
+
+The text of a key is the prefix, 43 random base62 characters and 6 base62 characters: the CRC-32 (zlib, polynomial 0xEDB88320) of the prefix and the 43 characters. A verifier refuses an unknown prefix, a bad length, a bad character and a bad checksum before any lookup. It then checks the kind. All these refusals are `401` with no detail. A key follows its owner, for both kinds: the rights of a key are the rights of the key and the current rights of its owner. When the owner loses a right, the key loses it at once. When an account is deleted, all its keys go with it. The page of the account tells the number of keys: "Delete carol and 3 keys?".
+
+The rights to make and to use a key are by kind: `keys.own.create` and `keys.own.use` apply to the resource type `key_kind`, with the nodes `key_kind:mcp` and `key_kind:api`. The form of a new key shows only the kinds that the account may make. With one kind, the form has no selector. With no kind, the page has no "New key".
+
+The file turns each kind on or off (`keys.mcp`, default `true`; `keys.api`, default `false`). The kind `api` needs the block `inbox`. The kind `mcp` needs the blocks `identity` and `pdp`. A part that is off is absent from the pages. It is never grey.
+
+### Senders of alerts
+
+A sender sends alerts with an API key. The header is `Authorization: Bearer <key>`. The query `?token=<key>` works for the tools that cannot set a header. Two sources of API key work at the same time.
+
+- **A key of the file** is a block `api_key` of the block `inbox`. It names its owner, an account of the file (a block `user`), and its groups. At start, the portal checks the grants of the owner and keeps the groups that the owner may send to. The rights of a file account do not change while the server runs. This decision never reads the directory or the database: a key of the file works when the portal is not ready and when PostgreSQL is away. The page **Keys** does not list it.
+- **A key of the database** is made on the page **Keys** with the kind API. The inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:portal/inbox_group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the inbox answers `503` with the code `directory_not_ready`.
 
 The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The page **Documentation** of the tab Inbox shows them with the real address of the listener, and the recipes for Grafana and Alertmanager.
 
@@ -733,11 +761,11 @@ The pages are in the style of the other settings pages. They work without script
 
 | Page | Route | Needs |
 |---|---|---|
-| Overview | `/auth/settings/inbox` | `alert.read`, `device.read`, `connection.read` or `alert.send`. |
+| Overview | `/auth/settings/inbox` | `alert.read`, `phone.read`, `phone.log` or `alert.send`. |
 | Alert | `/auth/settings/inbox/alerts/<id>` | `alert.read` on the group of the alert. |
-| Phones | `/auth/settings/inbox/devices` | `device.read`. |
-| Connections | `/auth/settings/inbox/connections?login=<login>` | `connection.read`. |
-| My phones | `/auth/settings/inbox/phones` | `group.subscribe` on one group at least. |
+| Phones | `/auth/settings/inbox/devices` | `phone.read`. |
+| Connections | `/auth/settings/inbox/connections?login=<login>` | `phone.log`. |
+| My phones | `/auth/settings/inbox/phones` | `inbox.receive` on one group at least. |
 | Documentation | `/auth/settings/inbox/doc` | A page of the tab. |
 
 - **Overview:** the figures of the delivery (with `device.read`), the groups with their critical mark and the number of phones, the form **Send an alert** and the last alerts. The form lists the groups that the account may send to. A double click sends one alert: the form has a key. The page of an alert shows each delivery: sent, received, expired.
@@ -880,7 +908,7 @@ logging {
 
 ## Configuration
 
-The program reads one HCL file. The HCL parser is a small, strict subset parser. Blocks hold `key = value` lines. A block has no nested block, with one exception: the block `inbox` holds the blocks `devices`, `storage`, `replica` and `cluster`, and the blocks with a label `group` and `producer`. A block can have a label (`user "alice" { ... }`). A value is a scalar or a list of quoted strings (`["a", "b"]`). The file is the only source of the configuration. The program reads an environment variable or a file only when the file names it.
+The program reads one HCL file. The HCL parser is a small, strict subset parser. Blocks hold `key = value` lines. A block has no nested block, with one exception: the block `inbox` holds the blocks `devices`, `storage`, `replica` and `cluster`, and the blocks with a label `group` and `api_key`. A block can have a label (`user "alice" { ... }`). A value is a scalar or a list of quoted strings (`["a", "b"]`). The file is the only source of the configuration. The program reads an environment variable or a file only when the file names it.
 
 ### Rules
 
@@ -895,7 +923,7 @@ The program reads one HCL file. The HCL parser is a small, strict subset parser.
 
 ### Secrets: `_env` and `_file`
 
-These attributes hold a secret: `authentication.superadmin_login`, `authentication.superadmin_password`, `session.secret`, `postgres.password`, `identity.signing_key`, the `token` of each `pdp_client` block, `inbox.server_key` and the `token` of each `producer` block. The file never holds the value. Give exactly one of these two forms:
+These attributes hold a secret: `authentication.superadmin_login`, `authentication.superadmin_password`, `session.secret`, `postgres.password`, `identity.signing_key`, the `token` of each `pdp_client` block, `inbox.server_key` and the `secret` of each `api_key` block. The file never holds the value. Give exactly one of these two forms:
 
 | Form | The value is |
 |---|---|
@@ -977,6 +1005,7 @@ The accounts in the database.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `max_users` | number, 1 to 1024 | `64` | The largest number of accounts in the database. |
+| `allow_creation` | `true` or `false` | `true` | `true`: the superadmin can make accounts in the database. `false`: the route that makes an account answers `404`, and the pages show no button and no entry that makes an account. The accounts that exist stay editable, as `access.grants_mode` says. The value `true` contradicts `access.grants_mode = "static"`: in this mode the database holds no account. |
 | `max_grants` | number, 1 to 30000 | `512` | The largest number of grants of one user. A key holds at most 512 grants, at any value of this key. A user with 3 grants for each service and the 8 actions of the service `portal` needs 3 x the number of services + 8 grants. |
 
 #### Block `access`
@@ -1020,10 +1049,12 @@ This block is optional. If it is present, the server is an AuthZEN PDP on a seco
 
 #### Block `keys`
 
-This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys, and the edge and the PDP accept them. The block needs the blocks `identity` and `pdp`.
+This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox. The keys `mcp` and `api` turn each kind on or off. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. The block needs one kind on at least.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `mcp` | `true` or `false` | `true` | `true`: the kind `mcp` is on. A user can make MCP keys, with the prefix `mcp_`, and the key edge and the PDP accept them. `false`: the kind is off. The key edge refuses these keys, and the pages show no MCP key, no MCP right and no MCP chip. The value `true` needs the blocks `identity` and `pdp`. |
+| `api` | `true` or `false` | `false` | `true`: the kind `api` is on. A user can make API keys, with the prefix `api_`, and the API of the inbox accepts them. `false`: the kind is off. The API of the inbox refuses these keys, and the pages show no API key, no API right and no API chip. The value `true` needs the block `inbox`. A block `api_key` needs the value `true`. |
 | `default_lifetime` | duration, 1d to 365d | `"30d"` | The lifetime that the form of a new key proposes. The form uses the lower of this value and the longest lifetime of the owner (`max_key_lifetime`). |
 | `directory_max_age` | duration, 15s to 5m | `"30s"` | The longest age of the directory of the users and the keys. When the last good read of the database is older, the PDP answers `false` for each key and the edge refuses each key. The directory is read again every 5 seconds, so the minimum is 3 rounds. |
 | `max_per_user` | number, 1 to 10000 | `100` | The largest number of active keys of one user. An expired key and a key that is too old do not count. |
@@ -1129,7 +1160,7 @@ The log.
 
 #### Block `inbox`
 
-This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group "<id>"` and `producer "<name>"` are inside this block.
+This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group "<id>"` and `api_key "<name>"` are inside this block.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -1137,7 +1168,7 @@ This block is optional. If it is present, this server runs the inbox: it sends a
 
 #### Block `inbox.devices`
 
-This block is inside the block `inbox`. It sets the public address that phones use, the limits of the phones, and the delivery values. The phones use the listener of the portal, as the producers do. The routes of the phones have no session: phones prove themselves.
+This block is inside the block `inbox`. It sets the public address that phones use, the limits of the phones, and the delivery values. The phones use the listener of the portal, as the senders do. The routes of the phones have no session: phones prove themselves.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -1183,7 +1214,7 @@ This block is optional and is inside the block `inbox`. If it is present, the in
 | `snapshot_interval` | duration, 1s to 1d | `"10s"` | The inbox copies a changed database at most this often. An accepted alert, an enrollment and a revocation do not wait for this time. |
 | `lease_ttl` | duration, 5s to 1h | `"30s"` | The other instances consider an instance lost when its lease did not change for this time. They then take over. |
 | `sync_timeout` | duration, 1s to 1m | `"5s"` | The time that an accepted alert waits for the copy that holds it. |
-| `sync_alerts` | `true` or `false` | `true` | `true`: the inbox confirms an alert only after the copy holds it. If the copy fails, the inbox answers `503` and the producer sends the alert again. `false`: the inbox confirms an alert after the local commit and copies it as soon as possible. |
+| `sync_alerts` | `true` or `false` | `true` | `true`: the inbox confirms an alert only after the copy holds it. If the copy fails, the inbox answers `503` and the sender sends the alert again. `false`: the inbox confirms an alert after the local commit and copies it as soon as possible. |
 
 #### Block `inbox.cluster`
 
@@ -1230,22 +1261,23 @@ This block has a label and can occur more than one time. One key of a user of th
 
 #### Block `group "<id>"`
 
-This block has a label and can occur more than one time. One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A producer sends an alert to a group.
+This block has a label and can occur more than one time. One group of alerts. The block is inside the block `inbox`. The label is the id of the group: 1 to 64 characters of a-z, 0-9, '-' and '_'. A phone subscribes to a group. A key sends an alert to a group.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `name` | text: 1 to 128 bytes, not blank | required | The name of the group that the phones show. |
 | `description` | text: at most 512 bytes | `""` | The description of the group. |
-| `critical` | `true` or `false` | `false` | `true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a producer applies to the group. |
+| `critical` | `true` or `false` | `false` | `true`: the group is critical. A limit on the action `alert.send` never applies to a critical group. `false`: the limit of a key applies to the group. |
 
-#### Block `producer "<name>"`
+#### Block `api_key "<name>"`
 
-This block has a label and can occur more than one time. One producer of alerts that has a token: a monitoring tool, a script or a webhook. The block is inside the block `inbox`. The label is the name of the producer: 1 to 64 characters of a-z, 0-9, '-' and '_'.
+This block has a label and can occur more than one time. One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the page Keys.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the producer. It has at least 32 printable characters. Make it with `portal inbox token`. Two producers must not have the same token. |
-| `groups` | list of at most 64 quoted strings: ids of groups that the block `inbox` defines | required | The groups that the producer can send alerts to. The list has at least one group. Each group must exist. |
+| `owner` | text: the login of an account of the file (a block `user`) | required | The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, and `alert.send` on each group of the key. |
+| `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The text of the key: `api_`, 43 characters and 6 characters of checksum, 53 characters in all. Make it with `portal inbox token`. Two keys must not have the same text. A bad form stops the server. |
+| `groups` | list of at most 64 quoted strings: ids of groups that the block `inbox` defines | required | The groups that the key can send alerts to. The list has at least one group. Each group must exist, and the owner must hold `alert.send` on it. |
 | `webhook_send_resolved` | `true` or `false` | `false` | `true`: the notifications "resolved" of Alertmanager and Grafana become alerts. `false`: the inbox ignores them. |
 
 #### Block `pdp_client "<server>"`
@@ -1432,7 +1464,7 @@ Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in b
 | **`portal_inbox_devices_unreachable`** | Subscribed phones that the inbox did not see for `inbox.devices.unreachable_after`. |
 | **`portal_inbox_storage_degraded`** | 1 while the database has no writable primary and the inbox holds alerts in memory. |
 | **`portal_inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
-| `portal_inbox_alerts_accepted_total{source,kind}` | Messages accepted, by source and by kind (`alert`). The source is `producer`, `webhook`, `notify`, `admin`, `portal`. |
+| `portal_inbox_alerts_accepted_total{source,kind}` | Messages accepted, by source and by kind (`alert`). The source is `producer` (an API key), `webhook`, `notify`, `admin`, `portal`. |
 | `portal_inbox_alerts_duplicate_total{source,kind}` | Submissions that the idempotency key merged. |
 | `portal_inbox_deliveries_created_total`, `portal_inbox_deliveries_sent_total`, `portal_inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
 | `portal_inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
@@ -1468,7 +1500,7 @@ Roll the instances one at a time. A new instance opens its ports only when its c
 ## Limitations
 
 - The inbox is Android only. iOS cannot keep a connection in the background without the push service of Apple.
-- The inbox has no TLS. Noise protects the phones. A producer token travels in clear text on plain HTTP. Put a TLS proxy in front of the portal for the producers.
+- The inbox has no TLS. Noise protects the phones. An API key travels in clear text on plain HTTP. Put a TLS proxy in front of the portal for the senders.
 - With SQLite, only one instance is active. A standby needs the block `inbox.replica`.
 - An alert that the inbox accepts while the database has no writable primary exists only in memory until the database returns. If every instance that holds it stops, the inbox loses it.
 - Each instance has its own rate limits and its own counter of refused sign-ins.

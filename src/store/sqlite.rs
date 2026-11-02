@@ -15,7 +15,7 @@ use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
 mod keys;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
@@ -183,6 +183,13 @@ CREATE TABLE directory_version (
   version INTEGER NOT NULL
 );
 INSERT INTO directory_version (id, version) VALUES (1, 0);
+";
+
+/// Schema version 7: the kind of a key (portal 5.1). The kind is the prefix of the text of the key:
+/// `mcp` for an agent, `api` for a service. A key that exists before this version is an MCP key: no
+/// other kind existed.
+const KEY_KIND_SCHEMA: &str = "
+ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -366,6 +373,7 @@ impl Sqlite {
                 tx.execute_batch(&missing).map_err(db)?;
                 migrate_to_resource_path(&tx)?;
                 tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
+                tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -373,6 +381,14 @@ impl Sqlite {
             5 => {
                 let tx = conn.transaction().map_err(db)?;
                 tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
+                tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
+                tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+                    .map_err(db)?;
+                tx.commit().map_err(db)?;
+            }
+            6 => {
+                let tx = conn.transaction().map_err(db)?;
+                tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -1003,7 +1019,10 @@ impl Sqlite {
         };
         // A file of version 6 has the keys and the summary rows of the revoked keys.
         let (keys, key_history) = if version >= 6 {
-            (keys::read_keys(conn)?, keys::read_history(conn)?)
+            (
+                keys::read_keys(conn, version >= 7)?,
+                keys::read_history(conn)?,
+            )
         } else {
             (Vec::new(), Vec::new())
         };
@@ -1135,7 +1154,8 @@ mod tests {
     #[test]
     fn a_new_database_has_the_tables_of_the_keys() {
         let store = Sqlite::open_in_memory();
-        assert_eq!(version(&store), 6);
+        assert_eq!(version(&store), 7);
+        assert!(has_column(&store, "keys", "kind"));
         for table in KEY_TABLES {
             assert!(has_table(&store, table), "{table}");
         }
@@ -1147,6 +1167,44 @@ mod tests {
             .query_row("SELECT version FROM directory_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 0);
+    }
+
+    #[test]
+    fn a_database_at_version_six_gains_the_kind_of_a_key_and_its_keys_are_mcp_keys() {
+        let dir = std::env::temp_dir().join(format!("portal-v6-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        store.insert_user(&user("alice", &["db"])).unwrap();
+        store.execute_raw(
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
+             SELECT 'key1', id, 'agent', zeroblob(32), 'ab12', 1 FROM users WHERE login = 'alice'",
+        );
+        drop(store);
+        // This is the file of the portal before version 7: the column `kind` did not exist.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE keys DROP COLUMN kind; PRAGMA user_version = 6;")
+            .unwrap();
+        drop(conn);
+        let store = Sqlite::open(&path).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(has_column(&store, "keys", "kind"));
+        let keys = store.load_directory().unwrap().keys;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0].kind,
+            crate::keys::KeyKind::Mcp,
+            "no other kind existed"
+        );
+        // The column accepts the two kinds and no other.
+        store.execute_raw("UPDATE keys SET kind = 'api'");
+        assert_eq!(
+            store.load_directory().unwrap().keys[0].kind,
+            crate::keys::KeyKind::Api
+        );
+        let bad = store.conn().execute("UPDATE keys SET kind = 'whk'", []);
+        assert!(bad.is_err(), "the kind whk is reserved");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

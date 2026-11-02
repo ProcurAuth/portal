@@ -14,7 +14,6 @@ mod http;
 mod icons;
 mod identity;
 mod inbox;
-mod inbox_actions;
 mod key_forms;
 mod keyauth;
 mod keys;

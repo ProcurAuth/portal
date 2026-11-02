@@ -23,8 +23,8 @@ use crate::grants::{Grant, Mode};
 
 #[allow(unused_imports)] // some of these types serve only the module `inbox`
 pub use inbox::{
-    ClusterConfig, DevicesConfig, GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig,
-    ProducerConfig, ReplicaConfig, WatchConfig, MIN_TOKEN_LEN,
+    ApiKeyConfig, ClusterConfig, DevicesConfig, GroupConfig, InboxConfig, InboxSecrets,
+    InboxStorageConfig, ReplicaConfig, WatchConfig,
 };
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};
@@ -120,6 +120,23 @@ pub struct KeysConfig {
     pub max_counter_rows: usize,
     pub max_directory_grants: usize,
     pub history_days: u32,
+    /// The kind `mcp` is on (portal 5.1, 10.2).
+    pub mcp: bool,
+    /// The kind `api` is on (portal 5.1, 10.2).
+    pub api: bool,
+}
+
+impl KeysConfig {
+    /// The kinds of key that are on, in the order of [`crate::keys::KeyKind::ALL`].
+    pub fn kinds(&self) -> Vec<crate::keys::KeyKind> {
+        crate::keys::KeyKind::ALL
+            .into_iter()
+            .filter(|kind| match kind {
+                crate::keys::KeyKind::Mcp => self.mcp,
+                crate::keys::KeyKind::Api => self.api,
+            })
+            .collect()
+    }
 }
 
 /// The identity token that `/auth/verify` gives to a service (contract 11.3).
@@ -147,6 +164,8 @@ pub struct PdpConfig {
 
 #[derive(Clone, Debug)]
 pub struct UsersConfig {
+    /// `false`: the superadmin makes no account in the database (the route answers 404).
+    pub allow_creation: bool,
     pub max_users: usize,
     /// The largest number of grants of one user (portal 10.2d).
     pub max_grants: usize,
@@ -311,6 +330,12 @@ impl LogLevel {
 }
 
 impl Config {
+    /// What the file turns on: the groups of the inbox and the kinds of key. The document of the
+    /// service `portal` follows it.
+    pub fn portal_features(&self) -> crate::portal_actions::Features {
+        crate::portal_actions::Features::new(self.inbox.as_ref(), self.keys.as_ref())
+    }
+
     /// Read the file. The environment variables that the file names come from the process.
     pub fn load(path: &Path) -> Result<(Self, Secrets), String> {
         let raw = fs::read_to_string(path)
@@ -381,19 +406,35 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         max_directory_grants: r.count("keys", "max_directory_grants")?,
         history_days: u32::try_from(r.int("keys", "history_days")?)
             .map_err(|_| "internal error: keys.history_days is out of range".to_string())?,
+        mcp: r.bool("keys", "mcp")?,
+        api: r.bool("keys", "api")?,
     };
     let keys = if r.has_block("keys") {
-        for block in ["identity", "pdp"] {
-            if !r.has_block(block) {
-                return Err(format!(
-                    "the block keys needs the block {block}: add the block {block}"
-                ));
+        // The five contradictions of the switches (portal 10.2e): each error names the key, the
+        // expected value and the value found.
+        if !key_limits.mcp && !key_limits.api {
+            return Err("a block keys with both kinds off does nothing: keys.mcp is false and keys.api is false; expected one of them to be true, or no block keys".into());
+        }
+        if key_limits.mcp {
+            for block in ["identity", "pdp"] {
+                if !r.has_block(block) {
+                    return Err(format!(
+                        "keys.mcp is true and the block {block} is absent: the kind mcp needs the blocks identity and pdp; expected keys.mcp = false, or the block {block}"
+                    ));
+                }
             }
+        }
+        if key_limits.api && !r.has_block("inbox") {
+            return Err("keys.api is true and the block inbox is absent: the kind api is verified by the API of the inbox; expected keys.api = false, or the block inbox".into());
         }
         Some(key_limits.clone())
     } else {
         None
     };
+    let allow_creation = r.bool("users", "allow_creation")?;
+    if allow_creation && r.text("access", "grants_mode")? == "static" {
+        return Err("users.allow_creation is true and access.grants_mode is \"static\": in this mode the database holds no account; expected users.allow_creation = false, or another value of access.grants_mode".into());
+    }
     let mut secrets = build_secrets(r)?;
     let access = build_access(r, &secrets.superadmin_login, keys.as_ref())?;
     secrets.pdp_tokens = build_pdp_tokens(r)?;
@@ -442,7 +483,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         StorageBackend::Sqlite(PathBuf::from(r.text("storage", "database")?))
     };
 
-    let inbox_built = inbox::build(r)?;
+    let inbox_built = inbox::build(r, keys.as_ref().is_some_and(|k| k.api))?;
 
     let kubernetes = if r.bool("discovery", "kubernetes")? {
         Some(kubernetes_api(r, env)?)
@@ -522,6 +563,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         keys,
         key_limits,
         users: UsersConfig {
+            allow_creation,
             max_users: r.count("users", "max_users")?,
             max_grants: r.count("users", "max_grants")?,
         },
@@ -545,6 +587,16 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         inbox::check_against(&config, &inbox, postgres)?;
         config.inbox = Some(inbox);
         secrets.inbox = Some(inbox_secrets);
+    }
+    // The grants of the accounts of the file on the service portal follow the document of the
+    // features that the file turns on.
+    let features = config.portal_features();
+    for (login, account) in &config.access.accounts {
+        crate::portal_actions::check_user_grants(&features, &account.grants)
+            .map_err(|e| format!("user {login:?}: {e}"))?;
+    }
+    if let Some(inbox) = &config.inbox {
+        inbox::check_api_keys(&config, inbox, &features)?;
     }
     if let Some(pdp) = &config.pdp {
         // The two values must agree: an `http` URL needs `plain_http`, and `plain_http` needs an
@@ -684,7 +736,7 @@ fn build_access(
     let rules = accounts::Rules {
         mode: grants_mode,
         superadmin_login: superadmin_login.to_string(),
-        keys_enabled: keys.is_some(),
+        keys_enabled: keys.is_some_and(|k| k.mcp),
         max_grants: r.count("users", "max_grants")?,
         max_keys_per_user: match keys {
             Some(keys) => keys.max_per_user,

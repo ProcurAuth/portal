@@ -55,8 +55,11 @@ fn active_keys(state: &AppState, now: i64) -> usize {
         .iter()
         .filter(|key| {
             let max = match &key.owner {
-                KeyOwner::User(login) => crate::keyauth::person_grants(state, login)
-                    .and_then(|(grants, _)| crate::portal_actions::max_key_lifetime(&grants)),
+                KeyOwner::User(login) => {
+                    crate::keyauth::person_grants(state, login).and_then(|(grants, _)| {
+                        crate::portal_actions::max_key_lifetime(&grants, key.kind)
+                    })
+                }
                 _ => None,
             };
             !key.expired(now) && !key.too_old(now, max)

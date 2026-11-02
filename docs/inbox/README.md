@@ -13,7 +13,7 @@ This chapter is for operators and for people who send alerts. The root `README.m
 | Producer | A program that sends alerts: a script, Grafana, Alertmanager or the portal itself. |
 | Phone | An Android phone that runs the app and enrolled with an account of the portal. |
 | Account | An account of the portal. It owns its phones. Its login is the user name of each phone. |
-| Subscription | The link between one phone and one group. The phone chooses it. The account must have the permission `group.subscribe` on the group. |
+| Subscription | The link between one phone and one group. The phone chooses it. The account must have the permission `inbox.receive` on the group. |
 | Delivery | The record that one alert must reach one phone. The inbox makes one delivery for each phone that is subscribed when it accepts the alert. |
 | Enrollment code | A text that the account makes in the inbox pages. It lets one phone enroll one time. |
 
@@ -48,9 +48,9 @@ inbox {
 }
 ```
 
-The permissions of the service `inbox` control each group:
+The permissions of the portal features (the service `portal`) control each group:
 
-- `group.subscribe` lets the phones of an account subscribe to the group.
+- `inbox.receive` lets the phones of an account subscribe to the group.
 - `alert.send` lets an account or a key send an alert to the group.
 - `alert.read` lets an account or a key read the alerts of the group and their delivery.
 
@@ -60,7 +60,7 @@ The budget `alerts` limits `alert.send`. It counts alerts in a window of a secon
 
 ## Send an alert (producers)
 
-A producer sends a request to the portal, on the same host and port as the pages. These routes need no session of the portal, and the proxy does not apply ForwardAuth to them. The producer proves itself with a bearer token or a key. The phones use the same port and the same proxy rule (`/v1/enroll` and `/v1/session`).
+A producer sends a request to the portal, on the same host and port as the pages. These routes need no session of the portal, and the proxy does not apply ForwardAuth to them. The producer proves itself with an API key as a bearer token. The phones use the same port and the same proxy rule (`/v1/enroll` and `/v1/session`).
 
 | Route | Use |
 |---|---|
@@ -74,10 +74,10 @@ Send the token in the header `Authorization: Bearer <token>`. A tool that cannot
 
 Two kinds of token work at the same time.
 
-- **A token of the file.** It is the value of a block `producer`. The block lists the groups of the token. This token does not depend on the portal. It works when the portal is not ready.
+- **A key of the file.** It is a block `api_key`. The block names its owner, an account of the file, and lists the groups of the key. This key does not depend on the portal. It works when the portal is not ready.
 - **A key of the portal.** It starts with `mcp_`. The key and its owner must both have `alert.send` on the group. A key can read the status of an alert with `alert.read` on the group of the alert.
 
-Make a token of the file with `portal inbox token --out FILE`. Make a key on the page **Keys** of the portal. Add the permission `alert.send` of the service `inbox` for each group.
+Make the text of an API key with `portal inbox token --out FILE` for a block `api_key` of the file. Or make an API key on the page **Keys** of the portal. Give the owner the permission `alert.send` on each group.
 
 The header `Idempotency-Key` is optional. It has 1 to 128 printable ASCII characters. Two requests with the same key make one alert. The second answer is `200` with `"duplicate": true`. A key that two different alerts use gets `409`. Without the header, the inbox derives a key from the content and the minute.
 
@@ -102,7 +102,7 @@ Grafana has a fixed list of contact point types. A plugin cannot add one. The in
 - **Alertmanager.** Use a `webhook_configs` receiver with a bearer token. The example is [`alertmanager.yml`](alertmanager.yml).
 - **Grafana.** Make a contact point of the type Webhook. The example is [`grafana/contact-point.yaml`](grafana/contact-point.yaml).
 
-The inbox ignores the notifications `resolved`. A producer of the file can set `webhook_send_resolved = true` to turn them into alerts. A key never sends them. The inbox merges a repeat of the same alert. It compares the fingerprint, the status and `startsAt`.
+The inbox ignores the notifications `resolved`. An `api_key` block can set `webhook_send_resolved = true` to turn them into alerts. A key never sends them. The inbox merges a repeat of the same alert. It compares the fingerprint, the status and `startsAt`.
 
 ### Alerts of the portal
 
@@ -113,7 +113,7 @@ The portal can send alerts about itself, in process, with the source `portal`. I
 An account makes the code, and the phone uses it one time.
 
 1. Sign in to the portal with the account that owns the phone.
-2. Open the page **My phones** of the tab Inbox. The account needs `group.subscribe` on one group at least.
+2. Open the page **My phones** of the tab Inbox. The account needs `inbox.receive` on one group at least.
 3. Press **Make a code**. The page shows the code one time.
 4. On the phone, install the app and open **Add a server**.
 5. Type the code, or tap the link `portal-inbox://enroll?...` on the phone.
@@ -133,19 +133,19 @@ If the enrollment fails, the app shows one of these texts:
 | Update the app. | The app does not speak protocol 4. |
 | Too many attempts. | The client address sent too many attempts. Wait. |
 
-To remove a phone, open **My phones** and press **Revoke**. An account revokes its own phones only. An account with `device.revoke` and `device.read` can revoke any phone on the page **Phones**. The phone gets the close code 4403. It must enroll again.
+To remove a phone, open **My phones** and press **Revoke**. An account revokes its own phones only. An account with `phone.revoke` and `phone.read` can revoke any phone on the page **Phones**. The phone gets the close code 4403. It must enroll again.
 
 ## The pages of the tab Inbox
 
-The pages are under `/auth/settings/inbox`. The tab shows for an account that has a permission of the service `inbox`. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
+The pages are under `/auth/settings/inbox`. The tab shows for an account that has a permission of the inbox features. The launcher has no tile for the inbox. The gear of the launcher opens the pages.
 
 | Page | Needs | Use |
 |---|---|---|
-| Overview | `alert.read`, `device.read`, `connection.read` or `alert.send` | The figures of the delivery, the groups, the form **Send an alert**, the last alerts. |
+| Overview | `alert.read`, `phone.read`, `phone.log` or `alert.send` | The figures of the delivery, the groups, the form **Send an alert**, the last alerts. |
 | Alert | `alert.read` on the group | The delivery of one alert to each phone. |
-| Phones | `device.read` | All phones, with state, owner and groups. **Revoke** needs `device.revoke`. |
-| Connections | `connection.read` | The connection log, with a filter on the login. |
-| My phones | `group.subscribe` on one group | The phones of the account, **Make a code** and **Revoke**. |
+| Phones | `phone.read` | All phones, with state, owner and groups. **Revoke** needs `phone.revoke`. |
+| Connections | `phone.log` | The connection log, with a filter on the login. |
+| My phones | `inbox.receive` on one group | The phones of the account, **Make a code** and **Revoke**. |
 | Documentation | any page of the tab | The producer API with the real address. |
 
 A session that the superadmin opens with **Log in as** can read the pages and make a code. It cannot send an alert and it cannot revoke a phone.
@@ -245,11 +245,11 @@ An alert that the inbox accepts while the database is away exists only in memory
 | The app says "The code is not valid". | The code is used or expired. Make a new code. Check `inbox.devices.max_devices`. The log has the event `enroll_refused` with a reason. |
 | The app says "Update the app". | The app is older than protocol 4. Install the current APK. |
 | A phone is `unreachable`. | The app is stopped, the phone is off, or the battery saver blocks the app. Check the permissions of the app. |
-| An alert does not come. | Open the page of the alert. Check that the phone subscribed to the group and that the account has `group.subscribe`. |
-| A producer gets `403`. | The token cannot send to the group. Check the block `producer` or the permission `alert.send` of the key and of its owner. |
+| An alert does not come. | Open the page of the alert. Check that the phone subscribed to the group and that the account has `inbox.receive`. |
+| A producer gets `403`. | The key cannot send to the group. Check the block `api_key` or the permission `alert.send` of the key and of its owner. |
 | A producer gets `429`. | The budget `alerts` is empty. Wait for `Retry-After`, or send to a critical group. |
-| A producer gets `503 directory_not_ready`. | The portal has no fresh directory. A token of the file still works. Check `portal_directory_age_seconds`. |
-| After a rights change, a phone lost a group. | The account lost `group.subscribe`. The inbox removed the subscription. Give the permission again. |
+| A producer gets `503 directory_not_ready`. | The portal has no fresh directory. A key of the file still works. Check `portal_directory_age_seconds`. |
+| After a rights change, a phone lost a group. | The account lost `inbox.receive`. The inbox removed the subscription. Give the permission again. |
 | Every phone is invalid after a restart. | The key file of the server changed. Restore the old file. Else, every phone must enroll again. |
 
 The log of the inbox is in the JSON log of the portal. Each line has the field `event`.

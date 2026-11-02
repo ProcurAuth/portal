@@ -16,11 +16,15 @@ use super::ratelimit::AuthLimiter;
 use super::replica::{Replica, Stats as ReplicaStats};
 use super::shutdown::Shutdown;
 use super::store::Store;
-use crate::config::{InboxConfig, InboxSecrets, MIN_TOKEN_LEN};
+use crate::config::{InboxConfig, InboxSecrets};
 
-pub struct Producer {
+/// A key of the file (a block `api_key`). It follows its owner, an account of the file. The rights
+/// of a file account do not change while the server runs, so the start decided the groups. The
+/// check of the key reads no directory and no database: a key of the file works when the
+/// directory is not ready.
+pub struct FileKey {
     pub name: String,
-    pub token_hash: [u8; 32],
+    pub digest: [u8; 32],
     pub groups: Vec<String>,
     pub webhook_send_resolved: bool,
 }
@@ -29,7 +33,7 @@ pub struct Producer {
 /// from a file.
 pub struct Secrets {
     pub server_key: ServerKey,
-    pub producers: Vec<Producer>,
+    pub file_keys: Vec<FileKey>,
 }
 
 impl Secrets {
@@ -39,34 +43,39 @@ impl Secrets {
         let server_key = ServerKey::decode(&key_text).map_err(|e| {
             format!("inbox.server_key: {e} (make a key with `portal inbox keygen`; a key file of protocol 3 is not read)")
         })?;
-        let mut producers = Vec::new();
-        let mut hashes = std::collections::HashSet::new();
-        for (name, token) in &secrets.producers {
-            let label = format!("inbox.producer.{name}.token");
-            let token = text(token.as_bytes(), &label)?;
-            if token.len() < MIN_TOKEN_LEN || !token.bytes().all(|b| b.is_ascii_graphic()) {
-                return Err(format!(
-                    "{label}: the token must have at least {MIN_TOKEN_LEN} printable characters (make one with `portal inbox token`)"
-                ));
+        let mut file_keys = Vec::new();
+        let mut digests = std::collections::HashSet::new();
+        for (name, key_text) in &secrets.api_keys {
+            let label = format!("inbox.api_key.{name}.secret");
+            let key_text = text(key_text.as_bytes(), &label)?;
+            // The configuration checked the form. The start checks it again: a key that the
+            // verifier refuses must never reach the table.
+            match crate::keys::check_format(&key_text) {
+                Ok(crate::keys::KeyKind::Api) => {}
+                _ => {
+                    return Err(format!(
+                        "{label}: expected an API key with the prefix api_ (make one with `portal inbox token`)"
+                    ))
+                }
             }
-            let token_hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-            if !hashes.insert(token_hash) {
-                return Err(format!("{label}: another producer has the same token"));
+            let digest = crate::keys::digest(&key_text);
+            if !digests.insert(digest) {
+                return Err(format!("{label}: another key has the same text"));
             }
             let block = config
-                .producers
+                .api_keys
                 .get(name)
-                .ok_or_else(|| format!("internal error: inbox.producer.{name} is missing"))?;
-            producers.push(Producer {
+                .ok_or_else(|| format!("internal error: inbox.api_key.{name} is missing"))?;
+            file_keys.push(FileKey {
                 name: name.clone(),
-                token_hash,
+                digest,
                 groups: block.groups.clone(),
                 webhook_send_resolved: block.webhook_send_resolved,
             });
         }
         Ok(Secrets {
             server_key,
-            producers,
+            file_keys,
         })
     }
 }
@@ -154,13 +163,13 @@ impl App {
         live
     }
 
-    /// Finds the producer owning `token`, comparing hashes in constant time.
-    pub fn producer_for_token(&self, token: &str) -> Option<&Producer> {
+    /// Finds the key of the file that has this text, comparing digests in constant time.
+    pub fn file_key_for_token(&self, token: &str) -> Option<&FileKey> {
         let presented: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let mut found = None;
-        for p in &self.secrets.producers {
+        for p in &self.secrets.file_keys {
             let mut diff = 0u8;
-            for (a, b) in p.token_hash.iter().zip(presented.iter()) {
+            for (a, b) in p.digest.iter().zip(presented.iter()) {
                 diff |= a ^ b;
             }
             if diff == 0 {
@@ -225,7 +234,22 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    /// A configuration with two producers. `tokens` are their tokens.
+    /// The text of two API keys that the tests use.
+    fn key_text(index: usize) -> String {
+        static CELL: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| {
+            (0..3)
+                .map(|_| {
+                    crate::keys::generate(crate::keys::KeyKind::Api)
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        })[index]
+            .clone()
+    }
+
+    /// A configuration with two API keys. `tokens` are their texts.
     fn load(tokens: [&str; 2], key: Option<&str>) -> Result<Secrets, String> {
         let server_key = ServerKey::generate().unwrap();
         let key_text = key.map_or_else(|| server_key.encode().to_string(), str::to_string);
@@ -233,6 +257,15 @@ mod tests {
         let raw = r#"
             server { listen_address = "0.0.0.0:4181" trusted_proxies = [] }
             authentication { superadmin_login_env = "L" superadmin_password_env = "P" }
+            access { grants_mode = "static" }
+            users { allow_creation = false }
+            keys { mcp = false api = true }
+            user "ci" {
+              grants = [
+                "keys.own.use on service:portal/key_kind:api",
+                "alert.send on service:portal/inbox_group:infra",
+              ]
+            }
             inbox {
               server_key_env = "K"
               devices {
@@ -242,8 +275,8 @@ mod tests {
               }
               storage { delivery_ttl = "7d" alert_retention = "30d" connection_log_retention = "90d" }
               group "infra" { name = "Infra" }
-              producer "a" { token_env = "A" groups = ["infra"] }
-              producer "b" { token_env = "B" groups = ["infra"] webhook_send_resolved = true }
+              api_key "a" { owner = "ci" secret_env = "A" groups = ["infra"] }
+              api_key "b" { owner = "ci" secret_env = "B" groups = ["infra"] webhook_send_resolved = true }
             }"#;
         let (config, mut secrets) = Config::parse(raw, &|name| match name {
             "L" => Some("root".into()),
@@ -259,32 +292,29 @@ mod tests {
         )
     }
 
-    const TOKEN_A: &str = "0123456789abcdef0123456789abcdef";
-    const TOKEN_B: &str = "fedcba9876543210fedcba9876543210";
-
     #[test]
-    fn the_secrets_decode_and_the_producers_keep_only_the_hash_of_their_token() {
-        let secrets = load([TOKEN_A, TOKEN_B], None).unwrap();
-        assert_eq!(secrets.producers.len(), 2);
-        let a = secrets.producers.iter().find(|p| p.name == "a").unwrap();
-        let b = secrets.producers.iter().find(|p| p.name == "b").unwrap();
+    fn the_secrets_decode_and_the_file_keys_keep_only_the_digest_of_their_text() {
+        let (a_text, b_text) = (key_text(0), key_text(1));
+        let secrets = load([&a_text, &b_text], None).unwrap();
+        assert_eq!(secrets.file_keys.len(), 2);
+        let a = secrets.file_keys.iter().find(|p| p.name == "a").unwrap();
+        let b = secrets.file_keys.iter().find(|p| p.name == "b").unwrap();
         assert!(!a.webhook_send_resolved && b.webhook_send_resolved);
         assert_eq!(a.groups, ["infra"]);
-        let expected: [u8; 32] = Sha256::digest(TOKEN_A.as_bytes()).into();
-        assert_eq!(a.token_hash, expected);
+        let expected: [u8; 32] = Sha256::digest(a_text.as_bytes()).into();
+        assert_eq!(a.digest, expected);
     }
 
     #[test]
     fn a_bad_secret_stops_the_start_and_the_error_names_the_key() {
+        let (a_text, b_text) = (key_text(0), key_text(1));
         let error = |r: Result<Secrets, String>| r.err().expect("must be refused");
-        assert!(error(load([TOKEN_A, TOKEN_A], None)).contains("inbox.producer.b.token"));
-        assert!(error(load(["short", TOKEN_B], None)).contains("inbox.producer.a.token"));
-        assert!(error(load(
-            ["a token with spaces in it, long enough", TOKEN_B],
-            None
-        ))
-        .contains("printable"));
-        assert!(error(load([TOKEN_A, TOKEN_B], Some("not a key"))).contains("inbox.server_key"));
+        assert!(error(load([&a_text, &a_text], None)).contains("inbox.api_key.b.secret"));
+        assert!(error(load(["short", &b_text], None)).contains("inbox.api_key.a.secret"));
+        let mcp = crate::keys::generate(crate::keys::KeyKind::Mcp).unwrap();
+        let refused = error(load([&mcp, &b_text], None));
+        assert!(refused.contains("inbox.api_key.a.secret") && !refused.contains(&*mcp));
+        assert!(error(load([&a_text, &b_text], Some("not a key"))).contains("inbox.server_key"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! its path.
 //!
 //! - `keygen --out FILE`: makes the key of the server. The file holds the Noise key pair only.
-//! - `token --out FILE`: makes the token of a producer.
+//! - `token --out FILE`: makes the text of an API key, for a block `api_key` of the file.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
 //! - `healthcheck --config FILE`: asks `/readyz` of the listener of the portal.
@@ -12,7 +12,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use inbox_core::rng::Rng;
 use inbox_core::server_key::ServerKey;
 use zeroize::Zeroizing;
 
@@ -78,9 +77,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "token" => {
             let f = Flags::parse(rest, &["--out"])?;
             let out = PathBuf::from(f.required("--out")?);
-            let token = Zeroizing::new(super::util::hex(&Rng::os().bytes::<32>()));
+            let token = crate::keys::generate(crate::keys::KeyKind::Api)?;
             write_new_secret(&out, &token)?;
-            eprintln!("producer token written to {}", out.display());
+            eprintln!("API key written to {}", out.display());
             Ok(())
         }
         "import-sqlite" => {

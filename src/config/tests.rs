@@ -1016,8 +1016,10 @@ fn user_blocks_give_grants_in_the_static_and_hybrid_modes() {
     for mode in ["static", "hybrid"] {
         let (cfg, _) = ok(&with(&format!(
             r#"access {{ grants_mode = "{mode}" }}
+            users {{ allow_creation = {} }}
             user "alice" {{ grants = ["query.run.read on service:db", "access on service:db"] }}
-            user "bob" {{ grants = [] }}"#
+            user "bob" {{ grants = [] }}"#,
+            mode != "static"
         )));
         assert_eq!(cfg.access.grants_mode, Mode::parse(mode).unwrap());
         let alice = &cfg.access.configured_grants["alice"];
@@ -1343,7 +1345,9 @@ fn with_keys(extra: &str) -> String {
 
 /// The variables of the tests and the text of one new key.
 fn vars_with_key() -> (Vec<(String, String)>, String) {
-    let text = crate::keys::generate().unwrap().to_string();
+    let text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
     let mut vars: Vec<(String, String)> = VARS
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1373,10 +1377,10 @@ fn the_keys_block_gives_its_defaults_and_needs_the_identity_and_pdp_blocks() {
     assert_eq!(line(&cfg, "keys.max_per_user").source, "default");
     assert!(ok(MINIMAL).0.keys.is_none(), "no block, no key");
     for (extra, expected) in [
-        (r#"keys {}"#, "needs the block identity"),
+        (r#"keys {}"#, "the block identity is absent"),
         (
             r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" } keys {}"#,
-            "needs the block pdp",
+            "the block pdp is absent",
         ),
     ] {
         let message = err(&with(extra));
@@ -1481,7 +1485,7 @@ fn a_grant_of_a_user_block_can_carry_limit_values() {
             { grant = "access on service:datastore", limits = { requests = [ { amount = 300, window = "minute" }, { amount = 10, window = "second" } ] } },
             { grant = "data.read on service:datastore/host:prod/database:test1", limits = { max_rows = 1000 } },
             "keys.own.read on service:portal",
-            { grant = "keys.own.use on service:portal", limits = { max_key_lifetime = 2592000 } },
+            { grant = "keys.own.use on service:portal/key_kind:mcp", limits = { max_key_lifetime = 2592000 } },
           ]
         }"#,
     ));
@@ -1551,7 +1555,7 @@ fn a_user_block_with_a_bad_limit_a_bad_right_or_too_many_grants_stops_the_start(
             "colour",
         ),
         (
-            r#""keys.own.create on service:portal", "keys.own.read on service:portal""#,
+            r#""keys.own.create on service:portal/key_kind:mcp", "keys.own.read on service:portal""#,
             "keys.own.create",
         ),
         (
@@ -1636,7 +1640,7 @@ fn a_key_of_the_file_gives_its_digest_its_id_and_its_grants() {
     vars.push(("CAROL_SUM".into(), hex));
     let raw = with_keys(
         r#"user "carol" {
-          grants = ["access on service:datastore", "keys.own.use on service:portal"]
+          grants = ["access on service:datastore", "keys.own.use on service:portal/key_kind:mcp"]
           key "nightly report" {
             key_env = "CAROL_KEY"
             grants = [
@@ -1660,7 +1664,9 @@ fn a_key_of_the_file_gives_its_digest_its_id_and_its_grants() {
         !message.contains(&text),
         "the text of the key stays hidden: {message}"
     );
-    let other = crate::keys::generate().unwrap().to_string();
+    let other = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
     vars.push((
         "OTHER_SUM".into(),
         crate::keys::digest(&other)
@@ -1734,7 +1740,7 @@ fn a_bad_block_key_stops_the_start_and_never_shows_the_text_of_a_key() {
                 r#"key_env = "CAROL_KEY""#,
                 r#""keys.own.read on service:portal""#,
             ),
-            "never holds one",
+            "cannot hold",
         ),
         (
             key(r#"key_env = "MISSING_VARIABLE""#, ""),
@@ -1771,7 +1777,9 @@ fn a_bad_block_key_stops_the_start_and_never_shows_the_text_of_a_key() {
 #[test]
 fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() {
     let (mut vars, _) = vars_with_key();
-    let second = crate::keys::generate().unwrap().to_string();
+    let second = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
     vars.push(("SECOND_KEY".into(), second));
     let raw = with(&format!(
         r#"access {{ grants_mode = "hybrid" }}
@@ -1812,20 +1820,31 @@ fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() 
 
 // The block `inbox`.
 
-const INBOX_VARS: &[(&str, &str)] = &[
-    ("INBOX_KEY", "the text of a server key"),
-    (
-        "INBOX_TOKEN",
-        "a token of the producer grafana of 32 bytes or more",
-    ),
-    (
-        "INBOX_TOKEN_2",
-        "another token of the producer ci of 32 bytes or more",
-    ),
-];
+const INBOX_VARS: &[(&str, &str)] = &[("INBOX_KEY", "the text of a server key")];
+
+/// The texts of two API keys, made once for the tests.
+fn api_texts() -> &'static [String; 2] {
+    static TEXTS: std::sync::OnceLock<[String; 2]> = std::sync::OnceLock::new();
+    TEXTS.get_or_init(|| {
+        [(); 2].map(|_| {
+            crate::keys::generate(crate::keys::KeyKind::Api)
+                .unwrap()
+                .to_string()
+        })
+    })
+}
 
 fn inbox_parse(raw: &str) -> Result<(Config, Secrets), String> {
-    let vars: Vec<(&str, &str)> = VARS.iter().chain(INBOX_VARS).copied().collect();
+    let texts = api_texts();
+    let vars: Vec<(&str, &str)> = VARS
+        .iter()
+        .chain(INBOX_VARS)
+        .copied()
+        .chain([
+            ("INBOX_TOKEN", texts[0].as_str()),
+            ("INBOX_TOKEN_2", texts[1].as_str()),
+        ])
+        .collect();
     parse_with(raw, &vars)
 }
 
@@ -1858,11 +1877,26 @@ const INBOX: &str = r#"inbox {
   }
   group "infra" { name = "Infra prod" description = "Production outages" }
   group "oncall" { name = "On call" }
-  producer "grafana" { token_env = "INBOX_TOKEN" groups = ["infra"] }
+  api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }
 }"#;
 
+/// The blocks that an API key of the file needs: the kind `api` on, an account of the file that
+/// owns the key, and the rights of this account.
+const API_ACCESS: &str = r#"
+access { grants_mode = "static" }
+users { allow_creation = false }
+keys { mcp = false api = true }
+user "ci" {
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+    "alert.send on service:portal/inbox_group:oncall",
+  ]
+}
+"#;
+
 fn with_inbox(inbox: &str) -> String {
-    format!("{MINIMAL}\n{inbox}")
+    format!("{MINIMAL}\n{API_ACCESS}\n{inbox}")
 }
 
 #[test]
@@ -1897,11 +1931,12 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
         line(&config, "inbox.group.infra.critical").source,
         "default"
     );
-    assert_eq!(inbox.producers["grafana"].groups, ["infra"]);
-    assert!(!inbox.producers["grafana"].webhook_send_resolved);
+    assert_eq!(inbox.api_keys["grafana"].groups, ["infra"]);
+    assert_eq!(inbox.api_keys["grafana"].owner, "ci");
+    assert!(!inbox.api_keys["grafana"].webhook_send_resolved);
     let secrets = secrets.inbox.unwrap();
     assert_eq!(secrets.server_key.as_bytes(), b"the text of a server key");
-    assert_eq!(secrets.producers.len(), 1);
+    assert_eq!(secrets.api_keys.len(), 1);
     // The effective configuration shows the source and hides the secrets.
     assert_eq!(line(&config, "server.name").source, "default");
     assert!(config
@@ -1926,7 +1961,7 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
         "the shared password does not exist any more"
     );
     assert_eq!(
-        line(&config, "inbox.producer.grafana.token").value,
+        line(&config, "inbox.api_key.grafana.secret").value,
         "<hidden>"
     );
     assert_eq!(
@@ -2004,7 +2039,7 @@ fn the_inbox_block_needs_its_inner_blocks_and_one_group() {
         )
         .replace(r#"group "oncall" { name = "On call" }"#, "")
         .replace(
-            r#"producer "grafana" { token_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+            r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
             "",
         );
     let message = inbox_err(&with_inbox(&no_group));
@@ -2131,7 +2166,7 @@ fn the_inbox_schema_is_closed_and_strict() {
         (
             "groups = [\"infra\"]",
             "groups = [\"Infra\"]",
-            "inbox.producer.grafana.groups",
+            "inbox.api_key.grafana.groups",
         ),
         (
             "server_key_env = \"INBOX_KEY\"",
@@ -2174,8 +2209,8 @@ fn the_inbox_schema_is_closed_and_strict() {
             "unknown configuration key: inbox.enrollment.colour",
         ),
         (
-            "token_env = \"INBOX_TOKEN\"",
-            "token_env = \"NOT_SET\"",
+            "secret_env = \"INBOX_TOKEN\"",
+            "secret_env = \"NOT_SET\"",
             "NOT_SET",
         ),
         (
@@ -2273,15 +2308,15 @@ fn the_inbox_values_that_contradict_each_other_stop_the_start() {
 }
 
 #[test]
-fn two_producers_have_their_own_tokens_and_options() {
+fn two_api_keys_have_their_own_texts_and_options() {
     let two = INBOX.replace(
-        r#"producer "grafana""#,
-        r#"producer "ci" { token_env = "INBOX_TOKEN_2" groups = ["oncall"] webhook_send_resolved = true }
-  producer "grafana""#,
+        r#"api_key "grafana""#,
+        r#"api_key "ci" { owner = "ci" secret_env = "INBOX_TOKEN_2" groups = ["oncall"] webhook_send_resolved = true }
+  api_key "grafana""#,
     );
     let (config, secrets) = inbox_ok(&with_inbox(&two));
-    assert!(config.inbox.as_ref().unwrap().producers["ci"].webhook_send_resolved);
-    assert_eq!(secrets.inbox.unwrap().producers.len(), 2);
+    assert!(config.inbox.as_ref().unwrap().api_keys["ci"].webhook_send_resolved);
+    assert_eq!(secrets.inbox.unwrap().api_keys.len(), 2);
 }
 
 #[test]
@@ -2598,4 +2633,359 @@ fn the_name_of_the_instance_has_a_default_and_a_check() {
     }
     let (config, _) = ok(&with_server(&format!("name = \"{}\"", "a".repeat(64)), ""));
     assert_eq!(config.server.name.len(), 64);
+}
+
+// The switches of the features, and the keys of the file -----------------------------------------
+
+#[test]
+fn the_switches_have_documented_defaults() {
+    let (config, _) = ok(&with_keys(""));
+    let keys = config.keys.as_ref().unwrap();
+    assert!(keys.mcp && !keys.api, "mcp is on and api is off");
+    assert_eq!(keys.kinds(), [crate::keys::KeyKind::Mcp]);
+    assert_eq!(line(&config, "keys.mcp").value, "true");
+    assert_eq!(line(&config, "keys.mcp").source, "default");
+    assert_eq!(line(&config, "keys.api").value, "false");
+    assert_eq!(line(&config, "keys.api").source, "default");
+    assert!(config.users.allow_creation);
+    assert_eq!(line(&config, "users.allow_creation").value, "true");
+    assert_eq!(line(&config, "users.allow_creation").source, "default");
+    // The defaults are in the generated reference.
+    let reference = keys::reference();
+    for expected in [
+        "| `mcp` | `true` or `false` | `true` |",
+        "| `api` | `true` or `false` | `false` |",
+        "| `allow_creation` | `true` or `false` | `true` |",
+    ] {
+        assert!(reference.contains(expected), "{expected}");
+    }
+    // The switches take a boolean, written without quotes.
+    for bad in ["mcp = \"true\"", "api = 1", "api = \"yes\""] {
+        let message = err(&with(&format!(
+            "{}\n{}",
+            KEYS_NEEDS.replace("keys {}", ""),
+            format_args!("keys {{ {bad} }}")
+        )));
+        assert!(message.contains("keys."), "{bad}: {message}");
+    }
+    let message = err(&with("users { allow_creation = \"no\" }"));
+    assert!(message.contains("users.allow_creation"), "{message}");
+}
+
+#[test]
+fn both_kinds_can_be_on_and_each_kind_can_be_off() {
+    let (config, _) = inbox_ok(&with(&format!(
+        "{}\n{}\n{}",
+        KEYS_NEEDS.replace("keys {}", ""),
+        "keys { api = true }",
+        INBOX.replace(
+            r#"  api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+            ""
+        )
+    )));
+    assert_eq!(
+        config.keys.as_ref().unwrap().kinds(),
+        [crate::keys::KeyKind::Mcp, crate::keys::KeyKind::Api]
+    );
+    let (config, _) = inbox_ok(&with_inbox(INBOX));
+    assert_eq!(
+        config.keys.as_ref().unwrap().kinds(),
+        [crate::keys::KeyKind::Api],
+        "api only, with no identity and no pdp"
+    );
+    assert!(config.identity.is_none() && config.pdp.is_none());
+}
+
+#[test]
+fn the_five_contradictions_of_the_switches_stop_the_start() {
+    let no_keys_block = KEYS_NEEDS.replace("keys {}", "");
+    for (what, raw, expected) in [
+        (
+            "keys.api = true without the block inbox",
+            with(&format!("{no_keys_block}\nkeys {{ api = true }}")),
+            vec![
+                "keys.api",
+                "the block inbox is absent",
+                "expected keys.api = false",
+            ],
+        ),
+        (
+            "keys.mcp = true without the block identity",
+            with(
+                r#"pdp { listen_address = "0.0.0.0:4182" url = "https://portal-pdp.test:4182" } keys { mcp = true }"#,
+            ),
+            vec![
+                "keys.mcp",
+                "the block identity is absent",
+                "expected keys.mcp = false",
+            ],
+        ),
+        (
+            "keys.mcp = true without the block pdp",
+            with(r#"identity { issuer = "i" signing_key_env = "IDENTITY_KEY" } keys {}"#),
+            vec!["keys.mcp", "the block pdp is absent"],
+        ),
+        (
+            "a block keys with both kinds off",
+            with("keys { mcp = false api = false }"),
+            vec!["keys.mcp is false", "keys.api is false", "both kinds off"],
+        ),
+        (
+            "an api_key block and keys.api = false, the kind mcp on",
+            format!(
+                "{MINIMAL}\n{}\n{}\n{}",
+                r#"access { grants_mode = "hybrid" }"#, KEYS_NEEDS, INBOX
+            ),
+            vec![
+                "inbox.api_key",
+                "needs keys.api = true",
+                "keys.api is false",
+            ],
+        ),
+        (
+            "an api_key block and no block keys",
+            format!("{MINIMAL}\naccess {{ grants_mode = \"hybrid\" }}\n{INBOX}"),
+            vec!["inbox.api_key", "needs keys.api = true"],
+        ),
+        (
+            "grants_mode static and users.allow_creation true",
+            with(r#"access { grants_mode = "static" }"#),
+            vec![
+                "users.allow_creation",
+                "access.grants_mode",
+                "expected users.allow_creation = false",
+                "\"static\"",
+            ],
+        ),
+        (
+            "grants_mode static and users.allow_creation written true",
+            with(r#"access { grants_mode = "static" } users { allow_creation = true }"#),
+            vec!["users.allow_creation is true"],
+        ),
+    ] {
+        let message = inbox_err(&raw);
+        for part in expected {
+            assert!(message.contains(part), "{what}: {part}\n{message}");
+        }
+    }
+    // The static mode with no creation starts.
+    ok(&with(
+        r#"access { grants_mode = "static" } users { allow_creation = false }"#,
+    ));
+    // The other modes start with creation on or off.
+    for mode in ["dynamic", "hybrid"] {
+        for creation in [true, false] {
+            ok(&with(&format!(
+                r#"access {{ grants_mode = "{mode}" }} users {{ allow_creation = {creation} }}"#
+            )));
+        }
+    }
+}
+
+#[test]
+fn a_user_block_cannot_name_a_feature_that_the_file_turns_off() {
+    let user = |extra: &str, grant: &str| {
+        inbox_err(&with(&format!(
+            "access {{ grants_mode = \"hybrid\" }}\n{extra}\nuser \"carol\" {{ grants = [\"{grant}\"] }}"
+        )))
+    };
+    // No inbox block: no action of the inbox.
+    let message = user("", "alert.send on service:portal/inbox_group:infra");
+    assert!(
+        message.contains("carol") && message.contains("no action"),
+        "{message}"
+    );
+    let message = user("", "inbox.receive on service:portal/inbox_group:infra");
+    assert!(message.contains("no action"), "{message}");
+    let message = user("", "phone.read on service:portal");
+    assert!(message.contains("no action"), "{message}");
+    // No block keys: no action of the keys.
+    let message = user("", "keys.own.read on service:portal");
+    assert!(message.contains("no action"), "{message}");
+    // A kind that is off is not a node.
+    let message = user(KEYS_NEEDS, "keys.own.use on service:portal/key_kind:api");
+    assert!(
+        message.contains("does not exist") && message.contains("key_kind:mcp"),
+        "{message}"
+    );
+    // A group that does not exist is not a node.
+    let message = inbox_err(&format!(
+        "{}\nuser \"dan\" {{ grants = [\"alert.send on service:portal/inbox_group:nowhere\"] }}",
+        with_inbox(INBOX).replace("user \"ci\"", "user \"ci2\"")
+    ));
+    assert!(
+        message.contains("dan") && message.contains("does not exist"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_api_key_block_follows_its_owner_and_checks_its_text_at_start() {
+    let good = inbox_ok(&with_inbox(INBOX));
+    assert_eq!(
+        good.0.inbox.as_ref().unwrap().api_keys["grafana"].owner,
+        "ci"
+    );
+    let block =
+        r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#;
+    let changed = |to: &str| with_inbox(&INBOX.replace(block, to));
+    // The owner is a login of a file account.
+    let message = inbox_err(&changed(
+        r#"api_key "grafana" { owner = "nobody" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+    ));
+    assert!(
+        message.contains("inbox.api_key.grafana.owner") && message.contains("\"nobody\""),
+        "{message}"
+    );
+    let message = inbox_err(&changed(
+        r#"api_key "grafana" { secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+    ));
+    assert!(message.contains("inbox.api_key.grafana.owner"), "{message}");
+    // A superadmin login is not an account of the file.
+    let message = inbox_err(&changed(
+        r#"api_key "grafana" { owner = "admin" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+    ));
+    assert!(message.contains("inbox.api_key.grafana.owner"), "{message}");
+    // The owner must hold the right to use the keys of the kind, and the right on each group.
+    let no_use = with_inbox(INBOX).replace("\"keys.own.use on service:portal/key_kind:api\",", "");
+    let message = inbox_err(&no_use);
+    assert!(
+        message.contains("inbox.api_key.grafana") && message.contains("keys.own.use"),
+        "{message}"
+    );
+    let no_send =
+        with_inbox(INBOX).replace("\"alert.send on service:portal/inbox_group:infra\",", "");
+    let message = inbox_err(&no_send);
+    assert!(
+        message.contains("inbox.api_key.grafana.groups") && message.contains("alert.send"),
+        "{message}"
+    );
+    // A group of the key that the owner may not use, with a group that it may use.
+    let message = inbox_err(&changed(
+        r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra", "ghost"] }"#,
+    ));
+    assert!(message.contains("ghost"), "{message}");
+    // A secret is never in the file, and one form only.
+    for (what, bad, expected) in [
+        (
+            "inline",
+            r#"api_key "grafana" { owner = "ci" secret = "api_x" groups = ["infra"] }"#,
+            "must not be written in the file",
+        ),
+        (
+            "two forms",
+            r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" secret_file = "/x/y" groups = ["infra"] }"#,
+            "exactly one",
+        ),
+        (
+            "no form",
+            r#"api_key "grafana" { owner = "ci" groups = ["infra"] }"#,
+            "exactly one",
+        ),
+        (
+            "unknown key",
+            r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] token_env = "INBOX_TOKEN" }"#,
+            "unknown configuration key: inbox.api_key.grafana.token_env",
+        ),
+    ] {
+        let message = inbox_err(&changed(bad));
+        assert!(message.contains(expected), "{what}: {message}");
+    }
+    // The text has the form of an API key: the error names the key, the form, and never the value.
+    let texts = api_texts();
+    let mcp = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
+    let mut bad_sum = texts[0].clone();
+    let last = bad_sum.pop().unwrap();
+    bad_sum.push(if last == 'a' { 'b' } else { 'a' });
+    for (what, text) in [
+        ("an MCP key", mcp.clone()),
+        ("a bad checksum", bad_sum.clone()),
+        ("a short text", "api_short".to_string()),
+        (
+            "a token of 32 characters",
+            "0123456789abcdef0123456789abcdef".to_string(),
+        ),
+        ("a reserved prefix", format!("whk_{}", &texts[0][4..])),
+    ] {
+        let mut vars: Vec<(&str, &str)> = VARS.iter().chain(INBOX_VARS).copied().collect();
+        vars.push(("INBOX_TOKEN", text.as_str()));
+        let message = parse_with(&with_inbox(INBOX), &vars)
+            .err()
+            .unwrap_or_else(|| panic!("{what} must stop the start"));
+        assert!(
+            message.contains("inbox.api_key.grafana.secret")
+                && message.contains("expected an API key with the prefix api_")
+                && message.contains("env:INBOX_TOKEN"),
+            "{what}: {message}"
+        );
+        assert!(
+            !message.contains(&text),
+            "{what}: the value is in the message"
+        );
+    }
+    // Two keys cannot have the same text.
+    let two = with_inbox(&INBOX.replace(
+        block,
+        &format!(
+            r#"{block}
+  api_key "again" {{ owner = "ci" secret_env = "INBOX_TOKEN" groups = ["oncall"] }}"#
+        ),
+    ));
+    let message = inbox_err(&two);
+    assert!(
+        message.contains("inbox.api_key.grafana.secret")
+            || message.contains("inbox.api_key.again.secret"),
+        "{message}"
+    );
+    assert!(
+        message.contains("the same text") && !message.contains(&texts[0]),
+        "{message}"
+    );
+    // The old block is gone, with no alias.
+    let message = inbox_err(&changed(
+        r#"producer "grafana" { token_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+    ));
+    assert!(message.contains("producer"), "{message}");
+    // The secret can come from a file, and the effective configuration shows its source.
+    let file = temp_file(texts[0].as_bytes());
+    let (config, _) = inbox_ok(&changed(&format!(
+        r#"api_key "grafana" {{ owner = "ci" secret_file = "{}" groups = ["infra"] }}"#,
+        file.display()
+    )));
+    let shown = line(&config, "inbox.api_key.grafana.secret");
+    assert_eq!(shown.value, "<hidden>");
+    assert_eq!(shown.source, format!("file:{}", file.display()));
+    fs::remove_file(file).ok();
+}
+
+#[test]
+fn a_block_key_of_an_account_of_the_file_holds_an_mcp_key_only() {
+    let (mut vars, _) = vars_with_key();
+    let api = crate::keys::generate(crate::keys::KeyKind::Api)
+        .unwrap()
+        .to_string();
+    vars.push(("API_KEY".into(), api.clone()));
+    let raw = with_keys(
+        r#"user "carol" {
+          grants = []
+          key "svc" { key_env = "API_KEY" grants = [] }
+        }"#,
+    );
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(
+        message.contains("carol") && message.contains("MCP key") && message.contains("api_key"),
+        "{message}"
+    );
+    assert!(!message.contains(&api));
+    // With the kind mcp off, a block key stops the start.
+    let raw = format!(
+        "{MINIMAL}\n{}\n{}\n{}",
+        r#"access { grants_mode = "hybrid" }"#,
+        r#"users { allow_creation = true }"#,
+        r#"user "carol" { grants = [] key "k" { key_env = "CAROL_KEY" grants = [] } }"#
+    );
+    let message = parse_keys(&raw, &vars).err().unwrap();
+    assert!(message.contains("keys.mcp = true"), "{message}");
 }

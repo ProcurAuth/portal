@@ -3,7 +3,7 @@
 # on fingerprint + status + startsAt, so Alertmanager retries and repeat_interval
 # re-sends never page twice for the same firing.
 # The URL is the address of the portal (the same host and port as the pages). The last path element is the group.
-# The token is the value of a block `producer` of the file, or a key of the portal (mcp_...)
+# The token is the value of a block `api_key` of the file, or an API key of the portal (api_...)
 # that has the permission alert.send on the group. Use HTTPS when the token crosses a network.
 route:
   receiver: inbox-oncall

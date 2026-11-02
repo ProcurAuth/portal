@@ -284,6 +284,21 @@ session {{
 logging {{
   level = "info"
 }}
+# access-begin
+access {{
+  grants_mode = "hybrid"
+}}
+keys {{
+  mcp = false
+  api = true
+}}
+user "ci" {{
+  grants = [
+    "keys.own.use on service:portal/key_kind:api",
+    "alert.send on service:portal/inbox_group:infra",
+  ]
+}}
+# access-end
 inbox {{
   server_key_file = "{key}"
   devices {{
@@ -313,8 +328,9 @@ inbox {{
     name = "Other"
     description = ""
   }}
-  producer "ci" {{
-    token_file = "{tok}"
+  api_key "ci" {{
+    owner = "ci"
+    secret_file = "{tok}"
     groups = ["infra"]
     webhook_send_resolved = false
   }}
@@ -731,8 +747,8 @@ fn users_form(s: &Server, path: &str, fields: &str) -> String {
 /// The permissions that a test account has when the test does not choose: it may subscribe to the
 /// two groups of the test servers.
 const DEFAULT_GRANTS: [&str; 2] = [
-    "group.subscribe on service:inbox/group:infra",
-    "group.subscribe on service:inbox/group:other",
+    "inbox.receive on service:portal/inbox_group:infra",
+    "inbox.receive on service:portal/inbox_group:other",
 ];
 
 /// Encodes a value of a form.
@@ -764,12 +780,20 @@ fn add_account_with(s: &Server, login: &str, grants: &[&str]) {
     set_grants(s, login, grants);
 }
 
-/// The superadmin sets the permissions of a database account. The form replaces the permissions of
-/// the account, but those of the service `portal`.
+/// The superadmin sets the permissions of a database account. The form replaces all the
+/// permissions of the account, those of the portal features included.
 fn set_grants(s: &Server, login: &str, grants: &[&str]) {
+    set_grants_with(s, login, grants, "");
+}
+
+/// The same, with more fields of the form: the limit values of the grants.
+fn set_grants_with(s: &Server, login: &str, grants: &[&str], more: &str) {
     let mut fields = format!("login={login}&grants=1");
     for (n, grant) in grants.iter().enumerate() {
         fields.push_str(&format!("&grant{n}={}", form_value(grant)));
+    }
+    if !more.is_empty() {
+        fields.push_str(&format!("&{more}"));
     }
     // An account that another instance made shows up here after a round of the directory.
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -2572,7 +2596,7 @@ fn check_config_reports_the_replica_block() {
     assert!(shown.contains("inbox.devices.public_address"), "{shown}");
     assert!(!shown.contains("inbox.devices.listen"), "{shown}");
     assert!(
-        shown.contains("inbox.producer.ci.token = <hidden>  # file:"),
+        shown.contains("inbox.api_key.ci.secret = <hidden>  # file:"),
         "{shown}"
     );
     assert!(
@@ -3775,7 +3799,11 @@ async fn a_deleted_account_loses_its_phones_and_its_codes() {
 async fn without_the_inbox_block_the_pages_are_absent() {
     let mut s = Server::setup();
     let text = std::fs::read_to_string(s.config()).unwrap();
-    // The block `inbox` goes. The block `postgres`, if any, stays.
+    // The block `inbox` goes, and the blocks that need it: the kind api, the account of the file
+    // and its key. The block `postgres`, if any, stays.
+    let start = text.find("# access-begin").unwrap();
+    let access_end = text.find("# access-end\n").unwrap() + "# access-end\n".len();
+    let text = format!("{}{}", &text[..start], &text[access_end..]);
     let cut = text.find("inbox {").unwrap();
     let end = text.find("\npostgres {").unwrap_or(text.len());
     std::fs::write(s.config(), format!("{}{}", &text[..cut], &text[end..])).unwrap();
@@ -3942,56 +3970,68 @@ async fn a_burst_of_refused_sign_ins_makes_one_alert() {
 // ---------------------------------------------------------------------------------------------
 // Rights: keys of the portal as producers, subscriptions that follow the permissions.
 
-/// The text of a key of the portal: `mcp_`, 43 characters and the checksum. The tests use fixed text.
-fn key_text(seed: u8) -> String {
-    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let random: Vec<u8> = (0..43)
-        .map(|i| ALPHABET[(usize::from(seed) * 7 + i * 5) % 62])
-        .collect();
-    let mut crc = 0xFFFF_FFFFu32;
-    for byte in &random {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    let mut value = !crc;
-    let mut check = [b'0'; 6];
-    for digit in check.iter_mut().rev() {
-        *digit = ALPHABET[(value % 62) as usize];
-        value /= 62;
-    }
-    format!(
-        "mcp_{}{}",
-        String::from_utf8(random).unwrap(),
-        String::from_utf8(check.to_vec()).unwrap()
-    )
-}
-
-fn key_digest(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// The configuration of the keys: the blocks `access`, `keys` and `identity`, and the accounts of
-/// the file in `users`.
-fn enable_keys(s: &Server, users: &str) {
+/// Turns on the kind `mcp`: it needs the blocks `identity` and `pdp`. The base configuration has
+/// the kind `api` only.
+fn enable_mcp(s: &Server) {
     std::fs::write(
         s.dir.join("identity.pem"),
         "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n-----END PRIVATE KEY-----\n",
     )
     .unwrap();
-    let mut text = std::fs::read_to_string(s.config()).unwrap();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let from = "keys {\n  mcp = false\n  api = true\n}";
+    assert!(text.contains(from));
+    let mut text = text.replace(from, "keys {\n  api = true\n}");
     let pdp = free_port();
     text.push_str(&format!(
-        "\naccess {{\n  grants_mode = \"hybrid\"\n}}\nkeys {{\n}}\nidentity {{\n  issuer = \"https://portal.e2e\"\n  signing_key_file = \"{}\"\n}}\npdp {{\n  listen_address = \"127.0.0.1:{pdp}\"\n  url = \"http://127.0.0.1:{pdp}\"\n  plain_http = true\n}}\n{users}\n",
+        "\nidentity {{\n  issuer = \"https://portal.e2e\"\n  signing_key_file = \"{}\"\n}}\npdp {{\n  listen_address = \"127.0.0.1:{pdp}\"\n  url = \"http://127.0.0.1:{pdp}\"\n  plain_http = true\n}}\n",
         s.dir.join("identity.pem").display()
     ));
     std::fs::write(s.config(), text).unwrap();
+}
+
+/// A key that an account makes on the page Keys, with the form of its kind. `grants` are the fields
+/// `grant<n>` of the form. The answer is the text of the key, shown one time.
+fn make_key(s: &Server, cookie: &str, kind: &str, name: &str, grants: &[&str]) -> String {
+    let host = format!("127.0.0.1:{}", s.port);
+    let (st, _, page) = http_full(
+        s.port,
+        &host,
+        "GET",
+        &format!("/auth/keys/new?kind={kind}"),
+        &[("Cookie", cookie.to_string())],
+        "",
+    );
+    assert_eq!(st, 200, "{page}");
+    let form = page
+        .find("id=\"new-key-form\"")
+        .expect("the form of a new key");
+    let marker = "name=\"csrf\" value=\"";
+    let start = form + page[form..].find(marker).unwrap() + marker.len();
+    let csrf = page[start..].split('"').next().unwrap().to_string();
+    let mut body = format!(
+        "csrf={csrf}&kind={kind}&name={}&expires_at=",
+        form_value(name)
+    );
+    for (n, grant) in grants.iter().enumerate() {
+        body.push_str(&format!("&grant{n}={}", form_value(grant)));
+    }
+    let (st, _, page) = http_full(
+        s.port,
+        &host,
+        "POST",
+        "/auth/keys/create",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Origin", format!("http://{host}")),
+            ("Cookie", cookie.to_string()),
+        ],
+        &body,
+    );
+    assert_eq!(st, 200, "the key is not made: {page}");
+    let marker = "id=\"key-text\" type=\"text\" readonly value=\"";
+    let start = page.find(marker).expect("the text of the key") + marker.len();
+    page[start..].split('"').next().unwrap().to_string()
 }
 
 /// A request of a producer with the text of a key or a token. The answer is the status, the head and
@@ -4035,55 +4075,84 @@ fn send_with(s: &Server, token: &str, key: &str, group: &str, title: &str) -> (u
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_key_of_the_portal_sends_alerts_with_the_permissions_and_the_limit_of_its_owner() {
+async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner() {
     let mut s = Server::setup();
     s.add_to_inbox("  group \"crit\" {\n    name = \"Critical\"\n    critical = true\n  }");
-    let (ci, narrow, ghost) = (key_text(1), key_text(2), key_text(3));
-    std::fs::write(s.dir.join("ci.sha256"), key_digest(&ci)).unwrap();
-    std::fs::write(s.dir.join("narrow.sha256"), key_digest(&narrow)).unwrap();
-    let users = format!(
-        r#"
-user "svc" {{
-  grants = [
-    "keys.own.use on service:portal",
-    {{ grant = "access on service:inbox", limits = {{ alerts = [ {{ amount = 3, window = "minute" }} ] }} }},
-    "alert.send on service:inbox/group:infra",
-    "alert.send on service:inbox/group:crit",
-    "alert.read on service:inbox/group:infra",
-  ]
-  key "ci" {{
-    key_sha256_file = "{}"
-    grants = [
-      "alert.send on service:inbox/group:infra",
-      "alert.send on service:inbox/group:crit",
-      "alert.read on service:inbox/group:infra",
-    ]
-  }}
-}}
-user "partial" {{
-  grants = [
-    "keys.own.use on service:portal",
-    "alert.send on service:inbox/group:infra",
-  ]
-  key "narrow" {{
-    key_sha256_file = "{}"
-    grants = [
-      "alert.send on service:inbox/group:infra",
-      "alert.send on service:inbox/group:other",
-    ]
-  }}
-}}
-"#,
-        s.dir.join("ci.sha256").display(),
-        s.dir.join("narrow.sha256").display()
-    );
-    enable_keys(&s, &users);
+    enable_mcp(&s);
     s.start();
     let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
     let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
     conn.subscribe("infra").await;
     conn.subscribe("crit").await;
 
+    // The owner of the first key: it may make keys of both kinds, send to two groups, read one, and
+    // its budget is 3 alerts each minute.
+    let rights = |kind_rights: &[&str]| -> Vec<String> {
+        let mut grants = vec!["keys.own.read on service:portal".to_string()];
+        grants.extend(kind_rights.iter().map(|g| g.to_string()));
+        grants
+    };
+    // The budget is a limit value of the grant `access` on the service portal: it is the first grant.
+    let svc_grants = rights(&[
+        "keys.own.create on service:portal/key_kind:api",
+        "keys.own.use on service:portal/key_kind:api",
+        "keys.own.create on service:portal/key_kind:mcp",
+        "keys.own.use on service:portal/key_kind:mcp",
+        "alert.send on service:portal/inbox_group:infra",
+        "alert.send on service:portal/inbox_group:crit",
+        "alert.read on service:portal/inbox_group:infra",
+    ]);
+    add_account_with(&s, "svc", &[]);
+    let svc_refs: Vec<&str> = std::iter::once("access on service:portal")
+        .chain(svc_grants.iter().map(String::as_str))
+        .collect();
+    set_grants_with(&s, "svc", &svc_refs, "limit0.alerts.minute=3");
+    let partial_grants = rights(&[
+        "keys.own.create on service:portal/key_kind:api",
+        "keys.own.use on service:portal/key_kind:api",
+        "alert.send on service:portal/inbox_group:infra",
+        "alert.send on service:portal/inbox_group:other",
+    ]);
+    let partial_refs: Vec<&str> = partial_grants.iter().map(String::as_str).collect();
+    add_account_with(&s, "partial", &partial_refs);
+    let svc = sign_in_as(s.port, "svc", ACCOUNT_PASSWORD).cookie;
+    let partial = sign_in_as(s.port, "partial", ACCOUNT_PASSWORD).cookie;
+    let ci = make_key(
+        &s,
+        &svc,
+        "api",
+        "ci",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.send on service:portal/inbox_group:crit",
+            "alert.read on service:portal/inbox_group:infra",
+        ],
+    );
+    assert!(ci.starts_with("api_") && ci.len() == 53, "{ci}");
+    let narrow = make_key(
+        &s,
+        &partial,
+        "api",
+        "narrow",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.send on service:portal/inbox_group:other",
+        ],
+    );
+    let mcp = make_key(&s, &svc, "mcp", "agent", &[]);
+    assert!(mcp.starts_with("mcp_"));
+
+    // The windows of a budget are fixed windows of the clock. Start the count early in a minute, so
+    // that the window does not end before the test has used it.
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        % 60
+        > 30
+    {
+        std::thread::sleep(Duration::from_millis(500));
+    }
     // An allowed group: the alert is made and the phone gets it exactly one time.
     let (st, _, v) = send_with(&s, &ci, "k1", "infra", "from a key");
     assert_eq!(st, 201, "{v}");
@@ -4105,14 +4174,29 @@ user "partial" {{
         v["error"]["message"].as_str().unwrap().contains("other"),
         "{v}"
     );
-    // The key has the permission, its owner has not: the decision is no.
-    let (st, _, _) = send_with(&s, &narrow, "n1", "other", "no");
-    assert_eq!(st, 403);
-    let (st, _, _) = send_with(&s, &narrow, "n2", "infra", "ok");
+    // The key has the permission, its owner has it too: the alert is made.
+    let (st, _, _) = send_with(&s, &narrow, "n1", "other", "to other");
+    assert_eq!(st, 201);
+    // The owner loses the permission: the key loses it at once. The permission on the other group
+    // stays.
+    set_grants(
+        &s,
+        "partial",
+        &[
+            "keys.own.read on service:portal",
+            "keys.own.create on service:portal/key_kind:api",
+            "keys.own.use on service:portal/key_kind:api",
+            "alert.send on service:portal/inbox_group:infra",
+        ],
+    );
+    let (st, _, v) = send_with(&s, &narrow, "n2", "other", "no");
+    assert_eq!(st, 403, "the owner has no permission now: {v}");
+    let (st, _, _) = send_with(&s, &narrow, "n3", "infra", "ok");
     assert_eq!(st, 201);
     assert_eq!(take(&mut conn).await.title, "ok");
 
-    // The limit of the owner: 3 each minute. Two units are used (the first send and its repeat). This send takes the last.
+    // The limit of the owner: 3 each minute. Two units are used (the first send and its repeat),
+    // and the send to the group other is a use of another owner. This send takes the last.
     let (st, _, v) = send_with(&s, &ci, "k3", "infra", "second");
     assert_eq!(st, 201, "{v}");
     assert_eq!(take(&mut conn).await.title, "second");
@@ -4174,14 +4258,17 @@ user "partial" {{
     assert_eq!(st, 200);
     assert!(take(&mut conn).await.title.starts_with("[FIRING] Disk"));
 
-    // The token of the file still works as before, and the key in the query works too.
+    // The key of the file works as before. It is an API key too: its owner is an account of the
+    // file, and the start decided its groups. The key in the query works too.
     let (st, v) = post_alert(
         &s,
-        "hcl1",
+        "file1",
         json!({"group": "infra", "title": "from the file"}),
     );
     assert_eq!(st, 201, "{v}");
     assert_eq!(take(&mut conn).await.title, "from the file");
+    let (st, v) = post_alert(&s, "file2", json!({"group": "other", "title": "no"}));
+    assert_eq!(st, 403, "the key of the file has the group infra only: {v}");
     let (st, _) = http(
         s.port,
         "POST",
@@ -4203,12 +4290,111 @@ user "partial" {{
     assert_eq!(st, 404, "the key has no alert.read on the group crit");
     let _ = take(&mut conn).await;
 
-    // A text that is not a key, and a key that nobody has: 401.
-    for token in ["not a key at all", ghost.as_str(), "mcp_short"] {
-        let (st, _, _) = send_with(&s, token, "g1", "infra", "no");
+    // A text that is not a key, a key that nobody has, and an MCP key: 401 with no detail. The
+    // form is checked before any lookup, and the kind next.
+    let counted = |kind: &str| -> u64 {
+        let line = format!("portal_inbox_auth_failures_total{{kind=\"{kind}\"}} ");
+        metrics_of(&s)
+            .lines()
+            .find_map(|l| l.strip_prefix(&line).and_then(|n| n.trim().parse().ok()))
+            .unwrap_or(0)
+    };
+    let token_before = counted("producer_token");
+    let key_before = counted("producer_key");
+    let kind_before = counted("producer_kind");
+    let ghost = {
+        // A good form that no key has: the lookup finds nothing.
+        let mut text = ci.clone();
+        text.replace_range(10..11, if &ci[10..11] == "A" { "B" } else { "A" });
+        let (random, _) = text.split_at(47);
+        let sum = crc_text(random);
+        format!("{random}{sum}")
+    };
+    let mut bad_sum = ci.clone();
+    let last = bad_sum.pop().unwrap();
+    bad_sum.push(if last == 'a' { 'b' } else { 'a' });
+    for token in [
+        "not a key at all".to_string(),
+        "api_short".to_string(),
+        bad_sum,
+        // A changed prefix fails the checksum, and `whk_` is reserved.
+        format!("mcp_{}", &ci[4..]),
+        format!("whk_{}", &ci[4..]),
+    ] {
+        let (st, _, v) = send_with(&s, &token, "g1", "infra", "no");
         assert_eq!(st, 401, "{token}");
+        assert_eq!(v["error"]["code"], "unauthorized", "no detail: {v}");
     }
+    assert_eq!(
+        counted("producer_token") - token_before,
+        5,
+        "five bad forms"
+    );
+    assert_eq!(
+        counted("producer_key"),
+        key_before,
+        "no lookup for a bad form"
+    );
+    let (st, _, _) = send_with(&s, &ghost, "g2", "infra", "no");
+    assert_eq!(st, 401);
+    assert_eq!(
+        counted("producer_key") - key_before,
+        1,
+        "a good form is a lookup"
+    );
+    let (st, _, v) = send_with(&s, &mcp, "g3", "infra", "no");
+    assert_eq!(st, 401, "{v}");
+    assert_eq!(
+        counted("producer_kind") - kind_before,
+        1,
+        "the kind is not served here"
+    );
+    for path in [
+        "/api/v1/notify/infra",
+        "/api/v1/webhooks/alertmanager/infra",
+    ] {
+        let (st, _, _) = producer_call(&s, "POST", path, &mcp, "g4", "x");
+        assert_eq!(st, 401, "{path}");
+    }
+
+    // The other verifier: the key edge serves the kind mcp. An API key gets 401 there.
+    let edge = |token: &str| {
+        http(
+            s.port,
+            "GET",
+            "/auth/verify-key",
+            &[
+                ("Authorization", format!("Bearer {token}")),
+                ("X-Forwarded-Uri", "/anything/".into()),
+            ],
+            "",
+        )
+        .0
+    };
+    assert_eq!(edge(&ci), 401, "an API key at the key edge");
+    assert_eq!(edge(&narrow), 401);
+    assert_ne!(edge(&mcp), 204, "the agent has no service to open here");
     s.stop();
+}
+
+/// The checksum characters of a key text: the CRC-32 of zlib in base62, as portal 5.1 says.
+fn crc_text(covered: &str) -> String {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in covered.bytes() {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    let mut value = !crc;
+    let mut check = [b'0'; 6];
+    for digit in check.iter_mut().rev() {
+        *digit = ALPHABET[(value % 62) as usize];
+        value /= 62;
+    }
+    String::from_utf8(check.to_vec()).unwrap()
 }
 
 /// A service that goes unhealthy makes one alert after `unhealthy_after`. When it is healthy again, the
@@ -4382,7 +4568,7 @@ async fn a_phone_follows_the_permission_to_subscribe() {
     set_grants(
         &s,
         "nina",
-        &["group.subscribe on service:inbox/group:other"],
+        &["inbox.receive on service:portal/inbox_group:other"],
     );
     let nina = enroll_as(&s, "phone-nina", "nina").await.unwrap();
     let (mut conn, welcome) = Conn::open(port, &nina).await.unwrap();
@@ -4488,7 +4674,7 @@ async fn an_account_that_loses_the_permission_loses_the_subscription_and_keeps_i
     set_grants(
         &s,
         "omar",
-        &["group.subscribe on service:inbox/group:other"],
+        &["inbox.receive on service:portal/inbox_group:other"],
     );
     wait_for(
         "the removal of the subscription",
@@ -4525,15 +4711,15 @@ async fn an_account_that_loses_the_permission_loses_the_subscription_and_keeps_i
         &s,
         "omar",
         &[
-            "group.subscribe on service:inbox/group:other",
-            "group.subscribe on service:inbox/group:infra",
+            "inbox.receive on service:portal/inbox_group:other",
+            "inbox.receive on service:portal/inbox_group:infra",
         ],
     );
     c.subscribe("infra").await;
     set_grants(
         &s,
         "omar",
-        &["group.subscribe on service:inbox/group:infra"],
+        &["inbox.receive on service:portal/inbox_group:infra"],
     );
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -4562,12 +4748,12 @@ async fn the_superadmin_and_the_accounts_of_the_file_follow_their_permissions() 
         r#"
 user "fred" {{
   password_hash_file = "{}"
-  grants = [ "group.subscribe on service:inbox/group:infra" ]
+  grants = [ "inbox.receive on service:portal/inbox_group:infra" ]
 }}
 "#,
         s.dir.join("fred.hash").display()
     );
-    enable_keys(&s, &users);
+    s.add_block(&users);
     s.start();
     // The superadmin has every permission: it subscribes to each group.
     let root = enroll_as(&s, "phone-root", SUPERADMIN).await.unwrap();
@@ -4632,8 +4818,8 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let pia = s.account_with(
         "pia",
         &[
-            "alert.send on service:inbox/group:infra",
-            "alert.read on service:inbox/group:infra",
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:infra",
         ],
     );
     let (st, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
@@ -4733,9 +4919,9 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let owen = s.account_with(
         "owen",
         &[
-            "device.read on service:inbox",
-            "device.revoke on service:inbox",
-            "connection.read on service:inbox",
+            "phone.read on service:portal",
+            "phone.revoke on service:portal",
+            "phone.log on service:portal",
         ],
     );
     let alice = enroll_as(&s, "phone-alice", "alice").await.unwrap();
@@ -4748,10 +4934,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         !has(&page, "Last alerts"),
         "no alert.read: no list of alerts"
     );
-    assert!(
-        has(&page, "Alerts waiting"),
-        "device.read gives the figures"
-    );
+    assert!(has(&page, "Alerts waiting"), "phone.read gives the figures");
     let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox/devices");
     assert_eq!(st, 200);
     assert!(has(&page, "phone-alice") && has(&page, "Confirm: revoke phone-alice"));
@@ -4786,8 +4969,8 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         ca.closed_code().await,
         Some(inbox_core::proto::close::REVOKED)
     );
-    // A reader without device.revoke sees no button, and a forced request changes nothing.
-    let rita = s.account_with("rita", &["device.read on service:inbox"]);
+    // A reader without phone.revoke sees no button, and a forced request changes nothing.
+    let rita = s.account_with("rita", &["phone.read on service:portal"]);
     let bob = enroll_as(&s, "phone-bob", "bob").await.unwrap();
     let (_, page) = inbox_page_as(&s, &rita.cookie, "/auth/settings/inbox/devices");
     assert!(has(&page, "phone-bob") && !has(&page, "Confirm: revoke"));
@@ -4888,13 +5071,13 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         "no tile of the inbox"
     );
     // The superadmin sees the five tabs at most and the permission editor shows the groups by name.
+    // The test servers have the block keys (the kind api), so the tab Keys shows.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
-    for tab in ["Users", "Services", "Activity", "Inbox"] {
+    for tab in ["Users", "Services", "Activity", "Keys", "Inbox"] {
         assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
     }
-    assert!(!has(&page, ">Keys</a>"), "no block keys, no tab Keys");
     // The inbox is a feature of the portal, as the keys are: the Services page does not list it, and
-    // it has no page of a service. The editor of permissions keeps it as "Inbox (portal)".
+    // it has no page of a service. The editor of permissions shows it in the group "Portal features".
     let (st, services) = inbox_page(&s, "/auth/settings/services");
     assert_eq!(st, 200);
     assert!(
@@ -4903,13 +5086,13 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     );
     let (st, _) = inbox_page(&s, "/auth/settings/services/inbox");
     assert_eq!(st, 404);
-    let (st, editor) = inbox_page(&s, "/auth/settings/users/pia?service=inbox");
+    let (st, editor) = inbox_page(&s, "/auth/settings/users/pia");
     assert_eq!(st, 200);
     assert!(
-        has(&editor, "Inbox (portal)")
-            && has(&editor, "group:infra")
+        has(&editor, "Portal features")
+            && has(&editor, "inbox_group:infra")
             && has(&editor, "Infra")
-            && has(&editor, "device.revoke"),
+            && has(&editor, "phone.revoke"),
         "{editor}"
     );
     s.stop();
@@ -4931,27 +5114,27 @@ async fn demo_for_the_eyes() {
     s.account_with(
         "pia",
         &[
-            "alert.send on service:inbox/group:infra",
-            "alert.read on service:inbox/group:infra",
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:infra",
         ],
     );
     s.account_with(
         "owen",
         &[
-            "device.read on service:inbox",
-            "device.revoke on service:inbox",
-            "connection.read on service:inbox",
-            "alert.read on service:inbox/group:infra",
-            "alert.read on service:inbox/group:other",
-            "alert.read on service:inbox/group:crit",
-            "alert.send on service:inbox/group:infra",
+            "phone.read on service:portal",
+            "phone.revoke on service:portal",
+            "phone.log on service:portal",
+            "alert.read on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:other",
+            "alert.read on service:portal/inbox_group:crit",
+            "alert.send on service:portal/inbox_group:infra",
         ],
     );
     s.account_with(
         "alice",
         &[
-            "group.subscribe on service:inbox/group:infra",
-            "group.subscribe on service:inbox/group:other",
+            "inbox.receive on service:portal/inbox_group:infra",
+            "inbox.receive on service:portal/inbox_group:other",
         ],
     );
     let alice = enroll_as(&s, "Pixel 8 of Alice", "alice").await.unwrap();

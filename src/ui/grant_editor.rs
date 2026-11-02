@@ -54,10 +54,15 @@ pub struct EditorService {
     pub fetch: bool,
 }
 
-/// What the form needs to draw the editor.
+/// What the form needs to draw the editor. It has two parts: the services, which are the workloads
+/// of the launcher, and the portal features, which are the one internal scope of the portal.
 #[derive(Clone, Debug)]
 pub struct EditorData {
+    /// The workloads of the launcher, with the actions that their documents publish.
     pub services: Vec<EditorService>,
+    /// The features of the portal (the service `portal`): the keys and the inbox. `None`: the file
+    /// turns none on, or the holder of the form cannot give any.
+    pub features: Option<EditorService>,
     /// The grants that the form has at the start, with their limit values.
     pub ticked: Vec<Grant>,
     /// The grants of the owner. `None`: the superadmin, who has every right.
@@ -126,57 +131,54 @@ fn input_json(input: &Input) -> serde_json::Value {
     })
 }
 
-/// The JSON block of the editor. `<`, `>` and `&` are written as `\u00XX`, so the text cannot
-/// close the element.
-fn json_block(data: &EditorData) -> String {
-    let services: Vec<serde_json::Value> = data
-        .services
+/// The JSON of one service for the script.
+fn service_json(service: &EditorService) -> serde_json::Value {
+    let actions: Vec<serde_json::Value> = service
+        .actions
         .iter()
-        .map(|service| {
-            let actions: Vec<serde_json::Value> = service
-                .actions
-                .iter()
-                .map(|a| {
-                    serde_json::json!({
-                        "name": a.name,
-                        "description": a.description,
-                        "whole": a.whole,
-                        "types": a.types,
-                        "limits": a.limits.iter().map(input_json).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            let nodes: Vec<serde_json::Value> = service
-                .nodes
-                .iter()
-                .map(|n| {
-                    serde_json::json!({
-                        "path": n.path,
-                        "kind": n.kind,
-                        "label": n.label,
-                        "only": n.only,
-                        "more": n.more,
-                    })
-                })
-                .collect();
+        .map(|a| {
             serde_json::json!({
-                "id": service.id,
-                "name": service.name,
-                "actions": actions,
-                "nodes": nodes,
-                "types": service
-                    .types
-                    .iter()
-                    .map(|(name, parent)| serde_json::json!({ "name": name, "parent": parent }))
-                    .collect::<Vec<_>>(),
-                "fetch": service.fetch,
-                // The inbox owns no path: the switch does not open anything.
-                "gated": service.id != crate::inbox_actions::SERVICE,
+                "name": a.name,
+                "description": a.description,
+                "whole": a.whole,
+                "types": a.types,
+                "limits": a.limits.iter().map(input_json).collect::<Vec<_>>(),
             })
         })
         .collect();
+    let nodes: Vec<serde_json::Value> = service
+        .nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "path": n.path,
+                "kind": n.kind,
+                "label": n.label,
+                "only": n.only,
+                "more": n.more,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "id": service.id,
+        "name": service.name,
+        "actions": actions,
+        "nodes": nodes,
+        "types": service
+            .types
+            .iter()
+            .map(|(name, parent)| serde_json::json!({ "name": name, "parent": parent }))
+            .collect::<Vec<_>>(),
+        "fetch": service.fetch,
+    })
+}
+
+/// The JSON block of the editor. `<`, `>` and `&` are written as `\u00XX`, so the text cannot
+/// close the element.
+fn json_block(data: &EditorData) -> String {
     let value = serde_json::json!({
-        "services": services,
+        "services": data.services.iter().map(service_json).collect::<Vec<_>>(),
+        "features": data.features.as_ref().map(service_json),
         "ticked": data.ticked.iter().map(grant_json).collect::<Vec<_>>(),
         "owner": data.owner.as_ref().map(|grants| {
             grants
@@ -265,46 +267,59 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
 /// The text of the grant `access`.
 const ACCESS_DESCRIPTION: &str = "Open the service. The gate lets the holder in.";
 
-/// The actions and the tree of one service.
-fn editor_service(service: &ServiceActions, portal_service: &str) -> EditorService {
-    let mut actions = vec![EditorAction {
-        name: ACCESS.to_string(),
-        description: ACCESS_DESCRIPTION.to_string(),
-        whole: true,
-        types: Vec::new(),
-        limits: service.document.limit_inputs(ACCESS),
-    }];
+/// The actions and the tree of one service. The service `portal` is the scope of the portal
+/// features: its action `access` has no use but to carry a budget, so the editor offers it only when
+/// the document declares one.
+fn editor_service(service: &ServiceActions) -> EditorService {
+    let portal = service.id == crate::portal_actions::SERVICE;
+    let access_limits = service.document.limit_inputs(ACCESS);
+    let mut actions = Vec::new();
+    if !portal || !access_limits.is_empty() {
+        actions.push(EditorAction {
+            name: ACCESS.to_string(),
+            description: if portal {
+                ACCESS_BUDGET_DESCRIPTION.to_string()
+            } else {
+                ACCESS_DESCRIPTION.to_string()
+            },
+            whole: true,
+            types: Vec::new(),
+            limits: access_limits,
+        });
+    }
     let mut nodes = vec![EditorNode {
         path: String::new(),
         kind: SERVICE_TYPE.to_string(),
-        label: "Whole service".to_string(),
+        label: if portal {
+            "Portal features".to_string()
+        } else {
+            "Whole service".to_string()
+        },
         only: Vec::new(),
         more: Vec::new(),
     }];
-    if service.id != portal_service {
-        for (name, description) in &service.actions {
-            let found = service.document.actions.iter().find(|a| a.name == *name);
-            let types = found
-                .map(|a| a.sub_resource_types().map(str::to_string).collect())
-                .unwrap_or_default();
-            let whole = found.is_some_and(|a| a.resource_types.iter().any(|t| t == SERVICE_TYPE));
-            actions.push(EditorAction {
-                name: name.clone(),
-                description: description.clone(),
-                whole,
-                types,
-                limits: service.document.limit_inputs(name),
-            });
-        }
-        for node in &service.document.resources {
-            nodes.push(EditorNode {
-                path: crate::grants::path_text(&node.path),
-                kind: node.path.last().map(|s| s.kind.clone()).unwrap_or_default(),
-                label: node.label.clone(),
-                only: node.actions.clone(),
-                more: Vec::new(),
-            });
-        }
+    for (name, description) in &service.actions {
+        let found = service.document.actions.iter().find(|a| a.name == *name);
+        let types = found
+            .map(|a| a.sub_resource_types().map(str::to_string).collect())
+            .unwrap_or_default();
+        let whole = found.is_some_and(|a| a.resource_types.iter().any(|t| t == SERVICE_TYPE));
+        actions.push(EditorAction {
+            name: name.clone(),
+            description: description.clone(),
+            whole,
+            types,
+            limits: service.document.limit_inputs(name),
+        });
+    }
+    for node in &service.document.resources {
+        nodes.push(EditorNode {
+            path: crate::grants::path_text(&node.path),
+            kind: node.path.last().map(|s| s.kind.clone()).unwrap_or_default(),
+            label: node.label.clone(),
+            only: node.actions.clone(),
+            more: Vec::new(),
+        });
     }
     EditorService {
         id: service.id.clone(),
@@ -321,6 +336,10 @@ fn editor_service(service: &ServiceActions, portal_service: &str) -> EditorServi
     }
 }
 
+/// The text of the grant `access` on the service `portal`.
+const ACCESS_BUDGET_DESCRIPTION: &str =
+    "Carry the limits of the alerts that the holder sends. It opens no page.";
+
 /// Whether the editor shows `action` on `node`: the same rule as the script.
 fn applies(action: &EditorAction, node: &EditorNode) -> bool {
     node.more.contains(&action.name)
@@ -332,11 +351,26 @@ fn applies(action: &EditorAction, node: &EditorNode) -> bool {
         }
 }
 
-/// Whether the editor can show the grant `grant`: its service, its action and its node are in it.
-pub fn shows(services: &[EditorService], grant: &Grant) -> bool {
-    let Some(service) = services.iter().find(|s| s.id == grant.service) else {
-        return false;
-    };
+/// A service with no action: the base of a service that the editor adds for a grant.
+fn bare_service(id: &str, name: &str) -> EditorService {
+    EditorService {
+        id: id.to_string(),
+        name: name.to_string(),
+        actions: Vec::new(),
+        nodes: vec![EditorNode {
+            path: String::new(),
+            kind: SERVICE_TYPE.to_string(),
+            label: "Whole service".to_string(),
+            only: Vec::new(),
+            more: Vec::new(),
+        }],
+        types: Vec::new(),
+        fetch: false,
+    }
+}
+
+/// Whether the service shows the grant: its action and its node are in it.
+fn service_shows(service: &EditorService, grant: &Grant) -> bool {
     let path = grant.path_text();
     let (Some(action), Some(node)) = (
         service.actions.iter().find(|a| a.name == grant.action),
@@ -347,69 +381,81 @@ pub fn shows(services: &[EditorService], grant: &Grant) -> bool {
     applies(action, node)
 }
 
-/// Make the editor able to show the grant `grant`: its service, its action and its node. A grant
-/// that the document does not name, for example of a service that went away, gets a line of its
-/// own.
-pub fn keep(services: &mut Vec<EditorService>, grant: &Grant) {
-    let at = match services.iter().position(|s| s.id == grant.service) {
-        Some(at) => at,
-        None => {
-            services.push(EditorService {
-                id: grant.service.clone(),
-                name: grant.service.clone(),
-                actions: Vec::new(),
-                nodes: vec![EditorNode {
-                    path: String::new(),
-                    kind: SERVICE_TYPE.to_string(),
-                    label: "Whole service".to_string(),
+impl EditorData {
+    /// The part of the editor that holds the grants of this service.
+    fn part(&self, service: &str) -> Option<&EditorService> {
+        if service == crate::portal_actions::SERVICE {
+            self.features.as_ref()
+        } else {
+            self.services.iter().find(|s| s.id == service)
+        }
+    }
+
+    /// Whether the editor can show the grant `grant`: its service, its action and its node are in it.
+    pub fn shows(&self, grant: &Grant) -> bool {
+        self.part(&grant.service)
+            .is_some_and(|service| service_shows(service, grant))
+    }
+
+    /// Make the editor able to show the grant `grant`: its service, its action and its node. A grant
+    /// that the document does not name, for example of a service that went away, gets a line of its
+    /// own.
+    pub fn keep(&mut self, grant: &Grant) {
+        let service = if grant.service == crate::portal_actions::SERVICE {
+            self.features
+                .get_or_insert_with(|| bare_service(&grant.service, "Portal features"))
+        } else {
+            let at = match self.services.iter().position(|s| s.id == grant.service) {
+                Some(at) => at,
+                None => {
+                    self.services
+                        .push(bare_service(&grant.service, &grant.service));
+                    self.services.len() - 1
+                }
+            };
+            &mut self.services[at]
+        };
+        if !service.actions.iter().any(|a| a.name == grant.action) {
+            service.actions.push(EditorAction {
+                name: grant.action.clone(),
+                description: String::new(),
+                whole: false,
+                types: Vec::new(),
+                limits: Vec::new(),
+            });
+        }
+        let path = grant.path_text();
+        let node_at = match service.nodes.iter().position(|n| n.path == path) {
+            Some(at) => at,
+            None => {
+                service.nodes.push(EditorNode {
+                    path: path.clone(),
+                    kind: grant.kind().to_string(),
+                    label: path,
                     only: Vec::new(),
                     more: Vec::new(),
-                }],
-                types: Vec::new(),
-                fetch: false,
-            });
-            services.len() - 1
-        }
-    };
-    let service = &mut services[at];
-    if !service.actions.iter().any(|a| a.name == grant.action) {
-        service.actions.push(EditorAction {
-            name: grant.action.clone(),
-            description: String::new(),
-            whole: false,
-            types: Vec::new(),
-            limits: Vec::new(),
-        });
-    }
-    let path = grant.path_text();
-    let node_at = match service.nodes.iter().position(|n| n.path == path) {
-        Some(at) => at,
-        None => {
-            service.nodes.push(EditorNode {
-                path: path.clone(),
-                kind: grant.kind().to_string(),
-                label: path,
-                only: Vec::new(),
-                more: Vec::new(),
-            });
-            service.nodes.len() - 1
-        }
-    };
-    let action = service
-        .actions
-        .iter()
-        .find(|a| a.name == grant.action)
-        .cloned();
-    if let Some(action) = action {
-        let node = &mut service.nodes[node_at];
-        if !applies(&action, node) {
-            node.more.push(action.name);
+                });
+                service.nodes.len() - 1
+            }
+        };
+        let action = service
+            .actions
+            .iter()
+            .find(|a| a.name == grant.action)
+            .cloned();
+        if let Some(action) = action {
+            let node = &mut service.nodes[node_at];
+            if !applies(&action, node) {
+                node.more.push(action.name);
+            }
         }
     }
 }
 
-/// The data of an editor from the services of the catalogue.
+/// The data of an editor from the services of the catalogue and the features of the portal.
 ///
+/// - `features`: the service `portal` with the document of the features that the holder of the form
+///   can give. `None`: the form has no part for the features.
 /// - `owner`: the grants that the holder of the form can give. `None`: each grant.
 /// - `offered`: whether a grant can be ticked at all.
 /// - `ticked`: the grants that the form has at the start.
@@ -417,42 +463,49 @@ pub fn keep(services: &mut Vec<EditorService>, grant: &Grant) {
 ///   name. Without it, such a ticked grant is left out. The handler then keeps it as it is.
 pub fn build(
     services: &[ServiceActions],
+    features: Option<&ServiceActions>,
     owner: Option<&[Grant]>,
     offered: impl Fn(&Grant) -> bool,
     ticked: Vec<Grant>,
     keep_extras: bool,
 ) -> EditorData {
-    let portal_service = crate::portal_actions::SERVICE;
-    let mut built: Vec<EditorService> = services
+    let holds =
+        |id: &str| owner.is_none_or(|held| held.iter().any(|g| g.service == id && offered(g)));
+    let wanted = |id: &str| keep_extras && ticked.iter().any(|g| g.service == id);
+    let built: Vec<EditorService> = services
         .iter()
-        .filter(|service| {
-            owner.is_none_or(|held| held.iter().any(|g| g.service == service.id && offered(g)))
-                || (keep_extras && ticked.iter().any(|g| g.service == service.id))
-        })
-        .map(|service| editor_service(service, portal_service))
+        .filter(|service| holds(&service.id) || wanted(&service.id))
+        .map(editor_service)
         .collect();
-    let mut ticked = ticked;
-    if keep_extras {
-        // Each grant of the owner, and each grant of the key, can be ticked (portal 4.2).
-        let held: Vec<&Grant> = owner
-            .unwrap_or_default()
-            .iter()
-            .filter(|g| offered(g))
-            .chain(ticked.iter())
-            .collect();
-        for grant in held {
-            keep(&mut built, grant);
-        }
-    } else {
-        ticked.retain(|g| shows(&built, g));
-    }
-    ticked.sort();
-    EditorData {
+    let built_features = features
+        .filter(|service| holds(&service.id) || wanted(&service.id))
+        .map(editor_service);
+    let mut data = EditorData {
         services: built,
+        features: built_features,
         ticked,
         owner: owner.map(|held| held.iter().filter(|g| offered(g)).cloned().collect()),
         locked: Vec::new(),
+    };
+    if keep_extras {
+        // Each grant of the owner, and each grant of the key, can be ticked (portal 4.2).
+        let held: Vec<Grant> = owner
+            .unwrap_or_default()
+            .iter()
+            .filter(|g| offered(g))
+            .chain(data.ticked.iter())
+            .cloned()
+            .collect();
+        for grant in &held {
+            data.keep(grant);
+        }
+    } else {
+        let mut ticked = std::mem::take(&mut data.ticked);
+        ticked.retain(|g| data.shows(g));
+        data.ticked = ticked;
     }
+    data.ticked.sort();
+    data
 }
 
 #[cfg(test)]
@@ -491,6 +544,7 @@ mod tests {
                 types: Vec::new(),
                 fetch: false,
             }],
+            features: None,
             ticked: vec![grant("data.read on service:db/host:prod")],
             owner: None,
             locked: Vec::new(),

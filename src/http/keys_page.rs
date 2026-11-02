@@ -11,6 +11,7 @@ use super::*;
 use crate::grants::ACCESS;
 use crate::key_forms::Context;
 use crate::keyauth;
+use crate::keys::KeyKind;
 use crate::limits::{Limits, Value as LimitValue};
 use crate::portal_actions as portal;
 use crate::store::{KeyCaps, KeyListItem, KeyScope, KeyWriteError};
@@ -30,6 +31,9 @@ pub(super) const MAX_FORM_BYTES: usize = 7 * 1024 * 1024;
 /// The rights that the viewer has on the page.
 struct Rights {
     read_own: bool,
+    /// The kinds of key that the viewer may make: `keys.own.create` on the kind, and the file turns
+    /// the kind on. `create` is true when there is one at least.
+    create_kinds: Vec<KeyKind>,
     create: bool,
     edit: bool,
     revoke: bool,
@@ -39,40 +43,62 @@ struct Rights {
     cannot_use: bool,
 }
 
-fn rights_of(viewer: &Viewer) -> Rights {
-    let (read_own, create, edit, revoke, read_all, revoke_all, use_keys) = match &viewer.grants {
-        // The superadmin in its own right, and in the session of the superadmin as such.
-        None => (true, true, true, true, true, true, true),
-        Some(grants) => {
-            let has = |action| portal::effective(grants, action);
-            (
-                has(portal::KEYS_OWN_READ),
-                has(portal::KEYS_OWN_CREATE),
-                has(portal::KEYS_OWN_EDIT),
-                has(portal::KEYS_OWN_REVOKE),
-                has(portal::KEYS_ALL_READ),
-                has(portal::KEYS_ALL_REVOKE),
-                has(portal::KEYS_OWN_USE),
-            )
-        }
-    };
+fn rights_of(state: &AppState, viewer: &Viewer) -> Rights {
+    let on: Vec<KeyKind> = state
+        .config
+        .keys
+        .as_ref()
+        .map(|keys| keys.kinds())
+        .unwrap_or_default();
+    let (read_own, create_kinds, edit, revoke, read_all, revoke_all, cannot_use) =
+        match &viewer.grants {
+            // The superadmin in its own right, and in the session of the superadmin as such.
+            None => (true, on.clone(), true, true, true, true, false),
+            Some(grants) => {
+                let has = |action| portal::effective(grants, action);
+                let create_kinds: Vec<KeyKind> = on
+                    .iter()
+                    .copied()
+                    .filter(|kind| portal::effective_kind(grants, portal::KEYS_OWN_CREATE, *kind))
+                    .collect();
+                // The viewer can make a kind of key and cannot use it (portal 5.3b).
+                let cannot_use = create_kinds
+                    .iter()
+                    .any(|kind| !portal::effective_kind(grants, portal::KEYS_OWN_USE, *kind));
+                (
+                    has(portal::KEYS_OWN_READ),
+                    create_kinds,
+                    has(portal::KEYS_OWN_EDIT),
+                    has(portal::KEYS_OWN_REVOKE),
+                    has(portal::KEYS_ALL_READ),
+                    has(portal::KEYS_ALL_REVOKE),
+                    cannot_use,
+                )
+            }
+        };
     // A session that "Log in as" opens changes and revokes no key (portal 3.7, 3.7a).
     let browsing_as_user = viewer.session.impersonated;
+    let create_kinds = if browsing_as_user {
+        Vec::new()
+    } else {
+        create_kinds
+    };
     Rights {
         read_own,
-        create: create && !browsing_as_user,
+        create: !create_kinds.is_empty(),
+        create_kinds,
         edit: edit && !browsing_as_user,
         revoke: revoke && !browsing_as_user,
         read_all,
         revoke_all: revoke_all && !browsing_as_user,
-        cannot_use: create && !use_keys,
+        cannot_use,
     }
 }
 
 /// Whether the viewer fills a form that gives grants: the superadmin, and a user who makes or
 /// changes keys. These forms use the options of the services (portal 3.1a).
-pub(super) fn may_fill_forms(viewer: &Viewer) -> bool {
-    let rights = rights_of(viewer);
+pub(super) fn may_fill_forms(state: &AppState, viewer: &Viewer) -> bool {
+    let rights = rights_of(state, viewer);
     viewer.grants.is_none() || rights.create || rights.edit
 }
 
@@ -165,15 +191,28 @@ fn owner_limits(owner: Option<&[Grant]>, grant: &Grant) -> Limits {
     out
 }
 
-/// The editor of the grants of a form of a key. The owner can give what the owner holds, so each
-/// service where the owner holds a grant is in the editor. `ticked` are the grants that the form has
-/// at the start.
-fn editor_for(state: &AppState, owner: Option<&[Grant]>, ticked: Vec<Grant>) -> EditorData {
+/// The editor of the grants of a form of a key of this kind. The owner can give what the owner
+/// holds, so each service where the owner holds a grant is in the editor. An API key holds the
+/// alert actions of the portal features and no service. An MCP key holds services. `ticked` are the
+/// grants that the form has at the start.
+fn editor_for(
+    state: &AppState,
+    kind: KeyKind,
+    owner: Option<&[Grant]>,
+    ticked: Vec<Grant>,
+) -> EditorData {
     let catalog = current_catalog(state);
+    let services = if kind == KeyKind::Mcp {
+        service_grants(state, &catalog)
+    } else {
+        Vec::new()
+    };
+    let features = portal::key_document(&state.config.portal_features(), kind).map(feature_actions);
     grant_editor::build(
-        &service_grants(state, &catalog),
+        &services,
+        features.as_ref(),
         owner,
-        ui_keys::is_offered,
+        |grant| ui_keys::is_offered(kind, grant),
         ticked,
         true,
     )
@@ -184,6 +223,7 @@ fn editor_for(state: &AppState, owner: Option<&[Grant]>, ticked: Vec<Grant>) -> 
 fn state_of(
     state: &AppState,
     login: Option<&str>,
+    kind: Option<KeyKind>,
     created_at: i64,
     expires_at: Option<i64>,
     now: i64,
@@ -193,7 +233,10 @@ fn state_of(
     }
     let max = login
         .and_then(|l| keyauth::person_grants(state, l))
-        .and_then(|(grants, _)| portal::max_key_lifetime(&grants));
+        .and_then(|(grants, _)| match kind {
+            Some(kind) => portal::max_key_lifetime(&grants, kind),
+            None => portal::max_key_lifetime_any(&grants),
+        });
     if max
         .is_some_and(|max| now.saturating_sub(created_at) > i64::try_from(max).unwrap_or(i64::MAX))
     {
@@ -246,7 +289,14 @@ fn line_of_record(
     let key_state = if key.is_from_file() {
         KeyState::Active
     } else {
-        state_of(state, login, key.created_at, key.expires_at, now)
+        state_of(
+            state,
+            login,
+            Some(key.kind),
+            key.created_at,
+            key.expires_at,
+            now,
+        )
     };
     let (last, count) = if key.is_from_file() {
         state
@@ -261,6 +311,7 @@ fn line_of_record(
         owner: login.map(str::to_string),
         name: key.name.clone(),
         hint: key.hint.clone(),
+        kind: Some(key.kind),
         state: key_state,
         file: key.is_from_file(),
         created_at: key.created_at,
@@ -292,13 +343,21 @@ fn line_of_item(state: &AppState, item: &KeyListItem, now: i64, can_edit: bool) 
     let key_state = if item.revoked_at.is_some() {
         KeyState::Revoked
     } else {
-        state_of(state, login, item.created_at, item.expires_at, now)
+        state_of(
+            state,
+            login,
+            item.kind,
+            item.created_at,
+            item.expires_at,
+            now,
+        )
     };
     KeyLine {
         id: item.id.clone(),
         owner: item.owner.clone(),
         name: item.name.clone(),
         hint: item.hint.clone(),
+        kind: item.kind,
         state: key_state,
         file: false,
         created_at: item.created_at,
@@ -349,7 +408,10 @@ fn query_parameters(uri: &str) -> Option<std::collections::HashMap<String, Strin
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let name = percent_decode_form(name).ok()?;
         let value = percent_decode_form(value).ok()?;
-        if !matches!(name.as_str(), "section" | "after" | "copy" | "s" | "id") || value.len() > 160
+        if !matches!(
+            name.as_str(),
+            "section" | "after" | "copy" | "s" | "id" | "kind"
+        ) || value.len() > 160
         {
             return None;
         }
@@ -440,7 +502,7 @@ pub(super) async fn handle_keys(
             return bad_request();
         }
     }
-    let rights = rights_of(&viewer);
+    let rights = rights_of(state, &viewer);
     match section {
         Section::Mine if !rights.read_own => return forbidden(),
         Section::All if !rights.read_all => return forbidden(),
@@ -571,10 +633,19 @@ pub(super) async fn handle_keys(
         (lines, next)
     };
 
-    // The form of a new key.
-    let max_lifetime = my_grants.as_deref().and_then(portal::max_key_lifetime);
-    let default_lifetime = state.config.key_limits.default_lifetime.as_secs();
-    let first_lifetime = max_lifetime.map_or(default_lifetime, |max| max.min(default_lifetime));
+    // The form of a key. The kind of a new key comes from the address (`kind`), or from the key that
+    // the form copies, or it is the first kind that the viewer may make. A kind that the viewer may
+    // not make is a bad request. The page of a change shows the kind of the key.
+    let mut kind: Option<KeyKind> = None;
+    if new {
+        kind = match params.get("kind") {
+            None => None,
+            Some(name) => match KeyKind::from_name(name) {
+                Some(asked) if rights.create_kinds.contains(&asked) => Some(asked),
+                _ => return bad_request(),
+            },
+        };
+    }
     let mut copy_name = String::new();
     let mut ticked: Vec<Grant> = Vec::new();
     let mut edit: Option<EditTarget> = None;
@@ -585,10 +656,16 @@ pub(super) async fn handle_keys(
                 (KeyOwner::User(a), Me::Database(b)) => a == b,
                 _ => false,
             };
-            if mine_key && !source.is_from_file() {
+            let same_kind = kind.is_none_or(|k| k == source.kind);
+            if mine_key
+                && !source.is_from_file()
+                && same_kind
+                && rights.create_kinds.contains(&source.kind)
+            {
                 // The form copies the grants and the limit values of the key (portal 4.1a).
                 ticked = source.grants.clone();
                 copy_name = source.name.clone();
+                kind = Some(source.kind);
             }
         }
     }
@@ -599,6 +676,7 @@ pub(super) async fn handle_keys(
         match editable_key(state, id, &mine, now) {
             Ok(key) => {
                 ticked = key.grants.clone();
+                kind = Some(key.kind);
                 edit = Some(EditTarget {
                     id: key.id.clone(),
                     name: key.name.clone(),
@@ -607,13 +685,26 @@ pub(super) async fn handle_keys(
             Err(code) => return refusal_redirect(code),
         }
     }
-    let editor = (form_page && (new || edit.is_some()))
-        .then(|| editor_for(state, my_grants.as_deref(), ticked));
+    if new && kind.is_none() {
+        kind = rights.create_kinds.first().copied();
+    }
+    let max_lifetime = kind.and_then(|kind| {
+        my_grants
+            .as_deref()
+            .and_then(|grants| portal::max_key_lifetime(grants, kind))
+    });
+    let default_lifetime = state.config.key_limits.default_lifetime.as_secs();
+    let first_lifetime = max_lifetime.map_or(default_lifetime, |max| max.min(default_lifetime));
+    let editor = kind
+        .filter(|_| form_page && (new || edit.is_some()))
+        .map(|kind| editor_for(state, kind, my_grants.as_deref(), ticked));
     let view = KeysView {
         section,
         can_read_own: rights.read_own,
         can_read_all: rights.read_all,
         can_create: rights.create,
+        create_kinds: rights.create_kinds.clone(),
+        kind,
         can_revoke: rights.revoke,
         can_revoke_all: rights.revoke_all,
         cannot_use: rights.cannot_use,
@@ -671,7 +762,7 @@ async fn form_request(
     let Some(viewer) = current_viewer(state, request.headers(), client) else {
         return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
     };
-    let rights = rights_of(&viewer);
+    let rights = rights_of(state, &viewer);
     if !allowed(&rights) {
         return Err(forbidden());
     }
@@ -718,10 +809,10 @@ async fn form_request(
 }
 
 /// A refused creation goes back to the page of the new key, where the owner can correct the form.
-fn new_key_refusal(code: &str) -> HttpResponse {
+fn new_key_refusal(code: &str, kind: KeyKind) -> HttpResponse {
     redirect_response(
         StatusCode::SEE_OTHER,
-        &format!("{}?s={code}", ui_keys::NEW_PATH),
+        &format!("{}?kind={}&s={code}", ui_keys::NEW_PATH, kind.name()),
     )
 }
 
@@ -737,6 +828,7 @@ fn with_context<R>(
     state: &AppState,
     owner: Option<&[Grant]>,
     old_grants: Option<&[Grant]>,
+    kind: KeyKind,
     use_context: impl FnOnce(&Context<'_>) -> R,
 ) -> R {
     let catalog = current_catalog(state);
@@ -751,7 +843,7 @@ fn with_context<R>(
     let context = Context {
         now: unix_now(),
         owner_grants: owner,
-        max_lifetime: owner.and_then(portal::max_key_lifetime),
+        max_lifetime: owner.and_then(|grants| portal::max_key_lifetime(grants, kind)),
         document: &lookup,
         service_exists: &exists,
         old_grants,
@@ -768,7 +860,7 @@ fn caps(state: &AppState, now: i64, owner: Option<&[Grant]>) -> KeyCaps {
         now,
         // A key older than the longest lifetime of its owner is not active (portal 5.5b).
         created_not_before: owner
-            .and_then(portal::max_key_lifetime)
+            .and_then(portal::max_key_lifetime_any)
             .map(|max| now - i64::try_from(max).unwrap_or(i64::MAX)),
     }
 }
@@ -795,24 +887,33 @@ pub(super) async fn handle_keys_create(
     request: Request<Incoming>,
     client: &Client,
 ) -> HttpResponse {
-    let (viewer, _rights, form) = match form_request(state, request, client, |r| r.create).await {
+    let (viewer, rights, mut form) = match form_request(state, request, client, |r| r.create).await
+    {
         Ok(v) => v,
         Err(response) => return response,
     };
+    // The kind of the key is a field of the form. A kind that the viewer may not make, or that the
+    // file turns off, is refused: the kind decides who verifies the key.
+    let Some(kind) = form.remove("kind").as_deref().and_then(KeyKind::from_name) else {
+        return bad_request();
+    };
+    if !rights.create_kinds.contains(&kind) {
+        return forbidden();
+    }
     let Ok(raw) = key_forms::read(form, false) else {
         return bad_request();
     };
     let mine = me(state, &viewer);
     let owner = owner_grants(state, owner_login(&mine));
-    let checked = with_context(state, owner.as_deref(), None, |ctx| {
-        key_forms::check(&raw, ctx)
+    let checked = with_context(state, owner.as_deref(), None, kind, |ctx| {
+        key_forms::check(&raw, ctx, kind)
     });
     let form = match checked {
         Ok(form) => form,
-        Err(code) => return new_key_refusal(code),
+        Err(code) => return new_key_refusal(code, kind),
     };
     let now = unix_now();
-    let (Ok(text), Ok(id)) = (crate::keys::generate(), crate::keys::new_id()) else {
+    let (Ok(text), Ok(id)) = (crate::keys::generate(kind), crate::keys::new_id()) else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error\n");
     };
     let row = crate::store::KeyRow {
@@ -825,6 +926,7 @@ pub(super) async fn handle_keys_create(
         expires_at: form.expires_at,
         last_check_at: None,
         check_count: 0,
+        kind,
         grants: form.grants,
     };
     let caps = caps(state, now, owner.as_deref());
@@ -834,7 +936,7 @@ pub(super) async fn handle_keys_create(
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             if let Some(code) = write_code(&error) {
-                return new_key_refusal(code);
+                return new_key_refusal(code, kind);
             }
             log(
                 state,
@@ -854,6 +956,7 @@ pub(super) async fn handle_keys_create(
         &[
             ("key", id),
             ("owner", viewer.login.clone()),
+            ("kind", kind.name().to_string()),
             (
                 "expires_at",
                 form.expires_at.map(|a| a.to_string()).unwrap_or_default(),
@@ -908,7 +1011,15 @@ fn editable_key(
         return Err("unknown_key");
     }
     let login = owner_login(mine);
-    if state_of(state, login, key.created_at, key.expires_at, now) != KeyState::Active {
+    if state_of(
+        state,
+        login,
+        Some(key.kind),
+        key.created_at,
+        key.expires_at,
+        now,
+    ) != KeyState::Active
+    {
         return Err("unknown_key");
     }
     Ok(key)
@@ -938,8 +1049,8 @@ pub(super) async fn handle_keys_edit(
     };
     let owner = owner_grants(state, owner_login(&mine));
     let old = key.grants.clone();
-    let checked = with_context(state, owner.as_deref(), Some(&old), |ctx| {
-        key_forms::check(&raw, ctx)
+    let checked = with_context(state, owner.as_deref(), Some(&old), key.kind, |ctx| {
+        key_forms::check(&raw, ctx, key.kind)
     });
     let form = match checked {
         Ok(form) => form,
