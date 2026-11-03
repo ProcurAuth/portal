@@ -646,11 +646,12 @@ input.keyText {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 4px 12px;
   min-width: 0;
 }
 
 .ge__svcTop > .srcLine {
+/* The limits go under the line when the two do not fit: nothing leaves the pane. */
   min-width: 0;
 }
 
@@ -892,7 +893,10 @@ input.keyText {
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 4px 12px;
+  max-width: 100%;
+  margin-left: auto;
 }
 
 .ge__limit {
