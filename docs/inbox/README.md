@@ -54,10 +54,21 @@ The permissions of the portal features (the service `portal`) control each group
 - `inbox.receive` lets the phones of an account subscribe to the group.
 - `alert.send` lets an account or a key send an alert to the group.
 - `alert.read` lets an account or a key read the alerts of the group and their delivery.
+- `alert.send_user` lets an account or a key send an alert to any account. This permission is on the whole service `portal`, with no group.
 
-Give these permissions in the editor of permissions of the account or of the key. The editor lists each group by name. A permission on the whole service is not valid for these three actions. Give one permission for each group.
+Give these permissions in the editor of permissions of the account or of the key. The editor lists each group by name. A permission on the whole service is not valid for `inbox.receive`, `alert.send` and `alert.read`. Give one permission for each group. `alert.send_user` is the other way: it has no group, so give it on `service:portal`.
 
-The budget `alerts` limits `alert.send`. It counts alerts in a window of a second, a minute, an hour or a day. A group with `critical = true` has no limit. The limit never stops an alert to this group.
+The budget `alerts` limits `alert.send` and `alert.send_user`. The two actions use one count. It counts alerts in a window of a second, a minute, an hour or a day. A group with `critical = true` has no limit. The limit never stops an alert to this group. An alert to an account is never critical, so the limit always applies to it.
+
+### An alert to one account
+
+An alert has one target: a group or one account. An alert to an account goes to each phone of the account that is not revoked. The phone needs no subscription. The alert has the same life as an alert to a group: the same spool, time to live, resend, receipt, rate limit and budget.
+
+- An account with no phone, or with only revoked phones, gets no alert. The Inbox answers `409` with the code `no_phone` and stores nothing. The refused alert uses no budget.
+- An account that does not exist gets `404` with the code `unknown_user`.
+- The level of an alert to an account is Ring. It is never critical.
+- The protocol of the phones does not change. The frame of the alert has the group id `@direct` and the group name `Direct`. A group of the file cannot have this id.
+- The account that is the target, the sender and the superadmin can read the alert. A right on a group does not apply, because the alert has no group.
 
 ## Keys of the senders
 
@@ -73,8 +84,8 @@ The routes of the Inbox accept `api_` keys only. They answer `401` with no detai
 
 Two sources of `api_` key work at the same time.
 
-- **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. The page **Keys** does not list it. Make its text with `portal inbox token --out FILE`.
-- **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it on the page **Keys**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api` and `alert.send` on the group.
+- **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. With `direct_alerts = true`, the key can send an alert to an account too: the owner must hold `alert.send_user` on `service:portal`, and `groups` can be empty. The page **Keys** does not list it. Make its text with `portal inbox token --out FILE`.
+- **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it on the page **Keys**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api`, and `alert.send` on the group or `alert.send_user` on the service.
 
 The switch `keys.api` turns the kind on. The default is `false`. The kind needs the block `inbox`. The root `README.md` has the example of a file key and of the account that owns it.
 
@@ -84,10 +95,10 @@ A sender sends a request to the portal, on the same host and port as the pages. 
 
 | Route | Use |
 |---|---|
-| `POST /api/v1/alerts` | Body: `{"group": "<id>", "title": "<text>"}`. The answer is `201` with `alert_id`, `duplicate` and `targets`. |
+| `POST /api/v1/alerts` | Body: `{"group": "<id>", "title": "<text>"}` or `{"user": "<login>", "title": "<text>"}`. Give exactly one of `group` and `user`. The answer is `201` with `alert_id`, `duplicate` and `targets` (the number of phones). |
 | `POST /api/v1/notify/{group}` | A webhook for any tool. The title comes from `?title=`, from the header `X-Title`, from the field `title` of a JSON body, or from the body. The Inbox cuts a long title. |
 | `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each alert with the status `firing` makes one alert. The answer has the counts `created`, `duplicates` and `skipped`. |
-| `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. It needs `alert.read` on the group of the alert. |
+| `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. The field `target` has the `kind` (`group` or `user`) and the `id`. An alert to a group needs `alert.read` on the group. An alert to an account can be read by the key that sent it. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. No key. |
 
 Send the key in the header `Authorization: Bearer <key>`. A tool that cannot set a header can use the query `?token=<key>`. A proxy can write an address with a query in its log, so use the header when you can.
@@ -100,6 +111,10 @@ curl -X POST https://portal.example.org/api/v1/alerts \
   -H "Idempotency-Key: deploy-4711" \
   -d '{"group":"infra","title":"Disk full on db-1"}'
 
+curl -X POST https://portal.example.org/api/v1/alerts \
+  -H "Authorization: Bearer $KEY" \
+  -d '{"user":"alice","title":"Call the on-call lead"}'
+
 curl -X POST "https://portal.example.org/api/v1/notify/infra?title=Backup%20done" \
   -H "Authorization: Bearer $KEY"
 ```
@@ -108,11 +123,11 @@ The header `Idempotency-Key` is optional. It has 1 to 128 printable ASCII charac
 
 | Status | Use |
 |---|---|
-| `400` | The JSON or the query is not valid. |
+| `400` | The JSON or the query is not valid. The code `invalid_target` means that the body has both `group` and `user`, or none of them. |
 | `401` | The key is absent or not valid. The key can have a bad form or the wrong kind. |
-| `403` | The key cannot send to this group. The code is `forbidden_group`. |
-| `404` | The alert does not exist, or the key may not read its group. |
-| `409` | The idempotency key belongs to a different alert. |
+| `403` | The key cannot send to this group (`forbidden_group`), or cannot send to an account (`forbidden_user`). |
+| `404` | The alert does not exist, or the key may not read it. For a send, the code `unknown_user` means that the account does not exist. |
+| `409` | The idempotency key belongs to a different alert, or the account has no phone to use (`no_phone`). |
 | `413` | The title has more than 128 characters, or the request body is too large. |
 | `422` | The group does not exist, or the title is empty or has a control character. |
 | `429` | The budget `alerts` of the key is empty. `Retry-After` gives the seconds to wait. |
@@ -172,7 +187,7 @@ The page is `/auth/settings/inbox`. It has no sub-page. The tab shows for an acc
 | Zone **Phones** | `phone.read` | All phones, with state, owner and pending alerts. **Revoke (N)** needs `phone.revoke`. |
 | Zone **My phones** | `inbox.receive` on one group | The phones of the account, the plus button and **Revoke (N)**. |
 | Zone **Connections** | `phone.log` | The connection log, with a search on the login. |
-| **Send alert** | `alert.send` on one group at least | The form of a manual alert. |
+| **Send alert** | `alert.send` on one group at least | The form of a manual alert. The field `to` has the value `group:<id>` or `user:<login>`. A target `user:<login>` needs `alert.send_user`. |
 | The book icon | `alert.send` or `alert.read` | The routes, the groups and the header of the key. |
 
 The zone **Sent** holds the 500 newest alerts of the period. The count shows `500+` when older alerts exist. The counts of the state chips come from these alerts. The graph counts every alert. The chips Question, Approval and Unanswered are dashed and do nothing. They show the place for a later step (see "Roadmap").
@@ -292,7 +307,8 @@ At step 2, an agent first sends alerts through the same REST route with an `api_
 | A phone is `unreachable`. | The app is stopped, the phone is off, or the battery saver blocks the app. Check the permissions of the app. |
 | An alert does not come. | Open the alert in the zone **Sent**. Check that the phone subscribed to the group and that the account has `inbox.receive`. |
 | A sender gets `401`. | The key is not an `api_` key, or it has a bad form, or it is revoked or expired. Check that `keys.api` is `true`. |
-| A sender gets `403`. | The key cannot send to the group. Check the block `api_key`, or the permission `alert.send` of the key and of its owner. |
+| A sender gets `403`. | The key cannot send to the group. Check the block `api_key`, or the permission `alert.send` of the key and of its owner. For an account, check `alert.send_user`, or `direct_alerts` of the block `api_key`. |
+| A sender gets `409 no_phone`. | The account has no phone that is not revoked. The owner of the account must enroll a phone. |
 | A sender gets `429`. | The budget `alerts` is empty. Wait for `Retry-After`, or send to a critical group. |
 | A sender gets `503 directory_not_ready`. | The portal has no fresh directory. A key of the file still works. Check `portal_directory_age_seconds`. |
 | After a rights change, a phone lost a group. | The account lost `inbox.receive`. The Inbox removed the subscription. Give the permission again. |

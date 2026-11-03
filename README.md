@@ -390,7 +390,7 @@ A verifier refuses an unknown prefix, a bad length, a bad character and a bad ch
 - **A key is deleted with its owner.** When the superadmin deletes an account of the database, the portal deletes its keys, their grants and their counters. The page of the account tells the number: "Delete carol and 3 keys?". An account of the file cannot be deleted.
 - **Creation rights are by kind.** `keys.own.create` and `keys.own.use` apply to the resource type `key_kind`, with the nodes `key_kind:mcp` and `key_kind:api`. An account can have the right to make MCP keys and not API keys. The ceiling `max_key_lifetime` has one value for each kind.
 - **The pane shows only what the account may make.** With two kinds, the pane of a new key has a selector. With one kind, it has no selector. With no kind, the page has no **New key**.
-- **A key holds what its kind lists.** An MCP key holds grants on services. It holds no action of the portal. An API key holds `alert.send` and `alert.read` on groups of the Inbox. It holds the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on another service.
+- **A key holds what its kind lists.** An MCP key holds grants on services. It holds no action of the portal. An API key holds `alert.send` and `alert.read` on groups of the Inbox, and `alert.send_user` on the service. It holds the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on another service.
 - **A key never goes beyond its owner.** The account can tick only the rights that the owner holds. A right that the owner lost has a warning mark in the pane.
 
 ### Switches
@@ -719,6 +719,7 @@ inbox {
     owner       = "grafana"                            # an account of the file: a block user
     secret_file = "/run/secrets/inbox_grafana_key"     # or: secret_env
     groups      = ["infra"]
+    # direct_alerts = false                            # default; true: the key can alert an account (the owner needs alert.send_user)
   }
 }
 
@@ -765,7 +766,7 @@ The Inbox is a feature of the portal, so it has no listener for the senders or t
 
 | Route | Use |
 |---|---|
-| `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Send an alert. Read its delivery status. |
+| `POST /api/v1/alerts`, `GET /api/v1/alerts/{id}` | Send an alert to a group (field `group`) or to one account (field `user`). Read its delivery status. |
 | `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. They need no key. |
 
@@ -810,6 +811,7 @@ The Inbox is a feature of the portal, and the portal has one internal scope for 
 |---|---|---|
 | `inbox.receive` | `inbox_group` | The phones of the account can subscribe to the group, for all the kinds of message. |
 | `alert.send` | `inbox_group` | Send an alert to the group (the form, the API with a key). It has the budget `alerts`. |
+| `alert.send_user` | the service | Send an alert to any account. The alert goes to each phone of the account. It has the budget `alerts`, the same count as `alert.send`. |
 | `alert.read` | `inbox_group` | See the alerts of the group and their delivery. |
 | `phone.read` | the service | See all the phones. |
 | `phone.revoke` | the service | Revoke any phone. It needs `phone.read`. |
@@ -817,8 +819,9 @@ The Inbox is a feature of the portal, and the portal has one internal scope for 
 
 The text of a grant is, for example, `alert.send on service:portal/inbox_group:infra`. The superadmin has all of them. A permission on the whole service is not possible for the actions of a group: give one permission for each group.
 
-- **Limit.** The action `alert.send` lists the budget `alerts`: a count of alerts in a window of a second, a minute, an hour or a day. The value is on the permission `access on service:portal`, as for each other service. For this service, `access` opens no path: it carries the budget only. The portal counts one use for each request of a key and each send of the form, for the key and for its owner. A request that an `Idempotency-Key` repeats is a use too. A webhook with many alerts is one use. A budget that has no room gives `429` with `Retry-After`. The name of a budget cannot start with `max_`, so the budget has the name `alerts`.
-- **Critical groups.** A group with `critical = true` never counts a use. A limit never stops an alert to this group.
+- **Limit.** The actions `alert.send` and `alert.send_user` list the budget `alerts`: a count of alerts in a window of a second, a minute, an hour or a day. The value is on the permission `access on service:portal`, as for each other service. For this service, `access` opens no path: it carries the budget only. The portal counts one use for each request of a key and each send of the form, for the key and for its owner. A request that an `Idempotency-Key` repeats is a use too. A webhook with many alerts is one use. A budget that has no room gives `429` with `Retry-After`. The name of a budget cannot start with `max_`, so the budget has the name `alerts`.
+- **Critical groups.** A group with `critical = true` never counts a use. A limit never stops an alert to this group. An alert to an account is never critical, so it always counts.
+- **An alert to an account.** `POST /api/v1/alerts` takes exactly one of `group` and `user`. A body with both, or with none, gets `400` with the code `invalid_target`. The target `user` needs `alert.send_user` for the key and for its owner. It goes to each phone of the account that is not revoked, and the phone needs no subscription. An account that does not exist gets `404 unknown_user`. An account with no phone that works gets `409 no_phone`, and the Inbox stores nothing and counts no use. The level is Ring: the alert is never critical. The frame that the phone receives is the frame of any alert, with the group id `@direct` and the group name `Direct`. The sender, the target account and the superadmin can read the alert. The route `GET /api/v1/alerts/{id}` lets the key that sent it read it.
 - **Phones.** A phone subscribes to a group only when its account has `inbox.receive` on the group. The message `welcome` lists these groups. A `subscribe` to another group gets the error `forbidden_group`. When an account loses the permission, the Inbox removes the subscription and tells the phone with the message `subscriptions`. The Inbox checks this when the directory of the portal changes, not for each alert. The Inbox never removes a subscription when it does not know. A directory that is not ready, old or empty changes nothing. An account that the directory does not know changes nothing. An alert that exists stays deliverable. The accounts of the file (blocks `user`) and the superadmin follow the same rules.
 - **No block `inbox`.** The file has no Inbox actions, no tab Inbox, no route of the Inbox, no phone endpoint and no `api_` kind. A grant that names an Inbox action stops the start.
 
@@ -826,8 +829,8 @@ The text of a grant is, for example, `alert.send on service:portal/inbox_group:i
 
 The two kinds of key are in "Keys and limits". The kind `api_` sends alerts. A sender sends alerts with an API key. The header is `Authorization: Bearer <key>`. The query `?token=<key>` works for the tools that cannot set a header. A proxy can write the query in its log, so use the header when you can. Two sources of API key work at the same time.
 
-- **A key of the file** is a block `api_key` of the block `inbox`. It names its owner, an account of the file (a block `user`), and its groups. At start, the portal checks the grants of the owner and keeps the groups that the owner may send to. The rights of a file account do not change while the server runs. This decision never reads the directory or the database. A key of the file works when the portal is not ready and when PostgreSQL is away. A key of the file has no budget. The page **Keys** does not list it.
-- **A key of the database** is made on the page **Keys** with the kind API. The Inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:portal/inbox_group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the Inbox answers `503` with the code `directory_not_ready`.
+- **A key of the file** is a block `api_key` of the block `inbox`. It names its owner, an account of the file (a block `user`), and its groups. At start, the portal checks the grants of the owner and keeps the groups that the owner may send to. The rights of a file account do not change while the server runs. This decision never reads the directory or the database. A key of the file works when the portal is not ready and when PostgreSQL is away. A key of the file has no budget. The key `direct_alerts = true` lets it alert an account too: the owner must hold `alert.send_user` on `service:portal`, and `groups` can then be empty. The page **Keys** does not list it.
+- **A key of the database** is made on the page **Keys** with the kind API. The Inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:portal/inbox_group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`, or `forbidden_user` for an alert to an account. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the Inbox answers `503` with the code `directory_not_ready`.
 
 An `mcp_` key, a key with a bad form and an unknown prefix get `401` with no detail. The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The book icon of the tab Inbox opens a popover with the routes, the groups and the form of the header. `docs/inbox/README.md` has the long text: the recipes for Grafana and Alertmanager and the table of the HTTP statuses.
 
@@ -845,11 +848,11 @@ Each part of the page needs a permission. A part that the account may not use is
 | **Revoke (N)** and the boxes | `phone.revoke` with `phone.read`, or a phone of the account. |
 | The plus button | `inbox.receive` on one group at least. |
 | Zone **Connections** | `phone.log`. |
-| **Send alert** | `alert.send` on one group at least. The list holds these groups. |
+| **Send alert** | `alert.send` on one group at least, or `alert.send_user`. The field `to` of the form has the value `group:<id>` or `user:<login>`. |
 | The book icon | `alert.send` or `alert.read`. |
 
 - **Filters:** a chip is a link with a query parameter. A chip with a count of zero is absent. A click on the chip that is on turns it off. The parameters are `p`, `g`, `a`, `ps`, `pp`, `mine`, `cs`, `login` and `open`. `p` is the period: `1h`, `6h`, `24h`, `7d` or `30d`. The default is `24h`. `g` is a group. `a` is `ok`, `wait` or `expired`. `ps` is `online`, `unreachable`, `offline` or `revoked`. `pp=1` shows the phones with pending alerts. `mine=1` shows the phones of the account. `cs` is `open` or `closed`. `login` is the search of the connections. `open=<alert id>` opens one alert. A value that is not valid, an unknown parameter and a repeated parameter give `400`.
-- **Sent:** the list holds the 500 newest alerts of the period. The count shows `500+` when older alerts of the period exist. The chips of the states and the counts of the groups come from these rows. The graph counts every alert of the period, in 12 to 30 bars, with the alerts of the critical groups on top. A row opens its detail in place with `open=<id>`: the phones that do not have the alert come first, then a few that have it. The chips of Question, Approval and Unanswered are dashed and do nothing: the place is ready for a later step. A manual alert shows the origin "account".
+- **Sent:** the list holds the 500 newest alerts of the period. The count shows `500+` when older alerts of the period exist. The chips of the states and the counts of the groups come from these rows. The graph counts every alert of the period, in 12 to 30 bars, with the alerts of the critical groups on top. A row opens its detail in place with `open=<id>`: the phones that do not have the alert come first, then a few that have it. The chips of Question, Approval and Unanswered are dashed and do nothing: the place is ready for a later step. A manual alert shows the origin "account". The column of the group shows `@login` for an alert to an account.
 - **Phones:** the columns are the state (one icon), the phone, the owner and the app. The owner is in the zone **Phones** only. The last columns are the last time seen and the number of alerts that wait. **Revoke (N)** shows when a box is ticked. A click asks "Revoke N phones?" in the same place. The form sends the fields `id.<id>` with the value `1`.
 - **Connections:** the newest 200 connections. The search is a form with the method GET. The last column shows the reason, or "open".
 
@@ -1355,9 +1358,10 @@ This block has a label and can occur more than one time. One API key of the file
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `owner` | text: the login of an account of the file (a block `user`) | required | The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, and `alert.send` on each group of the key. |
+| `owner` | text: the login of an account of the file (a block `user`) | required | The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, `alert.send` on each group of the key, and `alert.send_user` on `service:portal` when `direct_alerts` is `true`. |
 | `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The text of the key: `api_`, 43 characters and 6 characters of checksum, 53 characters in all. Make it with `portal inbox token`. Two keys must not have the same text. A bad form stops the server. |
-| `groups` | list of at most 64 quoted strings: ids of groups that the block `inbox` defines | required | The groups that the key can send alerts to. The list has at least one group. Each group must exist, and the owner must hold `alert.send` on it. |
+| `groups` | list of at most 64 quoted strings: ids of groups that the block `inbox` defines | required | The groups that the key can send alerts to. The list has at least one group, except when `direct_alerts` is `true`: then it can be empty. Each group must exist, and the owner must hold `alert.send` on it. |
+| `direct_alerts` | `true` or `false` | `false` | `true`: the key can send an alert to any account (`POST /api/v1/alerts` with the field `user`). The owner must hold `alert.send_user` on `service:portal`. `false`: the key sends to groups only. |
 | `webhook_send_resolved` | `true` or `false` | `false` | `true`: the notifications "resolved" of Alertmanager and Grafana become alerts. `false`: the inbox ignores them. |
 
 #### Block `pdp_client "<server>"`
@@ -1544,8 +1548,8 @@ Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in b
 | **`portal_inbox_devices_unreachable`** | Subscribed phones that the Inbox did not see for `inbox.devices.unreachable_after`. |
 | **`portal_inbox_storage_degraded`** | 1 while the database has no writable primary and the Inbox holds alerts in memory. |
 | **`portal_inbox_replica_last_snapshot_age_seconds`** | Age of the newest snapshot (with `inbox.replica` only). |
-| `portal_inbox_alerts_accepted_total{source,kind}` | Messages accepted, by source and by kind (`alert`). The source names the route: the JSON route, a webhook, the notify route, the form of the page or the portal itself. |
-| `portal_inbox_alerts_duplicate_total{source,kind}` | Submissions that the idempotency key merged. |
+| `portal_inbox_alerts_accepted_total{source,kind,target}` | Messages accepted, by source, by kind (`alert`) and by target (`group` or `user`). The source names the route: the JSON route, a webhook, the notify route, the form of the page or the portal itself. |
+| `portal_inbox_alerts_duplicate_total{source,kind,target}` | Submissions that the idempotency key merged. |
 | `portal_inbox_deliveries_created_total`, `portal_inbox_deliveries_sent_total`, `portal_inbox_delivery_receipts_total` | Deliveries made, frames sent (with repeats), receipts from phones. |
 | `portal_inbox_delivery_latency_seconds` | Histogram. Time from acceptance to the first receipt. |
 | `portal_inbox_deliveries_pending` | Deliveries that wait for a phone. |
@@ -1553,7 +1557,7 @@ Prometheus reads `metrics.path` of the pages listener. Alert on the metrics in b
 | `portal_inbox_device_session_closes_total{reason}` | Session ends, by reason. |
 | `portal_inbox_auth_failures_total{kind}` | Failed authentications. |
 | `portal_inbox_enrollments_total` | Phones enrolled. |
-| `portal_inbox_alerts_spooled_total{source,kind}`, `portal_inbox_spool_alerts`, `portal_inbox_spool_rejected_total` | The spool of the degraded mode. |
+| `portal_inbox_alerts_spooled_total{source,kind,target}`, `portal_inbox_spool_alerts`, `portal_inbox_spool_rejected_total` | The spool of the degraded mode. |
 | `portal_inbox_replica_epoch`, `portal_inbox_replica_snapshots_total`, `portal_inbox_replica_snapshot_failures_total`, `portal_inbox_replica_sync_failures_total` | The replica (with `inbox.replica` only). |
 | `portal_watch_sent_total{kind}`, `portal_watch_failed_total{kind}` | Alerts of the portal about itself, by kind: `service_unhealthy`, `service_recovered`, `sign_in_burst`. |
 | `portal_directory_age_seconds` | Time since the database last answered a read of the directory. It grows when the refresh fails. |

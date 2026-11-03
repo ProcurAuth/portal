@@ -39,9 +39,10 @@ A block `api_key "<name>"` is an API key of the file. These rules apply. The err
 
 - The switch `keys.api` is `true`. This needs the block `keys`.
 - `owner` is the login of an account of the file (a block `user`). A block `user` needs `access.grants_mode` to be `static` or `hybrid`.
-- The owner holds `keys.own.use` on `service:portal/key_kind:api` and `alert.send` on each group of `groups`.
+- The owner holds `keys.own.use` on `service:portal/key_kind:api` and `alert.send` on each group of `groups`. With `direct_alerts = true`, the owner holds `alert.send_user` on `service:portal` too.
 - `secret` is an API key of 53 characters with the prefix `api_` and a good checksum. Two keys must not have the same text.
-- `groups` lists one group at least. Each group is a block `group`.
+- `groups` lists one group at least, except when `direct_alerts` is `true`. Each group is a block `group`.
+- `direct_alerts` is `false` by default. With `true`, the key can send an alert to any account (`POST /api/v1/alerts` with the field `user`).
 - `webhook_send_resolved` is `false` by default. With `true`, the notifications "resolved" of Alertmanager and Grafana become alerts.
 
 ## Switches that touch the Inbox

@@ -129,6 +129,10 @@ The messages `set_user_name` and `user_name` do not exist in protocol 4. The ser
 | `pong` | `nonce` |
 | `error` | `code`, `message`. The codes are `unknown_group`, `forbidden_group` and `unavailable`. `unknown_group`: the group does not exist. `forbidden_group`: the account has no permission `inbox.receive` on the group, and `message` is the group. `unavailable`: the storage or the rights are not ready, so send the message again later. |
 
+### An alert to one account
+
+An alert can be for one account, not for a group. The frame is the same frame. It has the group id `@direct` and the group name `Direct`. The id of a group of the file has only the characters `a-z`, `0-9`, `-` and `_`, so the two never collide. The server sends the frame to each phone of the account that is not revoked, with no subscription. The phone never subscribes to `@direct`. The app can keep one local level for this id. The protocol version stays 4.
+
 ### The kind of a message
 
 Each alert frame has the field `kind`. Protocol 4 has one kind: `alert`. The field is mandatory.
