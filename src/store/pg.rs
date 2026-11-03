@@ -842,29 +842,20 @@ impl Pg {
 
     // History: reads --------------------------------------------------------------------------
 
-    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
+    pub fn login_attempts(&self, since: i64, only_failed: bool) -> Result<LoginPage, String> {
         self.run(|c| {
-            let matching: i64 = c
-                .query_one(
-                    "SELECT COUNT(*) FROM login_attempts WHERE (NOT $1::boolean OR NOT success)",
-                    &[&only_failed],
-                )?
-                .get(0);
-            let mut result = LoginPage {
-                matching: matching as u32,
-                ..LoginPage::default()
-            };
-            result.page = page.min(result.pages() - 1);
-            result.rows = c
+            let figures = c.query_one(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT success),
+                        COUNT(*) FILTER (WHERE NOT $2::boolean OR NOT success)
+                   FROM login_attempts WHERE ts >= $1",
+                &[&since, &only_failed],
+            )?;
+            let rows = c
                 .query(
                     "SELECT ts, login, known, success, ip, user_agent FROM login_attempts
-                      WHERE (NOT $1::boolean OR NOT success)
-                      ORDER BY id DESC LIMIT $2 OFFSET $3",
-                    &[
-                        &only_failed,
-                        &LOGIN_PAGE_SIZE,
-                        &(i64::from(result.page) * LOGIN_PAGE_SIZE),
-                    ],
+                      WHERE ts >= $1 AND (NOT $2::boolean OR NOT success)
+                      ORDER BY id DESC LIMIT $3",
+                    &[&since, &only_failed, &WINDOW_ROWS],
                 )?
                 .into_iter()
                 .map(|row| LoginRow {
@@ -876,13 +867,12 @@ impl Pg {
                     user_agent: row.get(5),
                 })
                 .collect();
-            let figures = c.query_one(
-                "SELECT COUNT(*), COUNT(*) FILTER (WHERE NOT success) FROM login_attempts",
-                &[],
-            )?;
-            result.total = figures.get::<_, i64>(0) as u32;
-            result.refused = figures.get::<_, i64>(1) as u32;
-            Ok(result)
+            Ok(LoginPage {
+                rows,
+                total: figures.get::<_, i64>(0) as u32,
+                refused: figures.get::<_, i64>(1) as u32,
+                matching: figures.get::<_, i64>(2) as u32,
+            })
         })
     }
 
@@ -954,8 +944,8 @@ impl Pg {
             }
             snapshot.recent_events = c
                 .query(
-                    "SELECT ts, kind, login, actor, ip FROM audit_events ORDER BY ts DESC, id DESC LIMIT $1",
-                    &[&RECENT_EVENTS],
+                    "SELECT ts, kind, login, actor, ip FROM audit_events WHERE ts >= $1 ORDER BY ts DESC, id DESC LIMIT $2",
+                    &[&first_day, &WINDOW_ROWS],
                 )?
                 .into_iter()
                 .map(|row| AuditRow {

@@ -1237,7 +1237,7 @@ async fn handle_settings(
         ui::settings::ACTIVITY_PATH => {
             let (_, snapshot) = load_admin_data(state).await;
             let only_refused = query_value(uri, "r").as_deref() == Some("failed");
-            let logins = load_login_page(state, only_refused).await;
+            let logins = load_login_page(state, snapshot.first_day, only_refused).await;
             ui::activity_page(
                 &frame,
                 &ui::ActivityView {
@@ -1307,11 +1307,11 @@ async fn handle_settings(
     html_response(StatusCode::OK, page)
 }
 
-/// The newest sign-ins, and the figures of the chips. If the database cannot be read, the panel
-/// is empty and the logs get one line.
-async fn load_login_page(state: &Arc<AppState>, only_failed: bool) -> LoginPage {
+/// The sign-ins since `since` (the first day of the graph), and the figures of the chips. If the
+/// database cannot be read, the panel is empty and the logs get one line.
+async fn load_login_page(state: &Arc<AppState>, since: i64, only_failed: bool) -> LoginPage {
     let store = Arc::clone(&state.store);
-    match tokio::task::spawn_blocking(move || store.login_attempts(0, only_failed)).await {
+    match tokio::task::spawn_blocking(move || store.login_attempts(since, only_failed)).await {
         Ok(Ok(data)) => data,
         Ok(Err(error)) => {
             log(

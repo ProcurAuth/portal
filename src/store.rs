@@ -22,11 +22,10 @@ use sqlite::Sqlite;
 /// Days drawn by the connection graphs. Today is included.
 pub const GRAPH_DAYS: usize = 30;
 const RECENT_SESSIONS: i64 = 8;
-const RECENT_EVENTS: i64 = 12;
+/// The most rows that the lists of the tab Activity hold. Each list covers the days of the graph.
+pub const WINDOW_ROWS: i64 = 1_000;
 const TOP_SERVICES: i64 = 12;
 const DAY: i64 = 86_400;
-/// Rows per page of the sign-in log.
-pub const LOGIN_PAGE_SIZE: i64 = 50;
 /// The sign-in log keeps at most this many rows, newest first.
 /// Failures are bounded per minute by the rate limiter. This limit bounds what a long siege can leave in the database.
 const MAX_LOGIN_ROWS: i64 = 20_000;
@@ -284,24 +283,17 @@ pub struct LoginRow {
     pub user_agent: String,
 }
 
-/// One page of the sign-in log and the figures above it.
+/// The sign-in log of a period and the figures above it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoginPage {
+    /// The newest rows of the period that match the filter, at most `WINDOW_ROWS`.
     pub rows: Vec<LoginRow>,
-    /// Rows that match the filter, over every page.
+    /// Rows of the period that match the filter. It is more than `rows.len()` when the list is cut.
     pub matching: u32,
-    /// Zero-based. The value is brought back into range.
-    pub page: u32,
-    /// Every attempt that the log holds, and the refused ones among them. The figures do not
-    /// depend on the filter: they are the counts of the chips of the Users page.
+    /// Every attempt of the period, and the refused ones among them. The figures do not depend on
+    /// the filter: they are the counts of the chips of the tab Activity.
     pub total: u32,
     pub refused: u32,
-}
-
-impl LoginPage {
-    pub fn pages(&self) -> u32 {
-        self.matching.div_ceil(LOGIN_PAGE_SIZE as u32).max(1)
-    }
 }
 
 /// What the Users page shows about one account.
@@ -685,10 +677,10 @@ impl Store {
         backend!(self.prune(cutoff))
     }
 
-    /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
-    /// A page past the end is brought back to the last page.
-    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
-        backend!(self.login_attempts(page, only_failed))
+    /// The sign-in log from `since` (unix time), newest first, at most `WINDOW_ROWS` rows. If
+    /// `only_failed` is true, the list holds only the refused attempts.
+    pub fn login_attempts(&self, since: i64, only_failed: bool) -> Result<LoginPage, String> {
+        backend!(self.login_attempts(since, only_failed))
     }
 
     /// Everything the Users page shows. `accounts` is `(login, is_superadmin)`.
@@ -1992,11 +1984,49 @@ mod tests {
     }
 
     #[test]
-    fn the_sign_in_log_pages_and_a_page_past_the_end_comes_back_to_the_last_one() {
+    fn the_sign_in_log_covers_a_period_and_its_figures_are_those_of_the_period() {
         each_backend(|backend| {
             let store = backend.fresh();
-            let events = (0..(LOGIN_PAGE_SIZE + 5))
-                .map(|i| attempt("alice", false, "10.0.0.2", NOW - 1_000 + i))
+            store
+                .apply(&Batch {
+                    events: vec![
+                        attempt("alice", true, "10.0.0.2", NOW - 3 * DAY),
+                        attempt("alice", false, "10.0.0.2", NOW - 3 * DAY + 5),
+                        attempt("alice", false, "10.0.0.2", NOW - 600),
+                        attempt("alice", true, "10.0.0.2", NOW - 300),
+                    ],
+                    ..Batch::default()
+                })
+                .unwrap();
+            let recent = store.login_attempts(NOW - DAY, false).unwrap();
+            assert_eq!(
+                recent.rows.len(),
+                2,
+                "the older rows are outside the period"
+            );
+            assert_eq!(
+                (recent.matching, recent.total, recent.refused),
+                (2, 2, 1),
+                "the chips count what the list holds"
+            );
+            let failed = store.login_attempts(NOW - DAY, true).unwrap();
+            assert_eq!(
+                (failed.rows.len(), failed.matching, failed.total),
+                (1, 1, 2)
+            );
+            let all = store.login_attempts(0, false).unwrap();
+            assert_eq!((all.rows.len(), all.total, all.refused), (4, 4, 2));
+            let none = backend.fresh().login_attempts(NOW - DAY, false).unwrap();
+            assert_eq!((none.rows.len(), none.matching, none.total), (0, 0, 0));
+        });
+    }
+
+    #[test]
+    fn the_list_of_a_period_holds_the_newest_rows_up_to_a_hard_limit() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let events = (0..(WINDOW_ROWS + 5))
+                .map(|i| attempt("alice", false, "10.0.0.2", NOW - 10_000 + i))
                 .collect();
             store
                 .apply(&Batch {
@@ -2004,23 +2034,18 @@ mod tests {
                     ..Batch::default()
                 })
                 .unwrap();
-            let first = store.login_attempts(0, false).unwrap();
+            let page = store.login_attempts(0, false).unwrap();
+            assert_eq!(page.rows.len() as i64, WINDOW_ROWS);
             assert_eq!(
-                (first.rows.len() as i64, first.pages()),
-                (LOGIN_PAGE_SIZE, 2)
+                i64::from(page.matching),
+                WINDOW_ROWS + 5,
+                "the figure is whole"
             );
-            let second = store.login_attempts(1, false).unwrap();
-            assert_eq!(second.rows.len(), 5);
             assert_eq!(
-                second.rows[0].ts,
-                NOW - 1_000 + 4,
-                "continues where the first page stopped"
+                page.rows[0].ts,
+                NOW - 10_000 + WINDOW_ROWS + 4,
+                "the newest are the ones kept"
             );
-            let beyond = store.login_attempts(99, false).unwrap();
-            assert_eq!(beyond.page, 1);
-            assert_eq!(beyond.rows.len(), 5);
-            let empty = backend.fresh().login_attempts(7, false).unwrap();
-            assert_eq!((empty.page, empty.pages(), empty.rows.len()), (0, 1, 0));
         });
     }
 

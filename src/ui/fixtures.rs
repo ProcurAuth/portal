@@ -186,7 +186,6 @@ pub(super) fn data() -> Data {
             matching: 2,
             total: 12,
             refused: 3,
-            ..LoginPage::default()
         },
         days,
         events: vec![AuditRow {

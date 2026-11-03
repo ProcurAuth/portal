@@ -1,6 +1,7 @@
 //! The tab Activity: the sign-in attempts and the changes of the accounts. Two chips switch the
 //! list, and a third chip keeps the refused attempts. The chips are links, so the page works
-//! without script. Above the list, from 1400 px, a graph shows the connections of 30 days.
+//! without script. Above the list, a graph shows the connections of 30 days. The two lists and
+//! their chips cover the same 30 days.
 
 use std::fmt::Write as _;
 
@@ -44,28 +45,45 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
     let signed = format!(r#"<span class="st--ok">{}</span>"#, icon("check"));
     let pencil = icon("pencil");
     let refused = format!(r#"<span class="st--bad">{}</span>"#, icon("ban"));
+    // A chip that is alone is a fact, not a control: it has no link.
+    let on_sign_ins = !view.changes && !view.only_refused;
+    let on_refused = view.only_refused && !view.changes;
+    let shown = [
+        data.total > 0 || on_sign_ins,
+        !view.recent_events.is_empty() || view.changes,
+        data.refused > 0 || on_refused,
+    ]
+    .iter()
+    .filter(|shown| **shown)
+    .count();
+    let (sign_ins_href, changes_href) = if shown == 1 {
+        (String::new(), String::new())
+    } else {
+        (href(false, false), href(true, false))
+    };
     let views = chips(&[
         Chip {
             label_html: &format!("{signed}Sign-ins"),
-            name: "Sign-in attempts",
+            name: "Sign-in attempts, 30 days",
             count: data.total as usize,
-            href: &href(false, false),
-            on: !view.changes && !view.only_refused,
+            href: &sign_ins_href,
+            on: on_sign_ins,
         },
         Chip {
             label_html: &format!("{pencil}Changes"),
-            name: "Recent changes",
+            name: "Changes, 30 days",
             count: view.recent_events.len(),
-            href: &href(true, false),
+            href: &changes_href,
             on: view.changes,
         },
     ]);
+    let refused_href = href(false, true);
     let refusals = chips(&[Chip {
         label_html: &refused,
-        name: "Refused attempts",
+        name: "Refused attempts, 30 days",
         count: data.refused as usize,
-        href: &href(false, true),
-        on: view.only_refused && !view.changes,
+        href: if shown == 1 { "" } else { &refused_href },
+        on: on_refused,
     }]);
     let connections: u32 = view.days.iter().map(|d| d.sessions).sum();
     let chips_html = if refusals.is_empty() {
@@ -74,7 +92,7 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
         format!(r#"{views}<span class="chips__sep"></span>{refusals}"#)
     };
     let tools = format!(
-        r#"<span class="count wide" title="Connections for each day, all accounts">{connections} connections in {} days</span>"#,
+        r#"<span class="count" title="Connections for each day, all accounts">{connections} connections in {} days</span>"#,
         view.days.len()
     );
     let body = if view.changes {
@@ -91,10 +109,7 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
             chips_html: &chips_html,
             tools_html: &tools,
             class: " zone--page",
-            above_html: &format!(
-                r#"<div class="wide">{}</div>"#,
-                spark(view.days, "spark--strip")
-            ),
+            above_html: &spark(view.days, "spark--strip"),
         },
         &body,
     ));
@@ -114,12 +129,20 @@ fn signins_table(view: &ActivityView) -> String {
         );
     }
     let mut out = String::from(
-        r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w152"><col class="w120"><col class="w120"><col></colgroup><thead><tr><th scope="col"><span class="visually-hidden">Result</span></th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#,
+        r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w136"><col class="w120"><col class="w120"><col></colgroup><thead><tr><th scope="col"><span class="visually-hidden">Result</span></th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#,
     );
     for row in &view.logins.rows {
         login_row(&mut out, row);
     }
     out.push_str("</tbody></table>");
+    if view.logins.rows.len() < view.logins.matching as usize {
+        let _ = write!(
+            out,
+            r#"<p class="empty">The list shows the newest {} of {} attempts.</p>"#,
+            view.logins.rows.len(),
+            view.logins.matching
+        );
+    }
     out
 }
 
@@ -158,25 +181,35 @@ fn changes_table(view: &ActivityView) -> String {
     if view.recent_events.is_empty() {
         return r#"<p class="empty">No change recorded yet.</p>"#.to_string();
     }
-    let mut out = String::from(
-        r#"<table class="grid grid--changes"><colgroup><col class="w152"><col><col class="w180"></colgroup><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By, address</th></tr></thead><tbody>"#,
+    // The column of the account fits the longest login.
+    let widest = view
+        .recent_events
+        .iter()
+        .filter_map(|e| e.login.as_deref())
+        .map(|login| login.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(20);
+    let mut out = format!(
+        r#"<table class="grid grid--changes"><colgroup><col class="w136"><col class="w180"><col class="{}"><col class="w88"><col></colgroup><thead><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">Account</th><th scope="col">By</th><th scope="col">Address</th></tr></thead><tbody>"#,
+        super::access::col_class(widest, 88)
     );
     for event in view.recent_events {
         let account = match &event.login {
             Some(login) if !login.is_empty() => format!(
-                r#" <a href="{}">{}</a>"#,
+                r#"<a href="{}">{}</a>"#,
                 html_escape(&user_path(login)),
                 html_escape(login)
             ),
             _ => String::new(),
         };
         let by = match &event.actor {
-            Some(actor) if !actor.is_empty() => format!("{}, ", html_escape(actor)),
+            Some(actor) if !actor.is_empty() => html_escape(actor),
             _ => String::new(),
         };
         let _ = write!(
             out,
-            r#"<tr><td>{}</td><td>{}{account}</td><td class="muted">{by}{}</td></tr>"#,
+            r#"<tr><td>{}</td><td>{}</td><td>{account}</td><td class="muted">{by}</td><td class="muted">{}</td></tr>"#,
             time_tag(event.ts, false),
             audit_label(&event.kind),
             opt(&event.ip),
@@ -233,7 +266,9 @@ mod tests {
         );
         assert!(panel.contains(r#"href="/auth/settings/activity?v=changes""#));
         assert!(panel.contains(r#"href="/auth/settings/activity?r=failed""#));
-        assert!(panel.contains(r#"aria-label="Refused attempts 3" title="Refused attempts""#));
+        assert!(panel.contains(
+            r#"aria-label="Refused attempts, 30 days 3" title="Refused attempts, 30 days""#
+        ));
         assert!(!panel.contains("<button"), "no script needed to filter");
         // The graph has a name and its figure is in the text.
         assert!(panel.contains(r#"<svg class="spark spark--strip""#));
@@ -265,6 +300,41 @@ mod tests {
         assert!(!html.contains("r=failed"));
         // No pages: no Newer, no Older.
         assert!(!html.contains("Newer") && !html.contains("Older"));
+        // The graph is always there: no column or block hides at a small width.
+        assert!(!html.contains("wide"), "nothing hides below 1400 px");
+        // The chip "Sign-ins" counts the rows of the period, and the chip "Changes" too.
+        let mut v = view(&d);
+        v.changes = true;
+        let html = page(&v);
+        assert!(
+            html.contains(r#"aria-label="Changes, 30 days 1""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"aria-label="Sign-in attempts, 30 days 12""#));
+        // A list cut at the limit says so, and the chip keeps the whole figure.
+        let mut cut = data();
+        cut.logins.matching = 1_500;
+        cut.logins.total = 1_500;
+        let html = page(&view(&cut));
+        assert!(html.contains("The list shows the newest 2 of 1500 attempts."));
+    }
+
+    #[test]
+    fn a_chip_that_is_alone_is_a_fact_with_no_link() {
+        let mut d = data();
+        d.logins.refused = 0;
+        d.events.clear();
+        let html = page(&view(&d));
+        assert!(
+            html.contains(
+                r#"<span class="chip chip--static is-on" aria-label="Sign-in attempts, 30 days 12""#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("?v=changes") && !html.contains("r=failed"));
+        // With a second chip both are links.
+        let d = data();
+        assert!(page(&view(&d)).contains(r#"<a class="chip is-on" href="/auth/settings/activity""#));
     }
 
     #[test]
@@ -278,7 +348,7 @@ mod tests {
         ));
         assert!(html.contains("Permissions changed"));
         assert!(html.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
-        assert!(html.contains("root, 192.0.2.10"));
+        assert!(html.contains(r#"<td class="muted">root</td><td class="muted">192.0.2.10</td>"#));
         assert!(!html.contains("grid--signins"));
         let mut empty = data();
         empty.events.clear();

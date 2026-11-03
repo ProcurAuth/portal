@@ -852,7 +852,6 @@ fn demo_logins() -> crate::store::LoginPage {
         matching: 6,
         total: 6,
         refused: 4,
-        ..LoginPage::default()
     }
 }
 

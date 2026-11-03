@@ -638,59 +638,43 @@ impl Sqlite {
 
     // History: reads --------------------------------------------------------------------------
 
-    /// One page of the sign-in log, newest first. If `only_failed` is true, the page holds only the refused attempts.
-    /// A page past the end is brought back to the last page.
-    pub fn login_attempts(&self, page: u32, only_failed: bool) -> Result<LoginPage, String> {
+    /// The sign-in log from `since`, newest first, at most `WINDOW_ROWS` rows. If `only_failed` is true, the list holds only the refused attempts.
+    pub fn login_attempts(&self, since: i64, only_failed: bool) -> Result<LoginPage, String> {
         let conn = self.conn();
-        let matching: i64 = conn
+        let (total, refused, matching): (i64, i64, i64) = conn
             .query_row(
-                "SELECT COUNT(*) FROM login_attempts WHERE (?1 = 0 OR success = 0)",
-                [only_failed],
-                |row| row.get(0),
+                "SELECT COUNT(*), COALESCE(SUM(success = 0), 0), COALESCE(SUM(?2 = 0 OR success = 0), 0)
+                   FROM login_attempts WHERE ts >= ?1",
+                params![since, only_failed],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(db)?;
-        let mut result = LoginPage {
-            matching: matching as u32,
-            ..LoginPage::default()
-        };
-        result.page = page.min(result.pages() - 1);
-        result.rows = conn
+        let rows = conn
             .prepare(
                 "SELECT ts, login, known, success, ip, user_agent FROM login_attempts
-                  WHERE (?1 = 0 OR success = 0)
-                  ORDER BY id DESC LIMIT ?2 OFFSET ?3",
+                  WHERE ts >= ?1 AND (?2 = 0 OR success = 0)
+                  ORDER BY id DESC LIMIT ?3",
             )
             .map_err(db)?
-            .query_map(
-                params![
-                    only_failed,
-                    LOGIN_PAGE_SIZE,
-                    i64::from(result.page) * LOGIN_PAGE_SIZE
-                ],
-                |row| {
-                    Ok(LoginRow {
-                        ts: row.get(0)?,
-                        login: row.get(1)?,
-                        known: row.get(2)?,
-                        success: row.get(3)?,
-                        ip: row.get(4)?,
-                        user_agent: row.get(5)?,
-                    })
-                },
-            )
+            .query_map(params![since, only_failed, WINDOW_ROWS], |row| {
+                Ok(LoginRow {
+                    ts: row.get(0)?,
+                    login: row.get(1)?,
+                    known: row.get(2)?,
+                    success: row.get(3)?,
+                    ip: row.get(4)?,
+                    user_agent: row.get(5)?,
+                })
+            })
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
-        let (total, refused): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(success = 0), 0) FROM login_attempts",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(db)?;
-        result.total = total as u32;
-        result.refused = refused as u32;
-        Ok(result)
+        Ok(LoginPage {
+            rows,
+            matching: matching as u32,
+            total: total as u32,
+            refused: refused as u32,
+        })
     }
 
     /// Everything the Users page shows. `accounts` is `(login, is_superadmin)`.
@@ -772,10 +756,10 @@ impl Sqlite {
         }
         snapshot.recent_events = conn
             .prepare(
-                "SELECT ts, kind, login, actor, ip FROM audit_events ORDER BY ts DESC, id DESC LIMIT ?1",
+                "SELECT ts, kind, login, actor, ip FROM audit_events WHERE ts >= ?1 ORDER BY ts DESC, id DESC LIMIT ?2",
             )
             .map_err(db)?
-            .query_map([RECENT_EVENTS], |row| {
+            .query_map(params![first_day, WINDOW_ROWS], |row| {
                 Ok(AuditRow {
                     ts: row.get(0)?,
                     kind: row.get(1)?,
