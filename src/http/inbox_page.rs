@@ -21,7 +21,7 @@ use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
 use crate::ui::inbox::{
     AlertRow, CodeData, ConnData, DocsData, GroupChoice, GroupLine, InboxView, Origin, PhonesData,
-    Query, Rights, SentData, UserChoice,
+    Query, Rights, SendError, SentData, UserChoice,
 };
 
 pub(super) const PREFIX: &str = ui_inbox::PAGE;
@@ -347,21 +347,25 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
             not_found()
         };
     }
+    // A refusal of the page has the frame of the settings pages, with the way back.
+    let refuse = |status: StatusCode, text: &str| {
+        html_response(status, ui_inbox::status_page(&ctx.frame(state), text))
+    };
     if !ctx.held.ui.any() {
-        return forbidden();
+        return refuse(StatusCode::FORBIDDEN, "Forbidden");
     }
     let Some(pairs) = query_pairs(ctx.uri) else {
-        return bad_request();
+        return refuse(StatusCode::BAD_REQUEST, "Bad request");
     };
     let Some(query) = Query::parse(&pairs) else {
-        return bad_request();
+        return refuse(StatusCode::BAD_REQUEST, "Bad request");
     };
     let code = pairs.iter().find(|(name, _)| name == "s").map(|(_, v)| v);
     let notice = code.and_then(|code| ui_inbox::notice_for(code));
     if code.is_some() && notice.is_none() {
-        return bad_request();
+        return refuse(StatusCode::BAD_REQUEST, "Bad request");
     }
-    page(state, ctx, &query, notice, None).await
+    page(state, ctx, &query, notice, None, None).await
 }
 
 /// The name of the sender of an alert that a key of the database made.
@@ -401,6 +405,7 @@ async fn page(
     query: &Query,
     notice: Option<crate::ui::settings::Notice>,
     code: Option<CodeData<'_>>,
+    refused: Option<SendError<'_>>,
 ) -> HttpResponse {
     let rights = &ctx.held.ui;
     let now_ms = unix_now() * 1000;
@@ -492,7 +497,10 @@ async fn page(
     } else {
         None
     };
-    let key = random_key();
+    // A form that the server refused keeps its key: a second try sends one alert.
+    let key = refused
+        .as_ref()
+        .map_or_else(random_key, |refused| refused.key.to_string());
     let view = InboxView {
         rights,
         notice,
@@ -511,10 +519,14 @@ async fn page(
         }),
         code,
         impersonated: ctx.viewer.session.impersonated,
+        send_error: refused,
     };
     let html = ui_inbox::inbox_page(&ctx.frame(state), &view);
     let mut response = html_response(StatusCode::OK, html);
-    if view.code.is_some() {
+    if view.send_error.is_some() {
+        *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    }
+    if view.code.is_some() || view.send_error.is_some() {
         response.headers_mut().insert(
             HeaderName::from_static("cache-control"),
             HeaderValue::from_static("no-store"),
@@ -614,6 +626,25 @@ fn parse_to(text: &str) -> Option<Target> {
     Target::from_columns(kind, id.to_string())
 }
 
+/// The answer to a send form that the server refuses: the page, with the popup open, the title
+/// that was typed and the reason. The status is 422.
+async fn send_refused(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    code: &str,
+    to: &str,
+    title: &str,
+    key: &str,
+) -> HttpResponse {
+    let refused = SendError {
+        code,
+        to,
+        title,
+        key,
+    };
+    page(state, ctx, &Query::default(), None, None, Some(refused)).await
+}
+
 /// `POST /auth/settings/inbox/send`: the title and the target of an alert. The field `to` is
 /// `group:<id>` or `user:<login>`. For a group, the account needs `alert.send` on the group. The
 /// decision counts one use, as for a key, unless the group is critical. For an account, the account
@@ -641,39 +672,42 @@ async fn send(
         return forbidden();
     }
     let back = ui_inbox::PAGE;
+    // A refusal shows the popup again with what the person typed.
+    let (typed_to, typed_title) = (to.clone(), title.clone());
+    let refuse = |code: &'static str| send_refused(state, ctx, code, &typed_to, &typed_title, &key);
     let Some(target) = parse_to(&to) else {
-        return back_with(back, "bad_target");
+        return refuse("bad_target").await;
     };
     let title = title.trim().to_string();
     if title.is_empty() {
-        return back_with(back, "no_title");
+        return refuse("no_title").await;
     }
     if title.chars().count() > ui_inbox::MAX_TITLE || title.chars().any(char::is_control) {
-        return back_with(back, "bad_title");
+        return refuse("bad_title").await;
     }
     let (action, chain, count_use) = match &target {
         Target::Group(group) => {
             if !ctx.held.ui.send.iter().any(|g| g.id == *group) {
-                return back_with(back, "bad_group");
+                return refuse("bad_group").await;
             }
             let Some(chain) = actions::group_chain(group) else {
-                return back_with(back, "bad_group");
+                return refuse("bad_group").await;
             };
             (actions::ALERT_SEND, chain, !ctx.app.is_critical(group))
         }
         Target::User(login) => {
             if !ctx.held.ui.send_user {
-                return back_with(back, "bad_target");
+                return refuse("bad_target").await;
             }
             let known = *login == state.superadmin_login || state.users.get(login).is_some();
             if !known {
-                return back_with(back, "bad_user");
+                return refuse("bad_user").await;
             }
             // An account with no phone gets nothing, and the refused alert uses no budget.
             match admin::active_phone_counts(&ctx.app).await {
                 Ok(phones) if phones.contains_key(login) => {}
-                Ok(_) => return back_with(back, "no_phone"),
-                Err(_) => return back_with(back, "failed"),
+                Ok(_) => return refuse("no_phone").await,
+                Err(_) => return refuse("failed").await,
             }
             (actions::ALERT_SEND_USER, Vec::new(), true)
         }
@@ -684,18 +718,16 @@ async fn send(
     };
     match verdict {
         UseVerdict::Allowed => {}
-        UseVerdict::Limited(_) => return back_with(back, "limited"),
+        UseVerdict::Limited(_) => return refuse("limited").await,
         UseVerdict::Denied | UseVerdict::UnknownSubject => {
-            return back_with(
-                back,
-                if matches!(target, Target::Group(_)) {
-                    "bad_group"
-                } else {
-                    "bad_target"
-                },
-            )
+            return refuse(if matches!(target, Target::Group(_)) {
+                "bad_group"
+            } else {
+                "bad_target"
+            })
+            .await
         }
-        UseVerdict::NotReady | UseVerdict::Unavailable => return back_with(back, "failed"),
+        UseVerdict::NotReady | UseVerdict::Unavailable => return refuse("failed").await,
     }
     log(
         state,
@@ -721,27 +753,34 @@ async fn send(
     .await
     {
         Ok(accepted) => accepted,
-        Err(e) if e.code() == "no_phone" => return back_with(back, "no_phone"),
-        Err(_) => return back_with(back, "failed"),
-    };
-    let code = if accepted.duplicate {
-        "duplicate"
-    } else {
-        "sent"
+        Err(e) if e.code() == "no_phone" => return refuse("no_phone").await,
+        Err(_) => return refuse("failed").await,
     };
     if readable {
-        // The page opens the new alert in place.
+        // The page opens the new alert in place: the row is the answer. A repeat says so.
+        let notice = if accepted.duplicate {
+            "s=duplicate&"
+        } else {
+            ""
+        };
         return redirect_response(
             StatusCode::SEE_OTHER,
             &format!(
-                "{}?s={code}&open={}#a-{}",
+                "{}?{notice}open={}#a-{}",
                 ui_inbox::PAGE,
                 accepted.alert_id,
                 accepted.alert_id
             ),
         );
     }
-    back_with(back, code)
+    back_with(
+        back,
+        if accepted.duplicate {
+            "duplicate"
+        } else {
+            "sent"
+        },
+    )
 }
 
 /// `POST /auth/settings/inbox/revoke`: one phone or more. The form names each phone `id.<id>`, or
@@ -798,14 +837,11 @@ async fn revoke(
             Err(_) => return back_with(back, "failed"),
         }
     }
-    back_with(
-        back,
-        if revoked > 0 {
-            "revoked"
-        } else {
-            "unknown_device"
-        },
-    )
+    // A revoked phone shows in its row: the page needs no banner.
+    if revoked > 0 {
+        return redirect_response(StatusCode::SEE_OTHER, back);
+    }
+    back_with(back, "unknown_device")
 }
 
 /// `POST /auth/settings/inbox/code`: a new enrollment code for the account of the session. The
@@ -840,6 +876,7 @@ async fn code(
                     fingerprint: &code.fingerprint,
                     expires_at_ms: code.expires_at_ms,
                 }),
+                None,
             )
             .await
         }
