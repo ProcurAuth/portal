@@ -112,7 +112,7 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
             tools_html: &tools,
             class: " zone--page",
             above_html: &format!(
-                "{}{}",
+                r#"<div class="spark__box">{}{}</div>"#,
                 spark(view.days, "spark--strip"),
                 spark_axis(view.first_day, view.days.len())
             ),
