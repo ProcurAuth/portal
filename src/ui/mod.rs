@@ -120,13 +120,21 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         body.push_str(&problems_notice(catalog.problems()));
     }
 
+    // The notice has the space below it, so the page under it has no space above it.
+    let empty = if catalog.problems().is_empty() {
+        "empty"
+    } else {
+        "empty empty--after"
+    };
     if catalog.groups().is_empty() && ctx.hidden_services > 0 {
-        body.push_str(
-            r#"<main class="empty"><h1>No service available</h1><p>No service is open to your account. Ask the administrator.</p></main>"#,
+        let _ = write!(
+            body,
+            r#"<main class="{empty}"><h1>No service available</h1><p>No service is open to your account. Ask the administrator.</p></main>"#,
         );
     } else if catalog.groups().is_empty() {
-        body.push_str(
-            r#"<main class="empty"><h1>No services yet</h1><p>Add <code>portal.name</code> and <code>portal.href</code> labels to a container or an IngressRoute and it appears here.</p></main>"#,
+        let _ = write!(
+            body,
+            r#"<main class="{empty}"><h1>No services yet</h1><p>Add <code>portal.name</code> and <code>portal.href</code> labels to a container or an IngressRoute and it appears here.</p></main>"#,
         );
     } else {
         body.push_str(r#"<main class="rows"><h1 class="visually-hidden">Services</h1>"#);
