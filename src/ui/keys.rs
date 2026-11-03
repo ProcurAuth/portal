@@ -166,6 +166,9 @@ pub struct KeysView<'a> {
     pub max_lifetime: Option<u64>,
     /// The name that the form of a new key has when it copies a key (portal 4.1a).
     pub copy_name: String,
+    /// The id of the service that has a right and no `access`, when the server refused the form
+    /// for this reason. The form shows again with the values that the person typed.
+    pub needs_access: Option<String>,
 }
 
 /// The text of the outcome of a form, from a fixed list (portal 5.8f).
@@ -198,7 +201,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "needs_access" => (
-            "A permission on a service does not work without the permission to open the service. Tick the switch of the service.",
+            "A permission on a service needs the switch Can open on that service. Tick the switch, then save.",
             false,
         ),
         "capacity" => (
@@ -714,9 +717,10 @@ fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, St
     }
 }
 
-/// The aside of the form of an API key: what the ticked rights allow, and the calls. The script
-/// fills it from the editor, so without script it is absent.
-const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title">This key can</h2><dl class="facts" data-summary><div data-s-row="send"><dt>Send to</dt><dd data-s="send">no group</dd></div><div data-s-row="read"><dt>Read</dt><dd data-s="read">no group</dd></div><div data-s-row="user"><dt>Send to accounts</dt><dd data-s="user">no</dd></div><div data-s-row="limit"><dt>Limit</dt><dd data-s="limit">none</dd></div></dl><h2 class="title">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><p class="hint">The portal knows these calls from its own documentation. A service does not publish its calls in the action document.</p><div class="mono-line">Authorization: Bearer &lt;key&gt;</div><p class="hint">The key text shows one time, after Create. Copy it then.</p><p class="hint">The key holds at most the rights of its owner. A right that the owner loses has no effect.</p></aside>"#;
+/// The aside of the form of an API key: the calls that the ticked rights allow. The script fills it
+/// from the editor, so without script it is absent. The boxes of the editor already show the rights:
+/// the aside does not list them again.
+const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><p class="hint">The portal knows these calls from its own documentation. A service does not publish its calls in the action document.</p><div class="mono-line">Authorization: Bearer &lt;key&gt;</div><p class="hint">The key text shows one time, after Create. Copy it then.</p><p class="hint">The key holds at most the rights of its owner. A right that the owner loses has no effect.</p></aside>"#;
 
 /// The page "New key" or "Edit key": the fields across the width, then the editor of the
 /// permissions. An MCP key shows the services on the whole width. An API key shows the inbox on the
@@ -792,9 +796,12 @@ fn form_page(view: &KeysView<'_>) -> String {
         None => view.copy_name.as_str(),
     };
     let (name_class, name_error) = field_error("key-name", view, Field::Name);
+    // The kind comes first: a click on a kind loads the page again, and the fields after it stay
+    // as they are before the choice.
     let _ = write!(
         out,
-        r#"<div class="fgrid fgrid--key"><div class="field"><label class="field__label" for="key-name">Name</label><input class="uiInput {name_class}" type="text" id="key-name" name="name" value="{}" maxlength="64" required placeholder="1 to 64 characters" autocomplete="off"{}>{name_error}</div>"#,
+        r#"<div class="fgrid fgrid--key">{}<div class="field"><label class="field__label" for="key-name">Name</label><input class="uiInput {name_class}" type="text" id="key-name" name="name" value="{}" maxlength="64" required placeholder="1 to 64 characters" autocomplete="off"{}>{name_error}</div>"#,
+        kind_field(view, edit.is_some()),
         html_escape(name),
         if name_error.is_empty() {
             ""
@@ -802,7 +809,6 @@ fn form_page(view: &KeysView<'_>) -> String {
             r#" aria-invalid="true" aria-describedby="key-name-error""#
         }
     );
-    out.push_str(&kind_field(view, edit.is_some()));
     if edit.is_none() {
         let hint = match view.max_lifetime {
             Some(max) => format!(
@@ -827,16 +833,7 @@ fn form_page(view: &KeysView<'_>) -> String {
             html_escape(&hint)
         );
     }
-    let note = match kind {
-        Some(KeyKind::Api) => {
-            "The key sends alerts to the groups that you tick. The owner must hold the same rights."
-        }
-        _ => "The agent uses the services that you tick. The owner must hold the same rights.",
-    };
-    let _ = write!(
-        out,
-        r#"<div class="field field--note"><span class="field__label">Rights</span><span class="hint">{note}</span></div></div></form>"#
-    );
+    out.push_str("</div></form>");
     if let Some(editor) = &view.editor {
         let mut grants = String::new();
         grant_editor::render(
@@ -887,7 +884,15 @@ fn made_page(key: &NewKey<'_>) -> String {
 pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
     let mut out = String::new();
     // A refusal that names a field shows under that field. The other outcomes show as a banner.
-    if view.field.is_none() {
+    if let Some(service) = &view.needs_access {
+        let name = view
+            .editor
+            .iter()
+            .flat_map(|e| e.services.iter().chain(e.features.iter()))
+            .find(|s| s.id == *service)
+            .map_or(service.as_str(), |s| s.name.as_str());
+        out.push_str(&banner_error(&super::settings::needs_access_text(name)));
+    } else if view.field.is_none() {
         notice_html(&mut out, view.notice);
     }
     out.push_str(&match &view.pane {
@@ -936,6 +941,7 @@ mod tests {
             expires_at: "2026-12-01T00:00:00Z".into(),
             max_lifetime: None,
             copy_name: String::new(),
+            needs_access: None,
         }
     }
 
@@ -1085,8 +1091,8 @@ mod tests {
         api.kind = Some(KeyKind::Api);
         api.editor = Some(editor(&data));
         let html = page(&api);
-        assert!(html.contains(r#"<div class="keyLayout">"#) && html.contains("This key can"));
-        assert!(html.contains("data-summary") && html.contains("data-calls"));
+        assert!(html.contains(r#"<div class="keyLayout">"#));
+        assert!(html.contains("data-calls") && !html.contains("This key can"));
         assert!(html.contains("Authorization: Bearer"));
         assert!(html.contains(r#"data-form="key-form""#));
         let mut mcp = view(Pane::New, &BOTH);
@@ -1094,7 +1100,31 @@ mod tests {
         mcp.editor = Some(editor(&data));
         let html = page(&mcp);
         assert!(!html.contains("keyLayout") && !html.contains("This key can"));
-        assert!(html.contains("The agent uses the services that you tick."));
+        assert!(!html.contains("The agent uses the services that you tick."));
+    }
+
+    #[test]
+    fn the_kind_comes_first_and_the_form_has_no_label_without_a_control() {
+        let mut two = view(Pane::New, &BOTH);
+        two.kind = Some(KeyKind::Mcp);
+        let html = page(&two);
+        assert!(html.find("Kind of key").unwrap() < html.find(r#"id="key-name""#).unwrap());
+        assert!(!html.contains(">Rights<") && !html.contains("field--note"));
+    }
+
+    #[test]
+    fn a_form_refused_for_access_names_the_service_and_keeps_the_name() {
+        let mut v = view(Pane::New, &BOTH);
+        v.kind = Some(KeyKind::Mcp);
+        v.copy_name = "my <agent>".into();
+        v.needs_access = Some("grafana".into());
+        let html = page(&v);
+        assert!(
+            html.contains("grafana: a permission needs the switch Can open grafana."),
+            "{html}"
+        );
+        assert!(html.contains(r#"value="my &lt;agent&gt;""#));
+        assert!(html.contains(r#"role="alert""#));
     }
 
     #[test]

@@ -1306,6 +1306,10 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
             let (st, head, text) =
                 inbox_form(s, &session.cookie, "/auth/settings/inbox/send", &fields);
             let loc = location(&head);
+            // A refused form answers the page itself, with the status 422.
+            if st == 422 {
+                return (400, json!({ "body": text }));
+            }
             if st != 303 {
                 return (st, json!({ "body": text }));
             }
@@ -1314,10 +1318,11 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                 .nth(1)
                 .and_then(|r| r.split(['&', '#']).next())
                 .unwrap_or_default();
-            let status = if loc.contains("s=sent") {
-                201
-            } else if loc.contains("s=duplicate") {
+            // The row that opens is the answer to a new alert. A repeat says so.
+            let status = if loc.contains("s=duplicate") {
                 200
+            } else if loc.contains("open=") {
+                201
             } else {
                 400
             };
@@ -1336,7 +1341,7 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
             if st != 303 {
                 return (st, json!({ "body": text }));
             }
-            let revoked = location(&head).contains("s=revoked");
+            let revoked = location(&head) == "/auth/settings/inbox";
             (200, json!({ "revoked": revoked }))
         }
         _ => (404, Value::Null),
@@ -4894,30 +4899,36 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         "{page}"
     );
     // The form refuses a group that the account may not send to, and sends to the others.
-    let (st, head, _) = inbox_form(
+    let (st, _, text) = inbox_form(
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
         "to=group:other&title=no&key=pia1",
     );
-    assert_eq!(st, 303);
-    assert!(location(&head).contains("s=bad_group"), "{head}");
-    let (st, head, _) = inbox_form(
+    assert_eq!(st, 422, "{text}");
+    // The page comes back with the popup open and the title that was typed.
+    assert!(
+        has(&text, "<details class=\"pop\" open>") && has(&text, r#"value="no""#),
+        "{text}"
+    );
+    assert!(has(&text, r#"data-send-error="bad_group""#), "{text}");
+    let (st, _, text) = inbox_form(
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
         "to=group:infra&title=+&key=pia2",
     );
-    assert_eq!(st, 303);
-    assert!(location(&head).contains("s=no_title"), "{head}");
+    assert_eq!(st, 422, "{text}");
+    assert!(has(&text, r#"data-send-error="no_title""#), "{text}");
     let long = "x".repeat(200);
-    let (_, head, _) = inbox_form(
+    let (st, _, text) = inbox_form(
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
         &format!("to=group:infra&title={long}&key=pia3"),
     );
-    assert!(location(&head).contains("s=bad_title"), "{head}");
+    assert_eq!(st, 422, "{text}");
+    assert!(has(&text, r#"data-send-error="bad_title""#), "{text}");
     let (st, head, _) = inbox_form(
         &s,
         &pia.cookie,
@@ -4927,12 +4938,12 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert_eq!(st, 303);
     let sent = location(&head);
     assert!(
-        sent.starts_with("/auth/settings/inbox?s=sent&open="),
-        "the page opens the new alert in place: {sent}"
+        sent.starts_with("/auth/settings/inbox?open="),
+        "the page opens the new alert in place, with no banner: {sent}"
     );
     let (st, page) = inbox_page_as(&s, &pia.cookie, sent.split('#').next().unwrap());
     assert_eq!(st, 200, "{page}");
-    assert!(has(&page, "Disk full") && has(&page, "The alert is sent."));
+    assert!(has(&page, "Disk full") && !has(&page, "The alert is sent."));
     assert!(has(&page, "data-detail="), "the row is open: {page}");
     // The alert of a group that the account may not read is not there for it.
     let (st, _) = admin(
@@ -4994,7 +5005,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert!(has(&page, r#"data-login="alice""#) && has(&page, r#"value="alice""#));
     let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox?login=nobody");
     assert_eq!(st, 200);
-    assert!(has(&page, "No connection in the log."));
+    assert!(has(&page, "No connection for these filters."));
     // The operator revokes the phone of another account.
     let (st, head, text) = inbox_form(
         &s,
@@ -5003,7 +5014,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &format!("id.{}=1", alice.device_id),
     );
     assert_eq!(st, 303, "{text}");
-    assert!(location(&head).contains("s=revoked"), "{head}");
+    assert_eq!(location(&head), "/auth/settings/inbox", "{head}");
     assert_eq!(
         ca.closed_code().await,
         Some(inbox_core::proto::close::REVOKED)
@@ -5050,7 +5061,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         "/auth/settings/inbox/revoke",
         &format!("id.{}=1", bob.device_id),
     );
-    assert!(location(&head).contains("s=revoked"), "{head}");
+    assert_eq!(location(&head), "/auth/settings/inbox", "{head}");
     assert_eq!(
         Conn::open(port, &bob).await.err(),
         Some(inbox_core::proto::close::REVOKED)
@@ -5565,12 +5576,19 @@ async fn the_form_of_the_page_sends_an_alert_to_a_group_or_to_an_account() {
             "/auth/settings/inbox/send",
             &format!("to={}&title=hello&key={key}", form_value(to)),
         );
-        assert_eq!(st, 303, "{text}");
-        location(&head)
+        // A form that works redirects. A form that the server refuses answers the page with 422.
+        match st {
+            303 => location(&head),
+            422 => {
+                let code = text.split("data-send-error=\"").nth(1).unwrap_or_default();
+                format!("s={}", code.split('"').next().unwrap_or_default())
+            }
+            _ => panic!("{st}: {text}"),
+        }
     };
     // The superadmin may do both.
     let loc = post(&root.cookie, "user:alice", "f1");
-    assert!(loc.contains("s=sent&open="), "{loc}");
+    assert!(loc.contains("open="), "{loc}");
     let msg = take(&mut c1).await;
     assert_eq!(
         (msg.title.as_str(), msg.group.as_str()),
@@ -5583,13 +5601,13 @@ async fn the_form_of_the_page_sends_an_alert_to_a_group_or_to_an_account() {
         page.contains("data-to=\"user:alice\"") && page.contains("@alice"),
         "{page}"
     );
-    assert!(post(&root.cookie, "group:infra", "f2").contains("s=sent"));
+    assert!(post(&root.cookie, "group:infra", "f2").contains("open="));
     // A forced form of an account without the right for an account is refused.
     assert!(post(&group_only.cookie, "user:alice", "f3").contains("s=bad_target"));
-    assert!(post(&group_only.cookie, "group:infra", "f4").contains("s=sent"));
+    assert!(post(&group_only.cookie, "group:infra", "f4").contains("open="));
     // An account with both rights sends to an account and reads its own alert (the sender).
     let loc = post(&both.cookie, "user:alice", "f5");
-    assert!(loc.contains("s=sent&open="), "{loc}");
+    assert!(loc.contains("open="), "{loc}");
     let id = loc
         .split("open=")
         .nth(1)

@@ -197,6 +197,8 @@ pub enum AlertState {
     Pending,
     /// A phone never received it before it expired.
     Expired,
+    /// No phone had the group when the alert was made: nobody can receive it.
+    NoPhone,
 }
 
 impl AlertState {
@@ -205,11 +207,14 @@ impl AlertState {
             Self::Received => "ok",
             Self::Pending => "wait",
             Self::Expired => "expired",
+            Self::NoPhone => "none",
         }
     }
 
     fn of(alert: &AlertSummary) -> Self {
-        if alert.expired > 0 {
+        if alert.targets == 0 {
+            Self::NoPhone
+        } else if alert.expired > 0 {
             Self::Expired
         } else if alert.received < alert.targets {
             Self::Pending
@@ -289,6 +294,7 @@ impl Query {
                         "ok" => AlertState::Received,
                         "wait" => AlertState::Pending,
                         "expired" => AlertState::Expired,
+                        "none" => AlertState::NoPhone,
                         _ => return None,
                     })
                 }
@@ -483,6 +489,29 @@ pub struct CodeData<'a> {
     pub expires_at_ms: i64,
 }
 
+/// A send form that the server refused. The page shows the popup again, open, with what the person
+/// typed and the reason.
+pub struct SendError<'a> {
+    /// The code of the reason (see [`notice_for`]).
+    pub code: &'a str,
+    /// The field `to` as the form sent it.
+    pub to: &'a str,
+    /// The title as the form sent it.
+    pub title: &'a str,
+    /// The key of the form: a second try sends one alert.
+    pub key: &'a str,
+}
+
+impl SendError<'_> {
+    fn text(&self) -> &'static str {
+        notice_for(self.code).map_or("The inbox could not do this. Try again.", |n| n.text)
+    }
+
+    fn for_user(&self) -> bool {
+        self.to.starts_with("user:")
+    }
+}
+
 pub struct InboxView<'a> {
     pub rights: &'a Rights,
     pub notice: Option<Notice>,
@@ -504,12 +533,19 @@ pub struct InboxView<'a> {
     pub code: Option<CodeData<'a>>,
     /// The session is a session of "Log in as": it sends no alert and revokes no phone.
     pub impersonated: bool,
+    /// The send form that the server refused.
+    pub send_error: Option<SendError<'a>>,
 }
 
 // Small parts ----------------------------------------------------------------------------------
 
+/// A time. The script drops the year when it is the current year.
 fn when(ms: i64) -> String {
-    time_tag(ms / 1000, false)
+    short_time(ms / 1000)
+}
+
+fn short_time(unix: i64) -> String {
+    time_tag(unix, false).replacen("<time ", r#"<time data-short="1" "#, 1)
 }
 
 fn when_opt(ms: Option<i64>) -> String {
@@ -551,6 +587,7 @@ fn alert_icon(state: AlertState, alert: &AlertSummary) -> String {
                 alert.expired, alert.targets
             ),
         ),
+        AlertState::NoPhone => st("st--off", "device-mobile-off", "No phone had the group"),
     }
 }
 
@@ -589,24 +626,6 @@ fn age(now_ms: i64, then_ms: i64) -> String {
         3600..=86_399 => format!("{}h", secs / 3600),
         _ => format!("{}d", secs / 86_400),
     }
-}
-
-/// A chip that is not a control: the kind of message that the zone shows.
-fn kind_chip(label: &str, icon_name: &str, count: usize) -> String {
-    format!(
-        r#"<span class="chip is-on" role="img" aria-label="{0}: {count}" title="{0}">{1}<span class="num">{count}</span></span>"#,
-        html_escape(label),
-        icon(icon_name)
-    )
-}
-
-/// A chip of the roadmap: dashed, grey, with no behaviour. The place is ready for a later kind.
-fn future_chip(label: &str, icon_name: &str) -> String {
-    format!(
-        r#"<button class="chip chip--future" type="button" disabled aria-label="{0}" title="{0}">{1}</button>"#,
-        html_escape(label),
-        icon(icon_name)
-    )
 }
 
 const SEPARATOR: &str = r#"<span class="chips__sep"></span>"#;
@@ -653,7 +672,7 @@ fn docs_popover(view: &InboxView, docs: &DocsData) -> String {
         );
     }
     let body = format!(
-        r#"<div class="twoCols"><div><h3 class="sectionLabel">Endpoints</h3><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div></div><div><h3 class="sectionLabel">Groups</h3>{}</div></div>"#,
+        r#"<div class="twoCols"><div><h2 class="sectionLabel">Endpoints</h2><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div></div><div><h2 class="sectionLabel">Groups</h2>{}</div></div>"#,
         html_escape(&docs.base),
         if groups.is_empty() {
             r#"<span class="muted">No group</span>"#.to_string()
@@ -680,18 +699,46 @@ fn members_text(group: &GroupChoice) -> String {
     )
 }
 
-/// The title field and the button of one form of the popup.
-fn title_and_send(id: &str) -> String {
+/// The title field and the button of one form of the popup. `error` is the refusal that this form
+/// shows: the title that was typed and the reason.
+fn title_and_send(id: &str, error: Option<&SendError>) -> String {
+    let (value, reason, count) = match error {
+        Some(e) => (
+            format!(r#" value="{}""#, html_escape(e.title)),
+            format!(
+                r#"<span class="hint hint--bad" role="alert" data-send-error="{}">{}</span>"#,
+                html_escape(e.code),
+                html_escape(e.text())
+            ),
+            e.title.chars().count(),
+        ),
+        None => (String::new(), String::new(), 0),
+    };
     format!(
-        r#"<div class="field"><label class="field__label" for="{id}-title">Title</label><input class="uiInput" type="text" id="{id}-title" name="title" maxlength="{MAX_TITLE}" autocomplete="off" required></div><div class="composer__row"><span class="count" data-title-count="{id}-title">0/{MAX_TITLE}</span><span class="grow"></span><button class="button button--primary" type="submit">{}Send</button></div>"#,
+        r#"<div class="field"><label class="field__label" for="{id}-title">Title</label><input class="uiInput" type="text" id="{id}-title" name="title" maxlength="{MAX_TITLE}" autocomplete="off" required{value}>{reason}</div><div class="composer__row"><span class="count" data-title-count="{id}-title">{count}/{MAX_TITLE}</span><span class="grow"></span><button class="button button--primary" type="submit">{}Send</button></div>"#,
         icon("send")
     )
+}
+
+/// The refusal that one form of the popup shows. It belongs to the form for an account when the
+/// person aimed at an account and the popup has this form. Else it belongs to the form for a group,
+/// or to the other one when the popup has no form for a group.
+fn refusal_of<'a>(view: &'a InboxView, user_form: bool) -> Option<&'a SendError<'a>> {
+    let error = view.send_error.as_ref()?;
+    let groups = !view.rights.send.is_empty();
+    let to_user = if error.for_user() && view.rights.send_user {
+        true
+    } else {
+        !groups
+    };
+    (to_user == user_form).then_some(error)
 }
 
 /// The form that sends to a group: a select with the member count of each group. One group is no
 /// choice: the form names it and sends it.
 fn group_form(view: &InboxView) -> String {
     let choices = &view.rights.send;
+    let error = refusal_of(view, false);
     let field = if let [only] = choices.as_slice() {
         format!(
             r#"<input type="hidden" name="to" value="group:{}"><div class="field"><span class="field__label">Group</span><span>{} ({})</span></div>"#,
@@ -702,11 +749,17 @@ fn group_form(view: &InboxView) -> String {
     } else {
         let mut options = String::new();
         for c in choices {
+            let value = format!("group:{}", c.id);
             let _ = write!(
                 options,
-                r#"<option value="group:{}" data-members="{}">{} ({})</option>"#,
+                r#"<option value="group:{}" data-members="{}"{}>{} ({})</option>"#,
                 html_escape(&c.id),
                 c.members,
+                if error.is_some_and(|e| e.to == value) {
+                    " selected"
+                } else {
+                    ""
+                },
                 html_escape(&c.name),
                 members_text(c)
             );
@@ -719,13 +772,14 @@ fn group_form(view: &InboxView) -> String {
         r#"<form class="rcptForm rcptForm--group" method="post" action="{SEND_PATH}" data-gate><input type="hidden" name="csrf" value="{}"><input type="hidden" name="key" value="{}">{field}{}</form>"#,
         html_escape(view.csrf),
         html_escape(view.idempotency_key),
-        title_and_send("send-group-form"),
+        title_and_send("send-group-form", error),
     )
 }
 
 /// The form that sends to one account: a search field (script) and the list of the accounts, each
 /// with its phones. An account with no phone is disabled, with the reason in its row.
 fn user_form(view: &InboxView) -> String {
+    let error = refusal_of(view, true);
     let mut rows = String::new();
     for u in view.users {
         let login = html_escape(&u.login);
@@ -738,8 +792,13 @@ fn user_form(view: &InboxView) -> String {
         } else {
             let _ = write!(
                 rows,
-                r#"<label class="urow"><input type="radio" name="to" value="user:{login}" data-phones="{}" required><b>{login}</b><span class="muted">{}</span></label>"#,
+                r#"<label class="urow"><input type="radio" name="to" value="user:{login}" data-phones="{}" required{}><b>{login}</b><span class="muted">{}</span></label>"#,
                 u.phones,
+                if error.is_some_and(|e| e.to == format!("user:{}", u.login)) {
+                    " checked"
+                } else {
+                    ""
+                },
                 plural(u.phones, "phone", "phones")
             );
         }
@@ -749,7 +808,7 @@ fn user_form(view: &InboxView) -> String {
         html_escape(view.csrf),
         html_escape(view.idempotency_key),
         icon("search"),
-        title_and_send("send-user-form"),
+        title_and_send("send-user-form", error),
     )
 }
 
@@ -761,6 +820,7 @@ fn send_popover(view: &InboxView) -> String {
     let groups = !view.rights.send.is_empty();
     let users = view.rights.send_user;
     let both = groups && users;
+    let on_user = refusal_of(view, true).is_some();
     let mut body = format!(
         r#"<div class="composer composer--alert{}">"#,
         if both { " composer--both" } else { "" }
@@ -768,7 +828,9 @@ fn send_popover(view: &InboxView) -> String {
     if both {
         let _ = write!(
             body,
-            r#"<input class="visually-hidden rcpt__group" type="radio" name="rcpt" id="rcpt-group" checked><input class="visually-hidden rcpt__user" type="radio" name="rcpt" id="rcpt-user"><div class="field"><span class="field__label">Send to</span><span class="chips" role="group" aria-label="Recipient"><label class="chip" for="rcpt-group" title="Send to a group">{}Group</label><label class="chip" for="rcpt-user" title="Send to one account">{}User</label></span></div>"#,
+            r#"<input class="visually-hidden rcpt__group" type="radio" name="rcpt" id="rcpt-group"{}><input class="visually-hidden rcpt__user" type="radio" name="rcpt" id="rcpt-user"{}><div class="field"><span class="field__label">Send to</span><span class="chips" role="group" aria-label="Recipient"><label class="chip" for="rcpt-group" title="Send to a group">{}Group</label><label class="chip" for="rcpt-user" title="Send to one account">{}User</label></span></div>"#,
+            if on_user { "" } else { " checked" },
+            if on_user { " checked" } else { "" },
             icon("users"),
             icon("user")
         );
@@ -780,35 +842,38 @@ fn send_popover(view: &InboxView) -> String {
         body.push_str(&user_form(view));
     }
     body.push_str("</div>");
-    popover_with(
+    let html = popover_with(
         "",
         "button button--primary",
         &format!("{}New alert", icon("plus")),
         Side::End,
         " pop__menu--pad",
         &body,
-    )
+    );
+    // After a refusal the popup stays open, with what the person typed.
+    if view.send_error.is_some() {
+        html.replacen(
+            r#"<details class="pop">"#,
+            r#"<details class="pop" open>"#,
+            1,
+        )
+    } else {
+        html
+    }
 }
 
 fn bar(view: &InboxView) -> String {
     let mut out = String::from(r#"<div class="tbar tbar--inbox">"#);
-    if let Some(sent) = &view.sent {
+    if view.sent.is_some() {
         out.push_str(&period_menu(view));
-        let _ = write!(
-            out,
-            r#"<span class="bar__kinds" role="group" aria-label="Kinds of message">{}{}{}</span>"#,
-            kind_chip("Alerts: one way, no answer", "bell", sent.alerts.len()),
-            future_chip("Questions: not enabled", "help-circle"),
-            future_chip("Approvals: not enabled", "checkbox"),
-        );
     }
     out.push_str(r#"<span class="grow"></span>"#);
     if let Some(sent) = &view.sent {
         let _ = write!(
             out,
             r#"<span class="bar__range">{} - {}</span>"#,
-            time_tag(sent.since_ms / 1000, false),
-            time_tag(view.now_ms / 1000, false)
+            short_time(sent.since_ms / 1000),
+            short_time(view.now_ms / 1000)
         );
     }
     if let Some(docs) = &view.docs {
@@ -1013,6 +1078,12 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             "st--bad",
             "Expired: some phones never received it",
         ),
+        (
+            AlertState::NoPhone,
+            "device-mobile-off",
+            "st--off",
+            "No phone had the group",
+        ),
     ];
     let state_labels: Vec<String> = state_defs
         .iter()
@@ -1039,18 +1110,24 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             on: query.alert == Some(*state),
         })
         .collect();
-    let chips_html = format!(
-        "{}{SEPARATOR}{}{}",
-        chips(&group_chips),
-        chips(&state_chips),
-        future_chip("Unanswered: not enabled", "help-circle")
-    );
+    // One group and no alert to an account: the chips of the groups repeat the count of "All".
+    let one_group =
+        view.groups.len() < 2 && user_count == 0 && query.group.is_none() && !query.to_user;
+    let chips_html = if one_group {
+        chips(&state_chips)
+    } else {
+        format!("{}{SEPARATOR}{}", chips(&group_chips), chips(&state_chips))
+    };
 
     let mut body = String::new();
     if shown.is_empty() {
-        body.push_str(r#"<p class="empty">No alert in this period.</p>"#);
+        body.push_str(if sent.alerts.is_empty() {
+            r#"<p class="empty">No alert in this period.</p>"#
+        } else {
+            r#"<p class="empty">No alert for these filters.</p>"#
+        });
     } else {
-        body.push_str(r#"<table class="grid grid--sent"><colgroup><col class="w28"><col class="w152"><col class="w136"><col><col class="w128"></colgroup><thead class="visually-hidden"><tr><th scope="col">State</th><th scope="col">When</th><th scope="col">To</th><th scope="col">Title</th><th scope="col">Sent by</th></tr></thead><tbody>"#);
+        body.push_str(r#"<table class="grid grid--sent"><colgroup><col class="w28"><col class="wtime"><col class="w136"><col><col class="w128"></colgroup><thead class="visually-hidden"><tr><th scope="col">State</th><th scope="col">When</th><th scope="col">To</th><th scope="col">Title</th><th scope="col">Sent by</th></tr></thead><tbody>"#);
         for row in &shown {
             alert_row(&mut body, view, sent, row);
         }
@@ -1143,19 +1220,13 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
     );
     if open {
         if let Some(detail) = &sent.opened {
-            detail_row(out, view, detail, &href, &row.origin);
+            detail_row(out, view, detail, &href);
         }
     }
 }
 
 /// The deliveries of the opened alert: the phones that do not have it first, then a few that do.
-fn detail_row(
-    out: &mut String,
-    view: &InboxView,
-    detail: &AlertDetail,
-    close: &str,
-    origin: &Origin,
-) {
+fn detail_row(out: &mut String, view: &InboxView, detail: &AlertDetail, close: &str) {
     const WAITING_SHOWN: usize = 30;
     const RECEIVED_SHOWN: usize = 3;
     let a = &detail.summary;
@@ -1165,13 +1236,8 @@ fn detail_row(
         .partition(|d| d.received_at.is_some());
     let _ = write!(
         out,
-        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Sent by</b> {}</span><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {} of {}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
+        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {} of {}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
         html_escape(&a.id),
-        match origin {
-            Origin::Watch => "the portal watch".to_string(),
-            Origin::Account => "an account".to_string(),
-            Origin::Key(name) => format!("key {}", html_escape(name)),
-        },
         html_escape(&a.id),
         a.received,
         a.targets,
@@ -1181,7 +1247,7 @@ fn detail_row(
     if detail.deliveries.is_empty() {
         out.push_str(r#"<p class="empty">No phone had the group when the alert was made.</p>"#);
     } else {
-        out.push_str(r#"<table class="grid grid--deliveries"><colgroup><col class="w28"><col><col class="w96"><col class="w64"><col class="w152"></colgroup><thead><tr><th scope="col"></th><th scope="col">Phone</th><th scope="col">Owner</th><th scope="col" class="r">Sent</th><th scope="col" class="r">Received</th></tr></thead><tbody>"#);
+        out.push_str(r#"<table class="grid grid--deliveries"><colgroup><col class="w28"><col><col class="w96"><col class="w64"><col class="wtime"></colgroup><thead><tr><th scope="col"></th><th scope="col">Phone</th><th scope="col">Owner</th><th scope="col" class="r">Sent</th><th scope="col" class="r">Received</th></tr></thead><tbody>"#);
         let shown = waiting
             .iter()
             .take(WAITING_SHOWN)
@@ -1382,8 +1448,12 @@ fn phones_zone(view: &InboxView, data: &PhonesData) -> String {
     if any_box {
         body.push_str(&bulk_form(&bulk));
     }
-    if data.rows.is_empty() {
-        body.push_str(r#"<p class="empty">No phone yet.</p>"#);
+    if rows.is_empty() {
+        body.push_str(if data.rows.is_empty() {
+            r#"<p class="empty">No phone yet.</p>"#
+        } else {
+            r#"<p class="empty">No phone for these filters.</p>"#
+        });
     } else {
         body.push_str(r#"<table class="grid grid--phones"><colgroup>"#);
         if any_box {
@@ -1520,7 +1590,7 @@ fn phone_row(
 fn code_popover(code: &CodeData) -> String {
     let text = html_escape(code.code);
     format!(
-        r##"<div class="pop pop--code" data-code-pop><div class="pop__menu pop__menu--end pop__menu--pad pop__menu--code"><dl class="facts"><div><dt>Server key</dt><dd><code>{}</code></dd></div><div><dt>Code valid until</dt><dd>{}</dd></div></dl><div class="codeBox"><textarea class="codeText" id="enroll-code" readonly rows="4" spellcheck="false" aria-label="Enrollment code" data-expires-ms="{}">{text}</textarea><button class="ib copy" type="button" data-copy="enroll-code" aria-label="Copy the code" title="Copy"><span class="copy__idle">{}</span><span class="copy__done">{}</span></button></div><div class="inline"><a class="button" href="{PAGE}" data-code-done>Done</a><a class="button button--ghost" href="{text}">Open in the app</a></div></div></div>"##,
+        r##"<div class="pop pop--code" data-code-pop role="group" aria-label="New enrollment code"><div class="pop__menu pop__menu--end pop__menu--pad pop__menu--code"><dl class="facts"><div><dt>Server key</dt><dd><code>{}</code></dd></div><div><dt>Code valid until</dt><dd>{}</dd></div></dl><div class="codeBox"><textarea class="codeText" id="enroll-code" readonly rows="4" spellcheck="false" aria-label="Enrollment code" data-expires-ms="{}">{text}</textarea><button class="ib copy" type="button" data-copy="enroll-code" aria-label="Copy the code" title="Copy"><span class="copy__idle">{}</span><span class="copy__done">{}</span></button></div><div class="inline"><a class="button" href="{PAGE}" data-code-done>Done</a><a class="button button--ghost" href="{text}">Open in the app</a></div></div></div>"##,
         html_escape(code.fingerprint),
         time_tag(code.expires_at_ms / 1000, false),
         code.expires_at_ms,
@@ -1602,9 +1672,13 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
     );
     let mut body = String::new();
     if rows.is_empty() {
-        body.push_str(r#"<p class="empty">No connection in the log.</p>"#);
+        body.push_str(if query.login.is_empty() && query.conn.is_none() {
+            r#"<p class="empty">No connection in the log.</p>"#
+        } else {
+            r#"<p class="empty">No connection for these filters.</p>"#
+        });
     } else {
-        body.push_str(r#"<table class="grid grid--conn"><colgroup><col class="w28"><col class="w152"><col class="w88"><col><col class="w120"></colgroup><thead><tr><th scope="col"><span class="visually-hidden">State</span></th><th scope="col">Start</th><th scope="col">Login</th><th scope="col">Phone</th><th scope="col">End</th></tr></thead><tbody>"#);
+        body.push_str(r#"<table class="grid grid--conn"><colgroup><col class="w28"><col class="wtime"><col class="w88"><col><col class="w120"></colgroup><thead><tr><th scope="col"><span class="visually-hidden">State</span></th><th scope="col">Start</th><th scope="col">Login</th><th scope="col">Phone</th><th scope="col">End</th></tr></thead><tbody>"#);
         for c in &rows {
             let state = if c.disconnected_at.is_none() {
                 st("st--ok", "point", "Open")
@@ -1654,6 +1728,16 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
 }
 
 // The page -------------------------------------------------------------------------------------
+
+/// A page of the tab "Inbox" that only says why there is no content: "Forbidden", "Bad request".
+/// It has the frame of the settings pages and a link to the tab.
+pub fn status_page(frame: &Frame, text: &str) -> String {
+    let body = format!(
+        r#"<div class="zone"><p class="empty">{}</p><p class="empty"><a href="{PAGE}">Inbox</a></p></div>"#,
+        html_escape(text)
+    );
+    super::settings::fill_page(Tab::Inbox, frame, "Inbox", &body)
+}
 
 pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     let mut out = String::new();
@@ -1869,6 +1953,7 @@ mod tests {
             }),
             code: None,
             impersonated: false,
+            send_error: None,
         }
     }
 
@@ -2172,18 +2257,200 @@ mod tests {
     }
 
     #[test]
-    fn the_kinds_of_a_later_step_are_dashed_chips_with_no_behaviour() {
+    fn the_page_has_no_chip_for_a_kind_that_is_not_built() {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
-        assert_eq!(html.matches("chip chip--future").count(), 3, "{html}");
-        assert!(html.contains("Questions: not enabled"));
-        assert!(html.contains("Approvals: not enabled"));
-        assert!(html.contains("Unanswered: not enabled"));
-        assert_eq!(
-            html.matches("chip--future\" type=\"button\" disabled")
-                .count(),
-            3
+        for absent in [
+            "chip--future",
+            "Questions",
+            "Approvals",
+            "Unanswered",
+            "bar__kinds",
+        ] {
+            assert!(!html.contains(absent), "{absent}");
+        }
+    }
+
+    #[test]
+    fn an_alert_that_no_phone_could_receive_has_its_own_state_and_chip() {
+        let (rights, groups) = (all_rights(), groups());
+        let mut data = sent(None);
+        data.alerts
+            .push(row(summary("n1", "infra", "Nobody", 0, 0), Origin::Account));
+        data.alerts.last_mut().unwrap().summary.targets = 0;
+        let query = Query::default();
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = Some(data);
+        let html = page(&view);
+        // The row is not a success: the icon is the grey one, with its reason.
+        let row_html = &html[html.find(r#"data-alert="n1""#).unwrap()..];
+        let row_html = &row_html[..row_html.find("</tr>").unwrap()];
+        assert!(row_html.contains("st--off") && row_html.contains("No phone had the group"));
+        assert!(!row_html.contains("st--ok"), "{row_html}");
+        // The chip filters on it, and the address names the state `none`.
+        assert!(
+            html.contains(r#"href="/auth/settings/inbox?a=none""#),
+            "{html}"
         );
+        let query = Query::parse(&[("a".to_string(), "none".to_string())]).unwrap();
+        assert_eq!(query.alert, Some(AlertState::NoPhone));
+        let mut view = full_view(&rights, &query, &groups);
+        let mut data = sent(None);
+        data.alerts
+            .push(row(summary("n1", "infra", "Nobody", 0, 0), Origin::Account));
+        data.alerts.last_mut().unwrap().summary.targets = 0;
+        view.sent = Some(data);
+        let html = page(&view);
+        assert!(
+            html.contains(">Nobody<") && !html.contains(">Outage<"),
+            "{html}"
+        );
+        // The other alerts are not in this state.
+        assert_eq!(
+            AlertState::of(&summary("a", "infra", "t", 3, 0)),
+            AlertState::Received
+        );
+    }
+
+    #[test]
+    fn a_filter_that_keeps_nothing_says_so_and_does_not_say_the_period_is_empty() {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query {
+            alert: Some(AlertState::NoPhone),
+            ..Query::default()
+        };
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(html.contains("No alert for these filters."), "{html}");
+        assert!(!html.contains("No alert in this period."));
+        let plain = Query::default();
+        let mut view = full_view(&rights, &plain, &groups);
+        view.sent = Some(SentData {
+            alerts: Vec::new(),
+            ..sent(None)
+        });
+        assert!(page(&view).contains("No alert in this period."));
+    }
+
+    #[test]
+    fn one_group_and_no_alert_to_an_account_have_no_group_chips() {
+        let rights = all_rights();
+        let one = [groups().remove(0)];
+        let query = Query::default();
+        let mut view = full_view(&rights, &query, &one);
+        view.sent = Some(SentData {
+            alerts: vec![row(summary("a1", "infra", "Only", 3, 0), Origin::Account)],
+            ..sent(None)
+        });
+        let html = page(&view);
+        assert!(!html.contains("?g=infra"), "{html}");
+        // Two groups keep their chips.
+        let html = page(&full_view(&rights, &query, &groups()));
+        assert!(html.contains("?g=crit"));
+    }
+
+    #[test]
+    fn a_refused_form_shows_the_popup_open_with_the_title_the_target_and_the_reason() {
+        let rights = Rights {
+            send_user: true,
+            ..all_rights()
+        };
+        let (query, groups) = (Query::default(), groups());
+        let users = [
+            UserChoice {
+                login: "alice".into(),
+                phones: 2,
+            },
+            UserChoice {
+                login: "dora".into(),
+                phones: 0,
+            },
+        ];
+        // A group form that failed: the group is selected and the title is there.
+        let mut view = full_view(&rights, &query, &groups);
+        view.users = &users;
+        view.send_error = Some(SendError {
+            code: "limited",
+            to: "group:crit",
+            title: "Disk <full>",
+            key: "k9",
+        });
+        let html = page(&view);
+        assert!(
+            html.contains(r#"<details class="pop" open><summary class="button button--primary""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"value="Disk &lt;full&gt;""#) && !html.contains("Disk <full>"));
+        assert!(html.contains(r#"<option value="group:crit" data-members="1" selected>"#));
+        assert!(html.contains(r#"role="alert" data-send-error="limited">The limit of alerts"#));
+        assert!(
+            html.contains(r#"id="rcpt-group" checked"#),
+            "the group form shows"
+        );
+        assert!(
+            html.contains("11/128") || html.contains("12/128"),
+            "the counter starts at the length"
+        );
+        // One message, in the form that failed only.
+        assert_eq!(html.matches("data-send-error").count(), 1);
+        // A form for an account that failed: the account is checked and its form shows.
+        view.send_error = Some(SendError {
+            code: "no_phone",
+            to: "user:alice",
+            title: "Call me",
+            key: "k9",
+        });
+        let html = page(&view);
+        assert!(
+            html.contains(r#"id="rcpt-user" checked"#)
+                && !html.contains(r#"id="rcpt-group" checked"#)
+        );
+        assert!(
+            html.contains(r#"value="user:alice" data-phones="2" required checked>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-send-error="no_phone""#));
+        // The key of the form stays for a second try.
+        view.idempotency_key = "k9";
+        assert!(page(&view).contains(r#"name="key" value="k9""#));
+        // Without an error nothing is open.
+        view.send_error = None;
+        let html = page(&view);
+        assert!(!html.contains("pop\" open") && !html.contains("data-send-error"));
+    }
+
+    #[test]
+    fn the_two_forms_of_the_popup_share_one_cell_so_the_popup_keeps_its_height() {
+        let css = include_str!("../../web/settings.css");
+        let at = css.find(".composer--both .rcptForm {").unwrap();
+        let rule = &css[at..at + 200];
+        assert!(
+            rule.contains("grid-row: 2") && rule.contains("grid-column: 1"),
+            "{rule}"
+        );
+        assert!(rule.contains("visibility: hidden"));
+    }
+
+    #[test]
+    fn a_page_that_says_no_has_the_frame_and_a_way_back() {
+        let html = status_page(&frame(), "Forbidden <");
+        assert!(html.contains("Forbidden &lt;") && !html.contains("Forbidden <"));
+        assert!(html.contains(r#"href="/auth/settings/inbox">Inbox</a>"#));
+        assert!(
+            html.contains("contentTabs"),
+            "the frame of the settings pages"
+        );
+    }
+
+    #[test]
+    fn a_time_of_the_page_may_lose_its_year_in_the_browser() {
+        let (rights, query, groups) = (all_rights(), Query::default(), groups());
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(
+            html.contains(r#"<time data-short="1" class="when""#),
+            "{html}"
+        );
+        // The column keeps the full width without script.
+        assert!(html.contains(r#"<col class="wtime">"#) && !html.contains("w152"));
     }
 
     #[test]
@@ -2281,11 +2548,8 @@ mod tests {
             "close keeps the place"
         );
         assert_eq!(html.matches("data-detail=").count(), 1);
-        assert!(
-            html.contains("Sent by</b> key ci-deploy")
-                || html.contains("Sent by</b> an account")
-                || html.contains("Sent by</b>")
-        );
+        // The row has the sender: the detail does not repeat it.
+        assert!(!html.contains("Sent by</b>"));
     }
 
     #[test]

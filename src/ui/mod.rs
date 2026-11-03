@@ -979,6 +979,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     services: std::mem::take(&mut users.services),
                     features: users.features.take(),
                     token: "demo",
+                    refused: None,
                 },
             )
         }

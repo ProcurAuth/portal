@@ -1,5 +1,6 @@
-// Checks the rule "any right on a service opens the service" in the editor of grants, in a real
-// browser. Run it with tools/dev/ui-check.sh. The portal is the demo (demo/up.sh): the check needs
+// Checks the editor of grants in a real browser: the rule "any right on a service opens the service",
+// the focus and the scroll after a tick, the note "Access off" with its Undo button, the live region,
+// the keys of the tree, and a few rules of the pages of the Inbox. Run it with tools/dev/ui-check.sh. The portal is the demo (demo/up.sh): the check needs
 // the services ClickHouse Dash, Notes, Wiki and Big database, and the superadmin.
 //
 // Environment:
@@ -9,8 +10,12 @@
 //   UI_CHECK_KEY_LOGIN   login of an account that can make keys (optional, for the form of a key)
 //   UI_CHECK_KEY_PASSWORD  its password
 //   UI_CHECK_SHOTS       a directory for the screenshots (optional)
+//   UI_CHECK_INBOX       1: run the checks of the Inbox pages too. They send alerts. They need the
+//                        accounts carol (no phone, no right of the Inbox) and bob (receives only):
+//                        UI_CHECK_CAROL_PASSWORD and UI_CHECK_BOB_PASSWORD.
 //
-// The check writes nothing to the portal: it never clicks Save.
+// The editor checks write nothing to the portal: they never click Save. The Inbox checks send alerts,
+// so run them against a portal that is yours (UI_CHECK_INBOX=1).
 
 const { chromium } = require("playwright");
 
@@ -115,6 +120,9 @@ async function newUser(browser) {
   await node(page, "host:ch-eu1");
   await tick(page, "query.run.read");
   await expectOpen(page, CH, CH_ID, "1 permission", "resource");
+  await page.waitForTimeout(100);
+  const said = await page.locator("[data-ge-live]").innerText();
+  check("the live region says that the service opened", said.includes("can open"), said);
 
   // A right on a sub-resource: the databases come from the options route.
   await page.waitForSelector('.ge__svc.is-expanded .ge__node[data-path="host:ch-eu1/database:default"]');
@@ -128,23 +136,61 @@ async function newUser(browser) {
   await page.locator('.ge__svc.is-expanded input[data-group-box="query"]').check();
   await expectOpen(page, CH, CH_ID, "5 permissions", "group box");
 
-  // The switch off takes the rights with it, and says how many.
-  await row(page, CH).locator("input[data-switch]").uncheck();
+  // The service has the switch: the pane has no second control for the same right.
+  check("no row access in the pane", (await page.locator('.ge__svc.is-expanded input[data-action="access"]').count()) === 0, "row found");
+
+  // The keyboard: a tick keeps the focus on its box.
+  const key = page.locator('.ge__svc.is-expanded input[data-action="query.export"]');
+  await key.focus();
+  await page.keyboard.press("Space");
+  let active = await page.evaluate(() => (document.activeElement && document.activeElement.dataset.action) || "");
+  check("a tick with the keyboard keeps the focus on the box", active === "query.export", active);
+  // The same for the switch: the keyboard turns it off, and the note shows.
+  const gate = row(page, CH).locator("input[data-switch]");
+  const count = (await fields(page)).length - 1;
+  await gate.focus();
+  await page.keyboard.press("Space");
+  active = await page.evaluate(() => (document.activeElement && document.activeElement.dataset.switch) || "");
+  check("a tick of the switch keeps the focus on the switch", active === CH_ID, active);
+
+  // The tree: one stop of the key Tab, and the arrow keys move.
+  const stops = await page.locator('.ge__svc.is-expanded .ge__node[tabindex="0"]').count();
+  check("the tree has one stop of the key Tab", stops === 1, String(stops));
+  const names = await page.locator(".ge__svc.is-expanded .ge__tree").evaluate((el) => el.getAttribute("aria-label"));
+  check("the tree has a name", !!names, String(names));
+  await page.locator('.ge__svc.is-expanded .ge__node[data-path=""]').focus();
+  await page.keyboard.press("ArrowDown");
+  active = await page.evaluate(() => (document.activeElement && document.activeElement.dataset.path) || "none");
+  check("ArrowDown moves to the next row of the tree", active !== "" && active !== "none", active);
+
+  // The switch off takes the rights with it, says how many, and the note stays with a button Undo.
   s = await state(page, CH);
-  check("switch off: the row says Access off and the count", !s.on && s.info.includes("Access off") && s.info.includes("5 permissions removed"), JSON.stringify(s));
+  check("switch off: the row says Access off and the count", !s.on && s.info.includes("Access off") && s.info.includes(`${count} permissions removed`), JSON.stringify(s));
   check("switch off: no field is sent", (await fields(page)).length === 0, (await fields(page)).join());
   await shot(page, "switch-off");
+  await page.waitForTimeout(5500);
+  s = await state(page, CH);
+  check("the note stays after 5 seconds", s.info.includes("Access off"), JSON.stringify(s));
+  check("the note has an Undo button", (await row(page, CH).locator("button[data-undo]").count()) === 1, s.info);
+  const said2 = await page.locator("[data-ge-live]").innerText();
+  check("the live region says the note", said2.includes("Access off"), said2);
 
-  // The switch on again brings nothing back.
-  await row(page, CH).locator("input[data-switch]").check();
+  // Undo puts the grants back, and the focus goes to the switch.
+  await row(page, CH).locator("button[data-undo]").click();
+  s = await state(page, CH);
+  check("Undo: the switch and the rights are back", s.on && (await fields(page)).length === count + 1, JSON.stringify(s) + (await fields(page)).length);
+  active = await page.evaluate(() => (document.activeElement && document.activeElement.dataset.switch) || "");
+  check("Undo: the focus is on the switch", active === CH_ID, active);
+
+  // A new change takes the note away. The switch on again brings only access.
+  await gate.uncheck();
+  await tick(page, "query.export");
+  s = await state(page, CH);
+  check("a new change takes the note away", !s.info.includes("Access off"), s.info);
+  await gate.uncheck();
+  await gate.check();
   s = await state(page, CH);
   check("switch on again: only access is back", s.on && (await fields(page)).join() === `access on service:${CH_ID}`, JSON.stringify(s));
-
-  // The row `access` of the pane works as the switch.
-  await tick(page, "query.export");
-  await tick(page, "access", false);
-  s = await state(page, CH);
-  check("row access unticked: the switch is off and the rights are gone", !s.on && (await fields(page)).length === 0, JSON.stringify(s) + (await fields(page)).join());
 
   // A table, four levels below the service (Big database).
   await expand(page, "Big database");
@@ -155,6 +201,24 @@ async function newUser(browser) {
   const first = await page.locator(".ge__svc.is-expanded .ge__act input[data-action]:not([disabled])").first().getAttribute("data-action");
   await tick(page, first);
   await expectOpen(page, "Big database", "bigdb", "1 permission", "table");
+
+  // The scroll of the list stays after a tick.
+  for (let n = 0; n < 30; n += 1) {
+    const closed = page.locator('.ge__svc.is-expanded .ge__chev[aria-expanded="false"]');
+    if (!(await closed.count())) break;
+    await closed.first().click();
+  }
+  const list = page.locator(".ge__svc.is-expanded .ge__list");
+  await list.evaluate((el) => (el.scrollTop = 200));
+  const before = await list.evaluate((el) => el.scrollTop);
+  const second = page.locator(".ge__svc.is-expanded .ge__act input[data-action]:not([disabled]):not(:checked)").nth(3);
+  await second.scrollIntoViewIfNeeded();
+  const moved = await list.evaluate((el) => el.scrollTop);
+  await second.click();
+  const after = await list.evaluate((el) => el.scrollTop);
+  check("the scroll of the list stays after a tick", before > 0 && after === moved, `${before} ${moved} ${after}`);
+  const width = await page.locator(".ge__svc.is-expanded .ge__list").evaluate((el) => el.scrollWidth - el.clientWidth);
+  check("the list of the actions has no horizontal scroll", width <= 0, String(width));
 
   // A right of the portal features adds no `access on service:portal`.
   await page.locator('.featBox input[data-cell-action="keys.own.read"]').check();
@@ -180,11 +244,128 @@ async function keyForm(browser) {
   await page.close();
 }
 
+// ---- the pages of the Inbox. These checks send alerts: they need a portal that is yours.
+
+async function signIn(browser, user, password, path, viewport, scheme) {
+  const context = await browser.newContext({ viewport: viewport || { width: 1440, height: 900 }, colorScheme: scheme || "dark" });
+  const page = await context.newPage();
+  await page.goto(BASE + "/auth/login");
+  await page.fill("#login", user);
+  await page.fill("#password", password);
+  await page.click("button[type=submit]");
+  const response = await page.goto(BASE + path);
+  return { page, response };
+}
+
+function contrast(page, selector) {
+  return page.evaluate((sel) => {
+    const parse = (text) => text.match(/[\d.]+/g).map(Number);
+    const light = (rgb) => {
+      const [r, g, b] = rgb.map((v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const el = document.querySelector(sel);
+    const style = getComputedStyle(el);
+    const a = light(parse(style.color)), b = light(parse(style.backgroundColor));
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }, selector);
+}
+
+async function inbox(browser) {
+  const login = process.env.UI_CHECK_LOGIN || "admin";
+  const password = process.env.UI_CHECK_PASSWORD || "test";
+  const NEW = "details.pop > summary.button--primary";
+  for (const scheme of ["dark", "light"]) {
+    const { page } = await signIn(browser, login, password, "/auth/settings/inbox", { width: 1280, height: 800 }, scheme);
+    await page.click(NEW);
+    check(`${scheme}: the open button of New alert has a contrast of 4.5`, (await contrast(page, NEW)) >= 4.5, String(await contrast(page, NEW)));
+    const opened = await page.locator("details.pop[open]").count();
+    check(`${scheme}: New alert opens`, opened === 1, String(opened));
+    await page.keyboard.press("Escape");
+    check(`${scheme}: Escape closes New alert`, (await page.locator("details.pop[open]").count()) === 0, "still open");
+    const onButton = await page.evaluate(() => document.activeElement && document.activeElement.matches("summary.button--primary"));
+    check(`${scheme}: the focus goes back to the button`, onButton, "elsewhere");
+    await page.click('summary[aria-label="Documentation for senders"]');
+    await page.keyboard.press("Escape");
+    check(`${scheme}: Escape closes the documentation`, (await page.locator("details.pop[open]").count()) === 0, "still open");
+    // The popup keeps its height and the title its place between the two recipients.
+    await page.click(NEW);
+    const box = async () =>
+      page.evaluate(() => {
+        const menu = document.querySelector("details.pop[open] .pop__menu").getBoundingClientRect();
+        const visible = Array.from(document.querySelectorAll("details.pop[open] input[name=title]")).find((el) => el.offsetParent);
+        return { h: Math.round(menu.height), y: Math.round(visible.getBoundingClientRect().top) };
+      });
+    const group = await box();
+    await page.click('label[for="rcpt-user"]');
+    const user = await box();
+    check(`${scheme}: the popup has the same height for a group and for an account`, group.h === user.h && group.y === user.y, JSON.stringify([group, user]));
+    await shot(page, `inbox-popup-${scheme}`);
+    if (scheme === "dark") {
+      // A refused form comes back open, with the title. The account carol has no phone.
+      await page.evaluate(() => {
+        const radio = document.querySelector('input[name="to"][value="user:carol"]');
+        radio.disabled = false;
+        radio.checked = true;
+      });
+      await page.fill("#send-user-form-title", "Keep this title");
+      await page.evaluate(() => document.querySelector(".rcptForm--user").dispatchEvent(new Event("input", { bubbles: true })));
+      await Promise.all([page.waitForNavigation(), page.click(".rcptForm--user button[type=submit]")]);
+      check("a refused form keeps the popup open", (await page.locator("details.pop[open]").count()) === 1, "closed");
+      const typed = await page.locator("#send-user-form-title").inputValue();
+      check("a refused form keeps the title", typed === "Keep this title", typed);
+      const why = await page.locator("[data-send-error]").innerText();
+      check("a refused form says why", why.includes("no phone"), why);
+      check("a refused form shows no banner that moves the page", (await page.locator(".uiBanner").count()) === 0, "banner");
+      await shot(page, "inbox-refused");
+      // A group with no phone: the alert is made and has its own state.
+      await page.goto(BASE + "/auth/settings/inbox");
+      await page.click(NEW);
+      await page.click('label[for="rcpt-group"]');
+      await page.fill("#send-group-form-title", "Nobody is home");
+      await Promise.all([page.waitForNavigation(), page.click(".rcptForm--group button[type=submit]")]);
+      check("a new alert shows no banner", (await page.locator(".uiBanner").count()) === 0, "banner");
+      const state = await page.locator("tr[data-alert] .st--off").count();
+      check("an alert that no phone can receive is not a success", state >= 1 && (await page.locator('a.chip[href*="a=none"]').count()) === 1, String(state));
+      const years = await page.locator("tr[data-alert] time.when[data-short]").first().innerText();
+      check("a date of this year has no year", /^\d\d-\d\d \d\d:\d\d$/.test(years), years);
+      const cols = await page.evaluate(() => {
+        const cells = Array.from(document.querySelectorAll("tr[data-alert]")[0].children).map((el) => Math.round(el.getBoundingClientRect().width));
+        return { sentBy: cells[4], title: cells[3] };
+      });
+      check("the column Sent by keeps 128 px and the title has more", cols.sentBy === 128 && cols.title > cols.sentBy, JSON.stringify(cols));
+    }
+    await page.context().close();
+  }
+  // The pages that say no have the frame of the settings pages.
+  const { page: bad, response: bad400 } = await signIn(browser, login, password, "/auth/settings/inbox?p=bad");
+  check("the page 400 has the frame and a way back", bad400.status() === 400 && (await bad.locator(".empty a[href='/auth/settings/inbox']").count()) === 1, String(bad400.status()));
+  await shot(bad, "inbox-400");
+  await bad.context().close();
+  // carol has no right of the Inbox, and bob can receive only.
+  if (process.env.UI_CHECK_CAROL_PASSWORD) {
+    const { page: carol, response: no } = await signIn(browser, "carol", process.env.UI_CHECK_CAROL_PASSWORD, "/auth/settings/inbox");
+    check("the page 403 has the frame", no.status() === 403 && (await carol.locator(".empty").count()) >= 1, String(no.status()));
+    await carol.context().close();
+  } else console.log("skip  page 403: UI_CHECK_CAROL_PASSWORD is not set");
+  if (process.env.UI_CHECK_BOB_PASSWORD) {
+    const { page: bob } = await signIn(browser, "bob", process.env.UI_CHECK_BOB_PASSWORD, "/auth/settings/inbox", { width: 1440, height: 800 });
+    const width = await bob.locator(".zone").first().evaluate((el) => Math.round(el.getBoundingClientRect().width));
+    check("My phones uses the width of the page", width > 1000, String(width));
+    await shot(bob, "inbox-bob");
+    await bob.context().close();
+  } else console.log("skip  My phones: UI_CHECK_BOB_PASSWORD is not set");
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     await newUser(browser);
     await keyForm(browser);
+    if (process.env.UI_CHECK_INBOX === "1") await inbox(browser);
   } finally {
     await browser.close();
   }

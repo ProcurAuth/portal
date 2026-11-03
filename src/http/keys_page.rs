@@ -552,7 +552,32 @@ pub(super) async fn handle_keys(
     let Some(params) = query_parameters(uri) else {
         return bad_request();
     };
-    draw(state, &viewer, params, page, None).await
+    draw(state, &viewer, params, page, None, None).await
+}
+
+/// A form that the server refused because a right has no `access` on its service. The page draws
+/// the form again with the values that the person typed.
+pub(super) struct Refused {
+    pub service: String,
+    pub name: String,
+    pub expires_at: Option<String>,
+    pub grants: Vec<Grant>,
+}
+
+/// The form that `raw` holds, when the check refuses it for `access`.
+fn refused_for_access(
+    raw: &key_forms::RawForm,
+    ctx: &Context<'_>,
+    kind: KeyKind,
+) -> Option<Refused> {
+    let (grants, service) =
+        key_forms::grants_without_access(raw, ctx, key_forms::Holder::Key(kind))?;
+    Some(Refused {
+        service,
+        name: raw.name.clone(),
+        expires_at: raw.expires_at.clone(),
+        grants,
+    })
 }
 
 /// The text of a key that was just made: its name and its text, for the page of the creation.
@@ -569,6 +594,7 @@ async fn draw(
     params: std::collections::HashMap<String, String>,
     page: Page,
     made: Option<Made<'_>>,
+    refused: Option<Refused>,
 ) -> HttpResponse {
     let new = page == Page::New;
     let notice_code = params.get("s");
@@ -628,6 +654,8 @@ async fn draw(
     }
     let mut copy_name = String::new();
     let mut ticked: Vec<Grant> = Vec::new();
+    // The form that the server refused keeps what the person typed.
+    let typed_expiry = refused.as_ref().and_then(|r| r.expires_at.clone());
     let mut edit: Option<EditTarget> = None;
     if let Some(id) = copy.filter(|_| new) {
         if let Some(source) = state.users.key_by_id(id) {
@@ -663,6 +691,14 @@ async fn draw(
                 });
             }
             Err(code) => return refusal_redirect(code),
+        }
+    }
+    if let Some(r) = &refused {
+        ticked = r.grants.clone();
+        if let Some(target) = &mut edit {
+            target.name = r.name.clone();
+        } else {
+            copy_name = r.name.clone();
         }
     }
     if new && kind.is_none() {
@@ -701,9 +737,14 @@ async fn draw(
         csrf: &csrf,
         editor,
         pane,
-        expires_at: ui_keys::instant_text(now + i64::try_from(first_lifetime).unwrap_or(i64::MAX)),
+        expires_at: typed_expiry
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| {
+                ui_keys::instant_text(now + i64::try_from(first_lifetime).unwrap_or(i64::MAX))
+            }),
         max_lifetime,
         copy_name,
+        needs_access: refused.map(|r| r.service),
     };
     let frame = ui::Frame {
         logout_token: &logout_token,
@@ -711,8 +752,13 @@ async fn draw(
         inbox: inbox_page::tab_visible(state, viewer),
         superadmin: is_superadmin(viewer),
     };
-    let mut response = html_response(StatusCode::OK, ui_keys::keys_page(&frame, &view));
-    if made.is_some() {
+    let status = if view.needs_access.is_some() {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::OK
+    };
+    let mut response = html_response(status, ui_keys::keys_page(&frame, &view));
+    if made.is_some() || view.needs_access.is_some() {
         response.headers_mut().insert(
             HeaderName::from_static("cache-control"),
             HeaderValue::from_static("no-store"),
@@ -898,6 +944,19 @@ pub(super) async fn handle_keys_create(
     });
     let form = match checked {
         Ok(form) => form,
+        Err(key_forms::NEEDS_ACCESS) => {
+            let refused = with_context(state, owner.as_deref(), None, kind, |ctx| {
+                refused_for_access(&raw, ctx, kind)
+            });
+            if let Some(refused) = refused {
+                let params = std::collections::HashMap::from([(
+                    "kind".to_string(),
+                    kind.name().to_string(),
+                )]);
+                return draw(state, &viewer, params, Page::New, None, Some(refused)).await;
+            }
+            return new_key_refusal(key_forms::NEEDS_ACCESS, kind);
+        }
         Err(code) => return new_key_refusal(code, kind),
     };
     let now = unix_now();
@@ -960,6 +1019,7 @@ pub(super) async fn handle_keys_create(
             name: &form.name,
             text: &text,
         }),
+        None,
     )
     .await
 }
@@ -1030,6 +1090,16 @@ pub(super) async fn handle_keys_edit(
     });
     let form = match checked {
         Ok(form) => form,
+        Err(key_forms::NEEDS_ACCESS) => {
+            let refused = with_context(state, owner.as_deref(), Some(&old), key.kind, |ctx| {
+                refused_for_access(&raw, ctx, key.kind)
+            });
+            if let Some(refused) = refused {
+                let params = std::collections::HashMap::from([("id".to_string(), id.clone())]);
+                return draw(state, &viewer, params, Page::Edit, None, Some(refused)).await;
+            }
+            return refusal_redirect(key_forms::NEEDS_ACCESS);
+        }
         Err(code) => return refusal_redirect(code),
     };
     let caps = caps(state, now, owner.as_deref());

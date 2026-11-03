@@ -441,7 +441,7 @@ The commands are in the section "Build and release" of the README. The files are
 - **Resource type.** `inbox_group` is a group of recipients. A user as a target is a second type, `inbox_user`, added at step 3. It has no effect now.
 - **Wire and database.** A field `kind` in the frames and in the message table, with the value `alert`. The metrics carry the label `kind`.
 - **Keys.** Both kinds exist from step 1. The prefix `whk_` is reserved for a later kind.
-- **Page.** The toolbar has kind chips. Only Alert is on. Question and Approval are dashed and grey. The list of states has a dashed chip "Unanswered".
+- **Page.** A kind of message that does not exist has no chip. A later step adds the chip with the kind.
 
 ### 17.2 Step 2
 

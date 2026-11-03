@@ -288,6 +288,32 @@ pub fn check_grants(
     ctx: &Context<'_>,
     holder: Holder,
 ) -> Result<Vec<Grant>, &'static str> {
+    let grants = check_grants_apart(raw, ctx, holder)?;
+    if service_without_access(&grants).is_some() {
+        return Err(NEEDS_ACCESS);
+    }
+    Ok(grants)
+}
+
+/// The grants of a form that the check refuses with `NEEDS_ACCESS`, and the service that has no
+/// `access`. The page uses it to draw the form again with the grants that the person ticked.
+/// `None`: the check refuses the form for another reason, or accepts it.
+pub fn grants_without_access(
+    raw: &RawForm,
+    ctx: &Context<'_>,
+    holder: Holder,
+) -> Option<(Vec<Grant>, String)> {
+    let grants = check_grants_apart(raw, ctx, holder).ok()?;
+    let service = service_without_access(&grants)?.to_string();
+    Some((grants, service))
+}
+
+/// The check of `check_grants` without the rule of `access`.
+fn check_grants_apart(
+    raw: &RawForm,
+    ctx: &Context<'_>,
+    holder: Holder,
+) -> Result<Vec<Grant>, &'static str> {
     let mut grants = Vec::new();
     for (n, grant) in read_grants(raw)? {
         let limits = match raw.limits.get(&n) {
@@ -369,9 +395,6 @@ pub fn check_grants(
         {
             return Err(BAD_LIMITS);
         }
-    }
-    if service_without_access(&grants).is_some() {
-        return Err(NEEDS_ACCESS);
     }
     Ok(grants)
 }
@@ -964,6 +987,44 @@ mod tests {
             ]),
             Some("a".to_string())
         );
+    }
+
+    #[test]
+    fn the_refused_grants_and_the_service_come_back_for_the_page() {
+        let raw = read(
+            fields(&[
+                ("name", "n"),
+                ("grant0", "data.read on service:datastore/host:prod"),
+            ]),
+            false,
+        )
+        .unwrap();
+        let document = document();
+        let lookup = move |service: &str| (service == "datastore").then(|| Arc::clone(&document));
+        let exists = |service: &str| service == "datastore";
+        let ctx = Context {
+            now: NOW,
+            owner_grants: None,
+            max_lifetime: None,
+            document: &lookup,
+            service_exists: &exists,
+            old_grants: None,
+        };
+        let (grants, service) = grants_without_access(&raw, &ctx, Holder::Account).unwrap();
+        assert_eq!(service, "datastore");
+        assert_eq!(grants.len(), 1);
+        // A form that has the access is no case, and a form with another fault is none.
+        let ok = read(
+            fields(&[
+                ("grant0", "data.read on service:datastore/host:prod"),
+                ("grant1", "access on service:datastore"),
+            ]),
+            false,
+        )
+        .unwrap();
+        assert!(grants_without_access(&ok, &ctx, Holder::Account).is_none());
+        let bad = read(fields(&[("grant0", "x.y on service:ghost")]), false).unwrap();
+        assert!(grants_without_access(&bad, &ctx, Holder::Account).is_none());
     }
 
     #[test]

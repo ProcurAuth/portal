@@ -53,6 +53,17 @@
   }
   localTimes();
 
+  // A time with data-short drops the year when it is the current year: 11-03 14:03.
+  function shortYears() {
+    var nodes = document.querySelectorAll("time.when[data-short]");
+    var year = String(new Date().getFullYear()) + "-";
+    for (var i = 0; i < nodes.length; i += 1) {
+      var text = nodes[i].textContent;
+      if (text.indexOf(year) === 0) nodes[i].textContent = text.slice(year.length);
+    }
+  }
+  shortYears();
+
   // A form with data-gate: the submit buttons stay disabled until the browser finds the fields valid.
   function gateForm(form) {
     var buttons = Array.prototype.slice.call(form.querySelectorAll('[type="submit"]'));
@@ -132,6 +143,7 @@
 (function () {
   "use strict";
   var PANELS = "details.pop, details.ask";
+  // The open panels. Each selector of the list needs its own [open].
   var OPEN = "details.pop[open], details.ask[open]";
 
   function closeAll(except) {
@@ -147,16 +159,32 @@
     function (event) {
       var panel = event.target;
       if (!panel.matches || !panel.matches(PANELS) || !panel.open) return;
+      // A bulk action with no ticked row does not open, also from the keyboard.
+      if (panel.matches(".bulk__ask:not(.has-count)")) {
+        panel.removeAttribute("open");
+        return;
+      }
       closeAll(panel);
       // A popover gives the focus to its first field. A confirmation keeps it on its cross, so
       // that a second key press cannot confirm. The confirmation of a name asks for the name.
-      var target = panel.classList.contains("pop")
+      var failed = panel.querySelector("[data-send-error]");
+      var target = failed
+        ? failed.closest("form").querySelector('input[name="title"]')
+        : panel.classList.contains("pop")
         ? panel.querySelector("input:not([type=hidden]), select, textarea")
         : panel.querySelector(".ask__name");
       if (target) target.focus();
     },
     true
   );
+
+  // A send form that the server refused comes back open. The focus goes to its title, which the
+  // person can fix, with the reason read by the screen reader.
+  var refused = document.querySelector("[data-send-error]");
+  if (refused && refused.closest("form")) {
+    var again = refused.closest("form").querySelector('input[name="title"]');
+    if (again) again.focus();
+  }
 
   document.addEventListener("click", function (event) {
     if (event.target.closest && event.target.closest(PANELS)) return;
@@ -172,6 +200,17 @@
     if (summary) summary.focus();
   });
 
+  // The key Tab that leaves an open popover closes it: it does not stay over the page.
+  document.addEventListener("focusout", function (event) {
+    var panel = event.target.closest && event.target.closest("details.pop[open]");
+    if (!panel) return;
+    // The focus has moved when the timer runs. A click on a label moves it twice.
+    window.setTimeout(function () {
+      var now = document.activeElement;
+      if (panel.open && now && now !== document.body && !panel.contains(now)) panel.removeAttribute("open");
+    }, 0);
+  });
+
   // "Done" in the popover of an enrollment code: the code leaves the page. Without script the link
   // loads the page again, and the code is gone too.
   document.addEventListener("click", function (event) {
@@ -180,7 +219,13 @@
     event.preventDefault();
     var pop = done.closest("[data-code-pop]");
     if (pop) pop.remove();
+    var add = document.querySelector('[aria-label="Add a phone"]');
+    if (add) add.focus();
   });
+
+  // The popover of a new enrollment code takes the focus: the person that made it reads it now.
+  var codeCopy = document.querySelector("[data-code-pop] .copy");
+  if (codeCopy) codeCopy.focus();
 
   function esc(id) {
     return window.CSS && window.CSS.escape ? window.CSS.escape(id) : id;
@@ -205,6 +250,11 @@
       summary.setAttribute("aria-disabled", n ? "false" : "true");
       summary.tabIndex = n ? 0 : -1;
       if (!n) control.removeAttribute("open");
+      var summary = control.querySelector("summary");
+      if (summary) {
+        summary.tabIndex = n ? 0 : -1;
+        summary.setAttribute("aria-disabled", n ? "false" : "true");
+      }
     }
     var all = document.querySelector('[data-bulk-all="' + esc(id) + '"]');
     if (all) {
@@ -240,16 +290,14 @@
    them its state after each change (the event `grants-state`). A click on a chip asks the editor to tick or
    to untick the right `inbox.receive` on the group (the event `group-chip`), so the chip and the column
    Receive of the editor always show the same grant. The chips are buttons that the markup disables:
-   without script they only show the state. The summary lists what the ticked rights allow, with the calls
-   of the API of the inbox. */
+   without script they only show the state. The aside of an API key lists the calls of the API of the inbox
+   that the ticked rights allow. */
 (function () {
   "use strict";
   var chips = document.querySelectorAll("[data-group-chip]");
-  var summary = document.querySelector("[data-summary]");
   var calls = document.querySelector("[data-calls]");
-  if (!chips.length && !summary) return;
+  if (!chips.length && !calls) return;
   var editor = document.querySelector(".grantEditor");
-  var WINDOW_NAMES = { second: "second", minute: "minute", hour: "hour", day: "day" };
 
   Array.prototype.forEach.call(chips, function (chip) {
     chip.disabled = false;
@@ -281,21 +329,6 @@
     });
   }
 
-  function labelsOf(feature, held, action) {
-    var names = {};
-    feature.nodes.forEach(function (n) {
-      if (n.kind === "inbox_group") names[n.path] = n.label;
-    });
-    if (holds(held, action, "")) return ["every group"];
-    return held
-      .filter(function (item) {
-        return item.action === action && names[item.path];
-      })
-      .map(function (item) {
-        return names[item.path];
-      });
-  }
-
   function groupIds(feature, held, action) {
     if (holds(held, action, "")) return ["{group}"];
     return held
@@ -307,42 +340,11 @@
       });
   }
 
-  function setText(name, text) {
-    var cell = summary.querySelector('[data-s="' + name + '"]');
-    if (cell) cell.textContent = text;
-  }
-
-  function updateSummary(feature, held) {
-    var actions = {};
-    feature.actions.forEach(function (a) {
-      actions[a.name] = true;
-    });
-    // A row of a right that the document does not have is absent.
-    [["send", "alert.send"], ["read", "alert.read"], ["user", "alert.send_user"], ["limit", "alert.send"]].forEach(function (pair) {
-      var row = summary.querySelector('[data-s-row="' + pair[0] + '"]');
-      if (row && !actions[pair[1]]) row.parentNode.removeChild(row);
-    });
-    var send = labelsOf(feature, held, "alert.send");
-    var read = labelsOf(feature, held, "alert.read");
+  function updateCalls(feature, held) {
+    if (!calls) return;
     var toUser = held.some(function (item) {
       return item.action === "alert.send_user";
     });
-    setText("send", send.length ? send.join(", ") : "no group");
-    setText("read", read.length ? read.join(", ") : "no group");
-    setText("user", toUser ? "yes, to any account" : "no");
-    var budget = held.filter(function (item) {
-      return item.action === "access" && item.path === "";
-    })[0];
-    var windows = budget && budget.limits && typeof budget.limits.alerts === "object" ? budget.limits.alerts : {};
-    var parts = Object.keys(WINDOW_NAMES)
-      .filter(function (w) {
-        return windows[w];
-      })
-      .map(function (w) {
-        return windows[w] + " alerts each " + WINDOW_NAMES[w];
-      });
-    setText("limit", parts.length ? parts.join(", ") : "none");
-    if (!calls) return;
     var lines = [];
     var sendIds = groupIds(feature, held, "alert.send");
     if (sendIds.length) {
@@ -367,7 +369,7 @@
   document.addEventListener("grants-state", function (event) {
     var detail = event.detail;
     updateChips(detail.held);
-    if (summary) updateSummary(detail.feature, detail.held);
+    updateCalls(detail.feature, detail.held);
   });
 })();
 
@@ -511,6 +513,13 @@
     }
     var formId = root.dataset.form || "";
 
+    // What the editor did that the person did not tick. The row of a service shows it until the next
+    // change, and a screen reader reads it from the live region.
+    var live = root.querySelector("[data-ge-live]");
+    var spoken = [];
+    var notes = {};
+    var liveTimer = null;
+
     // The ticked grants. A limit value is the text that the field holds. A locked grant comes from
     // the configuration: the editor shows it and does not change it.
     var ticked = new Map();
@@ -557,6 +566,8 @@
     Array.from(ticked.values()).forEach(function (item) {
       if (item.action !== "access" && hasSwitch(item.service)) openService(item.service);
     });
+    // The page loads with this state: the live region says nothing about it.
+    spoken = [];
     var saveButtons = document.querySelectorAll("[data-save]");
     function updateSave() {
       var dirty = signature() !== baseline;
@@ -691,18 +702,34 @@
       return !(data.features && serviceId === data.features.id);
     }
 
-    // What the row of a service says for a moment after a change that the person did not tick.
-    var notes = {};
-    function say(serviceId, text) {
-      var note = notes[serviceId];
-      if (note) window.clearTimeout(note.timer);
-      notes[serviceId] = {
-        text: text,
-        timer: window.setTimeout(function () {
-          delete notes[serviceId];
-          renderList();
-        }, 5000),
-      };
+    // A change that the person makes starts here: the notes of the change before go.
+    function begin() {
+      notes = {};
+      spoken = [];
+    }
+
+    function nameOf(serviceId) {
+      var svc = serviceById(serviceId);
+      return svc ? svc.name : serviceId;
+    }
+
+    // The note of a row: it stays until the next change. `undo` holds the grants that the change
+    // removed, so that the button Undo can put them back.
+    function say(serviceId, text, undo) {
+      notes[serviceId] = { text: text, undo: undo || null };
+      spoken.push(nameOf(serviceId) + ": " + text);
+    }
+
+    // The live region says the notes and the services that opened by themselves.
+    function speak() {
+      if (!live || !spoken.length) return;
+      var text = spoken.join(". ");
+      spoken = [];
+      live.textContent = "";
+      window.clearTimeout(liveTimer);
+      liveTimer = window.setTimeout(function () {
+        live.textContent = text;
+      }, 30);
     }
 
     // Every way to add or remove a grant of a service goes through this function. A right ticks the
@@ -729,6 +756,7 @@
       if (ticked.has(k)) return;
       if (!owns(serviceId, "access", "")) return;
       ticked.set(k, { action: "access", service: serviceId, path: "", limits: {} });
+      spoken.push(nameOf(serviceId) + ": can open");
     }
 
     // Untick `access`: the rights of the service go too, because they do nothing without it. A right
@@ -741,11 +769,31 @@
         say(serviceId, "Access stays on: a permission comes from the configuration file");
         return;
       }
+      var gate = ticked.get(keyOf(serviceId, "access", ""));
       rights.forEach(function (item) {
         ticked.delete(keyOf(serviceId, item.action, item.path));
       });
       ticked.delete(keyOf(serviceId, "access", ""));
-      if (rights.length) say(serviceId, "Access off · " + plural(rights.length, "permission", "permissions") + " removed");
+      if (rights.length) {
+        say(serviceId, "Access off · " + plural(rights.length, "permission", "permissions") + " removed", {
+          items: gate ? rights.concat([gate]) : rights,
+        });
+      }
+    }
+
+    // Undo of "Access off": the grants that the switch removed come back, the switch too.
+    function undoClose(serviceId) {
+      var note = notes[serviceId];
+      begin();
+      if (!note || !note.undo) return;
+      var back = 0;
+      note.undo.items.forEach(function (item) {
+        var k = keyOf(item.service, item.action, item.path);
+        if (ticked.has(k)) return;
+        ticked.set(k, item);
+        if (!(item.action === "access" && item.path === "")) back += 1;
+      });
+      spoken.push(nameOf(serviceId) + ": access on · " + plural(back, "permission", "permissions") + " back");
     }
 
     // ---- the limit fields of a ticked action, on the line of the action
@@ -802,7 +850,7 @@
               return typeof item.limits[decl.name] === "string" ? item.limits[decl.name] : "";
             },
             "",
-            decl.range ? String(decl.range[1]) : ""
+            decl.range ? "\u2264 " + decl.range[1] : ""
           );
         }
         cell.appendChild(holder);
@@ -848,6 +896,8 @@
         var id = service().id;
         ticked.forEach(function (item) {
           if (item.service !== id) return;
+          // The switch of the service is its grant `access`: the row of the service shows it.
+          if (item.action === "access" && item.path === "" && hasSwitch(id)) return;
           if (path === "" || item.path === path || item.path.indexOf(path + "/") === 0) n += 1;
         });
         return n;
@@ -864,7 +914,10 @@
       side.appendChild(treeSearch);
       var treeList = node("ul", "ge__tree");
       treeList.setAttribute("role", "tree");
+      treeList.setAttribute("aria-label", "Resources");
       side.appendChild(treeList);
+      // The row of the tree that the key Tab reaches: the others have the tabindex -1.
+      var roving = "";
       var main = node("div", "ge__main");
       var bar = node("div", "ge__bar");
       var title = node("strong", "ge__title");
@@ -878,6 +931,8 @@
       var allButton = node("button", "segmented__option is-active", "All");
       var tickedButton = node("button", "segmented__option");
       allButton.type = tickedButton.type = "button";
+      allButton.setAttribute("aria-pressed", "true");
+      tickedButton.setAttribute("aria-pressed", "false");
       seg.appendChild(allButton);
       seg.appendChild(tickedButton);
       bar.appendChild(title);
@@ -975,6 +1030,8 @@
         // focus gets it back.
         var focused = treeList.contains(document.activeElement) ? document.activeElement : null;
         var focusPath = focused && focused.classList.contains("ge__node") ? focused.dataset.path : null;
+        var scrolled = treeList.scrollTop;
+        treeList.setAttribute("aria-label", "Resources of " + svc.name);
         treeList.textContent = "";
         function row(item, depth) {
           var kids = tree.children[item.path] || [];
@@ -982,7 +1039,10 @@
           var isOpen = shown !== null || opened.has(item.path);
           var li = node("li", "ge__node" + (item.path === current ? " is-selected" : ""));
           li.setAttribute("role", "treeitem");
-          li.tabIndex = 0;
+          li.tabIndex = -1;
+          li.setAttribute("aria-level", String(depth + 1));
+          li.setAttribute("aria-selected", item.path === current ? "true" : "false");
+          if (kids.length || more) li.setAttribute("aria-expanded", isOpen ? "true" : "false");
           li.dataset.path = item.path;
           li.style.paddingLeft = 6 + depth * 14 + "px";
           var twist = node("span", "ge__twist");
@@ -1016,7 +1076,7 @@
               var cursor = next[[svc.id, item.path, t.name, ""].join("\u0001")];
               if (cursor) {
                 var li2 = node("li", "ge__more", "Show more " + t.name);
-                li2.tabIndex = 0;
+                li2.tabIndex = -1;
                 li2.setAttribute("role", "button");
                 li2.dataset.path = item.path;
                 li2.dataset.type = t.name;
@@ -1033,10 +1093,21 @@
           }
         }
         row(tree.byPath[""], 0);
+        if (shown !== null && treeList.querySelectorAll(".ge__node").length === 1 && !tree.byPath[""].pending) {
+          treeList.appendChild(node("li", "ge__note", "No resource matches"));
+        }
+        treeList.scrollTop = scrolled;
+        // One row takes the key Tab: the row that had it, else the chosen row, else the first.
+        var nodes = Array.prototype.slice.call(treeList.querySelectorAll(".ge__node"));
+        var byPath = function (path) {
+          return nodes.filter(function (el) {
+            return el.dataset.path === path;
+          })[0];
+        };
+        var stop = byPath(focusPath !== null ? focusPath : roving) || byPath(current) || nodes[0];
+        if (stop) stop.tabIndex = 0;
         if (focusPath !== null) {
-          var back = Array.prototype.find.call(treeList.querySelectorAll(".ge__node"), function (el) {
-            return el.dataset.path === focusPath;
-          });
+          var back = byPath(focusPath);
           if (back) back.focus();
         }
       }
@@ -1052,6 +1123,8 @@
         actList.textContent = "";
         var rows = svc.actions.filter(function (a) {
           if (!applies(a, item)) return false;
+          // The switch of the service is this grant: the row of the service has it already.
+          if (a.name === "access" && hasSwitch(svc.id)) return false;
           return owns(svc.id, a.name, item.path) || ticked.has(keyOf(svc.id, a.name, item.path));
         });
         var available = rows.length;
@@ -1085,10 +1158,13 @@
           var closed = (closedByDefault !== toggledGroups.has(item.path + "|" + name)) && !text;
           var header = node("div", "ge__group");
           header.dataset.group = name;
-          header.tabIndex = 0;
-          header.setAttribute("role", "button");
-          header.setAttribute("aria-expanded", closed ? "false" : "true");
-          header.appendChild(icon(closed ? "chevron-right" : "chevron-down"));
+          var chev = node("button", "ge__chev");
+          chev.type = "button";
+          chev.dataset.group = name;
+          chev.setAttribute("aria-expanded", closed ? "false" : "true");
+          chev.setAttribute("aria-label", "Actions of " + (name || "the service"));
+          chev.appendChild(icon(closed ? "chevron-right" : "chevron-down"));
+          header.appendChild(chev);
           var master = node("input");
           master.type = "checkbox";
           master.dataset.groupBox = name;
@@ -1107,6 +1183,7 @@
             box.type = "checkbox";
             box.checked = isTicked;
             box.dataset.action = a.name;
+            box.setAttribute("aria-label", a.name);
             var held = ticked.get(keyOf(svc.id, a.name, item.path));
             var via = isTicked ? null : coveredBy(svc.id, a.name, item.path);
             if (held && held.locked) box.disabled = true;
@@ -1193,20 +1270,90 @@
         if (!li) return;
         var path = li.dataset.path;
         if (event.target.closest("[data-twist]")) {
-          if (opened.has(path)) opened.delete(path);
-          else {
-            opened.add(path);
-            var item = treeOf(service()).byPath[path];
-            if (item) loadChildren(service(), item);
-          }
-          current = path;
-          toggledGroups.clear();
+          twist(path, !opened.has(path));
         } else {
           select(path);
         }
         renderTree();
         renderActions();
       });
+      // Open or close a node of the tree, and choose it.
+      function twist(path, open) {
+        if (!open) opened.delete(path);
+        else {
+          opened.add(path);
+          var item = treeOf(service()).byPath[path];
+          if (item) loadChildren(service(), item);
+        }
+        current = path;
+        toggledGroups.clear();
+      }
+      // The keys of a tree. Up and Down move, Home and End go to the ends. Right opens a node, or
+      // goes to its first child. Left closes a node, or goes to its parent. Enter and Space choose.
+      treeList.addEventListener("focusin", function (event) {
+        var li = event.target.closest && event.target.closest(".ge__node");
+        if (!li) return;
+        roving = li.dataset.path;
+        Array.prototype.forEach.call(treeList.querySelectorAll(".ge__node"), function (el) {
+          el.tabIndex = el === li ? 0 : -1;
+        });
+      });
+      treeList.addEventListener("keydown", function (event) {
+        var el = event.target;
+        if (!el.matches || !el.matches(".ge__node, .ge__more")) return;
+        var items = Array.prototype.slice.call(treeList.querySelectorAll(".ge__node, .ge__more"));
+        var at = items.indexOf(el);
+        var level = function (x) {
+          return Number(x.getAttribute("aria-level")) || 0;
+        };
+        var go = null;
+        switch (event.key) {
+          case "ArrowDown":
+            go = items[at + 1];
+            break;
+          case "ArrowUp":
+            go = items[at - 1];
+            break;
+          case "Home":
+            go = items[0];
+            break;
+          case "End":
+            go = items[items.length - 1];
+            break;
+          case "ArrowRight":
+            if (el.getAttribute("aria-expanded") === "false") {
+              twist(el.dataset.path, true);
+              renderTree();
+              renderActions();
+            } else if (el.getAttribute("aria-expanded") === "true") {
+              go = items[at + 1];
+              if (go && level(go) <= level(el)) go = null;
+            }
+            break;
+          case "ArrowLeft":
+            if (el.getAttribute("aria-expanded") === "true" && shownAll() === false) {
+              twist(el.dataset.path, false);
+              renderTree();
+              renderActions();
+            } else {
+              for (var up = at - 1; up >= 0; up -= 1) {
+                if (level(items[up]) < level(el)) {
+                  go = items[up];
+                  break;
+                }
+              }
+            }
+            break;
+          default:
+            return;
+        }
+        event.preventDefault();
+        if (go) go.focus();
+      });
+      // A search shows every node open: a node cannot close then.
+      function shownAll() {
+        return treeSearch.value.trim() !== "";
+      }
       // A search asks the service too: the node that is chosen lists its children that match.
       var searching = null;
       treeSearch.addEventListener("input", function () {
@@ -1227,16 +1374,21 @@
         onlyTicked = false;
         allButton.classList.add("is-active");
         tickedButton.classList.remove("is-active");
+        allButton.setAttribute("aria-pressed", "true");
+        tickedButton.setAttribute("aria-pressed", "false");
         renderActions();
       });
       tickedButton.addEventListener("click", function () {
         onlyTicked = true;
         tickedButton.classList.add("is-active");
         allButton.classList.remove("is-active");
+        allButton.setAttribute("aria-pressed", "false");
+        tickedButton.setAttribute("aria-pressed", "true");
         renderActions();
       });
       actList.addEventListener("change", function (event) {
         var box = event.target;
+        if (box.dataset.action || box.dataset.groupBox !== undefined) begin();
         if (box.dataset.action) {
           setGrant(box.dataset.action, current, box.checked, service().id);
         } else if (box.dataset.groupBox !== undefined) {
@@ -1246,6 +1398,7 @@
           var item = treeOf(svc).byPath[current];
           svc.actions.forEach(function (a) {
             if (groupOf(a.name) !== group || !applies(a, item)) return;
+            if (a.name === "access" && hasSwitch(svc.id)) return;
             if (!(owns(svc.id, a.name, current) || ticked.has(keyOf(svc.id, a.name, current)))) return;
             if (text && a.name.toLowerCase().indexOf(text) < 0 && a.description.toLowerCase().indexOf(text) < 0) return;
             setGrant(a.name, current, box.checked, svc.id);
@@ -1261,10 +1414,18 @@
         var key = current + "|" + header.dataset.group;
         if (toggledGroups.has(key)) toggledGroups.delete(key);
         else toggledGroups.add(key);
+        // The list is drawn again: the button of the group gets the focus back.
+        var wasChev = event.target.closest(".ge__chev");
         renderActions();
+        if (wasChev) {
+          var again = Array.prototype.find.call(actList.querySelectorAll(".ge__chev"), function (el) {
+            return el.dataset.group === header.dataset.group;
+          });
+          if (again) again.focus();
+        }
       });
-      // Keyboard: Enter or Space on a row does what a click does. The list is drawn again after the
-      // action, so the focus goes back to the same row.
+      // Keyboard: Enter or Space on a row of the tree does what a click does. The list is drawn
+      // again after the action, so the focus goes back to the same row.
       function pressable(listEl, selector, same) {
         listEl.addEventListener("keydown", function (event) {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -1282,9 +1443,17 @@
       pressable(treeList, ".ge__node, .ge__more", function (el) {
         return (el.dataset.type || "") + "|" + el.dataset.path;
       });
-      pressable(actList, ".ge__group", function (el) {
-        return el.dataset.group;
-      });
+
+      // What a pane keeps when the page takes it out of the document and puts it back: the
+      // scroll of its two lists and the control that has the focus.
+      function identify(el) {
+        var d = el.dataset || {};
+        return {
+          tag: el.tagName,
+          cls: el.classList[0] || "",
+          id: [d.action, d.groupBox, d.group, d.path, d.type].join("|"),
+        };
+      }
 
       return {
         ui: ui,
@@ -1294,6 +1463,30 @@
         draw: function () {
           renderTree();
           renderActions();
+        },
+        save: function () {
+          var active = document.activeElement;
+          var inside = ui.contains(active);
+          return {
+            tree: treeList.scrollTop,
+            list: actList.scrollTop,
+            node: inside && (active === treeSearch || active === actSearch) ? active : null,
+            focus: inside && active.dataset ? identify(active) : null,
+          };
+        },
+        restore: function (kept) {
+          treeList.scrollTop = kept.tree;
+          actList.scrollTop = kept.list;
+          if (kept.node) {
+            kept.node.focus();
+            return;
+          }
+          if (!kept.focus) return;
+          var found = Array.prototype.find.call(ui.querySelectorAll("input, button, [tabindex]"), function (el) {
+            var now = identify(el);
+            return now.tag === kept.focus.tag && now.cls === kept.focus.cls && now.id === kept.focus.id && !el.disabled;
+          });
+          if (found) found.focus();
         },
       };
     }
@@ -1615,6 +1808,7 @@
 
       ui.addEventListener("change", function (event) {
         var box = event.target;
+        if (box.dataset.cellAction !== undefined || box.dataset.columnAction !== undefined) begin();
         if (box.dataset.cellAction !== undefined) {
           setGrant(box.dataset.cellAction, box.dataset.cellPath, box.checked, svc.id);
           if (!box.checked && box.dataset.cellPath === "") dropDependents(box.dataset.cellAction);
@@ -1753,11 +1947,21 @@
         }
         if (notes[svc.id]) info = notes[svc.id].text;
         head.appendChild(node("span", "ge__svcInfo", info));
+        if (notes[svc.id] && notes[svc.id].undo) {
+          var undo = node("button", "ge__undo", "Undo");
+          undo.type = "button";
+          undo.dataset.undo = svc.id;
+          head.appendChild(undo);
+        }
         if (data.owner !== null) {
           var same = node("button", "button button--small ge__same", "Same as mine");
           same.type = "button";
           same.dataset.same = svc.id;
           same.title = "Give this key all the permissions that you hold on " + svc.name;
+          // Nothing left to give: the owner holds nothing here, or each permission is ticked.
+          same.disabled = data.owner.every(function (g) {
+            return g[1] !== svc.id || ticked.has(keyOf(svc.id, g[0], g[2]));
+          });
           head.appendChild(same);
         }
         var toggle = node("button", groups ? "ib ge__toggle" : "button button--small ge__toggle");
@@ -1775,7 +1979,18 @@
         row.appendChild(head);
         if (expanded) {
           var body = node("div", "ge__svcBody");
-          body.appendChild(sourceLine(svc));
+          // The limits of `access` (the requests of the service) sit on the line of the switch,
+          // not in the list of the actions.
+          var top = node("div", "ge__svcTop");
+          top.appendChild(sourceLine(svc));
+          var gate = ticked.get(keyOf(svc.id, "access", ""));
+          var gateAction = actionOf(svc, "access");
+          if (!svc.feature && gate && gateAction && gateAction.limits.length) {
+            var gateLimits = node("span", "ge__limitsInline");
+            limitFields(gateLimits, gate, svc);
+            top.appendChild(gateLimits);
+          }
+          body.appendChild(top);
           body.appendChild(services.ui);
           row.appendChild(body);
         }
@@ -1803,12 +2018,39 @@
       }
     }
 
+    // The row of a service holds the controls that the person reaches first: the switch, the button
+    // "Same as mine", the button of the permissions and Undo. The list is drawn again after each
+    // change, so the control that had the focus gets it back.
+    function headFocus() {
+      var active = document.activeElement;
+      if (!active || !rowsEl.contains(active) || (services && services.ui.contains(active))) return null;
+      var d = active.dataset || {};
+      if (d.undo !== undefined) return { attr: "switch", value: d.undo };
+      var names = ["switch", "same", "toggle"];
+      for (var j = 0; j < names.length; j += 1) if (d[names[j]] !== undefined) return { attr: names[j], value: d[names[j]] };
+      return null;
+    }
+
+    function headRefocus(kept) {
+      var found = Array.prototype.find.call(rowsEl.querySelectorAll("input, button"), function (el) {
+        return el.dataset[kept.attr] === kept.value && !el.disabled;
+      });
+      if (found) found.focus();
+    }
+
     function render() {
+      var paneKept = services && expandedAt >= 0 ? services.save() : null;
+      var headKept = headFocus();
       renderList();
-      if (services && expandedAt >= 0) services.draw();
+      if (services && expandedAt >= 0) {
+        services.draw();
+        if (paneKept) services.restore(paneKept);
+      }
+      if (headKept) headRefocus(headKept);
       if (features) features.draw();
       syncFields();
       announce();
+      speak();
     }
 
     // ---- the group chips of the page and the summary of the key use the grants of the editor. The
@@ -1840,6 +2082,7 @@
       var path = receivePath(id);
       var item = ticked.get(keyOf(featureSvc.id, "inbox.receive", path));
       if (item && item.locked) return;
+      begin();
       setGrant("inbox.receive", path, wanted, featureSvc.id);
       render();
     });
@@ -1857,12 +2100,20 @@
     strip.addEventListener("change", function (event) {
       var box = event.target;
       if (box.dataset.switch === undefined) return;
+      begin();
       setGrant("access", "", box.checked, box.dataset.switch);
       render();
     });
     strip.addEventListener("click", function (event) {
+      var undo = event.target.closest("[data-undo]");
+      if (undo) {
+        undoClose(undo.dataset.undo);
+        render();
+        return;
+      }
       var same = event.target.closest("[data-same]");
       if (same) {
+        begin();
         var id = same.dataset.same;
         (data.owner || []).forEach(function (g) {
           if (g[1] === id) setGrant(g[0], g[2], true, id);
