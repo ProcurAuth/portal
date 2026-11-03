@@ -347,7 +347,9 @@ fn filter_bar(view: &AccessView, accounts: &Accounts) -> String {
     if query.mine {
         out.push_str(r#"<input type="hidden" name="mine" value="1">"#);
     }
-    out.push_str(r#"<button class="visually-hidden" type="submit">Apply the filters</button>"#);
+    out.push_str(
+        r#"<button class="visually-hidden" type="submit" tabindex="-1">Apply the filters</button>"#,
+    );
     out.push_str(&active_chips(view, accounts));
     let _ = write!(
         out,
@@ -361,7 +363,8 @@ fn clip(text: &str) -> String {
     text.chars().take(64).collect()
 }
 
-/// One chip for each filter that is on, with a cross that removes it, then "Clear".
+/// One chip for each filter of a field that is on, with a cross that removes it, then "Clear". A
+/// group that is on shows in the chip of the group.
 fn active_chips(view: &AccessView, accounts: &Accounts) -> String {
     let query = &view.query;
     let mut out = String::new();
@@ -387,14 +390,6 @@ fn active_chips(view: &AccessView, accounts: &Accounts) -> String {
         };
         chip("user", &clip(&query.user), &query.with_user(""), &go);
     }
-    if !query.group.is_empty() {
-        let name = view
-            .groups
-            .iter()
-            .find(|g| g.id == query.group)
-            .map_or_else(|| clip(&query.group), |g| g.name.clone());
-        chip("group", &name, &query.with_group(""), "");
-    }
     if !query.service.is_empty() {
         let name = clip(&service_label(accounts.catalog, &query.service));
         chip("service", &name, &query.with_service(""), "");
@@ -410,6 +405,30 @@ fn active_chips(view: &AccessView, accounts: &Accounts) -> String {
 }
 
 // The accounts ----------------------------------------------------------------------------------
+
+/// The class of a fixed column that holds `chars` characters of 13 px text and a cell padding.
+/// `floor` is the smallest class. The caller limits `chars`: a longer text is cut with an
+/// ellipsis, and the tooltip of the cell gives it in full.
+pub(super) fn col_class(chars: usize, floor: usize) -> &'static str {
+    const CLASSES: [(usize, &str); 11] = [
+        (88, "w88"),
+        (108, "w108"),
+        (120, "w120"),
+        (136, "w136"),
+        (152, "w152"),
+        (160, "w160"),
+        (176, "w176"),
+        (208, "w208"),
+        (240, "w240"),
+        (272, "w272"),
+        (320, "w320"),
+    ];
+    let need = chars * 8 + 12;
+    CLASSES
+        .iter()
+        .find(|(px, _)| *px >= floor && *px >= need)
+        .map_or("w320", |(_, class)| class)
+}
 
 /// The accounts that the filters keep.
 fn accounts_matching<'a>(
@@ -511,21 +530,34 @@ fn accounts_table(
     let inbox = !view.groups.is_empty();
     let features = keys || inbox;
     let opens = !keys && !inbox;
-    let mut out = String::from(r#"<table class="grid grid--users"><colgroup><col>"#);
+    // The column of the account fits the longest login and the badge. The next column takes the
+    // free width.
+    let widest = shown
+        .iter()
+        .map(|u| u.login.chars().count() + if u.file { 5 } else { 0 })
+        .max()
+        .unwrap_or(0)
+        .min(13);
+    let mut out = String::from(r#"<table class="grid grid--users"><colgroup>"#);
+    if inbox || opens {
+        let _ = write!(out, r#"<col class="{}">"#, col_class(widest, 88));
+    } else {
+        out.push_str("<col>");
+    }
     if inbox {
-        out.push_str(r#"<col class="w176">"#);
+        out.push_str("<col>");
     }
     if opens {
         out.push_str("<col>");
     }
     out.push_str(r#"<col class="w64">"#);
     if features {
-        out.push_str(r#"<col class="w88">"#);
+        out.push_str(r#"<col class="w80">"#);
     }
     if keys {
-        out.push_str(r#"<col class="w48 wide">"#);
+        out.push_str(r#"<col class="w48">"#);
     }
-    out.push_str(r#"<col class="w136"><col class="w48 wide"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
+    out.push_str(r#"<col class="w136"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
     if inbox {
         out.push_str(r#"<th scope="col">Groups</th>"#);
     }
@@ -545,9 +577,9 @@ fn accounts_table(
         out.push_str(r#"<th scope="col">Features</th>"#);
     }
     if keys {
-        out.push_str(r#"<th scope="col" class="r wide">Keys</th>"#);
+        out.push_str(r#"<th scope="col" class="r">Keys</th>"#);
     }
-    out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r wide" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
+    out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
     for user in shown {
         account_row(&mut out, view, accounts, user, service);
     }
@@ -568,7 +600,7 @@ fn account_row(
     let login = html_escape(&user.login);
     let _ = write!(
         out,
-        r#"<tr><th scope="row"><a class="rowLink" href="{}">{login}</a>"#,
+        r#"<tr><th scope="row" title="{login}"><a class="rowLink" href="{}">{login}</a>"#,
         html_escape(&user_path(&user.login))
     );
     if user.file {
@@ -641,7 +673,7 @@ fn account_row(
                 .iter()
                 .any(|s| s.id == id && !s.actions.is_empty());
             if rights == 0 {
-                out.push_str(r#"<span class="muted">none</span>"#);
+                out.push_str(r#"<span class="muted">-</span>"#);
             } else if publishes {
                 out.push_str(&plural(rights, "right", "rights"));
             } else {
@@ -651,7 +683,7 @@ fn account_row(
         None => {
             let s = summary(accounts.catalog, &accounts.services, user);
             if s.services == 0 {
-                out.push_str(r#"<span class="muted">none</span>"#);
+                out.push_str(r#"<span class="muted">-</span>"#);
             } else {
                 let _ = write!(out, "{} of {}", s.services, accounts.services.len());
             }
@@ -668,9 +700,11 @@ fn account_row(
     out.push_str("</td>");
     if keys || inbox {
         out.push_str("<td>");
+        let mut any = false;
         for (shown, feature) in [(keys, Feature::Keys), (inbox, Feature::Inbox)] {
             let (held, total) = feature_rights(user, accounts.features.as_ref(), feature);
             if shown && held > 0 {
+                any = true;
                 out.push_str(&icon_count(
                     &format!("{}: {held} of {total} rights", feature.name()),
                     feature.icon(),
@@ -678,12 +712,15 @@ fn account_row(
                 ));
             }
         }
+        if !any {
+            out.push_str(r#"<span class="muted">-</span>"#);
+        }
         out.push_str("</td>");
     }
     if keys {
         let _ = write!(
             out,
-            r#"<td class="r num wide{}">{}</td>"#,
+            r#"<td class="r num{}">{}</td>"#,
             if user.keys == 0 { " muted" } else { "" },
             if user.keys == 0 {
                 "-".to_string()
@@ -699,7 +736,7 @@ fn account_row(
     let failed = user.activity.failed_30d;
     let _ = write!(
         out,
-        r#"<td class="r num">{last}</td><td class="r num wide">{}</td><td class="r num{}">{failed}</td></tr>"#,
+        r#"<td class="r num">{last}</td><td class="r num">{}</td><td class="r num{}">{failed}</td></tr>"#,
         user.activity.sessions_30d,
         if failed > 0 { " danger" } else { "" },
     );
@@ -793,7 +830,7 @@ mod tests {
             "alice opens two of the four services"
         );
         assert!(
-            accounts.contains(r#"<span class="muted">none</span>"#),
+            accounts.contains(r#"<span class="muted">-</span>"#),
             "carol"
         );
         assert!(
@@ -807,7 +844,7 @@ mod tests {
         );
         assert!(accounts.contains(r#"aria-label="Inbox: 1 of 7 rights""#));
         assert!(
-            accounts.contains(r#"<td class="r num wide">3</td>"#),
+            accounts.contains(r#"<td class="r num">3</td>"#),
             "the keys of alice"
         );
         assert!(accounts.contains(r#"<td class="r num danger">2</td>"#));
@@ -1065,8 +1102,7 @@ mod tests {
         let html = page(&v);
         let keys = zone_of(&html, "keys-title");
         assert!(keys.contains("No key matches these filters."));
-        assert!(keys
-            .contains("A key holds the rights of a service or the rights of a group, not both."));
+        assert!(!keys.contains("not both"), "no help sentence");
         assert!(keys.contains(r#"<a href="/auth/settings">Clear</a>"#));
         // A user that does not exist, a group that does not exist, a service that does not exist:
         // empty lists, never an error.
@@ -1109,7 +1145,8 @@ mod tests {
             "{keys}"
         );
         assert!(keys.contains(r#"aria-label="MCP key: for agents 1""#));
-        assert!(keys.contains(r#"<a class="chip is-on" href="/auth/settings?user=alice" aria-current="true">All<span class="num">2</span></a>"#), "{keys}");
+        // No chip "All": it would repeat the count of the list and filter nothing.
+        assert!(!keys.contains(">All<"), "{keys}");
         // The chip of a kind is a link that keeps the filters, and a second click removes it.
         assert!(keys.contains(r#"href="/auth/settings?user=alice&amp;k=api""#));
         let mut v = view(&cat);
@@ -1128,6 +1165,30 @@ mod tests {
         let keys = zone_of(&html, "keys-title");
         assert!(keys.contains("k1-key") && keys.contains("k2-key") && !keys.contains("k3-key"));
         assert!(keys.contains(r#"aria-label="My keys 2""#));
+        // The chips keep their place when the filters keep no key of a kind: the chip stays, dimmed
+        // and with no link, and the chip "mine" stays too.
+        let mut v = view(&cat);
+        v.query.user = "nobody".into();
+        let html = page(&v);
+        let keys = zone_of(&html, "keys-title");
+        assert!(
+            keys.contains(r#"<span class="chip chip--static is-zero" aria-disabled="true" aria-label="API key: for services and webhooks 0""#),
+            "{keys}"
+        );
+        assert!(keys.contains(r#"aria-label="My keys 0""#), "{keys}");
+        // One kind in the list: a chip of a kind would filter nothing, so it is absent.
+        let mut one = view(&cat);
+        one.keys
+            .as_mut()
+            .unwrap()
+            .lines
+            .retain(|l| l.kind == Some(KeyKind::Api));
+        let html = page(&one);
+        let keys = zone_of(&html, "keys-title");
+        assert!(
+            !keys.contains(r##"<span class="st--off"><svg class="icon" aria-hidden="true"><use href="#i-webhook"/>"##),
+            "{keys}"
+        );
         let mut own = view(&cat);
         own.keys.as_mut().unwrap().all = false;
         own.keys.as_mut().unwrap().lines.retain(|l| l.mine);

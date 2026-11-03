@@ -51,6 +51,10 @@
   white-space: nowrap;
 }
 
+.contentTabs__tab:focus-visible {
+  outline-offset: -2px;
+}
+
 .contentTabs__tab:hover {
   color: var(--text);
 }
@@ -412,7 +416,7 @@ time.when {
 
 .uiInput::placeholder {
   color: var(--muted);
-  opacity: 0.8;
+  opacity: 1;
 }
 
 .uiInput:hover:not(:focus):not(:disabled) {
@@ -1162,6 +1166,22 @@ input.keyText {
   width: 180px;
 }
 
+.grid col.w208 {
+  width: 208px;
+}
+
+.grid col.w240 {
+  width: 240px;
+}
+
+.grid col.w272 {
+  width: 272px;
+}
+
+.grid col.w320 {
+  width: 320px;
+}
+
 .grid tbody tr {
   position: relative;
 }
@@ -1226,6 +1246,15 @@ input.keyText {
 .grid .statusIcon .icon {
   width: 14px;
   height: 14px;
+}
+
+.grid th .statusIcon {
+  margin-left: 4px;
+}
+
+/* The cell of an icon button keeps its whole click area. */
+.grid td:has(> .ib) {
+  padding: 0 2px;
 }
 
 .grid a:not(.rowLink) {
@@ -1799,6 +1828,20 @@ input.keyText {
   font-size: 12px;
 }
 
+/* A chip that is a fact, not a control: no link, no hover. With no row to filter it is dimmed. */
+.settings .chip.chip--static,
+.settings .chip.chip--static:hover {
+  cursor: default;
+}
+
+.settings .chip.chip--static:not(.is-on):hover {
+  color: var(--muted);
+}
+
+.settings .chip.is-zero {
+  opacity: 0.45;
+}
+
 .chip .st--off {
   color: var(--muted);
 }
@@ -1852,6 +1895,7 @@ input.keyText {
 
 /* The zone "Sent": the graph does not scroll, the list does. */
 .zone--above {
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr);
 }
 
@@ -2460,6 +2504,7 @@ input.keyText {
   display: inline-grid;
   place-items: center;
   color: var(--muted);
+  vertical-align: middle;
 }
 
 .kindIcon .icon,
@@ -2522,18 +2567,6 @@ input.keyText {
 
 /* The tab Access: the accounts and the keys side by side, under one row of filters ------------ */
 
-/* Columns that need room show from 1400 px. Below it, the facts are in a tooltip or on the page of
-   the account. */
-.wide {
-  display: none;
-}
-
-@media (min-width: 1400px) {
-  .wide {
-    display: revert;
-  }
-}
-
 .shell .settings--fill > .access {
   flex: 1 1 auto;
   min-height: 0;
@@ -2560,13 +2593,22 @@ input.keyText {
   min-width: 480px;
 }
 
-/* Under 1200 px the lists stack, and each list scrolls inside. */
+/* Under 1400 px the lists stack and share the height, so no column is hidden. Under 1200 px each
+   list takes up to 60% of the height and the page scrolls. */
+@media (max-width: 1399px) {
+  .access:not(.access--1) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1199px) {
   .shell .settings--fill > .access {
     flex: none;
   }
 
-  .access {
+  .access,
+  .access:not(.access--1) {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: none;
   }
@@ -2722,6 +2764,17 @@ input.keyText {
   display: inline-flex;
 }
 
+/* A long name of a group is cut inside the cell. The tooltip gives it in full. */
+.grid td.tagsCell .tags {
+  max-width: 100%;
+}
+
+.grid td.tagsCell .tags > .tag:not(.tag--more) {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .pop__menu--list {
   min-width: 200px;
 }
@@ -2832,6 +2885,7 @@ input.keyText {
 /* What the service published: one line for each block of the editor. */
 .srcLine {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
   min-height: 22px;

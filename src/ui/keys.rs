@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 
 use super::access::Query;
 use super::components::{
-    ask, bulk_all_box, bulk_box, bulk_button, bulk_form, cancel_link, chips, icon, icon_link,
-    page_head, zone, Ask, Bulk, Chip, PageHead, Side, Strength, Zone,
+    ask, bulk_all_box, bulk_box, bulk_button, bulk_form, cancel_link, chips_stable, icon,
+    icon_link, page_head, zone, Ask, Bulk, Chip, PageHead, Side, Strength, Zone,
 };
 use super::grant_editor::{self, EditorData, Place};
 use super::settings::{banner_error, fill_page, notice_html, Frame, Notice, Tab};
@@ -457,7 +457,7 @@ fn key_row(out: &mut String, list: &KeysList, bulk: &Bulk, boxes: bool, line: &K
     if list.all {
         let _ = write!(
             out,
-            r#"<td class="muted wide">{}</td>"#,
+            r#"<td class="muted">{}</td>"#,
             match &line.owner {
                 Some(login) => html_escape(login),
                 None => "superadmin".to_string(),
@@ -467,7 +467,7 @@ fn key_row(out: &mut String, list: &KeysList, bulk: &Bulk, boxes: bool, line: &K
     let (can_use_html, can_use_text) = can_use(&list.groups, line);
     let _ = write!(
         out,
-        r#"<td title="{}">{}</td><td class="r wide">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
+        r#"<td title="{}">{}</td><td class="r">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
         html_escape(&can_use_text),
         can_use_html,
         match line.expires_at {
@@ -504,44 +504,42 @@ pub(super) fn keys_zone(list: &KeysList, query: &Query, matching: &[&KeyLine]) -
     let api_label = format!(r#"<span class="st--off">{}</span>"#, icon("webhook"));
     let mcp_label = format!(r#"<span class="st--off">{}</span>"#, icon("robot"));
     let mine_label = format!(r#"<span class="st--off">{}</span>"#, icon("user"));
-    let all_href = query.with_kind(None).with_mine(false).href();
     let api_href = query.with_kind(toggled(query.kind, KeyKind::Api)).href();
     let mcp_href = query.with_kind(toggled(query.kind, KeyKind::Mcp)).href();
     let mine_href = query.with_mine(!query.mine).href();
-    let chips_html = chips(&[
-        Chip {
-            label_html: "All",
-            name: "",
-            count: matching.len(),
-            href: &all_href,
-            on: query.kind.is_none() && !query.mine,
-        },
-        Chip {
+    // The presence of a chip follows the whole list, not the filters: the chips keep their place
+    // when a filter changes. A chip of a kind needs two kinds in the list, or it filters nothing.
+    let kinds_in_list = [KeyKind::Api, KeyKind::Mcp]
+        .iter()
+        .filter(|k| list.lines.iter().any(|l| l.kind == Some(**k)))
+        .count();
+    let mut items = Vec::new();
+    if kinds_in_list > 1 {
+        items.push(Chip {
             label_html: &api_label,
             name: KIND_TIP_API,
             count: count_kind(KeyKind::Api),
             href: &api_href,
             on: query.kind == Some(KeyKind::Api),
-        },
-        Chip {
+        });
+        items.push(Chip {
             label_html: &mcp_label,
             name: KIND_TIP_MCP,
             count: count_kind(KeyKind::Mcp),
             href: &mcp_href,
             on: query.kind == Some(KeyKind::Mcp),
-        },
-        Chip {
+        });
+    }
+    if list.all && list.lines.iter().any(|l| l.mine) {
+        items.push(Chip {
             label_html: &mine_label,
             name: "My keys",
-            count: if list.all {
-                matching.iter().filter(|l| l.mine).count()
-            } else {
-                0
-            },
+            count: matching.iter().filter(|l| l.mine).count(),
             href: &mine_href,
             on: query.mine,
-        },
-    ]);
+        });
+    }
+    let chips_html = chips_stable(&items);
     let bulk = Bulk {
         id: "revoke-keys",
         action: REVOKE_PATH,
@@ -584,21 +582,32 @@ pub(super) fn keys_zone(list: &KeysList, query: &Query, matching: &[&KeyLine]) -
         if boxes {
             body.push_str(r#"<col class="w28">"#);
         }
-        body.push_str(r#"<col class="w28"><col class="w136">"#);
+        // The column of the key fits the longest name, the badge and the state.
+        let widest = shown
+            .iter()
+            .map(|l| l.name.chars().count() + if l.file { 5 } else { 0 } + 2)
+            .max()
+            .unwrap_or(0)
+            .min(18);
+        let _ = write!(
+            body,
+            r#"<col class="w28"><col class="{}">"#,
+            super::access::col_class(widest, 136)
+        );
         if list.all {
-            body.push_str(r#"<col class="w88 wide">"#);
+            body.push_str(r#"<col class="w88">"#);
         }
         body.push_str(
-            r#"<col><col class="w120 wide"><col class="w120"><col class="w28"></colgroup><thead><tr>"#,
+            r#"<col><col class="w136"><col class="w136"><col class="w28"></colgroup><thead><tr>"#,
         );
         if boxes {
             let _ = write!(body, r#"<th scope="col">{}</th>"#, bulk_all_box(&bulk));
         }
         body.push_str(r#"<th scope="col"><span class="visually-hidden">Kind</span></th><th scope="col">Key</th>"#);
         if list.all {
-            body.push_str(r#"<th scope="col" class="wide">Owner</th>"#);
+            body.push_str(r#"<th scope="col">Owner</th>"#);
         }
-        body.push_str(r#"<th scope="col">Can use</th><th scope="col" class="r wide">Expires</th><th scope="col" class="r">Last used</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
+        body.push_str(r#"<th scope="col">Can use</th><th scope="col" class="r">Expires</th><th scope="col" class="r">Last used</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
         for line in &shown {
             key_row(&mut body, list, &bulk, boxes, line);
         }
@@ -636,19 +645,13 @@ fn toggled(current: Option<KeyKind>, kind: KeyKind) -> Option<KeyKind> {
     (current != Some(kind)).then_some(kind)
 }
 
-/// What an empty list says: no key at all, or no key that the filters keep. A key holds the rights
-/// of services or the rights of the inbox, so a filter on both gives none.
+/// What an empty list says: no key at all, or no key that the filters keep.
 fn empty_keys(list: &KeysList, query: &Query) -> String {
     if list.lines.is_empty() {
         return r#"<p class="empty">No key yet.</p>"#.to_string();
     }
-    let both = if !query.group.is_empty() && !query.service.is_empty() {
-        " A key holds the rights of a service or the rights of a group, not both."
-    } else {
-        ""
-    };
     format!(
-        r#"<p class="empty">No key matches these filters.{both} <a href="{}">Clear</a></p>"#,
+        r#"<p class="empty">No key matches these filters. <a href="{}">Clear</a></p>"#,
         query.cleared().href()
     )
 }

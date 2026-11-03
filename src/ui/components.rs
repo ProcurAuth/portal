@@ -83,11 +83,49 @@ pub struct Chip<'a> {
 /// No chip at all gives an empty string.
 pub fn chips(items: &[Chip]) -> String {
     let shown: Vec<&Chip> = items.iter().filter(|c| c.count > 0 || c.on).collect();
+    chip_group(&shown)
+}
+
+/// A group of chips that keeps its place when a filter changes. The caller picks the chips from
+/// the totals of the list. A chip with a count of zero stays, dimmed, and is not a link.
+pub fn chips_stable(items: &[Chip]) -> String {
+    let shown: Vec<&Chip> = items.iter().collect();
+    chip_group(&shown)
+}
+
+fn chip_group(shown: &[&Chip]) -> String {
     if shown.is_empty() {
         return String::new();
     }
     let mut out = String::from(r#"<span class="chips" role="group" aria-label="Filter">"#);
     for chip in shown {
+        let name = if chip.name.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#" aria-label="{0} {1}" title="{0}""#,
+                html_escape(chip.name),
+                chip.count
+            )
+        };
+        if chip.href.is_empty() || (chip.count == 0 && !chip.on) {
+            // A fact, not a control: an empty `href`, or no row to filter.
+            let _ = write!(
+                out,
+                r#"<span class="chip chip--static{}{}"{}{}>{}<span class="num">{}</span></span>"#,
+                if chip.on { " is-on" } else { "" },
+                if chip.count == 0 { " is-zero" } else { "" },
+                if chip.count == 0 && !chip.on {
+                    r#" aria-disabled="true""#
+                } else {
+                    ""
+                },
+                name,
+                chip.label_html,
+                chip.count
+            );
+            continue;
+        }
         let _ = write!(
             out,
             r#"<a class="chip{}" href="{}"{}{}>{}<span class="num">{}</span></a>"#,
@@ -98,15 +136,7 @@ pub fn chips(items: &[Chip]) -> String {
             } else {
                 ""
             },
-            if chip.name.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    r#" aria-label="{0} {1}" title="{0}""#,
-                    html_escape(chip.name),
-                    chip.count
-                )
-            },
+            name,
             chip.label_html,
             chip.count
         );

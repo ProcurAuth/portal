@@ -132,9 +132,10 @@
 (function () {
   "use strict";
   var PANELS = "details.pop, details.ask";
+  var OPEN = "details.pop[open], details.ask[open]";
 
   function closeAll(except) {
-    var open = document.querySelectorAll(PANELS + "[open]");
+    var open = document.querySelectorAll(OPEN);
     for (var i = 0; i < open.length; i += 1) {
       if (open[i] !== except) open[i].removeAttribute("open");
     }
@@ -164,7 +165,7 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") return;
-    var open = document.querySelector(PANELS + "[open]");
+    var open = document.querySelector(OPEN);
     if (!open) return;
     open.removeAttribute("open");
     var summary = open.querySelector("summary");
@@ -200,6 +201,9 @@
       control.querySelector("[data-bulk-q]").textContent =
         control.getAttribute("data-verb") + " " + n + " " +
         (n === 1 ? control.getAttribute("data-one") : control.getAttribute("data-many")) + "?";
+      var summary = control.querySelector("summary");
+      summary.setAttribute("aria-disabled", n ? "false" : "true");
+      summary.tabIndex = n ? 0 : -1;
       if (!n) control.removeAttribute("open");
     }
     var all = document.querySelector('[data-bulk-all="' + esc(id) + '"]');
@@ -208,6 +212,12 @@
       all.indeterminate = n > 0 && n < list.length;
     }
   }
+
+  // The button of a bulk action with no ticked row does nothing, for the keyboard too.
+  document.addEventListener("click", function (event) {
+    var summary = event.target.closest && event.target.closest("[data-bulk] > summary");
+    if (summary && summary.getAttribute("aria-disabled") === "true") event.preventDefault();
+  });
 
   document.addEventListener("change", function (event) {
     var box = event.target;
