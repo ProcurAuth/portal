@@ -34,15 +34,17 @@
     return n < 10 ? "0" + n : String(n);
   }
 
-  // The time of the browser: 2026-10-10 14:03, with the seconds when the element has data-secs.
+  // The time of the browser: 10-10 14:03, with the seconds when the element has data-secs.
+  // The year comes first (2025-10-10 14:03) only when it is not the current year.
   function localTimes() {
+    var thisYear = new Date().getFullYear();
     var nodes = document.querySelectorAll("time.when[datetime]");
     for (var i = 0; i < nodes.length; i += 1) {
       var node = nodes[i];
       var at = new Date(node.getAttribute("datetime"));
       if (isNaN(at.getTime())) continue;
       var text =
-        at.getFullYear() + "-" + two(at.getMonth() + 1) + "-" + two(at.getDate()) + " " +
+        (at.getFullYear() === thisYear ? "" : at.getFullYear() + "-") + two(at.getMonth() + 1) + "-" + two(at.getDate()) + " " +
         two(at.getHours()) + ":" + two(at.getMinutes());
       if (node.hasAttribute("data-secs")) text += ":" + two(at.getSeconds());
       node.setAttribute("title", node.textContent);

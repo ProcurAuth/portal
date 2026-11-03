@@ -266,16 +266,43 @@ pub fn format_utc(unix: i64) -> String {
 
 /// A time as a `<time>` element. The text is in UTC for a page without script. The script of the
 /// settings pages (`settings.js`) shows the time of the browser instead. `seconds` adds the seconds.
+/// The year is absent when it is the current year, in the text and in the script.
 pub fn time_tag(unix: i64, seconds: bool) -> String {
-    let (text, secs) = if seconds {
-        (format_utc_secs(unix), r#" data-secs="1""#)
+    time_tag_in_year(unix, seconds, current_year())
+}
+
+/// The same as `time_tag`, with the current year given. The tests use it.
+pub fn time_tag_in_year(unix: i64, seconds: bool, year: i64) -> String {
+    let full = if seconds {
+        format_utc_secs(unix)
     } else {
-        (format_utc(unix), "")
+        format_utc(unix)
     };
+    let prefix = format!("{year:04}-");
+    let text = full.strip_prefix(&prefix).unwrap_or(&full);
+    let secs = if seconds { r#" data-secs="1""# } else { "" };
     format!(
         r#"<time class="when" datetime="{}"{secs}>{text} UTC</time>"#,
         format_utc_instant(unix)
     )
+}
+
+/// The current year in UTC.
+fn current_year() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    year_of(now)
+}
+
+/// The year of a Unix time, in UTC.
+fn year_of(unix: i64) -> i64 {
+    let text = format_utc(unix);
+    text.split('-')
+        .next()
+        .and_then(|y| y.parse().ok())
+        .unwrap_or(1970)
 }
 
 /// `2026-11-23T00:00:00Z`: the form of a date and a time in UTC of the form of a key (portal 5.8c).
@@ -545,13 +572,25 @@ mod tests {
         assert_eq!(format_utc(-86_400), "1969-12-31 00:00");
         assert_eq!(format_utc_secs(1_791_623_502), "2026-10-10 09:11:42");
         assert_eq!(
-            time_tag(1_791_623_502, false),
+            time_tag_in_year(1_791_623_502, false, 2025),
             r#"<time class="when" datetime="2026-10-10T09:11:42Z">2026-10-10 09:11 UTC</time>"#
         );
         assert_eq!(
-            time_tag(1_791_623_502, true),
+            time_tag_in_year(1_791_623_502, true, 2025),
             r#"<time class="when" datetime="2026-10-10T09:11:42Z" data-secs="1">2026-10-10 09:11:42 UTC</time>"#
         );
+        // The year is absent when it is the current year.
+        assert_eq!(
+            time_tag_in_year(1_791_623_502, false, 2026),
+            r#"<time class="when" datetime="2026-10-10T09:11:42Z">10-10 09:11 UTC</time>"#
+        );
+        assert_eq!(
+            time_tag_in_year(1_791_623_502, true, 2026),
+            r#"<time class="when" datetime="2026-10-10T09:11:42Z" data-secs="1">10-10 09:11:42 UTC</time>"#
+        );
+        assert_eq!(year_of(1_791_623_502), 2026);
+        assert_eq!(year_of(0), 1970);
+        assert_eq!(year_of(-86_400), 1969);
         assert_eq!(format_duration(-5), "0 s");
         assert_eq!(format_duration(45), "45 s");
         assert_eq!(format_duration(720), "12 min");

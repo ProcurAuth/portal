@@ -271,7 +271,7 @@ The editor of the account and the pane of a key draw the portal features as plai
 
 ### 9.6 Deviations from the mockups
 
-- **Dates.** A time is `2026-11-02 01:39`, the form that `settings.js` writes in the time zone of the browser. The mockup shows "Nov 1 02:58".
+- **Dates.** A time is `11-02 01:39`, the form that `settings.js` writes in the time zone of the browser. The year comes first (`2025-11-02 01:39`) only when it is not the current year. The mockup shows "Nov 1 02:58".
 - **Labels of the changes.** The panel keeps the labels of the audit kinds ("Permissions changed", "Account added"). The mockup has other words. The audit kinds did not change.
 - **Request limits.** The row of a service has no fields "Requests". The limit `requests` of `access` shows in the list of the actions of the service, as before.
 - **The count of accounts.** "3 of 64" counts the accounts of the database. The table also lists the superadmin and the accounts of the file.
