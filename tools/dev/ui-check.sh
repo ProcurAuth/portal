@@ -1,6 +1,8 @@
 #!/bin/sh
 # Check the editor of grants in a real browser (Playwright, in Docker). The check runs against a
 # portal that already runs with the demo services (demo/up.sh). It never saves anything.
+# With UI_CHECK_INBOX=1 it also checks the pages of the Inbox. Those checks send alerts: use a
+# portal that is yours, not a shared demo.
 # Usage: tools/dev/ui-check.sh
 # UI_CHECK_BASE, UI_CHECK_LOGIN, UI_CHECK_PASSWORD, UI_CHECK_KEY_LOGIN, UI_CHECK_KEY_PASSWORD and
 # UI_CHECK_SHOTS: see the header of tools/dev/ui-check.js. UI_CHECK_SHOTS must be a directory of the
@@ -18,7 +20,7 @@ if [ -n "${UI_CHECK_SHOTS:-}" ]; then
 fi
 # shellcheck disable=SC2086
 exec docker run --rm --network host -v "$here":/check:ro $shots \
-  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD \
+  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD -e UI_CHECK_INBOX -e UI_CHECK_BOB_PASSWORD -e UI_CHECK_CAROL_PASSWORD \
   ${UI_CHECK_SHOTS:+-e UI_CHECK_SHOTS=/shots} \
   -e NODE_PATH=/tmp/node_modules -w /tmp "$image" \
   sh -c 'npm install --silent --no-audit --no-fund --prefix /tmp playwright@1.49.1 && node /check/ui-check.js'
