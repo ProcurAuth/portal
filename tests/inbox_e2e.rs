@@ -23,12 +23,50 @@ const BIN: &str = env!("CARGO_BIN_EXE_portal");
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// A free TCP port that this process has not given before. The kernel gives a random port from
+/// about 14 000 ports and takes it back at once. Parallel tests would sometimes get the same
+/// port: two servers on one port, or a restarted server that finds its port taken.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
+}
+
+/// A name that no other test and no other run has: the tests of several runs share one
+/// PostgreSQL server, and a database of another run must never be created or dropped here.
+fn unique_name(prefix: &str) -> String {
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+        .as_nanos();
+    format!(
+        "{prefix}_{}_{}_{nanos:x}",
+        std::process::id(),
+        COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    )
+}
+
+/// Runs `portal` and makes sure that it succeeds. The failure shows its message.
+fn portal_ok(args: &[&str]) -> std::process::Output {
+    let out = portal(args, None);
+    assert!(
+        out.status.success(),
+        "portal {args:?} failed with {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
 }
 
 fn portal(args: &[&str], stdin: Option<&str>) -> std::process::Output {
@@ -196,22 +234,13 @@ impl Server {
     }
 
     fn setup_with(pg: Option<PgAdmin>) -> Server {
-        let dir = std::env::temp_dir().join(format!(
-            "portal-inbox-e2e-{}-{}",
-            std::process::id(),
-            free_port()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::env::temp_dir().join(unique_name("portal-inbox-e2e"));
+        // `create_dir` fails when the directory exists: two tests never share one.
+        std::fs::create_dir(&dir).unwrap();
         let p = |n: &str| dir.join(n).to_string_lossy().to_string();
-        assert!(
-            portal(&["inbox", "keygen", "--out", &p("server_key")], None)
-                .status
-                .success()
-        );
+        portal_ok(&["inbox", "keygen", "--out", &p("server_key")]);
         let key = p("server_key");
-        assert!(portal(&["inbox", "token", "--out", &p("token")], None)
-            .status
-            .success());
+        portal_ok(&["inbox", "token", "--out", &p("token")]);
         // Refuses to overwrite an existing secret.
         assert!(!portal(&["inbox", "token", "--out", &p("token")], None)
             .status
@@ -229,7 +258,7 @@ impl Server {
         .unwrap();
 
         let port = free_port();
-        let database = format!("inbox_e2e_{}", free_port());
+        let database = unique_name("inbox_e2e");
         let (storage_block, postgres_block) = match &pg {
             None => (
                 format!("storage {{ database = \"{}\" }}", p("portal.db")),
@@ -402,6 +431,12 @@ inbox {{
     }
 
     fn start(&mut self) {
+        self.spawn();
+        self.wait_ready();
+    }
+
+    /// Starts the process. It does not wait: see [`Server::wait_ready`].
+    fn spawn(&mut self) {
         *self.session.lock().unwrap() = None;
         self.accounts.lock().unwrap().clear();
         let log = std::fs::File::create(self.dir.join(format!("{}.log", self.name))).unwrap();
@@ -412,11 +447,24 @@ inbox {{
             .spawn()
             .unwrap();
         self.child = Some(child);
+    }
+
+    /// Waits until the server is ready. Ready means two things. The inbox answers `/readyz` as
+    /// soon as its listener is open. The pages answer `503 starting` until the first catalogue
+    /// is complete: `/healthz` is `200` only after that. A test that makes its first request
+    /// before that gets a 503.
+    fn wait_ready(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
+            // A server that cannot bind its port exits at once. Another server on this port
+            // would answer in its place.
+            if let Some(status) = self.child.as_mut().unwrap().try_wait().unwrap() {
+                panic!("server exited with {status} at start: {}", self.log());
+            }
             if portal(&["healthcheck", "--config", &self.config()], None)
                 .status
                 .success()
+                && http(self.port, "GET", "/healthz", &[], "").0 == 200
             {
                 return;
             }
@@ -485,6 +533,17 @@ inbox {{
 
 impl Drop for Server {
     fn drop(&mut self) {
+        // A failed test shows what its server logged: the log goes away with the directory.
+        if std::thread::panicking() {
+            let log = self.log();
+            let lines: Vec<&str> = log.lines().collect();
+            let tail = &lines[lines.len().saturating_sub(40)..];
+            eprintln!(
+                "--- log of the server {:?} (last lines) ---\n{}",
+                self.name,
+                tail.join("\n")
+            );
+        }
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -635,7 +694,16 @@ fn http_full(
         panic!("{method} {path} on {host}: {e} after {:?}", began.elapsed());
     }
     let text = String::from_utf8_lossy(&raw).to_string();
-    let status = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "{method} {path} on {host} (port {port}) got no HTTP answer after {:?}: {text:?}",
+                began.elapsed()
+            )
+        });
     let (head, body) = text.split_once("\r\n\r\n").unwrap();
     let body = if head
         .to_ascii_lowercase()
@@ -2586,14 +2654,18 @@ async fn a_second_instance_takes_over_a_lost_node() {
     );
 
     // A clean stop hands the lease over at once: no waiting for the ttl.
+    // The start itself takes seconds on a loaded machine, as long as the lease: the time does not
+    // tell. The log tells: an instance that finds a released lease never waits for it.
     s.stop();
     let began = Instant::now();
     s.start();
     assert!(
-        began.elapsed() < Duration::from_secs(4),
-        "a released lease was not taken at once: {:?}",
-        began.elapsed()
+        !s.log().contains("replica_waiting"),
+        "a released lease was not taken at once ({:?}): {}",
+        began.elapsed(),
+        s.log()
     );
+    assert!(s.log().contains("replica_ready"), "{}", s.log());
     let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
     assert_eq!(
         overview["stats"]["enrolled"], 2,
@@ -2924,7 +2996,7 @@ async fn a_sqlite_installation_moves_to_postgres() {
     s.stop();
 
     // The same configuration, on PostgreSQL.
-    let database = format!("inbox_e2e_{}", free_port());
+    let database = unique_name("inbox_e2e");
     admin_pg.create_database(&database);
     std::fs::write(s.dir.join("db_password"), &admin_pg.password).unwrap();
     let sqlite_file = s.dir.join("portal.db");
@@ -3026,15 +3098,20 @@ fn postgres_may_come_up_after_inbox() {
     let mut s = Server::setup_with(Some(admin_pg.clone()));
     let database = s.pg.as_ref().map(|(_, d)| d.clone()).unwrap();
     admin_pg.drop_database(&database);
-    let late = std::thread::spawn({
-        let (admin_pg, database) = (admin_pg.clone(), database.clone());
-        move || {
-            std::thread::sleep(Duration::from_secs(3));
-            admin_pg.create_database(&database);
-        }
-    });
-    s.start();
-    late.join().unwrap();
+    // The database appears only after the server has said that it cannot reach it. A fixed
+    // delay is not enough: on a loaded machine the server needs more than that to try.
+    s.spawn();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !s.log().contains("postgres_unreachable") {
+        assert!(
+            Instant::now() < deadline,
+            "the server never said that PostgreSQL is away: {}",
+            s.log()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    admin_pg.create_database(&database);
+    s.wait_ready();
     assert!(s.log().contains("postgres_unreachable"), "{}", s.log());
     assert!(s.log().contains("postgres_ready"), "{}", s.log());
 }

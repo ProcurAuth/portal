@@ -17,6 +17,14 @@ mod keys;
 
 const SCHEMA_VERSION: i64 = 7;
 
+/// Starts a transaction that takes the write lock now. Another connection writes to the same file
+/// (the inbox). A deferred transaction that reads first and writes after fails at once with
+/// "database is locked" when the other connection commits between the two: the busy timeout does
+/// not apply to it. A transaction that reads first must use this function.
+fn begin_write(conn: &mut Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+}
+
 /// The tables of schema version 1 that the current version keeps.
 const SCHEMA: &str = "
 CREATE TABLE users (
@@ -484,7 +492,7 @@ impl Sqlite {
         grants: Option<&[Grant]>,
     ) -> Result<bool, String> {
         let mut conn = self.conn();
-        let tx = conn.transaction().map_err(db)?;
+        let tx = begin_write(&mut conn).map_err(db)?;
         let id: Option<i64> = tx
             .query_row("SELECT id FROM users WHERE login = ?1", [login], |row| {
                 row.get(0)
@@ -1571,5 +1579,58 @@ CREATE TABLE user_roles (
             ]
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The inbox writes to the same SQLite file through its own connection. A change that reads
+    /// first and writes after, in a deferred transaction, fails at once with "database is
+    /// locked" when the other connection commits between the two. It must wait for its turn
+    /// instead (`busy_timeout`): a user must never see an error because an alert was stored.
+    #[test]
+    fn the_update_of_a_user_waits_for_another_writer_of_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "portal-store-writers-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        store.insert_user(&user("omar", &["ops"])).unwrap();
+        store.insert_user(&user("alice", &["ops"])).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (path, stop) = (path.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let other = Connection::open(&path).unwrap();
+                other
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                let mut writes = 0_u64;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    other
+                        .execute("UPDATE users SET created_at = created_at + 1", [])
+                        .unwrap();
+                    writes += 1;
+                }
+                writes
+            })
+        };
+        let grants = [Grant::new("access", "db").unwrap()];
+        let mut failures = Vec::new();
+        for round in 0..300 {
+            if let Err(error) = store.update_user("omar", Some("$argon2id$stub2"), Some(&grants)) {
+                failures.push(format!("update_user, round {round}: {error}"));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let writes = writer.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(writes > 0);
+        assert!(
+            failures.is_empty(),
+            "{} failures, the first ones: {:?}",
+            failures.len(),
+            &failures[..failures.len().min(3)]
+        );
     }
 }

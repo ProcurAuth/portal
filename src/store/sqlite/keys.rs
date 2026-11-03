@@ -281,7 +281,7 @@ impl Sqlite {
 
     pub fn ensure_counter_rows(&self, rows: &[(CounterOwner, CounterId)]) -> Result<usize, String> {
         let mut conn = self.conn();
-        let tx = conn.transaction().map_err(db)?;
+        let tx = super::begin_write(&mut conn).map_err(db)?;
         let mut made = 0;
         for (owner, id) in rows {
             let (column, subject) = match owner {
@@ -327,7 +327,7 @@ impl Sqlite {
 
     pub fn delete_file_counters(&self, keep: &[String]) -> Result<usize, String> {
         let mut conn = self.conn();
-        let tx = conn.transaction().map_err(db)?;
+        let tx = super::begin_write(&mut conn).map_err(db)?;
         let mut stale: Vec<String> = tx
             .prepare(
                 "SELECT DISTINCT file_subject FROM budget_counters WHERE file_subject IS NOT NULL",
@@ -583,7 +583,7 @@ impl Sqlite {
 
     pub fn revoke_keys(&self, login: Option<&str>, now: i64) -> Result<usize, String> {
         let mut conn = self.conn();
-        let tx = conn.transaction().map_err(db)?;
+        let tx = super::begin_write(&mut conn).map_err(db)?;
         let ids: Vec<String> = match login {
             Some(login) => tx
                 .prepare(
