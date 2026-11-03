@@ -1467,6 +1467,17 @@ Only failed password checks use the failure budgets. A successful authentication
 
 `max_concurrent_password_checks` separately limits the number of concurrent Argon2 operations.
 
+## Hardening of the sign-in page
+
+The sign-in page has four measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key.
+
+- **Anti-enumeration (real protection).** An unknown login, a wrong password and a failed check of the form give the same answer: status 401, the same page, the same headers. Each of them runs one Argon2 check and counts as one failure. A refusal of a limiter (status 429) is the only visible difference. It does not depend on the login, with one documented exception: the budget of the superadmin login.
+- **Hide the product (obscurity, not security).** The page has a neutral title, no comment and no version. The stylesheet and the script have neutral paths, `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The cookie of the form is `lc`. The default name of the session cookie is not changed: set `session.cookie_name` for a neutral name.
+- **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
+- **Script minification (obscurity, not security).** The script and the stylesheet that every page loads are minified at the first request, with no tool at build time. A test runs `node --check` on the script when `node` exists.
+
+A script that signs in with `curl` must read the field `token` of the page, wait one second, and post the field.
+
 ## Prometheus
 
 When enabled, `/metrics` exports Prometheus metrics with bounded cardinality. The metrics cover: HTTP status and route; login success and failure; CSRF and origin failures; IP and global rate limits; session checks; active sessions; session-capacity rejections; Argon2 concurrency; HTTP connections; sign-in bodies refused at the limit `server.max_login_body_reads` (`portal_login_body_rejected_total`); the state of the catalogue (`portal_catalog_complete`); and uptime. The Inbox adds the metrics `portal_inbox_*`, and the alerts of the portal add `portal_watch_*` (see "Operations").
