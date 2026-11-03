@@ -20,6 +20,7 @@ mod fixtures;
 pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
+pub mod mask;
 pub mod minify;
 pub mod settings;
 
