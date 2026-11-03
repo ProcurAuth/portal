@@ -484,7 +484,7 @@ fn accounts_zone(view: &AccessView, accounts: &Accounts) -> String {
     let count = if shown.len() == total {
         total.to_string()
     } else {
-        format!("{} of {total}", shown.len())
+        format!("{}/{total}", shown.len())
     };
     let count_title = format!(
         "Accounts that match the filters. The limit is {}.",
@@ -685,7 +685,7 @@ fn account_row(
             if s.services == 0 {
                 out.push_str(r#"<span class="muted">-</span>"#);
             } else {
-                let _ = write!(out, "{} of {}", s.services, accounts.services.len());
+                let _ = write!(out, "{}/{}", s.services, accounts.services.len());
             }
             if s.to_check > 0 {
                 out.push(' ');
@@ -826,7 +826,7 @@ mod tests {
             "the superadmin is not a row of the accounts table"
         );
         assert!(
-            accounts.contains("2 of 4"),
+            accounts.contains("2/4"),
             "alice opens two of the four services"
         );
         assert!(
@@ -1032,13 +1032,10 @@ mod tests {
         let html = page(&v);
         let accounts = zone_of(&html, "accounts-title");
         assert!(accounts.contains("users/alice") && !accounts.contains("users/bob"));
-        assert!(accounts.contains(r#"<span class="count" title="Accounts that match the filters. The limit is 64.">1 of 3</span>"#));
+        assert!(accounts.contains(r#"<span class="count" title="Accounts that match the filters. The limit is 64.">1/3</span>"#));
         let keys = zone_of(&html, "keys-title");
         assert!(keys.contains("k1-key") && keys.contains("k2-key") && !keys.contains("k3-key"));
-        assert!(
-            keys.contains(r#"<span class="count">2 of 3</span>"#),
-            "{keys}"
-        );
+        assert!(keys.contains(r#"<span class="count">2/3</span>"#), "{keys}");
         // The chip of the filter has a cross and the link "Show account"; "Clear" shows.
         assert!(html.contains(r#"<span class="fchip">user: alice<a class="fchip__x" href="/auth/settings" aria-label="Remove the filter user alice""#), "{html}");
         assert!(html.contains(

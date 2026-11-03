@@ -1253,7 +1253,7 @@ fn detail_row(out: &mut String, view: &InboxView, detail: &AlertDetail, close: &
         .partition(|d| d.received_at.is_some());
     let _ = write!(
         out,
-        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {} of {}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
+        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {}/{}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
         html_escape(&a.id),
         html_escape(&a.id),
         a.received,

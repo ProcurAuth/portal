@@ -2001,7 +2001,7 @@
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
       }
-      servicesCount.textContent = "Opens " + openCount + " of " + rowList.length;
+      servicesCount.textContent = "Opens " + openCount + "/" + rowList.length;
       if (featureSvc) {
         var held = 0;
         ticked.forEach(function (item) {
@@ -2014,7 +2014,7 @@
             return applies(a, n);
           }).length;
         });
-        featuresCount.textContent = held + " of " + total + " rights";
+        featuresCount.textContent = "Rights " + held + "/" + total;
       }
     }
 

@@ -2143,7 +2143,7 @@ async fn delivery_guarantees_end_to_end() {
     );
     assert_eq!(st, 200);
     assert!(
-        page.contains("Received</b> 0 of 0"),
+        page.contains("Received</b> 0/0"),
         "no phone subscribes to the group: {page}"
     );
     // The same key sends nothing a second time.

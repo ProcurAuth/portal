@@ -1844,7 +1844,7 @@ mod tests {
             html.contains("Change the \\u003cdashboards\\u003e."),
             "escaped"
         );
-        assert!(!html.contains("Save access") && !html.contains("Opens 2 of 4"));
+        assert!(!html.contains("Save access") && !html.contains("Opens 2/4"));
         // Without script the grants are a read-only list.
         assert!(html.contains(r#"<noscript><ul class="grantList"><li><code>"#));
         // Without keys, the delete needs one click.

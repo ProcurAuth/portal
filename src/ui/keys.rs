@@ -626,7 +626,7 @@ pub(super) fn keys_zone(list: &KeysList, query: &Query, matching: &[&KeyLine]) -
     let count = if shown.len() == list.lines.len() {
         list.lines.len().to_string()
     } else {
-        format!("{} of {}", shown.len(), list.lines.len())
+        format!("{}/{}", shown.len(), list.lines.len())
     };
     zone(
         &Zone {
