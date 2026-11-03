@@ -45,6 +45,8 @@ async function open(browser, user, password, path) {
   await page.goto(BASE + "/auth/login");
   await page.fill("#login", user);
   await page.fill("#password", password);
+  // The sign-in form has a minimum time between its display and its submit.
+  await page.waitForTimeout(1200);
   await page.click("button[type=submit]");
   await page.goto(BASE + path);
   await page.waitForSelector(".ge__svc");
@@ -261,6 +263,8 @@ async function signIn(browser, user, password, path, viewport, scheme) {
   await page.goto(BASE + "/auth/login");
   await page.fill("#login", user);
   await page.fill("#password", password);
+  // The sign-in form has a minimum time between its display and its submit.
+  await page.waitForTimeout(1200);
   await page.click("button[type=submit]");
   const response = await page.goto(BASE + path);
   return { page, response };
@@ -508,6 +512,7 @@ async function wide(browser, login, password) {
       await page.goto(BASE + "/auth/login");
       await page.fill("#login", login);
       await page.fill("#password", password);
+      await page.waitForTimeout(1200);
       await page.click("button[type=submit]");
       for (const [name, path] of WIDE_PAGES) {
         await page.goto(BASE + path);

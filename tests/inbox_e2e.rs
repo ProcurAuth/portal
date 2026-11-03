@@ -583,12 +583,15 @@ fn sign_in_request(port: u16, login: &str, password: &str) -> (u16, String, Stri
         let start = page.find(&marker).expect("a field of the form") + marker.len();
         page[start..].split('"').next().unwrap().to_string()
     };
+    // The form has a minimum time between its display and its submit.
+    std::thread::sleep(std::time::Duration::from_millis(1_200));
     let form = format!(
-        "login={login}&password={}&csrf={}&rd={}&sig={}",
+        "login={login}&password={}&csrf={}&rd={}&sig={}&token={}&website=",
         password.replace(' ', "+"),
         field("csrf"),
         field("rd"),
-        field("sig")
+        field("sig"),
+        field("token")
     );
     http_full(
         port,

@@ -23,8 +23,9 @@ use crate::actions;
 use crate::catalog::Catalog;
 use crate::config::{Config, LogLevel, Secret};
 use crate::crypto::{
-    hash_password, new_csrf_token, sign_action_token, sign_return_uri, verify_action_token,
-    verify_csrf, verify_password, verify_return_uri_signature,
+    check_form_token, hash_password, new_csrf_token, sign_action_token, sign_form_token,
+    sign_return_uri, verify_action_token, verify_csrf, verify_password,
+    verify_return_uri_signature, FormToken,
 };
 use crate::discovery;
 use crate::grants::{self, Grant, Policy};
@@ -73,6 +74,10 @@ const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
+/// The hidden field that holds the signed token of the sign-in form.
+const FORM_TOKEN_FIELD: &str = "token";
+/// The name of the trap field of the sign-in form. A person never fills it.
+const TRAP_FIELD: &str = "website";
 /// The budget of the global limiter for the sign-ins that name the superadmin. Failures against
 /// other logins never use it. Anonymous failures thus cannot refuse the sign-in of the superadmin.
 const SUPERADMIN_RATE_LIMIT_KEY: &str = "superadmin";
@@ -1893,6 +1898,14 @@ fn refresh_directory_if_due(state: &AppState) -> bool {
         })
 }
 
+/// The time in milliseconds since the Unix epoch.
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn ip_text(client: &Client) -> Option<String> {
     client.ip.map(|ip| ip.to_string())
 }
@@ -2097,6 +2110,9 @@ async fn handle_login_post(
     let csrf = form.remove("csrf").unwrap_or_default();
     let rd = form.remove("rd").unwrap_or_else(|| "/".to_string());
     let sig = form.remove("sig").unwrap_or_default();
+    let form_token = form.remove(FORM_TOKEN_FIELD).unwrap_or_default();
+    // A person never sees this field. A script that fills every field of the form fills it.
+    let trap_filled = form.remove(TRAP_FIELD).is_some_and(|v| !v.is_empty());
 
     if !form.is_empty()
         || password.len() > state.config.security.max_password_bytes
@@ -2107,14 +2123,14 @@ async fn handle_login_post(
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
 
-    if !verify_csrf(csrf_cookie.as_deref().unwrap_or(""), &csrf) {
+    let stale_page = |state: &AppState| {
         // The cookie of the token expired under an open page, or the browser dropped it. The
         // answer is the sign-in page again, with a new token and a plain sentence.
         state.metrics.login_csrf_failure();
         let Ok(fresh) = new_csrf_token() else {
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         };
-        return login_page(
+        login_page(
             state,
             client.https,
             &rd,
@@ -2122,8 +2138,21 @@ async fn handle_login_post(
             &fresh,
             Some("The page was open too long. Enter your login and password again."),
             StatusCode::FORBIDDEN,
-        );
+        )
+    };
+    if !verify_csrf(csrf_cookie.as_deref().unwrap_or(""), &csrf) {
+        return stale_page(state);
     }
+    // The anti-bot check of the form. A form that is too old is a page that stayed open: it gets
+    // the answer of an expired anti-CSRF token. Any other failure of the check (no token, a
+    // damaged token, a submit that is too fast, a filled trap) must look exactly like a wrong
+    // password: it goes the whole way of a sign-in, Argon2 check and limiters included, and it
+    // is refused at the end. See `docs/login-hardening.md`.
+    let form_state = check_form_token(&state.signing_secret, &csrf, &form_token, unix_millis());
+    if form_state == FormToken::Expired {
+        return stale_page(state);
+    }
+    let form_ok = form_state == FormToken::Valid && !trap_filled;
 
     let client_ip_text = client_ip
         .map(|v| v.to_string())
@@ -2191,7 +2220,7 @@ async fn handle_login_post(
         })
         .await
         {
-            Ok(v) => v && !matches!(who, Who::Unknown),
+            Ok(v) => v && form_ok && !matches!(who, Who::Unknown),
             Err(_) => {
                 state.metrics.login_internal_error();
                 return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
@@ -2212,6 +2241,9 @@ async fn handle_login_post(
             );
         }
         state.metrics.login_failure();
+        if !form_ok {
+            state.metrics.login_form_check_failure();
+        }
         // A person can type the password in the login field. The text is recorded only when it names an account.
         let recorded = if known {
             typed
@@ -2226,6 +2258,10 @@ async fn handle_login_post(
                 ("client_ip", client_ip_text),
                 ("login", recorded.clone()),
                 ("known", known.to_string()),
+                (
+                    "reason",
+                    if form_ok { "credentials" } else { "form_check" }.to_string(),
+                ),
             ],
         );
         state.tracker.emit(Event::Login(LoginAttempt {
@@ -3500,10 +3536,13 @@ fn login_page(
     } else {
         String::new()
     };
+    let Ok(form_token) = sign_form_token(&state.signing_secret, csrf, unix_millis()) else {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    };
     let body = ui::auth_document(
         "Authentication",
         &format!(
-            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><label for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><button class="button button--primary" type="submit">Continue</button></form>{}"#,
+            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
             error_html,
             html_escape(csrf),
             html_escape(rd),
