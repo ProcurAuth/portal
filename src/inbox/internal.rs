@@ -10,17 +10,18 @@ use inbox_core::proto::Kind;
 use super::db::NewAlert;
 use super::log;
 use super::state::App;
+use super::target::Target;
 
 /// The source of these alerts. A producer has the source `producer:<name>`: no conflict.
 const SOURCE: &str = "portal";
 
-/// Accepts one alert for `group`. The result is `true` when the key was already in use: another
+/// Accepts one alert for the target. The result is `true` when the key was already in use: another
 /// instance, or an earlier try, sent it. A key that another title already uses (two instances
 /// with two configurations, during an update) counts the same way: the phones have an alert for
 /// this event, and a new try would fail again.
 pub async fn send_alert(
     app: &App,
-    group: &str,
+    target: Target,
     title: String,
     key: String,
 ) -> Result<bool, ApiError> {
@@ -28,7 +29,7 @@ pub async fn send_alert(
         app,
         NewAlert {
             kind: Kind::Alert,
-            group: group.to_string(),
+            target,
             title,
             source: SOURCE.into(),
             idempotency_key: key,

@@ -41,24 +41,29 @@ impl Labeled {
     }
 }
 
-/// A counter with the labels `source` and `kind`.
+/// A counter with the labels `source`, `kind` and `target`. The target is `group` or `user`.
 #[derive(Default)]
-struct Kinded(Mutex<BTreeMap<(&'static str, &'static str), u64>>);
+struct Kinded(Mutex<BTreeMap<(&'static str, &'static str, &'static str), u64>>);
 
 impl Kinded {
-    fn add(&self, source: &'static str, kind: Kind) {
+    fn add(&self, source: &'static str, kind: Kind, target: &'static str) {
         *self
             .0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .entry((source, kind.as_str()))
+            .entry((source, kind.as_str(), target))
             .or_insert(0) += 1;
     }
 
     fn render(&self, out: &mut String, name: &str, help: &str) {
         header(out, name, help, "counter");
-        for ((source, kind), count) in self.0.lock().unwrap_or_else(|p| p.into_inner()).iter() {
-            let _ = writeln!(out, "{name}{{source=\"{source}\",kind=\"{kind}\"}} {count}");
+        for ((source, kind, target), count) in
+            self.0.lock().unwrap_or_else(|p| p.into_inner()).iter()
+        {
+            let _ = writeln!(
+                out,
+                "{name}{{source=\"{source}\",kind=\"{kind}\",target=\"{target}\"}} {count}"
+            );
         }
     }
 }
@@ -100,16 +105,16 @@ pub struct InboxMetrics {
 }
 
 impl InboxMetrics {
-    pub fn alert_accepted(&self, source: &'static str, kind: Kind) {
-        self.alerts_accepted.add(source, kind);
+    pub fn alert_accepted(&self, source: &'static str, kind: Kind, target: &'static str) {
+        self.alerts_accepted.add(source, kind, target);
     }
 
-    pub fn alert_duplicate(&self, source: &'static str, kind: Kind) {
-        self.alerts_duplicate.add(source, kind);
+    pub fn alert_duplicate(&self, source: &'static str, kind: Kind, target: &'static str) {
+        self.alerts_duplicate.add(source, kind, target);
     }
 
-    pub fn alert_spooled(&self, source: &'static str, kind: Kind) {
-        self.alerts_spooled.add(source, kind);
+    pub fn alert_spooled(&self, source: &'static str, kind: Kind, target: &'static str) {
+        self.alerts_spooled.add(source, kind, target);
     }
 
     pub fn auth_failure(&self, kind: &'static str) {
@@ -169,12 +174,12 @@ impl InboxMetrics {
         self.alerts_accepted.render(
             &mut out,
             "portal_inbox_alerts_accepted_total",
-            "Messages durably accepted, by source kind and message kind",
+            "Messages durably accepted, by source kind, message kind and target kind",
         );
         self.alerts_duplicate.render(
             &mut out,
             "portal_inbox_alerts_duplicate_total",
-            "Message submissions deduplicated by idempotency key, by source kind and message kind",
+            "Message submissions deduplicated by idempotency key, by source kind, message kind and target kind",
         );
         counter(
             &mut out,
@@ -228,7 +233,7 @@ impl InboxMetrics {
         self.alerts_spooled.render(
             &mut out,
             "portal_inbox_alerts_spooled_total",
-            "Messages accepted without the database, by source kind and message kind",
+            "Messages accepted without the database, by source kind, message kind and target kind",
         );
         counter(
             &mut out,
@@ -350,8 +355,9 @@ mod tests {
     #[test]
     fn the_text_has_every_metric_of_the_documentation() {
         let metrics = InboxMetrics::default();
-        metrics.alert_accepted("producer", Kind::Alert);
-        metrics.alert_accepted("producer", Kind::Alert);
+        metrics.alert_accepted("producer", Kind::Alert, "group");
+        metrics.alert_accepted("producer", Kind::Alert, "group");
+        metrics.alert_accepted("producer", Kind::Alert, "user");
         metrics.auth_failure("device_key");
         metrics.delivery_latency(0.2);
         metrics.delivery_latency(7000.0);
@@ -359,7 +365,8 @@ mod tests {
         metrics.oldest_pending_ms.store(1500, Relaxed);
         let text = metrics.render(None);
         for expected in [
-            "portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\"} 2",
+            "portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\",target=\"group\"} 2",
+            "portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\",target=\"user\"} 1",
             "portal_inbox_auth_failures_total{kind=\"device_key\"} 1",
             "portal_inbox_devices_unreachable 2",
             "portal_inbox_oldest_pending_delivery_seconds 1.5",

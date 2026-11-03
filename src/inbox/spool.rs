@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::db::{AckOutcome, PendingDelivery};
+use super::target::Target;
 use super::util::hex;
 
 /// Alerts held at most. Beyond this the producer gets a 503 and retries: the database has been away for very long.
@@ -51,7 +52,7 @@ pub struct WireDelivery {
 pub struct WireAlert {
     pub id: String,
     pub kind: Kind,
-    pub group: String,
+    pub target: Target,
     pub title: String,
     pub source: String,
     pub key: String,
@@ -74,7 +75,7 @@ pub struct Delivery {
 pub struct Entry {
     pub id: String,
     pub kind: Kind,
-    pub group: String,
+    pub target: Target,
     pub title: String,
     pub source: String,
     pub key: String,
@@ -89,7 +90,7 @@ impl Entry {
         WireAlert {
             id: self.id.clone(),
             kind: self.kind,
-            group: self.group.clone(),
+            target: self.target.clone(),
             title: self.title.clone(),
             source: self.source.clone(),
             key: self.key.clone(),
@@ -214,7 +215,7 @@ impl Spool {
         &self,
         id: String,
         kind: Kind,
-        group: String,
+        target: Target,
         title: String,
         source: String,
         key: String,
@@ -224,7 +225,7 @@ impl Spool {
         let mut inner = self.inner.lock().expect("spool lock");
         if let Some(existing) = inner.by_key.get(&(source.clone(), key.clone())) {
             let e = &inner.alerts[existing];
-            return if e.group == group && e.title == title {
+            return if e.target == target && e.title == title {
                 Accepted::Duplicate(e.clone())
             } else {
                 Accepted::Conflict
@@ -236,7 +237,7 @@ impl Spool {
         let entry = Entry {
             id,
             kind,
-            group,
+            target,
             title,
             source,
             key,
@@ -258,7 +259,7 @@ impl Spool {
             .cloned()
         {
             let known = inner.alerts.get_mut(&existing).expect("indexed");
-            if known.group != wire.group || known.title != wire.title {
+            if known.target != wire.target || known.title != wire.title {
                 return Accepted::Conflict;
             }
             let mut changed = false;
@@ -294,7 +295,7 @@ impl Spool {
         let entry = Entry {
             id: wire.id,
             kind: wire.kind,
-            group: wire.group,
+            target: wire.target,
             title: wire.title,
             source: wire.source,
             key: wire.key,
@@ -330,7 +331,7 @@ impl Spool {
                     seq: d.seq,
                     alert_id: e.id.clone(),
                     kind: e.kind,
-                    group: e.group.clone(),
+                    target: e.target.clone(),
                     title: e.title.clone(),
                     created_at: e.created_at,
                 });
@@ -479,7 +480,7 @@ mod tests {
         s.accept(
             alert_id("producer:ci", key),
             Kind::Alert,
-            "infra".into(),
+            Target::Group("infra".into()),
             title.into(),
             "producer:ci".into(),
             key.into(),
@@ -573,7 +574,7 @@ mod tests {
         let wire = WireAlert {
             id: alert_id("producer:ci", "k"),
             kind: Kind::Alert,
-            group: "infra".into(),
+            target: Target::Group("infra".into()),
             title: "t".into(),
             source: "producer:ci".into(),
             key: "k".into(),
@@ -609,9 +610,38 @@ mod tests {
         s.merge(more);
         assert_eq!(s.pending_for("d3", 10, 0).len(), 1);
         // Same key, different title.
-        let mut other = wire;
+        let mut other = wire.clone();
         other.title = "other".into();
         assert!(matches!(s.merge(other), Accepted::Conflict));
+        // Same key, same id, another kind of target.
+        let mut other = wire;
+        other.target = Target::User("infra".into());
+        assert!(matches!(s.merge(other), Accepted::Conflict));
+    }
+
+    #[test]
+    fn a_spooled_alert_for_an_account_keeps_its_target_in_the_wire_and_the_pending_list() {
+        let s = Spool::default();
+        let Accepted::Created(e) = s.accept(
+            alert_id("producer:ci", "k"),
+            Kind::Alert,
+            Target::User("alice".into()),
+            "t".into(),
+            "producer:ci".into(),
+            "k".into(),
+            1,
+            vec!["d1".into()],
+        ) else {
+            panic!("created")
+        };
+        assert_eq!(e.wire().target, Target::User("alice".into()));
+        let text = serde_json::to_string(&e.wire()).unwrap();
+        let back: WireAlert = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, e.wire());
+        assert_eq!(
+            s.pending_for("d1", 10, 0)[0].target,
+            Target::User("alice".into())
+        );
     }
 
     #[test]

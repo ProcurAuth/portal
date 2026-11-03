@@ -18,9 +18,11 @@ use super::log;
 use super::rights::{Decision, KeyCheck};
 use super::spool::{self, Accepted as Spooled};
 use super::state::{App, FileKey};
+use super::target::Target;
 use super::util::{hex, is_hex_id, now_ms, truncate_chars};
 use crate::util::parse_form;
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -47,6 +49,11 @@ impl ApiError {
 
     pub fn status(&self) -> StatusCode {
         self.status
+    }
+
+    /// The short code of the error, as the JSON answer shows it.
+    pub fn code(&self) -> &'static str {
+        self.code
     }
 
     /// One line for a log: the status, the code and the message.
@@ -97,12 +104,22 @@ pub async fn accept_alert(
     alert: NewAlert,
     source_kind: &'static str,
 ) -> Result<Accepted, ApiError> {
-    if !app.group_names.contains_key(&alert.group) {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unknown_group",
-            format!("unknown group {:?}", alert.group),
-        ));
+    match &alert.target {
+        Target::Group(group) if !app.group_names.contains_key(group) => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown_group",
+                format!("unknown group {group:?}"),
+            ));
+        }
+        Target::User(login) if login.is_empty() => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unknown_user",
+                "an alert for an account needs a login",
+            ));
+        }
+        _ => {}
     }
     let title = alert.title.trim();
     if title.is_empty() {
@@ -132,11 +149,12 @@ pub async fn accept_alert(
     };
 
     // The encoded alert must fit in one encrypted frame, whatever the escaping.
+    let (frame_group, frame_group_name) = alert.target.frame(|id| app.group_name(id));
     let probe = ServerMsg::Alert(AlertMsg {
         alert_id: "0".repeat(32),
         kind: alert.kind,
-        group: alert.group.clone(),
-        group_name: app.group_name(&alert.group),
+        group: frame_group,
+        group_name: frame_group_name,
         title: alert.title.clone(),
         created_at_ms: i64::MAX,
     });
@@ -164,7 +182,8 @@ pub async fn accept_alert(
         InsertOutcome::Created {
             alert_id, devices, ..
         } => {
-            app.metrics.alert_accepted(source_kind, alert.kind);
+            app.metrics
+                .alert_accepted(source_kind, alert.kind, alert.target.kind());
             app.metrics.deliveries_created(devices.len() as u64);
             log::info!(event = "alert_accepted", alert.id = %alert_id, targets = devices.len());
             if devices.is_empty() {
@@ -179,7 +198,8 @@ pub async fn accept_alert(
             })
         }
         InsertOutcome::Duplicate { alert_id, devices } => {
-            app.metrics.alert_duplicate(source_kind, alert.kind);
+            app.metrics
+                .alert_duplicate(source_kind, alert.kind, alert.target.kind());
             // A retry after a failed copy must not be acknowledged before the copy exists.
             replicate(app).await?;
             app.hub.wake(&devices);
@@ -194,7 +214,17 @@ pub async fn accept_alert(
             "idempotency_conflict",
             "idempotency key already used for a different alert",
         )),
+        InsertOutcome::NoPhone => Err(no_phone()),
     }
+}
+
+/// The answer for an alert to an account that has no phone to use. The alert is not stored.
+fn no_phone() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "no_phone",
+        "the account has no phone that can receive the alert: no phone is enrolled, or each phone is revoked",
+    )
 }
 
 /// The alert is accepted although the database cannot take it: kept in the spool, copied to the other instances before the
@@ -214,23 +244,27 @@ async fn accept_without_database(
     };
     // Stored a moment ago: the phones know it under that id, a retry must not create another.
     if let Some(known) = pg.cached_alert(&alert.source, &alert.idempotency_key) {
-        if known.group != alert.group || known.title != alert.title {
+        if known.target != alert.target || known.title != alert.title {
             return Err(conflict());
         }
-        app.metrics.alert_duplicate(source_kind, alert.kind);
-        let targets = pg.cached_targets(&alert.group).len();
+        app.metrics
+            .alert_duplicate(source_kind, alert.kind, alert.target.kind());
+        let targets = pg.cached_targets(&alert.target).len();
         return Ok(Accepted {
             alert_id: known.id,
             duplicate: true,
             targets,
         });
     }
-    let devices = pg.cached_targets(&alert.group);
+    let devices = pg.cached_targets(&alert.target);
+    if devices.is_empty() && matches!(alert.target, Target::User(_)) {
+        return Err(no_phone());
+    }
     let id = spool::alert_id(&alert.source, &alert.idempotency_key);
     let (entry, duplicate) = match pg.spool().accept(
         id,
         alert.kind,
-        alert.group,
+        alert.target.clone(),
         alert.title,
         alert.source,
         alert.idempotency_key,
@@ -238,8 +272,10 @@ async fn accept_without_database(
         devices,
     ) {
         Spooled::Created(entry) => {
-            app.metrics.alert_accepted(source_kind, entry.kind);
-            app.metrics.alert_spooled(source_kind, entry.kind);
+            app.metrics
+                .alert_accepted(source_kind, entry.kind, entry.target.kind());
+            app.metrics
+                .alert_spooled(source_kind, entry.kind, entry.target.kind());
             app.metrics
                 .deliveries_created(entry.deliveries.len() as u64);
             log::warn!(
@@ -250,7 +286,8 @@ async fn accept_without_database(
             (entry, false)
         }
         Spooled::Duplicate(entry) => {
-            app.metrics.alert_duplicate(source_kind, entry.kind);
+            app.metrics
+                .alert_duplicate(source_kind, entry.kind, entry.target.kind());
             (entry, true)
         }
         Spooled::Conflict => return Err(conflict()),
@@ -426,16 +463,53 @@ fn sender<'a>(
 /// of the portal. For `alert.send` the decision counts one use, except for
 /// a critical group: a critical group never has a limit.
 fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Result<(), ApiError> {
-    let refused = || {
-        ApiError::new(
+    let count_use = action == crate::portal_actions::ALERT_SEND && !app.is_critical(group);
+    authorize_at(app, sender, action, Some(group), count_use)
+}
+
+/// Lets the sender send an alert to an account (`alert.send_user`, flat on the service `portal`).
+/// A key of the file needs `direct_alerts = true`: the start checked that its owner holds the
+/// action. A key of the database needs the decision of the portal. With `count_use` the decision
+/// counts one use of the budget `alerts`. A direct alert is never critical, so the budget always
+/// applies. The caller asks first without `count_use`, then checks the target, then asks again with
+/// `count_use`: an alert that is refused for its target does not use the budget.
+fn authorize_user(app: &App, sender: &Sender<'_>, count_use: bool) -> Result<(), ApiError> {
+    authorize_at(
+        app,
+        sender,
+        crate::portal_actions::ALERT_SEND_USER,
+        None,
+        count_use,
+    )
+}
+
+/// The decision for one action of the sender. `group` is `None` for an action on the service.
+fn authorize_at(
+    app: &App,
+    sender: &Sender<'_>,
+    action: &str,
+    group: Option<&str>,
+    count_use: bool,
+) -> Result<(), ApiError> {
+    let refused = || match group {
+        Some(group) => ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden_group",
             format!("the sender has no permission {action:?} on the group {group:?}"),
-        )
+        ),
+        None => ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden_user",
+            format!("the sender has no permission {action:?} on the service portal"),
+        ),
     };
     match sender {
         Sender::FileKey(p) => {
-            if p.groups.iter().any(|g| g == group) {
+            let allowed = match group {
+                Some(group) => p.groups.iter().any(|g| g == group),
+                None => p.direct_alerts,
+            };
+            if allowed {
                 Ok(())
             } else {
                 Err(refused())
@@ -449,8 +523,11 @@ fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Resul
                     "the portal cannot check keys yet, retry in a moment",
                 ));
             };
-            let count_use = action == crate::portal_actions::ALERT_SEND && !app.is_critical(group);
-            match authorizer.decide(id, action, group, count_use) {
+            let decision = match group {
+                Some(group) => authorizer.decide(id, action, group, count_use),
+                None => authorizer.decide_service(id, action, count_use),
+            };
+            match decision {
                 Decision::Allowed => Ok(()),
                 Decision::Refused {
                     reason: "key_not_valid",
@@ -487,6 +564,32 @@ fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Resul
     }
 }
 
+/// Checks that the account exists. The portal knows its accounts: the inbox asks it. `404
+/// unknown_user` for an account that the directory does not hold, `503` when the directory is not
+/// ready.
+fn check_user_exists(app: &App, login: &str) -> Result<(), ApiError> {
+    let Some(authorizer) = app.authorizer() else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "directory_not_ready",
+            "the portal cannot check accounts yet, retry in a moment",
+        ));
+    };
+    match authorizer.user_exists(login) {
+        Some(true) => Ok(()),
+        Some(false) => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "unknown_user",
+            format!("unknown user {login:?}"),
+        )),
+        None => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "directory_not_ready",
+            "the portal cannot check accounts yet, retry in a moment",
+        )),
+    }
+}
+
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(body)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()))
@@ -495,9 +598,35 @@ fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError>
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertRequest {
-    pub group: String,
+    /// The id of a group. Exactly one of `group` and `user`.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// The login of an account. Exactly one of `group` and `user`.
+    #[serde(default)]
+    pub user: Option<String>,
     /// One line, at most 128 characters.
     pub title: String,
+}
+
+impl AlertRequest {
+    /// The target of the request: exactly one of `group` and `user`. None, or both, is a bad
+    /// request.
+    pub fn target(&self) -> Result<Target, ApiError> {
+        match (&self.group, &self.user) {
+            (Some(group), None) => Ok(Target::Group(group.clone())),
+            (None, Some(user)) => Ok(Target::User(user.clone())),
+            (Some(_), Some(_)) => Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                "give one target: group or user, not both",
+            )),
+            (None, None) => Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                "give one target: the field group or the field user",
+            )),
+        }
+    }
 }
 
 /// The `Idempotency-Key` header, or, when the client sends none, a key derived
@@ -576,13 +705,31 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
     } = read_call(app, request).await?;
     let who = sender(app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
-    authorize(app, &who, crate::portal_actions::ALERT_SEND, &req.group)?;
-    let key = idempotency_key(&headers, &[&req.group, &req.title])?;
+    let target = req.target()?;
+    match &target {
+        Target::Group(group) => authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?,
+        Target::User(login) => {
+            // The right first, without a count. Then the target. Then the count: a refused
+            // target does not use the budget.
+            authorize_user(app, &who, false)?;
+            check_user_exists(app, login)?;
+            let phones = app
+                .db
+                .active_phones_by_login()
+                .await
+                .map_err(ApiError::storage)?;
+            if !phones.contains_key(login) {
+                return Err(no_phone());
+            }
+            authorize_user(app, &who, true)?;
+        }
+    }
+    let key = idempotency_key(&headers, &[&target.to_string(), &req.title])?;
     let accepted = accept_alert(
         app,
         NewAlert {
             kind: Kind::Alert,
-            group: req.group,
+            target,
             title: req.title,
             source: format!("producer:{}", who.name()),
             idempotency_key: key,
@@ -615,18 +762,25 @@ async fn get_alert_inner(
         .await
         .map_err(ApiError::storage)?;
     let detail = detail.ok_or_else(not_found)?;
-    // A sender that may not read the group sees the same answer as for an alert that is not there.
-    if let Err(error) = authorize(
-        app,
-        &who,
-        crate::portal_actions::ALERT_READ,
-        &detail.summary.group,
-    ) {
-        return Err(if error.status() == StatusCode::FORBIDDEN {
-            not_found()
-        } else {
-            error
-        });
+    // A sender that may not read the alert sees the same answer as for an alert that is not there.
+    // An alert for a group needs `alert.read` on the group. An alert for an account has no group:
+    // the key that sent it reads it. The account that is the target and the superadmin read it in
+    // the page of the Inbox.
+    match &detail.summary.target {
+        Target::Group(group) => {
+            if let Err(error) = authorize(app, &who, crate::portal_actions::ALERT_READ, group) {
+                return Err(if error.status() == StatusCode::FORBIDDEN {
+                    not_found()
+                } else {
+                    error
+                });
+            }
+        }
+        Target::User(_) => {
+            if detail.summary.source != format!("producer:{}", who.name()) {
+                return Err(not_found());
+            }
+        }
     }
     Ok(json(
         StatusCode::OK,
@@ -703,7 +857,7 @@ async fn alertmanager_inner(
             app,
             NewAlert {
                 kind: Kind::Alert,
-                group: group.to_string(),
+                target: Target::Group(group.to_string()),
                 title: truncate_chars(&title, MAX_TITLE_CHARS),
                 source: format!("webhook:{}", who.name()),
                 idempotency_key: key,
@@ -771,7 +925,7 @@ async fn notify_inner(
         app,
         NewAlert {
             kind: Kind::Alert,
-            group: group.to_string(),
+            target: Target::Group(group.to_string()),
             title,
             source: format!("notify:{}", who.name()),
             idempotency_key: key,
@@ -780,4 +934,56 @@ async fn notify_inner(
     )
     .await?;
     Ok(created_or_ok(&accepted))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(text: &str) -> Result<AlertRequest, ApiError> {
+        parse_json(&Bytes::from(text.to_string()))
+    }
+
+    #[test]
+    fn a_request_has_exactly_one_target() {
+        let group = request(r#"{"group":"infra","title":"t"}"#).unwrap();
+        assert_eq!(group.target().unwrap(), Target::Group("infra".into()));
+        let user = request(r#"{"user":"alice","title":"t"}"#).unwrap();
+        assert_eq!(user.target().unwrap(), Target::User("alice".into()));
+        for body in [
+            r#"{"group":"infra","user":"alice","title":"t"}"#,
+            r#"{"title":"t"}"#,
+        ] {
+            let error = request(body).unwrap().target().unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(error.code(), "invalid_target", "{body}");
+        }
+        // An unknown field, or a missing title, is a bad JSON as before.
+        for body in [
+            r#"{"group":"infra","title":"t","bogus":1}"#,
+            r#"{"user":"alice"}"#,
+            r#"{"user":7,"title":"t"}"#,
+        ] {
+            assert_eq!(
+                request(body).err().unwrap().code(),
+                "invalid_json",
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_idempotency_key_of_two_targets_with_the_same_id_differs() {
+        let headers = HeaderMap::new();
+        let group = idempotency_key(&headers, &[&Target::Group("a".into()).to_string(), "t"]);
+        let user = idempotency_key(&headers, &[&Target::User("a".into()).to_string(), "t"]);
+        assert_ne!(group.unwrap(), user.unwrap());
+    }
+
+    #[test]
+    fn no_phone_is_a_conflict_with_its_own_code() {
+        let error = no_phone();
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), "no_phone");
+    }
 }

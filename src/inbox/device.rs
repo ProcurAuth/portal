@@ -742,11 +742,12 @@ async fn flush_deliveries(
         {
             continue;
         }
+        let (group, group_name) = p.target.frame(|id| app.group_name(id));
         let msg = ServerMsg::Alert(AlertMsg {
             alert_id: p.alert_id,
             kind: p.kind,
-            group_name: app.group_name(&p.group),
-            group: p.group,
+            group_name,
+            group,
             title: p.title,
             created_at_ms: p.created_at,
         });

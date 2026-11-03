@@ -18,7 +18,7 @@ use super::components::{
 };
 use super::settings::{notice_html, plural, Frame, Notice, Tab};
 use crate::inbox::admin::{
-    AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceRow, DeviceState,
+    AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceRow, DeviceState, Target,
 };
 use crate::util::{html_escape, percent_encode_query_component, time_tag};
 
@@ -54,12 +54,19 @@ pub struct Rights {
     pub own_phones: bool,
     /// The groups with `alert.send`.
     pub send: Vec<GroupChoice>,
+    /// `alert.send_user`: the account may send an alert to any account.
+    pub send_user: bool,
 }
 
 impl Rights {
     /// Whether the account has any right in the tab.
     pub fn any(&self) -> bool {
-        self.sent || self.phones || self.connections || self.own_phones || !self.send.is_empty()
+        self.sent
+            || self.phones
+            || self.connections
+            || self.own_phones
+            || !self.send.is_empty()
+            || self.send_user
     }
 }
 
@@ -75,6 +82,15 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "bad_group" => ("Choose a group that you may send to.", false),
+        "bad_target" => (
+            "Choose a group or an account that you may send to.",
+            false,
+        ),
+        "bad_user" => ("That account does not exist.", false),
+        "no_phone" => (
+            "That account has no phone that can receive the alert: no phone is enrolled, or each phone is revoked.",
+            false,
+        ),
         "unknown_device" => ("That phone does not exist, or you cannot revoke it.", false),
         "too_many_codes" => (
             "You have the largest number of codes that are not used. Use one, or wait until it ends.",
@@ -391,6 +407,7 @@ impl Origin {
         match source {
             "portal" => Origin::Watch,
             "admin" => Origin::Account,
+            other if other.starts_with("admin:") => Origin::Account,
             other => {
                 let name = other.split_once(':').map_or(other, |(_, name)| name);
                 match name.strip_prefix("key:") {
@@ -638,7 +655,7 @@ fn send_popover(view: &InboxView) -> String {
     let group_field = if choices.len() == 1 {
         // One group is no choice: the form names it and sends it.
         format!(
-            r#"<input type="hidden" name="group" value="{}"><div class="field"><span class="field__label">Group</span><span>{}</span></div>"#,
+            r#"<input type="hidden" name="to" value="group:{}"><div class="field"><span class="field__label">Group</span><span>{}</span></div>"#,
             html_escape(&choices[0].id),
             html_escape(&choices[0].name)
         )
@@ -647,13 +664,13 @@ fn send_popover(view: &InboxView) -> String {
         for c in choices {
             let _ = write!(
                 options,
-                r#"<option value="{}">{}</option>"#,
+                r#"<option value="group:{}">{}</option>"#,
                 html_escape(&c.id),
                 html_escape(&c.name)
             );
         }
         format!(
-            r#"<div class="field"><label class="field__label" for="send-group">Group</label><select class="uiInput" id="send-group" name="group" required>{options}</select></div>"#
+            r#"<div class="field"><label class="field__label" for="send-group">Group</label><select class="uiInput" id="send-group" name="to" required>{options}</select></div>"#
         )
     };
     let body = format!(
@@ -783,11 +800,24 @@ fn group_name<'a>(groups: &'a [GroupLine], id: &'a str) -> &'a str {
         .map_or(id, |g| g.name.as_str())
 }
 
+/// What the column "To" shows: the name of the group, or `@login` for an account.
+fn target_label(groups: &[GroupLine], target: &Target) -> String {
+    match target {
+        Target::Group(id) => group_name(groups, id).to_string(),
+        Target::User(login) => format!("@{login}"),
+    }
+}
+
 fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     let query = view.query;
     // The group chips count the alerts of the state that is on. The state chips count the alerts
     // of the group that is on.
-    let in_group = |a: &&AlertRow| query.group.as_deref().is_none_or(|g| g == a.summary.group);
+    let in_group = |a: &&AlertRow| {
+        query
+            .group
+            .as_deref()
+            .is_none_or(|g| a.summary.target.group() == Some(g))
+    };
     let in_state = |a: &&AlertRow| query.alert.is_none_or(|s| s == AlertState::of(&a.summary));
     let shown: Vec<&AlertRow> = sent
         .alerts
@@ -806,7 +836,7 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         sent.alerts
             .iter()
             .filter(in_state)
-            .filter(|a| a.summary.group == id)
+            .filter(|a| a.summary.target.group() == Some(id))
             .count()
     };
     let total = sent.alerts.iter().filter(in_group).filter(in_state).count();
@@ -942,15 +972,16 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
     let critical = view
         .groups
         .iter()
-        .find(|g| g.id == a.group)
+        .find(|g| Some(g.id.as_str()) == a.target.group())
         .is_some_and(|g| g.critical);
     let _ = write!(
         out,
-        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{name}{crit}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
+        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-group="{group}" data-to="{to}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{name}{crit}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
         id = html_escape(&a.id),
         open_class = if open { "is-selected" } else { "" },
         kind = a.kind.as_str(),
-        group = html_escape(&a.group),
+        group = html_escape(a.target.group().unwrap_or("")),
+        to = html_escape(&a.target.to_string()),
         source = html_escape(&a.source),
         title = html_escape(&a.title),
         received = a.received,
@@ -959,7 +990,7 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
         created = a.created_at,
         icon = alert_icon(state, a),
         when = when(a.created_at),
-        name = html_escape(group_name(view.groups, &a.group)),
+        name = html_escape(&target_label(view.groups, &a.target)),
         crit = if critical {
             format!(
                 r#" <span class="crit" title="Critical group">{}</span>"#,
@@ -1543,6 +1574,7 @@ mod tests {
             connections: true,
             own_phones: true,
             send: vec![choice("infra", "Infra <b>"), choice("crit", "Critical")],
+            send_user: true,
         }
     }
 
@@ -1573,7 +1605,7 @@ mod tests {
         AlertSummary {
             id: id.into(),
             kind: inbox_core::proto::Kind::Alert,
-            group: group.into(),
+            target: Target::Group(group.into()),
             title: title.into(),
             source: "producer:ci".into(),
             created_at: NOW - 60_000,
@@ -1784,8 +1816,8 @@ mod tests {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
         assert!(html.contains(r#"action="/auth/settings/inbox/send""#));
-        assert!(html.contains(r#"<option value="infra">Infra &lt;b&gt;</option>"#));
-        assert!(html.contains(r#"<option value="crit">Critical</option>"#));
+        assert!(html.contains(r#"<option value="group:infra">Infra &lt;b&gt;</option>"#));
+        assert!(html.contains(r#"<option value="group:crit">Critical</option>"#));
         assert!(html.contains(r#"name="key" value="k1""#));
         assert!(html.contains(r#"name="csrf" value="tok&lt;""#));
         // One group is no choice: no select.
@@ -1795,7 +1827,7 @@ mod tests {
         };
         let html = page(&full_view(&one, &query, &groups));
         assert!(!html.contains("<select"), "{html}");
-        assert!(html.contains(r#"<input type="hidden" name="group" value="infra">"#));
+        assert!(html.contains(r#"<input type="hidden" name="to" value="group:infra">"#));
         // A session of "Log in as" sends nothing: the button is absent.
         let mut view = full_view(&rights, &query, &groups);
         view.impersonated = true;

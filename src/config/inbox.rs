@@ -114,6 +114,8 @@ pub struct ApiKeyConfig {
     pub owner: String,
     /// The groups that the block lists. The server keeps only those that the owner may send to.
     pub groups: Vec<String>,
+    /// The key can send an alert to an account. The owner holds `alert.send_user`.
+    pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
 }
 
@@ -246,9 +248,10 @@ pub fn build(
         super::keys::check_inbox_id(&name)
             .map_err(|e| format!("inbox.api_key {name:?}: the label is not a name: {e}"))?;
         let listed = block.list("groups")?;
-        if listed.is_empty() {
+        let direct_alerts = block.bool("direct_alerts")?;
+        if listed.is_empty() && !direct_alerts {
             return Err(format!(
-                "invalid inbox.api_key.{name}.groups: expected at least one group id, got []"
+                "invalid inbox.api_key.{name}.groups: expected at least one group id, or direct_alerts = true, got []"
             ));
         }
         for group in &listed {
@@ -295,6 +298,7 @@ pub fn build(
             ApiKeyConfig {
                 owner: block.text("owner")?,
                 groups: listed,
+                direct_alerts,
                 webhook_send_resolved: block.bool("webhook_send_resolved")?,
             },
         );
@@ -414,8 +418,9 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
 }
 
 /// Checks each block `api_key` against the accounts of the file (portal 3.4a, 4.1). The owner is an
-/// account of the file. The owner must hold `keys.own.use` on the kind `api`, and `alert.send` on
-/// each group of the key. The error names the key, the expected value and the value found.
+/// account of the file. The owner must hold `keys.own.use` on the kind `api`, `alert.send` on each
+/// group of the key, and `alert.send_user` on the service when the key has `direct_alerts`. The
+/// error names the key, the expected value and the value found.
 pub fn check_api_keys(
     config: &Config,
     inbox: &InboxConfig,
@@ -437,6 +442,20 @@ pub fn check_api_keys(
         ) {
             return Err(format!(
                 "inbox.api_key.{name}: the owner {:?} does not hold keys.own.use on service:portal/key_kind:api: add this grant to the block user, or the key can do nothing",
+                key.owner
+            ));
+        }
+        if key.direct_alerts
+            && !portal::allows(
+                &document,
+                &key.owner,
+                &account.grants,
+                portal::ALERT_SEND_USER,
+                None,
+            )
+        {
+            return Err(format!(
+                "inbox.api_key.{name}.direct_alerts: the owner {:?} does not hold alert.send_user on service:portal: add this grant to the block user, or set direct_alerts = false",
                 key.owner
             ));
         }

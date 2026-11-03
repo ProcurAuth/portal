@@ -45,6 +45,55 @@ pub(super) fn directory_fresh(state: &AppState) -> bool {
     state.users.age() <= max
 }
 
+impl PortalAuthorizer {
+    /// The decision for a key on the node `chain` of the service `portal`. `group` is the id of
+    /// the group of the chain, for the log.
+    fn decide_on(
+        &self,
+        key_id: &str,
+        action: &str,
+        chain: &[crate::grants::Segment],
+        group: Option<&str>,
+        count_use: bool,
+    ) -> Decision {
+        let Some(state) = self.state.upgrade() else {
+            return Decision::NotReady;
+        };
+        let verdict = decide_key_for(&state, key_id, actions::SERVICE, action, chain, count_use);
+        let (decision, word) = match verdict {
+            UseVerdict::Allowed => (Decision::Allowed, "allow"),
+            UseVerdict::UnknownSubject => (
+                Decision::Refused {
+                    reason: "key_not_valid",
+                },
+                "key_not_valid",
+            ),
+            UseVerdict::Denied => (
+                Decision::Refused {
+                    reason: "no_permission",
+                },
+                "deny",
+            ),
+            UseVerdict::Limited(retry_after) => (Decision::Limited { retry_after }, "limited"),
+            UseVerdict::NotReady => (Decision::NotReady, "not_ready"),
+            UseVerdict::Unavailable => (Decision::Unavailable, "unavailable"),
+        };
+        log(
+            &state,
+            LogLevel::Info,
+            "inbox_key_decision",
+            &[
+                ("key", key_id.to_string()),
+                ("action", action.to_string()),
+                ("group", group.unwrap_or("").to_string()),
+                ("counted", count_use.to_string()),
+                ("decision", word.to_string()),
+            ],
+        );
+        decision
+    }
+}
+
 impl Authorizer for PortalAuthorizer {
     fn check_key(&self, token: &str) -> KeyCheck {
         let Some(state) = self.state.upgrade() else {
@@ -96,46 +145,27 @@ impl Authorizer for PortalAuthorizer {
     }
 
     fn decide(&self, key_id: &str, action: &str, group: &str, count_use: bool) -> Decision {
-        let Some(state) = self.state.upgrade() else {
-            return Decision::NotReady;
-        };
         let Some(chain) = actions::group_chain(group) else {
             return Decision::Refused {
                 reason: "no_permission",
             };
         };
-        let verdict = decide_key_for(&state, key_id, actions::SERVICE, action, &chain, count_use);
-        let (decision, word) = match verdict {
-            UseVerdict::Allowed => (Decision::Allowed, "allow"),
-            UseVerdict::UnknownSubject => (
-                Decision::Refused {
-                    reason: "key_not_valid",
-                },
-                "key_not_valid",
-            ),
-            UseVerdict::Denied => (
-                Decision::Refused {
-                    reason: "no_permission",
-                },
-                "deny",
-            ),
-            UseVerdict::Limited(retry_after) => (Decision::Limited { retry_after }, "limited"),
-            UseVerdict::NotReady => (Decision::NotReady, "not_ready"),
-            UseVerdict::Unavailable => (Decision::Unavailable, "unavailable"),
-        };
-        log(
-            &state,
-            LogLevel::Info,
-            "inbox_key_decision",
-            &[
-                ("key", key_id.to_string()),
-                ("action", action.to_string()),
-                ("group", group.to_string()),
-                ("counted", count_use.to_string()),
-                ("decision", word.to_string()),
-            ],
-        );
-        decision
+        self.decide_on(key_id, action, &chain, Some(group), count_use)
+    }
+
+    fn decide_service(&self, key_id: &str, action: &str, count_use: bool) -> Decision {
+        self.decide_on(key_id, action, &[], None, count_use)
+    }
+
+    fn user_exists(&self, login: &str) -> Option<bool> {
+        let state = self.state.upgrade()?;
+        if !directory_fresh(&state) {
+            return None;
+        }
+        Some(
+            constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes())
+                || state.users.get(login).is_some(),
+        )
     }
 
     fn subscribable(&self, login: &str) -> Subscribable {

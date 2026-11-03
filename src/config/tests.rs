@@ -2820,6 +2820,52 @@ fn a_user_block_cannot_name_a_feature_that_the_file_turns_off() {
 }
 
 #[test]
+fn a_file_key_alerts_an_account_only_with_direct_alerts_and_an_owner_that_holds_the_right() {
+    let block =
+        r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#;
+    let direct = r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] direct_alerts = true }"#;
+    let only_direct = r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = [] direct_alerts = true }"#;
+    let empty = r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = [] }"#;
+    let with_right = |key: &str| {
+        with_inbox(&INBOX.replace(block, key)).replace(
+            "\"keys.own.use on service:portal/key_kind:api\",",
+            "\"keys.own.use on service:portal/key_kind:api\", \"alert.send_user on service:portal\",",
+        )
+    };
+    // The default is `false`.
+    let (config, _) = inbox_ok(&with_inbox(INBOX));
+    assert!(!config.inbox.as_ref().unwrap().api_keys["grafana"].direct_alerts);
+    // With the right, the key can have it, with a group or with none.
+    for key in [direct, only_direct] {
+        let (config, _) = inbox_ok(&with_right(key));
+        assert!(config.inbox.as_ref().unwrap().api_keys["grafana"].direct_alerts);
+    }
+    // The owner has no `alert.send_user`: the start stops and names the key and the right.
+    let message = inbox_err(&with_inbox(&INBOX.replace(block, direct)));
+    assert!(
+        message.contains("inbox.api_key.grafana.direct_alerts")
+            && message.contains("alert.send_user")
+            && message.contains("\"ci\""),
+        "{message}"
+    );
+    // The right without `direct_alerts` changes nothing: the key sends to its groups only.
+    let (config, _) = inbox_ok(&with_right(block));
+    assert!(!config.inbox.as_ref().unwrap().api_keys["grafana"].direct_alerts);
+    // A key with no group and no direct alert can do nothing.
+    let message = inbox_err(&with_right(empty));
+    assert!(
+        message.contains("inbox.api_key.grafana.groups") && message.contains("direct_alerts"),
+        "{message}"
+    );
+    // The right has no node: a grant on a group is refused.
+    let message = inbox_err(&with_inbox(INBOX).replace(
+        "\"keys.own.use on service:portal/key_kind:api\",",
+        "\"keys.own.use on service:portal/key_kind:api\", \"alert.send_user on service:portal/inbox_group:infra\",",
+    ));
+    assert!(message.contains("alert.send_user"), "{message}");
+}
+
+#[test]
 fn an_api_key_block_follows_its_owner_and_checks_its_text_at_start() {
     let good = inbox_ok(&with_inbox(INBOX));
     assert_eq!(

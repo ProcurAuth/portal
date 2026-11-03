@@ -35,6 +35,7 @@ mod shutdown;
 mod spool;
 mod state;
 mod store;
+mod target;
 mod tasks;
 mod util;
 mod ws;
@@ -309,7 +310,7 @@ impl Slot {
         key: String,
     ) -> Result<bool, String> {
         let app = self.app().ok_or("the inbox is not running")?;
-        internal::send_alert(&app, group, title, key)
+        internal::send_alert(&app, target::Target::Group(group.to_string()), title, key)
             .await
             .map_err(|e| e.summary())
     }

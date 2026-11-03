@@ -333,7 +333,7 @@ impl Store {
                         &alert.idempotency_key,
                         RecentAlert {
                             id: alert_id.clone(),
-                            group: alert.group,
+                            target: alert.target,
                             title: alert.title,
                             at: now_ms(),
                         },
@@ -449,6 +449,16 @@ impl Store {
                     .await
             }
             Store::Pg(pg) => pg.guard(pg.recent_alerts(limit, since_ms, cutoff)).await,
+        }
+    }
+
+    /// The number of phones that are not revoked, for each login that has one at least.
+    pub async fn active_phones_by_login(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u32>, DbError> {
+        match self {
+            Store::Sqlite(db) => db.call(move |c| Ok(db::active_phones_by_login(c)?)).await,
+            Store::Pg(pg) => pg.guard(pg.active_phones_by_login()).await,
         }
     }
 

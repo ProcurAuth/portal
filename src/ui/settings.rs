@@ -1995,7 +1995,7 @@ mod tests {
             html.contains(r#"role="img" aria-label="Keys: 2 of 8 rights""#),
             "{html}"
         );
-        assert!(html.contains(r#"aria-label="Inbox: 1 of 6 rights""#));
+        assert!(html.contains(r#"aria-label="Inbox: 1 of 7 rights""#));
         assert!(
             html.contains(r#"<td class="r num">3</td>"#),
             "the keys of alice"
