@@ -654,13 +654,8 @@ fn groups_field(groups: &[GroupChip], member_of: &[String], editable: bool) -> S
             );
         }
     }
-    let hint = if editable {
-        r#"<span class="hint">A group chip gives the right <code>inbox.receive</code> on that group. The account then gets its alerts.</span>"#
-    } else {
-        ""
-    };
     format!(
-        r#"<div class="field field--groups"><span class="field__label">Groups</span><span class="chips" role="group" aria-label="Groups of the account">{chips}</span>{hint}</div>"#
+        r#"<div class="field field--groups"><span class="field__label">Groups</span><span class="chips" role="group" aria-label="Groups of the account">{chips}</span></div>"#
     )
 }
 
@@ -1623,6 +1618,7 @@ mod tests {
             changes: false,
             only_refused: false,
             days: &d.days,
+            first_day: FIRST_DAY,
             recent_events: &d.events,
         };
         let pages = [
@@ -1849,7 +1845,7 @@ mod tests {
             html.contains("Change the \\u003cdashboards\\u003e."),
             "escaped"
         );
-        assert!(!html.contains("Save access") && !html.contains("Opens 2 of 4"));
+        assert!(!html.contains("Save access") && !html.contains("Opens 2/4"));
         // Without script the grants are a read-only list.
         assert!(html.contains(r#"<noscript><ul class="grantList"><li><code>"#));
         // Without keys, the delete needs one click.
@@ -2078,9 +2074,8 @@ mod tests {
         assert!(form.contains(r#"<button class="chip chip--toggle" type="button" data-group-chip="infra" aria-pressed="false""#), "{form}");
         assert!(form.contains(r#"<span class="num">11</span>"#));
         assert!(form.contains("#i-bell-ringing"), "the critical mark");
-        assert!(
-            form.contains("A group chip gives the right <code>inbox.receive</code> on that group.")
-        );
+        assert!(!form.contains(r#"class="hint""#), "no help sentence");
+        assert!(form.contains("the right inbox.receive on service:portal/inbox_group:infra"));
         // The editor sits under the fields and belongs to the form.
         assert!(
             html.contains(r#"data-title="Permissions" data-layout="groups" data-form="add-user">"#)

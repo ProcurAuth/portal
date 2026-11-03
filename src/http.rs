@@ -1246,6 +1246,7 @@ async fn handle_settings(
                     changes: query_value(uri, "v").as_deref() == Some("changes"),
                     only_refused,
                     days: &snapshot.days,
+                    first_day: snapshot.first_day,
                     recent_events: &snapshot.recent_events,
                 },
             )

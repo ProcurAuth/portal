@@ -1628,7 +1628,7 @@
       // The matrix of the kinds of key: the rows are "Make a key" and "Use the keys".
       function kindMatrix() {
         if (!kinds.length || !(actions["keys.own.create"] || actions["keys.own.use"])) return;
-        ui.appendChild(sub("key", "Key kinds"));
+        ui.appendChild(sub("tags", "Key kinds"));
         var table = node("div", "matrix matrix--" + kinds.length);
         table.appendChild(node("div", "mh", "Right"));
         kinds.forEach(function (n) {
@@ -1792,7 +1792,7 @@
         kindMatrix();
         inboxMatrix();
         // The row of the direct alerts exists only when the document of the portal has the action.
-        flatSection("inbox", "Direct alerts", DIRECT_ROWS);
+        flatSection("user", "Direct alerts", DIRECT_ROWS);
         flatSection("device-mobile", "Phones", PHONE_ROWS);
         if (again) {
           var boxes = ui.querySelectorAll("input[type=checkbox]");
@@ -2001,7 +2001,7 @@
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
       }
-      servicesCount.textContent = "Opens " + openCount + " of " + rowList.length;
+      servicesCount.textContent = "Opens " + openCount + "/" + rowList.length;
       if (featureSvc) {
         var held = 0;
         ticked.forEach(function (item) {
@@ -2014,7 +2014,7 @@
             return applies(a, n);
           }).length;
         });
-        featuresCount.textContent = held + " of " + total + " rights";
+        featuresCount.textContent = "Rights " + held + "/" + total;
       }
     }
 

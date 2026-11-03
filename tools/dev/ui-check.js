@@ -12,7 +12,16 @@
 //   UI_CHECK_SHOTS       a directory for the screenshots (optional)
 //   UI_CHECK_INBOX       1: run the checks of the Inbox pages too. They send alerts. They need the
 //                        accounts carol (no phone, no right of the Inbox) and bob (receives only):
-//                        UI_CHECK_CAROL_PASSWORD and UI_CHECK_BOB_PASSWORD.
+//                        UI_CHECK_CAROL_PASSWORD and UI_CHECK_BOB_PASSWORD. They also check, on a
+//                        portal that is yours: Revoke (0) of the phones (needs one phone), the popup of
+//                        an enrollment code, and the refusal of a key without the right to open the
+//                        service (UI_CHECK_KEY_LOGIN and UI_CHECK_KEY_PASSWORD: an account that makes
+//                        MCP keys and holds a right on the service Notes). Each run makes one enrollment
+//                        code, and an account holds only a few unused codes for 10 minutes.
+//   UI_CHECK_LIMITS_NAME with UI_CHECK_INBOX=1: the names, with commas, of services in the editor whose
+//                        document has a budget, to check the limits of `access` on the line of the
+//                        source (the demo service Notes has one).
+//   UI_CHECK_WIDE        1: look at the six pages at 1440, 1920 and 2560 px, dark and light.
 //
 // The editor checks write nothing to the portal: they never click Save. The Inbox checks send alerts,
 // so run them against a portal that is yours (UI_CHECK_INBOX=1).
@@ -360,12 +369,183 @@ async function inbox(browser) {
   } else console.log("skip  My phones: UI_CHECK_BOB_PASSWORD is not set");
 }
 
+
+// ---- the checks of the leftovers of the review. They write to the portal: a key, an enrollment
+// code. Use a portal that is yours (UI_CHECK_INBOX=1). They need the accounts alice (the rights to
+// make an MCP key and to add a phone) and a phone of any account in the Inbox.
+
+// "Revoke (0)" is not a stop of the key Tab, and the keyboard does not open it, in the Inbox and in
+// the list of keys. A ticked row gives it back.
+async function revokeZero(browser, login, password) {
+  const { page } = await signIn(browser, login, password, "/auth/settings/inbox");
+  const summary = page.locator('[data-bulk="revoke-phones"] > summary');
+  check("Revoke (0) of the phones: it exists", (await summary.count()) === 1, "no button");
+  check("Revoke (0) of the phones: tabindex is -1 and aria-disabled is true", (await summary.getAttribute("tabindex")) === "-1" && (await summary.getAttribute("aria-disabled")) === "true", await summary.evaluate((el) => el.outerHTML));
+  await page.locator("input.bulk__box").first().focus();
+  for (let n = 0; n < 4; n += 1) await page.keyboard.press("Tab");
+  const onSummary = await page.evaluate(() => !!(document.activeElement && document.activeElement.matches("[data-bulk] > summary")));
+  check("Revoke (0) of the phones: the key Tab does not stop on it", !onSummary, "the focus is on the button");
+  await page.locator("input.bulk__box").first().check();
+  check("Revoke (1) of the phones: tabindex is 0", (await summary.getAttribute("tabindex")) === "0", String(await summary.getAttribute("tabindex")));
+  await page.context().close();
+}
+
+// The popup of a new enrollment code: the focus goes into it, it has a name, the code is a text
+// that can be read, and "Done" takes it away and gives the focus back to the button.
+async function enrollmentCode(browser, login, password) {
+  const { page } = await signIn(browser, login, password, "/auth/settings/inbox");
+  await Promise.all([page.waitForNavigation(), page.click('button[aria-label="Add a phone"]')]);
+  const pop = page.locator("[data-code-pop]");
+  // An account holds a few codes that are not used (inbox.enrollment.max_active_per_account): each run makes one.
+  check("the code popup is on the page", (await pop.count()) === 1, "absent: " + (await page.locator(".uiBanner, .empty").allInnerTexts()).join(" | "));
+  check("the code popup has a role and a name", (await pop.getAttribute("role")) === "group" && !!(await pop.getAttribute("aria-label")), "no name");
+  const where = await page.evaluate(() => {
+    const el = document.activeElement;
+    return { inside: !!(el && el.closest("[data-code-pop]")), label: el ? el.getAttribute("aria-label") || el.tagName : "" };
+  });
+  check("the focus is inside the code popup", where.inside, JSON.stringify(where));
+  const code = await page.locator("#enroll-code").inputValue();
+  check("the code is a text with the address of the server", /^http/.test(code) || code.length > 20, code.slice(0, 20));
+  await shot(page, "inbox-code");
+  await page.locator("[data-code-done]").click();
+  check("Done takes the code away", (await page.locator("[data-code-pop]").count()) === 0, "still there");
+  const back = await page.evaluate(() => !!(document.activeElement && document.activeElement.matches('[aria-label="Add a phone"]')));
+  check("Done gives the focus back to the button Add a phone", back, "elsewhere");
+  await page.context().close();
+}
+
+// The limits of the action `access` show on the line of the source, at the right, when the switch
+// is on, and the pane has no second row for the same grant. The service has a budget in its document.
+async function accessLimits(browser, login, password, name) {
+  for (const width of [1280, 1440]) {
+    const { page } = await signIn(browser, login, password, "/auth/settings/new-user", { width, height: 900 });
+    await page.waitForSelector(".ge__svc");
+    await expand(page, name);
+    await row(page, name).locator("input[data-switch]").check();
+    const line = page.locator(".ge__svc.is-expanded .ge__svcTop .srcLine");
+    check(`limits of access at ${width}: ${name} has a source line`, (await line.count()) === 1, String(await line.count()));
+    const fields = page.locator(".ge__svc.is-expanded .ge__svcTop .ge__limitsInline input");
+    check(`limits of access at ${width}: ${name} shows its limit fields`, (await fields.count()) > 0, "no field");
+    const same = await page.evaluate(() => {
+      const top = document.querySelector(".ge__svc.is-expanded .ge__svcTop");
+      const src = top.querySelector(".srcLine").getBoundingClientRect();
+      const boxes = Array.from(top.querySelectorAll(".ge__limitsInline input")).map((el) => el.getBoundingClientRect());
+      const edge = top.getBoundingClientRect();
+      return {
+        // One budget fits on the line of the source. Several budgets may go under it.
+        ok:
+          boxes.length > 0 &&
+          boxes.every((b) => b.right <= edge.right + 1) &&
+          (top.querySelectorAll(".ge__limit").length > 1 || boxes.every((b) => b.top >= src.top - 8 && b.bottom <= src.bottom + 8 && b.left >= src.right - 1)),
+        scroll: top.scrollWidth - top.clientWidth,
+      };
+    });
+    check(`limits of access at ${width}: the fields are inside the pane, and at the right of the source line for one budget`, same.ok && same.scroll <= 0, JSON.stringify(same));
+    await shot(page, `access-limits-${width}`);
+    // The pane has no row access: the switch is the grant.
+    check(`limits of access at ${width}: no row access in the pane`, (await page.locator('.ge__svc.is-expanded input[data-action="access"]').count()) === 0, "row found");
+    await page.context().close();
+  }
+}
+
+// A right without the right to open the service is refused, and the form comes back with what
+// the person typed.
+async function editRefused(browser, login, password) {
+  const { page } = await signIn(browser, login, password, "/auth/keys/new?kind=mcp");
+  await page.waitForSelector(".ge__svc");
+  await page.fill("#key-name", "i3-refused");
+  await expand(page, "Notes");
+  await node(page, "");
+  await tick(page, "notes.read");
+  await Promise.all([page.waitForNavigation(), page.click('button[type=submit].button--primary')]);
+  await page.goto(BASE + "/auth/settings");
+  const href = await page.evaluate(() => {
+    const row = Array.from(document.querySelectorAll("tr")).find((r) => r.textContent.includes("i3-refused"));
+    const a = row && row.querySelector('a[href^="/auth/keys/edit?id="]');
+    return a ? a.getAttribute("href") : "";
+  });
+  check("edit refused: the key is in the list", href !== "", "no edit link");
+  await page.goto(BASE + href);
+  await page.waitForSelector(".ge__svc");
+  await expand(page, "Notes");
+  await node(page, "");
+  await tick(page, "notes.read", false);
+  await tick(page, "notes.read", true);
+  // The editor ticked the switch too. Take it away from the fields: the form has a right and no access.
+  await page.evaluate(() => {
+    document.querySelectorAll('.grantEditor__fields input[value^="access on service:notes"]').forEach((el) => el.remove());
+  });
+  const before = (await fields(page)).join();
+  await Promise.all([page.waitForNavigation(), page.click('button[type=submit].button--primary')]);
+  const html = await page.content();
+  check("edit refused: the page is the form again", (await page.locator("#key-form").count()) === 1 && html.includes("Edit key"), page.url());
+  check("edit refused: the name is still there", (await page.locator("#key-name").inputValue()) === "i3-refused", await page.locator("#key-name").inputValue());
+  const notice = await page.locator('[role="alert"], .uiBanner, .uiField__error').allInnerTexts();
+  check("edit refused: the notice names the service", notice.join(" ").includes("Notes"), notice.join(" | "));
+  const kept = await fields(page);
+  check("edit refused: the form keeps the rights that were typed", kept.some((v) => v.startsWith("notes.read on service:notes")), before + " -> " + kept.join());
+  await shot(page, "edit-refused");
+  await page.context().close();
+}
+
+// Each page at the wide widths, dark and light: no scroll of the page where the window has room,
+// no horizontal scroll, and the first zone does not stretch past what a person reads.
+const WIDE_PAGES = [
+  ["access", "/auth/settings"],
+  ["services", "/auth/settings/services"],
+  ["activity", "/auth/settings/activity"],
+  ["inbox", "/auth/settings/inbox"],
+  ["new-user", "/auth/settings/new-user"],
+  ["new-key", "/auth/keys/new?kind=api"],
+];
+
+async function wide(browser, login, password) {
+  for (const width of [1440, 1920, 2560]) {
+    const height = width === 2560 ? 1440 : width === 1920 ? 1080 : 900;
+    for (const scheme of ["dark", "light"]) {
+      const context = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
+      const page = await context.newPage();
+      await page.goto(BASE + "/auth/login");
+      await page.fill("#login", login);
+      await page.fill("#password", password);
+      await page.click("button[type=submit]");
+      for (const [name, path] of WIDE_PAGES) {
+        await page.goto(BASE + path);
+        await page.waitForLoadState("load");
+        const m = await page.evaluate(() => {
+          const doc = document.documentElement;
+          const inputs = Array.from(document.querySelectorAll("input.uiInput:not([type=checkbox]):not([type=hidden])")).map((el) => el.getBoundingClientRect().width);
+          return { vScroll: doc.scrollHeight - window.innerHeight, hScroll: doc.scrollWidth - window.innerWidth, widest: Math.round(Math.max(0, ...inputs)) };
+        });
+        check(`${name} ${width}x${height} ${scheme}: no horizontal scroll of the page`, m.hScroll <= 0, JSON.stringify(m));
+        // Where the page fills the window at 1440, it must do the same at the wide widths.
+        check(`${name} ${width}x${height} ${scheme}: no scroll of the page`, m.vScroll <= 0, JSON.stringify(m));
+        check(`${name} ${width}x${height} ${scheme}: no text field stretches past 900 px`, m.widest <= 900, JSON.stringify(m));
+        await shot(page, `wide-${name}-${width}-${scheme}`);
+      }
+      await context.close();
+    }
+  }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     await newUser(browser);
     await keyForm(browser);
-    if (process.env.UI_CHECK_INBOX === "1") await inbox(browser);
+    if (process.env.UI_CHECK_INBOX === "1") {
+      await inbox(browser);
+      const login = process.env.UI_CHECK_LOGIN || "admin";
+      const password = process.env.UI_CHECK_PASSWORD || "test";
+      await revokeZero(browser, login, password);
+      await enrollmentCode(browser, login, password);
+      if (process.env.UI_CHECK_LIMITS_NAME) {
+        for (const name of process.env.UI_CHECK_LIMITS_NAME.split(",")) await accessLimits(browser, login, password, name);
+      }
+      if (process.env.UI_CHECK_KEY_LOGIN) await editRefused(browser, process.env.UI_CHECK_KEY_LOGIN, process.env.UI_CHECK_KEY_PASSWORD || "");
+      else console.log("skip  edit refused: UI_CHECK_KEY_LOGIN is not set");
+    }
+    if (process.env.UI_CHECK_WIDE === "1") await wide(browser, process.env.UI_CHECK_LOGIN || "admin", process.env.UI_CHECK_PASSWORD || "test");
   } finally {
     await browser.close();
   }

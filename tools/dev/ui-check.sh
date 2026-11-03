@@ -20,7 +20,7 @@ if [ -n "${UI_CHECK_SHOTS:-}" ]; then
 fi
 # shellcheck disable=SC2086
 exec docker run --rm --network host -v "$here":/check:ro $shots \
-  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD -e UI_CHECK_INBOX -e UI_CHECK_BOB_PASSWORD -e UI_CHECK_CAROL_PASSWORD \
+  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD -e UI_CHECK_INBOX -e UI_CHECK_BOB_PASSWORD -e UI_CHECK_CAROL_PASSWORD -e UI_CHECK_WIDE -e UI_CHECK_LIMITS_NAME \
   ${UI_CHECK_SHOTS:+-e UI_CHECK_SHOTS=/shots} \
   -e NODE_PATH=/tmp/node_modules -w /tmp "$image" \
   sh -c 'npm install --silent --no-audit --no-fund --prefix /tmp playwright@1.49.1 && node /check/ui-check.js'

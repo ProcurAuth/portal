@@ -13,8 +13,8 @@
 use std::fmt::Write as _;
 
 use super::components::{
-    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, icon, icon_post, popover_with,
-    split_zones, zone, Bulk, Chip, Side, Zone,
+    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, chips_stable, icon, icon_post,
+    popover_with, split_zones, zone, Bulk, Chip, Side, Zone,
 };
 use super::settings::{notice_html, plural, Frame, Notice, Tab};
 use crate::inbox::admin::{
@@ -1042,7 +1042,7 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             on: query.group.as_deref() == Some(&g.id),
         });
     }
-    // The chip of the alerts that went to one account shows only when there is one.
+    // The chip of the alerts that went to one account shows when the period has one.
     let user_label = format!(r#"<span class="st--off">{}</span>"#, icon("user"));
     let user_href = query.toggle(
         query.to_user,
@@ -1052,13 +1052,19 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         },
         |q| q.to_user = false,
     );
-    group_chips.push(Chip {
-        label_html: &user_label,
-        name: "Alerts sent to one account",
-        count: user_count,
-        href: &user_href,
-        on: query.to_user,
-    });
+    let any_user = sent
+        .alerts
+        .iter()
+        .any(|a| matches!(a.summary.target, Target::User(_)));
+    if any_user || query.to_user {
+        group_chips.push(Chip {
+            label_html: &user_label,
+            name: "Alerts sent to one account",
+            count: user_count,
+            href: &user_href,
+            on: query.to_user,
+        });
+    }
     let state_defs = [
         (
             AlertState::Received,
@@ -1099,9 +1105,18 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             )
         })
         .collect();
+    // The chips follow the alerts of the period, not the filters: they keep their place when a
+    // filter changes. A chip that the filters leave at zero stays, dimmed.
     let state_chips: Vec<Chip> = state_defs
         .iter()
         .enumerate()
+        .filter(|(_, (state, ..))| {
+            query.alert == Some(*state)
+                || sent
+                    .alerts
+                    .iter()
+                    .any(|a| AlertState::of(&a.summary) == *state)
+        })
         .map(|(i, (state, _, _, name))| Chip {
             label_html: &state_labels[i],
             name,
@@ -1111,12 +1126,15 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         })
         .collect();
     // One group and no alert to an account: the chips of the groups repeat the count of "All".
-    let one_group =
-        view.groups.len() < 2 && user_count == 0 && query.group.is_none() && !query.to_user;
+    let one_group = view.groups.len() < 2 && !any_user && query.group.is_none() && !query.to_user;
     let chips_html = if one_group {
-        chips(&state_chips)
+        chips_stable(&state_chips)
     } else {
-        format!("{}{SEPARATOR}{}", chips(&group_chips), chips(&state_chips))
+        format!(
+            "{}{SEPARATOR}{}",
+            chips_stable(&group_chips),
+            chips_stable(&state_chips)
+        )
     };
 
     let mut body = String::new();
@@ -1148,8 +1166,8 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     )
 }
 
-/// The column "To": a chip `group:infra`, with the mark of a critical group, or `@alice` with the
-/// icon of an account.
+/// The column "To": a chip `group:infra`, with the mark of a critical group before the name as in
+/// the chips of the filter, or `@alice`.
 fn to_cell(view: &InboxView, target: &Target) -> String {
     match target {
         Target::Group(id) => {
@@ -1167,15 +1185,14 @@ fn to_cell(view: &InboxView, target: &Target) -> String {
                 String::new()
             };
             format!(
-                r#"<span class="to" title="{}"><span>group:{}</span>{mark}</span>"#,
+                r#"<span class="to" title="{}">{mark}<span>group:{}</span></span>"#,
                 html_escape(&title),
                 html_escape(id)
             )
         }
         Target::User(login) => format!(
-            r#"<span class="to" title="Sent to the account {0}: all its phones">{1}<span>@{0}</span></span>"#,
+            r#"<span class="to" title="Sent to the account {0}: all its phones"><span>@{0}</span></span>"#,
             html_escape(login),
-            icon("user")
         ),
     }
 }
@@ -1236,7 +1253,7 @@ fn detail_row(out: &mut String, view: &InboxView, detail: &AlertDetail, close: &
         .partition(|d| d.received_at.is_some());
     let _ = write!(
         out,
-        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {} of {}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
+        r#"<tr class="adetail" data-detail="{}"><td colspan="5"><div class="adetail__head"><span><b>Id</b> <code>{}</code></span><span><b>Received</b> {}/{}</span><span class="grow"></span><a class="ib" href="{}" aria-label="Close the detail" title="Close">{}</a></div>"#,
         html_escape(&a.id),
         html_escape(&a.id),
         a.received,
@@ -2189,7 +2206,11 @@ mod tests {
         let html = page(&full_view(&rights, &query, &groups));
         assert!(!html.contains("tu=1") && !html.contains("Alerts sent to one account"));
         assert!(html.contains(r#"<span class="to" title="Sent to the group Infra &lt;b&gt;"><span>group:infra</span></span>"#), "{html}");
-        assert!(html.contains(r#"<span>group:crit</span><span class="crit" title="Critical group: its alerts always ring." role="img" aria-label="Critical group">"#));
+        assert!(html.contains(r#"<span class="crit" title="Critical group: its alerts always ring." role="img" aria-label="Critical group">"#));
+        assert!(
+            html.contains("</span><span>group:crit</span></span>"),
+            "mark before the name"
+        );
         assert!(html.contains("<th scope=\"col\">To</th>"));
         // One alert went to an account.
         let mut view = full_view(&rights, &query, &groups);
@@ -2199,6 +2220,10 @@ mod tests {
             html.contains(r#"<span class="to" title="Sent to the account alice: all its phones">"#)
         );
         assert!(html.contains("<span>@alice</span>") && html.contains("Call me &lt;back&gt;"));
+        assert!(
+            !html.contains(r#"all its phones"><svg"#),
+            "no icon before @"
+        );
         assert!(html.contains(
             r#"aria-label="Alerts sent to one account 1" title="Alerts sent to one account""#
         ));
@@ -2254,6 +2279,26 @@ mod tests {
         assert!(html.contains(r#"href="/auth/settings/inbox?p=7d&amp;g=infra""#));
         // The filter shows only the alerts of the group.
         assert!(html.contains(">Outage<") && !html.contains(">Disk "));
+    }
+
+    #[test]
+    fn the_chips_of_the_alerts_keep_their_place_when_a_filter_leaves_one_at_zero() {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query {
+            alert: Some(AlertState::Expired),
+            ..Query::default()
+        };
+        let html = page(&full_view(&rights, &query, &groups));
+        // Only "Old" in infra is expired: the chip of the group crit stays, dimmed, with no link.
+        assert!(!html.contains("?g=crit"), "{html}");
+        assert!(
+            html.contains(r#"<span class="chip chip--static is-zero" aria-disabled="true">"#),
+            "{html}"
+        );
+        // A state without any alert in the period has no chip, with or without a filter.
+        assert!(!html.contains("a=none"), "{html}");
+        // The states that the period has stay as links.
+        assert!(html.contains("a=wait"), "{html}");
     }
 
     #[test]

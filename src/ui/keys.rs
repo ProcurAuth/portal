@@ -626,7 +626,7 @@ pub(super) fn keys_zone(list: &KeysList, query: &Query, matching: &[&KeyLine]) -
     let count = if shown.len() == list.lines.len() {
         list.lines.len().to_string()
     } else {
-        format!("{} of {}", shown.len(), list.lines.len())
+        format!("{}/{}", shown.len(), list.lines.len())
     };
     zone(
         &Zone {
@@ -720,7 +720,7 @@ fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, St
 /// The aside of the form of an API key: the calls that the ticked rights allow. The script fills it
 /// from the editor, so without script it is absent. The boxes of the editor already show the rights:
 /// the aside does not list them again.
-const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><p class="hint">The portal knows these calls from its own documentation. A service does not publish its calls in the action document.</p><div class="mono-line">Authorization: Bearer &lt;key&gt;</div><p class="hint">The key text shows one time, after Create. Copy it then.</p><p class="hint">The key holds at most the rights of its owner. A right that the owner loses has no effect.</p></aside>"#;
+const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title" title="The portal knows these calls from its own documentation. The key holds at most the rights of its owner.">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><div class="mono-line">Authorization: Bearer &lt;key&gt;</div></aside>"#;
 
 /// The page "New key" or "Edit key": the fields across the width, then the editor of the
 /// permissions. An MCP key shows the services on the whole width. An API key shows the inbox on the
@@ -1094,6 +1094,8 @@ mod tests {
         assert!(html.contains(r#"<div class="keyLayout">"#));
         assert!(html.contains("data-calls") && !html.contains("This key can"));
         assert!(html.contains("Authorization: Bearer"));
+        let aside = &html[html.find("keyAside").unwrap()..];
+        assert!(!aside[..aside.find("</aside>").unwrap()].contains("hint"));
         assert!(html.contains(r#"data-form="key-form""#));
         let mut mcp = view(Pane::New, &BOTH);
         mcp.kind = Some(KeyKind::Mcp);

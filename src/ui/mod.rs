@@ -938,6 +938,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 changes: false,
                 only_refused: false,
                 days: &data.days,
+                first_day: 1_791_244_800,
                 recent_events: &data.events,
             },
         ),
