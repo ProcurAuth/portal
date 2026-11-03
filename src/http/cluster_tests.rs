@@ -2703,7 +2703,9 @@ fn the_instance_serves_five_seconds_after_the_stop_and_then_closes() {
         .unwrap();
     let mut first = [0_u8; 512];
     assert!(idle.read(&mut first).unwrap() > 0);
-    assert_eq!(node.state.stop.live(), 1);
+    // The probe connections of the start end in the background: the server drops their marks
+    // a little after the client sees the close. On a loaded machine this takes longer.
+    wait_until(Duration::from_secs(10), || node.state.stop.live() == 1);
     let stopped = Instant::now();
     tx.send(()).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
@@ -2712,8 +2714,13 @@ fn the_instance_serves_five_seconds_after_the_stop_and_then_closes() {
         200,
         "the instance still serves in the first seconds"
     );
+    // Only a refused connection shows a closed listener. Another error, such as a lack of local
+    // ports on a loaded machine, shows nothing.
     wait_until(Duration::from_secs(10), || {
-        TcpStream::connect(("127.0.0.1", node.port)).is_err()
+        matches!(
+            TcpStream::connect(("127.0.0.1", node.port)),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        )
     });
     let closed_after = stopped.elapsed();
     assert!(
