@@ -523,7 +523,9 @@ impl EditorData {
 ///
 /// - `features`: the service `portal` with the document of the features that the holder of the form
 ///   can give. `None`: the form has no part for the features.
-/// - `owner`: the grants that the holder of the form can give. `None`: each grant.
+/// - `owner`: the grants that the holder of the form can give. `None`: each grant. A right on a
+///   service counts only when the owner also holds `access` on it: without it the right does not
+///   work, so the editor does not offer it (portal 4.2b).
 /// - `offered`: whether a grant can be ticked at all.
 /// - `ticked`: the grants that the form has at the start.
 /// - `keep_extras`: show a grant of the owner or a ticked grant that the documents do not
@@ -536,6 +538,16 @@ pub fn build(
     ticked: Vec<Grant>,
     keep_extras: bool,
 ) -> EditorData {
+    let usable: Option<Vec<Grant>> = owner.map(|held| {
+        held.iter()
+            .filter(|g| {
+                g.service == crate::portal_actions::SERVICE
+                    || crate::grants::holds(held, ACCESS, &g.service)
+            })
+            .cloned()
+            .collect()
+    });
+    let owner = usable.as_deref();
     let holds =
         |id: &str| owner.is_none_or(|held| held.iter().any(|g| g.service == id && offered(g)));
     let wanted = |id: &str| keep_extras && ticked.iter().any(|g| g.service == id);
@@ -824,5 +836,88 @@ mod tests {
                 && !text.contains("inbox_group")
         );
         assert!(text.contains("key_kind:mcp") && !text.contains("key_kind:api"));
+    }
+
+    /// A service with one action on the whole service and on a host.
+    fn datastore() -> ServiceActions {
+        let text = r#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"A host."}],"actions":[{"name":"data.read","resource_types":["service","host"],"description":"Read."}],"resources":[{"path":"host:prod","label":"Prod"}]}"#;
+        let document = crate::actions::parse("db", text.as_bytes()).unwrap();
+        ServiceActions {
+            id: "db".into(),
+            name: "Data".into(),
+            actions: vec![("data.read".into(), "Read.".into())],
+            document: std::sync::Arc::new(document),
+            known: true,
+            fetch: false,
+            critical: Vec::new(),
+            source: Source::Absent,
+        }
+    }
+
+    fn owner_json(data: &EditorData) -> serde_json::Value {
+        let mut out = String::new();
+        render(&mut out, data, PLACE);
+        let block = &out[out.find("application/json").unwrap()..];
+        let block = &block[block.find('>').unwrap() + 1..];
+        let block = block[..block.find("</script>").unwrap()].replace("\\u003c", "<");
+        serde_json::from_str::<serde_json::Value>(&block).unwrap()
+    }
+
+    #[test]
+    fn an_owner_without_access_on_a_service_cannot_give_a_right_on_it() {
+        // The right of a key works only when the owner can open the service too (portal 4.2b): the
+        // editor offers no service, no node and no right that the owner holds without `access`.
+        let services = [datastore()];
+        let rights = vec![grant("data.read on service:db/host:prod")];
+        let data = build(&services, None, Some(&rights), |_| true, Vec::new(), true);
+        assert!(data.services.is_empty(), "{:?}", data.services);
+        assert_eq!(data.owner.as_deref(), Some(&[][..]));
+        // With `access`, the service and its rights are in.
+        let both = vec![
+            grant("access on service:db"),
+            grant("data.read on service:db/host:prod"),
+        ];
+        let data = build(&services, None, Some(&both), |_| true, Vec::new(), true);
+        assert_eq!(data.services.len(), 1);
+        assert_eq!(owner_json(&data)["owner"].as_array().unwrap().len(), 2);
+        // A key that holds a right already keeps its line, so the person can remove it.
+        let kept = vec![grant("data.read on service:db/host:prod")];
+        let data = build(&services, None, Some(&rights), |_| true, kept, true);
+        assert_eq!(data.services.len(), 1);
+        assert_eq!(data.owner.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn the_rights_on_the_portal_features_need_no_access() {
+        let features = portal_service();
+        let rights = vec![grant("keys.own.read on service:portal")];
+        let data = build(
+            &[],
+            Some(&features),
+            Some(&rights),
+            |_| true,
+            Vec::new(),
+            true,
+        );
+        assert!(data.features.is_some());
+        assert_eq!(data.owner.as_deref().map(<[Grant]>::len), Some(1));
+    }
+
+    #[test]
+    fn the_script_ticks_access_for_each_right_and_removes_the_rights_with_access() {
+        // The page has no script test harness: the rule is in one function that every path uses.
+        let script = include_str!("../../web/settings.js");
+        for needle in [
+            "function hasSwitch(serviceId)",
+            "if (action !== \"access\" && hasSwitch(serviceId)) openService(serviceId);",
+            "closeService(serviceId);",
+            "function closeService(serviceId)",
+        ] {
+            assert!(script.contains(needle), "{needle}");
+        }
+        // The only direct writes to the map of the grants are the load, the one function, the
+        // budget of the portal and the "give access" link.
+        let writes = script.matches("ticked.set(").count();
+        assert_eq!(writes, 6, "a new write must go through setGrant");
     }
 }

@@ -539,6 +539,12 @@
       );
     }
     var baseline = signature();
+    // An account or a key that holds a right on a service without `access` (made before the editor
+    // ticked it by itself) shows the switch ticked, and Save turns on. The server refuses the form
+    // without it.
+    Array.from(ticked.values()).forEach(function (item) {
+      if (item.action !== "access" && hasSwitch(item.service)) openService(item.service);
+    });
     var saveButtons = document.querySelectorAll("[data-save]");
     function updateSave() {
       var dirty = signature() !== baseline;
@@ -667,14 +673,67 @@
       return null;
     }
 
+    // The switch of a service is its grant `access`, and a right on a service works only when the
+    // service is open. The portal features have no switch: their rights work as they are.
+    function hasSwitch(serviceId) {
+      return !(data.features && serviceId === data.features.id);
+    }
+
+    // What the row of a service says for a moment after a change that the person did not tick.
+    var notes = {};
+    function say(serviceId, text) {
+      var note = notes[serviceId];
+      if (note) window.clearTimeout(note.timer);
+      notes[serviceId] = {
+        text: text,
+        timer: window.setTimeout(function () {
+          delete notes[serviceId];
+          renderList();
+        }, 5000),
+      };
+    }
+
+    // Every way to add or remove a grant of a service goes through this function. A right ticks the
+    // grant `access` of its service at once. The last right that goes does not untick it: the
+    // person can want access alone. `access` that goes takes the rights of the service with it.
     function setGrant(action, path, on, serviceId) {
       var k = keyOf(serviceId, action, path);
       if (ticked.has(k) && ticked.get(k).locked) return;
+      var gate = action === "access" && path === "" && hasSwitch(serviceId);
       if (on) {
         if (!ticked.has(k)) ticked.set(k, { action: action, service: serviceId, path: path, limits: {} });
+        if (action !== "access" && hasSwitch(serviceId)) openService(serviceId);
+      } else if (gate) {
+        closeService(serviceId);
       } else {
         ticked.delete(k);
       }
+    }
+
+    // Tick `access` on the service, unless the owner cannot give it: then the right stays dead and
+    // the row says so.
+    function openService(serviceId) {
+      var k = keyOf(serviceId, "access", "");
+      if (ticked.has(k)) return;
+      if (!owns(serviceId, "access", "")) return;
+      ticked.set(k, { action: "access", service: serviceId, path: "", limits: {} });
+    }
+
+    // Untick `access`: the rights of the service go too, because they do nothing without it. A right
+    // that comes from the configuration file cannot go: then `access` stays.
+    function closeService(serviceId) {
+      var rights = Array.from(ticked.values()).filter(function (item) {
+        return item.service === serviceId && !(item.action === "access" && item.path === "");
+      });
+      if (rights.some(function (item) { return item.locked; })) {
+        say(serviceId, "Access stays on: a permission comes from the configuration file");
+        return;
+      }
+      rights.forEach(function (item) {
+        ticked.delete(keyOf(serviceId, item.action, item.path));
+      });
+      ticked.delete(keyOf(serviceId, "access", ""));
+      if (rights.length) say(serviceId, "Access off · " + plural(rights.length, "permission", "permissions") + " removed");
     }
 
     // ---- the limit fields of a ticked action, on the line of the action
@@ -1661,6 +1720,10 @@
           box.dataset.switch = svc.id;
           box.setAttribute("aria-label", "Can open " + svc.name);
           if (open && open.locked) box.disabled = true;
+          if (!open && !owns(svc.id, "access", "")) {
+            box.disabled = true;
+            box.title = "Your account cannot open this service.";
+          }
           head.appendChild(box);
         }
         head.appendChild(node("span", "ge__svcName", svc.name));
@@ -1672,9 +1735,11 @@
           info = others ? plural(others, "permission", "permissions") : "No permission";
         } else if (others) info += " · " + plural(others, "permission", "permissions");
         if (others && !open && !svc.feature) {
-          info += ": turn the switch on, or the permissions do nothing";
+          // Only a right that nothing could complete is left: the owner has no `access` to give.
+          info += ": it needs the permission to open the service, and nobody can give it here";
           row.classList.add("is-orphan");
         }
+        if (notes[svc.id]) info = notes[svc.id].text;
         head.appendChild(node("span", "ge__svcInfo", info));
         if (data.owner !== null) {
           var same = node("button", "button button--small ge__same", "Same as mine");
