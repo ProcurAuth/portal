@@ -5118,16 +5118,16 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         );
         assert!(form.body.contains(r#"action="/auth/keys/create""#));
         assert!(
-            form.body.contains("No key yet"),
-            "the list stays beside the pane"
+            !form.body.contains("No key yet"),
+            "the page of a key holds no list"
         );
-        // One entry point: with the pane open, the toolbar has no "New key".
+        // One entry point: the page of a key has no "New key" link.
         assert!(
             !form.body.contains(r#"href="/auth/keys/new""#) && !form.body.contains("New key</a>"),
             "{}",
             form.body
         );
-        assert!(form.body.contains(r#"<button class="button button--primary" type="submit" form="new-key-form">Create</button>"#));
+        assert!(form.body.contains(r#"<button class="button button--primary" type="submit" form="key-form">Create</button>"#));
 
         // Make a key: the answer shows the text one time.
         let created = keys_post(
@@ -5143,16 +5143,16 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             created.body.contains("acts as you"),
             "the warning of portal 5.2"
         );
-        // The text of the key is in the pane of the page, with Copy and Done. The list is there too.
+        // The text of the key is in the page, with Copy and Done.
         assert!(created.body.contains(r#"data-copy="key-text""#));
-        assert!(created.body.contains(r#"href="/auth/keys">Done</a>"#));
+        assert!(created.body.contains(r#"href="/auth/settings">Done</a>"#));
         assert!(
             !created.body.contains("New key</a>") && !created.body.contains(">Create</button>"),
-            "one entry point: the pane shows the key, the toolbar has no New key"
+            "one entry point: the page shows the key"
         );
         assert!(
             created.body.contains("nightly report"),
-            "the list shows the new key"
+            "the page names the new key"
         );
         // The key works at the edge, with the grants that the form gave.
         let edge = |text: &str| {
@@ -5191,9 +5191,9 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         let copy = get_new_key(&node, &alice, &format!("?copy={}", key.id));
         assert_eq!(copy.status, 200, "{}", copy.body);
         assert!(copy.body.contains(r#"value="nightly report""#));
-        assert!(copy
-            .body
-            .contains(r#"<input type="hidden" name="limit1.max_rows" value="100">"#));
+        assert!(copy.body.contains(
+            r#"<input type="hidden" name="limit1.max_rows" value="100" form="key-form">"#
+        ));
         assert_eq!(
             copy.body.matches(r#"type="hidden" name="grant"#).count(),
             2,
@@ -5385,7 +5385,6 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
         let (node, _pdp, alice) = keys_user(backend, "max_per_user = 1");
         // No session: a redirect to the sign-in page, on each address.
         for (method, path) in [
-            ("GET", "/auth/keys"),
             ("GET", "/auth/keys/new"),
             ("POST", "/auth/keys/create"),
             ("POST", "/auth/keys/edit"),
@@ -5405,29 +5404,41 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
             assert_eq!(reply.status, 303, "{path}");
             assert_eq!(reply.location(), Some("/auth/login"), "{path}");
         }
-        // Bad parameters of the page.
+        // The list of the keys is a panel of the tab Access: the old address does not exist, and a
+        // signed-in account gets 404 with no redirect.
+        let old = send(
+            node.port,
+            "GET",
+            "/auth/keys",
+            &[("Cookie", &format!("{}={alice}", session_cookie_name(&node)))],
+            "",
+        );
+        assert_eq!(old.status, 404);
+        assert!(old.location().is_none());
+        // Bad parameters of the page of a new key.
         for query in [
-            "?section=other",
-            "?section=mine&section=mine",
             "?colour=red",
-            "?after=nonsense",
-            "?after=12.UPPER",
+            "?kind=nonsense",
             "?s=unknown",
             "?copy=BAD",
+            "?kind=mcp&kind=mcp",
         ] {
-            assert_eq!(get_keys(&node, &alice, query).status, 400, "{query}");
+            assert_eq!(get_new_key(&node, &alice, query).status, 400, "{query}");
         }
-        assert_eq!(
-            get_keys(&node, &alice, "?after=1792569600.9b1c04e2aa71f0c3").status,
-            200
-        );
-        assert_eq!(
-            get_keys(&node, &alice, "?after=file.9b1c04e2aa71f0c3").status,
-            200
-        );
-        assert_eq!(get_keys(&node, &alice, "?s=bad_name").status, 200);
-        // The section "All" needs `keys.all.read`.
-        assert_eq!(get_keys(&node, &alice, "?section=all").status, 403);
+        assert_eq!(get_new_key(&node, &alice, "?s=bad_name").status, 200);
+        // The tab Access ignores what it does not know, and a value that names nothing gives an
+        // empty list, not an error.
+        for query in [
+            "?colour=red",
+            "?user=nobody",
+            "?group=%3Cx%3E&service=%3Cy%3E",
+            "?k=other",
+        ] {
+            assert_eq!(get_keys(&node, &alice, query).status, 200, "{query}");
+        }
+        // The keys of other accounts need `keys.all.read`: alice sees no column Owner and no chip mine.
+        let list = get_keys(&node, &alice, "");
+        assert!(!list.body.contains(">Owner</th>") && !list.body.contains("My keys"));
         // The maximum number of active keys.
         let made = keys_post(
             &node,
@@ -5458,7 +5469,11 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
             .unwrap();
         node.state.users.refresh(&node.state.store).unwrap();
         let bob = sign_in(&node, "bob", PASSWORD);
-        assert_eq!(get_keys(&node, &bob, "").status, 403);
+        assert_eq!(
+            get_keys(&node, &bob, "").status,
+            404,
+            "no right of the keys: no page"
+        );
         assert_eq!(keys_post(&node, &bob, "create", "name=x").status, 403);
         assert_eq!(keys_post(&node, &bob, "edit", "id=x&name=x").status, 403);
         assert_eq!(
@@ -5544,12 +5559,17 @@ fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
             root_key.body.contains("every right"),
             "the warning of the superadmin (portal 5.2)"
         );
-        let all = get_keys(&node, &root, "?section=all");
+        let all = get_keys(&node, &root, "");
         assert_eq!(all.status, 200);
         assert!(all.body.contains("alices key") && all.body.contains("root key"));
-        assert!(all.body.contains("superadmin"), "the owner of its key");
-        let mine = get_keys(&node, &root, "");
+        assert!(all.body.contains(">superadmin<"), "the owner of its key");
+        assert!(all.body.contains(">Owner</th>"));
+        // The chip "mine" keeps the keys of the viewer. The filter by user keeps the keys of an account.
+        let mine = get_keys(&node, &root, "?mine=1");
         assert!(mine.body.contains("root key") && !mine.body.contains("alices key"));
+        assert!(all.body.contains(r#"href="/auth/settings?mine=1""#));
+        let alice_keys = get_keys(&node, &root, "?user=alice");
+        assert!(alice_keys.body.contains("alices key") && !alice_keys.body.contains("root key"));
         // The superadmin revokes the key of Alice in the section "All".
         let revoked = keys_post(
             &node,
@@ -5559,7 +5579,7 @@ fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
         );
         assert_eq!(revoked.location(), Some("/auth/settings?s=revoked"));
         assert!(node.state.users.key_by_id(&key.id).is_none());
-        // In the section "Mine" it cannot revoke the key of another user.
+        // An address that does not exist answers 404.
         let other = keys_post(&node, &root, "make_it_fail", "");
         assert_eq!(other.status, 404);
     });
@@ -5569,7 +5589,11 @@ fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
 fn the_page_of_the_keys_does_not_exist_without_the_block_keys() {
     let node = start_with(Arc::new(Backend::Sqlite.fresh()), None, "");
     let root = sign_in(&node, "root", PASSWORD);
-    assert_eq!(get_keys(&node, &root, "").status, 404);
+    assert_eq!(get_new_key(&node, &root, "").status, 404);
+    // Without the block keys the tab Access has the accounts alone.
+    let access = get_keys(&node, &root, "");
+    assert_eq!(access.status, 200);
+    assert!(!access.body.contains("keys-title") && !access.body.contains("/auth/keys/new"));
     assert_eq!(keys_post(&node, &root, "create", "name=x").status, 404);
     assert_eq!(keys_post(&node, &root, "edit", "id=x").status, 404);
     assert_eq!(
@@ -6813,22 +6837,24 @@ mod kinds_tests {
                     "access on service:db",
                 ],
             );
-            // The selector is a small GET form: each kind is a submit button that names it.
+            // The selector is two chips that are links: each kind is an address. The API kind is
+            // the first choice.
             let form = get_new_key(&node, &alice, "");
-            assert!(form
-                .body
-                .contains(r#"<form id="kind-form" method="get" action="/auth/keys/new">"#));
             assert!(form.body.contains(
-                r#"<button class="segmented__option is-active" type="submit" form="kind-form" name="kind" value="mcp""#
+                r#"<a class="segmented__option is-active" href="/auth/keys/new?kind=api""#
             ));
             assert!(form
                 .body
-                .contains(r#"<button class="segmented__option" type="submit" form="kind-form" name="kind" value="api""#));
+                .contains(r#"<a class="segmented__option" href="/auth/keys/new?kind=mcp""#));
             let api = get_new_key(&node, &alice, "?kind=api");
             assert_eq!(api.status, 200);
             assert!(api.body.contains(
-                r#"<button class="segmented__option is-active" type="submit" form="kind-form" name="kind" value="api""#
+                r#"<a class="segmented__option is-active" href="/auth/keys/new?kind=api""#
             ));
+            assert!(
+                api.body.contains("This key can"),
+                "the summary of an API key"
+            );
             assert!(api
                 .body
                 .contains(r#"<input type="hidden" name="kind" value="api">"#));

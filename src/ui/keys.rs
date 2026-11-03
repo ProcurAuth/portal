@@ -14,10 +14,11 @@ use std::fmt::Write as _;
 
 use super::access::Query;
 use super::components::{
-    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, icon, icon_link, zone, Bulk, Chip, Zone,
+    ask, bulk_all_box, bulk_box, bulk_button, bulk_form, cancel_link, chips, icon, icon_link,
+    page_head, zone, Ask, Bulk, Chip, PageHead, Side, Strength, Zone,
 };
 use super::grant_editor::{self, EditorData, Place};
-use super::settings::{fill_page, notice_html, Frame, Notice, Tab};
+use super::settings::{banner_error, fill_page, notice_html, Frame, Notice, Tab};
 use crate::grants::{Grant, ACCESS};
 use crate::keys::KeyKind;
 use crate::util::{format_utc_instant, html_escape, time_tag};
@@ -119,7 +120,7 @@ pub struct EditTarget {
     pub name: String,
 }
 
-/// The state of the pane.
+/// The page of a key.
 pub enum Pane<'a> {
     /// The form of a new key. The view holds the kind and the editor.
     New,
@@ -129,15 +130,32 @@ pub enum Pane<'a> {
     Made(NewKey<'a>),
 }
 
+/// The field of the form of a key that a refusal names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Name,
+    Expiry,
+}
+
+/// The field that the outcome of a refused form names. `None`: the outcome is for the whole form.
+pub fn field_of(code: &str) -> Option<Field> {
+    match code {
+        "bad_name" => Some(Field::Name),
+        "bad_expiry" => Some(Field::Expiry),
+        _ => None,
+    }
+}
+
 /// The data of the pages of a key.
 pub struct KeysView<'a> {
-    pub can_create: bool,
     /// The kinds of key that the viewer may make: the kinds that the file turns on and that the
     /// viewer holds `keys.own.create` on. The new-key page has a selector only with two or more.
     pub create_kinds: Vec<KeyKind>,
     /// The kind of the key that the form makes or changes.
     pub kind: Option<KeyKind>,
     pub notice: Option<Notice>,
+    /// The field that the outcome names. The message shows under it.
+    pub field: Option<Field>,
     pub csrf: &'a str,
     /// The editor of the grants of the form. `None`: the page has no form.
     pub editor: Option<EditorData>,
@@ -148,8 +166,6 @@ pub struct KeysView<'a> {
     pub max_lifetime: Option<u64>,
     /// The name that the form of a new key has when it copies a key (portal 4.1a).
     pub copy_name: String,
-    /// The user browses as another user: no change is possible (portal 3.7).
-    pub impersonated: bool,
 }
 
 /// The text of the outcome of a form, from a fixed list (portal 5.8f).
@@ -633,32 +649,16 @@ fn empty_keys(list: &KeysList, query: &Query) -> String {
     )
 }
 
-// The pane -------------------------------------------------------------------------------------
-
-/// The head of the pane: the title, Cancel and the action. The action is a button of the form of
-/// the pane, or a link when the pane has no form.
-fn pane_head(title: &str, cancel: Option<&str>, action: &str) -> String {
-    let mut out = format!(
-        r#"<div class="formHead"><h2 class="title" id="key-pane-title">{}</h2><span class="grow"></span>"#,
-        html_escape(title)
-    );
-    if let Some(cancel) = cancel {
-        let _ = write!(out, r#"<a class="button" href="{cancel}">Cancel</a>"#);
-    }
-    out.push_str(action);
-    out.push_str("</div>");
-    out
-}
+// The pages -------------------------------------------------------------------------------------
 
 /// The kind of a new key: a selector when the viewer may make two kinds or more, and nothing when
-/// the viewer may make one. The selector is a form with the method GET, so it works without script:
-/// each button is a submit button that names its kind.
+/// the viewer may make one. The chips are links, so the selector works without script. The kind
+/// of a key that exists does not change: the page shows it as a fact.
 fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
     let Some(kind) = view.kind else {
         return String::new();
     };
     if editing {
-        // The kind of a key does not change: the pane shows it as a fact.
         return format!(
             r#"<div class="field"><span class="field__label">Kind</span><span class="kindTag" title="{}">{}{}</span></div>"#,
             kind_tip(kind),
@@ -675,7 +675,7 @@ fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
     for each in &kinds {
         let _ = write!(
             buttons,
-            r#"<button class="segmented__option{}" type="submit" form="kind-form" name="kind" value="{}" title="{}"{}>{}{}</button>"#,
+            r#"<a class="segmented__option{}" href="{NEW_PATH}?kind={}" title="{}"{}>{}{}</a>"#,
             if *each == kind { " is-active" } else { "" },
             each.name(),
             kind_tip(*each),
@@ -693,7 +693,28 @@ fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
     )
 }
 
-fn form_pane(view: &KeysView<'_>) -> String {
+/// The message under a field that a refused form names, and the attributes that tie it to it.
+fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, String) {
+    match view.notice.filter(|n| !n.ok && view.field == Some(field)) {
+        Some(notice) => (
+            "uiInput--error",
+            format!(
+                r#"<span class="field__error" id="{id}-error">{}</span>"#,
+                html_escape(notice.text)
+            ),
+        ),
+        None => ("", String::new()),
+    }
+}
+
+/// The aside of the form of an API key: what the ticked rights allow, and the calls. The script
+/// fills it from the editor, so without script it is absent.
+const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title">This key can</h2><dl class="facts" data-summary><div data-s-row="send"><dt>Send to</dt><dd data-s="send">no group</dd></div><div data-s-row="read"><dt>Read</dt><dd data-s="read">no group</dd></div><div data-s-row="user"><dt>Send to accounts</dt><dd data-s="user">no</dd></div><div data-s-row="limit"><dt>Limit</dt><dd data-s="limit">none</dd></div></dl><h2 class="title">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><p class="hint">The portal knows these calls from its own documentation. A service does not publish its calls in the action document.</p><div class="mono-line">Authorization: Bearer &lt;key&gt;</div><p class="hint">The key text shows one time, after Create. Copy it then.</p><p class="hint">The key holds at most the rights of its owner. A right that the owner loses has no effect.</p></aside>"#;
+
+/// The page "New key" or "Edit key": the fields across the width, then the editor of the
+/// permissions. An MCP key shows the services on the whole width. An API key shows the inbox on the
+/// left and what it allows on the right. Cancel and the action are at the top right.
+fn form_page(view: &KeysView<'_>) -> String {
     let edit = match &view.pane {
         Pane::Edit(target) => Some(target),
         _ => None,
@@ -704,29 +725,45 @@ fn form_pane(view: &KeysView<'_>) -> String {
         (None, Some(kind)) if view.create_kinds.len() < 2 => format!("New {} key", kind.label()),
         _ => "New key".to_string(),
     };
-    let (action, form_id, submit) = match edit {
-        Some(_) => (EDIT_PATH, "key-form", "Save"),
-        None => (CREATE_PATH, "new-key-form", "Create"),
+    let (action, submit) = match edit {
+        Some(_) => (EDIT_PATH, "Save"),
+        None => (CREATE_PATH, "Create"),
     };
-    let mut out = String::from(r#"<section class="pane" aria-labelledby="key-pane-title">"#);
-    out.push_str(&pane_head(
-        &title,
-        Some(PATH),
-        &format!(
-            r#"<button class="button button--primary" type="submit" form="{form_id}">{submit}</button>"#
+    let tools = match edit {
+        Some(target) => ask(&Ask {
+            label: &format!("Revoke {}", target.name),
+            icon: "trash",
+            question: &format!("Revoke {}?", target.name),
+            verb: "Revoke",
+            action: REVOKE_PATH,
+            fields_html: &format!(
+                r#"<input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}"><input type="hidden" name="section" value="mine">"#,
+                html_escape(view.csrf),
+                html_escape(&target.id)
+            ),
+            strength: Strength::Light,
+            name: "",
+            danger: true,
+            side: Side::Start,
+        }),
+        None => String::new(),
+    };
+    let mut out = page_head(&PageHead {
+        title: &title,
+        tools_html: &tools,
+        actions_html: &format!(
+            r#"{}<button class="button button--primary" type="submit" form="key-form">{submit}</button>"#,
+            cancel_link()
         ),
-    ));
-    out.push_str(r#"<div class="pane__body">"#);
-    if edit.is_none() && view.create_kinds.len() > 1 {
-        // The selector is a form of its own: the buttons name it with the attribute `form`.
-        let _ = write!(
-            out,
-            r#"<form id="kind-form" method="get" action="{NEW_PATH}"></form>"#
-        );
+    });
+    if view.field.is_some() && view.notice.is_some_and(|n| !n.ok) {
+        out.push_str(&banner_error(
+            "The key is not saved. Fix the field that shows an error.",
+        ));
     }
     let _ = write!(
         out,
-        r#"<form method="post" action="{action}" id="{form_id}" class="keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
+        r#"<form method="post" action="{action}" id="key-form" class="keyForm" data-gate><input type="hidden" name="csrf" value="{}">"#,
         html_escape(view.csrf)
     );
     if let (None, Some(kind)) = (edit, kind) {
@@ -747,10 +784,16 @@ fn form_pane(view: &KeysView<'_>) -> String {
         Some(target) => target.name.as_str(),
         None => view.copy_name.as_str(),
     };
+    let (name_class, name_error) = field_error("key-name", view, Field::Name);
     let _ = write!(
         out,
-        r#"<div class="keyFields"><div class="field keyFields__name"><label class="field__label" for="key-name">Name</label><input class="uiInput" type="text" id="key-name" name="name" value="{}" maxlength="256" required></div>"#,
+        r#"<div class="fgrid fgrid--key"><div class="field"><label class="field__label" for="key-name">Name</label><input class="uiInput {name_class}" type="text" id="key-name" name="name" value="{}" maxlength="64" required placeholder="1 to 64 characters" autocomplete="off"{}>{name_error}</div>"#,
         html_escape(name),
+        if name_error.is_empty() {
+            ""
+        } else {
+            r#" aria-invalid="true" aria-describedby="key-name-error""#
+        }
     );
     out.push_str(&kind_field(view, edit.is_some()));
     if edit.is_none() {
@@ -761,42 +804,65 @@ fn form_pane(view: &KeysView<'_>) -> String {
             ),
             None => "UTC, for example 2026-11-23T00:00:00Z.".to_string(),
         };
+        let (expiry_class, expiry_error) = field_error("key-expires", view, Field::Expiry);
         let _ = write!(
             out,
-            r#"<div class="field expiry" data-expiry{}><label class="field__label" for="key-expires">Expires</label><input class="uiInput" type="text" id="key-expires" name="expires_at" value="{}" size="22"><p class="uiField__hint expiry__hint">{}</p></div>"#,
+            r#"<div class="field expiry" data-expiry{}><label class="field__label" for="key-expires">Expires</label><input class="uiInput {expiry_class}" type="text" id="key-expires" name="expires_at" value="{}" size="22"{}><p class="uiField__hint expiry__hint">{}</p>{expiry_error}</div>"#,
             view.max_lifetime
                 .map(|max| format!(r#" data-max="{max}""#))
                 .unwrap_or_default(),
             html_escape(&view.expires_at),
+            if expiry_error.is_empty() {
+                ""
+            } else {
+                r#" aria-invalid="true" aria-describedby="key-expires-error""#
+            },
             html_escape(&hint)
         );
     }
-    out.push_str("</div>");
+    let note = match kind {
+        Some(KeyKind::Api) => {
+            "The key sends alerts to the groups that you tick. The owner must hold the same rights."
+        }
+        _ => "The agent uses the services that you tick. The owner must hold the same rights.",
+    };
+    let _ = write!(
+        out,
+        r#"<div class="field field--note"><span class="field__label">Rights</span><span class="hint">{note}</span></div></div></form>"#
+    );
     if let Some(editor) = &view.editor {
+        let mut grants = String::new();
         grant_editor::render(
-            &mut out,
+            &mut grants,
             editor,
             Place {
-                form: None,
+                form: Some("key-form"),
                 title: "Permissions of the key",
                 blank_rows: 3,
                 groups: true,
             },
         );
+        if kind == Some(KeyKind::Api) {
+            let _ = write!(out, r#"<div class="keyLayout">{grants}{API_ASIDE}</div>"#);
+        } else {
+            out.push_str(&grants);
+        }
     }
-    out.push_str("</form></div></section>");
     out
 }
 
-/// The pane after a creation: the text of the key, one time.
-fn made_pane(key: &NewKey<'_>) -> String {
-    format!(
-        r##"<section class="pane" aria-labelledby="key-pane-title">{}<div class="pane__body"><p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</span></p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</span></p></div></section>"##,
-        pane_head(
-            "Key made",
-            None,
-            &format!(r#"<a class="button button--primary" href="{PATH}">Done</a>"#)
+/// The page after a creation: the text of the key, one time.
+fn made_page(key: &NewKey<'_>) -> String {
+    let head = page_head(&PageHead {
+        title: "Key made",
+        tools_html: "",
+        actions_html: &format!(
+            r#"<a class="button button--primary" href="{}">Done</a>"#,
+            super::settings::ACCESS_PATH
         ),
+    });
+    format!(
+        r##"{head}<p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</span></p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</span></p>"##,
         html_escape(key.name),
         html_escape(key.text),
         if key.superadmin {
@@ -813,13 +879,20 @@ fn made_pane(key: &NewKey<'_>) -> String {
 /// key that was just made.
 pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
     let mut out = String::new();
-    notice_html(&mut out, view.notice);
-    let pane = match &view.pane {
-        Pane::New | Pane::Edit(_) => form_pane(view),
-        Pane::Made(key) => made_pane(key),
+    // A refusal that names a field shows under that field. The other outcomes show as a banner.
+    if view.field.is_none() {
+        notice_html(&mut out, view.notice);
+    }
+    out.push_str(&match &view.pane {
+        Pane::New | Pane::Edit(_) => form_page(view),
+        Pane::Made(key) => made_page(key),
+    });
+    let title = match &view.pane {
+        Pane::New => "New key",
+        Pane::Edit(_) => "Edit key",
+        Pane::Made(_) => "Key made",
     };
-    let _ = write!(out, r#"<div class="split split--one">{pane}</div>"#);
-    fill_page(Tab::Access, frame, "Keys", &out)
+    fill_page(Tab::Access, frame, title, &out)
 }
 
 /// The grant of a new key of this kind that the form offers as a box, from a grant of the owner.
@@ -837,4 +910,212 @@ pub fn is_offered(kind: KeyKind, grant: &Grant) -> bool {
 /// The text of a time in the form of the field `expires_at`.
 pub fn instant_text(unix: i64) -> String {
     format_utc_instant(unix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::fixtures::*;
+
+    fn view(pane: Pane<'static>, kinds: &[KeyKind]) -> KeysView<'static> {
+        KeysView {
+            create_kinds: kinds.to_vec(),
+            kind: kinds.first().copied(),
+            notice: None,
+            field: None,
+            csrf: "tok<",
+            editor: None,
+            pane,
+            expires_at: "2026-12-01T00:00:00Z".into(),
+            max_lifetime: None,
+            copy_name: String::new(),
+        }
+    }
+
+    const BOTH: [KeyKind; 2] = [KeyKind::Mcp, KeyKind::Api];
+
+    fn page(view: &KeysView) -> String {
+        keys_page(
+            &Frame {
+                superadmin: false,
+                keys: true,
+                ..frame()
+            },
+            view,
+        )
+    }
+
+    #[test]
+    fn the_form_is_a_full_page_with_cancel_and_the_action_at_the_top_right_and_no_list() {
+        for pane in [
+            Pane::New,
+            Pane::Edit(EditTarget {
+                id: "k1".into(),
+                name: "ci <deploy>".into(),
+            }),
+        ] {
+            let edit = matches!(pane, Pane::Edit(_));
+            let mut v = view(pane, &BOTH);
+            v.kind = Some(KeyKind::Api);
+            let html = page(&v);
+            let head = &html[html.find(r#"<div class="accountBar">"#).unwrap()..];
+            let head = &head[..head
+                .find(r#"<form method="post" action="/auth/keys/"#)
+                .unwrap()];
+            assert!(head.contains(r#"<a href="/auth/settings">Access</a>"#));
+            assert!(head.contains(if edit {
+                ">Edit key</h2>"
+            } else {
+                ">New key</h2>"
+            }));
+            assert!(head.contains(r#"<a class="button" href="/auth/settings">Cancel</a>"#));
+            assert!(head.contains(&format!(
+                r#"type="submit" form="key-form">{}</button>"#,
+                if edit { "Save" } else { "Create" }
+            )));
+            assert!(
+                !html.contains("New key</a>") && !html.contains("keys-title"),
+                "no list, no second entry"
+            );
+            assert!(!html.contains("contentTabs"), "one tab: no strip");
+        }
+    }
+
+    #[test]
+    fn the_kind_selector_shows_with_two_kinds_and_only_then_and_its_chips_are_links() {
+        let mut two = view(Pane::New, &BOTH);
+        two.kind = Some(KeyKind::Mcp);
+        let html = page(&two);
+        assert!(html.contains(r#"<a class="segmented__option" href="/auth/keys/new?kind=api""#));
+        assert!(html
+            .contains(r#"<a class="segmented__option is-active" href="/auth/keys/new?kind=mcp""#));
+        // The API kind comes first.
+        assert!(html.find("kind=api").unwrap() < html.find("kind=mcp").unwrap());
+        assert!(html.contains(">New key<") || html.contains("New key</h2>"));
+        for one in [[KeyKind::Mcp], [KeyKind::Api]] {
+            let mut single = view(Pane::New, &one);
+            single.kind = Some(one[0]);
+            let html = page(&single);
+            assert!(!html.contains("segmented"), "{html}");
+            assert!(html.contains(&format!("New {} key", one[0].label())));
+            // The kind is a hidden field of the form.
+            assert!(html.contains(&format!(
+                r#"<input type="hidden" name="kind" value="{}">"#,
+                one[0].name()
+            )));
+        }
+    }
+
+    #[test]
+    fn the_change_of_a_key_shows_its_kind_as_a_fact_and_can_revoke_it_in_place() {
+        let mut edit = view(
+            Pane::Edit(EditTarget {
+                id: "k1".into(),
+                name: "ci <deploy>".into(),
+            }),
+            &BOTH,
+        );
+        edit.kind = Some(KeyKind::Api);
+        let html = page(&edit);
+        assert!(html.contains(r#"<span class="kindTag""#) && !html.contains("segmented"));
+        assert!(html.contains(r#"<input type="hidden" name="id" value="k1">"#));
+        assert!(html.contains(r#"action="/auth/keys/edit""#));
+        assert!(html.contains(r#"value="ci &lt;deploy&gt;""#));
+        assert!(
+            !html.contains(r#"name="expires_at""#),
+            "a key keeps its expiry date"
+        );
+        // A trash icon revokes the key with a confirmation in place. The form of the revoke is not
+        // inside the form of the key.
+        assert!(html.contains(r#"aria-label="Revoke ci &lt;deploy&gt;""#));
+        assert!(html.contains(r#"action="/auth/keys/revoke""#));
+        assert!(html.contains(r#"name="section" value="mine""#));
+        let key_form = &html[html
+            .find(r#"<form method="post" action="/auth/keys/edit""#)
+            .unwrap()..];
+        let key_form = &key_form[..key_form.find("</form>").unwrap()];
+        assert!(!key_form[1..].contains("<form"), "no nested form");
+    }
+
+    #[test]
+    fn a_refused_form_says_why_under_the_field_and_in_a_banner() {
+        let mut v = view(Pane::New, &BOTH);
+        v.notice = notice_for("bad_name");
+        v.field = field_of("bad_name");
+        let html = page(&v);
+        assert!(html.contains("The key is not saved. Fix the field that shows an error."));
+        assert!(html.contains(r#"<span class="field__error" id="key-name-error">The name of a key has 1 to 64 characters"#));
+        assert!(html.contains(r#"aria-invalid="true" aria-describedby="key-name-error""#));
+        v.notice = notice_for("bad_expiry");
+        v.field = field_of("bad_expiry");
+        let html = page(&v);
+        assert!(html.contains(r#"id="key-expires-error">The expiry date is not valid."#));
+        // The outcome of the whole form shows in a banner only.
+        v.notice = notice_for("too_many_keys");
+        v.field = field_of("too_many_keys");
+        let html = page(&v);
+        assert!(
+            html.contains("You have the maximum number of active keys.")
+                && !html.contains("field__error")
+        );
+    }
+
+    #[test]
+    fn an_api_key_shows_the_summary_and_the_calls_and_an_mcp_key_shows_only_the_editor() {
+        use crate::ui::grant_editor::{self, EditorData};
+        let editor = |data: &EditorData| {
+            let _ = grant_editor::render;
+            data.clone()
+        };
+        let data = EditorData {
+            services: Vec::new(),
+            features: None,
+            ticked: Vec::new(),
+            owner: None,
+            locked: Vec::new(),
+        };
+        let mut api = view(Pane::New, &BOTH);
+        api.kind = Some(KeyKind::Api);
+        api.editor = Some(editor(&data));
+        let html = page(&api);
+        assert!(html.contains(r#"<div class="keyLayout">"#) && html.contains("This key can"));
+        assert!(html.contains("data-summary") && html.contains("data-calls"));
+        assert!(html.contains("Authorization: Bearer"));
+        assert!(html.contains(r#"data-form="key-form""#));
+        let mut mcp = view(Pane::New, &BOTH);
+        mcp.kind = Some(KeyKind::Mcp);
+        mcp.editor = Some(editor(&data));
+        let html = page(&mcp);
+        assert!(!html.contains("keyLayout") && !html.contains("This key can"));
+        assert!(html.contains("The agent uses the services that you tick."));
+    }
+
+    #[test]
+    fn a_key_made_shows_its_text_one_time_with_a_copy_button() {
+        let html = page(&view(
+            Pane::Made(NewKey {
+                text: "api_secret<",
+                name: "ci <1>",
+                superadmin: true,
+            }),
+            &BOTH,
+        ));
+        assert!(html.contains(r#"id="key-text" type="text" readonly value="api_secret&lt;""#));
+        assert!(html.contains(r#"data-copy="key-text""#));
+        assert!(html.contains("<strong>ci &lt;1&gt;</strong>") && html.contains("acts as you"));
+        assert!(html.contains("This key can have every right"));
+        assert!(
+            html.contains(r#"<a class="button button--primary" href="/auth/settings">Done</a>"#)
+        );
+        assert!(!html.contains("key-form") && !html.contains(">Cancel</a>"));
+    }
+
+    #[test]
+    fn a_page_of_a_key_has_no_inline_style_and_no_inline_script() {
+        for pane in [Pane::New] {
+            let html = page(&view(pane, &BOTH));
+            assert!(!html.contains(" style=") && !html.contains("<style"));
+            assert!(!html.contains("<script>"));
+        }
+    }
 }

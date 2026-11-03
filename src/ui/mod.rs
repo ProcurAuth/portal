@@ -30,8 +30,8 @@ use crate::util::html_escape;
 pub use access::{access_page, AccessView, Accounts};
 pub use activity::{activity_page, ActivityView};
 pub use settings::{
-    new_user_page, notice_for, services_page, user_page, Frame, Holder, NewUserView,
-    ServiceActions, ServicesView, UserCard, UserView,
+    new_user_page, notice_for, services_page, user_page, Frame, GroupChip, Holder, KeyChip,
+    NewUserView, ServiceActions, ServicesView, UserCard, UserView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -572,6 +572,7 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
                 known: true,
                 fetch: false,
                 critical: Vec::new(),
+                source: crate::actions::Source::Absent,
             }
         })
         .collect()
@@ -620,7 +621,21 @@ fn demo_features() -> ServiceActions {
         known: true,
         fetch: false,
         critical: Vec::new(),
+        source: crate::actions::Source::Absent,
     }
+}
+
+/// The groups of the demo for the chips of the forms of an account.
+fn demo_group_chips() -> Vec<GroupChip> {
+    [("infra", "Infra", false, 4), ("oncall", "On call", true, 2)]
+        .iter()
+        .map(|(id, name, critical, members)| GroupChip {
+            id: id.to_string(),
+            name: name.to_string(),
+            critical: *critical,
+            members: *members,
+        })
+        .collect()
 }
 
 fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> Accounts<'a> {
@@ -940,6 +955,17 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     token: "demo",
                     features: users.features.take(),
                     owned_keys: 2,
+                    groups: demo_group_chips(),
+                    keys: vec![
+                        KeyChip {
+                            name: "ci".into(),
+                            kind: crate::keys::KeyKind::Api,
+                        },
+                        KeyChip {
+                            name: "agent".into(),
+                            kind: crate::keys::KeyKind::Mcp,
+                        },
+                    ],
                 },
             )
         }
@@ -949,6 +975,8 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 &frame,
                 &NewUserView {
                     notice: None,
+                    field: None,
+                    groups: demo_group_chips(),
                     services: std::mem::take(&mut users.services),
                     features: users.features.take(),
                     token: "demo",

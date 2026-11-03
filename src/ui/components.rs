@@ -217,6 +217,36 @@ pub fn split_zones(class: &str, left: Option<&str>, right: &str) -> String {
     }
 }
 
+/// The head of a page that fills the window and belongs to the tab Access: the account, "New user",
+/// "New key" and "Edit key". The crumb goes back to the tab, the title follows, then the tools of
+/// the page. The actions stand at the right: Cancel and the primary button.
+pub struct PageHead<'a> {
+    pub title: &'a str,
+    /// The tools after the title (markup). Empty: none.
+    pub tools_html: &'a str,
+    /// The actions at the right (markup). Empty: none.
+    pub actions_html: &'a str,
+}
+
+pub fn page_head(h: &PageHead) -> String {
+    format!(
+        r##"<div class="accountBar"><nav class="crumb" aria-label="Breadcrumb"><a href="{}">Access</a>{}</nav><h2 class="name" aria-current="page">{}</h2>{}<span class="grow"></span>{}</div>"##,
+        super::settings::ACCESS_PATH,
+        icon("chevron-right"),
+        html_escape(h.title),
+        h.tools_html,
+        h.actions_html,
+    )
+}
+
+/// A link that looks like a button: "Cancel" in the head of a full page.
+pub fn cancel_link() -> String {
+    format!(
+        r#"<a class="button" href="{}">Cancel</a>"#,
+        super::settings::ACCESS_PATH
+    )
+}
+
 /// Where a popover opens: under its button, from the left edge or from the right edge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -268,6 +298,8 @@ pub fn popover_with(
 
 /// One small chip of a list of tags: a name that links to a filtered page.
 pub struct Tag<'a> {
+    /// Markup before the text: the icon of a kind. Empty: none.
+    pub lead_html: &'a str,
     pub text: &'a str,
     /// Markup after the text: the mark of a critical group. Empty: none.
     pub mark_html: &'a str,
@@ -279,9 +311,10 @@ pub struct Tag<'a> {
 
 fn tag_link(tag: &Tag) -> String {
     format!(
-        r#"<a class="tag" href="{}" title="{}">{}{}</a>"#,
+        r#"<a class="tag" href="{}" title="{}">{}{}{}</a>"#,
         html_escape(tag.href),
         html_escape(tag.title),
+        tag.lead_html,
         html_escape(tag.text),
         tag.mark_html
     )
@@ -650,6 +683,7 @@ mod tests {
         let items: Vec<Tag> = ["a", "b", "c <d>"]
             .iter()
             .map(|name| Tag {
+                lead_html: "",
                 text: name,
                 mark_html: "",
                 href: "/p?group=x&y=1",

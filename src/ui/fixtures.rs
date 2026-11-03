@@ -94,6 +94,7 @@ pub(super) fn services() -> Vec<ServiceActions> {
         known: true,
         fetch: false,
         critical: Vec::new(),
+        source: crate::actions::Source::Absent,
     };
     let grafana = crate::actions::parse("infra-grafana", GRAFANA.as_bytes()).unwrap();
     vec![
@@ -109,6 +110,7 @@ pub(super) fn services() -> Vec<ServiceActions> {
             known: true,
             fetch: false,
             critical: Vec::new(),
+            source: crate::actions::Source::Absent,
         },
         plain("infra-notes", "Notes"),
         plain("infra-typo", "Typo"),
@@ -148,6 +150,7 @@ pub(super) fn features() -> ServiceActions {
         known: true,
         fetch: false,
         critical: Vec::new(),
+        source: crate::actions::Source::Absent,
     }
 }
 
@@ -322,6 +325,8 @@ pub(super) fn user_view(catalog: &Catalog, user: UserCard) -> UserView<'_> {
         token: "tok<en",
         features: Some(features()),
         owned_keys: 0,
+        groups: Vec::new(),
+        keys: Vec::new(),
     }
 }
 

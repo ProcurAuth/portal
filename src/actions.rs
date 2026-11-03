@@ -274,6 +274,20 @@ struct Entry {
 /// does not say it (`access.actions_max_age`).
 pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(3600);
 
+/// Where the document of a service comes from, and how old the copy is. The forms of the keys
+/// show it, so a person who makes a key knows what the service published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The service publishes no document, or its last good copy is older than
+    /// `access.actions_max_age`: the service has only `access`.
+    #[default]
+    Absent,
+    /// The last read gave this document. The time is the age of the read.
+    Fresh(Duration),
+    /// The last read failed. The time is the age of the last good copy, which still applies.
+    Stale(Duration),
+}
+
 /// The actions of each service, by service id.
 pub struct Registry {
     entries: RwLock<HashMap<String, Entry>>,
@@ -340,6 +354,28 @@ impl Registry {
     /// service `portal` has its document in the code: it never gets old.
     pub fn too_old(&self, service: &str) -> bool {
         self.internal(service).is_none() && self.age(service) > self.max_age
+    }
+
+    /// The state of the document of a service: fresh, a stale copy, or none. The service `portal`
+    /// has no entry: its document is in the code.
+    pub fn source(&self, service: &str) -> Source {
+        let entries = self.read();
+        let Some(entry) = entries.get(service) else {
+            return Source::Absent;
+        };
+        let Some(good) = entry.good_at else {
+            return Source::Absent;
+        };
+        let age = Instant::now().saturating_duration_since(good);
+        if age > self.max_age {
+            Source::Absent
+        } else if entry.read_at.is_some_and(|read| read > good) {
+            // A read after the last good one failed. The first spread of the reads moves the time
+            // of a read back, so a good read is never after its own mark.
+            Source::Stale(age)
+        } else {
+            Source::Fresh(age)
+        }
     }
 
     /// The age of the oldest document among `services` (portal 10.3a, 10.5).
@@ -1658,6 +1694,34 @@ mod tests {
         );
         registry.record("a", "http://a/y", Outcome::Failed("down".into()), now);
         assert!(registry.declared("a").is_none(), "a new URL: not known");
+    }
+
+    #[test]
+    fn the_source_of_a_document_is_fresh_stale_or_absent() {
+        let registry = Registry::default();
+        assert_eq!(registry.source("db"), Source::Absent, "never read");
+        registry.set("db", Vec::new());
+        assert!(
+            matches!(registry.source("db"), Source::Fresh(age) if age < Duration::from_secs(5))
+        );
+        registry.fail("db");
+        assert!(
+            matches!(registry.source("db"), Source::Stale(age) if age < Duration::from_secs(5)),
+            "the last read failed: the last good copy still applies"
+        );
+        registry.set("db", Vec::new());
+        assert!(
+            matches!(registry.source("db"), Source::Fresh(_)),
+            "a good read again"
+        );
+        let short = Registry::new(Duration::ZERO);
+        short.set("db", Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            short.source("db"),
+            Source::Absent,
+            "a copy past the maximum age is no copy"
+        );
     }
 
     #[test]

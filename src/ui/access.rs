@@ -511,7 +511,7 @@ fn accounts_table(
     let inbox = !view.groups.is_empty();
     let features = keys || inbox;
     let opens = !keys && !inbox;
-    let mut out = String::from(r#"<table class="grid grid--users"><colgroup><col class="w136">"#);
+    let mut out = String::from(r#"<table class="grid grid--users"><colgroup><col>"#);
     if inbox {
         out.push_str(r#"<col class="w152">"#);
     }
@@ -525,7 +525,7 @@ fn accounts_table(
     if keys {
         out.push_str(r#"<col class="w48 wide">"#);
     }
-    out.push_str(r#"<col class="w120"><col class="w48 wide"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
+    out.push_str(r#"<col class="w136"><col class="w48 wide"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
     if inbox {
         out.push_str(r#"<th scope="col">Groups</th>"#);
     }
@@ -609,6 +609,7 @@ fn account_row(
             .iter()
             .zip(marks.iter().zip(titles.iter()))
             .map(|((href, note, g), (mark, title))| Tag {
+                lead_html: "",
                 text: &g.name,
                 mark_html: mark,
                 href,
@@ -723,6 +724,7 @@ fn opened_tags(view: &AccessView, accounts: &Accounts, user: &UserCard) -> Strin
         .iter()
         .zip(hrefs.iter())
         .map(|((name, _), href)| Tag {
+            lead_html: "",
             text: name,
             mark_html: "",
             href,

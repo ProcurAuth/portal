@@ -665,7 +665,13 @@ async fn draw(
         }
     }
     if new && kind.is_none() {
-        kind = rights.create_kinds.first().copied();
+        // The API kind comes first, as in the selector.
+        kind = rights
+            .create_kinds
+            .iter()
+            .copied()
+            .find(|k| *k == KeyKind::Api)
+            .or_else(|| rights.create_kinds.first().copied());
     }
     let max_lifetime = kind.and_then(|kind| {
         my_grants
@@ -687,9 +693,9 @@ async fn draw(
         (None, None) => Pane::New,
     };
     let view = KeysView {
-        can_create: rights.create,
         create_kinds: rights.create_kinds.clone(),
         kind: kind.filter(|_| made.is_none()),
+        field: notice_code.and_then(|code| ui_keys::field_of(code)),
         notice,
         csrf: &csrf,
         editor,
@@ -697,7 +703,6 @@ async fn draw(
         expires_at: ui_keys::instant_text(now + i64::try_from(first_lifetime).unwrap_or(i64::MAX)),
         max_lifetime,
         copy_name,
-        impersonated: viewer.session.impersonated,
     };
     let frame = ui::Frame {
         logout_token: &logout_token,

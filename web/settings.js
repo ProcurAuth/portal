@@ -224,6 +224,193 @@
   for (var c = 0; c < controls.length; c += 1) updateBulk(controls[c].getAttribute("data-bulk"));
 })();
 
+/* The group chips of the pages of an account and the summary of an API key. The editor of grants tells
+   them its state after each change (the event `grants-state`). A click on a chip asks the editor to tick or
+   to untick the right `inbox.receive` on the group (the event `group-chip`), so the chip and the column
+   Receive of the editor always show the same grant. The chips are buttons that the markup disables:
+   without script they only show the state. The summary lists what the ticked rights allow, with the calls
+   of the API of the inbox. */
+(function () {
+  "use strict";
+  var chips = document.querySelectorAll("[data-group-chip]");
+  var summary = document.querySelector("[data-summary]");
+  var calls = document.querySelector("[data-calls]");
+  if (!chips.length && !summary) return;
+  var editor = document.querySelector(".grantEditor");
+  var WINDOW_NAMES = { second: "second", minute: "minute", hour: "hour", day: "day" };
+
+  Array.prototype.forEach.call(chips, function (chip) {
+    chip.disabled = false;
+    chip.addEventListener("click", function () {
+      if (!editor) return;
+      var on = chip.getAttribute("aria-pressed") !== "true";
+      editor.dispatchEvent(new CustomEvent("group-chip", { detail: { id: chip.getAttribute("data-group-chip"), on: on } }));
+    });
+  });
+
+  function holds(held, action, path) {
+    return held.some(function (item) {
+      return item.action === action && item.path === path;
+    });
+  }
+
+  function updateChips(held) {
+    Array.prototype.forEach.call(chips, function (chip) {
+      var id = chip.getAttribute("data-group-chip");
+      var own = held.filter(function (item) {
+        return item.action === "inbox.receive" && item.path === "inbox_group:" + id;
+      })[0];
+      var whole = holds(held, "inbox.receive", "");
+      var on = !!own || whole;
+      chip.setAttribute("aria-pressed", on ? "true" : "false");
+      chip.classList.toggle("is-on", on);
+      // A grant of the configuration file, or a grant on every group, is not changed by a chip.
+      chip.disabled = (!!own && own.locked) || (whole && !own);
+    });
+  }
+
+  function labelsOf(feature, held, action) {
+    var names = {};
+    feature.nodes.forEach(function (n) {
+      if (n.kind === "inbox_group") names[n.path] = n.label;
+    });
+    if (holds(held, action, "")) return ["every group"];
+    return held
+      .filter(function (item) {
+        return item.action === action && names[item.path];
+      })
+      .map(function (item) {
+        return names[item.path];
+      });
+  }
+
+  function groupIds(feature, held, action) {
+    if (holds(held, action, "")) return ["{group}"];
+    return held
+      .filter(function (item) {
+        return item.action === action && item.path.indexOf("inbox_group:") === 0;
+      })
+      .map(function (item) {
+        return item.path.slice("inbox_group:".length);
+      });
+  }
+
+  function setText(name, text) {
+    var cell = summary.querySelector('[data-s="' + name + '"]');
+    if (cell) cell.textContent = text;
+  }
+
+  function updateSummary(feature, held) {
+    var actions = {};
+    feature.actions.forEach(function (a) {
+      actions[a.name] = true;
+    });
+    // A row of a right that the document does not have is absent.
+    [["send", "alert.send"], ["read", "alert.read"], ["user", "alert.send_user"], ["limit", "alert.send"]].forEach(function (pair) {
+      var row = summary.querySelector('[data-s-row="' + pair[0] + '"]');
+      if (row && !actions[pair[1]]) row.parentNode.removeChild(row);
+    });
+    var send = labelsOf(feature, held, "alert.send");
+    var read = labelsOf(feature, held, "alert.read");
+    var toUser = held.some(function (item) {
+      return item.action === "alert.send_user";
+    });
+    setText("send", send.length ? send.join(", ") : "no group");
+    setText("read", read.length ? read.join(", ") : "no group");
+    setText("user", toUser ? "yes, to any account" : "no");
+    var budget = held.filter(function (item) {
+      return item.action === "access" && item.path === "";
+    })[0];
+    var windows = budget && budget.limits && typeof budget.limits.alerts === "object" ? budget.limits.alerts : {};
+    var parts = Object.keys(WINDOW_NAMES)
+      .filter(function (w) {
+        return windows[w];
+      })
+      .map(function (w) {
+        return windows[w] + " alerts each " + WINDOW_NAMES[w];
+      });
+    setText("limit", parts.length ? parts.join(", ") : "none");
+    if (!calls) return;
+    var lines = [];
+    var sendIds = groupIds(feature, held, "alert.send");
+    if (sendIds.length) {
+      lines.push("POST /api/v1/alerts  (group: " + sendIds.join(", ") + ")");
+      lines.push("POST /api/v1/notify/{group}");
+      lines.push("POST /api/v1/webhooks/alertmanager/{group}");
+    }
+    var readIds = groupIds(feature, held, "alert.read");
+    if (readIds.length) lines.push("GET /api/v1/alerts/{id}  (alerts of: " + readIds.join(", ") + ")");
+    if (toUser) lines.push("POST /api/v1/alerts  (user: an account)  [proposed]");
+    calls.textContent = "";
+    if (!lines.length) {
+      calls.textContent = "No call yet. Tick a right.";
+      return;
+    }
+    lines.forEach(function (line, at) {
+      if (at) calls.appendChild(document.createElement("br"));
+      calls.appendChild(document.createTextNode(line));
+    });
+  }
+
+  document.addEventListener("grants-state", function (event) {
+    var detail = event.detail;
+    updateChips(detail.held);
+    if (summary) updateSummary(detail.feature, detail.held);
+  });
+})();
+
+/* The popup "New alert". The switch between a group and an account works without this code. The code adds
+   the counter of the title, the search of the accounts and the line that tells where the alert goes. */
+(function () {
+  "use strict";
+  var counters = document.querySelectorAll("[data-title-count]");
+  Array.prototype.forEach.call(counters, function (counter) {
+    var input = document.getElementById(counter.getAttribute("data-title-count"));
+    if (!input) return;
+    var update = function () {
+      counter.textContent = input.value.length + "/" + input.maxLength;
+    };
+    input.addEventListener("input", update);
+    update();
+  });
+
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
+
+  var select = document.getElementById("send-group");
+  var groupHint = document.querySelector("[data-hint-group]");
+  if (select && groupHint) {
+    var showGroup = function () {
+      var option = select.options[select.selectedIndex];
+      var members = option ? Number(option.getAttribute("data-members")) : 0;
+      groupHint.textContent = "The alert goes to the " + plural(members, "account", "accounts") + " of the group. It rings on their phones.";
+    };
+    select.addEventListener("change", showGroup);
+    showGroup();
+  }
+
+  var find = document.querySelector("[data-ufind]");
+  var userHint = document.querySelector("[data-hint-user]");
+  var rows = document.querySelectorAll(".rcptForm--user .urow");
+  if (find) {
+    find.addEventListener("input", function () {
+      var text = find.value.trim().toLowerCase();
+      Array.prototype.forEach.call(rows, function (row) {
+        row.hidden = text !== "" && row.textContent.toLowerCase().indexOf(text) < 0;
+      });
+    });
+  }
+  if (userHint) {
+    document.addEventListener("change", function (event) {
+      var radio = event.target;
+      if (!radio || radio.name !== "to" || radio.value.indexOf("user:") !== 0) return;
+      var phones = Number(radio.getAttribute("data-phones"));
+      userHint.textContent = "The alert goes to the " + plural(phones, "phone", "phones") + " of " + radio.value.slice(5) + ".";
+    });
+  }
+})();
+
 /* The editor of grants (the forms of the keys and of the accounts). The page holds the actions and
    the tree of each service as a JSON block, and the ticked grants as hidden fields. This code draws
    the editor from the block: the tree of the resources on the left, the actions of the chosen node
@@ -734,7 +921,14 @@
           }
           li.appendChild(twist);
           li.appendChild(node("span", "ge__nodeName", item.path === "" ? (svc.feature ? "All features" : "Whole service") : item.label));
-          if (item.path !== "") li.appendChild(node("span", "ge__kind", item.kind));
+          if (item.path !== "") {
+            var kindLabel = node("span", "ge__kind", item.kind);
+            var typeInfo = (svc.types || []).filter(function (t) {
+              return t.name === item.kind;
+            })[0];
+            if (typeInfo && typeInfo.description) kindLabel.title = typeInfo.description;
+            li.appendChild(kindLabel);
+          }
           var n = ticksUnder(item.path);
           li.appendChild(node("span", "ge__ticks", n ? String(n) : ""));
           treeList.appendChild(li);
@@ -1038,6 +1232,7 @@
     // (`key_kind`) and actions on a group of the inbox (`inbox_group`). Only what the document
     // holds is drawn: a feature that the file turns off has no row and no column.
     var KEY_ROWS = ["keys.own.read", "keys.own.edit", "keys.own.revoke", "users.read", "keys.all.read", "keys.all.revoke"];
+    var DIRECT_ROWS = ["alert.send_user"];
     var PHONE_ROWS = ["phone.read", "phone.revoke", "phone.log"];
     var INBOX_COLUMNS = [
       ["inbox.receive", "Receive", "Receive the alerts of the group on the phones", ""],
@@ -1332,6 +1527,8 @@
         flatSection("key", "Keys", KEY_ROWS);
         kindMatrix();
         inboxMatrix();
+        // The row of the direct alerts exists only when the document of the portal has the action.
+        flatSection("inbox", "Direct alerts", DIRECT_ROWS);
         flatSection("device-mobile", "Phones", PHONE_ROWS);
         if (again) {
           var boxes = ui.querySelectorAll("input[type=checkbox]");
@@ -1365,6 +1562,35 @@
       return { ui: ui, draw: draw };
     }
 
+    // ---- where the document of a service comes from, and how old the copy is
+    var SOURCE_PATH = "/.well-known/procurauth/actions";
+    function minutes(secs) {
+      var m = Math.max(0, Math.round(secs / 60));
+      return m < 1 ? "less than a minute" : m + " min";
+    }
+    function sourceLine(svc) {
+      var src = svc.source || { state: "absent" };
+      var line = node("div", "srcLine");
+      var text = node("span");
+      if (src.state === "fresh") {
+        line.className += " srcLine--ok";
+        line.appendChild(icon("circle-check"));
+        text.appendChild(document.createTextNode("Published by the service at "));
+        text.appendChild(node("code", "", SOURCE_PATH));
+        text.appendChild(document.createTextNode(" \u00b7 read " + minutes(src.secs) + " ago"));
+      } else if (src.state === "stale") {
+        line.className += " srcLine--stale";
+        line.appendChild(icon("clock"));
+        text.textContent = "Last good copy from " + minutes(src.secs) + " ago. The last read failed.";
+      } else {
+        line.className += " srcLine--none";
+        line.appendChild(icon("ban"));
+        text.textContent = "Not published: access only. The service gives no document at " + SOURCE_PATH + ".";
+      }
+      line.appendChild(text);
+      return line;
+    }
+
     // ---- the rows of the services: the switch of `access`, a short sentence, the button
     var services = rowList.length ? makePane(rowList, serviceAt, false) : null;
     var features = featureSvc ? makeFeatures(featureSvc) : null;
@@ -1391,6 +1617,11 @@
         featHead.appendChild(node("h2", "title", "Portal features"));
         featHead.appendChild(featuresCount);
         featGroup.appendChild(featHead);
+        var portalLine = node("div", "srcLine srcLine--ok");
+        portalLine.title = "The portal builds this document in its own code. It does not serve it over HTTP.";
+        portalLine.appendChild(icon("circle-check"));
+        portalLine.appendChild(node("span", "", "Published by the portal. Built in, always current."));
+        featGroup.appendChild(portalLine);
         var featBody = node("div", "ge__featBody");
         featBody.appendChild(features.ui);
         featGroup.appendChild(featBody);
@@ -1433,6 +1664,9 @@
           head.appendChild(box);
         }
         head.appendChild(node("span", "ge__svcName", svc.name));
+        var origin = (svc.source || {}).state;
+        if (!svc.feature && origin === "stale") head.appendChild(node("span", "svc__flag svc__flag--stale", "stale copy"));
+        else if (!svc.feature && origin !== "fresh") head.appendChild(node("span", "svc__flag", "access only"));
         var info = open ? (groups ? "Opens" : "Can open") : "Cannot open";
         if (svc.feature) {
           info = others ? plural(others, "permission", "permissions") : "No permission";
@@ -1464,6 +1698,7 @@
         row.appendChild(head);
         if (expanded) {
           var body = node("div", "ge__svcBody");
+          body.appendChild(sourceLine(svc));
           body.appendChild(services.ui);
           row.appendChild(body);
         }
@@ -1496,7 +1731,41 @@
       if (services && expandedAt >= 0) services.draw();
       if (features) features.draw();
       syncFields();
+      announce();
     }
+
+    // ---- the group chips of the page and the summary of the key use the grants of the editor. The
+    // editor tells them its state after each change, and it listens to a click on a chip.
+    function receivePath(id) {
+      return "inbox_group:" + id;
+    }
+    function announce() {
+      if (!featureSvc) return;
+      var held = Array.from(ticked.values()).filter(function (item) {
+        return item.service === featureSvc.id;
+      });
+      root.dispatchEvent(
+        new CustomEvent("grants-state", {
+          bubbles: true,
+          detail: {
+            feature: featureSvc,
+            held: held.map(function (item) {
+              return { action: item.action, path: item.path, limits: item.limits, locked: !!item.locked };
+            }),
+          },
+        })
+      );
+    }
+    root.addEventListener("group-chip", function (event) {
+      if (!featureSvc) return;
+      var id = event.detail.id;
+      var wanted = event.detail.on;
+      var path = receivePath(id);
+      var item = ticked.get(keyOf(featureSvc.id, "inbox.receive", path));
+      if (item && item.locked) return;
+      setGrant("inbox.receive", path, wanted, featureSvc.id);
+      render();
+    });
 
     function chooseService(at) {
       if (expandedAt === at) {

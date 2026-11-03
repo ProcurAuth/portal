@@ -1259,8 +1259,11 @@ async fn handle_settings(
                 &frame,
                 &ui::NewUserView {
                     notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+                    field: query_value(uri, "s")
+                        .and_then(|code| ui::settings::user_field_of(&code)),
                     services: service_grants(state, &workloads),
                     features: features_service(state),
+                    groups: group_chips(state),
                     token: &users_token,
                 },
             )
@@ -1446,6 +1449,7 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
                     && state.config.identity.is_some()
                     && service.actions_url.is_some(),
                 critical: Vec::new(),
+                source: state.actions.source(&service.id),
             }
         })
         .collect()
@@ -1545,6 +1549,62 @@ fn access_query(uri: &str) -> ui::access::Query {
     }
 }
 
+/// The members of each group of the inbox: one pass over the grants of the accounts. The superadmin
+/// is a member of each group.
+fn group_members(state: &AppState) -> std::collections::HashMap<String, usize> {
+    let mut members: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut count = |grants: &[Grant]| {
+        for id in groups_of(state, grants) {
+            *members.entry(id).or_insert(0) += 1;
+        }
+    };
+    for (login, record) in state.users.list() {
+        count(&state.policy.effective(&login, &record.grants));
+    }
+    for account in state.config.access.accounts.values() {
+        count(&account.grants);
+    }
+    if let Some(inbox) = state.config.inbox.as_ref() {
+        for id in inbox.groups.keys() {
+            *members.entry(id.clone()).or_insert(0) += 1;
+        }
+    }
+    members
+}
+
+/// The groups of the inbox with their members, for the chips of the forms of an account. The
+/// critical groups come last. Empty without the block `inbox`.
+fn group_chips(state: &AppState) -> Vec<ui::GroupChip> {
+    let members = group_members(state);
+    inbox_groups(state)
+        .into_iter()
+        .map(|group| ui::GroupChip {
+            members: members.get(&group.id).copied().unwrap_or(0),
+            id: group.id,
+            name: group.name,
+            critical: group.critical,
+        })
+        .collect()
+}
+
+/// The keys of an account, by name, for the chips of its page.
+fn key_chips(state: &AppState, login: &str) -> Vec<ui::KeyChip> {
+    let mut keys: Vec<ui::KeyChip> = state
+        .users
+        .keys()
+        .iter()
+        .filter(|key| {
+            matches!(&key.owner, KeyOwner::User(owner) | KeyOwner::File(owner) if owner == login)
+        })
+        .map(|key| ui::KeyChip {
+            name: key.name.clone(),
+            kind: key.kind,
+        })
+        .collect();
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+    keys
+}
+
 /// The groups of the inbox, the critical groups last. Empty without the block `inbox`.
 fn inbox_groups(state: &AppState) -> Vec<ui::access::GroupLine> {
     let Some(inbox) = state.config.inbox.as_ref() else {
@@ -1641,6 +1701,8 @@ fn user_view<'a>(
         services: service_grants(state, catalog),
         features: features_service(state),
         owned_keys: user.keys,
+        groups: group_chips(state),
+        keys: key_chips(state, &user.login),
         user,
         token: users_token,
     })
@@ -1717,6 +1779,7 @@ fn feature_actions(
         known: true,
         fetch: false,
         critical,
+        source: crate::actions::Source::Absent,
     }
 }
 

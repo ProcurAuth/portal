@@ -23,9 +23,10 @@
 
 use std::fmt::Write as _;
 
+use super::access::Query;
 use super::components::{
-    ask, chips, icon, icon_link, icon_post, popover, split, toolbar, zone, Ask, Chip, Side,
-    Strength, Zone,
+    ask, cancel_link, chips, icon, icon_link, icon_post, page_head, popover, split, tags, toolbar,
+    zone, Ask, Chip, PageHead, Side, Strength, Tag, Zone,
 };
 use super::grant_editor::{self, Place};
 use super::{document_class, sign_out_form, status_icon, theme_switch};
@@ -378,6 +379,8 @@ pub struct ServiceActions {
     pub fetch: bool,
     /// The ids of the groups of the inbox that are critical. Only the service `portal` has any.
     pub critical: Vec<String>,
+    /// Where the document comes from and how old the copy is. The forms of the keys show it.
+    pub source: crate::actions::Source,
 }
 
 impl ServiceActions {
@@ -506,6 +509,28 @@ pub struct UserView<'a> {
     /// The number of keys that the account owns. The confirmation of the delete names them: they go
     /// with the account.
     pub owned_keys: usize,
+    /// The groups of the inbox, with their members. Empty: the file has no block `inbox`.
+    pub groups: Vec<GroupChip>,
+    /// The keys of the account, for the chips of the page.
+    pub keys: Vec<KeyChip>,
+}
+
+/// A group of the inbox with the number of its members, for the chips "Groups" of the pages of an
+/// account.
+#[derive(Clone, Debug)]
+pub struct GroupChip {
+    pub id: String,
+    pub name: String,
+    pub critical: bool,
+    /// The accounts that hold `inbox.receive` on the group, and the superadmin.
+    pub members: usize,
+}
+
+/// A key of an account, for the chips "Keys" of its page.
+#[derive(Clone, Debug)]
+pub struct KeyChip {
+    pub name: String,
+    pub kind: crate::keys::KeyKind,
 }
 
 /// The keys that go with an account: " and 3 keys". Empty without a key.
@@ -533,6 +558,14 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
             r#"<form id="grants" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}"><input type="hidden" name="grants" value="1"></form>"#,
             html_escape(view.token),
             html_escape(&user.login),
+        );
+    }
+    let groups = groups_field(&view.groups, &user.groups, editable);
+    let keys = keys_field(&user.login, &view.keys);
+    if !groups.is_empty() || !keys.is_empty() {
+        let _ = write!(
+            out,
+            r#"<div class="fgrid fgrid--account">{groups}{keys}</div>"#
         );
     }
     if view.services.is_empty() && view.features.is_none() {
@@ -568,26 +601,123 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
     fill_page(Tab::Access, frame, &user.login, &out)
 }
 
+/// The field "Groups" of the pages of an account: one chip for each group of the inbox. A chip of
+/// an account that the page changes is a button: it writes the grant `inbox.receive` on its group,
+/// and the column Receive of the editor shows the same grant (script). Otherwise a chip is a link
+/// to the list of the accounts of the group. Empty without a group.
+fn groups_field(groups: &[GroupChip], member_of: &[String], editable: bool) -> String {
+    if groups.is_empty() {
+        return String::new();
+    }
+    let mut chips = String::new();
+    for group in groups {
+        let on = member_of.contains(&group.id);
+        let mark = if group.critical {
+            format!(
+                r#"<span class="crit" title="Critical group: its alerts always ring.">{}</span>"#,
+                icon("bell-ringing")
+            )
+        } else {
+            String::new()
+        };
+        let title = format!(
+            "Group {}: the right inbox.receive on service:portal/inbox_group:{}",
+            group.name, group.id
+        );
+        if editable {
+            // The script turns the buttons on. Without script they only show the state.
+            let _ = write!(
+                chips,
+                r#"<button class="chip chip--toggle{}" type="button" data-group-chip="{}" aria-pressed="{on}" title="{}" disabled>{}{mark}<span class="num">{}</span></button>"#,
+                if on { " is-on" } else { "" },
+                html_escape(&group.id),
+                html_escape(&title),
+                html_escape(&group.name),
+                group.members,
+            );
+        } else {
+            let _ = write!(
+                chips,
+                r#"<a class="chip{}" href="{}" title="Members of {}">{}{mark}<span class="num">{}</span></a>"#,
+                if on { " is-on" } else { "" },
+                html_escape(&Query::default().with_group(&group.id).href()),
+                html_escape(&group.name),
+                html_escape(&group.name),
+                group.members,
+            );
+        }
+    }
+    let hint = if editable {
+        r#"<span class="hint">A group chip gives the right <code>inbox.receive</code> on that group. The account then gets its alerts.</span>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<div class="field field--groups"><span class="field__label">Groups</span><span class="chips" role="group" aria-label="Groups of the account">{chips}</span>{hint}</div>"#
+    )
+}
+
+/// The field "Keys" of the page of an account: one chip for each key, four at most, then "+N". A
+/// chip opens the list of the keys of the account. Empty without a key.
+fn keys_field(login: &str, keys: &[KeyChip]) -> String {
+    if keys.is_empty() {
+        return String::new();
+    }
+    let href = Query::default().with_user(login).href();
+    let titles: Vec<String> = keys
+        .iter()
+        .map(|k| format!("{}: {}", k.kind.label(), k.name))
+        .collect();
+    let leads: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            icon(match k.kind {
+                crate::keys::KeyKind::Api => "webhook",
+                crate::keys::KeyKind::Mcp => "robot",
+            })
+        })
+        .collect();
+    let list: Vec<Tag> = keys
+        .iter()
+        .zip(titles.iter().zip(leads.iter()))
+        .map(|(key, (title, lead))| Tag {
+            lead_html: lead,
+            text: &key.name,
+            mark_html: "",
+            href: &href,
+            title,
+            note: "",
+        })
+        .collect();
+    let api = keys
+        .iter()
+        .filter(|k| k.kind == crate::keys::KeyKind::Api)
+        .count();
+    format!(
+        r#"<div class="field field--keys"><span class="field__label">Keys</span>{}<span class="hint">{}: {api} API, {} MCP. A key holds at most the rights of its owner.</span></div>"#,
+        tags(&list, 4, &format!("All {} keys of {login}", keys.len())),
+        plural(keys.len(), "key", "keys"),
+        keys.len() - api,
+    )
+}
+
 /// The one row of tools of an account: the way back, the login, log in as, the password, the
 /// activity, delete, two facts, then Save. A control that does not apply is absent.
 fn account_bar(view: &UserView, editable: bool) -> String {
     let user = &view.user;
     let login = html_escape(&user.login);
     let token = html_escape(view.token);
-    let mut out = format!(
-        r##"<div class="accountBar"><nav class="crumb" aria-label="Breadcrumb"><a href="{ACCESS_PATH}">Access</a>{}</nav><h2 class="name" aria-current="page">{login}</h2>"##,
-        icon("chevron-right")
-    );
+    let mut tools = String::new();
     if user.superadmin {
-        out.push_str(r#"<span class="badge">Superadmin</span>"#);
+        tools.push_str(r#"<span class="badge">Superadmin</span>"#);
     }
     if user.file {
-        out.push_str(r#"<span class="badge">file</span>"#);
+        tools.push_str(r#"<span class="badge">file</span>"#);
     }
     if !user.superadmin {
         let s = summary(view.catalog, &view.services, user);
         if s.to_check > 0 {
-            out.push_str(&status_icon(
+            tools.push_str(&status_icon(
                 "warn",
                 "alert-triangle",
                 &plural(s.to_check, "permission to check", "permissions to check"),
@@ -596,7 +726,7 @@ fn account_bar(view: &UserView, editable: bool) -> String {
     }
     let can_manage = !user.superadmin && !user.file;
     if can_manage {
-        out.push_str(&icon_post(
+        tools.push_str(&icon_post(
             "/auth/users/impersonate",
             &format!("Log in as {}", user.login),
             "user-share",
@@ -604,7 +734,7 @@ fn account_bar(view: &UserView, editable: bool) -> String {
                 r#"<input type="hidden" name="csrf" value="{token}"><input type="hidden" name="login" value="{login}">"#
             ),
         ));
-        out.push_str(&popover(
+        tools.push_str(&popover(
             "Change the password",
             "key",
             Side::Start,
@@ -612,7 +742,7 @@ fn account_bar(view: &UserView, editable: bool) -> String {
             &password_form(&user.login, view.token),
         ));
     }
-    out.push_str(&popover(
+    tools.push_str(&popover(
         "Activity of the account",
         "activity",
         Side::Start,
@@ -621,7 +751,7 @@ fn account_bar(view: &UserView, editable: bool) -> String {
     ));
     if can_manage {
         let keys = keys_clause(view.owned_keys);
-        out.push_str(&ask(&Ask {
+        tools.push_str(&ask(&Ask {
             label: &format!("Delete {}", user.login),
             icon: "trash",
             question: &format!("Delete {}{keys}?", user.login),
@@ -651,16 +781,19 @@ fn account_bar(view: &UserView, editable: bool) -> String {
         .map(|at| time_tag(at, false))
         .unwrap_or_else(|| "never".to_string());
     let _ = write!(
-        out,
-        r#"<dl class="factLine"><div><dt>Created</dt><dd>{created}</dd></div><div><dt>Last sign-in</dt><dd>{last}</dd></div></dl><span class="grow"></span>"#
+        tools,
+        r#"<dl class="factLine"><div><dt>Created</dt><dd>{created}</dd></div><div><dt>Last sign-in</dt><dd>{last}</dd></div></dl>"#
     );
-    if editable && (!view.services.is_empty() || view.features.is_some()) {
-        out.push_str(
-            r#"<button class="button button--primary" type="submit" form="grants" data-save>Save</button>"#,
-        );
-    }
-    out.push_str("</div>");
-    out
+    let save = if editable && (!view.services.is_empty() || view.features.is_some()) {
+        r#"<button class="button button--primary" type="submit" form="grants" data-save>Save</button>"#
+    } else {
+        ""
+    };
+    page_head(&PageHead {
+        title: &user.login,
+        tools_html: &tools,
+        actions_html: save,
+    })
 }
 
 /// The password form of the popover. It holds the field and "Generate": the page has none.
@@ -670,16 +803,21 @@ fn password_form(login: &str, token: &str) -> String {
         r#"<form class="pwForm" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}">{}<button class="button" type="submit" title="The sessions of this account end at once">Change</button></form>"#,
         html_escape(token),
         html_escape(login),
-        password_input(&id, "New password", "At least 10 characters"),
+        password_input(&id, "New password", "At least 10 characters", false),
     )
 }
 
 /// A password field with its "Generate" button (script). The button shows the result of the
 /// action in its own slot: a second icon that takes the place of the first at the same size, so
 /// nothing moves (the live region for a screen reader takes no room).
-fn password_input(id: &str, label: &str, hint: &str) -> String {
+fn password_input(id: &str, label: &str, hint: &str, invalid: bool) -> String {
+    let invalid = if invalid {
+        format!(r#" uiInput--error" aria-invalid="true" aria-describedby="{id}-error"#)
+    } else {
+        String::new()
+    };
     format!(
-        r##"<input class="uiInput" id="{id}" name="password" type="password" minlength="10" required autocomplete="new-password" autocapitalize="off" spellcheck="false" placeholder="{hint}" aria-label="{label}"><button class="ib generate" type="button" data-generate-password="{id}" aria-label="Generate a password" title="Generate a password"><span class="generate__idle">{}</span><span class="generate__done" aria-hidden="true">{}</span></button><span class="visually-hidden" id="{id}-status" role="status"></span>"##,
+        r##"<input class="uiInput{invalid}" id="{id}" name="password" type="password" minlength="10" required autocomplete="new-password" autocapitalize="off" spellcheck="false" placeholder="{hint}" aria-label="{label}"><button class="ib generate" type="button" data-generate-password="{id}" aria-label="Generate a password" title="Generate a password"><span class="generate__idle">{}</span><span class="generate__done" aria-hidden="true">{}</span></button><span class="visually-hidden" id="{id}-status" role="status"></span>"##,
         icon("refresh"),
         icon("check"),
     )
@@ -781,30 +919,87 @@ fn end_label(reason: Option<&str>) -> &'static str {
 
 // A new account ---------------------------------------------------------------------------------
 
+/// The field of the form "New user" that a refused add names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserField {
+    Login,
+    Password,
+}
+
+/// The field that the outcome of a refused add names. `None`: the outcome is for the whole form.
+pub fn user_field_of(code: &str) -> Option<UserField> {
+    match code {
+        "exists" | "reserved" | "invalid-login" => Some(UserField::Login),
+        "weak-password" => Some(UserField::Password),
+        _ => None,
+    }
+}
+
 /// The data of the page "New user".
 pub struct NewUserView<'a> {
     pub notice: Option<Notice>,
+    /// The field that the outcome names. The message shows under it.
+    pub field: Option<UserField>,
     pub services: Vec<ServiceActions>,
     pub features: Option<ServiceActions>,
+    /// The groups of the inbox, with their members. Empty: the file has no block `inbox`.
+    pub groups: Vec<GroupChip>,
     /// The anti-CSRF token of the administration forms.
     pub token: &'a str,
 }
 
-/// The page of an account in create mode. The login and the password stand in the row of tools.
-/// The editor is under it. One primary action makes the account with its grants.
+/// The message under a field that a refused form names, and the attributes that tie it to the
+/// field for a screen reader.
+fn field_error(id: &str, message: Option<&str>) -> (String, String) {
+    match message {
+        Some(text) => (
+            format!(r#" uiInput--error" aria-invalid="true" aria-describedby="{id}-error"#),
+            format!(
+                r#"<span class="field__error" id="{id}-error">{}</span>"#,
+                html_escape(text)
+            ),
+        ),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// The page "New user": the login, the password and the groups across the width, then the editor
+/// of the permissions. Cancel and Create are at the top right. One primary action makes the account
+/// with its grants.
 pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
     let mut out = String::new();
-    notice_html(&mut out, view.notice);
+    out.push_str(&page_head(&PageHead {
+        title: "New user",
+        tools_html: "",
+        actions_html: &format!(
+            r#"{}<button class="button button--primary" type="submit" form="add-user">Create</button>"#,
+            cancel_link()
+        ),
+    }));
+    match (view.field, view.notice) {
+        (Some(_), Some(notice)) if !notice.ok => out.push_str(&banner_error(
+            "The account is not made. Fix the field that shows an error.",
+        )),
+        _ => notice_html(&mut out, view.notice),
+    }
+    let message = |field: UserField| {
+        view.notice
+            .filter(|n| !n.ok && view.field == Some(field))
+            .map(|n| n.text)
+    };
+    let (login_class, login_error) = field_error("new-login", message(UserField::Login));
+    let (_, password_error) = field_error("new-password", message(UserField::Password));
     let _ = write!(
         out,
-        r##"<form class="accountBar" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><nav class="crumb" aria-label="Breadcrumb"><a href="{ACCESS_PATH}">Access</a>{}</nav><h2 class="name" aria-current="page">New user</h2><input class="uiInput accountBar__login" id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Login" aria-label="Login" title="1 to 32 characters: letters, digits, dot, dash, underscore"><span class="pwRow">{}</span><span class="grow"></span><button class="button button--primary" type="submit">Create</button></form>"##,
+        r##"<form class="fgrid fgrid--user" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><div class="field"><label class="field__label" for="new-login">Login</label><input class="uiInput{login_class}" id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1 to 32 characters" title="1 to 32 characters: letters, digits, dot, dash, underscore">{login_error}</div><div class="field"><label class="field__label" for="new-password">Password</label><span class="pwRow">{}</span>{password_error}</div>{}</form>"##,
         html_escape(view.token),
-        icon("chevron-right"),
         password_input(
             "new-password",
             "Password",
-            "Password, at least 10 characters"
+            "At least 10 characters",
+            !password_error.is_empty()
         ),
+        groups_field(&view.groups, &[], true),
     );
     if view.services.is_empty() && view.features.is_none() {
         out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
@@ -829,6 +1024,14 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
         );
     }
     fill_page(Tab::Access, frame, "New user", &out)
+}
+
+/// A banner of an error that the page announces at once.
+pub(super) fn banner_error(text: &str) -> String {
+    format!(
+        r#"<div class="uiBanner uiBanner--inset" role="alert"><span class="uiBanner__text">{}</span></div>"#,
+        html_escape(text)
+    )
 }
 
 // Services --------------------------------------------------------------------------------------
@@ -1270,6 +1473,8 @@ mod tests {
                     &full_frame(),
                     &NewUserView {
                         notice: None,
+                        field: None,
+                        groups: Vec::new(),
                         services: services(),
                         features: Some(features()),
                         token: "tok<en",
@@ -1648,22 +1853,52 @@ mod tests {
         assert!(!html.contains(r#"" value="access on service:infra-grafana" form="grants">"#));
     }
 
-    #[test]
-    fn new_user_is_the_account_page_in_create_mode_with_one_primary_action() {
-        let cat = catalog();
-        let html = new_user_page(
-            &frame(),
-            &NewUserView {
-                notice: None,
-                services: services(),
-                features: Some(features()),
-                token: "tok<en",
+    fn new_user_view(groups: Vec<GroupChip>) -> NewUserView<'static> {
+        NewUserView {
+            notice: None,
+            field: None,
+            groups,
+            services: services(),
+            features: Some(features()),
+            token: "tok<en",
+        }
+    }
+
+    fn infra_and_oncall() -> Vec<GroupChip> {
+        vec![
+            GroupChip {
+                id: "infra".into(),
+                name: "Infra".into(),
+                critical: false,
+                members: 11,
             },
+            GroupChip {
+                id: "oncall".into(),
+                name: "On call".into(),
+                critical: true,
+                members: 5,
+            },
+        ]
+    }
+
+    #[test]
+    fn new_user_is_a_full_page_with_the_fields_across_the_width_and_one_primary_action() {
+        let html = new_user_page(&frame(), &new_user_view(infra_and_oncall()));
+        // The head: the crumb to Access, the title, Cancel and Create at the top right.
+        let head = &html[html.find(r#"<div class="accountBar">"#).unwrap()..];
+        let head = &head[..head.find("<form").unwrap()];
+        assert!(head.contains(r#"<a href="/auth/settings">Access</a>"#));
+        assert!(head.contains(r#"<h2 class="name" aria-current="page">New user</h2>"#));
+        assert!(head.contains(r#"<a class="button" href="/auth/settings">Cancel</a>"#));
+        assert!(head.contains(r#"<button class="button button--primary" type="submit" form="add-user">Create</button>"#));
+        assert_eq!(
+            html.matches(">Create</button>").count(),
+            1,
+            "one entry point"
         );
-        let _ = &cat;
-        // The login and the password are in the row of tools. One form holds them and the editor.
+        // One form holds the fields: the login, the password with its generator, the groups.
         let form = &html[html
-            .find(r#"<form class="accountBar" id="add-user""#)
+            .find(r#"<form class="fgrid fgrid--user" id="add-user""#)
             .unwrap()..];
         let form = &form[..form.find("</form>").unwrap()];
         assert!(form.contains(r#"data-gate method="post" action="/auth/users/add""#));
@@ -1672,11 +1907,14 @@ mod tests {
         assert!(form.contains(r#"id="new-login" name="login""#));
         assert!(form.contains(r#"id="new-password" name="password" type="password""#));
         assert!(form.contains(r#"data-generate-password="new-password""#));
-        assert!(form.contains(r#"<h2 class="name" aria-current="page">New user</h2>"#));
-        assert_eq!(form.matches(r#"type="submit""#).count(), 1);
-        assert!(form
-            .contains(r#"<button class="button button--primary" type="submit">Create</button>"#));
-        // The editor sits under it and belongs to the form.
+        // One chip for each group, a button that the script turns on, with its member count.
+        assert!(form.contains(r#"<button class="chip chip--toggle" type="button" data-group-chip="infra" aria-pressed="false""#), "{form}");
+        assert!(form.contains(r#"<span class="num">11</span>"#));
+        assert!(form.contains("#i-bell-ringing"), "the critical mark");
+        assert!(
+            form.contains("A group chip gives the right <code>inbox.receive</code> on that group.")
+        );
+        // The editor sits under the fields and belongs to the form.
         assert!(
             html.contains(r#"data-title="Permissions" data-layout="groups" data-form="add-user">"#)
         );
@@ -1690,27 +1928,84 @@ mod tests {
             "/auth/users/delete",
             "impersonate",
             "Create user",
-            "Cancel",
         ] {
             assert!(!html.contains(gone), "{gone}");
         }
-        // A refused try says why on the same page.
-        let refused = new_user_page(
-            &frame(),
-            &NewUserView {
-                notice: notice_for("exists"),
-                services: services(),
-                features: None,
-                token: "t",
-            },
-        );
+        // Without the block inbox the page has no field of groups.
+        let html = new_user_page(&frame(), &new_user_view(Vec::new()));
+        assert!(!html.contains("data-group-chip") && !html.contains("Groups"));
+    }
+
+    #[test]
+    fn a_refused_add_says_why_under_the_field_and_in_a_banner() {
+        let mut view = new_user_view(Vec::new());
+        view.notice = notice_for("exists");
+        view.field = user_field_of("exists");
+        let refused = new_user_page(&frame(), &view);
         assert!(
-            refused.contains(r#"role="alert""#) && refused.contains("That login already exists.")
+            refused.contains(r#"role="alert""#) && refused.contains("The account is not made.")
         );
-        assert!(
-            !refused.contains(r#"data-layout="groups" data-form="add-user">"#)
-                || refused.contains("grantEditor")
+        assert!(refused.contains(
+            r#"<span class="field__error" id="new-login-error">That login already exists.</span>"#
+        ));
+        assert!(refused.contains(r#"aria-invalid="true" aria-describedby="new-login-error""#));
+        assert!(!refused.contains("new-password-error"));
+        // A weak password names the password.
+        view.notice = notice_for("weak-password");
+        view.field = user_field_of("weak-password");
+        let weak = new_user_page(&frame(), &view);
+        assert!(weak
+            .contains(r#"id="new-password-error">The password must have at least 10 characters."#));
+        // A refusal for the whole form shows only in the banner.
+        view.notice = notice_for("limit");
+        view.field = user_field_of("limit");
+        let limit = new_user_page(&frame(), &view);
+        assert!(limit.contains("The account limit is reached") && !limit.contains("field__error"));
+        // The editor is still there: the person corrects and sends again.
+        assert!(refused.contains("grantEditor"));
+    }
+
+    #[test]
+    fn the_account_page_has_the_groups_and_the_keys_of_the_account_in_one_row() {
+        let cat = catalog();
+        let mut alice = card("alice", &["grafana"]);
+        alice.groups = vec!["infra".into()];
+        let mut view = user_view(&cat, alice.clone());
+        view.groups = infra_and_oncall();
+        view.keys = ["ci", "a", "b", "c", "d"]
+            .iter()
+            .map(|name| KeyChip {
+                name: name.to_string(),
+                kind: crate::keys::KeyKind::Api,
+            })
+            .collect();
+        let html = user_page(&frame(), &view);
+        let row = &html[html.find(r#"<div class="fgrid fgrid--account">"#).unwrap()..];
+        let row = &row[..row.find("<div class=\"grantEditor\"").unwrap()];
+        // The groups: infra is on, a button that the script turns on; the member count shows.
+        assert!(row.contains(r#"class="chip chip--toggle is-on" type="button" data-group-chip="infra" aria-pressed="true""#), "{row}");
+        assert!(row.contains(r#"data-group-chip="oncall" aria-pressed="false""#));
+        // The keys: four chips, then "+1" that opens the list. The chips go to the keys of the account.
+        assert_eq!(
+            row.matches(r#"<a class="tag" href="/auth/settings?user=alice""#)
+                .count(),
+            4 + 5
         );
+        assert!(row.contains("All 5 keys of alice") && row.contains("5 keys: 5 API, 0 MCP."));
+        // An account that the page does not change shows its groups as links to the list.
+        let mut file = card("dave", &[]);
+        file.file = true;
+        file.groups = vec!["infra".into()];
+        let mut view = user_view(&cat, file);
+        view.groups = infra_and_oncall();
+        let html = user_page(&frame(), &view);
+        assert!(html.contains(
+            r#"<a class="chip is-on" href="/auth/settings?group=infra" title="Members of Infra">"#
+        ));
+        assert!(!html.contains("data-group-chip"));
+        // No group and no key: no row.
+        let html = user_page(&frame(), &user_view(&cat, alice));
+        assert!(!html.contains("fgrid--account"));
     }
 
     #[test]

@@ -12,6 +12,7 @@
 use std::fmt::Write as _;
 
 use super::settings::ServiceActions;
+use crate::actions::Source;
 use crate::grants::{Grant, ACCESS, SERVICE_TYPE};
 use crate::limits::{Input, Limits, Value};
 use crate::util::html_escape;
@@ -53,10 +54,14 @@ pub struct EditorService {
     pub name: String,
     pub actions: Vec<EditorAction>,
     pub nodes: Vec<EditorNode>,
-    /// The types of the document with their parents: the types of the children of a node.
-    pub types: Vec<(String, String)>,
+    /// The types of the document with their parents and descriptions: the types of the children of
+    /// a node.
+    pub types: Vec<(String, String, String)>,
     /// The portal can ask the service for the children of a node (portal 3.1a).
     pub fetch: bool,
+    /// Where the document comes from and how old the copy is. The service `portal` is always
+    /// `Absent`: its document is in the code, and the script says so.
+    pub source: Source,
 }
 
 /// What the form needs to draw the editor. It has two parts: the services, which are the workloads
@@ -177,10 +182,22 @@ fn service_json(service: &EditorService) -> serde_json::Value {
         "types": service
             .types
             .iter()
-            .map(|(name, parent)| serde_json::json!({ "name": name, "parent": parent }))
+            .map(|(name, parent, description)| {
+                serde_json::json!({ "name": name, "parent": parent, "description": description })
+            })
             .collect::<Vec<_>>(),
         "fetch": service.fetch,
+        "source": source_json(service.source),
     })
+}
+
+/// The source of a document for the script: its state, and the age of the copy in seconds.
+fn source_json(source: Source) -> serde_json::Value {
+    match source {
+        Source::Absent => serde_json::json!({ "state": "absent" }),
+        Source::Fresh(age) => serde_json::json!({ "state": "fresh", "secs": age.as_secs() }),
+        Source::Stale(age) => serde_json::json!({ "state": "stale", "secs": age.as_secs() }),
+    }
 }
 
 /// The JSON block of the editor. `<`, `>` and `&` are written as `\u00XX`, so the text cannot
@@ -279,9 +296,13 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
         out.push_str("<noscript><div class=\"grantRows\">");
         for k in 0..place.blank_rows {
             let n = data.ticked.len() + k;
+            let form = place
+                .form
+                .map(|id| format!(r#" form="{id}""#))
+                .unwrap_or_default();
             let _ = write!(
                 out,
-                r#"<div class="grantRow"><label>Another grant <input class="uiInput" type="text" name="grant{n}" value="" size="48" maxlength="4096" placeholder="data.read on service:datastore/host:prod/database:test1"></label></div>"#
+                r#"<div class="grantRow"><label>Another grant <input class="uiInput" type="text" name="grant{n}" value="" size="48" maxlength="4096" placeholder="data.read on service:datastore/host:prod/database:test1"{form}></label></div>"#
             );
         }
         out.push_str("</div></noscript>");
@@ -371,9 +392,10 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             .document
             .types
             .iter()
-            .map(|t| (t.name.clone(), t.parent.clone()))
+            .map(|t| (t.name.clone(), t.parent.clone(), t.description.clone()))
             .collect(),
         fetch: service.fetch,
+        source: service.source,
     }
 }
 
@@ -408,6 +430,7 @@ fn bare_service(id: &str, name: &str) -> EditorService {
         }],
         types: Vec::new(),
         fetch: false,
+        source: Source::Absent,
     }
 }
 
@@ -590,12 +613,76 @@ mod tests {
                 }],
                 types: Vec::new(),
                 fetch: false,
+                source: Source::Fresh(std::time::Duration::from_secs(120)),
             }],
             features: None,
             ticked: vec![grant("data.read on service:db/host:prod")],
             owner: None,
             locked: Vec::new(),
         }
+    }
+
+    /// The service `portal` with a document that has the right to alert one account.
+    fn portal_with_direct_alerts() -> ServiceActions {
+        let text = r#"{"server":"portal","resource_types":[{"name":"inbox_group","parent":"service","description":"A group."}],"actions":[{"name":"alert.send","resource_types":["inbox_group"],"description":"Send an alert to the group."},{"name":"alert.send_user","resource_types":["service"],"description":"Send an alert to one account."}]}"#;
+        let document = crate::actions::parse("portal", text.as_bytes()).unwrap();
+        ServiceActions {
+            id: "portal".into(),
+            name: "Portal features".into(),
+            actions: document
+                .actions
+                .iter()
+                .map(|a| (a.name.clone(), a.description.clone()))
+                .collect(),
+            document: std::sync::Arc::new(document),
+            known: true,
+            fetch: false,
+            critical: Vec::new(),
+            source: Source::Absent,
+        }
+    }
+
+    #[test]
+    fn a_document_with_the_right_to_alert_an_account_gives_the_editor_the_row_direct_alerts() {
+        // The page draws the row "Direct alerts" from the document, and only when the document has
+        // the action. The editor has no code for the row but the list of the actions.
+        let features = portal_with_direct_alerts();
+        let data = build(&[], Some(&features), None, |_| true, Vec::new(), true);
+        let mut out = String::new();
+        render(&mut out, &data, PLACE);
+        assert!(out.contains(r#""name":"alert.send_user""#), "{out}");
+        let without = ServiceActions {
+            actions: vec![("alert.send".into(), "Send.".into())],
+            ..portal_with_direct_alerts()
+        };
+        let data = build(&[], Some(&without), None, |_| true, Vec::new(), true);
+        let mut out = String::new();
+        render(&mut out, &data, PLACE);
+        assert!(!out.contains("alert.send_user"));
+        let script = include_str!("../../web/settings.js");
+        assert!(
+            script.contains(r#"var DIRECT_ROWS = ["alert.send_user"];"#)
+                && script.contains(r#"flatSection("inbox", "Direct alerts", DIRECT_ROWS);"#)
+        );
+    }
+
+    #[test]
+    fn the_json_block_tells_where_the_document_comes_from_and_how_old_it_is() {
+        let mut out = String::new();
+        render(&mut out, &data(), PLACE);
+        assert!(
+            out.contains(r#""source":{"secs":120,"state":"fresh"}"#),
+            "{out}"
+        );
+        let mut stale = data();
+        stale.services[0].source = Source::Stale(std::time::Duration::from_secs(2400));
+        let mut out = String::new();
+        render(&mut out, &stale, PLACE);
+        assert!(out.contains(r#""source":{"secs":2400,"state":"stale"}"#));
+        stale.services[0].source = Source::Absent;
+        let mut out = String::new();
+        render(&mut out, &stale, PLACE);
+        assert!(out.contains(r#""source":{"state":"absent"}"#));
     }
 
     #[test]
@@ -644,6 +731,7 @@ mod tests {
             known: true,
             fetch: false,
             critical: vec!["crit".into()],
+            source: crate::actions::Source::Absent,
         }
     }
 
