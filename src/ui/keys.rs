@@ -197,6 +197,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             "A limit value is not valid for its permission.",
             false,
         ),
+        "needs_access" => (
+            "A permission on a service does not work without the permission to open the service. Tick the switch of the service.",
+            false,
+        ),
         "capacity" => (
             "The portal holds the largest number of counter rows or of permissions. Revoke a key first.",
             false,

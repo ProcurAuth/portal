@@ -194,6 +194,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             "A limit value is not valid for this grant: a whole number in the range of the limit, from the document of the service.",
             false,
         ),
+        "needs-access" => (
+            "A permission on a service does not work without the permission to open the service. Tick the switch of the service, and save.",
+            false,
+        ),
         "keys-needs" => (
             "An action of the keys needs another action. Give the other action first, and save.",
             false,

@@ -141,6 +141,8 @@ pub const BAD_EXPIRY: &str = "bad_expiry";
 pub const BAD_GRANT: &str = "bad_grant";
 pub const NOT_COVERED: &str = "not_covered";
 pub const BAD_LIMITS: &str = "bad_limits";
+/// A right on a service, and no grant `access` on this service.
+pub const NEEDS_ACCESS: &str = "needs_access";
 
 /// Checks the expiry date of a new key (portal 5.3, 5.3a).
 fn check_expiry(text: Option<&str>, ctx: &Context<'_>) -> Result<Option<i64>, &'static str> {
@@ -264,6 +266,21 @@ pub enum Holder {
     Account,
 }
 
+/// The first service where `grants` give a right and no grant `access`. A right on a service works
+/// only when the holder can open the service, so the right alone is dead. The service `portal`
+/// has no gate: its rights work as they are (portal 4.2b).
+pub fn service_without_access(grants: &[Grant]) -> Option<&str> {
+    grants
+        .iter()
+        .filter(|g| g.service != portal_actions::SERVICE && g.action != ACCESS)
+        .map(|g| g.service.as_str())
+        .find(|service| {
+            !grants
+                .iter()
+                .any(|a| a.action == ACCESS && a.path.is_empty() && a.service == *service)
+        })
+}
+
 /// Checks the grants of a form and their limit values, against the documents of the services. The
 /// rights of the owner are not checked here.
 pub fn check_grants(
@@ -352,6 +369,9 @@ pub fn check_grants(
         {
             return Err(BAD_LIMITS);
         }
+    }
+    if service_without_access(&grants).is_some() {
+        return Err(NEEDS_ACCESS);
     }
     Ok(grants)
 }
@@ -726,7 +746,11 @@ mod tests {
         assert_eq!(run(&pairs, None, None, None), Err(BAD_GRANT));
         // An action that lists the type `service` is valid on the service.
         assert!(run(
-            &[("name", "n"), ("grant0", "data.admin on service:datastore")],
+            &[
+                ("name", "n"),
+                ("grant0", "data.admin on service:datastore"),
+                ("grant1", "access on service:datastore")
+            ],
             None,
             None,
             None
@@ -738,12 +762,12 @@ mod tests {
     fn a_limit_value_follows_the_declaration_and_the_list_of_the_action() {
         let owner = owner();
         let limit = |grant: &str, field: &str, value: &str| {
-            run(
-                &[("name", "n"), ("grant0", grant), (field, value)],
-                Some(&owner),
-                None,
-                None,
-            )
+            let mut pairs = vec![("name", "n"), ("grant0", grant), (field, value)];
+            // A right needs the grant `access` on its service.
+            if grant != "access on service:datastore" {
+                pairs.push(("grant9", "access on service:datastore"));
+            }
+            run(&pairs, Some(&owner), None, None)
         };
         let read = "data.read on service:datastore/host:prod";
         let access = "access on service:datastore";
@@ -819,6 +843,13 @@ mod tests {
         let key = |pairs: &[(&str, &str)], old: Option<&[Grant]>| {
             let mut all = vec![("name", "n")];
             all.extend_from_slice(pairs);
+            // A right needs the grant `access` on its service.
+            if !pairs
+                .iter()
+                .any(|(_, v)| *v == "access on service:datastore")
+            {
+                all.push(("grant9", "access on service:datastore"));
+            }
             run(&all, Some(&owner), None, old)
         };
         // The owner holds `host:prod`: the key can hold it, or a node below it.
@@ -888,12 +919,101 @@ mod tests {
         assert!(run(
             &[
                 ("name", "n"),
-                ("grant0", "data.read on service:datastore/host:x")
+                ("grant0", "data.read on service:datastore/host:x"),
+                ("grant1", "access on service:datastore")
             ],
             None,
             None,
             None
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_right_on_a_service_needs_the_grant_access_on_the_same_service() {
+        let with = |texts: &[&str]| service_without_access(&grants(texts)).map(str::to_string);
+        // A right on the whole service, on a resource and on a sub-resource has the same rule.
+        for right in [
+            "data.admin on service:datastore",
+            "data.read on service:datastore/host:prod",
+            "data.read on service:datastore/host:prod/database:db1",
+        ] {
+            assert_eq!(with(&[right]), Some("datastore".to_string()), "{right}");
+            assert_eq!(
+                with(&[right, "access on service:datastore"]),
+                None,
+                "{right}"
+            );
+            assert_eq!(
+                with(&[right, "access on service:other"]),
+                Some("datastore".to_string()),
+                "the grant access of another service does not help: {right}"
+            );
+        }
+        // `access` alone is allowed: the person can want access and nothing else.
+        assert_eq!(with(&["access on service:datastore"]), None);
+        assert_eq!(with(&[]), None);
+        // The service portal has no gate: its rights work as they are.
+        assert_eq!(with(&["keys.own.read on service:portal"]), None);
+        // The first service of the list is named.
+        assert_eq!(
+            with(&[
+                "access on service:b",
+                "x.y on service:a",
+                "z.w on service:b"
+            ]),
+            Some("a".to_string())
+        );
+    }
+
+    #[test]
+    fn a_form_with_a_right_and_no_access_is_refused_for_a_key_and_for_an_account() {
+        let owner = grants(&[
+            "access on service:datastore",
+            "data.read on service:datastore",
+        ]);
+        let right = ("grant0", "data.read on service:datastore/host:prod");
+        assert_eq!(
+            run(&[("name", "n"), right], Some(&owner), None, None),
+            Err(NEEDS_ACCESS)
+        );
+        let ok = run(
+            &[
+                ("name", "n"),
+                right,
+                ("grant1", "access on service:datastore"),
+            ],
+            Some(&owner),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(ok.grants.len(), 2);
+        // The change of a key that holds a dead right is refused too: the form must add `access`.
+        let old = grants(&["data.read on service:datastore/host:prod"]);
+        assert_eq!(
+            run(&[("name", "n"), right], Some(&owner), None, Some(&old)),
+            Err(NEEDS_ACCESS)
+        );
+        // An account has the same rule.
+        let raw = read(fields(&[right]), true).unwrap();
+        let document = document();
+        let lookup = move |service: &str| (service == "datastore").then(|| Arc::clone(&document));
+        let exists = |service: &str| service == "datastore";
+        let ctx = Context {
+            now: NOW,
+            owner_grants: None,
+            max_lifetime: None,
+            document: &lookup,
+            service_exists: &exists,
+            old_grants: None,
+        };
+        assert_eq!(check_grants(&raw, &ctx, Holder::Account), Err(NEEDS_ACCESS));
+        let raw = read(
+            fields(&[right, ("grant1", "access on service:datastore")]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(check_grants(&raw, &ctx, Holder::Account).unwrap().len(), 2);
     }
 }

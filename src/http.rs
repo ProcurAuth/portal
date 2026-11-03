@@ -2791,10 +2791,10 @@ fn account_grants(
     key_forms::check_grants(&raw, &context, key_forms::Holder::Account)
         .map(drop_covered)
         .map_err(|code| {
-            GrantsError::Refused(if code == key_forms::BAD_LIMITS {
-                "bad-limits"
-            } else {
-                unknown_code
+            GrantsError::Refused(match code {
+                key_forms::BAD_LIMITS => "bad-limits",
+                key_forms::NEEDS_ACCESS => "needs-access",
+                _ => unknown_code,
             })
         })
 }

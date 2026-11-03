@@ -2209,6 +2209,13 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
             node.state.store.load_users().unwrap()[0].grants,
             node.state.users.grants_of("alice").unwrap()
         );
+        // The create page sends the grants with the account. A right on a service with no grant
+        // `access` on it does nothing: the account is not made.
+        assert_eq!(
+            add("login=uma&grants=1&grant0=query.run.read+on+service%3Adb"),
+            Some("/auth/settings/new-user?s=needs-access".into())
+        );
+        assert!(node.state.users.get("uma").is_none());
         // An account without a grant has none.
         assert_eq!(
             add("login=carol"),
@@ -2262,9 +2269,29 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
         );
         assert_eq!(
             reply.location(),
+            Some("/auth/settings/users/bob?s=needs-access"),
+            "a right on a service needs the grant access on it"
+        );
+        assert_eq!(
+            grants_of("bob").len(),
+            4,
+            "the refused form changes nothing"
+        );
+        let reply = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "grants=1&login=bob&grant0=access+on+service%3Adb&grant1=query.run.write+on+service%3Adb",
+        );
+        assert_eq!(
+            reply.location(),
             Some("/auth/settings/users/bob?s=user-updated")
         );
-        assert_eq!(grants_of("bob"), ["query.run.write on service:db"]);
+        assert_eq!(
+            grants_of("bob"),
+            ["access on service:db", "query.run.write on service:db"]
+        );
         let reply = post(
             &node,
             &root,
@@ -2282,7 +2309,7 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
             &root,
             USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "grants=1&login=bob&grant0=query.run.write+on+service%3Adb",
+            "grants=1&login=bob&grant0=access+on+service%3Adb&grant1=query.run.write+on+service%3Adb",
         );
         assert_eq!(
             reply.location(),
@@ -2294,7 +2321,7 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
             &root,
             USERS_UPDATE_PATH,
             USERS_TOKEN,
-            "grants=1&login=bob&grant0=query.run.write+on+service%3Adb&limit0.max_rows=5",
+            "grants=1&login=bob&grant0=access+on+service%3Adb&grant1=query.run.write+on+service%3Adb&limit1.max_rows=5",
         );
         assert_eq!(
             reply.location(),
@@ -5230,7 +5257,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
                 "bad_grant",
             ),
             (
-                "name=x&grant0=data.write+on+service%3Adb%2Fhost%3Aprod",
+                "name=x&grant0=data.write+on+service%3Adb%2Fhost%3Aprod&grant1=access+on+service%3Adb",
                 "not_covered",
             ),
             (
@@ -5238,12 +5265,17 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
                 "bad_grant",
             ),
             (
-                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Adev",
+                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Adev&grant1=access+on+service%3Adb",
                 "not_covered",
             ),
             (
                 "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Aprod&limit0.max_rows=0",
                 "bad_limits",
+            ),
+            // A right on a service, and no grant `access` on it: the key would do nothing.
+            (
+                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Aprod",
+                "needs_access",
             ),
         ] {
             let reply = keys_post(&node, &alice, "create", fields);
