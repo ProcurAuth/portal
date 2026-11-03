@@ -1154,6 +1154,10 @@ input.keyText {
   width: 160px;
 }
 
+.grid col.w176 {
+  width: 176px;
+}
+
 .grid col.w180 {
   width: 180px;
 }
@@ -2543,6 +2547,15 @@ input.keyText {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* A list keeps a width that shows its columns. In a narrow window it scrolls sideways inside. */
+.grid--users {
+  min-width: 540px;
+}
+
+.grid--keys {
+  min-width: 480px;
+}
+
 /* Under 1200 px the lists stack, and each list scrolls inside. */
 @media (max-width: 1199px) {
   .shell .settings--fill > .access {
@@ -2570,6 +2583,10 @@ input.keyText {
   overflow-x: auto;
   scrollbar-width: none;
   white-space: nowrap;
+}
+
+.fbar .chips {
+  flex: none;
 }
 
 .fbar__field {
@@ -2703,6 +2720,11 @@ input.keyText {
 
 .pop__menu--list {
   min-width: 200px;
+}
+
+/* A cell with a popover shows what leaves the cell. */
+.grid td.tagsCell {
+  overflow: visible;
 }
 
 .mrow {

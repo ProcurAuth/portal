@@ -513,7 +513,7 @@ fn accounts_table(
     let opens = !keys && !inbox;
     let mut out = String::from(r#"<table class="grid grid--users"><colgroup><col>"#);
     if inbox {
-        out.push_str(r#"<col class="w152">"#);
+        out.push_str(r#"<col class="w176">"#);
     }
     if opens {
         out.push_str("<col>");
@@ -619,7 +619,7 @@ fn account_row(
             .collect();
         let _ = write!(
             out,
-            "<td>{}</td>",
+            r#"<td class="tagsCell">{}</td>"#,
             tags(
                 &tag_list,
                 2,
@@ -628,7 +628,7 @@ fn account_row(
         );
     }
     if !keys && !inbox {
-        out.push_str("<td>");
+        out.push_str(r#"<td class="tagsCell">"#);
         out.push_str(&opened_tags(view, accounts, user));
         out.push_str("</td>");
     }
