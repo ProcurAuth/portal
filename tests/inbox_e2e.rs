@@ -1249,7 +1249,7 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                     let number = |name: &str| attr(tag, name).unwrap().parse::<i64>().unwrap();
                     json!({
                         "id": attr(tag, "data-alert").unwrap(),
-                        "group": attr(tag, "data-group").unwrap(),
+                        "group": attr(tag, "data-to").unwrap().trim_start_matches("group:"),
                         "source": attr(tag, "data-source").unwrap(),
                         "title": attr(tag, "data-title").unwrap(),
                         "received": number("data-received"),
@@ -1291,8 +1291,8 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
         ("POST", "/auth/inbox/api/alerts") => {
             let v: Value = serde_json::from_str(body).unwrap();
             let fields = format!(
-                "group={}&title={}&key={}",
-                form_value(v["group"].as_str().unwrap()),
+                "to={}&title={}&key={}",
+                form_value(&format!("group:{}", v["group"].as_str().unwrap())),
                 form_value(v["title"].as_str().unwrap()),
                 form_value(v["idempotency_key"].as_str().unwrap()),
             );
@@ -2049,7 +2049,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(b_row["device"]["user_name"], "bob");
     let session = s.session();
     let csrf = inbox_csrf(ap, &session.cookie);
-    let send = format!("csrf={csrf}&group=other&title=manual&key=m1");
+    let send = format!("csrf={csrf}&to=group%3Aother&title=manual&key=m1");
     let post = |extra: &[(&str, String)], body: &str| {
         let mut headers = vec![("Cookie", session.cookie.clone())];
         headers.extend_from_slice(extra);
@@ -2084,7 +2084,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(
         post(
             &[form_type.clone(), origin.clone()],
-            "group=other&title=manual&key=m1"
+            "to=group%3Aother&title=manual&key=m1"
         ),
         403,
         "POST without the anti-CSRF token"
@@ -2092,7 +2092,10 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(
         post(
             &[form_type.clone(), origin.clone()],
-            &format!("csrf={}&group=other&title=manual&key=m1", "x".repeat(43))
+            &format!(
+                "csrf={}&to=group%3Aother&title=manual&key=m1",
+                "x".repeat(43)
+            )
         ),
         403,
         "POST with a wrong anti-CSRF token"
@@ -3650,7 +3653,7 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     for absent in [
         r#"id="sent-title""#,
         r#"id="connections-title""#,
-        "Send alert",
+        "New alert",
     ] {
         assert!(!page.contains(absent), "{absent}");
     }
@@ -4027,9 +4030,7 @@ fn make_key(s: &Server, cookie: &str, kind: &str, name: &str, grants: &[&str]) -
         "",
     );
     assert_eq!(st, 200, "{page}");
-    let form = page
-        .find("id=\"new-key-form\"")
-        .expect("the form of a new key");
+    let form = page.find("id=\"key-form\"").expect("the form of a new key");
     let marker = "name=\"csrf\" value=\"";
     let start = form + page[form..].find(marker).unwrap() + marker.len();
     let csrf = page[start..].split('"').next().unwrap().to_string();
@@ -4849,11 +4850,11 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     );
     let (st, page) = inbox_page_as(&s, &pia.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
-    assert!(has(&page, "Send alert"));
+    assert!(has(&page, "New alert"));
     // One group is no choice: the form has no list.
     assert!(has(
         &page,
-        r#"<input type="hidden" name="group" value="infra">"#
+        r#"<input type="hidden" name="to" value="group:infra">"#
     ));
     assert!(
         !has(&page, r#"<option value="other">"#) && !has(&page, "value=\"other\""),
@@ -4864,10 +4865,10 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         !has(&page, r#"id="phones-title""#) && !has(&page, r#"id="connections-title""#),
         "no phone right: no phone zone"
     );
-    assert!(has(
-        &page,
-        r#"class="contentTabs__tab is-active" aria-current="page" href="/auth/settings/inbox">Inbox"#
-    ));
+    assert!(
+        !has(&page, "contentTabs"),
+        "an account with one tab has no tab strip"
+    );
     assert!(
         !has(&page, "/auth/settings/services"),
         "a plain account has not the tabs of the superadmin"
@@ -4893,7 +4894,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "group=other&title=no&key=pia1",
+        "to=group%3Aother&title=no&key=pia1",
     );
     assert_eq!(st, 303);
     assert!(location(&head).contains("s=bad_group"), "{head}");
@@ -4901,7 +4902,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "group=infra&title=+&key=pia2",
+        "to=group%3Ainfra&title=+&key=pia2",
     );
     assert_eq!(st, 303);
     assert!(location(&head).contains("s=no_title"), "{head}");
@@ -4910,14 +4911,14 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        &format!("group=infra&title={long}&key=pia3"),
+        &format!("to=group%3Ainfra&title={long}&key=pia3"),
     );
     assert!(location(&head).contains("s=bad_title"), "{head}");
     let (st, head, _) = inbox_form(
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "group=infra&title=Disk+full&key=pia4",
+        "to=group%3Ainfra&title=Disk+full&key=pia4",
     );
     assert_eq!(st, 303);
     let sent = location(&head);
@@ -4969,7 +4970,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     ca.subscribe("infra").await;
     let (st, page) = inbox_page_as(&s, &owen.cookie, "/auth/settings/inbox");
     assert_eq!(st, 200, "{page}");
-    assert!(!has(&page, "Send alert"));
+    assert!(!has(&page, "New alert"));
     assert!(
         !has(&page, r#"id="sent-title""#),
         "no alert.read: no zone of alerts"
@@ -5099,12 +5100,12 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         "no tile of the inbox"
     );
     // The superadmin sees four tabs at most and the permission editor shows the groups by name.
-    // The test servers have the block keys (the kind api), so the tab Keys shows.
+    // The tab Keys does not exist: the list of the keys is in the tab Access.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
-    for tab in ["Users", "Services", "Keys", "Inbox"] {
+    for tab in ["Access", "Services", "Activity", "Inbox"] {
         assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
     }
-    assert!(!has(&page, ">Activity</a>"), "the tab Activity is gone");
+    assert!(!has(&page, ">Keys</a>"), "the tab Keys is gone");
     assert_eq!(
         page.matches(r#"class="contentTabs__tab"#).count(),
         4,

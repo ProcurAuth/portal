@@ -21,10 +21,13 @@ use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
 use crate::ui::inbox::{
     AlertRow, CodeData, ConnData, DocsData, GroupChoice, GroupLine, InboxView, Origin, PhonesData,
-    Query, Rights, SentData,
+    Query, Rights, SentData, Target, UserChoice,
 };
 
 pub(super) const PREFIX: &str = ui_inbox::PAGE;
+/// The right to send an alert to one account. The document of the portal has it when the
+/// back end of the direct alerts is in the tree: the popup then offers the chip "User".
+const ALERT_SEND_USER: &str = "alert.send_user";
 /// The purpose of the anti-CSRF tokens of the forms of the inbox.
 const INBOX_TOKEN: &str = "inbox";
 /// The largest body of a form of the inbox.
@@ -54,10 +57,19 @@ pub(super) struct Held {
 pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
     let inbox = state.config.inbox.as_ref()?;
     let ids: Vec<String> = inbox.groups.keys().cloned().collect();
+    let members = super::group_members(state);
     let choice = |id: &String| GroupChoice {
         id: id.clone(),
         name: inbox.groups[id].name.clone(),
+        critical: inbox.groups[id].critical,
+        members: members.get(id).copied().unwrap_or(0),
     };
+    // The right to alert one account exists only when the document of the portal names it. The
+    // superadmin has every right of the document, so it follows the document too.
+    let document = state.actions.declared(actions::SERVICE);
+    let has_send_user = document
+        .as_ref()
+        .is_some_and(|d| d.actions.iter().any(|a| a.name == ALERT_SEND_USER));
     // A critical group comes last: the form never starts on it.
     let ordered = |mut ids: Vec<String>| {
         ids.sort_by_key(|id| inbox.groups[id].critical);
@@ -73,6 +85,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
                 connections: true,
                 own_phones: !ids.is_empty(),
                 send: ordered(ids.clone()).iter().map(choice).collect(),
+                send_user: has_send_user,
             },
             read_groups: None,
             named: None,
@@ -97,6 +110,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
             connections: at_service(actions::PHONE_LOG),
             own_phones: !on(actions::INBOX_RECEIVE).is_empty(),
             send: ordered(send_ids.clone()).iter().map(choice).collect(),
+            send_user: has_send_user && at_service(ALERT_SEND_USER),
         },
         read_groups: Some(read_ids),
         named: Some(named),
@@ -323,6 +337,31 @@ fn key_name(state: &AppState, id: &str) -> Option<String> {
     state.users.key_by_id(id).map(|key| key.name.clone())
 }
 
+/// The accounts that the popup may send an alert to, by login, each with its active phones. The
+/// accounts are the accounts of the database and of the file. The superadmin is not a row.
+/// This is the one place that builds the choices of the popup.
+fn user_choices(state: &AppState, devices: &[DeviceRow]) -> Vec<UserChoice> {
+    let mut logins: Vec<String> = state
+        .users
+        .list()
+        .into_iter()
+        .map(|(login, _)| login)
+        .collect();
+    logins.extend(state.config.access.accounts.keys().cloned());
+    logins.sort();
+    logins.dedup();
+    logins
+        .into_iter()
+        .map(|login| UserChoice {
+            phones: devices
+                .iter()
+                .filter(|row| row.device.user_name == login && row.device.revoked_at.is_none())
+                .count(),
+            login,
+        })
+        .collect()
+}
+
 /// Draws the page. `code` is a new enrollment code, shown in its popover.
 async fn page(
     state: &Arc<AppState>,
@@ -374,6 +413,8 @@ async fn page(
             .into_iter()
             .map(|summary| AlertRow {
                 origin: Origin::of(&summary.source, &resolve),
+                // An alert has a group today. The alerts to an account will name it here.
+                target: Target::Group(summary.group.clone()),
                 summary,
             })
             .collect();
@@ -387,11 +428,22 @@ async fn page(
     } else {
         None
     };
-    let phones = if rights.phones || rights.own_phones {
-        let mut rows = match admin::devices(&ctx.app).await {
-            Ok(rows) => rows,
+    let devices = if rights.phones || rights.own_phones || rights.send_user {
+        match admin::devices(&ctx.app).await {
+            Ok(rows) => Some(rows),
             Err(_) => return unavailable(),
-        };
+        }
+    } else {
+        None
+    };
+    // The accounts that the popup may send to, with their phones.
+    let users = if rights.send_user {
+        user_choices(state, devices.as_deref().unwrap_or_default())
+    } else {
+        Vec::new()
+    };
+    let phones = if rights.phones || rights.own_phones {
+        let mut rows = devices.unwrap_or_default();
         if !rights.phones {
             rows.retain(|row| row.device.user_name == ctx.viewer.login);
         }
@@ -422,6 +474,7 @@ async fn page(
         now_ms,
         login: &ctx.viewer.login,
         groups: &groups,
+        users: &users,
         sent,
         phones,
         connections,
@@ -523,7 +576,7 @@ async fn post(
     }
 }
 
-/// `POST /auth/settings/inbox/send`: the title and the group of an alert. The account needs
+/// `POST /auth/settings/inbox/send`: the title and the target of an alert (the field `to`). The account needs
 /// `alert.send` on the group. The decision counts one use, as for a key, unless the group is
 /// critical.
 async fn send(
@@ -531,8 +584,8 @@ async fn send(
     ctx: &Context<'_>,
     mut fields: std::collections::HashMap<String, String>,
 ) -> HttpResponse {
-    let (Some(group), Some(title), Some(key)) = (
-        fields.remove("group"),
+    let (Some(to), Some(title), Some(key)) = (
+        fields.remove("to"),
         fields.remove("title"),
         fields.remove("key"),
     ) else {
@@ -548,6 +601,10 @@ async fn send(
         return forbidden();
     }
     let back = ui_inbox::PAGE;
+    // The field `to` is `group:<id>` or `user:<login>`. The send to an account is not here yet.
+    let Some(group) = to.strip_prefix("group:").map(str::to_string) else {
+        return back_with(back, "bad_group");
+    };
     if !ctx.held.ui.send.iter().any(|g| g.id == group) {
         return back_with(back, "bad_group");
     }

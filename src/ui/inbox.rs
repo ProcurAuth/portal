@@ -37,6 +37,28 @@ pub const MAX_TITLE: usize = inbox_core::proto::MAX_TITLE_CHARS;
 pub struct GroupChoice {
     pub id: String,
     pub name: String,
+    /// A critical group always rings: the form says so.
+    pub critical: bool,
+    /// The accounts that hold `inbox.receive` on the group, and the superadmin.
+    pub members: usize,
+}
+
+/// An account that the account of the session may send an alert to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserChoice {
+    pub login: String,
+    /// The active phones of the account. An account with none cannot be chosen.
+    pub phones: usize,
+}
+
+/// Where an alert went: a group, or one account (all its phones).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Group(String),
+    /// One account. The page draws and filters it. The back end of the direct alerts fills it: no
+    /// alert has this target yet.
+    #[allow(dead_code)]
+    User(String),
 }
 
 /// What the account may do in the tab. Each part of the page needs one of these rights.
@@ -54,12 +76,20 @@ pub struct Rights {
     pub own_phones: bool,
     /// The groups with `alert.send`.
     pub send: Vec<GroupChoice>,
+    /// `alert.send_user`: the account may send an alert to one account. It is `false` while the
+    /// document of the portal has no such action.
+    pub send_user: bool,
 }
 
 impl Rights {
     /// Whether the account has any right in the tab.
     pub fn any(&self) -> bool {
-        self.sent || self.phones || self.connections || self.own_phones || !self.send.is_empty()
+        self.sent || self.phones || self.connections || self.own_phones || self.can_send()
+    }
+
+    /// The account may send an alert, to a group or to an account: the tab has "New alert".
+    pub fn can_send(&self) -> bool {
+        !self.send.is_empty() || self.send_user
     }
 }
 
@@ -204,6 +234,8 @@ pub struct Query {
     pub period: Period,
     pub group: Option<String>,
     pub alert: Option<AlertState>,
+    /// The chip "to an account" is on: only the alerts that went to one account.
+    pub to_user: bool,
     pub phone: Option<DeviceState>,
     pub pending: bool,
     pub mine: bool,
@@ -218,6 +250,7 @@ impl Default for Query {
             period: Period::DEFAULT,
             group: None,
             alert: None,
+            to_user: false,
             phone: None,
             pending: false,
             mine: false,
@@ -270,6 +303,7 @@ impl Query {
                         _ => return None,
                     })
                 }
+                "tu" if value == "1" => query.to_user = true,
                 "pp" if value == "1" => query.pending = true,
                 "mine" if value == "1" => query.mine = true,
                 "cs" => {
@@ -308,6 +342,9 @@ impl Query {
         }
         if let Some(state) = self.alert {
             out.push(("a", state.name().to_string()));
+        }
+        if self.to_user {
+            out.push(("tu", "1".to_string()));
         }
         if let Some(state) = self.phone {
             out.push(("ps", state.word().to_string()));
@@ -405,6 +442,8 @@ impl Origin {
 pub struct AlertRow {
     pub summary: AlertSummary,
     pub origin: Origin,
+    /// Where the alert went. The page filters and draws the column "To" from it.
+    pub target: Target,
 }
 
 /// The zone "Sent".
@@ -459,6 +498,8 @@ pub struct InboxView<'a> {
     pub login: &'a str,
     /// The groups that the account may read, send to or receive, with their names.
     pub groups: &'a [GroupLine],
+    /// The accounts that the form may send to, with their phones. Empty without `alert.send_user`.
+    pub users: &'a [UserChoice],
     pub sent: Option<SentData>,
     pub phones: Option<PhonesData>,
     pub connections: Option<ConnData>,
@@ -633,38 +674,119 @@ fn docs_popover(view: &InboxView, docs: &DocsData) -> String {
     )
 }
 
-fn send_popover(view: &InboxView) -> String {
+/// The members of a group in words: "11 accounts", or "5 accounts, critical".
+fn members_text(group: &GroupChoice) -> String {
+    format!(
+        "{}{}",
+        plural(group.members, "account", "accounts"),
+        if group.critical { ", critical" } else { "" }
+    )
+}
+
+/// The title field and the button of one form of the popup.
+fn title_and_send(id: &str) -> String {
+    format!(
+        r#"<div class="field"><label class="field__label" for="{id}-title">Title</label><input class="uiInput" type="text" id="{id}-title" name="title" maxlength="{MAX_TITLE}" autocomplete="off" required></div><div class="composer__row"><span class="count" data-title-count="{id}-title">0/{MAX_TITLE}</span><span class="grow"></span><button class="button button--primary" type="submit">{}Send</button></div>"#,
+        icon("send")
+    )
+}
+
+/// The form that sends to a group: a select with the member count of each group. One group is no
+/// choice: the form names it and sends it.
+fn group_form(view: &InboxView) -> String {
     let choices = &view.rights.send;
-    let group_field = if choices.len() == 1 {
-        // One group is no choice: the form names it and sends it.
+    let field = if let [only] = choices.as_slice() {
         format!(
-            r#"<input type="hidden" name="group" value="{}"><div class="field"><span class="field__label">Group</span><span>{}</span></div>"#,
-            html_escape(&choices[0].id),
-            html_escape(&choices[0].name)
+            r#"<input type="hidden" name="to" value="group:{}"><div class="field"><span class="field__label">Group</span><span>{} ({})</span></div>"#,
+            html_escape(&only.id),
+            html_escape(&only.name),
+            members_text(only)
         )
     } else {
         let mut options = String::new();
         for c in choices {
             let _ = write!(
                 options,
-                r#"<option value="{}">{}</option>"#,
+                r#"<option value="group:{}" data-members="{}">{} ({})</option>"#,
                 html_escape(&c.id),
-                html_escape(&c.name)
+                c.members,
+                html_escape(&c.name),
+                members_text(c)
             );
         }
         format!(
-            r#"<div class="field"><label class="field__label" for="send-group">Group</label><select class="uiInput" id="send-group" name="group" required>{options}</select></div>"#
+            r#"<div class="field"><label class="field__label" for="send-group">Group</label><select class="uiInput" id="send-group" name="to" required>{options}</select><span class="hint" data-hint-group></span></div>"#
         )
     };
-    let body = format!(
-        r#"<form class="composer" method="post" action="{SEND_PATH}" data-gate><input type="hidden" name="csrf" value="{}"><input type="hidden" name="key" value="{}">{group_field}<div class="field"><label class="field__label" for="send-title">Title</label><input class="uiInput" type="text" id="send-title" name="title" maxlength="{MAX_TITLE}" autocomplete="off" required></div><div class="composer__row"><button class="button button--primary" type="submit">Send</button></div></form>"#,
+    format!(
+        r#"<form class="rcptForm rcptForm--group" method="post" action="{SEND_PATH}" data-gate><input type="hidden" name="csrf" value="{}"><input type="hidden" name="key" value="{}">{field}{}</form>"#,
         html_escape(view.csrf),
         html_escape(view.idempotency_key),
+        title_and_send("send-group-form"),
+    )
+}
+
+/// The form that sends to one account: a search field (script) and the list of the accounts, each
+/// with its phones. An account with no phone is disabled, with the reason in its row.
+fn user_form(view: &InboxView) -> String {
+    let mut rows = String::new();
+    for u in view.users {
+        let login = html_escape(&u.login);
+        if u.phones == 0 {
+            let _ = write!(
+                rows,
+                r#"<label class="urow is-disabled" title="{login} has no phone. Enroll a phone first."><input type="radio" name="to" value="user:{login}" disabled><b>{login}</b><span class="muted">{}no phone enrolled</span></label>"#,
+                icon("device-mobile-off")
+            );
+        } else {
+            let _ = write!(
+                rows,
+                r#"<label class="urow"><input type="radio" name="to" value="user:{login}" data-phones="{}" required><b>{login}</b><span class="muted">{}</span></label>"#,
+                u.phones,
+                plural(u.phones, "phone", "phones")
+            );
+        }
+    }
+    format!(
+        r#"<form class="rcptForm rcptForm--user" method="post" action="{SEND_PATH}" data-gate><input type="hidden" name="csrf" value="{}"><input type="hidden" name="key" value="{}"><div class="field"><label class="field__label" for="send-find">Account</label><span class="searchBox needsScript">{}<input class="uiInput" id="send-find" type="search" placeholder="Find an account" autocomplete="off" data-ufind></span><div class="ulist" role="radiogroup" aria-label="Accounts">{rows}</div><span class="hint" data-hint-user></span></div>{}</form>"#,
+        html_escape(view.csrf),
+        html_escape(view.idempotency_key),
+        icon("search"),
+        title_and_send("send-user-form"),
+    )
+}
+
+/// The popup "New alert". A switch of two chips, Group and User, chooses the recipient. Both
+/// forms are in the page, and a radio button that the chips label shows one of them, so the switch
+/// works without script. The switch is absent when the account may use one kind of recipient. The
+/// field `to` is `group:<id>` or `user:<login>`.
+fn send_popover(view: &InboxView) -> String {
+    let groups = !view.rights.send.is_empty();
+    let users = view.rights.send_user;
+    let both = groups && users;
+    let mut body = format!(
+        r#"<div class="composer composer--alert{}">"#,
+        if both { " composer--both" } else { "" }
     );
+    if both {
+        let _ = write!(
+            body,
+            r#"<input class="visually-hidden rcpt__group" type="radio" name="rcpt" id="rcpt-group" checked><input class="visually-hidden rcpt__user" type="radio" name="rcpt" id="rcpt-user"><div class="field"><span class="field__label">Send to</span><span class="chips" role="group" aria-label="Recipient"><label class="chip" for="rcpt-group" title="Send to a group">{}Group</label><label class="chip" for="rcpt-user" title="Send to one account">{}User</label></span></div>"#,
+            icon("users"),
+            icon("user")
+        );
+    }
+    if groups {
+        body.push_str(&group_form(view));
+    }
+    if users {
+        body.push_str(&user_form(view));
+    }
+    body.push_str("</div>");
     popover_with(
         "",
         "button button--primary",
-        &format!("{}Send alert", icon("send")),
+        &format!("{}New alert", icon("plus")),
         Side::End,
         " pop__menu--pad",
         &body,
@@ -695,7 +817,7 @@ fn bar(view: &InboxView) -> String {
     if let Some(docs) = &view.docs {
         out.push_str(&docs_popover(view, docs));
     }
-    if !view.rights.send.is_empty() && !view.impersonated {
+    if view.rights.can_send() && !view.impersonated {
         out.push_str(&send_popover(view));
     }
     out.push_str("</div>");
@@ -776,18 +898,14 @@ fn graph(view: &InboxView, sent: &SentData) -> String {
     out
 }
 
-fn group_name<'a>(groups: &'a [GroupLine], id: &'a str) -> &'a str {
-    groups
-        .iter()
-        .find(|g| g.id == id)
-        .map_or(id, |g| g.name.as_str())
-}
-
 fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     let query = view.query;
     // The group chips count the alerts of the state that is on. The state chips count the alerts
     // of the group that is on.
-    let in_group = |a: &&AlertRow| query.group.as_deref().is_none_or(|g| g == a.summary.group);
+    let in_group = |a: &&AlertRow| match &a.target {
+        Target::Group(id) => !query.to_user && query.group.as_deref().is_none_or(|g| g == id),
+        Target::User(_) => query.to_user || query.group.is_none(),
+    };
     let in_state = |a: &&AlertRow| query.alert.is_none_or(|s| s == AlertState::of(&a.summary));
     let shown: Vec<&AlertRow> = sent
         .alerts
@@ -806,18 +924,27 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         sent.alerts
             .iter()
             .filter(in_state)
-            .filter(|a| a.summary.group == id)
+            .filter(|a| matches!(&a.target, Target::Group(group) if group == id))
             .count()
     };
+    let user_count = sent
+        .alerts
+        .iter()
+        .filter(in_state)
+        .filter(|a| matches!(a.target, Target::User(_)))
+        .count();
     let total = sent.alerts.iter().filter(in_group).filter(in_state).count();
 
-    let all_href = query.href(|q| q.group = None);
+    let all_href = query.href(|q| {
+        q.group = None;
+        q.to_user = false;
+    });
     let mut group_chips = vec![Chip {
         label_html: "All",
         name: "",
         count: sent.alerts.iter().filter(in_state).count(),
         href: &all_href,
-        on: query.group.is_none(),
+        on: query.group.is_none() && !query.to_user,
     }];
     let group_labels: Vec<String> = view
         .groups
@@ -836,7 +963,10 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         .map(|g| {
             query.toggle(
                 query.group.as_deref() == Some(&g.id),
-                |q| q.group = Some(g.id.clone()),
+                |q| {
+                    q.group = Some(g.id.clone());
+                    q.to_user = false;
+                },
                 |q| q.group = None,
             )
         })
@@ -850,6 +980,23 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
             on: query.group.as_deref() == Some(&g.id),
         });
     }
+    // The chip of the alerts that went to one account shows only when there is one.
+    let user_label = format!(r#"<span class="st--off">{}</span>"#, icon("user"));
+    let user_href = query.toggle(
+        query.to_user,
+        |q| {
+            q.to_user = true;
+            q.group = None;
+        },
+        |q| q.to_user = false,
+    );
+    group_chips.push(Chip {
+        label_html: &user_label,
+        name: "Alerts sent to one account",
+        count: user_count,
+        href: &user_href,
+        on: query.to_user,
+    });
     let state_defs = [
         (
             AlertState::Received,
@@ -906,7 +1053,7 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     if shown.is_empty() {
         body.push_str(r#"<p class="empty">No alert in this period.</p>"#);
     } else {
-        body.push_str(r#"<table class="grid grid--sent"><colgroup><col class="w28"><col class="w152"><col class="w96"><col><col class="w128"></colgroup><thead class="visually-hidden"><tr><th scope="col">State</th><th scope="col">When</th><th scope="col">Group</th><th scope="col">Title</th><th scope="col">Sent by</th></tr></thead><tbody>"#);
+        body.push_str(r#"<table class="grid grid--sent"><colgroup><col class="w28"><col class="w152"><col class="w136"><col><col class="w128"></colgroup><thead class="visually-hidden"><tr><th scope="col">State</th><th scope="col">When</th><th scope="col">To</th><th scope="col">Title</th><th scope="col">Sent by</th></tr></thead><tbody>"#);
         for row in &shown {
             alert_row(&mut body, view, sent, row);
         }
@@ -927,6 +1074,46 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     )
 }
 
+/// The target as text: `group:infra` or `@alice`.
+fn to_text(target: &Target) -> String {
+    match target {
+        Target::Group(id) => format!("group:{id}"),
+        Target::User(login) => format!("@{login}"),
+    }
+}
+
+/// The column "To": a chip `group:infra`, with the mark of a critical group, or `@alice` with the
+/// icon of an account.
+fn to_cell(view: &InboxView, target: &Target) -> String {
+    match target {
+        Target::Group(id) => {
+            let group = view.groups.iter().find(|g| g.id == *id);
+            let title = format!(
+                "Sent to the group {}",
+                group.map_or(id.as_str(), |g| g.name.as_str())
+            );
+            let mark = if group.is_some_and(|g| g.critical) {
+                format!(
+                    r#"<span class="crit" title="Critical group: its alerts always ring." role="img" aria-label="Critical group">{}</span>"#,
+                    icon("bell-ringing")
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                r#"<span class="to" title="{}"><span>group:{}</span>{mark}</span>"#,
+                html_escape(&title),
+                html_escape(id)
+            )
+        }
+        Target::User(login) => format!(
+            r#"<span class="to" title="Sent to the account {0}: all its phones">{1}<span>@{0}</span></span>"#,
+            html_escape(login),
+            icon("user")
+        ),
+    }
+}
+
 fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow) {
     let a = &row.summary;
     let state = AlertState::of(a);
@@ -940,18 +1127,13 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
             a.id
         )
     };
-    let critical = view
-        .groups
-        .iter()
-        .find(|g| g.id == a.group)
-        .is_some_and(|g| g.critical);
     let _ = write!(
         out,
-        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-group="{group}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{name}{crit}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
+        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-to="{to}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{to_cell}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
         id = html_escape(&a.id),
         open_class = if open { "is-selected" } else { "" },
         kind = a.kind.as_str(),
-        group = html_escape(&a.group),
+        to = html_escape(&to_text(&row.target)),
         source = html_escape(&a.source),
         title = html_escape(&a.title),
         received = a.received,
@@ -960,15 +1142,7 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
         created = a.created_at,
         icon = alert_icon(state, a),
         when = when(a.created_at),
-        name = html_escape(group_name(view.groups, &a.group)),
-        crit = if critical {
-            format!(
-                r#" <span class="crit" title="Critical group">{}</span>"#,
-                icon("bell-ringing")
-            )
-        } else {
-            String::new()
-        },
+        to_cell = to_cell(view, &row.target),
         href = html_escape(&href),
         expanded = if open {
             r#" aria-expanded="true""#
@@ -1494,7 +1668,7 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
 pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
-    let has_bar = view.sent.is_some() || view.docs.is_some() || !view.rights.send.is_empty();
+    let has_bar = view.sent.is_some() || view.docs.is_some() || view.rights.can_send();
     if has_bar {
         out.push_str(&bar(view));
     }
@@ -1535,6 +1709,8 @@ mod tests {
         GroupChoice {
             id: id.into(),
             name: name.into(),
+            critical: id == "crit",
+            members: if id == "crit" { 1 } else { 11 },
         }
     }
 
@@ -1546,6 +1722,7 @@ mod tests {
             connections: true,
             own_phones: true,
             send: vec![choice("infra", "Infra <b>"), choice("crit", "Critical")],
+            send_user: false,
         }
     }
 
@@ -1588,7 +1765,12 @@ mod tests {
     }
 
     fn row(summary: AlertSummary, origin: Origin) -> AlertRow {
-        AlertRow { summary, origin }
+        let target = Target::Group(summary.group.clone());
+        AlertRow {
+            summary,
+            origin,
+            target,
+        }
     }
 
     fn device(id: &str, name: &str, login: &str, state: DeviceState, pending: i64) -> DeviceRow {
@@ -1693,6 +1875,7 @@ mod tests {
             now_ms: NOW,
             login: "alice",
             groups,
+            users: &[],
             sent: Some(sent(None)),
             phones: Some(phones()),
             connections: Some(conns()),
@@ -1708,6 +1891,15 @@ mod tests {
         inbox_page(&frame(), view)
     }
 
+    /// The alerts of the tests, and one more that went to the account alice.
+    fn sent_with_direct() -> SentData {
+        let mut data = sent(None);
+        let mut direct = row(summary("u1", "", "Call me <back>", 1, 0), Origin::Account);
+        direct.target = Target::User("alice".into());
+        data.alerts.push(direct);
+        data
+    }
+
     #[test]
     fn the_page_has_every_part_for_an_account_with_every_right() {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
@@ -1716,7 +1908,7 @@ mod tests {
             r#"id="sent-title""#,
             r#"id="phones-title""#,
             r#"id="connections-title""#,
-            "Send alert",
+            "New alert",
             r#"aria-label="Documentation for senders""#,
             r#"aria-label="Add a phone""#,
         ] {
@@ -1776,21 +1968,28 @@ mod tests {
         view.phones = None;
         view.connections = None;
         let html = page(&view);
-        assert!(html.contains("Send alert") && html.contains("Documentation for senders"));
+        assert!(html.contains("New alert") && html.contains("Documentation for senders"));
         assert!(!html.contains(r#"id="sent-title""#) && !html.contains("Period"));
         assert!(!html.contains(r#"id="phones-title""#));
         assert!(!html.contains(r#"aria-label="Add a phone""#));
     }
 
     #[test]
-    fn the_send_form_lists_only_the_groups_that_the_account_may_send_to() {
+    fn the_send_form_lists_only_the_groups_that_the_account_may_send_to_and_posts_the_field_to() {
         let (rights, query, groups) = (all_rights(), Query::default(), groups());
         let html = page(&full_view(&rights, &query, &groups));
         assert!(html.contains(r#"action="/auth/settings/inbox/send""#));
-        assert!(html.contains(r#"<option value="infra">Infra &lt;b&gt;</option>"#));
-        assert!(html.contains(r#"<option value="crit">Critical</option>"#));
+        // The option carries the target `group:<id>` and the member count of the group.
+        assert!(html.contains(r#"<option value="group:infra" data-members="11">Infra &lt;b&gt; (11 accounts)</option>"#), "{html}");
+        assert!(html.contains(r#"<option value="group:crit" data-members="1">Critical (1 account, critical)</option>"#), "{html}");
+        assert!(html.contains(r#"<select class="uiInput" id="send-group" name="to" required>"#));
         assert!(html.contains(r#"name="key" value="k1""#));
         assert!(html.contains(r#"name="csrf" value="tok&lt;""#));
+        assert!(!html.contains(r#"name="group""#), "the old field is gone");
+        // The popup is called "New alert" and has no switch with one kind of recipient.
+        assert!(html.contains("New alert") && !html.contains("Send alert"));
+        assert!(!html.contains("rcpt-user") && !html.contains(r#"aria-label="Recipient""#));
+        assert!(!html.contains("rcptForm--user"), "no account to send to");
         // One group is no choice: no select.
         let one = Rights {
             send: vec![choice("infra", "Infra")],
@@ -1798,13 +1997,115 @@ mod tests {
         };
         let html = page(&full_view(&one, &query, &groups));
         assert!(!html.contains("<select"), "{html}");
-        assert!(html.contains(r#"<input type="hidden" name="group" value="infra">"#));
+        assert!(html.contains(r#"<input type="hidden" name="to" value="group:infra">"#));
         // A session of "Log in as" sends nothing: the button is absent.
         let mut view = full_view(&rights, &query, &groups);
         view.impersonated = true;
         let html = page(&view);
-        assert!(!html.contains("Send alert") && !html.contains("revoke-phones"));
+        assert!(!html.contains("New alert") && !html.contains("revoke-phones"));
         assert!(html.contains(r#"aria-label="Add a phone""#));
+    }
+
+    #[test]
+    fn with_the_right_to_alert_an_account_the_popup_has_a_switch_and_a_list_of_accounts() {
+        let rights = Rights {
+            send_user: true,
+            ..all_rights()
+        };
+        let (query, groups) = (Query::default(), groups());
+        let users = [
+            UserChoice {
+                login: "alice".into(),
+                phones: 2,
+            },
+            UserChoice {
+                login: "bob".into(),
+                phones: 1,
+            },
+            UserChoice {
+                login: "mal<>".into(),
+                phones: 0,
+            },
+        ];
+        let mut view = full_view(&rights, &query, &groups);
+        view.users = &users;
+        let html = page(&view);
+        // The two-chip switch works without script: radio buttons that the chips label.
+        assert!(html.contains(r#"<input class="visually-hidden rcpt__group" type="radio" name="rcpt" id="rcpt-group" checked>"#));
+        assert!(
+            html.contains(r#"<label class="chip" for="rcpt-user" title="Send to one account">"#)
+        );
+        assert!(html.contains("composer--both"));
+        assert_eq!(
+            html.matches(r#"action="/auth/settings/inbox/send""#)
+                .count(),
+            2,
+            "one form for each kind"
+        );
+        // The list: the phones of each account, and the reason of an account that has none.
+        assert!(html.contains(r#"<input type="radio" name="to" value="user:alice" data-phones="2" required><b>alice</b><span class="muted">2 phones</span>"#), "{html}");
+        assert!(html.contains(r#"value="user:bob" data-phones="1" required><b>bob</b><span class="muted">1 phone</span>"#));
+        assert!(html.contains(r#"<label class="urow is-disabled" title="mal&lt;&gt; has no phone. Enroll a phone first."><input type="radio" name="to" value="user:mal&lt;&gt;" disabled>"#));
+        assert!(html.contains("no phone enrolled"));
+        assert!(!html.contains("mal<>"));
+        // The search field needs script.
+        assert!(html.contains(r#"class="searchBox needsScript""#));
+        // An account that may send to accounts only has no switch and no group form.
+        let only_users = Rights {
+            send: Vec::new(),
+            send_user: true,
+            ..all_rights()
+        };
+        let mut view = full_view(&only_users, &query, &groups);
+        view.users = &users;
+        let html = page(&view);
+        assert!(!html.contains("composer--both") && !html.contains("rcpt-group"));
+        assert!(html.contains("rcptForm--user") && !html.contains("rcptForm--group"));
+        assert!(html.contains("New alert"));
+    }
+
+    #[test]
+    fn the_column_to_shows_a_chip_for_a_group_or_an_account_and_a_chip_filters_the_alerts_to_accounts(
+    ) {
+        let (rights, groups) = (all_rights(), groups());
+        let query = Query::default();
+        // No alert went to an account: the chip is absent, and the column shows the groups.
+        let html = page(&full_view(&rights, &query, &groups));
+        assert!(!html.contains("tu=1") && !html.contains("Alerts sent to one account"));
+        assert!(html.contains(r#"<span class="to" title="Sent to the group Infra &lt;b&gt;"><span>group:infra</span></span>"#), "{html}");
+        assert!(html.contains(r#"<span>group:crit</span><span class="crit" title="Critical group: its alerts always ring." role="img" aria-label="Critical group">"#));
+        assert!(html.contains("<th scope=\"col\">To</th>"));
+        // One alert went to an account.
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = Some(sent_with_direct());
+        let html = page(&view);
+        assert!(
+            html.contains(r#"<span class="to" title="Sent to the account alice: all its phones">"#)
+        );
+        assert!(html.contains("<span>@alice</span>") && html.contains("Call me &lt;back&gt;"));
+        assert!(html.contains(
+            r#"aria-label="Alerts sent to one account 1" title="Alerts sent to one account""#
+        ));
+        assert!(html.contains(r#"href="/auth/settings/inbox?tu=1""#));
+        // The chip keeps the alerts to accounts, and the others go.
+        let on = Query {
+            to_user: true,
+            ..Query::default()
+        };
+        let mut view = full_view(&rights, &on, &groups);
+        view.sent = Some(sent_with_direct());
+        let html = page(&view);
+        assert!(
+            html.contains("@alice") && !html.contains("group:infra</span>"),
+            "{html}"
+        );
+        assert!(html.contains(r#"class="chip is-on" href="/auth/settings/inbox" aria-current="true" aria-label="Alerts sent to one account"#), "{html}");
+        // A group chip turns the filter of the accounts off.
+        assert!(html.contains(r#"href="/auth/settings/inbox?g=infra""#));
+        // The address with this parameter is read back.
+        let pairs = vec![("tu".to_string(), "1".to_string())];
+        assert_eq!(Query::parse(&pairs).unwrap().to_user, true);
+        assert!(Query::parse(&[("tu".to_string(), "2".to_string())]).is_none());
     }
 
     #[test]
