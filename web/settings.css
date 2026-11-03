@@ -1756,6 +1756,13 @@ input.keyText {
 
 .ge__groups .ge__svcHead input[type="checkbox"]:checked {
   background: var(--accent-fill);
+/* The invisible margin makes the target 36 by 24 pixels, and the layout does not change. */
+.ge__groups .ge__svcHead input[type="checkbox"]::before {
+  position: absolute;
+  inset: -4px;
+  content: "";
+}
+
 }
 
 .ge__groups .ge__svcHead input[type="checkbox"]:checked::after {
