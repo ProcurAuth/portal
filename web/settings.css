@@ -2135,6 +2135,8 @@ input.keyText {
 }
 
 .to .icon {
+  width: 12px;
+  height: 12px;
   color: var(--muted);
 }
 
