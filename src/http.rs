@@ -23,8 +23,9 @@ use crate::actions;
 use crate::catalog::Catalog;
 use crate::config::{Config, LogLevel, Secret};
 use crate::crypto::{
-    hash_password, new_csrf_token, sign_action_token, sign_return_uri, verify_action_token,
-    verify_csrf, verify_password, verify_return_uri_signature,
+    check_form_token, hash_password, new_csrf_token, sign_action_token, sign_form_token,
+    sign_return_uri, verify_action_token, verify_csrf, verify_password,
+    verify_return_uri_signature, FormToken,
 };
 use crate::discovery;
 use crate::grants::{self, Grant, Policy};
@@ -73,6 +74,10 @@ const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
+/// The hidden field that holds the signed token of the sign-in form.
+const FORM_TOKEN_FIELD: &str = "token";
+/// The name of the trap field of the sign-in form. A person never fills it.
+const TRAP_FIELD: &str = "website";
 /// The budget of the global limiter for the sign-ins that name the superadmin. Failures against
 /// other logins never use it. Anonymous failures thus cannot refuse the sign-in of the superadmin.
 const SUPERADMIN_RATE_LIMIT_KEY: &str = "superadmin";
@@ -749,14 +754,18 @@ async fn handle_request(
         keys_page::handle_keys_revoke(&state, request, &client).await
     } else if method == Method::GET && path == HOME_PATH {
         handle_home(&state, request.headers(), &client).await
+    } else if method == Method::GET && path == ui::assets().css_path {
+        hashed_response("text/css; charset=utf-8", &ui::assets().css)
+    } else if method == Method::GET && path == ui::assets().js_path {
+        hashed_response("text/javascript; charset=utf-8", &ui::assets().js)
     } else if method == Method::GET && path == STYLE_PATH {
-        static_response("text/css; charset=utf-8", ui::CSS)
+        static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
         handle_icon(&state, &path)
     } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
         static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
     } else if method == Method::GET && path == THEME_JS_PATH {
-        static_response("text/javascript; charset=utf-8", ui::THEME_JS)
+        static_response("text/javascript; charset=utf-8", &ui::assets().js)
     } else if method == Method::GET && path == SETTINGS_JS_PATH {
         static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
     } else if method == Method::GET && is_settings_path(&path) {
@@ -903,7 +912,8 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     if matches!(
         original_path,
         LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH
-    ) {
+    ) || is_neutral_asset(original_path)
+    {
         state.metrics.verify_allowed();
         return empty_response(StatusCode::NO_CONTENT);
     }
@@ -1888,6 +1898,14 @@ fn refresh_directory_if_due(state: &AppState) -> bool {
         })
 }
 
+/// The time in milliseconds since the Unix epoch.
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn ip_text(client: &Client) -> Option<String> {
     client.ip.map(|ip| ip.to_string())
 }
@@ -2092,6 +2110,9 @@ async fn handle_login_post(
     let csrf = form.remove("csrf").unwrap_or_default();
     let rd = form.remove("rd").unwrap_or_else(|| "/".to_string());
     let sig = form.remove("sig").unwrap_or_default();
+    let form_token = form.remove(FORM_TOKEN_FIELD).unwrap_or_default();
+    // A person never sees this field. A script that fills every field of the form fills it.
+    let trap_filled = form.remove(TRAP_FIELD).is_some_and(|v| !v.is_empty());
 
     if !form.is_empty()
         || password.len() > state.config.security.max_password_bytes
@@ -2102,14 +2123,14 @@ async fn handle_login_post(
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
 
-    if !verify_csrf(csrf_cookie.as_deref().unwrap_or(""), &csrf) {
+    let stale_page = |state: &AppState| {
         // The cookie of the token expired under an open page, or the browser dropped it. The
         // answer is the sign-in page again, with a new token and a plain sentence.
         state.metrics.login_csrf_failure();
         let Ok(fresh) = new_csrf_token() else {
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         };
-        return login_page(
+        login_page(
             state,
             client.https,
             &rd,
@@ -2117,8 +2138,21 @@ async fn handle_login_post(
             &fresh,
             Some("The page was open too long. Enter your login and password again."),
             StatusCode::FORBIDDEN,
-        );
+        )
+    };
+    if !verify_csrf(csrf_cookie.as_deref().unwrap_or(""), &csrf) {
+        return stale_page(state);
     }
+    // The anti-bot check of the form. A form that is too old is a page that stayed open: it gets
+    // the answer of an expired anti-CSRF token. Any other failure of the check (no token, a
+    // damaged token, a submit that is too fast, a filled trap) must look exactly like a wrong
+    // password: it goes the whole way of a sign-in, Argon2 check and limiters included, and it
+    // is refused at the end. See `docs/login-hardening.md`.
+    let form_state = check_form_token(&state.signing_secret, &csrf, &form_token, unix_millis());
+    if form_state == FormToken::Expired {
+        return stale_page(state);
+    }
+    let form_ok = form_state == FormToken::Valid && !trap_filled;
 
     let client_ip_text = client_ip
         .map(|v| v.to_string())
@@ -2168,6 +2202,8 @@ async fn handle_login_post(
 
     // Exactly one Argon2 check runs, whatever account the login names.
     // The check uses the superadmin hash, the account hash, or a dummy hash when the login does not exist. Time and budget tell nothing about the login.
+    // The portal reads the shared accounts here, for every login. If it read them only for an unknown login, the time would tell.
+    refresh_directory_if_due(state);
     let who = identify(state, &login_input);
     // The portal keeps this information about the attempt: the login as typed, made safe, and whether it names an account.
     // The password is not kept.
@@ -2186,7 +2222,7 @@ async fn handle_login_post(
         })
         .await
         {
-            Ok(v) => v && !matches!(who, Who::Unknown),
+            Ok(v) => v && form_ok && !matches!(who, Who::Unknown),
             Err(_) => {
                 state.metrics.login_internal_error();
                 return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
@@ -2207,6 +2243,9 @@ async fn handle_login_post(
             );
         }
         state.metrics.login_failure();
+        if !form_ok {
+            state.metrics.login_form_check_failure();
+        }
         // A person can type the password in the login field. The text is recorded only when it names an account.
         let recorded = if known {
             typed
@@ -2221,6 +2260,10 @@ async fn handle_login_post(
                 ("client_ip", client_ip_text),
                 ("login", recorded.clone()),
                 ("known", known.to_string()),
+                (
+                    "reason",
+                    if form_ok { "credentials" } else { "form_check" }.to_string(),
+                ),
             ],
         );
         state.tracker.emit(Event::Login(LoginAttempt {
@@ -2381,28 +2424,26 @@ fn identify(state: &AppState, typed: &str) -> Who {
     if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
         return Who::Superadmin;
     }
-    match state.users.get(&login) {
-        Some(record) => Some(record),
-        // The account can have been created a moment ago on another instance.
-        None if refresh_directory_if_due(state) => state.users.get(&login),
-        None => None,
-    }
-    // An account of the file has a password only when its block gives the digest (portal 3.4b).
-    .or_else(|| {
-        let digest = state
-            .config
-            .access
-            .accounts
-            .get(&login)?
-            .password_hash
-            .clone()?;
-        Some(UserRecord {
-            password_hash: digest,
-            grants: Vec::new(),
-            created_at: 0,
+    // The caller reads the accounts of the shared database before, for every login: see `handle_login_post`.
+    state
+        .users
+        .get(&login)
+        // An account of the file has a password only when its block gives the digest (portal 3.4b).
+        .or_else(|| {
+            let digest = state
+                .config
+                .access
+                .accounts
+                .get(&login)?
+                .password_hash
+                .clone()?;
+            Some(UserRecord {
+                password_hash: digest,
+                grants: Vec::new(),
+                created_at: 0,
+            })
         })
-    })
-    .map_or(Who::Unknown, |record| Who::User(login, record))
+        .map_or(Who::Unknown, |record| Who::User(login, record))
 }
 
 /// The `Set-Cookie` value of a session. `max_age_secs` is the time left before the session ends.
@@ -3495,10 +3536,13 @@ fn login_page(
     } else {
         String::new()
     };
+    let Ok(form_token) = sign_form_token(&state.signing_secret, csrf, unix_millis()) else {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    };
     let body = ui::auth_document(
         "Authentication",
         &format!(
-            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><label for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><button class="button button--primary" type="submit">Continue</button></form>{}"#,
+            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
             error_html,
             html_escape(csrf),
             html_escape(rd),
@@ -3771,6 +3815,22 @@ fn static_response(content_type: &'static str, body: &str) -> HttpResponse {
     response
 }
 
+/// Whether `path` is the neutral path of the stylesheet or of the script that every page loads.
+fn is_neutral_asset(path: &str) -> bool {
+    path == ui::assets().css_path || path == ui::assets().js_path
+}
+
+/// An asset with a hashed path. The path changes when the content changes. Therefore, the browser
+/// can keep the file for a long time.
+fn hashed_response(content_type: &'static str, body: &str) -> HttpResponse {
+    let mut response = static_response(content_type, body);
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
 fn text_response(status: StatusCode, body: &str) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::copy_from_slice(body.as_bytes()));
     response.headers_mut().insert(
@@ -3920,6 +3980,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         READY_PATH => "ready",
         _ if crate::inbox::owns(path) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
+        _ if is_neutral_asset(path) => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",

@@ -20,6 +20,7 @@ mod fixtures;
 pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
+pub mod minify;
 pub mod settings;
 
 use std::fmt::Write as _;
@@ -41,6 +42,47 @@ pub const SETTINGS_JS: &str = include_str!("../../web/settings.js");
 const SPRITE: &str = include_str!("../../web/sprite.svg");
 
 const MAX_LISTED_PROBLEMS: usize = 3;
+
+/// The prefix of the neutral asset paths. The file name is a hash of the content.
+const ASSET_PREFIX: &str = "/auth/a/";
+
+/// The stylesheet and the script that every page loads, in the form that the server sends.
+/// The text is minified. The path has no name of the product, and it changes when the content
+/// changes. This is obscurity, not security: see `docs/login-hardening.md`.
+pub struct Assets {
+    pub css_path: String,
+    pub css: String,
+    pub js_path: String,
+    pub js: String,
+}
+
+/// The assets that every page loads. The server makes them once, at the first call.
+pub fn assets() -> &'static Assets {
+    static ASSETS: std::sync::OnceLock<Assets> = std::sync::OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let css = minify::stylesheet(CSS);
+        // The shipped script is inside the subset that the minifier accepts: a test proves it.
+        // If the transform fails, the page keeps the source: a script that works is better.
+        let js = minify::script(THEME_JS).unwrap_or_else(|_| THEME_JS.to_string());
+        Assets {
+            css_path: asset_path(&css, "css"),
+            js_path: asset_path(&js, "js"),
+            css,
+            js,
+        }
+    })
+}
+
+/// `/auth/a/<16 hexadecimal digits of the SHA-256 of the content>.<extension>`.
+fn asset_path(content: &str, extension: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    let mut name = String::with_capacity(16);
+    for byte in &digest[..8] {
+        let _ = write!(name, "{byte:02x}");
+    }
+    format!("{ASSET_PREFIX}{name}.{extension}")
+}
 
 /// The text of the 403 page. The text does not name a service. A user does not learn the name of a
 /// service that is not open to them.
@@ -145,8 +187,10 @@ fn document(title: &str, head: &str, icons: &[&str], body: &str) -> String {
 /// high as the window, and only its `main` element scrolls.
 fn document_class(title: &str, head: &str, icons: &[&str], class: &str, body: &str) -> String {
     format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="/auth/style.css">{head}<script src="/auth/assets/theme.js"></script></head><body{}>{}{body}</body></html>"#,
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow"><title>{}</title><link rel="stylesheet" href="{}">{head}<script src="{}"></script></head><body{}>{}{body}</body></html>"#,
         html_escape(title),
+        assets().css_path,
+        assets().js_path,
         if class.is_empty() {
             String::new()
         } else {
@@ -1028,6 +1072,47 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_assets_have_neutral_paths_no_comment_and_no_name_of_the_product() {
+        let assets = assets();
+        for (path, content) in [
+            (&assets.css_path, &assets.css),
+            (&assets.js_path, &assets.js),
+        ] {
+            assert!(path.starts_with("/auth/a/") && !path.to_lowercase().contains("portal"));
+            assert!(!content.to_lowercase().contains("portal"), "{path}");
+            assert!(!content.contains("/*") && !content.contains("//"), "{path}");
+            assert!(!content.contains("ClickHouse"), "{path}");
+        }
+        assert!(assets.css.len() < CSS.len());
+        assert!(assets.js.len() < THEME_JS.len() * 3 / 4);
+        // The same content gives the same path, on any instance.
+        assert_eq!(assets.css_path, asset_path(&assets.css, "css"));
+        // The script is not the source: the minifier accepted it, and it renamed a local name.
+        assert!(!assets.js.contains("buttons"));
+    }
+
+    #[test]
+    fn the_served_script_passes_a_syntax_check_when_node_is_present() {
+        let dir = std::env::temp_dir().join(format!("assets-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("script.js");
+        std::fs::write(&file, &assets().js).unwrap();
+        match std::process::Command::new("node")
+            .arg("--check")
+            .arg(&file)
+            .output()
+        {
+            Ok(output) => assert!(
+                output.status.success(),
+                "node --check: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(_) => eprintln!("node is not in this image: the syntax check is skipped"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::collections::BTreeMap;
 
     fn ctx<'a>() -> HomeContext<'a> {
@@ -1457,7 +1542,10 @@ mod tests {
             );
             assert!(!page.contains("<style"), "no inline style (CSP)");
             assert!(!page.contains(" style="), "no style attribute (CSP)");
-            assert!(page.contains(r#"<link rel="stylesheet" href="/auth/style.css">"#));
+            assert!(page.contains(&format!(
+                r#"<link rel="stylesheet" href="{}">"#,
+                assets().css_path
+            )));
         }
     }
 

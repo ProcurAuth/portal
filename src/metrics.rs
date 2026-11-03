@@ -52,6 +52,7 @@ pub struct Metrics {
     login_rate_limited_global: AtomicU64,
     login_invalid_request: AtomicU64,
     login_csrf_failure: AtomicU64,
+    login_form_check_failure: AtomicU64,
     login_origin_failure: AtomicU64,
     login_internal_error: AtomicU64,
     logout_origin_failure: AtomicU64,
@@ -96,6 +97,7 @@ impl Metrics {
             login_rate_limited_global: AtomicU64::new(0),
             login_invalid_request: AtomicU64::new(0),
             login_csrf_failure: AtomicU64::new(0),
+            login_form_check_failure: AtomicU64::new(0),
             login_origin_failure: AtomicU64::new(0),
             login_internal_error: AtomicU64::new(0),
             logout_origin_failure: AtomicU64::new(0),
@@ -196,6 +198,13 @@ impl Metrics {
 
     pub fn login_csrf_failure(&self) {
         self.login_csrf_failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A sign-in that failed the anti-bot check of the form. The sign-in also counts as a
+    /// `failure` of `portal_login_attempts_total`: the answer is the one of a wrong password.
+    pub fn login_form_check_failure(&self) {
+        self.login_form_check_failure
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn login_origin_failure(&self) {
@@ -419,6 +428,13 @@ impl Metrics {
             "internal_error",
             &self.login_internal_error,
         );
+
+        out.push_str("# HELP portal_login_form_check_failures_total Sign-ins that failed the anti-bot check of the form. Each one also counts as a failure in portal_login_attempts_total.\n");
+        out.push_str("# TYPE portal_login_form_check_failures_total counter\n");
+        out.push_str(&format!(
+            "portal_login_form_check_failures_total {}\n",
+            self.login_form_check_failure.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP portal_origin_rejections_total POST requests rejected by same-origin validation.\n");
         out.push_str("# TYPE portal_origin_rejections_total counter\n");

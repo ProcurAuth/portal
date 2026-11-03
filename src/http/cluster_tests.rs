@@ -369,10 +369,41 @@ fn session_cookie_name(node: &Node) -> String {
     transport::session_cookie_name(&node.state.config.session.cookie_name, false).to_string()
 }
 
+/// The body of the sign-in form, as a browser posts it. The token of the form is as old as a
+/// person needs to type: five seconds.
+fn login_body(node: &Node, csrf: &str, login: &str, password: &str) -> String {
+    let token = form_token_issued(node, csrf, 5_000);
+    login_body_with(node, csrf, login, password, &token, "")
+}
+
+/// The token of the sign-in form for the anti-CSRF token `csrf`, issued `age_ms` milliseconds ago.
+fn form_token_issued(node: &Node, csrf: &str, age_ms: u64) -> String {
+    sign_form_token(
+        &node.state.signing_secret,
+        csrf,
+        unix_millis().saturating_sub(age_ms),
+    )
+    .unwrap()
+}
+
+/// The same with the token of the form and the trap field that the test chooses.
+fn login_body_with(
+    node: &Node,
+    csrf: &str,
+    login: &str,
+    password: &str,
+    token: &str,
+    trap: &str,
+) -> String {
+    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
+    format!(
+        "login={login}&password={password}&csrf={csrf}&rd=%2F&sig={signature}&{FORM_TOKEN_FIELD}={token}&{TRAP_FIELD}={trap}"
+    )
+}
+
 /// Signs in as the login form does. It returns the session cookie.
 fn sign_in(node: &Node, login: &str, password: &str) -> String {
     let csrf = "A".repeat(32);
-    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
     let reply = send(
@@ -384,7 +415,7 @@ fn sign_in(node: &Node, login: &str, password: &str) -> String {
             ("Content-Type", "application/x-www-form-urlencoded"),
             ("Cookie", &cookie),
         ],
-        &format!("login={login}&password={password}&csrf={csrf}&rd=%2F&sig={signature}"),
+        &login_body(node, &csrf, login, password),
     );
     assert_eq!(reply.status, 303, "signing in as {login}");
     reply
@@ -397,7 +428,6 @@ fn a_sign_in_page_that_stayed_open_too_long_gives_the_page_again_with_a_new_toke
     let node = start_with(Arc::new(Backend::Sqlite.fresh()), None, "");
     let origin = format!("http://127.0.0.1:{}", node.port);
     let csrf = "A".repeat(32);
-    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
     // The browser dropped the cookie of the token: the form has a token and the request has none.
     let reply = send(
         node.port,
@@ -407,7 +437,7 @@ fn a_sign_in_page_that_stayed_open_too_long_gives_the_page_again_with_a_new_toke
             ("Origin", &origin),
             ("Content-Type", "application/x-www-form-urlencoded"),
         ],
-        &format!("login=root&password={PASSWORD}&csrf={csrf}&rd=%2F&sig={signature}"),
+        &login_body(&node, &csrf, "root", PASSWORD),
     );
     assert_eq!(reply.status, 403);
     assert!(
@@ -2747,7 +2777,6 @@ fn login_from(
     headers: &[(&str, &str)],
 ) -> Reply {
     let csrf = "A".repeat(32);
-    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
     let mut all = vec![
@@ -2762,7 +2791,7 @@ fn login_from(
         "POST",
         LOGIN_PATH,
         &all,
-        &format!("login={login}&password={password}&csrf={csrf}&rd=%2F&sig={signature}"),
+        &login_body(node, &csrf, login, password),
     )
 }
 
@@ -5735,7 +5764,6 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
     // The account signs in with the digest of its block. An account without a digest cannot.
     let carol = sign_in(&node, "carol", PASSWORD);
     let csrf = "A".repeat(32);
-    let signature = sign_return_uri(&node.state.signing_secret, "/").unwrap();
     let origin = format!("http://127.0.0.1:{}", node.port);
     let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
     let dave = send(
@@ -5747,7 +5775,7 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
             ("Content-Type", "application/x-www-form-urlencoded"),
             ("Cookie", &cookie),
         ],
-        &format!("login=dave&password={PASSWORD}&csrf={csrf}&rd=%2F&sig={signature}"),
+        &login_body(&node, &csrf, "dave", PASSWORD),
     );
     assert_eq!(dave.status, 401, "no digest: no session");
     // The key of the file works at the edge, and the page shows it as read-only.
@@ -7601,5 +7629,328 @@ mod kinds_tests {
             // The old page of one service is gone.
             assert_eq!(page(&node, &root, "/auth/settings/services/db").status, 404);
         });
+    }
+}
+
+// The sign-in form: anti-enumeration and anti-bot. See `docs/login-hardening.md`.
+
+/// A node for the tests of the sign-in form. It has the account `alice`, and `metrics`.
+fn sign_in_node(extra: &str) -> Node {
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!("metrics {{ enabled = true }} {extra}"),
+    );
+    insert_account(&node, "alice", "alice-correct-password");
+    node
+}
+
+/// Posts one body to the sign-in route from the local address `source`.
+fn post_login(node: &Node, source: &str, csrf: &str, body: &str) -> Reply {
+    let origin = format!("http://127.0.0.1:{}", node.port);
+    let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
+    send_from(
+        source,
+        node.port,
+        "POST",
+        LOGIN_PATH,
+        &[
+            ("Origin", &origin),
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Cookie", &cookie),
+        ],
+        body,
+    )
+}
+
+/// The value of the metric line that starts with `start`.
+fn metric(node: &Node, start: &str) -> u64 {
+    let body = send(node.port, "GET", "/metrics", &[], "").body;
+    body.lines()
+        .find(|line| line.starts_with(start))
+        .unwrap_or_else(|| panic!("{start} is not in the measures:\n{body}"))
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// The text of a refusal with the values that change at each render (the anti-CSRF token and the
+/// token of the form) replaced. Two refusals must be the same text.
+fn without_random(body: &str) -> String {
+    let mut out = body.to_string();
+    for name in ["csrf", FORM_TOKEN_FIELD] {
+        let marker = format!(r#"name="{name}" value=""#);
+        if let Some(start) = out.find(&marker) {
+            let value_start = start + marker.len();
+            let end = value_start + out[value_start..].find('"').unwrap();
+            out.replace_range(value_start..end, "X");
+        }
+    }
+    out
+}
+
+/// The headers of a reply as a sorted list. The values of `set-cookie` lose the token. The length
+/// of the body is part of the list: the pages must have the same size.
+fn shape_of(reply: &Reply) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = reply
+        .headers
+        .iter()
+        .filter(|(name, _)| name != "date")
+        .map(|(name, value)| {
+            let value = if name == "set-cookie" {
+                value.split('=').next().unwrap().to_string()
+                    + "="
+                    + value.split_once(';').map_or("", |(_, rest)| rest)
+            } else {
+                value.clone()
+            };
+            (name.clone(), value)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusal() {
+    let node = sign_in_node("");
+    let csrf = "B".repeat(32);
+    // Each case has a login, a password, the age of the token of the form (none: no token) and
+    // the value of the trap field.
+    let too_long = "a".repeat(300);
+    let cases: Vec<(&str, &str, &str, Option<u64>, &str)> = vec![
+        (
+            "unknown login",
+            "nobody",
+            "x-wrong-password",
+            Some(5_000),
+            "",
+        ),
+        (
+            "wrong password of the superadmin",
+            "root",
+            "x-wrong-password",
+            Some(5_000),
+            "",
+        ),
+        (
+            "wrong password of an account",
+            "alice",
+            "x-wrong-password",
+            Some(5_000),
+            "",
+        ),
+        (
+            "an account with the right password and a filled trap",
+            "alice",
+            "alice-correct-password",
+            Some(5_000),
+            "x",
+        ),
+        (
+            "the superadmin with the right password and a filled trap",
+            "root",
+            PASSWORD,
+            Some(5_000),
+            "x",
+        ),
+        (
+            "a submit that is too fast",
+            "alice",
+            "alice-correct-password",
+            Some(0),
+            "",
+        ),
+        (
+            "no token of the form",
+            "alice",
+            "alice-correct-password",
+            None,
+            "",
+        ),
+        (
+            "a login that is far too long",
+            &too_long,
+            "x-wrong-password",
+            Some(5_000),
+            "",
+        ),
+    ];
+    let checks_before = metric(&node, "portal_password_checks_total");
+    let failures_before = metric(&node, r#"portal_login_attempts_total{result="failure"}"#);
+    let mut replies = Vec::new();
+    for (index, (name, login, password, age, trap)) in cases.iter().enumerate() {
+        let token = age.map_or(String::new(), |age| form_token_issued(&node, &csrf, age));
+        let body = login_body_with(&node, &csrf, login, password, &token, trap);
+        let reply = post_login(&node, &format!("127.0.1.{}", index + 1), &csrf, &body);
+        assert_eq!(reply.status, 401, "{name}: {}", reply.body);
+        assert!(reply.body.contains("Invalid login or password"), "{name}");
+        replies.push((name, reply));
+    }
+    // A damaged token and the token of another anti-CSRF token get the same refusal.
+    for (index, token) in [
+        "AAAA".to_string(),
+        form_token_issued(&node, &"C".repeat(32), 5_000),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let body = login_body_with(&node, &csrf, "alice", "alice-correct-password", token, "");
+        let reply = post_login(&node, &format!("127.0.2.{}", index + 1), &csrf, &body);
+        assert_eq!(reply.status, 401, "{}", reply.body);
+        replies.push((&"a damaged token or a token of another form", reply));
+    }
+    let first = &replies[0].1;
+    for (name, reply) in &replies {
+        assert_eq!(
+            without_random(&reply.body),
+            without_random(&first.body),
+            "{name}: the page"
+        );
+        assert_eq!(reply.body.len(), first.body.len(), "{name}: the size");
+        assert_eq!(shape_of(reply), shape_of(first), "{name}: the headers");
+    }
+    // Each refusal went through one Argon2 check and counted as a failed sign-in: the time and
+    // the budgets are the same for each cause.
+    assert_eq!(
+        metric(&node, "portal_password_checks_total") - checks_before,
+        replies.len() as u64
+    );
+    assert_eq!(
+        metric(&node, r#"portal_login_attempts_total{result="failure"}"#) - failures_before,
+        replies.len() as u64
+    );
+    // Only the failed checks of the form count in their own series: two traps, the fast submit,
+    // the missing token, the damaged token and the token of another anti-CSRF token.
+    assert_eq!(metric(&node, "portal_login_form_check_failures_total"), 6);
+}
+
+#[test]
+fn a_good_sign_in_still_works_with_the_form_token() {
+    let node = sign_in_node("");
+    let csrf = "D".repeat(32);
+    let body = login_body(&node, &csrf, "alice", "alice-correct-password");
+    let reply = post_login(&node, "127.0.1.1", &csrf, &body);
+    assert_eq!(reply.status, 303, "{}", reply.body);
+    assert!(reply.cookie(&session_cookie_name(&node)).is_some());
+    assert_eq!(metric(&node, "portal_login_form_check_failures_total"), 0);
+}
+
+#[test]
+fn a_form_that_stayed_open_for_days_gets_the_page_that_stayed_open_too_long() {
+    let node = sign_in_node("");
+    let csrf = "E".repeat(32);
+    let old = form_token_issued(&node, &csrf, crate::crypto::FORM_MAX_AGE_MS + 1_000);
+    let body = login_body_with(&node, &csrf, "alice", "alice-correct-password", &old, "");
+    let reply = post_login(&node, "127.0.1.1", &csrf, &body);
+    assert_eq!(reply.status, 403);
+    assert!(reply.body.contains("The page was open too long"));
+    assert!(reply.cookie(&session_cookie_name(&node)).is_none());
+}
+
+#[test]
+fn a_failed_form_check_uses_the_budget_of_the_failed_sign_ins() {
+    let node = sign_in_node(r#"security { login_attempts_per_ip = 3 }"#);
+    let csrf = "F".repeat(32);
+    let filled = |login: &str, password: &str| {
+        let token = form_token_issued(&node, &csrf, 5_000);
+        login_body_with(&node, &csrf, login, password, &token, "spam")
+    };
+    for _ in 0..3 {
+        let reply = post_login(
+            &node,
+            "127.0.1.1",
+            &csrf,
+            &filled("alice", "alice-correct-password"),
+        );
+        assert_eq!(reply.status, 401);
+    }
+    // The address is locked out: even a good form with the good password is refused.
+    let good = login_body(&node, &csrf, "alice", "alice-correct-password");
+    let reply = post_login(&node, "127.0.1.1", &csrf, &good);
+    assert_eq!(reply.status, 429);
+    // The refusal of the limiter is the same for a known and an unknown login.
+    let unknown = login_body(&node, &csrf, "nobody", "x-wrong-password");
+    let other = post_login(&node, "127.0.1.1", &csrf, &unknown);
+    assert_eq!(other.status, 429);
+    assert_eq!(without_random(&other.body), without_random(&reply.body));
+    assert_eq!(shape_of(&other), shape_of(&reply));
+    // Another address is free.
+    assert_eq!(post_login(&node, "127.0.1.2", &csrf, &good).status, 303);
+}
+
+#[test]
+fn the_sign_in_page_names_no_product_and_has_a_trap_that_a_person_cannot_reach() {
+    let node = sign_in_node("");
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(page.status, 200);
+    let lower = page.body.to_ascii_lowercase();
+    for word in ["portal", "inbox", "generator", "<!--", "version"] {
+        assert!(!lower.contains(word), "{word}: {}", page.body);
+    }
+    assert!(page.body.contains("<title>Authentication</title>"));
+    for name in ["server", "x-powered-by", "via", "x-generator"] {
+        assert!(page.header(name).is_none(), "{name}");
+    }
+    for (name, value) in &page.headers {
+        assert!(
+            !value.to_ascii_lowercase().contains("portal"),
+            "{name}: {value}"
+        );
+        assert!(!name.contains("portal"), "{name}");
+    }
+    // The cookie of the form has a neutral name.
+    let cookie = page
+        .headers
+        .iter()
+        .find(|(n, _)| n == "set-cookie")
+        .unwrap();
+    assert!(cookie.1.starts_with("lc="), "{}", cookie.1);
+    // The trap: hidden by a class, out of the tab order, hidden from a screen reader, and not
+    // filled by a password manager.
+    assert!(page.body.contains(&format!(
+        r#"<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off""#
+    )));
+    // The fields of a person keep their names and their autocomplete tokens, for a password manager.
+    assert!(page
+        .body
+        .contains(r#"id="login" name="login" type="text" autocomplete="username""#));
+    assert!(page.body.contains(
+        r#"id="password" name="password" type="password" autocomplete="current-password""#
+    ));
+    // The page loads one stylesheet and one script, with neutral paths. No script is inline.
+    let assets = ui::assets();
+    assert!(page
+        .body
+        .contains(&format!(r#"href="{}""#, assets.css_path)));
+    assert!(page.body.contains(&format!(r#"src="{}""#, assets.js_path)));
+    assert_eq!(page.body.matches("<script").count(), 1);
+    for path in [
+        &assets.css_path,
+        &assets.js_path,
+        &STYLE_PATH.to_string(),
+        &THEME_JS_PATH.to_string(),
+    ] {
+        let asset = send(node.port, "GET", path, &[], "");
+        assert_eq!(asset.status, 200, "{path}");
+        assert!(
+            !asset.body.to_ascii_lowercase().contains("portal"),
+            "{path}"
+        );
+        assert!(!asset.body.contains("/*"), "{path}");
+        assert!(asset.header("server").is_none());
+    }
+    // ForwardAuth lets the neutral paths pass without a session.
+    for path in [&assets.css_path, &assets.js_path] {
+        let reply = send(
+            node.port,
+            "GET",
+            "/auth/verify",
+            &[("X-Forwarded-Uri", path), ("X-Forwarded-Method", "GET")],
+            "",
+        );
+        assert_eq!(reply.status, 204, "{path}");
     }
 }

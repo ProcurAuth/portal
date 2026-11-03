@@ -62,6 +62,64 @@ pub fn verify_csrf(cookie: &str, form: &str) -> bool {
     constant_time_eq(cookie.as_bytes(), form.as_bytes())
 }
 
+/// The shortest time between the display of the sign-in form and its submit, in milliseconds. A
+/// person cannot read the form and type a login and a password in less time.
+pub const FORM_MIN_AGE_MS: u64 = 1_000;
+
+/// The longest age of a sign-in form, in milliseconds. It is the life of the anti-CSRF cookie.
+pub const FORM_MAX_AGE_MS: u64 = 12 * 3600 * 1000;
+
+/// The result of the check of the token of a sign-in form.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FormToken {
+    /// The server signed the token for this anti-CSRF token, and its age is in the limits.
+    Valid,
+    /// The token is missing, damaged, signed for another anti-CSRF token, or too new.
+    /// A script that posts at once, and a script that did not read the form, give this result.
+    Refused,
+    /// The server signed the token, but it is too old. A person who left the page open gives this result.
+    Expired,
+}
+
+/// The token of the sign-in form: the time of issue and a MAC of this time and of the anti-CSRF
+/// token of the browser. The token has no state on the server. Any instance that has the session
+/// secret can check it.
+pub fn sign_form_token(secret: &[u8], csrf: &str, issued_ms: u64) -> Result<String, String> {
+    let issued = issued_ms.to_be_bytes();
+    let mac = sign(secret, &form_token_input(&issued, csrf))?;
+    let mut raw = Vec::with_capacity(8 + mac.len());
+    raw.extend_from_slice(&issued);
+    raw.extend_from_slice(&mac);
+    Ok(Base64UrlUnpadded::encode_string(&raw))
+}
+
+pub fn check_form_token(secret: &[u8], csrf: &str, token: &str, now_ms: u64) -> FormToken {
+    let raw = match Base64UrlUnpadded::decode_vec(token) {
+        Ok(v) if v.len() == 8 + 32 => v,
+        _ => return FormToken::Refused,
+    };
+    if !verify_mac(secret, &form_token_input(&raw[..8], csrf), &raw[8..]) {
+        return FormToken::Refused;
+    }
+    let mut issued = [0u8; 8];
+    issued.copy_from_slice(&raw[..8]);
+    let issued = u64::from_be_bytes(issued);
+    // A time in the future is too new: the signature proves that the server wrote it.
+    match now_ms.checked_sub(issued) {
+        Some(age) if age > FORM_MAX_AGE_MS => FormToken::Expired,
+        Some(age) if age >= FORM_MIN_AGE_MS => FormToken::Valid,
+        _ => FormToken::Refused,
+    }
+}
+
+fn form_token_input(issued: &[u8], csrf: &str) -> Vec<u8> {
+    let mut input = b"form\n".to_vec();
+    input.extend_from_slice(issued);
+    input.push(b'\n');
+    input.extend_from_slice(csrf.as_bytes());
+    input
+}
+
 /// The anti-CSRF token of a button on a page that stays open (sign out, account administration):
 /// bound to the session it acts for and to what it is for (`purpose`), so it stays valid as long
 /// as the page does (a cookie-based token would expire under an idle tab) and cannot be replayed
@@ -179,6 +237,46 @@ mod tests {
         assert!(
             !verify_action_token(key, "logout", "session-a", &uri_signature),
             "domains are separated"
+        );
+    }
+
+    #[test]
+    fn a_form_token_needs_the_right_secret_the_right_csrf_token_and_the_right_age() {
+        let key = b"01234567890123456789012345678901";
+        let csrf = "abcdefghijklmnopqrstuvwxyz012345";
+        let issued = 1_000_000_000u64;
+        let token = sign_form_token(key, csrf, issued).unwrap();
+        let at = |ms: u64| check_form_token(key, csrf, &token, issued + ms);
+        assert_eq!(at(0), FormToken::Refused, "no time to read the form");
+        assert_eq!(at(FORM_MIN_AGE_MS - 1), FormToken::Refused);
+        assert_eq!(at(FORM_MIN_AGE_MS), FormToken::Valid);
+        assert_eq!(at(FORM_MAX_AGE_MS), FormToken::Valid);
+        assert_eq!(at(FORM_MAX_AGE_MS + 1), FormToken::Expired);
+        assert_eq!(
+            check_form_token(key, csrf, &token, issued - 5_000),
+            FormToken::Refused,
+            "a clock that is behind"
+        );
+        let later = issued + 5_000;
+        assert_eq!(
+            check_form_token(b"another-key-another-key-another!", csrf, &token, later),
+            FormToken::Refused
+        );
+        assert_eq!(
+            check_form_token(key, "another-csrf-token-another-csrf-", &token, later),
+            FormToken::Refused,
+            "the token belongs to one anti-CSRF token"
+        );
+        for bad in ["", "short", &token[..token.len() - 1], "!!!!"] {
+            assert_eq!(check_form_token(key, csrf, bad, later), FormToken::Refused);
+        }
+        // The time is part of the signed text: a person cannot make the token look older.
+        let mut raw = Base64UrlUnpadded::decode_vec(&token).unwrap();
+        raw[7] ^= 1;
+        let forged = Base64UrlUnpadded::encode_string(&raw);
+        assert_eq!(
+            check_form_token(key, csrf, &forged, later),
+            FormToken::Refused
         );
     }
 

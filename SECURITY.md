@@ -175,7 +175,7 @@ The superadmin can end every session from the page **Users**. The command `porta
 
 The portal knows nothing about TLS. Traefik terminates TLS, and the portal listeners speak plain HTTP. Traefik can also serve plain HTTP. Examples are a LAN without certificates and a test stack. The server reads the scheme for each request. It uses the unique `X-Forwarded-Proto` value that Traefik sets (`trustForwardHeader: false`). Any value other than a single `https` counts as HTTP.
 
-Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `portal-csrf`). They have no `Secure` attribute.
+Browsers refuse `Secure` and `__Host-` cookies over HTTP. Therefore, over HTTP, the cookies have no prefix (`portal`, `lc`). They have no `Secure` attribute.
 
 Over HTTP, an attacker on the network can read the password and the session cookie. The binding limits the value of a stolen cookie. The binding uses the client address and User-Agent, relayed by `authRequestHeaders: [Cookie, User-Agent]`. The idle timeout also limits the value of a stolen cookie. Only HTTPS removes the exposure. Use HTTPS on every network that is not trusted.
 

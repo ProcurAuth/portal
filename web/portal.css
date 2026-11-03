@@ -749,3 +749,8 @@ a {
   background: var(--danger-bg);
   color: var(--danger);
 }
+
+/* The trap field of the sign-in form. A person never sees it. A script that fills every field fills it. */
+.hp {
+  display: none;
+}

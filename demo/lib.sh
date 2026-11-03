@@ -9,13 +9,16 @@ pw() { if [ "$1" = admin ]; then grep '^superadmin:' "$creds"; else grep "^$1:" 
 
 # login <user> <cookie jar>: signs in and prints the HTTP status (303 when it works).
 login() {
-  local jar=$2 page csrf sig rd
+  local jar=$2 page csrf sig rd token
   page=$(curl -s -c "$jar" "$base/auth/login")
   csrf=$(printf '%s' "$page" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')
   sig=$(printf '%s' "$page" | sed -n 's/.*name="sig" value="\([^"]*\)".*/\1/p')
   rd=$(printf '%s' "$page" | sed -n 's/.*name="rd" value="\([^"]*\)".*/\1/p')
+  token=$(printf '%s' "$page" | sed -n 's/.*name="token" value="\([^"]*\)".*/\1/p')
+  # The form has a minimum time between its display and its submit.
+  sleep 1.2
   curl -s -o /dev/null -w '%{http_code}' -b "$jar" -c "$jar" -H "Origin: $base" \
-    --data-urlencode "csrf=$csrf" --data-urlencode "rd=$rd" --data-urlencode "sig=$sig" \
+    --data-urlencode "csrf=$csrf" --data-urlencode "rd=$rd" --data-urlencode "sig=$sig" --data-urlencode "token=$token" \
     --data-urlencode "login=$1" --data-urlencode "password=$(pw "$1")" "$base/auth/login"
 }
 
