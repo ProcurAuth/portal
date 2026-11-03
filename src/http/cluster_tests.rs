@@ -5000,7 +5000,7 @@ fn get_keys(node: &Node, session: &str, query: &str) -> Reply {
     send(
         node.port,
         "GET",
-        &format!("/auth/keys{query}"),
+        &format!("/auth/settings{query}"),
         &[("Cookie", &cookie)],
         "",
     )
@@ -5214,7 +5214,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             2
         );
         let other = get_key_page(&node, &alice, "edit?id=nonexistent");
-        assert_eq!(other.location(), Some("/auth/keys?s=unknown_key"));
+        assert_eq!(other.location(), Some("/auth/settings?s=unknown_key"));
         assert!(page
             .body
             .contains(&format!("/auth/keys/edit?id={}", key.id)));
@@ -5289,7 +5289,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             ),
         );
         assert_eq!(edited.status, 303);
-        assert_eq!(edited.location(), Some("/auth/keys?s=edited"));
+        assert_eq!(edited.location(), Some("/auth/settings?s=edited"));
         let changed = node.state.users.key_by_id(&key.id).unwrap();
         assert_eq!(
             (changed.name.as_str(), changed.grants.len()),
@@ -5298,7 +5298,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         assert_eq!(edge(&text).status, 204);
         // A key of another user, and a key that does not exist, cannot be changed.
         let reply = keys_post(&node, &alice, "edit", "id=nonexistent&name=x");
-        assert_eq!(reply.location(), Some("/auth/keys?s=unknown_key"));
+        assert_eq!(reply.location(), Some("/auth/settings?s=unknown_key"));
 
         // Revoke it. The edge refuses the text, and the page shows the summary row.
         let revoked = keys_post(
@@ -5308,10 +5308,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             &format!("id={}&section=mine", key.id),
         );
         assert_eq!(revoked.status, 303);
-        assert_eq!(
-            revoked.location(),
-            Some("/auth/keys?section=mine&s=revoked")
-        );
+        assert_eq!(revoked.location(), Some("/auth/settings?s=revoked"));
         assert_eq!(edge(&text).status, 401);
         let page = get_keys(&node, &alice, "");
         assert!(page.body.contains("revoked"));
@@ -5322,12 +5319,9 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             "revoke",
             &format!("id={}&section=mine", key.id),
         );
-        assert_eq!(again.location(), Some("/auth/keys?section=mine&s=revoked"));
+        assert_eq!(again.location(), Some("/auth/settings?s=revoked"));
         let missing = keys_post(&node, &alice, "revoke", "id=nonexistent&section=mine");
-        assert_eq!(
-            missing.location(),
-            Some("/auth/keys?section=mine&s=unknown_key")
-        );
+        assert_eq!(missing.location(), Some("/auth/settings?s=unknown_key"));
 
         // The bulk form revokes each ticked key: the fields are `id.<id>`.
         let mut ids = Vec::new();
@@ -5368,7 +5362,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
             "revoke",
             &format!("id.{}=1&id.{}=1&section=mine", ids[0], ids[1]),
         );
-        assert_eq!(bulk.location(), Some("/auth/keys?section=mine&s=revoked"));
+        assert_eq!(bulk.location(), Some("/auth/settings?s=revoked"));
         node.state.users.refresh(&node.state.store).unwrap();
         assert!(ids
             .iter()
@@ -5492,17 +5486,14 @@ fn the_page_of_the_keys_refuses_what_the_rights_and_the_request_do_not_allow() {
             "edit",
             &format!("id={}&name=stolen", key_of_alice.id),
         );
-        assert_eq!(edit.location(), Some("/auth/keys?s=unknown_key"));
+        assert_eq!(edit.location(), Some("/auth/settings?s=unknown_key"));
         let revoke = keys_post(
             &node,
             &bob,
             "revoke",
             &format!("id={}&section=mine", key_of_alice.id),
         );
-        assert_eq!(
-            revoke.location(),
-            Some("/auth/keys?section=mine&s=unknown_key")
-        );
+        assert_eq!(revoke.location(), Some("/auth/settings?s=unknown_key"));
         assert!(node.state.users.key_by_id(&key_of_alice.id).is_some());
         // A session that "Log in as" opens changes no key, and revokes none (portal 3.7, 3.7a).
         let root = sign_in(&node, "root", PASSWORD);
@@ -5566,7 +5557,7 @@ fn the_section_all_shows_the_keys_of_the_users_and_revokes_any_key() {
             "revoke",
             &format!("id={}&section=all", key.id),
         );
-        assert_eq!(revoked.location(), Some("/auth/keys?section=all&s=revoked"));
+        assert_eq!(revoked.location(), Some("/auth/settings?s=revoked"));
         assert!(node.state.users.key_by_id(&key.id).is_none());
         // In the section "Mine" it cannot revoke the key of another user.
         let other = keys_post(&node, &root, "make_it_fail", "");
@@ -5690,10 +5681,7 @@ fn an_account_of_the_file_signs_in_reads_its_keys_and_changes_none() {
     );
     // No address changes a key of the file.
     let revoke = keys_post(&node, &carol, "revoke", &format!("id={id}&section=mine"));
-    assert_eq!(
-        revoke.location(),
-        Some("/auth/keys?section=mine&s=file_key")
-    );
+    assert_eq!(revoke.location(), Some("/auth/settings?s=file_key"));
     assert_eq!(keys_post(&node, &carol, "create", "name=x").status, 403);
     assert_eq!(node.state.users.key_count(), 1);
     // The settings page refuses a login that the file holds.
@@ -6740,7 +6728,7 @@ mod kinds_tests {
             // key that does not exist.
             for id in &carol_keys {
                 let pane = get_key_page(&node, &root, &format!("edit?id={id}"));
-                assert_eq!(pane.location(), Some("/auth/keys?s=unknown_key"));
+                assert_eq!(pane.location(), Some("/auth/settings?s=unknown_key"));
             }
             let all = get_keys(&node, &root, "?section=all");
             assert_eq!(all.status, 200);
@@ -7132,7 +7120,11 @@ mod kinds_tests {
                 .iter()
                 .any(|a| ["alert.send", "inbox.receive", "phone.read"].contains(a)));
             assert_eq!(seen.nodes, ["", "key_kind:mcp"], "one kind");
-            assert_eq!(seen.keys_routes, [404, 200], "the list is in the tab Access");
+            assert_eq!(
+                seen.keys_routes,
+                [404, 200],
+                "the list is in the tab Access"
+            );
             assert!(seen.inbox_routes_absent);
             assert_eq!(seen.inbox_page, 404);
             // The new-key form has no selector: one kind is possible.

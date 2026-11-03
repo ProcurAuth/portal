@@ -122,20 +122,6 @@ pub(super) fn tab_visible(state: &AppState, viewer: &Viewer) -> bool {
     held(state, viewer).is_some_and(|held| held.ui.any())
 }
 
-/// Whether the viewer sees the tab "Keys" in the pages of the inbox.
-fn keys_tab(state: &AppState, viewer: &Viewer) -> bool {
-    if state.config.keys.is_none() {
-        return false;
-    }
-    match &viewer.grants {
-        None => true,
-        Some(grants) => {
-            actions::effective(grants, actions::KEYS_OWN_READ)
-                || actions::effective(grants, actions::KEYS_ALL_READ)
-        }
-    }
-}
-
 fn not_found() -> HttpResponse {
     text_response(StatusCode::NOT_FOUND, "Not Found\n")
 }
@@ -172,7 +158,7 @@ impl Context<'_> {
     fn frame(&self, state: &AppState) -> ui::Frame<'_> {
         ui::Frame {
             logout_token: &self.logout_token,
-            keys: keys_tab(state, &self.viewer),
+            keys: super::keys_page::list_visible(state, &self.viewer),
             inbox: true,
             superadmin: is_superadmin(&self.viewer),
         }

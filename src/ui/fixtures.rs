@@ -2,15 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use super::access::AccessView;
-use super::settings::{
-    Frame, Holder, ServiceActions, ServicesView, UserCard, UserView, PORTAL,
-};
+use super::access::{AccessView, Accounts, GroupLine, Query};
+use super::keys::{Cover, GrantLine, KeyLine, KeyState, KeysList};
+use super::settings::{Frame, Holder, ServiceActions, ServicesView, UserCard, UserView, PORTAL};
 use crate::catalog::{parse_labels, Catalog, Service};
 use crate::grants::{Grant, Mode, ACCESS};
+use crate::keys::KeyKind;
 use crate::store::{AccountActivity, AuditRow, DayStat, LoginPage, LoginRow};
-
-
 
 pub(super) fn service(name: &str, href: &str) -> Service {
     let labels: BTreeMap<String, String> = [
@@ -34,8 +32,8 @@ pub(super) fn sub(text: &str) -> Grant {
 
 /// The data that the page gives to the editor of grants.
 pub(super) fn editor_of(html: &str) -> serde_json::Value {
-    let start = html.find(r#"class="grantEditor__data">"#).unwrap()
-        + r#"class="grantEditor__data">"#.len();
+    let start =
+        html.find(r#"class="grantEditor__data">"#).unwrap() + r#"class="grantEditor__data">"#.len();
     let end = start + html[start..].find("</script>").unwrap();
     serde_json::from_str(&html[start..end]).unwrap()
 }
@@ -57,6 +55,7 @@ pub(super) fn card(login: &str, services: &[&str]) -> UserCard {
         superadmin: false,
         file: false,
         keys: 0,
+        groups: Vec::new(),
         activity: AccountActivity {
             login: login.into(),
             days: vec![DayStat::default(); 30],
@@ -165,8 +164,7 @@ pub(super) fn login_row_of(login: &str, success: bool, known: bool) -> LoginRow 
         known,
         success,
         ip: Some("203.0.113.7".into()),
-        user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
-            .into(),
+        user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0".into(),
     }
 }
 
@@ -198,23 +196,119 @@ pub(super) fn data() -> Data {
     }
 }
 
-pub(super) fn view(catalog: &Catalog) -> AccessView<'_> {
-    AccessView {
-        notice: None,
+/// The accounts of the tests: alice and bob are in the group infra, carol is in none.
+pub(super) fn accounts(catalog: &Catalog) -> Accounts<'_> {
+    let mut users = vec![
+        card("alice", &["grafana", "mixed"]),
+        card("bob", &["mixed"]),
+        card("carol", &[]),
+    ];
+    users[0].groups = vec!["infra".into(), "oncall".into()];
+    users[1].groups = vec!["infra".into()];
+    Accounts {
         allow_creation: true,
         mode: Mode::Dynamic,
         catalog,
         services: services(),
-        users: vec![
-            card("alice", &["grafana", "mixed"]),
-            card("bob", &["mixed"]),
-            card("carol", &[]),
-        ],
+        users,
         features: Some(features()),
-        keys: true,
-        inbox: true,
         max_users: 64,
         token: "tok<en",
+    }
+}
+
+pub(super) fn groups() -> Vec<GroupLine> {
+    vec![
+        GroupLine {
+            id: "infra".into(),
+            name: "Infra".into(),
+            critical: false,
+        },
+        GroupLine {
+            id: "oncall".into(),
+            name: "On call".into(),
+            critical: true,
+        },
+    ]
+}
+
+/// A key of the tests. `grants` are texts of grants, all covered by the owner.
+pub(super) fn key(id: &str, owner: Option<&str>, kind: KeyKind, grants: &[&str]) -> KeyLine {
+    KeyLine {
+        id: id.into(),
+        owner: owner.map(str::to_string),
+        mine: owner == Some("alice"),
+        name: format!("{id}-key"),
+        hint: "AbCd".into(),
+        kind: Some(kind),
+        state: KeyState::Active,
+        file: false,
+        created_at: 1_791_000_000,
+        expires_at: None,
+        last_check_at: None,
+        check_count: 0,
+        revoked_at: None,
+        grants: grants
+            .iter()
+            .map(|text| GrantLine {
+                grant: Grant::parse(text).unwrap(),
+                cover: Cover::Full,
+            })
+            .collect(),
+        no_access: Vec::new(),
+        can_change: owner == Some("alice"),
+    }
+}
+
+/// The list of keys of the tests: all the keys of the accounts, for a viewer that may do all.
+pub(super) fn keys_list() -> KeysList {
+    KeysList {
+        lines: vec![
+            key(
+                "k1",
+                Some("alice"),
+                KeyKind::Api,
+                &["alert.send on service:portal/inbox_group:infra"],
+            ),
+            key(
+                "k2",
+                Some("alice"),
+                KeyKind::Mcp,
+                &[
+                    "access on service:infra-notes",
+                    "notes.read on service:infra-notes",
+                ],
+            ),
+            key(
+                "k3",
+                Some("bob"),
+                KeyKind::Api,
+                &["alert.read on service:portal/inbox_group:oncall"],
+            ),
+        ],
+        truncated: false,
+        all: true,
+        create_kinds: vec![KeyKind::Mcp, KeyKind::Api],
+        can_revoke: true,
+        can_revoke_all: true,
+        impersonated: false,
+        cannot_use: false,
+        groups: vec![
+            ("infra".into(), "Infra <b>".into()),
+            ("oncall".into(), "On call".into()),
+        ],
+        csrf: "tok<".into(),
+    }
+}
+
+/// The tab Access with everything on: the three accounts, the keys and the groups.
+pub(super) fn view(catalog: &Catalog) -> AccessView<'_> {
+    AccessView {
+        notice: None,
+        query: Query::default(),
+        accounts: Some(accounts(catalog)),
+        keys: Some(keys_list()),
+        groups: groups(),
     }
 }
 
@@ -258,4 +352,3 @@ pub(super) fn services_view<'a>(
 pub(super) fn main_of(html: &str) -> &str {
     &html[html.find("<main").unwrap()..html.find("</main>").unwrap()]
 }
-

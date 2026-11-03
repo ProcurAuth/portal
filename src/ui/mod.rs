@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Service};
 use crate::icons::Icons;
 use crate::util::html_escape;
-pub use access::{access_page, AccessView};
+pub use access::{access_page, AccessView, Accounts};
 pub use activity::{activity_page, ActivityView};
 pub use settings::{
     new_user_page, notice_for, services_page, user_page, Frame, Holder, NewUserView,
@@ -623,7 +623,7 @@ fn demo_features() -> ServiceActions {
     }
 }
 
-fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> AccessView<'a> {
+fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> Accounts<'a> {
     use crate::store::{AccountActivity, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
     let days = demo_days;
@@ -636,6 +636,11 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> AccessView<'a> {
         superadmin,
         file,
         keys: if superadmin { 0 } else { seed as usize % 3 },
+        groups: if panel_only || superadmin || seed % 2 == 1 {
+            Vec::new()
+        } else {
+            vec!["infra".to_string()]
+        },
         activity: AccountActivity {
             login: login.into(),
             days: days(seed),
@@ -689,8 +694,7 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> AccessView<'a> {
         "query.run.write on service:data-clickhouse-dash/host:local/database:analytics",
     ];
     alice_grants.extend(alice_portal.iter().map(String::as_str));
-    AccessView {
-        notice: None,
+    Accounts {
         allow_creation: !panel_only,
         mode: crate::grants::Mode::Dynamic,
         catalog,
@@ -712,10 +716,64 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> AccessView<'a> {
             card("dave", &["access on service:infra-notes"], 7, false, true),
         ],
         features: (!panel_only).then(demo_features),
-        keys: !panel_only,
-        inbox: !panel_only,
         max_users: 64,
         token: "demo",
+    }
+}
+
+/// The keys of the demo: one of each kind, and a key of the superadmin.
+fn demo_keys() -> keys::KeysList {
+    use crate::keys::KeyKind;
+    let now = 1_791_623_502_i64;
+    let line = |id: &str, owner: Option<&str>, kind: KeyKind, grants: &[&str]| keys::KeyLine {
+        id: id.into(),
+        owner: owner.map(str::to_string),
+        mine: owner.is_none(),
+        name: format!("{id}-key"),
+        hint: "AbCd".into(),
+        kind: Some(kind),
+        state: keys::KeyState::Active,
+        file: false,
+        created_at: now - 86_400,
+        expires_at: None,
+        last_check_at: Some(now - 600),
+        check_count: 4,
+        revoked_at: None,
+        grants: grants
+            .iter()
+            .map(|g| keys::GrantLine {
+                grant: crate::grants::Grant::parse(g).unwrap(),
+                cover: keys::Cover::Full,
+            })
+            .collect(),
+        no_access: Vec::new(),
+        can_change: owner.is_none(),
+    };
+    keys::KeysList {
+        lines: vec![
+            line(
+                "ci",
+                Some("alice"),
+                KeyKind::Api,
+                &["alert.send on service:portal/inbox_group:infra"],
+            ),
+            line(
+                "agent",
+                Some("alice"),
+                KeyKind::Mcp,
+                &["access on service:infra-notes"],
+            ),
+            line("root", None, KeyKind::Api, &[]),
+        ],
+        truncated: false,
+        all: true,
+        create_kinds: vec![KeyKind::Api, KeyKind::Mcp],
+        can_revoke: true,
+        can_revoke_all: true,
+        impersonated: false,
+        cannot_use: false,
+        groups: vec![("infra".into(), "Infra".into())],
+        csrf: "demo".into(),
     }
 }
 
@@ -809,7 +867,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         inbox: !panel_only,
         superadmin: true,
     };
-    let holders = |users: &AccessView| -> Vec<Holder> {
+    let holders = |users: &Accounts| -> Vec<Holder> {
         users
             .users
             .iter()
@@ -833,7 +891,31 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 settings: Some("/auth/settings"),
             },
         ),
-        "access" | "access-panel-only" => access_page(&frame, &demo_users(&catalog, panel_only)),
+        "access" | "access-panel-only" => access_page(
+            &frame,
+            &AccessView {
+                notice: None,
+                query: access::Query::default(),
+                accounts: Some(demo_users(&catalog, panel_only)),
+                keys: (!panel_only).then(demo_keys),
+                groups: if panel_only {
+                    Vec::new()
+                } else {
+                    vec![
+                        access::GroupLine {
+                            id: "infra".into(),
+                            name: "Infra".into(),
+                            critical: false,
+                        },
+                        access::GroupLine {
+                            id: "oncall".into(),
+                            name: "On call".into(),
+                            critical: true,
+                        },
+                    ]
+                },
+            },
+        ),
         "activity" | "activity-panel-only" => activity_page(
             &frame,
             &ActivityView {

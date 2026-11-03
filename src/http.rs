@@ -1108,7 +1108,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         None if superadmin => Arc::clone(&catalog),
         None => Arc::new(catalog.filtered(|_| true, false)),
     };
-    let gear = if superadmin {
+    let gear = if superadmin || keys_page::list_visible(state, &viewer) {
         Some(ui::settings::ACCESS_PATH)
     } else if inbox_page::tab_visible(state, &viewer) {
         Some(ui::settings::INBOX_PATH)
@@ -1162,7 +1162,12 @@ async fn handle_settings(
             Err(()) => text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n"),
         };
     };
-    if !is_superadmin(&viewer) {
+    // An account that is not the superadmin sees the tab Access with the list of its keys, and
+    // nothing else: the other pages do not exist for it.
+    let superadmin = is_superadmin(&viewer);
+    if !superadmin
+        && !(path == ui::settings::ACCESS_PATH && keys_page::list_visible(state, &viewer))
+    {
         state.metrics.user_admin("settings", "forbidden");
         return handle_not_found(state, &Method::GET, uri, headers, client);
     }
@@ -1174,9 +1179,9 @@ async fn handle_settings(
     };
     let frame = ui::Frame {
         logout_token: &logout_token,
-        keys: state.config.keys.is_some(),
-        inbox: state.config.inbox.is_some(),
-        superadmin: true,
+        keys: keys_page::list_visible(state, &viewer),
+        inbox: inbox_page::tab_visible(state, &viewer),
+        superadmin,
     };
     // The portal features are not in the catalogue: the pages of the services list the workloads
     // only.
@@ -1199,9 +1204,34 @@ async fn handle_settings(
             )
         }
         ui::settings::ACCESS_PATH => {
-            let (users, snapshot) = load_admin_data(state).await;
-            let view = access_view(state, &workloads, uri, &users_token, users, &snapshot);
-            ui::access_page(&frame, &view)
+            let keys = match keys_page::list(state, &viewer).await {
+                Ok(keys) => keys,
+                Err(response) => return response,
+            };
+            let accounts = if superadmin {
+                let (users, snapshot) = load_admin_data(state).await;
+                Some(accounts_data(
+                    state,
+                    &workloads,
+                    &users_token,
+                    users,
+                    &snapshot,
+                ))
+            } else {
+                None
+            };
+            ui::access_page(
+                &frame,
+                &ui::AccessView {
+                    notice: query_value(uri, "s").and_then(|code| {
+                        ui::notice_for(&code).or_else(|| ui::keys::notice_for(&code))
+                    }),
+                    query: access_query(uri),
+                    accounts,
+                    keys,
+                    groups: inbox_groups(state),
+                },
+            )
         }
         ui::settings::ACTIVITY_PATH => {
             let (_, snapshot) = load_admin_data(state).await;
@@ -1450,6 +1480,7 @@ fn file_card(
 ) -> ui::UserCard {
     ui::UserCard {
         activity: activity.unwrap_or_default(),
+        groups: groups_of(state, &account.grants),
         grants: account.grants.clone(),
         configured: state.policy.configured(login).to_vec(),
         login: login.to_string(),
@@ -1460,45 +1491,99 @@ fn file_card(
     }
 }
 
-fn access_view<'a>(
+/// The accounts of the tab Access.
+fn accounts_data<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
-    uri: &str,
     users_token: &'a str,
     users: Vec<(String, UserRecord)>,
     snapshot: &Snapshot,
-) -> ui::AccessView<'a> {
+) -> ui::Accounts<'a> {
     let mut activities = activities_of(snapshot);
     let counts = key_counts(state);
     let mut cards: Vec<ui::UserCard> = users
         .into_iter()
-        .map(|(login, record)| ui::UserCard {
-            activity: activities.remove(&login).unwrap_or_default(),
-            grants: state.policy.effective(&login, &record.grants),
-            configured: state.policy.configured(&login).to_vec(),
-            keys: counts.get(&login).copied().unwrap_or(0),
-            login,
-            created_at: Some(record.created_at),
-            superadmin: false,
-            file: false,
+        .map(|(login, record)| {
+            let grants = state.policy.effective(&login, &record.grants);
+            ui::UserCard {
+                activity: activities.remove(&login).unwrap_or_default(),
+                groups: groups_of(state, &grants),
+                grants,
+                configured: state.policy.configured(&login).to_vec(),
+                keys: counts.get(&login).copied().unwrap_or(0),
+                login,
+                created_at: Some(record.created_at),
+                superadmin: false,
+                file: false,
+            }
         })
         .collect();
     for (login, account) in &state.config.access.accounts {
         cards.push(file_card(state, login, account, activities.remove(login)));
     }
-    ui::AccessView {
-        notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+    ui::Accounts {
         allow_creation: state.config.users.allow_creation,
         mode: state.policy.mode,
         catalog,
         services: service_grants(state, catalog),
         users: cards,
         features: features_service(state),
-        keys: state.config.keys.is_some(),
-        inbox: state.config.inbox.is_some(),
         max_users: state.config.users.max_users,
         token: users_token,
     }
+}
+
+/// The query of the tab Access. A value that is too long names nothing: the lists are then empty.
+fn access_query(uri: &str) -> ui::access::Query {
+    let text = |key: &str| query_value_up_to(uri, key, 400).unwrap_or_default();
+    ui::access::Query {
+        user: text("user"),
+        group: text("group"),
+        service: text("service"),
+        kind: query_value(uri, "k").and_then(|name| crate::keys::KeyKind::from_name(&name)),
+        mine: query_value(uri, "mine").as_deref() == Some("1"),
+    }
+}
+
+/// The groups of the inbox, the critical groups last. Empty without the block `inbox`.
+fn inbox_groups(state: &AppState) -> Vec<ui::access::GroupLine> {
+    let Some(inbox) = state.config.inbox.as_ref() else {
+        return Vec::new();
+    };
+    let mut groups: Vec<ui::access::GroupLine> = inbox
+        .groups
+        .iter()
+        .map(|(id, group)| ui::access::GroupLine {
+            id: id.clone(),
+            name: group.name.clone(),
+            critical: group.critical,
+        })
+        .collect();
+    groups.sort_by_key(|g| g.critical);
+    groups
+}
+
+/// The groups of the inbox that the grants put an account in: `inbox.receive` on the group, or on
+/// the whole service (portal 15). One group chip for each group.
+fn groups_of(state: &AppState, grants: &[Grant]) -> Vec<String> {
+    let Some(inbox) = state.config.inbox.as_ref() else {
+        return Vec::new();
+    };
+    inbox
+        .groups
+        .keys()
+        .filter(|id| {
+            crate::portal_actions::group_chain(id).is_some_and(|chain| {
+                grants::covers(
+                    grants,
+                    crate::portal_actions::INBOX_RECEIVE,
+                    crate::portal_actions::SERVICE,
+                    &chain,
+                )
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The data of the page of one account. `None`: no account and not the superadmin has the login
@@ -1516,9 +1601,11 @@ fn user_view<'a>(
     let mut found = None;
     for (login, record) in users {
         if login == asked {
+            let grants = state.policy.effective(&login, &record.grants);
             found = Some(ui::UserCard {
                 activity: activities.remove(&login).unwrap_or_default(),
-                grants: state.policy.effective(&login, &record.grants),
+                groups: groups_of(state, &grants),
+                grants,
                 configured: state.policy.configured(&login).to_vec(),
                 keys: owned_keys(state, &login),
                 login,
@@ -1542,6 +1629,7 @@ fn user_view<'a>(
             superadmin: true,
             file: false,
             keys: 0,
+            groups: Vec::new(),
             activity: activities.remove(asked).unwrap_or_default(),
         });
     }

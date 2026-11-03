@@ -1,11 +1,12 @@
-//! The page "Keys" and its four addresses (portal 5.8a): `GET /auth/keys`, `POST /auth/keys/create`,
-//! `POST /auth/keys/edit` and `POST /auth/keys/revoke`.
+//! The keys of the tab Access and their addresses (portal 5.8a): `GET /auth/keys/new`,
+//! `GET /auth/keys/edit`, `POST /auth/keys/create`, `POST /auth/keys/edit` and
+//! `POST /auth/keys/revoke`. The list of the keys is a panel of the tab Access: `GET /auth/keys`
+//! does not exist.
 //!
-//! Each address needs a session. The page of a user shows the keys of the user (the section
-//! "Mine"). A user with `keys.all.read` also sees the keys of all the users (the section "All").
-//! A session that "Log in as" opens can read but never make, change or revoke a key (portal 3.7).
-//! The text of a new key is in the answer of the creation, one time, with `Cache-Control:
-//! no-store`. The portal puts it in no address and in no log.
+//! Each address needs a session. The list shows the keys of the user. A user with `keys.all.read`
+//! also sees the keys of all the users. A session that "Log in as" opens can read but never make,
+//! change or revoke a key (portal 3.7). The text of a new key is in the answer of the creation, one
+//! time, with `Cache-Control: no-store`. The portal puts it in no address and in no log.
 
 use super::*;
 use crate::grants::ACCESS;
@@ -16,15 +17,17 @@ use crate::portal_actions as portal;
 use crate::store::{KeyCaps, KeyListItem, KeyScope, KeyWriteError};
 use crate::ui::grant_editor::{self, EditorData};
 use crate::ui::keys::{
-    self as ui_keys, Cover, EditTarget, GrantLine, KeyLine, KeyState, KeysView, NewKey, Pane,
-    Section,
+    self as ui_keys, Cover, EditTarget, GrantLine, KeyLine, KeyState, KeysList, KeysView, NewKey,
+    Pane,
 };
 use crate::users::KeyOwner;
 
 /// The purpose of the anti-forgery tokens of the forms of the keys.
 pub(super) const KEYS_TOKEN: &str = "keys";
-/// The lines of a page (portal 5.5).
-const PAGE_SIZE: usize = 50;
+/// The lines that the list of the tab Access holds at most (portal 5.5).
+const LIST_LIMIT: usize = 500;
+/// The lines that one read of the database gives.
+const PAGE_SIZE: usize = 100;
 /// The largest body of the forms of the keys (portal 5.8c): 512 grants of 12 KiB and their limits.
 pub(super) const MAX_FORM_BYTES: usize = 7 * 1024 * 1024;
 
@@ -280,6 +283,7 @@ fn line_of_record(
     let mut line = KeyLine {
         id: key.id.clone(),
         owner: login.map(str::to_string),
+        mine: false,
         name: key.name.clone(),
         hint: key.hint.clone(),
         kind: Some(key.kind),
@@ -326,6 +330,7 @@ fn line_of_item(state: &AppState, item: &KeyListItem, now: i64, can_edit: bool) 
     KeyLine {
         id: item.id.clone(),
         owner: item.owner.clone(),
+        mine: false,
         name: item.name.clone(),
         hint: item.hint.clone(),
         kind: item.kind,
@@ -342,32 +347,6 @@ fn line_of_item(state: &AppState, item: &KeyListItem, now: i64, can_edit: bool) 
     }
 }
 
-/// The cursor of portal 5.8b.
-enum Cursor {
-    Database(i64, String),
-    File(String),
-}
-
-fn read_cursor(text: &str) -> Option<Cursor> {
-    let local_ok = |id: &str| {
-        (1..=64).contains(&id.len())
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    };
-    let (head, id) = text.split_once('.')?;
-    if !local_ok(id) {
-        return None;
-    }
-    if head == "file" {
-        return Some(Cursor::File(id.to_string()));
-    }
-    if head.is_empty() || head.len() > 12 || !head.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some(Cursor::Database(head.parse().ok()?, id.to_string()))
-}
-
 /// The query parameters, each one time at most. `None`: a parameter that is not known, or that
 /// is repeated (HTTP 400).
 fn query_parameters(uri: &str) -> Option<std::collections::HashMap<String, String>> {
@@ -379,11 +358,7 @@ fn query_parameters(uri: &str) -> Option<std::collections::HashMap<String, Strin
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let name = percent_decode_form(name).ok()?;
         let value = percent_decode_form(value).ok()?;
-        if !matches!(
-            name.as_str(),
-            "section" | "after" | "copy" | "s" | "id" | "kind" | "k"
-        ) || value.len() > 160
-        {
+        if !matches!(name.as_str(), "copy" | "s" | "id" | "kind") || value.len() > 160 {
             return None;
         }
         if out.insert(name, value).is_some() {
@@ -411,21 +386,155 @@ fn forbidden() -> HttpResponse {
     text_response(StatusCode::FORBIDDEN, "Forbidden\n")
 }
 
-/// The states of the page that `handle_keys` draws. The list is always there. The pane is closed,
-/// or it has the form of a new key or of the change of a key.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Page {
-    /// `GET /auth/keys`: the list, with the pane closed.
-    List,
-    /// `GET /auth/keys/new`: the list, with the form of a new key in the pane.
-    New,
-    /// `GET /auth/keys/edit?id=<id>`: the list, with the form of the change of a key in the pane.
-    Edit,
+/// Whether the viewer sees the list of the keys in the tab Access: the file has the block `keys`,
+/// and the viewer may read the keys of the account or of all the accounts.
+pub(super) fn list_visible(state: &AppState, viewer: &Viewer) -> bool {
+    if state.config.keys.is_none() {
+        return false;
+    }
+    let rights = rights_of(state, viewer);
+    rights.read_own || rights.read_all
 }
 
-/// `GET /auth/keys` (portal 5.8b), `GET /auth/keys/new` and `GET /auth/keys/edit`. The three
-/// addresses draw the same page. The last two open the pane with the form, with the editor of the
-/// grants that the owner can give.
+/// Whether a key of this owner is a key of the viewer.
+fn is_mine(me: &Me, owner: Option<&str>) -> bool {
+    owner == owner_login(me)
+}
+
+/// The keys of the tab Access: the keys of the viewer, or of all the accounts when the viewer may
+/// read them. The error is the response. `None`: the list is not for this viewer.
+pub(super) async fn list(
+    state: &Arc<AppState>,
+    viewer: &Viewer,
+) -> Result<Option<KeysList>, HttpResponse> {
+    if !list_visible(state, viewer) {
+        return Ok(None);
+    }
+    let rights = rights_of(state, viewer);
+    let Some((_, csrf)) = frame_token(state, viewer) else {
+        return Err(text_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "authentication error\n",
+        ));
+    };
+    let all = rights.read_all;
+    let now = unix_now();
+    let mine = me(state, viewer);
+    // The keys of the file first, by login and then by name, then the keys of the database
+    // (portal 5.8).
+    let mut file_keys: Vec<Arc<crate::users::KeyRecord>> = state
+        .users
+        .keys()
+        .into_iter()
+        .filter(|k| k.is_from_file())
+        .filter(|k| {
+            all || matches!(&k.owner, KeyOwner::File(login) if Some(login.as_str()) == owner_login(&mine))
+        })
+        .collect();
+    file_keys.sort_by(|a, b| {
+        let key = |k: &crate::users::KeyRecord| match &k.owner {
+            KeyOwner::File(login) => (login.clone(), k.name.clone()),
+            _ => (String::new(), k.name.clone()),
+        };
+        key(a).cmp(&key(b))
+    });
+    let mut lines: Vec<KeyLine> = file_keys
+        .iter()
+        .map(|key| line_of_record(state, key, now, false, None))
+        .collect();
+    // The keys of an account of the file are all in the file.
+    let scope_owner = match (&mine, all) {
+        (_, true) => Some(None),
+        (Me::Superadmin, false) => Some(Some(None)),
+        (Me::Database(login), false) => Some(Some(Some(login.clone()))),
+        (Me::File(_), false) => None,
+    };
+    let mut truncated = false;
+    if let Some(scope_owner) = scope_owner {
+        let mut after: Option<(i64, String)> = None;
+        loop {
+            let (store, cursor, owner) =
+                (Arc::clone(&state.store), after.clone(), scope_owner.clone());
+            let listed = tokio::task::spawn_blocking(move || {
+                let scope = match &owner {
+                    None => KeyScope::All,
+                    Some(None) => KeyScope::Superadmin,
+                    Some(Some(login)) => KeyScope::Owner(login),
+                };
+                store.list_keys(
+                    scope,
+                    cursor.as_ref().map(|(at, id)| (*at, id.as_str())),
+                    PAGE_SIZE,
+                )
+            })
+            .await;
+            let items = match listed {
+                Ok(Ok(items)) => items,
+                _ => {
+                    return Err(text_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Service Unavailable\n",
+                    ))
+                }
+            };
+            let last = items.last().map(|item| (item.created_at, item.id.clone()));
+            let full = items.len() == PAGE_SIZE;
+            for item in &items {
+                if lines.len() >= LIST_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                lines.push(line_of_item(state, item, now, rights.edit));
+            }
+            if truncated || !full {
+                break;
+            }
+            after = last;
+        }
+    }
+    for line in &mut lines {
+        line.mine = is_mine(&mine, line.owner.as_deref());
+        line.can_change = line.can_change && line.mine && rights.edit;
+    }
+    let groups = state
+        .config
+        .inbox
+        .as_ref()
+        .map(|inbox| {
+            inbox
+                .groups
+                .iter()
+                .map(|(id, group)| (id.clone(), group.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Some(KeysList {
+        lines,
+        truncated,
+        all,
+        create_kinds: rights.create_kinds.clone(),
+        can_revoke: rights.revoke,
+        can_revoke_all: rights.revoke_all,
+        impersonated: viewer.session.impersonated,
+        cannot_use: rights.cannot_use,
+        groups,
+        csrf,
+    }))
+}
+
+/// The states of the page that `handle_keys` draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Page {
+    /// `GET /auth/keys/new`: the form of a new key.
+    New,
+    /// `GET /auth/keys/edit?id=<id>`: the form of the change of a key.
+    Edit,
+    /// The answer of the creation: the text of the key.
+    Made,
+}
+
+/// `GET /auth/keys/new` and `GET /auth/keys/edit` (portal 5.8b). The page holds the form, with the
+/// editor of the grants that the owner can give. The list of the keys is in the tab Access.
 pub(super) async fn handle_keys(
     state: &Arc<AppState>,
     uri: &str,
@@ -445,14 +554,14 @@ pub(super) async fn handle_keys(
     draw(state, &viewer, params, page, None).await
 }
 
-/// The text of a key that was just made: its name and its text, for the pane of the creation.
+/// The text of a key that was just made: its name and its text, for the page of the creation.
 pub(super) struct Made<'a> {
     pub name: &'a str,
     pub text: &'a str,
 }
 
-/// Draws the page for a viewer: the list, and the pane for the state `page`. `made` is the key that
-/// the pane shows one time: it replaces the form.
+/// Draws the page of a key for a viewer: the form of a new key, the form of the change of a key,
+/// or the text of the key that was just made (`made`).
 async fn draw(
     state: &Arc<AppState>,
     viewer: &Viewer,
@@ -461,26 +570,6 @@ async fn draw(
     made: Option<Made<'_>>,
 ) -> HttpResponse {
     let new = page == Page::New;
-    let form_page = page != Page::List;
-    let section = match params.get("section").map(String::as_str) {
-        None | Some("mine") => Section::Mine,
-        Some("all") => Section::All,
-        Some(_) => return bad_request(),
-    };
-    let kind_filter = match params.get("k").map(String::as_str) {
-        None => None,
-        Some(name) => match KeyKind::from_name(name) {
-            Some(kind) => Some(kind),
-            None => return bad_request(),
-        },
-    };
-    let after = match params.get("after") {
-        None => None,
-        Some(text) => match read_cursor(text) {
-            Some(cursor) => Some(cursor),
-            None => return bad_request(),
-        },
-    };
     let notice_code = params.get("s");
     let notice = match notice_code {
         None => None,
@@ -500,15 +589,13 @@ async fn draw(
         }
     }
     let rights = rights_of(state, viewer);
-    match section {
-        Section::Mine if !rights.read_own => return forbidden(),
-        Section::All if !rights.read_all => return forbidden(),
-        _ => {}
-    }
-    if new && (section != Section::Mine || !rights.create) {
+    if !rights.read_own {
         return forbidden();
     }
-    if page == Page::Edit && (section != Section::Mine || !rights.edit) {
+    if new && !rights.create {
+        return forbidden();
+    }
+    if page == Page::Edit && !rights.edit {
         return forbidden();
     }
     let Some((logout_token, csrf)) = frame_token(state, viewer) else {
@@ -523,109 +610,6 @@ async fn draw(
                 .map(|(g, _)| g)
                 .unwrap_or_default()
         })),
-    };
-    let can_edit = rights.edit && section == Section::Mine;
-
-    // The lines: the keys of the file first, by login and then by name, then the pages of the
-    // database (portal 5.8).
-    let (lines, next) = {
-        let mut file_keys: Vec<Arc<crate::users::KeyRecord>> = state
-        .users
-        .keys()
-        .into_iter()
-        .filter(|k| k.is_from_file())
-        .filter(|k| match section {
-            Section::All => true,
-            Section::Mine => matches!(&k.owner, KeyOwner::File(login) if Some(login.as_str()) == owner_login(&mine)),
-        })
-        .collect();
-        file_keys.sort_by(|a, b| {
-            let key = |k: &crate::users::KeyRecord| match &k.owner {
-                KeyOwner::File(login) => (login.clone(), k.name.clone()),
-                _ => (String::new(), k.name.clone()),
-            };
-            key(a).cmp(&key(b))
-        });
-        let mut lines: Vec<KeyLine> = Vec::new();
-        let mut database_after: Option<(i64, String)> = None;
-        let mut start = 0;
-        match &after {
-            Some(Cursor::File(subject)) => {
-                start = file_keys
-                    .iter()
-                    .position(|k| k.id == *subject)
-                    .map_or(file_keys.len(), |i| i + 1);
-            }
-            Some(Cursor::Database(created, id)) => {
-                start = file_keys.len();
-                database_after = Some((*created, id.clone()));
-            }
-            None => {}
-        }
-        let mut next: Option<String> = None;
-        for key in file_keys.iter().skip(start).take(PAGE_SIZE) {
-            lines.push(line_of_record(state, key, now, false, None));
-        }
-        let file_taken = lines.len();
-        if start + file_taken < file_keys.len() {
-            let last = lines.last().map(|l| l.id.clone());
-            next = last.map(|id| format!("file.{id}"));
-        } else if file_taken < PAGE_SIZE
-            || database_after.is_some()
-            || file_keys.len() <= start + file_taken
-        {
-            // The database fills the rest of the page.
-            let scope = match (&section, &mine) {
-                (Section::All, _) => Some(KeyScope::All),
-                (Section::Mine, Me::Superadmin) => Some(KeyScope::Superadmin),
-                (Section::Mine, Me::Database(login)) => Some(KeyScope::Owner(login.as_str())),
-                // The keys of an account of the file are all in the file.
-                (Section::Mine, Me::File(_)) => None,
-            };
-            if let Some(scope) = scope {
-                let room = PAGE_SIZE - file_taken;
-                let cursor = database_after.as_ref().map(|(c, id)| (*c, id.as_str()));
-                let store = Arc::clone(&state.store);
-                let owned_scope = match scope {
-                    KeyScope::All => 0u8,
-                    KeyScope::Superadmin => 1,
-                    KeyScope::Owner(_) => 2,
-                };
-                let login = owner_login(&mine).map(str::to_string);
-                let cursor_owned = cursor.map(|(c, id)| (c, id.to_string()));
-                let listed = tokio::task::spawn_blocking(move || {
-                    let scope = match owned_scope {
-                        0 => KeyScope::All,
-                        1 => KeyScope::Superadmin,
-                        _ => KeyScope::Owner(login.as_deref().unwrap_or("")),
-                    };
-                    store.list_keys(
-                        scope,
-                        cursor_owned.as_ref().map(|(c, id)| (*c, id.as_str())),
-                        room + 1,
-                    )
-                })
-                .await;
-                let items = match listed {
-                    Ok(Ok(items)) => items,
-                    _ => {
-                        return text_response(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "Service Unavailable\n",
-                        )
-                    }
-                };
-                for item in items.iter().take(room) {
-                    lines.push(line_of_item(state, item, now, can_edit));
-                }
-                if items.len() > room {
-                    if let Some(last) = lines.last() {
-                        next = Some(format!("{}.{}", last.created_at, last.id));
-                    }
-                }
-            }
-        }
-        (lines, next)
     };
 
     // The form of a key. The kind of a new key comes from the address (`kind`), or from the key that
@@ -691,7 +675,7 @@ async fn draw(
     let default_lifetime = state.config.key_limits.default_lifetime.as_secs();
     let first_lifetime = max_lifetime.map_or(default_lifetime, |max| max.min(default_lifetime));
     let editor = kind
-        .filter(|_| made.is_none() && form_page && (new || edit.is_some()))
+        .filter(|_| made.is_none() && (new || edit.is_some()))
         .map(|kind| editor_for(state, kind, my_grants.as_deref(), ticked));
     let pane = match (&made, edit) {
         (Some(key), _) => Pane::Made(NewKey {
@@ -700,36 +684,13 @@ async fn draw(
             superadmin: matches!(mine, Me::Superadmin),
         }),
         (None, Some(target)) => Pane::Edit(target),
-        (None, None) if new => Pane::New,
-        (None, None) => Pane::Closed,
+        (None, None) => Pane::New,
     };
-    let groups = state
-        .config
-        .inbox
-        .as_ref()
-        .map(|inbox| {
-            inbox
-                .groups
-                .iter()
-                .map(|(id, group)| (id.clone(), group.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
     let view = KeysView {
-        section,
-        can_read_own: rights.read_own,
-        can_read_all: rights.read_all,
         can_create: rights.create,
         create_kinds: rights.create_kinds.clone(),
         kind: kind.filter(|_| made.is_none()),
-        kind_filter,
-        groups,
-        can_revoke: rights.revoke,
-        can_revoke_all: rights.revoke_all,
-        cannot_use: rights.cannot_use,
         notice,
-        lines,
-        next,
         csrf: &csrf,
         editor,
         pane,
@@ -740,7 +701,7 @@ async fn draw(
     };
     let frame = ui::Frame {
         logout_token: &logout_token,
-        keys: true,
+        keys: list_visible(state, viewer),
         inbox: inbox_page::tab_visible(state, viewer),
         superadmin: is_superadmin(viewer),
     };
@@ -988,7 +949,7 @@ pub(super) async fn handle_keys_create(
         state,
         &viewer,
         std::collections::HashMap::new(),
-        Page::List,
+        Page::Made,
         Some(Made {
             name: &form.name,
             text: &text,
@@ -1150,7 +1111,7 @@ pub(super) async fn handle_keys_revoke(
     let back = |code: &str| {
         redirect_response(
             StatusCode::SEE_OTHER,
-            &format!("{}?section={section}&s={code}", ui_keys::PATH),
+            &format!("{}?s={code}", ui_keys::PATH),
         )
     };
     let mut code = "revoked";

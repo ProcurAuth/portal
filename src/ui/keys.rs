@@ -1,21 +1,20 @@
-//! The page "Keys" (portal 5.8): the keys of the user and of all the users on the left, and the
-//! form of a key in a pane on the right.
+//! The keys in the tab Access (portal 5.8): the list of the keys, and the pages "New key" and
+//! "Edit key".
 //!
-//! A key has one kind, API or MCP, and the list shows it with an icon. The pane has four states:
-//! closed, a new key, the change of a key, and the text of a key that was just made. The text of a
-//! key shows one time, in the pane of the creation, with `Cache-Control: no-store`. The page works
-//! without script: the kind selector is a small form that asks for the page again, and a bulk
-//! revoke is a form with checkboxes.
+//! A key has one kind, API or MCP, and the list shows it with an icon. The list is a panel of the
+//! tab Access, next to the accounts. The pages of a key are child pages of Access, as the page of an
+//! account is. The text of a key shows one time, in the page that follows the creation, with
+//! `Cache-Control: no-store`. Each page works without script: the kind selector is a small form
+//! that asks for the page again, and a bulk revoke is a form with checkboxes.
 //!
-//! Each action has one entry point. With the pane closed, the toolbar has "New key". With the pane
-//! open, the toolbar button is absent, and the head of the pane has the title, Cancel and the
-//! action.
+//! Each action has one entry point. The head of the list has "New key". A page of a key has
+//! Cancel and the action.
 
 use std::fmt::Write as _;
 
+use super::access::Query;
 use super::components::{
-    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, icon, icon_link, toolbar, zone, Bulk,
-    Chip, Zone,
+    bulk_all_box, bulk_box, bulk_button, bulk_form, chips, icon, icon_link, zone, Bulk, Chip, Zone,
 };
 use super::grant_editor::{self, EditorData, Place};
 use super::settings::{fill_page, notice_html, Frame, Notice, Tab};
@@ -31,22 +30,6 @@ pub const CREATE_PATH: &str = "/auth/keys/create";
 /// `GET`: the page with the pane of the change of a key open. `POST`: the change.
 pub const EDIT_PATH: &str = "/auth/keys/edit";
 pub const REVOKE_PATH: &str = "/auth/keys/revoke";
-
-/// The sections of the page (portal 5.8).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Section {
-    Mine,
-    All,
-}
-
-impl Section {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Mine => "mine",
-            Self::All => "all",
-        }
-    }
-}
 
 /// The state of a key (portal 5.5): the first that applies, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +85,8 @@ pub struct KeyLine {
     pub id: String,
     /// The login of the owner. `None`: the key of the superadmin.
     pub owner: Option<String>,
+    /// The viewer owns the key.
+    pub mine: bool,
     pub name: String,
     pub hint: String,
     /// The kind of the key. `None`: the summary row of a revoked key has no kind.
@@ -136,8 +121,6 @@ pub struct EditTarget {
 
 /// The state of the pane.
 pub enum Pane<'a> {
-    /// No pane: the list has the full width, and the toolbar has "New key".
-    Closed,
     /// The form of a new key. The view holds the kind and the editor.
     New,
     /// The form of the change of a key.
@@ -146,31 +129,17 @@ pub enum Pane<'a> {
     Made(NewKey<'a>),
 }
 
-/// The data of the page.
+/// The data of the pages of a key.
 pub struct KeysView<'a> {
-    pub section: Section,
-    pub can_read_own: bool,
-    pub can_read_all: bool,
     pub can_create: bool,
     /// The kinds of key that the viewer may make: the kinds that the file turns on and that the
     /// viewer holds `keys.own.create` on. The new-key page has a selector only with two or more.
     pub create_kinds: Vec<KeyKind>,
-    /// The kind of the key that the form makes or changes. `None` with the pane closed.
+    /// The kind of the key that the form makes or changes.
     pub kind: Option<KeyKind>,
-    /// The filter of the list: only the keys of this kind.
-    pub kind_filter: Option<KeyKind>,
-    /// The names of the groups of the inbox, for the column "Can use".
-    pub groups: Vec<(String, String)>,
-    pub can_revoke: bool,
-    pub can_revoke_all: bool,
-    /// The owner can make keys and cannot use them (portal 5.3b).
-    pub cannot_use: bool,
     pub notice: Option<Notice>,
-    pub lines: Vec<KeyLine>,
-    /// The cursor of the next page (portal 5.8b), when there is one.
-    pub next: Option<String>,
     pub csrf: &'a str,
-    /// The editor of the grants of the form. `None`: the pane has no form.
+    /// The editor of the grants of the form. `None`: the page has no form.
     pub editor: Option<EditorData>,
     pub pane: Pane<'a>,
     /// The first value of the field `expires_at`.
@@ -244,25 +213,9 @@ fn kind_icon(kind: KeyKind) -> &'static str {
     }
 }
 
-/// The address of the page with a section and a kind filter.
-fn list_href(section: Section, kind: Option<KeyKind>) -> String {
-    let mut query = Vec::new();
-    if section == Section::All {
-        query.push("section=all".to_string());
-    }
-    if let Some(kind) = kind {
-        query.push(format!("k={}", kind.name()));
-    }
-    if query.is_empty() {
-        PATH.to_string()
-    } else {
-        format!("{PATH}?{}", query.join("&"))
-    }
-}
-
 /// What a key can use, in one short line: the groups of the inbox that it sends to and reads, or
 /// the services of an MCP key. A mark shows a right that the owner lost.
-fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
+fn can_use(groups: &[(String, String)], line: &KeyLine) -> (String, String) {
     if line.grants.is_empty() {
         return (
             r#"<span class="muted">nothing</span>"#.to_string(),
@@ -272,7 +225,7 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
     let portal = crate::portal_actions::SERVICE;
     let name_of = |path: &str| {
         let id = path.strip_prefix("inbox_group:").unwrap_or(path);
-        view.groups
+        groups
             .iter()
             .find(|(g, _)| g == id)
             .map_or(id.to_string(), |(_, name)| name.clone())
@@ -360,17 +313,65 @@ fn can_use(view: &KeysView<'_>, line: &KeyLine) -> (String, String) {
     )
 }
 
-/// Whether the row has a box: the account may revoke the key.
-fn may_revoke(view: &KeysView<'_>, line: &KeyLine) -> bool {
-    line.revoked_at.is_none()
-        && !line.file
-        && match view.section {
-            Section::Mine => view.can_revoke && !view.impersonated,
-            Section::All => view.can_revoke_all && !view.impersonated,
-        }
+/// The keys that the viewer sees in the tab Access, with what the list needs to draw its controls.
+pub struct KeysList {
+    /// Every key of the viewer, or of all the accounts. The file keys come first, then the keys of
+    /// the database, newest first.
+    pub lines: Vec<KeyLine>,
+    /// The list holds more keys than the page draws.
+    pub truncated: bool,
+    /// The viewer sees the keys of all the accounts: the list has the column Owner and the chip
+    /// "mine".
+    pub all: bool,
+    /// The kinds of key that the viewer may make. None: the list has no "New key".
+    pub create_kinds: Vec<KeyKind>,
+    pub can_revoke: bool,
+    pub can_revoke_all: bool,
+    /// The user browses as another user: no change is possible (portal 3.7).
+    pub impersonated: bool,
+    /// The owner can make keys and cannot use them (portal 5.3b).
+    pub cannot_use: bool,
+    /// The names of the groups of the inbox, for the column "Can use".
+    pub groups: Vec<(String, String)>,
+    /// The anti-CSRF token of the forms of the keys.
+    pub csrf: String,
 }
 
-fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line: &KeyLine) {
+impl KeysList {
+    /// Whether the row has a box: the viewer may revoke the key.
+    fn may_revoke(&self, line: &KeyLine) -> bool {
+        line.revoked_at.is_none()
+            && !line.file
+            && !self.impersonated
+            && if line.mine {
+                self.can_revoke || self.can_revoke_all
+            } else {
+                self.can_revoke_all
+            }
+    }
+
+    /// "New key" is a link in the head of the list. It is absent when the viewer may make no kind.
+    fn can_create(&self) -> bool {
+        !self.create_kinds.is_empty() && !self.impersonated
+    }
+}
+
+/// The groups of the inbox that a key names in its grants.
+pub(super) fn key_groups(line: &KeyLine) -> Vec<&str> {
+    line.grants
+        .iter()
+        .filter(|g| g.grant.service == crate::portal_actions::SERVICE)
+        .filter_map(|g| {
+            g.grant
+                .path
+                .first()
+                .filter(|s| s.kind == crate::portal_actions::INBOX_GROUP)
+        })
+        .map(|s| s.id.as_str())
+        .collect()
+}
+
+fn key_row(out: &mut String, list: &KeysList, bulk: &Bulk, boxes: bool, line: &KeyLine) {
     // One line: the kind, the name, what the key can use, when it ends, when it was used. The id,
     // the hint and the creation date are in the tooltip of the name.
     let hint = match line.kind {
@@ -384,22 +385,16 @@ fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line
     } else {
         format!(" Made {}.", crate::util::format_utc(line.created_at))
     };
-    let editing = matches!(&view.pane, Pane::Edit(target) if target.id == line.id);
     let _ = write!(
         out,
-        r#"<tr{} data-kind="{}">"#,
-        if editing {
-            r#" class="is-selected""#
-        } else {
-            ""
-        },
+        r#"<tr data-kind="{}">"#,
         line.kind.map_or("", KeyKind::name)
     );
     if boxes {
         let _ = write!(
             out,
             "<td>{}</td>",
-            if may_revoke(view, line) {
+            if list.may_revoke(line) {
                 bulk_box(bulk, &line.id, &format!("Select {}", line.name))
             } else {
                 String::new()
@@ -439,20 +434,20 @@ fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line
         );
     }
     out.push_str("</td>");
-    if view.section == Section::All {
+    if list.all {
         let _ = write!(
             out,
-            r#"<td class="muted">{}</td>"#,
+            r#"<td class="muted wide">{}</td>"#,
             match &line.owner {
                 Some(login) => html_escape(login),
                 None => "superadmin".to_string(),
             }
         );
     }
-    let (can_use_html, can_use_text) = can_use(view, line);
+    let (can_use_html, can_use_text) = can_use(&list.groups, line);
     let _ = write!(
         out,
-        r#"<td title="{}">{}</td><td class="r">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
+        r#"<td title="{}">{}</td><td class="r wide">{}</td><td class="r" title="{} checks">{}</td><td class="r">"#,
         html_escape(&can_use_text),
         can_use_html,
         match line.expires_at {
@@ -475,117 +470,166 @@ fn key_row(out: &mut String, view: &KeysView<'_>, bulk: &Bulk, boxes: bool, line
     out.push_str("</td></tr>");
 }
 
-fn list_zone(view: &KeysView<'_>) -> String {
-    let lines: Vec<&KeyLine> = view
-        .lines
+/// The list of the keys in the tab Access. `matching` are the lines that the filters of the page
+/// keep. The chips of the kinds count them, so the figures follow the filters. The chip "mine" and
+/// the chip of a kind then keep the rows of the list.
+pub(super) fn keys_zone(list: &KeysList, query: &Query, matching: &[&KeyLine]) -> String {
+    let shown: Vec<&KeyLine> = matching
         .iter()
-        .filter(|l| view.kind_filter.is_none_or(|k| l.kind == Some(k)))
+        .copied()
+        .filter(|l| query.kind.is_none_or(|k| l.kind == Some(k)))
+        .filter(|l| !query.mine || l.mine)
         .collect();
-    let count_kind = |kind: KeyKind| view.lines.iter().filter(|l| l.kind == Some(kind)).count();
-    let all_href = list_href(view.section, None);
-    let api_href = list_href(
-        view.section,
-        (view.kind_filter != Some(KeyKind::Api)).then_some(KeyKind::Api),
-    );
-    let mcp_href = list_href(
-        view.section,
-        (view.kind_filter != Some(KeyKind::Mcp)).then_some(KeyKind::Mcp),
-    );
+    let count_kind = |kind: KeyKind| matching.iter().filter(|l| l.kind == Some(kind)).count();
     let api_label = format!(r#"<span class="st--off">{}</span>"#, icon("webhook"));
     let mcp_label = format!(r#"<span class="st--off">{}</span>"#, icon("robot"));
+    let mine_label = format!(r#"<span class="st--off">{}</span>"#, icon("user"));
+    let all_href = query.with_kind(None).with_mine(false).href();
+    let api_href = query.with_kind(toggled(query.kind, KeyKind::Api)).href();
+    let mcp_href = query.with_kind(toggled(query.kind, KeyKind::Mcp)).href();
+    let mine_href = query.with_mine(!query.mine).href();
     let chips_html = chips(&[
         Chip {
             label_html: "All",
             name: "",
-            count: view.lines.len(),
+            count: matching.len(),
             href: &all_href,
-            on: view.kind_filter.is_none(),
+            on: query.kind.is_none() && !query.mine,
         },
         Chip {
             label_html: &api_label,
             name: KIND_TIP_API,
             count: count_kind(KeyKind::Api),
             href: &api_href,
-            on: view.kind_filter == Some(KeyKind::Api),
+            on: query.kind == Some(KeyKind::Api),
         },
         Chip {
             label_html: &mcp_label,
             name: KIND_TIP_MCP,
             count: count_kind(KeyKind::Mcp),
             href: &mcp_href,
-            on: view.kind_filter == Some(KeyKind::Mcp),
+            on: query.kind == Some(KeyKind::Mcp),
+        },
+        Chip {
+            label_html: &mine_label,
+            name: "My keys",
+            count: if list.all {
+                matching.iter().filter(|l| l.mine).count()
+            } else {
+                0
+            },
+            href: &mine_href,
+            on: query.mine,
         },
     ]);
     let bulk = Bulk {
         id: "revoke-keys",
         action: REVOKE_PATH,
         field: "id",
+        // A viewer who may revoke the keys of all the accounts asks for the section "all": the
+        // handler then keeps no owner filter.
         fields_html: &format!(
             r#"<input type="hidden" name="csrf" value="{}"><input type="hidden" name="section" value="{}">"#,
-            html_escape(view.csrf),
-            view.section.name()
+            html_escape(&list.csrf),
+            if list.can_revoke_all { "all" } else { "mine" }
         ),
         verb: "Revoke",
         one: "key",
         many: "keys",
         danger: true,
     };
-    let boxes = view.lines.iter().any(|l| may_revoke(view, l));
-    let tools = if boxes {
-        bulk_button(&bulk)
-    } else {
-        String::new()
-    };
+    let boxes = list.lines.iter().any(|l| list.may_revoke(l));
+    let mut tools = String::new();
+    if boxes {
+        tools.push_str(&bulk_button(&bulk));
+    }
+    if list.can_create() {
+        let _ = write!(
+            tools,
+            r#"<a class="button button--primary" href="{NEW_PATH}">{}New key</a>"#,
+            icon("plus")
+        );
+    }
     let mut body = String::new();
+    if list.cannot_use {
+        body.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Your keys cannot reach a service: you do not have the right keys.own.use.</span></p>"#);
+    }
     if boxes {
         body.push_str(&bulk_form(&bulk));
     }
-    if lines.is_empty() {
-        body.push_str(r#"<p class="empty">No key yet.</p>"#);
+    if shown.is_empty() {
+        body.push_str(&empty_keys(list, query));
     } else {
         body.push_str(r#"<table class="grid grid--keys"><colgroup>"#);
         if boxes {
             body.push_str(r#"<col class="w28">"#);
         }
-        body.push_str(r#"<col class="w28"><col class="w152">"#);
-        if view.section == Section::All {
-            body.push_str(r#"<col class="w88">"#);
+        body.push_str(r#"<col class="w28"><col class="w136">"#);
+        if list.all {
+            body.push_str(r#"<col class="w88 wide">"#);
         }
         body.push_str(
-            r#"<col><col class="w136"><col class="w136"><col class="w28"></colgroup><thead><tr>"#,
+            r#"<col><col class="w120 wide"><col class="w120"><col class="w28"></colgroup><thead><tr>"#,
         );
         if boxes {
             let _ = write!(body, r#"<th scope="col">{}</th>"#, bulk_all_box(&bulk));
         }
         body.push_str(r#"<th scope="col"><span class="visually-hidden">Kind</span></th><th scope="col">Key</th>"#);
-        if view.section == Section::All {
-            body.push_str(r#"<th scope="col">Owner</th>"#);
+        if list.all {
+            body.push_str(r#"<th scope="col" class="wide">Owner</th>"#);
         }
-        body.push_str(r#"<th scope="col">Can use</th><th scope="col" class="r">Expires</th><th scope="col" class="r">Last used</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
-        for line in &lines {
-            key_row(&mut body, view, &bulk, boxes, line);
+        body.push_str(r#"<th scope="col">Can use</th><th scope="col" class="r wide">Expires</th><th scope="col" class="r">Last used</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead><tbody>"#);
+        for line in &shown {
+            key_row(&mut body, list, &bulk, boxes, line);
         }
         body.push_str("</tbody></table>");
     }
-    if let Some(cursor) = &view.next {
+    if list.truncated {
         let _ = write!(
             body,
-            r#"<p class="more"><a href="{PATH}?section={}&amp;after={}">Next keys</a></p>"#,
-            view.section.name(),
-            html_escape(cursor)
+            r#"<p class="empty">The list shows the first {} keys.</p>"#,
+            list.lines.len()
         );
     }
+    let count = if shown.len() == list.lines.len() {
+        list.lines.len().to_string()
+    } else {
+        format!("{} of {}", shown.len(), list.lines.len())
+    };
     zone(
         &Zone {
-            id: "keys-list",
-            title: "",
-            count: "",
+            id: "keys-title",
+            title: "Keys",
+            count: &count,
+            count_title: "",
             chips_html: &chips_html,
             tools_html: &tools,
             class: "",
             above_html: "",
         },
         &body,
+    )
+}
+
+/// The chip of a kind that is on goes off at a second click.
+fn toggled(current: Option<KeyKind>, kind: KeyKind) -> Option<KeyKind> {
+    (current != Some(kind)).then_some(kind)
+}
+
+/// What an empty list says: no key at all, or no key that the filters keep. A key holds the rights
+/// of services or the rights of the inbox, so a filter on both gives none.
+fn empty_keys(list: &KeysList, query: &Query) -> String {
+    if list.lines.is_empty() {
+        return r#"<p class="empty">No key yet.</p>"#.to_string();
+    }
+    let both = if !query.group.is_empty() && !query.service.is_empty() {
+        " A key holds the rights of a service or the rights of a group, not both."
+    } else {
+        ""
+    };
+    format!(
+        r#"<p class="empty">No key matches these filters.{both} <a href="{}">Clear</a></p>"#,
+        query.cleared().href()
     )
 }
 
@@ -765,60 +809,16 @@ fn made_pane(key: &NewKey<'_>) -> String {
 
 // The page -------------------------------------------------------------------------------------
 
-/// The page "Keys": the list, and the pane when it is open.
+/// The page of a key: the form of a new key, the form of the change of a key, or the text of the
+/// key that was just made.
 pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
-    if view.cannot_use {
-        out.push_str(r#"<p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Your keys cannot reach a service: you do not have the right keys.own.use.</span></p>"#);
-    }
-    let mut tools = String::new();
-    if view.can_read_own && view.can_read_all {
-        let item = |section: Section, label: &str| {
-            let on = view.section == section;
-            format!(
-                r#"<a class="segmented__option{}" href="{}"{}>{label}</a>"#,
-                if on { " is-active" } else { "" },
-                list_href(section, None),
-                if on { r#" aria-current="true""# } else { "" },
-            )
-        };
-        let _ = write!(
-            tools,
-            r#"<div class="segmented" role="group" aria-label="Section">{}{}</div>"#,
-            item(Section::Mine, "Mine"),
-            item(Section::All, "All"),
-        );
-    }
-    // One entry point: "New key" shows only while the pane is closed.
-    let closed = matches!(view.pane, Pane::Closed);
-    if closed
-        && view.can_create
-        && !view.create_kinds.is_empty()
-        && view.section == Section::Mine
-        && !view.impersonated
-    {
-        let _ = write!(
-            tools,
-            r#"<a class="button button--primary" href="{NEW_PATH}">{}New key</a>"#,
-            icon("plus")
-        );
-    }
-    out.push_str(&toolbar("Keys", &view.lines.len().to_string(), &tools));
-    let list = list_zone(view);
     let pane = match &view.pane {
-        Pane::Closed => None,
-        Pane::New | Pane::Edit(_) => Some(form_pane(view)),
-        Pane::Made(key) => Some(made_pane(key)),
+        Pane::New | Pane::Edit(_) => form_pane(view),
+        Pane::Made(key) => made_pane(key),
     };
-    match pane {
-        Some(pane) => {
-            let _ = write!(out, r#"<div class="split split--even">{list}{pane}</div>"#);
-        }
-        None => {
-            let _ = write!(out, r#"<div class="split split--one">{list}</div>"#);
-        }
-    }
+    let _ = write!(out, r#"<div class="split split--one">{pane}</div>"#);
     fill_page(Tab::Access, frame, "Keys", &out)
 }
 
@@ -837,275 +837,4 @@ pub fn is_offered(kind: KeyKind, grant: &Grant) -> bool {
 /// The text of a time in the form of the field `expires_at`.
 pub fn instant_text(unix: i64) -> String {
     format_utc_instant(unix)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::grants::Grant;
-
-    fn frame() -> Frame<'static> {
-        Frame {
-            logout_token: "out",
-            keys: true,
-            inbox: true,
-            superadmin: false,
-        }
-    }
-
-    fn line(id: &str, name: &str, kind: KeyKind, grants: &[(&str, Cover)]) -> KeyLine {
-        KeyLine {
-            id: id.into(),
-            owner: Some("alice".into()),
-            name: name.into(),
-            hint: "AbCd".into(),
-            kind: Some(kind),
-            state: KeyState::Active,
-            file: false,
-            created_at: 1_700_000_000,
-            expires_at: None,
-            last_check_at: None,
-            check_count: 0,
-            revoked_at: None,
-            grants: grants
-                .iter()
-                .map(|(text, cover)| GrantLine {
-                    grant: Grant::parse(text).unwrap(),
-                    cover: *cover,
-                })
-                .collect(),
-            no_access: Vec::new(),
-            can_change: true,
-        }
-    }
-
-    fn view(pane: Pane<'static>, kinds: &[KeyKind]) -> KeysView<'static> {
-        KeysView {
-            section: Section::Mine,
-            can_read_own: true,
-            can_read_all: true,
-            can_create: !kinds.is_empty(),
-            create_kinds: kinds.to_vec(),
-            kind: kinds.first().copied(),
-            kind_filter: None,
-            groups: vec![
-                ("infra".into(), "Infra <b>".into()),
-                ("db".into(), "Database".into()),
-            ],
-            can_revoke: true,
-            can_revoke_all: false,
-            cannot_use: false,
-            notice: None,
-            lines: vec![
-                line(
-                    "k1",
-                    "ci <deploy>",
-                    KeyKind::Api,
-                    &[
-                        (
-                            "alert.send on service:portal/inbox_group:infra",
-                            Cover::Full,
-                        ),
-                        ("alert.send on service:portal/inbox_group:db", Cover::None),
-                        (
-                            "alert.read on service:portal/inbox_group:infra",
-                            Cover::Full,
-                        ),
-                    ],
-                ),
-                line(
-                    "k2",
-                    "agent",
-                    KeyKind::Mcp,
-                    &[
-                        ("access on service:notes", Cover::Full),
-                        ("notes.read on service:notes", Cover::Full),
-                    ],
-                ),
-            ],
-            next: None,
-            csrf: "tok<",
-            editor: None,
-            pane,
-            expires_at: "2026-12-01T00:00:00Z".into(),
-            max_lifetime: None,
-            copy_name: String::new(),
-            impersonated: false,
-        }
-    }
-
-    const BOTH: [KeyKind; 2] = [KeyKind::Mcp, KeyKind::Api];
-
-    fn page(view: &KeysView) -> String {
-        keys_page(&frame(), view)
-    }
-
-    #[test]
-    fn the_entry_point_is_the_toolbar_button_or_the_pane_action_and_never_both() {
-        let closed = page(&view(Pane::Closed, &BOTH));
-        assert!(closed.contains(r#"<a class="button button--primary" href="/auth/keys/new">"#));
-        assert!(!closed.contains(r#"class="pane""#) && !closed.contains(">Create</button>"));
-        for pane in [
-            Pane::New,
-            Pane::Edit(EditTarget {
-                id: "k1".into(),
-                name: "ci".into(),
-            }),
-        ] {
-            let mut open = view(pane, &BOTH);
-            open.kind = Some(KeyKind::Api);
-            let html = page(&open);
-            assert!(!html.contains("New key</a>"), "{html}");
-            assert!(!html.contains(r#"href="/auth/keys/new""#));
-            assert!(html.contains(">Cancel</a>") && html.contains(r#"type="submit" form=""#));
-            assert!(html.contains(">Create</button>") || html.contains(">Save</button>"));
-        }
-        // Made: the pane has "Done" and the toolbar has no button.
-        let made = page(&view(
-            Pane::Made(NewKey {
-                text: "api_secret<",
-                name: "ci",
-                superadmin: false,
-            }),
-            &BOTH,
-        ));
-        assert!(!made.contains("New key</a>") && made.contains(r#"href="/auth/settings">Done</a>"#));
-        assert!(!made.contains(">Create</button>") && !made.contains(">Cancel</a>"));
-    }
-
-    #[test]
-    fn the_kind_selector_shows_with_two_kinds_and_only_then() {
-        let mut two = view(Pane::New, &BOTH);
-        two.kind = Some(KeyKind::Mcp);
-        let html = page(&two);
-        assert!(
-            html.contains(r#"<form id="kind-form" method="get" action="/auth/keys/new"></form>"#)
-        );
-        assert!(html.contains(r#"form="kind-form" name="kind" value="api""#));
-        assert!(html.contains(r#"form="kind-form" name="kind" value="mcp""#));
-        // The API kind comes first.
-        assert!(
-            html.find(r#"form="kind-form" name="kind" value="api""#)
-                .unwrap()
-                < html
-                    .find(r#"form="kind-form" name="kind" value="mcp""#)
-                    .unwrap()
-        );
-        assert!(html.contains(">New key<") || html.contains("New key</h2>"));
-        for one in [[KeyKind::Mcp], [KeyKind::Api]] {
-            let mut single = view(Pane::New, &one);
-            single.kind = Some(one[0]);
-            let html = page(&single);
-            assert!(!html.contains("kind-form"), "{html}");
-            assert!(html.contains(&format!("New {} key", one[0].label())));
-            // The kind is a hidden field of the form.
-            assert!(html.contains(&format!(
-                r#"<input type="hidden" name="kind" value="{}">"#,
-                one[0].name()
-            )));
-        }
-        // With no kind to make, there is no "New key" and no pane.
-        let none = page(&view(Pane::Closed, &[]));
-        assert!(!none.contains("New key") && !none.contains("/auth/keys/new"));
-    }
-
-    #[test]
-    fn the_change_of_a_key_shows_its_kind_as_a_fact_and_not_as_a_choice() {
-        let mut edit = view(
-            Pane::Edit(EditTarget {
-                id: "k1".into(),
-                name: "ci <deploy>".into(),
-            }),
-            &BOTH,
-        );
-        edit.kind = Some(KeyKind::Api);
-        let html = page(&edit);
-        assert!(html.contains(r#"<span class="kindTag""#) && !html.contains("kind-form"));
-        assert!(html.contains(r#"<input type="hidden" name="id" value="k1">"#));
-        assert!(html.contains(r#"action="/auth/keys/edit""#) && html.contains(">Save</button>"));
-        assert!(html.contains(r#"value="ci &lt;deploy&gt;""#));
-        assert!(
-            !html.contains(r#"name="expires_at""#),
-            "a key keeps its expiry date"
-        );
-        // The row of the key is selected.
-        assert!(html.contains(r#"<tr class="is-selected" data-kind="api">"#));
-    }
-
-    #[test]
-    fn a_key_made_shows_its_text_one_time_with_a_copy_button() {
-        let html = page(&view(
-            Pane::Made(NewKey {
-                text: "api_secret<",
-                name: "ci <1>",
-                superadmin: true,
-            }),
-            &BOTH,
-        ));
-        assert!(html.contains(r#"id="key-text" type="text" readonly value="api_secret&lt;""#));
-        assert!(html.contains(r#"data-copy="key-text""#));
-        assert!(html.contains("<strong>ci &lt;1&gt;</strong>") && html.contains("acts as you"));
-        assert!(html.contains("This key can have every right"));
-        assert!(
-            !html.contains("new-key-form"),
-            "the pane has no form any more"
-        );
-    }
-
-    #[test]
-    fn the_list_has_kind_icons_kind_chips_and_a_bulk_revoke_and_no_button_in_a_row() {
-        let html = page(&view(Pane::Closed, &BOTH));
-        assert!(html.contains("#i-webhook") && html.contains("#i-robot"));
-        assert!(html.contains(r#"aria-label="API key: for services and webhooks""#));
-        assert!(
-            html.contains(r#"href="/auth/settings?k=api""#)
-                && html.contains(r#"href="/auth/settings?k=mcp""#)
-        );
-        assert!(html.contains(
-            r#"<form id="revoke-keys" class="bulk" method="post" action="/auth/keys/revoke">"#
-        ));
-        assert!(html.contains(r#"name="section" value="mine""#));
-        assert!(
-            html.contains(r#"name="id.k1" value="1""#)
-                && html.contains(r#"name="id.k2" value="1""#)
-        );
-        assert!(html.contains("Revoke the ticked keys?"));
-        assert!(!html.contains("Make a key like this one") && !html.contains("keyAction"));
-        // The columns, with the groups of the inbox named and escaped.
-        assert!(
-            html.contains("Send Infra &lt;b&gt;, Database &middot; Read Infra &lt;b&gt;")
-                || html.contains("Send Infra &lt;b&gt;, Database · Read Infra &lt;b&gt;"),
-            "{html}"
-        );
-        assert!(html.contains("notes · 2 permissions"));
-        assert!(
-            html.contains(r#"href="/auth/keys/edit?id=k1""#)
-                && html.contains(r#"aria-label="Edit ci &lt;deploy&gt;""#)
-        );
-        // A right that the owner lost shows the mark.
-        assert!(html.contains("1 right has no effect"));
-        // The filter keeps one kind.
-        let mut api = view(Pane::Closed, &BOTH);
-        api.kind_filter = Some(KeyKind::Api);
-        let html = page(&api);
-        assert!(html.contains(">ci &lt;deploy&gt;<") && !html.contains(">agent<"));
-        assert!(
-            html.contains(r#"class="chip is-on" href="/auth/settings?k=api""#)
-                || html.contains(r#"class="chip is-on" href="/auth/settings""#)
-        );
-        // No box and no bulk button without the right to revoke.
-        let mut quiet = view(Pane::Closed, &BOTH);
-        quiet.can_revoke = false;
-        let html = page(&quiet);
-        assert!(!html.contains("revoke-keys") && !html.contains("bulk__box"));
-    }
-
-    #[test]
-    fn the_pane_has_no_inline_style_and_no_inline_script() {
-        for pane in [Pane::Closed, Pane::New] {
-            let html = page(&view(pane, &BOTH));
-            assert!(!html.contains(" style=") && !html.contains("<style"));
-            assert!(!html.contains("<script>"));
-        }
-    }
 }

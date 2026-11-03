@@ -8,6 +8,7 @@
 //! | Icon, icon link, icon button | `icon`, `icon_link`, `icon_post` | A link or a form. |
 //! | Count chip that filters | `chips` | A link with a query parameter. |
 //! | Panel with a head and a bounded list | `zone` | A `section` with its own scroller. |
+//! | Small chips with an overflow | `tags` | Links and a `details` element. |
 //! | Popover | `popover` | A `details` element. |
 //! | Confirm in place | `ask` | A `details` element that holds a form. |
 //! | Bulk action | `bulk_*` | A form. The count needs script. |
@@ -120,6 +121,8 @@ pub struct Zone<'a> {
     pub title: &'a str,
     /// Muted text after the title: a count, or the name of the selected row. Empty: none.
     pub count: &'a str,
+    /// The tooltip of the count. Empty: none.
+    pub count_title: &'a str,
     pub chips_html: &'a str,
     pub tools_html: &'a str,
     /// More classes of the panel, with a space before the first: " zone--short". Empty: none.
@@ -154,9 +157,14 @@ pub fn zone(z: &Zone, body_html: &str) -> String {
         )
     };
     if !z.count.is_empty() {
+        let title = if z.count_title.is_empty() {
+            String::new()
+        } else {
+            format!(r#" title="{}""#, html_escape(z.count_title))
+        };
         let _ = write!(
             out,
-            r#"<span class="count">{}</span>"#,
+            r#"<span class="count"{title}>{}</span>"#,
             html_escape(z.count)
         );
     }
@@ -169,14 +177,6 @@ pub fn zone(z: &Zone, body_html: &str) -> String {
         z.above_html
     );
     out
-}
-
-/// A panel with no head: the toolbar above it names it. `label` is its name for a screen reader.
-pub fn zone_bare(label: &str, body_html: &str) -> String {
-    format!(
-        r#"<section class="zone zone--bare" aria-label="{}"><div class="scroll">{body_html}</div></section>"#,
-        html_escape(label)
-    )
 }
 
 /// The toolbar of a page: a title, a count, then the tools at the right.
@@ -264,6 +264,63 @@ pub fn popover_with(
             ""
         },
     )
+}
+
+/// One small chip of a list of tags: a name that links to a filtered page.
+pub struct Tag<'a> {
+    pub text: &'a str,
+    /// Markup after the text: the mark of a critical group. Empty: none.
+    pub mark_html: &'a str,
+    pub href: &'a str,
+    pub title: &'a str,
+    /// Muted text in the popover, after the chip: "11 accounts". Empty: none.
+    pub note: &'a str,
+}
+
+fn tag_link(tag: &Tag) -> String {
+    format!(
+        r#"<a class="tag" href="{}" title="{}">{}{}</a>"#,
+        html_escape(tag.href),
+        html_escape(tag.title),
+        html_escape(tag.text),
+        tag.mark_html
+    )
+}
+
+/// Small chips in one line. After `limit` chips, a chip "+N" opens a popover with all of them and
+/// their notes. `all_label` names the popover opener for a screen reader. No tag gives a dash.
+pub fn tags(items: &[Tag], limit: usize, all_label: &str) -> String {
+    if items.is_empty() {
+        return r#"<span class="muted">-</span>"#.to_string();
+    }
+    let mut out = String::from(r#"<span class="tags">"#);
+    for tag in items.iter().take(limit) {
+        out.push_str(&tag_link(tag));
+    }
+    if items.len() > limit {
+        let mut menu = format!(
+            r#"<div class="sectionLabel">{}</div>"#,
+            html_escape(all_label)
+        );
+        for tag in items {
+            let note = if tag.note.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<span class="muted">{}</span>"#, html_escape(tag.note))
+            };
+            let _ = write!(menu, r#"<div class="mrow">{}{note}</div>"#, tag_link(tag));
+        }
+        out.push_str(&popover_with(
+            all_label,
+            "tag tag--more",
+            &format!("+{}", items.len() - limit),
+            Side::Start,
+            " pop__menu--list",
+            &menu,
+        ));
+    }
+    out.push_str("</span>");
+    out
 }
 
 /// How much a confirmation asks for. It follows the importance of the resource.
@@ -589,12 +646,41 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_links_and_the_overflow_is_a_popover_with_all_of_them() {
+        let items: Vec<Tag> = ["a", "b", "c <d>"]
+            .iter()
+            .map(|name| Tag {
+                text: name,
+                mark_html: "",
+                href: "/p?group=x&y=1",
+                title: "Group",
+                note: "3 accounts",
+            })
+            .collect();
+        let html = tags(&items, 2, "All 3 groups of carol");
+        assert_eq!(
+            html.matches(r#"<a class="tag" href="/p?group=x&amp;y=1""#)
+                .count(),
+            2 + 3
+        );
+        assert!(html.contains(r#"<summary class="tag tag--more" aria-label="All 3 groups of carol" title="All 3 groups of carol">+1</summary>"#), "{html}");
+        assert!(
+            html.contains("c &lt;d&gt;")
+                && html.contains(r#"<span class="muted">3 accounts</span>"#)
+        );
+        let two = tags(&items[..2], 2, "x");
+        assert!(!two.contains("<details"), "no overflow, no popover: {two}");
+        assert_eq!(tags(&[], 2, "x"), r#"<span class="muted">-</span>"#);
+    }
+
+    #[test]
     fn a_panel_has_a_head_and_a_list_with_its_own_scroller() {
         let html = zone(
             &Zone {
                 id: "signins-title",
                 title: "Sign-ins",
                 count: "12",
+                count_title: "",
                 chips_html: "",
                 tools_html: "",
                 class: "",

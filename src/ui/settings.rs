@@ -355,6 +355,9 @@ pub struct UserCard {
     pub file: bool,
     /// The keys that the account owns.
     pub keys: usize,
+    /// The ids of the groups of the inbox that the account belongs to: it holds `inbox.receive` on
+    /// them (portal 15). Empty without the block `inbox`.
+    pub groups: Vec<String>,
     pub activity: AccountActivity,
 }
 
@@ -956,6 +959,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
             id: "services-title",
             title: "Services",
             count: "",
+            count_title: "",
             chips_html: &chip_list,
             tools_html: "",
             class: "",
@@ -1122,6 +1126,7 @@ fn opened_by_zone(view: &ServicesView, selected: Option<&str>) -> String {
             id: "opened-title",
             title: "Opened by",
             count: name,
+            count_title: "",
             chips_html: "",
             tools_html: "",
             class: " zone--short",
@@ -1170,6 +1175,7 @@ fn checks_zone(view: &ServicesView) -> String {
             id: "checks-title",
             title: "To check",
             count: &count.to_string(),
+            count_title: "",
             chips_html: "",
             tools_html: "",
             class: "",
@@ -1296,7 +1302,8 @@ mod tests {
             );
             assert!(
                 header.find("Back to panel").unwrap() < header.find("contentTabs").unwrap()
-                    && header.find("contentTabs").unwrap() < header.find("appHeader__right").unwrap(),
+                    && header.find("contentTabs").unwrap()
+                        < header.find("appHeader__right").unwrap(),
                 "the tabs stand between the way back and the controls"
             );
             assert!(!html.contains("navRow"), "no separate row of tabs");

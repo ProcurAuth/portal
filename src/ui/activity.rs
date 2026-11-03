@@ -5,7 +5,9 @@
 use std::fmt::Write as _;
 
 use super::components::{chips, icon, zone, Chip, Zone};
-use super::settings::{fill_page, notice_html, opt, spark, user_path, Frame, Notice, Tab, ACTIVITY_PATH};
+use super::settings::{
+    fill_page, notice_html, opt, spark, user_path, Frame, Notice, Tab, ACTIVITY_PATH,
+};
 use super::status_icon;
 use crate::store::{AuditRow, DayStat, LoginPage, LoginRow};
 use crate::util::{html_escape, short_agent, time_tag};
@@ -85,10 +87,14 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
             id: "activity-title",
             title: "Activity",
             count: "",
+            count_title: "",
             chips_html: &chips_html,
             tools_html: &tools,
             class: " zone--page",
-            above_html: &format!(r#"<div class="wide">{}</div>"#, spark(view.days, "spark--strip")),
+            above_html: &format!(
+                r#"<div class="wide">{}</div>"#,
+                spark(view.days, "spark--strip")
+            ),
         },
         &body,
     ));
@@ -221,7 +227,10 @@ mod tests {
         let panel = &html[html.find(r#"aria-labelledby="activity-title""#).unwrap()..];
         let panel = &panel[..panel.find("</section>").unwrap()];
         // The chips switch the list and filter it with a query parameter, so they work without script.
-        assert!(panel.contains(r#"href="/auth/settings/activity" aria-current="true""#), "{panel}");
+        assert!(
+            panel.contains(r#"href="/auth/settings/activity" aria-current="true""#),
+            "{panel}"
+        );
         assert!(panel.contains(r#"href="/auth/settings/activity?v=changes""#));
         assert!(panel.contains(r#"href="/auth/settings/activity?r=failed""#));
         assert!(panel.contains(r#"aria-label="Refused attempts 3" title="Refused attempts""#));
@@ -230,7 +239,11 @@ mod tests {
         assert!(panel.contains(r#"<svg class="spark spark--strip""#));
         assert!(panel.contains("4 connections in 30 days"));
         // One line for each attempt: the state is an icon with a name, the time is a local time.
-        assert_eq!(panel.matches("<tr>").count(), 2 + 1, "two attempts and the head");
+        assert_eq!(
+            panel.matches("<tr>").count(),
+            2 + 1,
+            "two attempts and the head"
+        );
         assert!(panel.contains(r#"<span class="visually-hidden">Signed in</span>"#));
         assert!(panel.contains(r#"title="Refused""#));
         assert!(panel.contains(r#"<time class="when" datetime="#));
@@ -260,7 +273,9 @@ mod tests {
         let mut v = view(&d);
         v.changes = true;
         let html = page(&v);
-        assert!(html.contains(r#"<a class="chip is-on" href="/auth/settings/activity?v=changes" aria-current="true""#));
+        assert!(html.contains(
+            r#"<a class="chip is-on" href="/auth/settings/activity?v=changes" aria-current="true""#
+        ));
         assert!(html.contains("Permissions changed"));
         assert!(html.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
         assert!(html.contains("root, 192.0.2.10"));
