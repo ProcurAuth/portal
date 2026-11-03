@@ -23,30 +23,27 @@
   color: var(--on-fill);
 }
 
-.navRow {
-  border-bottom: 1px solid var(--border);
-}
-
+/* The tabs stand in the header, on the line of "Back to panel". The header never wraps: only the
+   strip of the tabs scrolls sideways, with a thin bar that stays visible. */
 .contentTabs {
   display: flex;
+  flex: 0 1 auto;
+  align-self: stretch;
   gap: 2px;
+  min-width: 0;
   margin: 0;
-  padding: 0 24px;
+  padding: 0;
   overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.contentTabs::-webkit-scrollbar {
-  display: none;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 .contentTabs__tab {
   display: inline-flex;
   flex: none;
   align-items: center;
-  height: 34px;
   padding: 0 12px;
-  margin-bottom: -1px;
   border-bottom: 2px solid transparent;
   color: var(--muted);
   font-weight: 600;
@@ -85,7 +82,7 @@
   color: var(--accent-text);
 }
 
-/* The shell: the page is as high as the window. The header and the tabs stay at the top, and the
+/* The shell: the page is as high as the window. The header stays at the top, and the
    `main` element is the one scroller of the page. It reserves the place of its scrollbar, so the
    content does not move when the bar appears. The lists inside the page have no reserved place. */
 body.shell {
@@ -98,11 +95,21 @@ body.shell {
 
 .shell .appHeader {
   flex: none;
+  flex-wrap: nowrap;
+  gap: 12px;
   width: 100%;
+  max-width: none;
+  height: 48px;
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
-.shell .navRow {
+.shell .appHeader__left,
+.shell .appHeader__right {
   flex: none;
+}
+
+.shell .appHeader__right {
+  margin-left: auto;
 }
 
 .shell .settings {
@@ -131,8 +138,7 @@ body.shell {
 
 /* The inner scrollers and the browser parts follow the palette. */
 .ge__tree,
-.ge__list,
-.contentTabs {
+.ge__list {
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
 }

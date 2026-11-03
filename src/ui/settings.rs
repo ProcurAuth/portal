@@ -1,16 +1,17 @@
 //! The settings of the superadmin. Each tab is one HTML page, and each page is built from the parts
-//! of [`super::components`]. The tabs are Users, Services, Keys and Inbox. A tab shows only when its
-//! feature is on. The page of one account is a child page of Users, not a tab.
+//! of [`super::components`]. The tabs are Access, Services, Activity and Inbox, and they stand in
+//! the header, on the line of "Back to panel". A tab shows only when its feature is on. The page of
+//! one account, "New user", "New key" and "Edit key" are child pages of Access, not tabs: each one
+//! fills the window, and the tab Access stays marked.
 //!
 //! The pages explain the access model with their structure:
 //!
-//! - The Users page has the accounts on the left. On the right it has the sign-ins and the recent
-//!   changes. A row of the accounts opens the page of the account.
+//! - The Access page has the accounts and the keys side by side (see [`super::access`]).
+//! - The Activity page has the sign-ins and the changes (see [`super::activity`]).
 //! - The page of an account has one row of tools (log in as, the password, the activity, delete,
 //!   Save). Under it, the groups "Services" and "Portal features" stand side by side. The editor of
 //!   grants draws them.
-//! - "New user" opens the same page in create mode: the login and the password stand in the row of
-//!   tools, the editor is under it, and one button makes the account.
+//! - "New user" opens a page with the login, the password, the groups and the same editor.
 //! - The Services page has the services on the left. A click on a row selects it, with a link.
 //!   The panel "Opened by" shows which accounts open the selected service and which do not.
 //!
@@ -23,30 +24,31 @@
 use std::fmt::Write as _;
 
 use super::components::{
-    ask, chips, icon, icon_count, icon_link, icon_post, popover, split, toolbar, zone, zone_bare,
-    Ask, Chip, Side, Strength, Zone,
+    ask, chips, icon, icon_link, icon_post, popover, split, toolbar, zone, Ask, Chip, Side,
+    Strength, Zone,
 };
 use super::grant_editor::{self, Place};
 use super::{document_class, sign_out_form, status_icon, theme_switch};
 use crate::actions::Document;
 use crate::catalog::{Catalog, Service};
 use crate::grants::{holds, Grant, Mode, ACCESS};
-use crate::store::{AccountActivity, AuditRow, DayStat, LoginPage, ServiceUse, SessionRow};
+use crate::store::{AccountActivity, DayStat, ServiceUse, SessionRow};
 use crate::util::{
     format_duration, html_escape, percent_encode_query_component, short_agent, time_tag,
 };
 
-pub const USERS_PATH: &str = "/auth/settings";
+/// The first tab: the accounts and the keys.
+pub const ACCESS_PATH: &str = "/auth/settings";
 /// The page of one account is this prefix, then the login.
 pub const USER_PATH_PREFIX: &str = "/auth/settings/users/";
-/// "New user": the page of an account in create mode.
+/// "New user": a page with the fields of a new account.
 pub const NEW_USER_PATH: &str = "/auth/settings/new-user";
 pub const SERVICES_PATH: &str = "/auth/settings/services";
+/// The sign-ins and the changes.
+pub const ACTIVITY_PATH: &str = "/auth/settings/activity";
 /// The address of "Give access" in the panel "Opened by". The query names `user` and `service`.
 /// The answer is a redirect to the page of the account, with the service chosen in the editor.
 pub const GIVE_PATH: &str = "/auth/settings/give";
-/// The page of the keys (portal 5.8a).
-pub const KEYS_PATH: &str = "/auth/keys";
 /// The page of the inbox: the first page of the tab "Inbox".
 pub const INBOX_PATH: &str = crate::ui::inbox::PAGE;
 
@@ -90,10 +92,10 @@ fn services_href(selected: Option<&str>, only_check: bool) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
-    Users,
+    /// The accounts and the keys. The superadmin sees it, and each account with a right of the keys.
+    Access,
     Services,
-    /// The page of the keys (portal 5.8). Each user who can read keys sees it.
-    Keys,
+    Activity,
     /// The pages of the inbox. Each user with a right of the inbox features sees it.
     Inbox,
 }
@@ -101,18 +103,18 @@ pub enum Tab {
 impl Tab {
     fn path(self) -> &'static str {
         match self {
-            Self::Users => USERS_PATH,
+            Self::Access => ACCESS_PATH,
             Self::Services => SERVICES_PATH,
-            Self::Keys => KEYS_PATH,
+            Self::Activity => ACTIVITY_PATH,
             Self::Inbox => INBOX_PATH,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Users => "Users",
+            Self::Access => "Access",
             Self::Services => "Services",
-            Self::Keys => "Keys",
+            Self::Activity => "Activity",
             Self::Inbox => "Inbox",
         }
     }
@@ -121,25 +123,26 @@ impl Tab {
 /// The data that every settings page needs around its content.
 pub struct Frame<'a> {
     pub logout_token: &'a str,
-    /// The viewer sees the tab "Keys": the portal accepts keys.
+    /// The viewer sees the list of keys in the tab Access: the portal accepts keys, and the viewer
+    /// holds a right to read them.
     pub keys: bool,
     /// The viewer sees the tab "Inbox": the file has the block `inbox`, and the viewer has a right
     /// of the service.
     pub inbox: bool,
-    /// The viewer is the superadmin, who sees the tabs Users and Services too.
+    /// The viewer is the superadmin, who sees the accounts, the services and the activity.
     pub superadmin: bool,
 }
 
 impl Frame<'_> {
     /// The tabs of the viewer, in the order of the page. There are four at most. A tab that the
-    /// configuration turns off is not in the list: the page draws no grey tab.
+    /// configuration or the rights turn off is not in the list: the page draws no grey tab. An
+    /// account with one right only sees one tab, and the page draws no tab strip.
     pub fn tabs(&self) -> Vec<Tab> {
         let mut tabs = Vec::new();
         if self.superadmin {
-            tabs.extend([Tab::Users, Tab::Services]);
-        }
-        if self.keys {
-            tabs.push(Tab::Keys);
+            tabs.extend([Tab::Access, Tab::Services, Tab::Activity]);
+        } else if self.keys {
+            tabs.push(Tab::Access);
         }
         if self.inbox {
             tabs.push(Tab::Inbox);
@@ -226,8 +229,33 @@ pub(super) fn fill_page(tab: Tab, frame: &Frame, title: &str, content: &str) -> 
     shell_class(&frame.tabs(), tab, frame, title, content, " settings--fill")
 }
 
-/// The shell of every settings page. The header and the tabs stay at the top. The `main` element
-/// is the one scroller of the page, and it reserves the place of its scrollbar.
+/// The tabs of the header: one link for each tab, and the current one marked. With one tab the
+/// strip is absent, because a control with one choice is no control.
+fn tab_strip(tabs: &[Tab], current: Tab) -> String {
+    if tabs.len() < 2 {
+        return String::new();
+    }
+    let mut out = String::from(r#"<nav class="contentTabs" aria-label="Settings">"#);
+    for each in tabs.iter().copied() {
+        let mark = if each == current {
+            r#" is-active" aria-current="page"#
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            r#"<a class="contentTabs__tab{mark}" href="{}">{}</a>"#,
+            each.path(),
+            each.label()
+        );
+    }
+    out.push_str("</nav>");
+    out
+}
+
+/// The shell of every settings page. The header stays at the top, with the way back, the tabs, the
+/// theme and "Sign out" on one line. The `main` element is the one scroller of the page, and it
+/// reserves the place of its scrollbar.
 fn shell_class(
     tabs: &[Tab],
     tab: Tab,
@@ -239,26 +267,10 @@ fn shell_class(
     let mut body = String::new();
     let _ = write!(
         body,
-        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div><div class="appHeader__right">{}{}</div></header><nav class="navRow" aria-label="Settings"><div class="contentTabs contentTabs--nav">"##,
+        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
+        tab_strip(tabs, tab),
         theme_switch(),
         sign_out_form(frame.logout_token),
-    );
-    for each in tabs.iter().copied() {
-        let current = if each == tab {
-            r#" is-active" aria-current="page"#
-        } else {
-            ""
-        };
-        let _ = write!(
-            body,
-            r#"<a class="contentTabs__tab{current}" href="{}">{}</a>"#,
-            each.path(),
-            each.label()
-        );
-    }
-    let _ = write!(
-        body,
-        r#"</div></nav><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"#,
         html_escape(title)
     );
     body.push_str(&script_tag());
@@ -306,7 +318,7 @@ pub(super) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn opt(value: &Option<String>) -> String {
+pub(super) fn opt(value: &Option<String>) -> String {
     match value {
         Some(text) if !text.is_empty() => html_escape(text),
         _ => r#"<span class="muted">none</span>"#.to_string(),
@@ -369,31 +381,31 @@ impl ServiceActions {
     /// The problem of a grant below the service that does not follow its document: the action
     /// does not list the type, or the path does not follow the parents. `None`: the grant is on
     /// the whole service, the grant follows the document, or the service has not answered yet.
-    fn problem(&self, grant: &Grant) -> Option<String> {
+    pub(super) fn problem(&self, grant: &Grant) -> Option<String> {
         if grant.path.is_empty() || !self.known {
             return None;
         }
         self.document.check_grant(grant).err()
     }
 
-    fn undeclared(&self, grant: &Grant) -> bool {
+    pub(super) fn undeclared(&self, grant: &Grant) -> bool {
         self.problem(grant).is_some()
     }
 }
 
 /// The id of the service `portal`.
-const PORTAL: &str = crate::portal_actions::SERVICE;
+pub(super) const PORTAL: &str = crate::portal_actions::SERVICE;
 
 /// The feature of an action of the service `portal`: the group of the icon in the table of
 /// accounts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Feature {
+pub(super) enum Feature {
     Keys,
     Inbox,
 }
 
 impl Feature {
-    fn of(action: &str) -> Option<Self> {
+    pub(super) fn of(action: &str) -> Option<Self> {
         if action.starts_with("keys.") || action == crate::portal_actions::USERS_READ {
             Some(Self::Keys)
         } else if ["inbox.", "alert.", "phone."]
@@ -406,14 +418,14 @@ impl Feature {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Keys => "Keys",
             Self::Inbox => "Inbox",
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub(super) fn icon(self) -> &'static str {
         match self {
             Self::Keys => "key",
             Self::Inbox => "inbox",
@@ -422,7 +434,7 @@ impl Feature {
 }
 
 /// How many actions of a feature the account holds, and how many the document of the portal has.
-fn feature_rights(
+pub(super) fn feature_rights(
     user: &UserCard,
     features: Option<&ServiceActions>,
     feature: Feature,
@@ -445,12 +457,12 @@ fn feature_rights(
 }
 
 /// The access of one account in short: the services that it opens, and its grants to check.
-struct Summary {
-    services: usize,
-    to_check: usize,
+pub(super) struct Summary {
+    pub(super) services: usize,
+    pub(super) to_check: usize,
 }
 
-fn summary(catalog: &Catalog, services: &[ServiceActions], user: &UserCard) -> Summary {
+pub(super) fn summary(catalog: &Catalog, services: &[ServiceActions], user: &UserCard) -> Summary {
     let opened = catalog
         .groups()
         .iter()
@@ -469,342 +481,6 @@ fn summary(catalog: &Catalog, services: &[ServiceActions], user: &UserCard) -> S
     Summary {
         services: opened,
         to_check,
-    }
-}
-
-// Users -----------------------------------------------------------------------------------------
-
-/// The data of the Users page: the accounts, the sign-ins and the recent changes.
-pub struct UsersView<'a> {
-    pub notice: Option<Notice>,
-    /// `users.allow_creation`. `false`: the page has no button, and no entry that makes an
-    /// account.
-    pub allow_creation: bool,
-    /// Where the grants come from.
-    pub mode: Mode,
-    /// The whole catalogue, not the filtered catalogue for display.
-    pub catalog: &'a Catalog,
-    /// The services of the catalogue with their actions. The order is the order of the catalogue.
-    pub services: Vec<ServiceActions>,
-    /// The accounts of the database, then the accounts of the file.
-    pub users: Vec<UserCard>,
-    /// The portal features with their actions, for the totals of the icons. `None`: the file turns
-    /// none on.
-    pub features: Option<ServiceActions>,
-    /// The file has the block `keys`: the table has the column of the keys.
-    pub keys: bool,
-    /// The file has the block `inbox`.
-    pub inbox: bool,
-    pub max_users: usize,
-    /// The anti-CSRF token of the administration forms.
-    pub token: &'a str,
-    /// The newest sign-ins, and the figures of the chips.
-    pub logins: &'a LoginPage,
-    /// The chip "refused" is on.
-    pub only_refused: bool,
-    /// Every real connection, per day, all accounts.
-    pub days: &'a [DayStat],
-    /// The latest audit events.
-    pub recent_events: &'a [AuditRow],
-}
-
-impl UsersView<'_> {
-    /// The page offers "New user": the file allows it and the grants are not read-only.
-    fn can_create(&self) -> bool {
-        self.allow_creation && self.mode.editable()
-    }
-}
-
-pub fn users_page(frame: &Frame, view: &UsersView) -> String {
-    let mut out = String::new();
-    notice_html(&mut out, view.notice);
-    let mut tools = String::new();
-    let _ = write!(
-        tools,
-        "{}",
-        ask(&Ask {
-            label: "End all sessions",
-            icon: "logout",
-            question: "End all sessions? You sign in again too.",
-            verb: "End",
-            action: "/auth/users/end-sessions",
-            fields_html: &format!(
-                r#"<input type="hidden" name="csrf" value="{}"><input type="hidden" name="confirm" value="end-all-sessions">"#,
-                html_escape(view.token)
-            ),
-            strength: Strength::Light,
-            name: "",
-            danger: true,
-            side: Side::End,
-        })
-    );
-    if view.can_create() {
-        let _ = write!(
-            tools,
-            r#"<a class="button button--primary" href="{NEW_USER_PATH}">{}New user</a>"#,
-            icon("plus")
-        );
-    }
-    let database = view.users.iter().filter(|u| !u.file).count();
-    out.push_str(&toolbar(
-        "Accounts",
-        &format!("{database} of {}", view.max_users),
-        &tools,
-    ));
-    let left = zone_bare("Accounts", &accounts_table(view));
-    let signins = signins_zone(view);
-    let changes = changes_zone(view);
-    out.push_str(&split("users", &left, &format!("{signins}{changes}")));
-    fill_page(Tab::Users, frame, "Users", &out)
-}
-
-/// The table of the accounts. The columns of the features and of the keys are absent when the
-/// file turns the feature off.
-fn accounts_table(view: &UsersView) -> String {
-    let features = view.keys || view.inbox;
-    let mut out =
-        String::from(r#"<table class="grid grid--users"><colgroup><col><col class="w64">"#);
-    if features {
-        out.push_str(r#"<col class="w88">"#);
-    }
-    if view.keys {
-        out.push_str(r#"<col class="w48">"#);
-    }
-    out.push_str(r#"<col class="w152"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Services</th>"#);
-    if features {
-        out.push_str(r#"<th scope="col">Features</th>"#);
-    }
-    if view.keys {
-        out.push_str(r#"<th scope="col" class="r">Keys</th>"#);
-    }
-    out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
-    for user in &view.users {
-        account_row(&mut out, view, user);
-    }
-    out.push_str("</tbody></table>");
-    out
-}
-
-fn account_row(out: &mut String, view: &UsersView, user: &UserCard) {
-    let login = html_escape(&user.login);
-    let _ = write!(
-        out,
-        r#"<tr><th scope="row"><a class="rowLink" href="{}">{login}</a>"#,
-        html_escape(&user_path(&user.login))
-    );
-    if user.superadmin {
-        out.push_str(r#" <span class="badge">Superadmin</span>"#);
-    }
-    if user.file {
-        out.push_str(r#" <span class="badge">file</span>"#);
-    }
-    out.push_str("</th><td>");
-    if user.superadmin {
-        out.push_str(r#"<span class="muted">every</span>"#);
-    } else {
-        let s = summary(view.catalog, &view.services, user);
-        if s.services == 0 {
-            out.push_str(r#"<span class="muted">none</span>"#);
-        } else {
-            let _ = write!(out, "{} of {}", s.services, view.services.len());
-        }
-        if s.to_check > 0 {
-            out.push(' ');
-            out.push_str(&status_icon(
-                "warn",
-                "alert-triangle",
-                &plural(s.to_check, "permission to check", "permissions to check"),
-            ));
-        }
-    }
-    out.push_str("</td>");
-    if view.keys || view.inbox {
-        out.push_str("<td>");
-        if user.superadmin {
-            out.push_str(r#"<span class="muted">every</span>"#);
-        } else {
-            for (shown, feature) in [(view.keys, Feature::Keys), (view.inbox, Feature::Inbox)] {
-                let (held, total) = feature_rights(user, view.features.as_ref(), feature);
-                if shown && held > 0 {
-                    out.push_str(&icon_count(
-                        &format!("{}: {held} of {total} rights", feature.name()),
-                        feature.icon(),
-                        held,
-                    ));
-                }
-            }
-        }
-        out.push_str("</td>");
-    }
-    if view.keys {
-        let _ = write!(
-            out,
-            r#"<td class="r num{}">{}</td>"#,
-            if user.keys == 0 { " muted" } else { "" },
-            if user.superadmin {
-                "-".to_string()
-            } else {
-                user.keys.to_string()
-            }
-        );
-    }
-    let last = match user.activity.last_login {
-        Some(at) => time_tag(at, false),
-        None => r#"<span class="muted">never</span>"#.to_string(),
-    };
-    let failed = user.activity.failed_30d;
-    let _ = write!(
-        out,
-        r#"<td class="r num">{last}</td><td class="r num">{}</td><td class="r num{}">{failed}</td></tr>"#,
-        user.activity.sessions_30d,
-        if failed > 0 { " danger" } else { "" },
-    );
-}
-
-/// The panel "Sign-ins": the chips All and Refused, the graph of the connections of 30 days, then
-/// the newest attempts, one line each.
-fn signins_zone(view: &UsersView) -> String {
-    let data = view.logins;
-    let refused_icon = format!(r#"<span class="st--bad">{}</span>"#, icon("ban"));
-    let chip_list = chips(&[
-        Chip {
-            label_html: "All",
-            name: "",
-            count: data.total as usize,
-            href: USERS_PATH,
-            on: !view.only_refused,
-        },
-        Chip {
-            label_html: &refused_icon,
-            name: "Refused",
-            count: data.refused as usize,
-            href: &format!("{USERS_PATH}?r=failed"),
-            on: view.only_refused,
-        },
-    ]);
-    let connections: u32 = view.days.iter().map(|d| d.sessions).sum();
-    let tools = format!(
-        r#"<span class="count" title="Connections for each day, all accounts">{connections} in {} d</span>{}"#,
-        view.days.len(),
-        spark(view.days, "spark--mini"),
-    );
-    let mut body = String::new();
-    if data.rows.is_empty() {
-        let _ = write!(
-            body,
-            r#"<p class="empty">{}</p>"#,
-            if view.only_refused {
-                "No refused sign-in."
-            } else {
-                "No sign-in recorded yet."
-            }
-        );
-    } else {
-        body.push_str(r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w152"><col class="w120"><col class="w120"><col></colgroup><thead class="visually-hidden"><tr><th scope="col">Result</th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#);
-        for row in &data.rows {
-            login_row(&mut body, row);
-        }
-        body.push_str("</tbody></table>");
-    }
-    zone(
-        &Zone {
-            id: "signins-title",
-            title: "Sign-ins",
-            count: &data.matching.to_string(),
-            chips_html: &chip_list,
-            tools_html: &tools,
-            class: "",
-            above_html: "",
-        },
-        &body,
-    )
-}
-
-fn login_row(out: &mut String, row: &crate::store::LoginRow) {
-    let result = if row.success {
-        status_icon("ok", "check", "Signed in")
-    } else {
-        status_icon("error", "ban", "Refused")
-    };
-    let typed = if row.login.is_empty() {
-        r#"<span class="muted">(empty)</span>"#.to_string()
-    } else {
-        format!(
-            r#"<code class="typed{}"{}>{}</code>"#,
-            if row.known { "" } else { " muted" },
-            if row.known {
-                ""
-            } else {
-                r#" title="No such account""#
-            },
-            html_escape(&row.login)
-        )
-    };
-    let _ = write!(
-        out,
-        r#"<tr><td>{result}</td><td>{}</td><td>{typed}</td><td class="muted">{}</td><td class="muted" title="{}">{}</td></tr>"#,
-        time_tag(row.ts, false),
-        opt(&row.ip),
-        html_escape(&row.user_agent),
-        html_escape(&short_agent(&row.user_agent)),
-    );
-}
-
-/// The panel "Recent changes": the audit events.
-fn changes_zone(view: &UsersView) -> String {
-    let mut body = String::new();
-    if view.recent_events.is_empty() {
-        body.push_str(r#"<p class="empty">No change recorded yet.</p>"#);
-    } else {
-        body.push_str(r#"<table class="grid grid--changes"><colgroup><col class="w152"><col><col class="w180"></colgroup><thead class="visually-hidden"><tr><th scope="col">When</th><th scope="col">Change</th><th scope="col">By, address</th></tr></thead><tbody>"#);
-        for event in view.recent_events {
-            let account = match &event.login {
-                Some(login) if !login.is_empty() => format!(
-                    r#" <a href="{}">{}</a>"#,
-                    html_escape(&user_path(login)),
-                    html_escape(login)
-                ),
-                _ => String::new(),
-            };
-            let by = match &event.actor {
-                Some(actor) if !actor.is_empty() => format!("{}, ", html_escape(actor)),
-                _ => String::new(),
-            };
-            let _ = write!(
-                body,
-                r#"<tr><td>{}</td><td>{}{account}</td><td class="muted">{by}{}</td></tr>"#,
-                time_tag(event.ts, false),
-                audit_label(&event.kind),
-                opt(&event.ip),
-            );
-        }
-        body.push_str("</tbody></table>");
-    }
-    zone(
-        &Zone {
-            id: "changes-title",
-            title: "Recent changes",
-            count: &view.recent_events.len().to_string(),
-            chips_html: "",
-            tools_html: "",
-            class: "",
-            above_html: "",
-        },
-        &body,
-    )
-}
-
-fn audit_label(kind: &str) -> &'static str {
-    match kind {
-        "login_failed" => "Refused sign-in",
-        "user_added" => "Account added",
-        "user_deleted" => "Account deleted",
-        "user_updated" => "Permissions changed",
-        "password_reset" => "Password changed",
-        "impersonation_started" => "Signed in as the account",
-        "impersonation_ended" => "Back to superadmin",
-        "sessions_ended" => "All sessions ended",
-        _ => "Event",
     }
 }
 
@@ -846,7 +522,7 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
     out.push_str(&account_bar(view, editable));
     if user.superadmin {
         out.push_str(r#"<p class="lede">Every right on every service. The configuration file sets the login and the password.</p>"#);
-        return fill_page(Tab::Users, frame, &user.login, &out);
+        return fill_page(Tab::Access, frame, &user.login, &out);
     }
     if editable {
         let _ = write!(
@@ -886,7 +562,7 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
             },
         );
     }
-    fill_page(Tab::Users, frame, &user.login, &out)
+    fill_page(Tab::Access, frame, &user.login, &out)
 }
 
 /// The one row of tools of an account: the way back, the login, log in as, the password, the
@@ -896,7 +572,7 @@ fn account_bar(view: &UserView, editable: bool) -> String {
     let login = html_escape(&user.login);
     let token = html_escape(view.token);
     let mut out = format!(
-        r##"<div class="accountBar"><nav class="crumb" aria-label="Breadcrumb"><a href="{USERS_PATH}">Users</a>{}</nav><h2 class="name" aria-current="page">{login}</h2>"##,
+        r##"<div class="accountBar"><nav class="crumb" aria-label="Breadcrumb"><a href="{ACCESS_PATH}">Access</a>{}</nav><h2 class="name" aria-current="page">{login}</h2>"##,
         icon("chevron-right")
     );
     if user.superadmin {
@@ -1118,7 +794,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
     notice_html(&mut out, view.notice);
     let _ = write!(
         out,
-        r##"<form class="accountBar" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><nav class="crumb" aria-label="Breadcrumb"><a href="{USERS_PATH}">Users</a>{}</nav><h2 class="name" aria-current="page">New user</h2><input class="uiInput accountBar__login" id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Login" aria-label="Login" title="1 to 32 characters: letters, digits, dot, dash, underscore"><span class="pwRow">{}</span><span class="grow"></span><button class="button button--primary" type="submit">Create</button></form>"##,
+        r##"<form class="accountBar" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><nav class="crumb" aria-label="Breadcrumb"><a href="{ACCESS_PATH}">Access</a>{}</nav><h2 class="name" aria-current="page">New user</h2><input class="uiInput accountBar__login" id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Login" aria-label="Login" title="1 to 32 characters: letters, digits, dot, dash, underscore"><span class="pwRow">{}</span><span class="grow"></span><button class="button button--primary" type="submit">Create</button></form>"##,
         html_escape(view.token),
         icon("chevron-right"),
         password_input(
@@ -1149,7 +825,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
             },
         );
     }
-    fill_page(Tab::Users, frame, "New user", &out)
+    fill_page(Tab::Access, frame, "New user", &out)
 }
 
 // Services --------------------------------------------------------------------------------------
@@ -1511,7 +1187,7 @@ fn checks_zone(view: &ServicesView) -> String {
 /// kind of bar. It does not draw one element for each day: a graph costs the browser four nodes, not
 /// sixty. It uses attributes only, and no inline style. The values are in the text next to it, not
 /// in tooltips.
-fn spark(days: &[DayStat], class: &str) -> String {
+pub(super) fn spark(days: &[DayStat], class: &str) -> String {
     const STEP: usize = 4;
     const HEIGHT: i64 = 32;
     let max = i64::from(days.iter().map(|d| d.sessions).max().unwrap_or(0)).max(1);
@@ -1558,275 +1234,32 @@ fn spark(days: &[DayStat], class: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::parse_labels;
-    use crate::store::{AccountActivity, LoginRow, SessionRow};
-    use std::collections::BTreeMap;
-
-    fn service(name: &str, href: &str) -> Service {
-        let labels: BTreeMap<String, String> = [
-            ("portal.name", name),
-            ("portal.href", href),
-            ("portal.group", "Infra"),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        parse_labels("x", &labels).unwrap().unwrap()
-    }
-
-    fn grant(action: &str, service: &str) -> Grant {
-        Grant::new(action, service).unwrap()
-    }
-
-    fn sub(text: &str) -> Grant {
-        Grant::parse(text).unwrap()
-    }
-
-    /// The data that the page gives to the editor of grants.
-    fn editor_of(html: &str) -> serde_json::Value {
-        let start = html.find(r#"class="grantEditor__data">"#).unwrap()
-            + r#"class="grantEditor__data">"#.len();
-        let end = start + html[start..].find("</script>").unwrap();
-        serde_json::from_str(&html[start..end]).unwrap()
-    }
-
-    /// `access` on each named service (ids `infra-<name>`).
-    fn access(services: &[&str]) -> Vec<Grant> {
-        services
-            .iter()
-            .map(|s| grant(ACCESS, &format!("infra-{s}")))
-            .collect()
-    }
-
-    fn card(login: &str, services: &[&str]) -> UserCard {
-        UserCard {
-            login: login.into(),
-            grants: access(services),
-            configured: Vec::new(),
-            created_at: Some(1_791_000_000),
-            superadmin: false,
-            file: false,
-            keys: 0,
-            activity: AccountActivity {
-                login: login.into(),
-                days: vec![DayStat::default(); 30],
-                ..AccountActivity::default()
-            },
-        }
-    }
-
-    fn frame() -> Frame<'static> {
-        Frame {
-            logout_token: "out<",
-            keys: false,
-            inbox: false,
-            superadmin: true,
-        }
-    }
-
-    /// The four tabs: the file has the blocks `keys` and `inbox`.
-    fn full_frame() -> Frame<'static> {
-        Frame {
-            keys: true,
-            inbox: true,
-            ..frame()
-        }
-    }
-
-    /// The document of Grafana in the tests: a folder, and the dashboards of a folder.
-    const GRAFANA: &str = r#"{"server":"infra-grafana","resource_types":[{"name":"folder","parent":"service","description":"A folder."},{"name":"dashboard","parent":"folder","description":"The type dashboard."}],"actions":[{"name":"dashboards.read","resource_types":["service","folder"],"description":"See the dashboards."},{"name":"dashboards.write","resource_types":["service","folder","dashboard"],"description":"Change the <dashboards>."}]}"#;
-
-    fn services() -> Vec<ServiceActions> {
-        let plain = |id: &str, name: &str| ServiceActions {
-            id: id.into(),
-            name: name.into(),
-            actions: Vec::new(),
-            document: Default::default(),
-            known: true,
-            fetch: false,
-            critical: Vec::new(),
-        };
-        let grafana = crate::actions::parse("infra-grafana", GRAFANA.as_bytes()).unwrap();
-        vec![
-            ServiceActions {
-                id: "infra-grafana".into(),
-                name: "Grafana".into(),
-                actions: grafana
-                    .actions
-                    .iter()
-                    .map(|a| (a.name.clone(), a.description.clone()))
-                    .collect(),
-                document: std::sync::Arc::new(grafana),
-                known: true,
-                fetch: false,
-                critical: Vec::new(),
-            },
-            plain("infra-notes", "Notes"),
-            plain("infra-typo", "Typo"),
-            plain("infra-mixed", "Mixed"),
-        ]
-    }
-
-    fn catalog() -> Catalog {
-        Catalog::build(
-            vec![
-                service("Grafana", "/grafana/"),
-                service("Notes", "/notes/"),
-                service("Typo", "/typo/"),
-                service("Mixed", "/mixed/"),
-            ],
-            Vec::new(),
-        )
-    }
-
-    /// The portal features with the keys and the inbox: the real document of the code.
-    fn features() -> ServiceActions {
-        use crate::keys::KeyKind;
-        use crate::portal_actions::{document, Features};
-        let document = document(&Features {
-            inbox_groups: Some(vec![("infra".into(), "Infra".into())]),
-            kinds: vec![KeyKind::Api, KeyKind::Mcp],
-        });
-        ServiceActions {
-            id: PORTAL.into(),
-            name: "Portal features".into(),
-            actions: document
-                .actions
-                .iter()
-                .map(|a| (a.name.clone(), a.description.clone()))
-                .collect(),
-            document,
-            known: true,
-            fetch: false,
-            critical: Vec::new(),
-        }
-    }
-
-    struct Data {
-        logins: LoginPage,
-        days: Vec<DayStat>,
-        events: Vec<AuditRow>,
-    }
-
-    fn login_row_of(login: &str, success: bool, known: bool) -> LoginRow {
-        LoginRow {
-            ts: 1_791_623_502,
-            login: login.into(),
-            known,
-            success,
-            ip: Some("203.0.113.7".into()),
-            user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
-                .into(),
-        }
-    }
-
-    fn data() -> Data {
-        let mut days = vec![DayStat::default(); 30];
-        days[29] = DayStat {
-            sessions: 4,
-            seconds: 10,
-        };
-        Data {
-            logins: LoginPage {
-                rows: vec![
-                    login_row_of("alice", true, true),
-                    login_row_of("<b>x</b>", false, false),
-                ],
-                matching: 2,
-                total: 12,
-                refused: 3,
-                ..LoginPage::default()
-            },
-            days,
-            events: vec![AuditRow {
-                ts: 1_791_623_000,
-                kind: "user_updated".into(),
-                login: Some("alice".into()),
-                actor: Some("root".into()),
-                ip: Some("192.0.2.10".into()),
-            }],
-        }
-    }
-
-    fn view<'a>(catalog: &'a Catalog, data: &'a Data) -> UsersView<'a> {
-        UsersView {
-            notice: None,
-            allow_creation: true,
-            mode: Mode::Dynamic,
-            catalog,
-            services: services(),
-            users: vec![
-                card("alice", &["grafana", "mixed"]),
-                card("bob", &["mixed"]),
-                card("carol", &[]),
-            ],
-            features: Some(features()),
-            keys: true,
-            inbox: true,
-            max_users: 64,
-            token: "tok<en",
-            logins: &data.logins,
-            only_refused: false,
-            days: &data.days,
-            recent_events: &data.events,
-        }
-    }
-
-    fn user_view(catalog: &Catalog, user: UserCard) -> UserView<'_> {
-        UserView {
-            notice: None,
-            mode: Mode::Dynamic,
-            catalog,
-            services: services(),
-            user,
-            token: "tok<en",
-            features: Some(features()),
-            owned_keys: 0,
-        }
-    }
-
-    fn holder(login: &str, grants: Vec<Grant>) -> Holder {
-        Holder {
-            login: login.into(),
-            grants,
-            file: false,
-        }
-    }
-
-    fn services_view<'a>(
-        catalog: &'a Catalog,
-        actions: &'a [ServiceActions],
-        holders: &'a [Holder],
-    ) -> ServicesView<'a> {
-        ServicesView {
-            catalog,
-            services: actions,
-            holders,
-            problems: Vec::new(),
-            mode: Mode::Dynamic,
-            selected: None,
-            only_check: false,
-        }
-    }
-
-    fn main_of(html: &str) -> &str {
-        &html[html.find("<main").unwrap()..html.find("</main>").unwrap()]
-    }
+    use crate::ui::fixtures::*;
+    use crate::ui::{access_page, activity_page, ActivityView};
 
     #[test]
     fn every_page_is_a_whole_document_with_the_same_header_skip_link_and_tabs() {
         let cat = catalog();
-        let actions = services();
         let d = data();
+        let actions = services();
         let holders = vec![holder("alice", access(&["grafana"]))];
+        let activity = ActivityView {
+            notice: None,
+            logins: &d.logins,
+            changes: false,
+            only_refused: false,
+            days: &d.days,
+            recent_events: &d.events,
+        };
         let pages = [
-            (Tab::Users, users_page(&full_frame(), &view(&cat, &d))),
+            (Tab::Access, access_page(&full_frame(), &view(&cat))),
+            (Tab::Activity, activity_page(&full_frame(), &activity)),
             (
-                Tab::Users,
+                Tab::Access,
                 user_page(&full_frame(), &user_view(&cat, card("alice", &["grafana"]))),
             ),
             (
-                Tab::Users,
+                Tab::Access,
                 new_user_page(
                     &full_frame(),
                     &NewUserView {
@@ -1854,19 +1287,26 @@ mod tests {
             assert!(html.contains(r##"<a class="backLink" href="/">"##));
             assert!(html.contains("Back to panel"));
             assert!(html.contains(r#"action="/auth/logout""#) && html.contains("out&lt;"));
-            let nav = html.split("<main").next().unwrap();
+            // The tabs are in the header, on the line of "Back to panel". No row of tabs is under it.
+            let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
             assert_eq!(
-                nav.matches(r#"class="contentTabs__tab"#).count(),
+                header.matches(r#"class="contentTabs__tab"#).count(),
                 4,
-                "four tabs"
+                "four tabs, in the header"
             );
+            assert!(
+                header.find("Back to panel").unwrap() < header.find("contentTabs").unwrap()
+                    && header.find("contentTabs").unwrap() < header.find("appHeader__right").unwrap(),
+                "the tabs stand between the way back and the controls"
+            );
+            assert!(!html.contains("navRow"), "no separate row of tabs");
             assert_eq!(html.matches(r#"is-active" aria-current="page""#).count(), 1);
             assert!(html.contains(&format!(
                 r#"<a class="contentTabs__tab is-active" aria-current="page" href="{}">{}</a>"#,
                 tab.path(),
                 tab.label()
             )));
-            assert!(!html.contains("Activity</a>") && !html.contains("/auth/settings/logins"));
+            assert!(!html.contains("/auth/keys\""), "the tab Keys is gone");
             assert!(!html.contains(r#"class="modal"#), "no popup");
             assert!(!html.contains(" style="), "no inline style (CSP)");
             assert!(!html.contains('\u{2014}') && !html.contains('\u{2013}'));
@@ -1875,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_follow_the_configuration_and_there_are_four_at_most() {
+    fn the_tabs_follow_the_configuration_and_the_rights_and_one_tab_has_no_strip() {
         let tabs = |superadmin, keys, inbox| {
             Frame {
                 logout_token: "t",
@@ -1885,44 +1325,54 @@ mod tests {
             }
             .tabs()
         };
-        // All on: four tabs, no Activity.
+        // All on: four tabs, the tab Keys does not exist.
         assert_eq!(
             tabs(true, true, true),
-            [Tab::Users, Tab::Services, Tab::Keys, Tab::Inbox]
+            [Tab::Access, Tab::Services, Tab::Activity, Tab::Inbox]
         );
-        // Panel only: no keys and no inbox, two tabs.
-        assert_eq!(tabs(true, false, false), [Tab::Users, Tab::Services]);
+        // Panel only: three tabs.
+        assert_eq!(
+            tabs(true, false, false),
+            [Tab::Access, Tab::Services, Tab::Activity]
+        );
         assert_eq!(
             tabs(true, true, false),
-            [Tab::Users, Tab::Services, Tab::Keys]
+            [Tab::Access, Tab::Services, Tab::Activity]
         );
         assert_eq!(
             tabs(true, false, true),
-            [Tab::Users, Tab::Services, Tab::Inbox]
+            [Tab::Access, Tab::Services, Tab::Activity, Tab::Inbox]
         );
-        assert_eq!(tabs(false, true, true), [Tab::Keys, Tab::Inbox]);
+        // An account with a right of the keys sees the tab Access, with its list of keys alone.
+        assert_eq!(tabs(false, true, true), [Tab::Access, Tab::Inbox]);
+        assert_eq!(tabs(false, true, false), [Tab::Access]);
         assert_eq!(tabs(false, false, true), [Tab::Inbox]);
-        assert_eq!(tabs(false, true, false), [Tab::Keys]);
         assert!(tabs(false, false, false).is_empty());
-        for (keys, inbox) in [(false, false), (true, false), (false, true), (true, true)] {
-            assert!(tabs(true, keys, inbox).len() <= 4);
-        }
         // A page draws the links of the tabs of its frame, and no grey tab.
         let cat = catalog();
-        let d = data();
-        let html = users_page(&frame(), &view(&cat, &d));
-        let nav = html.split("<main").next().unwrap();
-        assert_eq!(nav.matches(r#"class="contentTabs__tab"#).count(), 2);
-        assert!(!nav.contains("/auth/keys") && !nav.contains("/auth/settings/inbox"));
-        assert!(!nav.contains("disabled") && !nav.contains("aria-disabled"));
-        let keys_only = Frame {
-            keys: true,
-            ..frame()
-        };
-        let html = users_page(&keys_only, &view(&cat, &d));
-        let nav = html.split("<main").next().unwrap();
-        assert!(nav.contains(r#"href="/auth/keys">Keys</a>"#));
-        assert!(!nav.contains("/auth/settings/inbox"));
+        let html = access_page(&frame(), &view(&cat));
+        let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
+        assert_eq!(header.matches(r#"class="contentTabs__tab"#).count(), 3);
+        assert!(header.contains(r#"href="/auth/settings/activity">Activity</a>"#));
+        assert!(!header.contains("/auth/settings/inbox") && !header.contains("Keys</a>"));
+        assert!(!header.contains("disabled") && !header.contains("aria-disabled"));
+        // One tab: the strip is absent.
+        for only in [
+            Frame {
+                keys: true,
+                superadmin: false,
+                ..frame()
+            },
+            Frame {
+                inbox: true,
+                superadmin: false,
+                ..frame()
+            },
+        ] {
+            let html = fill_page(only.tabs()[0], &only, "x", "");
+            assert!(!html.contains("contentTabs"), "{:?}", only.tabs());
+            assert!(html.contains("Back to panel") && html.contains("Sign out"));
+        }
     }
 
     #[test]
@@ -1939,8 +1389,7 @@ mod tests {
     #[test]
     fn a_page_inlines_only_the_icons_it_draws() {
         let cat = catalog();
-        let d = data();
-        let users = users_page(&frame(), &view(&cat, &d));
+        let users = access_page(&frame(), &view(&cat));
         assert!(!users.contains(r#"<symbol id="i-user-share""#));
         assert!(users.contains(r#"<symbol id="i-plus""#));
         let alice = user_page(&frame(), &user_view(&cat, card("alice", &["grafana"])));
@@ -1951,219 +1400,6 @@ mod tests {
             icon_ids(r##"<use href="#i-a"/><use href="#i-b"/><use href="#i-a"/>"##),
             ["i-a", "i-b"]
         );
-    }
-
-    #[test]
-    fn the_users_page_is_a_table_of_accounts_that_link_to_their_own_page() {
-        let cat = catalog();
-        let d = data();
-        let mut v = view(&cat, &d);
-        v.users[1]
-            .grants
-            .push(sub("dashboards.read on service:infra-grafana/team:x"));
-        v.users[0].activity.failed_30d = 2;
-        v.users[0].keys = 3;
-        v.users[0].grants.extend([
-            grant("keys.own.read", PORTAL),
-            grant("keys.own.edit", PORTAL),
-            grant("inbox.receive", PORTAL),
-        ]);
-        let html = users_page(&full_frame(), &v);
-        for login in ["alice", "bob", "carol"] {
-            assert!(
-                html.contains(&format!(
-                    r#"<a class="rowLink" href="/auth/settings/users/{login}">{login}</a>"#
-                )),
-                "{login}"
-            );
-        }
-        assert!(
-            !html.contains("Superadmin</span>"),
-            "the superadmin is not a row of the accounts table"
-        );
-        assert!(
-            html.contains("2 of 4"),
-            "alice opens two of the four services"
-        );
-        assert!(html.contains(r#"<span class="muted">none</span>"#), "carol");
-        assert!(
-            html.contains("permission to check"),
-            "bob holds a grant that Grafana does not declare"
-        );
-        // The features are icons with counts and a name.
-        assert!(
-            html.contains(r#"role="img" aria-label="Keys: 2 of 8 rights""#),
-            "{html}"
-        );
-        assert!(html.contains(r#"aria-label="Inbox: 1 of 6 rights""#));
-        assert!(
-            html.contains(r#"<td class="r num">3</td>"#),
-            "the keys of alice"
-        );
-        assert!(html.contains(r#"<td class="r num danger">2</td>"#));
-        assert!(html.contains(">3 of 64<"));
-        assert!(
-            !html.contains(r#"action="/auth/users/update""#),
-            "no editor on the list"
-        );
-        assert!(!html.contains("Access</th>") && !html.contains("accountLink"));
-        // A file account has its badge and its page.
-        v.users.push(UserCard {
-            file: true,
-            ..card("dave", &["notes"])
-        });
-        let html = users_page(&full_frame(), &v);
-        assert!(html.contains(r#"<a class="rowLink" href="/auth/settings/users/dave">dave</a> <span class="badge">file</span>"#));
-        assert!(
-            html.contains(">3 of 64<"),
-            "the limit counts the database only"
-        );
-    }
-
-    #[test]
-    fn the_columns_of_a_feature_that_is_off_are_absent_from_the_dom() {
-        let cat = catalog();
-        let d = data();
-        // Panel only: the file has neither the block keys nor the block inbox.
-        let mut v = view(&cat, &d);
-        v.keys = false;
-        v.inbox = false;
-        v.features = None;
-        v.allow_creation = false;
-        let html = users_page(&frame(), &v);
-        for gone in [
-            "Features",
-            "Keys</th>",
-            r#"class="feat""#,
-            "New user",
-            NEW_USER_PATH,
-        ] {
-            assert!(!html.contains(gone), "{gone}");
-        }
-        assert!(html.contains("Last sign-in") && html.contains("Services</th>"));
-        // Keys on, inbox off: the column of the keys, one icon.
-        let mut v = view(&cat, &d);
-        v.inbox = false;
-        v.users[0].grants.push(grant("keys.own.read", PORTAL));
-        v.users[0].grants.push(grant("inbox.receive", PORTAL));
-        let html = users_page(&frame(), &v);
-        assert!(html.contains("Keys</th>") && html.contains("aria-label=\"Keys: 1 of 8 rights\""));
-        assert!(!html.contains("Inbox: "), "the inbox is off");
-    }
-
-    #[test]
-    fn new_user_shows_only_when_the_file_allows_it_and_the_grants_are_not_read_only() {
-        let cat = catalog();
-        let d = data();
-        let on = users_page(&frame(), &view(&cat, &d));
-        assert!(on.contains(&format!(r#"href="{NEW_USER_PATH}">"#)));
-        assert!(on.contains("New user</a>"));
-        // The form that made accounts is not in the page any more.
-        for gone in [
-            r#"id="add-user""#,
-            r#"action="/auth/users/add""#,
-            "Create user",
-            "add=1",
-        ] {
-            assert!(!on.contains(gone), "{gone}");
-        }
-        let mut off = view(&cat, &d);
-        off.allow_creation = false;
-        let html = users_page(&frame(), &off);
-        assert!(!html.contains("New user") && !html.contains(NEW_USER_PATH));
-        let mut fixed = view(&cat, &d);
-        fixed.mode = Mode::Static;
-        let html = users_page(&frame(), &fixed);
-        assert!(
-            !html.contains("New user") && !html.contains(NEW_USER_PATH),
-            "static mode"
-        );
-        let mut hybrid = view(&cat, &d);
-        hybrid.mode = Mode::Hybrid;
-        assert!(users_page(&frame(), &hybrid).contains("New user</a>"));
-    }
-
-    #[test]
-    fn the_sign_ins_panel_has_chips_that_are_links_a_graph_and_one_line_for_each_attempt() {
-        let cat = catalog();
-        let d = data();
-        let html = users_page(&frame(), &view(&cat, &d));
-        let panel = &html[html.find(r#"aria-labelledby="signins-title""#).unwrap()..];
-        let panel = &panel[..panel.find("</section>").unwrap()];
-        // The chips filter with a query parameter, so they work without script.
-        assert!(panel.contains(r#"<a class="chip is-on" href="/auth/settings" aria-current="true">All<span class="num">12</span></a>"#), "{panel}");
-        assert!(panel.contains(r#"href="/auth/settings?r=failed""#));
-        assert!(panel.contains(r#"aria-label="Refused 3" title="Refused""#));
-        assert!(!panel.contains("<button"), "no script needed to filter");
-        // The graph has a name and its figure is in the text.
-        assert!(panel.contains(r#"<svg class="spark spark--mini""#));
-        assert!(panel.contains("4 in 30 d"));
-        // One line for each attempt: the state is an icon with a name, the time is a local time.
-        assert_eq!(
-            panel.matches("<tr>").count(),
-            2 + 1,
-            "two attempts and the hidden head"
-        );
-        assert!(panel.contains(r#"<span class="visually-hidden">Signed in</span>"#));
-        assert!(panel.contains(r#"title="Refused""#));
-        assert!(panel.contains(r#"<time class="when" datetime="#));
-        assert!(panel.contains("203.0.113.7") && panel.contains("Firefox 131"));
-        // What was typed is text.
-        assert!(panel.contains("&lt;b&gt;x&lt;/b&gt;") && !panel.contains("<b>x</b>"));
-        assert!(panel.contains("No such account"));
-        // The filter is on: the chip of the refused attempts is the current one.
-        let mut v = view(&cat, &d);
-        v.only_refused = true;
-        let html = users_page(&frame(), &v);
-        assert!(html.contains(
-            r#"<a class="chip is-on" href="/auth/settings?r=failed" aria-current="true""#
-        ));
-        assert!(html.contains(r#"<a class="chip" href="/auth/settings">All"#));
-        // A chip with a count of zero is absent (CTRL-15).
-        let mut none = data();
-        none.logins.refused = 0;
-        let html = users_page(&frame(), &view(&cat, &none));
-        assert!(!html.contains("r=failed"));
-        // No pages: no Newer, no Older.
-        assert!(!html.contains("Newer") && !html.contains("Older"));
-    }
-
-    #[test]
-    fn the_recent_changes_panel_lists_the_audit_events_and_the_old_activity_page_is_gone() {
-        let cat = catalog();
-        let d = data();
-        let html = users_page(&frame(), &view(&cat, &d));
-        let panel = &html[html.find(r#"aria-labelledby="changes-title""#).unwrap()..];
-        assert!(panel.contains("Permissions changed"));
-        assert!(panel.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
-        assert!(panel.contains("root, 192.0.2.10"));
-        let mut empty = data();
-        empty.events.clear();
-        empty.logins = LoginPage::default();
-        let html = users_page(&frame(), &view(&cat, &empty));
-        assert!(
-            html.contains("No change recorded yet.") && html.contains("No sign-in recorded yet.")
-        );
-        for gone in [
-            "Activity",
-            "settings/logins",
-            "Sign-in attempts",
-            "Connections</h2>",
-        ] {
-            assert!(!main_of(&html).contains(gone), "{gone}");
-        }
-    }
-
-    #[test]
-    fn end_all_sessions_is_a_confirmation_in_place_in_the_toolbar() {
-        let cat = catalog();
-        let d = data();
-        let html = users_page(&frame(), &view(&cat, &d));
-        assert!(html.contains(r#"<details class="ask ask--danger"><summary class="ib ib--danger" aria-label="End all sessions""#));
-        assert!(html.contains(r#"action="/auth/users/end-sessions""#));
-        assert!(html.contains(r#"name="confirm" value="end-all-sessions""#));
-        assert!(html.contains(r#"name="csrf" value="tok&lt;en""#));
-        assert!(!html.contains("dangerRow") && !html.contains("incident"));
     }
 
     #[test]
@@ -2183,7 +1419,7 @@ mod tests {
         let bar = &bar[..bar.find("<form id=\"grants\"").unwrap()];
         // The row: the way back, the login, log in as, the password, the activity, delete, the
         // facts, Save. One row, and an icon for each tool, with its name.
-        assert!(bar.contains(r#"<a href="/auth/settings">Users</a>"#));
+        assert!(bar.contains(r#"<a href="/auth/settings">Access</a>"#));
         assert!(bar.contains(r#"<h2 class="name" aria-current="page">alice</h2>"#));
         assert!(
             bar.contains(r#"action="/auth/users/impersonate""#)
@@ -2195,7 +1431,7 @@ mod tests {
         assert!(bar.contains("Created") && bar.contains("Last sign-in"));
         assert!(bar.contains(r#"type="submit" form="grants" data-save>Save</button>"#));
         let order = [
-            "Users</a>",
+            "Access</a>",
             "Log in as alice",
             "Change the password",
             "Activity of the account",

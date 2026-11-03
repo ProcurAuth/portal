@@ -721,15 +721,6 @@ async fn handle_request(
         text_response(StatusCode::OK, "ready\n")
     } else if inbox_page::is_inbox_path(&path) {
         inbox_page::handle(&state, request, &client).await
-    } else if method == Method::GET && path == ui::keys::PATH {
-        keys_page::handle_keys(
-            &state,
-            &uri,
-            request.headers(),
-            &client,
-            keys_page::Page::List,
-        )
-        .await
     } else if method == Method::GET && path == ui::keys::NEW_PATH {
         keys_page::handle_keys(
             &state,
@@ -1118,7 +1109,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         None => Arc::new(catalog.filtered(|_| true, false)),
     };
     let gear = if superadmin {
-        Some(ui::settings::USERS_PATH)
+        Some(ui::settings::ACCESS_PATH)
     } else if inbox_page::tab_visible(state, &viewer) {
         Some(ui::settings::INBOX_PATH)
     } else {
@@ -1148,8 +1139,9 @@ fn is_superadmin(viewer: &Viewer) -> bool {
 fn is_settings_path(path: &str) -> bool {
     matches!(
         path,
-        ui::settings::USERS_PATH
+        ui::settings::ACCESS_PATH
             | ui::settings::SERVICES_PATH
+            | ui::settings::ACTIVITY_PATH
             | ui::settings::NEW_USER_PATH
             | ui::settings::GIVE_PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
@@ -1206,21 +1198,26 @@ async fn handle_settings(
                 },
             )
         }
-        ui::settings::USERS_PATH => {
+        ui::settings::ACCESS_PATH => {
             let (users, snapshot) = load_admin_data(state).await;
+            let view = access_view(state, &workloads, uri, &users_token, users, &snapshot);
+            ui::access_page(&frame, &view)
+        }
+        ui::settings::ACTIVITY_PATH => {
+            let (_, snapshot) = load_admin_data(state).await;
             let only_refused = query_value(uri, "r").as_deref() == Some("failed");
             let logins = load_login_page(state, only_refused).await;
-            let view = users_view(
-                state,
-                &workloads,
-                uri,
-                &users_token,
-                users,
-                &snapshot,
-                &logins,
-                only_refused,
-            );
-            ui::users_page(&frame, &view)
+            ui::activity_page(
+                &frame,
+                &ui::ActivityView {
+                    notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+                    logins: &logins,
+                    changes: query_value(uri, "v").as_deref() == Some("changes"),
+                    only_refused,
+                    days: &snapshot.days,
+                    recent_events: &snapshot.recent_events,
+                },
+            )
         }
         // "New user": the page of an account in create mode. The route does not exist when the file
         // forbids the creation or the grants are read-only.
@@ -1463,17 +1460,14 @@ fn file_card(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn users_view<'a>(
+fn access_view<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
     uri: &str,
     users_token: &'a str,
     users: Vec<(String, UserRecord)>,
-    snapshot: &'a Snapshot,
-    logins: &'a LoginPage,
-    only_refused: bool,
-) -> ui::UsersView<'a> {
+    snapshot: &Snapshot,
+) -> ui::AccessView<'a> {
     let mut activities = activities_of(snapshot);
     let counts = key_counts(state);
     let mut cards: Vec<ui::UserCard> = users
@@ -1492,7 +1486,7 @@ fn users_view<'a>(
     for (login, account) in &state.config.access.accounts {
         cards.push(file_card(state, login, account, activities.remove(login)));
     }
-    ui::UsersView {
+    ui::AccessView {
         notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
         allow_creation: state.config.users.allow_creation,
         mode: state.policy.mode,
@@ -1504,10 +1498,6 @@ fn users_view<'a>(
         inbox: state.config.inbox.is_some(),
         max_users: state.config.users.max_users,
         token: users_token,
-        logins,
-        only_refused,
-        days: &snapshot.days,
-        recent_events: &snapshot.recent_events,
     }
 }
 
@@ -2554,7 +2544,7 @@ fn require_superadmin(
 fn settings_redirect(code: &str) -> HttpResponse {
     redirect_response(
         StatusCode::SEE_OTHER,
-        &format!("{}?s={code}", ui::settings::USERS_PATH),
+        &format!("{}?s={code}", ui::settings::ACCESS_PATH),
     )
 }
 
@@ -3094,7 +3084,7 @@ async fn handle_impersonate_end(
         Principal::Superadmin,
         state.superadmin_login.clone(),
         false,
-        redirect_response(StatusCode::SEE_OTHER, ui::settings::USERS_PATH),
+        redirect_response(StatusCode::SEE_OTHER, ui::settings::ACCESS_PATH),
     );
     if response.status() == StatusCode::SEE_OTHER {
         audit(
@@ -3804,7 +3794,7 @@ mod tests {
             ui::keys::EDIT_PATH,
             ui::keys::REVOKE_PATH,
             options_page::PATH,
-            ui::settings::USERS_PATH,
+            ui::settings::ACCESS_PATH,
             ui::settings::SERVICES_PATH,
             ui::settings::INBOX_PATH,
             "/metrics",

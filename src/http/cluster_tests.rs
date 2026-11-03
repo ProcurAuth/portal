@@ -3142,7 +3142,7 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
         let again = sign_in(&first, "root", PASSWORD);
         let _ = sign_in(&first, "carol", "a-long-password-1");
         wait_until(Duration::from_secs(10), || {
-            page(&first, &again, "/auth/settings")
+            page(&first, &again, "/auth/settings/activity?v=changes")
                 .body
                 .contains("All sessions ended")
         });
@@ -7003,9 +7003,9 @@ mod kinds_tests {
         assert_eq!(users.status, 200, "{}", users.body);
         let mut tabs = Vec::new();
         for (path, name) in [
-            ("/auth/settings", "users"),
+            ("/auth/settings", "access"),
             ("/auth/settings/services", "services"),
-            ("/auth/keys", "keys"),
+            ("/auth/settings/activity", "activity"),
             ("/auth/settings/inbox", "inbox"),
         ] {
             if users.body.contains(&format!(r#"href="{path}""#)) {
@@ -7104,11 +7104,11 @@ mod kinds_tests {
     }
 
     #[test]
-    fn panel_only_shows_two_tabs_no_new_user_and_no_feature_of_the_portal() {
+    fn panel_only_shows_three_tabs_no_new_user_and_no_feature_of_the_portal() {
         each_backend(|backend| {
             let node = matrix_node(backend, false, None, false, false);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["users", "services"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity"]);
             assert!(!seen.new_user, "no entry that makes an account");
             assert_eq!(seen.create_route, 404);
             assert!(seen.features.is_none(), "no part for the portal features");
@@ -7120,11 +7120,11 @@ mod kinds_tests {
     }
 
     #[test]
-    fn panel_and_keys_has_the_keys_tab_one_kind_and_no_inbox() {
+    fn panel_and_keys_has_three_tabs_one_kind_and_no_inbox() {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some(""), false, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["users", "services", "keys"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity"]);
             assert!(seen.new_user);
             let features = names(&seen.features);
             assert!(features.contains(&"keys.own.read") && features.contains(&"keys.own.create"));
@@ -7132,7 +7132,7 @@ mod kinds_tests {
                 .iter()
                 .any(|a| ["alert.send", "inbox.receive", "phone.read"].contains(a)));
             assert_eq!(seen.nodes, ["", "key_kind:mcp"], "one kind");
-            assert_eq!(seen.keys_routes[0], 200);
+            assert_eq!(seen.keys_routes, [404, 200], "the list is in the tab Access");
             assert!(seen.inbox_routes_absent);
             assert_eq!(seen.inbox_page, 404);
             // The new-key form has no selector: one kind is possible.
@@ -7158,7 +7158,7 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, false, None, true, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["users", "services", "inbox"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
             let features = names(&seen.features);
             assert!(features.contains(&"inbox.receive") && features.contains(&"alert.send"));
             assert!(
@@ -7178,7 +7178,7 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some("api = true"), true, true);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["users", "services", "keys", "inbox"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
             assert!(seen.new_user);
             assert_ne!(seen.create_route, 404);
             let features = names(&seen.features);
@@ -7194,7 +7194,7 @@ mod kinds_tests {
                 seen.nodes,
                 ["", "key_kind:mcp", "key_kind:api", "inbox_group:infra"]
             );
-            assert_eq!(seen.keys_routes[0], 200);
+            assert_eq!(seen.keys_routes, [404, 200]);
         });
     }
 
@@ -7203,7 +7203,7 @@ mod kinds_tests {
         each_backend(|backend| {
             let node = matrix_node(backend, true, Some("api = true"), true, false);
             let seen = look(&node);
-            assert_eq!(seen.tabs, ["users", "services", "keys", "inbox"]);
+            assert_eq!(seen.tabs, ["access", "services", "activity", "inbox"]);
             assert!(!seen.new_user, "no button, no form, no entry in the page");
             assert_eq!(seen.create_route, 404);
             // The accounts that exist stay editable, as the mode of the grants says.
@@ -7241,12 +7241,15 @@ mod kinds_tests {
             ] {
                 assert!(!users.body.contains(gone), "{gone}");
             }
-            // The panels are there: accounts, sign-ins and recent changes.
-            for part in ["Accounts", "Sign-ins", "Recent changes", "Last sign-in"] {
+            // The list of the accounts is there. The sign-ins and the changes are in the tab Activity.
+            for part in ["Accounts", "Last sign-in"] {
                 assert!(users.body.contains(part), "{part}");
             }
+            let activity = page(&node, &root, "/auth/settings/activity");
+            assert_eq!(activity.status, 200, "{}", activity.body);
+            assert!(activity.body.contains("Sign-ins"));
             let nav = users.body.split("<main").next().unwrap();
-            assert_eq!(nav.matches("contentTabs__tab").count(), 2, "two tabs");
+            assert_eq!(nav.matches("contentTabs__tab").count(), 3, "three tabs");
             assert!(!nav.contains("/auth/keys") && !nav.contains("/auth/settings/inbox"));
             // The route of the creation answers 404, and the old routes are gone.
             for path in [

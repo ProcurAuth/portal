@@ -12,7 +12,11 @@
 //! of [`settings`], the embedded assets ([`CSS`], [`SETTINGS_CSS`], [`THEME_JS`], [`SETTINGS_JS`]),
 //! and [`demo_page`] (synthetic data for `portal render-demo`).
 
+pub mod access;
+pub mod activity;
 pub mod components;
+#[cfg(test)]
+mod fixtures;
 pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
@@ -23,9 +27,11 @@ use std::fmt::Write as _;
 use crate::catalog::{parse_labels, Catalog, Group, Health, RuntimeHealth, Service};
 use crate::icons::Icons;
 use crate::util::html_escape;
+pub use access::{access_page, AccessView};
+pub use activity::{activity_page, ActivityView};
 pub use settings::{
-    new_user_page, notice_for, services_page, user_page, users_page, Frame, Holder, NewUserView,
-    ServiceActions, ServicesView, UserCard, UserView, UsersView,
+    new_user_page, notice_for, services_page, user_page, Frame, Holder, NewUserView,
+    ServiceActions, ServicesView, UserCard, UserView,
 };
 
 pub const CSS: &str = include_str!("../../web/portal.css");
@@ -617,7 +623,7 @@ fn demo_features() -> ServiceActions {
     }
 }
 
-fn demo_users<'a>(catalog: &'a Catalog, data: &'a DemoData, panel_only: bool) -> UsersView<'a> {
+fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> AccessView<'a> {
     use crate::store::{AccountActivity, ServiceUse, SessionRow};
     let now = 1_791_623_502_i64;
     let days = demo_days;
@@ -683,7 +689,7 @@ fn demo_users<'a>(catalog: &'a Catalog, data: &'a DemoData, panel_only: bool) ->
         "query.run.write on service:data-clickhouse-dash/host:local/database:analytics",
     ];
     alice_grants.extend(alice_portal.iter().map(String::as_str));
-    UsersView {
+    AccessView {
         notice: None,
         allow_creation: !panel_only,
         mode: crate::grants::Mode::Dynamic,
@@ -710,10 +716,6 @@ fn demo_users<'a>(catalog: &'a Catalog, data: &'a DemoData, panel_only: bool) ->
         inbox: !panel_only,
         max_users: 64,
         token: "demo",
-        logins: &data.logins,
-        only_refused: false,
-        days: &data.days,
-        recent_events: &data.events,
     }
 }
 
@@ -782,10 +784,12 @@ fn demo_logins() -> crate::store::LoginPage {
 }
 
 /// The pages of `portal render-demo`.
-pub const DEMO_PAGES: [&str; 8] = [
+pub const DEMO_PAGES: [&str; 10] = [
     "launcher",
-    "users",
-    "users-panel-only",
+    "access",
+    "access-panel-only",
+    "activity",
+    "activity-panel-only",
     "user",
     "new-user",
     "services",
@@ -805,7 +809,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         inbox: !panel_only,
         superadmin: true,
     };
-    let holders = |users: &UsersView| -> Vec<Holder> {
+    let holders = |users: &AccessView| -> Vec<Holder> {
         users
             .users
             .iter()
@@ -829,11 +833,20 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 settings: Some("/auth/settings"),
             },
         ),
-        "users" | "users-panel-only" => {
-            users_page(&frame, &demo_users(&catalog, &data, panel_only))
-        }
+        "access" | "access-panel-only" => access_page(&frame, &demo_users(&catalog, panel_only)),
+        "activity" | "activity-panel-only" => activity_page(
+            &frame,
+            &ActivityView {
+                notice: None,
+                logins: &data.logins,
+                changes: false,
+                only_refused: false,
+                days: &data.days,
+                recent_events: &data.events,
+            },
+        ),
         "user" => {
-            let mut users = demo_users(&catalog, &data, false);
+            let mut users = demo_users(&catalog, false);
             user_page(
                 &frame,
                 &UserView {
@@ -849,7 +862,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
             )
         }
         "new-user" => {
-            let mut users = demo_users(&catalog, &data, false);
+            let mut users = demo_users(&catalog, false);
             new_user_page(
                 &frame,
                 &NewUserView {
@@ -861,7 +874,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
             )
         }
         "services" | "services-panel-only" => {
-            let users = demo_users(&catalog, &data, panel_only);
+            let users = demo_users(&catalog, panel_only);
             let holders = holders(&users);
             services_page(
                 &frame,
@@ -1065,7 +1078,7 @@ mod tests {
             services.contains("statusIcon--warn"),
             "a demo service has a problem"
         );
-        let users = demo_page("users", &Icons::empty()).unwrap();
+        let users = demo_page("activity", &Icons::empty()).unwrap();
         assert!(
             users.contains("&#39;; DROP TABLE users; --") && !users.contains("<script>alert"),
             "what a visitor typed is text"

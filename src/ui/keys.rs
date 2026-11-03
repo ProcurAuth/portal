@@ -23,8 +23,8 @@ use crate::grants::{Grant, ACCESS};
 use crate::keys::KeyKind;
 use crate::util::{format_utc_instant, html_escape, time_tag};
 
-/// The address of the page.
-pub const PATH: &str = "/auth/keys";
+/// The list of the keys is in the tab Access.
+pub const PATH: &str = super::settings::ACCESS_PATH;
 /// `GET`: the page with the pane of a new key open.
 pub const NEW_PATH: &str = "/auth/keys/new";
 pub const CREATE_PATH: &str = "/auth/keys/create";
@@ -819,7 +819,7 @@ pub fn keys_page(frame: &Frame, view: &KeysView<'_>) -> String {
             let _ = write!(out, r#"<div class="split split--one">{list}</div>"#);
         }
     }
-    fill_page(Tab::Keys, frame, "Keys", &out)
+    fill_page(Tab::Access, frame, "Keys", &out)
 }
 
 /// The grant of a new key of this kind that the form offers as a box, from a grant of the owner.
@@ -969,7 +969,7 @@ mod tests {
             }),
             &BOTH,
         ));
-        assert!(!made.contains("New key</a>") && made.contains(r#"href="/auth/keys">Done</a>"#));
+        assert!(!made.contains("New key</a>") && made.contains(r#"href="/auth/settings">Done</a>"#));
         assert!(!made.contains(">Create</button>") && !made.contains(">Cancel</a>"));
     }
 
@@ -1058,8 +1058,8 @@ mod tests {
         assert!(html.contains("#i-webhook") && html.contains("#i-robot"));
         assert!(html.contains(r#"aria-label="API key: for services and webhooks""#));
         assert!(
-            html.contains(r#"href="/auth/keys?k=api""#)
-                && html.contains(r#"href="/auth/keys?k=mcp""#)
+            html.contains(r#"href="/auth/settings?k=api""#)
+                && html.contains(r#"href="/auth/settings?k=mcp""#)
         );
         assert!(html.contains(
             r#"<form id="revoke-keys" class="bulk" method="post" action="/auth/keys/revoke">"#
@@ -1090,8 +1090,8 @@ mod tests {
         let html = page(&api);
         assert!(html.contains(">ci &lt;deploy&gt;<") && !html.contains(">agent<"));
         assert!(
-            html.contains(r#"class="chip is-on" href="/auth/keys?k=api""#)
-                || html.contains(r#"class="chip is-on" href="/auth/keys""#)
+            html.contains(r#"class="chip is-on" href="/auth/settings?k=api""#)
+                || html.contains(r#"class="chip is-on" href="/auth/settings""#)
         );
         // No box and no bulk button without the right to revoke.
         let mut quiet = view(Pane::Closed, &BOTH);
