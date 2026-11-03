@@ -139,7 +139,7 @@ The code is in `src/ui/mask.rs`. The renderers still write plain names. A last s
 - Each instance that has the same secret makes the same names. No instance keeps a state, so a rolling upgrade works. A restart does not change the names. A new session secret changes them.
 - The same map rewrites the stylesheet and the script. In the stylesheet, only the selectors change. In the script, only the strings that name the class `js` and the data attributes change. The values do not change.
 - The mapped files have their own paths `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The hash follows the mapped content. The files are the same for all visitors, so the browser keeps them for one year (`immutable`).
-- The settings pages, and the old paths `/auth/style.css` and `/auth/assets/theme.js`, keep the plain files. A page that loads the plain files and a page that loads the mapped files never mix their names.
+- The settings pages, and the old paths `/auth/style.css` and `/auth/assets/theme.js`, keep the plain files. A browser that visits both kinds of page loads both pairs of files. A page that loads the plain files and a page that loads the mapped files never mix their names.
 - ForwardAuth lets the mapped paths pass without a session, as it does for the plain paths.
 
 ### The structure
@@ -191,4 +191,5 @@ Not done:
 - An upgrade changes the hash in the asset paths. A page that an old instance served can ask for a file that a new instance does not have. During a rolling upgrade, this gives a page without style for a short time. A reload fixes it.
 - The cookie of the form has a new name. A form that was open at the upgrade gives the page "The page was open too long" once.
 - The scripts that sign in with `curl` must read the field `token` of the page, wait one second, and post it. `demo/lib.sh` does this.
+- The page changes the order of the attributes at each render. A script must read the attributes of a tag in any order, and it must not use the plain class names or the identifiers of the page. Use the field names. `demo/lib.sh` and `tools/dev/ui-check.js` do this.
 - `tools/dev/ui-check.js` waits 1.2 seconds before it submits the form.

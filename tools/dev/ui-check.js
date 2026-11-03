@@ -43,8 +43,8 @@ async function open(browser, user, password, path) {
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   const page = await context.newPage();
   await page.goto(BASE + "/auth/login");
-  await page.fill("#login", user);
-  await page.fill("#password", password);
+  await page.fill("input[name=login]", user);
+  await page.fill("input[name=password]", password);
   // The sign-in form has a minimum time between its display and its submit.
   await page.waitForTimeout(1200);
   await page.click("button[type=submit]");
@@ -261,8 +261,8 @@ async function signIn(browser, user, password, path, viewport, scheme) {
   const context = await browser.newContext({ viewport: viewport || { width: 1440, height: 900 }, colorScheme: scheme || "dark" });
   const page = await context.newPage();
   await page.goto(BASE + "/auth/login");
-  await page.fill("#login", user);
-  await page.fill("#password", password);
+  await page.fill("input[name=login]", user);
+  await page.fill("input[name=password]", password);
   // The sign-in form has a minimum time between its display and its submit.
   await page.waitForTimeout(1200);
   await page.click("button[type=submit]");
@@ -510,8 +510,8 @@ async function wide(browser, login, password) {
       const context = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
       const page = await context.newPage();
       await page.goto(BASE + "/auth/login");
-      await page.fill("#login", login);
-      await page.fill("#password", password);
+      await page.fill("input[name=login]", login);
+      await page.fill("input[name=password]", password);
       await page.waitForTimeout(1200);
       await page.click("button[type=submit]");
       for (const [name, path] of WIDE_PAGES) {
