@@ -2930,7 +2930,7 @@ input.keyText {
 }
 
 .fgrid--key {
-  grid-template-columns: minmax(220px, 1.3fr) auto auto minmax(0, 2fr);
+  grid-template-columns: minmax(220px, 24rem) auto auto minmax(0, 1fr);
 }
 
 .fgrid--account {
@@ -3079,6 +3079,7 @@ input.keyText {
   min-width: 0;
 }
 
+  max-width: 56rem;
 .keyAside .title {
   margin: 8px 0 0;
   padding-bottom: 4px;
