@@ -1611,6 +1611,9 @@ CREATE TABLE user_roles (
                         .execute("UPDATE users SET created_at = created_at + 1", [])
                         .unwrap();
                     writes += 1;
+                    // A pause between two writes keeps the contention and stops the starvation of
+                    // the other connection, which polls the lock and loses it to a tight loop.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 writes
             })
