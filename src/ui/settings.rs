@@ -696,15 +696,9 @@ fn keys_field(login: &str, keys: &[KeyChip]) -> String {
             note: "",
         })
         .collect();
-    let api = keys
-        .iter()
-        .filter(|k| k.kind == crate::keys::KeyKind::Api)
-        .count();
     format!(
-        r#"<div class="field field--keys"><span class="field__label">Keys</span>{}<span class="hint">{}: {api} API, {} MCP. A key holds at most the rights of its owner.</span></div>"#,
+        r#"<div class="field field--keys"><span class="field__label">Keys</span>{}</div>"#,
         tags(&list, 4, &format!("All {} keys of {login}", keys.len())),
-        plural(keys.len(), "key", "keys"),
-        keys.len() - api,
     )
 }
 
@@ -1089,9 +1083,16 @@ impl ServicesView<'_> {
             })
     }
 
-    /// The id of the selected service: the one that the query names, or the first.
+    /// The id of the selected service: the one that the query names, or the first. A service that
+    /// the filter "to check" hides is not selected: the detail always names a row of the list.
     fn selected_id(&self) -> Option<&str> {
-        let all = || self.catalog.groups().iter().flat_map(|g| g.services.iter());
+        let all = || {
+            self.catalog
+                .groups()
+                .iter()
+                .flat_map(|g| g.services.iter())
+                .filter(|s| !self.only_check || self.needs_check(s))
+        };
         self.selected
             .as_deref()
             .and_then(|asked| all().find(|s| s.id == asked))
@@ -1120,24 +1121,41 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         r#"<span class="st--warn">{}</span>"#,
         icon("alert-triangle")
     );
-    let chip_list = chips(&[
-        Chip {
-            label_html: "All",
-            name: "",
-            count,
-            href: &services_href(selected, false, false),
-            on: !view.only_check,
-        },
-        Chip {
-            label_html: &check_icon,
-            name: "Services to check",
-            count: to_check,
-            href: &services_href(selected, true, false),
-            on: view.only_check,
-        },
-    ]);
-    let mut table = String::from(
-        r#"<table class="grid grid--services"><colgroup><col><col class="w160"><col class="w64"><col class="w64"><col class="w56"><col class="w80"></colgroup><thead><tr><th scope="col">Service</th><th scope="col">Path</th><th scope="col" class="r" title="Accounts that open the service">Opened</th><th scope="col" class="r">Actions</th><th scope="col" class="r">Types</th><th scope="col" class="r">Resources</th></tr></thead>"#,
+    // With no service to check, "All" would be the only choice: no chip.
+    let chip_list = if to_check == 0 && !view.only_check {
+        String::new()
+    } else {
+        chips(&[
+            Chip {
+                label_html: "All",
+                name: "",
+                count,
+                href: &services_href(selected, false, false),
+                on: !view.only_check,
+            },
+            Chip {
+                label_html: &check_icon,
+                name: "Services to check",
+                count: to_check,
+                href: &services_href(selected, true, false),
+                on: view.only_check,
+            },
+        ])
+    };
+    // The column of the service fits the longest name and id. The column of the path takes the
+    // free width.
+    let widest = view
+        .catalog
+        .groups()
+        .iter()
+        .flat_map(|g| g.services.iter())
+        .map(|s| s.name.chars().count() + s.id.chars().count() + 3)
+        .max()
+        .unwrap_or(0)
+        .min(40);
+    let mut table = format!(
+        r#"<table class="grid grid--services"><colgroup><col class="{}"><col class="w64"><col class="w64"><col class="w56"><col class="w80"><col></colgroup><thead><tr><th scope="col">Service</th><th scope="col" class="r" title="Accounts that open the service">Opened</th><th scope="col" class="r">Actions</th><th scope="col" class="r">Types</th><th scope="col" class="r">Resources</th><th scope="col">Path</th></tr></thead>"#,
+        super::access::col_class(widest, 136)
     );
     let mut index = 0;
     for group in view.catalog.groups() {
@@ -1197,12 +1215,14 @@ fn service_row(
     let found = view.actions_of(&service.id);
     let _ = write!(
         out,
-        r#"<tr id="row-{index}"{}><th scope="row"><a class="rowLink" href="{}#row-{index}"{}>{}</a> <code class="muted">{}</code>"#,
+        r#"<tr id="row-{index}"{}><th scope="row" title="{} ({})"><a class="rowLink" href="{}#row-{index}"{}>{}</a> <code class="muted">{}</code>"#,
         if selected {
             r#" class="is-selected""#
         } else {
             ""
         },
+        html_escape(&service.name),
+        html_escape(&service.id),
         html_escape(&services_href(Some(&service.id), view.only_check, false)),
         if selected {
             r#" aria-current="true""#
@@ -1212,20 +1232,33 @@ fn service_row(
         html_escape(&service.name),
         html_escape(&service.id),
     );
-    if let Some((_, text)) = problem {
-        let message = format!(
-            "The actions of {} cannot be read: {text}. The page keeps the last good list.",
-            service.name
-        );
+    if problem.is_some() {
         out.push_str(&status_icon(
             "warn",
             "alert-triangle",
-            &html_escape(&message),
+            "Document unreadable",
         ));
     }
+    out.push_str("</th>");
+    let opened = view
+        .holders
+        .iter()
+        .filter(|h| holds(&h.grants, ACCESS, &service.id))
+        .count();
+    let figure = |n: usize| {
+        if n == 0 {
+            r#"<span class="muted">-</span>"#.to_string()
+        } else {
+            n.to_string()
+        }
+    };
     let _ = write!(
         out,
-        r#"</th><td class="muted">{}"#,
+        r#"<td class="r num">{}</td><td class="r num">{}</td><td class="r num">{}</td><td class="r num">{}</td><td class="muted">{}"#,
+        figure(opened),
+        figure(found.map_or(0, |f| f.actions.len())),
+        figure(found.map_or(0, |f| f.document.types.len())),
+        figure(found.map_or(0, |f| f.document.resources.len())),
         html_escape(&service.href)
     );
     if !service.exclude.is_empty() {
@@ -1241,25 +1274,7 @@ fn service_row(
             rules.len()
         );
     }
-    let opened = view
-        .holders
-        .iter()
-        .filter(|h| holds(&h.grants, ACCESS, &service.id))
-        .count();
-    let figure = |n: usize| {
-        if n == 0 {
-            r#"<span class="muted">-</span>"#.to_string()
-        } else {
-            n.to_string()
-        }
-    };
-    let _ = write!(
-        out,
-        r#"</td><td class="r num">{opened}</td><td class="r num">{}</td><td class="r num">{}</td><td class="r num">{}</td></tr>"#,
-        figure(found.map_or(0, |f| f.actions.len())),
-        figure(found.map_or(0, |f| f.document.types.len())),
-        figure(found.map_or(0, |f| f.document.resources.len())),
-    );
+    out.push_str("</td></tr>");
 }
 
 /// The accounts that open the selected service, then the accounts that do not, each with a link
@@ -1282,7 +1297,7 @@ fn opened_by_body(view: &ServicesView, id: &str, name: &str) -> String {
         let _ = write!(
             body,
             r#"<tr><td><a href="{}">{}</a>{}</td><td class="r muted">{}</td><td class="r">{}</td></tr>"#,
-            html_escape(&user_path(&holder.login)),
+            html_escape(&user_service_path(&holder.login, id)),
             html_escape(&holder.login),
             if holder.file {
                 r#" <span class="badge">file</span>"#
@@ -1326,17 +1341,84 @@ fn opened_by_body(view: &ServicesView, id: &str, name: &str) -> String {
     body
 }
 
-/// The grants below a service that do not follow its document: the action does not list the
-/// type, or the path does not follow the parents.
+/// The path of the actions document of a service. The editor of the grants says the same.
+const SOURCE_PATH: &str = "/.well-known/procurauth/actions";
+
+/// The age of a copy of a document, as the editor of the grants says it.
+fn minutes(age: std::time::Duration) -> String {
+    let minutes = (age.as_secs() + 30) / 60;
+    if minutes < 1 {
+        "less than a minute".to_string()
+    } else {
+        format!("{minutes} min")
+    }
+}
+
+/// Where the document of a service comes from and how old the copy is: the line of the editor of
+/// the grants (`sourceLine` in `settings.js`), with the same classes and the same words. `problem`
+/// is why the last read failed. Empty: the last read did not fail.
+fn source_line(source: crate::actions::Source, problem: Option<&str>) -> String {
+    use crate::actions::Source;
+    let (class, icon_name, text) = match source {
+        Source::Fresh(age) => (
+            "ok",
+            "circle-check",
+            format!(
+                "Published by the service at <code>{SOURCE_PATH}</code> \u{b7} read {} ago",
+                minutes(age)
+            ),
+        ),
+        Source::Stale(age) => (
+            "stale",
+            "clock",
+            format!(
+                "Last good copy from {} ago. The last read failed{}.",
+                minutes(age),
+                problem.map_or(String::new(), |p| format!(": {}", html_escape(p)))
+            ),
+        ),
+        Source::Absent => (
+            "none",
+            "ban",
+            match problem {
+                Some(p) => format!(
+                    "The last read failed: {}. No copy applies: access only.",
+                    html_escape(p)
+                ),
+                None => format!(
+                    "Not published: access only. The service gives no document at {SOURCE_PATH}."
+                ),
+            },
+        ),
+    };
+    // The line is cut at the width of the panel: the tooltip gives the problem in full.
+    let title = problem.map_or(String::new(), |p| format!(r#" title="{}""#, html_escape(p)));
+    format!(
+        r#"<div class="srcLine srcLine--{class}"{title}>{}<span>{text}</span></div>"#,
+        icon(icon_name)
+    )
+}
+
+/// The grants below the selected service that do not follow its document: the action does not
+/// list the type, or the path does not follow the parents. A document that the portal cannot
+/// read is one more line.
 /// At start, the server does not know the services: the catalogue and the actions documents come
 /// at run time. Thus a grant of the configuration can name a type that the service does not
 /// declare. This list shows each such grant with its problem and a link to its account. The rows
 /// and their number: the chip "To check" has the number, and it is absent when there is none.
-fn checks_body(view: &ServicesView) -> (String, usize) {
+fn checks_body(view: &ServicesView, id: &str) -> (String, usize) {
     let mut rows = String::new();
     let mut count = 0;
+    if let Some((_, problem)) = view.problems.iter().find(|(own, _)| own == id) {
+        count += 1;
+        let _ = write!(
+            rows,
+            r#"<tr><td class="muted">-</td><td><code>actions document</code></td><td class="muted" title="{0}">{0}</td></tr>"#,
+            html_escape(problem),
+        );
+    }
     for holder in view.holders {
-        for grant in &holder.grants {
+        for grant in holder.grants.iter().filter(|g| g.service == id) {
             let Some(problem) = view
                 .services
                 .iter()
@@ -1370,7 +1452,8 @@ fn checks_body(view: &ServicesView) -> (String, usize) {
 
 /// The detail of the selected service. Its head has the name of the service and two chips that
 /// switch the list: **Opened by** and **To check**. The chips are links, so the switch works
-/// without script. The chip **To check** is absent when no grant needs a check.
+/// without script. The chip **To check** is absent when no grant needs a check. Above the list, a
+/// line says where the document of the service comes from, and why the last read failed.
 fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
     let Some(id) = selected else {
         return String::new();
@@ -1387,23 +1470,24 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
         .iter()
         .filter(|h| holds(&h.grants, ACCESS, id))
         .count();
-    let (checks_html, to_check) = checks_body(view);
+    let (checks_html, to_check) = checks_body(view, id);
     let on_checks = view.checks && to_check > 0;
     let user_label = icon("user");
     let check_label = icon("alert-triangle");
     let opened_href = services_href(selected, view.only_check, false);
     let checks_href = services_href(selected, view.only_check, true);
+    // "Opened by" alone is a fact, not a choice: it has no link.
     let chip_list = chips(&[
         Chip {
             label_html: &format!("{user_label}Opened by"),
             name: "Opened by: the accounts that open the service",
             count: opened,
-            href: &opened_href,
+            href: if to_check == 0 { "" } else { &opened_href },
             on: !on_checks,
         },
         Chip {
             label_html: &format!("{check_label}To check"),
-            name: "To check: grants that name a resource that is gone",
+            name: "To check: grants that name a resource that is gone, and a document that cannot be read",
             count: to_check,
             href: &checks_href,
             on: on_checks,
@@ -1414,6 +1498,16 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
     } else {
         opened_by_body(view, id, name)
     };
+    let source = view.actions_of(id).map(|s| s.source);
+    let problem = view
+        .problems
+        .iter()
+        .find(|(own, _)| own == id)
+        .map(|(_, text)| text.as_str());
+    let above = match source {
+        Some(source) => source_line(source, problem),
+        None => String::new(),
+    };
     zone(
         &Zone {
             id: "detail-title",
@@ -1423,7 +1517,7 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
             chips_html: &chip_list,
             tools_html: "",
             class: "",
-            above_html: "",
+            above_html: &above,
         },
         &body,
     )
@@ -2030,7 +2124,7 @@ mod tests {
                 .count(),
             4 + 5
         );
-        assert!(row.contains("All 5 keys of alice") && row.contains("5 keys: 5 API, 0 MCP."));
+        assert!(row.contains("All 5 keys of alice") && !row.contains("5 API, 0 MCP"));
         // An account that the page does not change shows its groups as links to the list.
         let mut file = card("dave", &[]);
         file.file = true;
@@ -2167,8 +2261,16 @@ mod tests {
         let panel = &html[html.find(r#"aria-labelledby="detail-title""#).unwrap()..];
         let panel = &panel[..panel.find("</section>").unwrap()];
         assert!(panel.contains(r#"<h2 class="title" id="detail-title">Grafana</h2>"#));
-        assert!(panel.contains(r#"class="chip is-on" href="/auth/settings/services?svc=infra-grafana" aria-current="true" aria-label="Opened by: the accounts that open the service 1""#), "{panel}");
-        assert!(panel.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
+        // Nothing to check: "Opened by" is alone, so it is a fact with no link.
+        assert!(panel.contains(r#"<span class="chip chip--static is-on" aria-label="Opened by: the accounts that open the service 1""#), "{panel}");
+        assert!(!panel.contains("To check"));
+        // The account opens the service with a link that keeps the service in the editor.
+        assert!(
+            panel.contains(
+                r#"<a href="/auth/settings/users/alice?service=infra-grafana">alice</a>"#
+            ),
+            "{panel}"
+        );
         assert!(
             !panel.contains(">bob</a></td><td class=\"r muted\">"),
             "an action without access does not open the service"
@@ -2221,6 +2323,19 @@ mod tests {
         )];
         let html = services_page(&frame(), &v);
         assert!(html.contains(r#"<a class="chip is-on" href="/auth/settings/services?svc=infra-grafana" aria-current="true">All<span class="num">4</span></a>"#), "{html}");
+        // The tooltip of the row is short. The problem shows in the detail of the service.
+        assert!(!html.contains("gave the status"), "{html}");
+        assert!(html.contains("Document unreadable"));
+        v.selected = Some("infra-typo".into());
+        let typo = services_page(&frame(), &v);
+        let detail = &typo[typo.find(r#"aria-labelledby="detail-title""#).unwrap()..];
+        assert!(detail.contains("srcLine srcLine--none"), "{detail}");
+        assert!(detail.contains("gave the status &lt;500&gt;"), "{detail}");
+        assert!(
+            detail.contains("To check"),
+            "the unreadable document is to check"
+        );
+        v.selected = None;
         assert!(
             html.contains(
                 r#"href="/auth/settings/services?svc=infra-grafana&f=check""#
@@ -2230,7 +2345,6 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"aria-label="Services to check 2" title="Services to check""#));
-        assert!(html.contains("gave the status &lt;500&gt;"));
         // The filter is on: only Grafana (a grant to check) and Typo (an unreadable document).
         v.only_check = true;
         let filtered = services_page(&frame(), &v);
@@ -2241,9 +2355,20 @@ mod tests {
         assert!(filtered.contains(
             r#"<a class="chip is-on" href="/auth/settings/services?svc=infra-grafana&amp;f=check""#
         ));
-        // No service to check: no chip.
+        // No service to check: no chip, and no chip "All" that would be the only choice.
         let clean = services_page(&frame(), &services_view(&cat, &actions, &[]));
         assert!(!clean.contains("f=check") && !clean.contains("Services to check"));
+        let zone = &clean[clean.find(r#"aria-labelledby="services-title""#).unwrap()..];
+        let head = &zone[..zone.find("</div>").unwrap()];
+        assert!(!head.contains("chip"), "{head}");
+        // A service that the filter hides is not the selected one: the detail names a listed row.
+        let mut hidden = services_view(&cat, &actions, &holders);
+        hidden.problems = vec![("infra-typo".into(), "x".into())];
+        hidden.only_check = true;
+        hidden.selected = Some("infra-notes".into());
+        let html = services_page(&frame(), &hidden);
+        assert!(!html.contains(r#"id="detail-title">Notes</h2>"#), "{html}");
+        assert!(html.contains(r#"id="detail-title">Grafana</h2>"#), "{html}");
     }
 
     #[test]
@@ -2268,7 +2393,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"aria-label="To check: grants that name a resource that is gone 3""#),
+            html.contains(r#"aria-label="To check: grants that name a resource that is gone, and a document that cannot be read 2""#),
             "{html}"
         );
         assert!(
@@ -2288,7 +2413,21 @@ mod tests {
             !html.contains("folder:ops</code>"),
             "a declared grant is fine"
         );
-        assert!(html.contains(r#"<a href="/auth/settings/users/bob">bob</a>"#));
+        // The list is for the selected service: the grant of bob is on another service.
+        assert!(
+            !html.contains(r#"<a href="/auth/settings/users/bob">bob</a>"#),
+            "{html}"
+        );
+        view.selected = Some("infra-notes".into());
+        let html = services_page(&frame(), &view);
+        assert!(
+            html.contains(r#"<a href="/auth/settings/users/bob">bob</a>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#),
+            "{html}"
+        );
         // The chip is absent when there is nothing to check, also when the address asks for it.
         let mut clean = services_view(&cat, &actions, &[]);
         let one = [holder("alice", access(&["grafana"]))];
@@ -2296,6 +2435,41 @@ mod tests {
         clean.checks = true;
         let none = services_page(&frame(), &clean);
         assert!(!none.contains("grid--checks") && !none.contains("v=checks"));
+    }
+
+    #[test]
+    fn the_source_line_of_a_service_says_what_the_line_of_the_editor_says() {
+        use crate::actions::Source;
+        use std::time::Duration;
+        let fresh = source_line(Source::Fresh(Duration::from_secs(125)), None);
+        assert!(fresh.contains(r#"class="srcLine srcLine--ok""#));
+        assert!(fresh.contains("read 2 min ago"), "{fresh}");
+        let stale = source_line(
+            Source::Stale(Duration::from_secs(2_400)),
+            Some("a <b> problem"),
+        );
+        assert!(stale.contains("srcLine--stale"));
+        assert!(stale.contains(
+            "Last good copy from 40 min ago. The last read failed: a &lt;b&gt; problem."
+        ));
+        assert!(source_line(Source::Fresh(Duration::from_secs(10)), None)
+            .contains("less than a minute"));
+        let none = source_line(Source::Absent, None);
+        assert!(none.contains("srcLine--none") && none.contains("Not published: access only."));
+        assert!(source_line(Source::Absent, Some("x")).contains("The last read failed: x."));
+        // The editor writes the same words: the two lines do not drift apart.
+        let js = include_str!("../../web/settings.js");
+        for phrase in [
+            "Published by the service at ",
+            " ago",
+            "Last good copy from ",
+            ". The last read failed.",
+            "Not published: access only. The service gives no document at ",
+            "/.well-known/procurauth/actions",
+            "less than a minute",
+        ] {
+            assert!(js.contains(phrase), "{phrase}");
+        }
     }
 
     #[test]

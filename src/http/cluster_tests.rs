@@ -7546,7 +7546,7 @@ mod kinds_tests {
             // Alice has `access` on the service db: she is in the panel, and the others are not.
             assert!(db
                 .body
-                .contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
+                .contains(r#"<a href="/auth/settings/users/alice?service=db">alice</a>"#));
             let other = page(&node, &root, "/auth/settings/services?svc=%3Cnope%3E");
             assert_eq!(other.status, 200);
             assert!(!other.body.contains("<nope>"));
