@@ -171,6 +171,9 @@ pub(super) fn login_row_of(login: &str, success: bool, known: bool) -> LoginRow 
     }
 }
 
+/// The start of the first day of the graph in the fixtures: 2026-10-06 UTC, and 29 days before today.
+pub(super) const FIRST_DAY: i64 = 1791244800;
+
 pub(super) fn data() -> Data {
     let mut days = vec![DayStat::default(); 30];
     days[29] = DayStat {

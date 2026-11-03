@@ -1618,6 +1618,7 @@ mod tests {
             changes: false,
             only_refused: false,
             days: &d.days,
+            first_day: FIRST_DAY,
             recent_events: &d.events,
         };
         let pages = [

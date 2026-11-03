@@ -24,6 +24,8 @@ pub struct ActivityView<'a> {
     pub only_refused: bool,
     /// Every real connection, per day, all accounts.
     pub days: &'a [DayStat],
+    /// The Unix time of the start of the first day of `days`, in UTC.
+    pub first_day: i64,
     /// The latest audit events.
     pub recent_events: &'a [AuditRow],
 }
@@ -109,11 +111,32 @@ pub fn activity_page(frame: &Frame, view: &ActivityView) -> String {
             chips_html: &chips_html,
             tools_html: &tools,
             class: " zone--page",
-            above_html: &spark(view.days, "spark--strip"),
+            above_html: &format!(
+                "{}{}",
+                spark(view.days, "spark--strip"),
+                spark_axis(view.first_day, view.days.len())
+            ),
         },
         &body,
     ));
     fill_page(Tab::Activity, frame, "Activity", &out)
+}
+
+/// The marks of the time under the graph: the first day, the middle day and today, in UTC as the
+/// bars are. Plain text, so it needs no script.
+fn spark_axis(first_day: i64, days: usize) -> String {
+    if days < 3 {
+        return String::new();
+    }
+    let mark = |index: usize| {
+        let at = first_day + i64::try_from(index).unwrap_or(0) * 86_400;
+        crate::util::format_utc(at)[5..10].to_string()
+    };
+    format!(
+        r#"<div class="spark__axis"><span>{}</span><span>{}</span><span>Today</span></div>"#,
+        mark(0),
+        mark(days / 2)
+    )
 }
 
 /// The newest attempts, one line each. The head of the table is for a screen reader only.
@@ -245,6 +268,7 @@ mod tests {
             changes: false,
             only_refused: false,
             days: &data.days,
+            first_day: FIRST_DAY,
             recent_events: &data.events,
         }
     }
@@ -272,6 +296,13 @@ mod tests {
         assert!(!panel.contains("<button"), "no script needed to filter");
         // The graph has a name and its figure is in the text.
         assert!(panel.contains(r#"<svg class="spark spark--strip""#));
+        // The marks: the first day, the middle day (the day 15 of 30) and today.
+        assert!(
+            panel.contains(
+                r#"<div class="spark__axis"><span>10-06</span><span>10-21</span><span>Today</span></div>"#
+            ),
+            "{panel}"
+        );
         assert!(panel.contains("4 connections in 30 days"));
         // One line for each attempt: the state is an icon with a name, the time is a local time.
         assert_eq!(
