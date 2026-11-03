@@ -10,6 +10,8 @@ import app.portalinbox.data.Alert
 import app.portalinbox.data.AlertFrame
 import app.portalinbox.data.Group
 import app.portalinbox.data.KeyVault
+import app.portalinbox.data.Levels
+import app.portalinbox.data.Reconcile
 import app.portalinbox.data.Store
 import app.portalinbox.net.Http
 import app.portalinbox.net.ServerAddress
@@ -95,8 +97,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
      */
     fun setLevel(group: String, action: String?) {
         store.setLevel(serverId, group, action)
+        // The pseudo group of the alerts to the account is not on the server: nothing to send.
         val t = if (action == null) "unsubscribe" else "subscribe"
-        if (connected) events.offer(Event.Command(JSONObject().put("t", t).put("group", group)))
+        if (connected && Levels.isServerGroup(group)) events.offer(Event.Command(JSONObject().put("t", t).put("group", group)))
         Registry.changed()
     }
 
@@ -373,7 +376,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         for (i in 0 until arr.length()) add(arr.getString(i))
     }
 
-    private fun onWelcome(msg: JSONObject): Store.Reconcile {
+    private fun onWelcome(msg: JSONObject): Reconcile {
         val groups = msg.getJSONArray("groups")
         val list = (0 until groups.length()).map {
             val g = groups.getJSONObject(it)
@@ -399,10 +402,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private fun onSubscriptions(msg: JSONObject) {
         val server = parseSubscriptions(msg.getJSONArray("subscriptions"))
         val now = System.currentTimeMillis()
-        for ((group, level) in store.levels(serverId)) {
-            if (level == Store.LEVEL_OFF || group in server) continue
-            val asked = subscribeSentAt[group]
-            if (asked != null && now - asked < SUBSCRIBE_SETTLE_MS) continue
+        for (group in Levels.lostOnServer(store.levels(serverId), server, subscribeSentAt, now, SUBSCRIBE_SETTLE_MS)) {
             store.setLevel(serverId, group, null)
         }
         Registry.changed()
@@ -436,11 +436,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     }
 
     /**
-     * The level is this phone's choice. An alert of a group just turned off was
-     * already targeted by the server: it is still shown, as a plain notification.
+     * The level is this phone's choice: see [Levels.alertAction]. An alert of a group just turned
+     * off was already targeted by the server: it is still shown, as a plain notification. An
+     * alert to the account (`@direct`) uses its own level, `ring` by default.
      */
-    private fun localAction(group: String): String =
-        store.levels(serverId)[group]?.takeIf { it == "alarm" || it == "ring" || it == "notify" } ?: Store.LEVEL_NOTIFY
+    private fun localAction(group: String): String = Levels.alertAction(group, store.levels(serverId))
 
     private fun JSONObject.optNullableString(key: String): String? =
         if (!has(key) || isNull(key)) null else getString(key).ifEmpty { null }

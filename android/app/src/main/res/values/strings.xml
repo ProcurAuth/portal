@@ -41,6 +41,8 @@
     <string name="swipe_read">Read</string>
     <string name="alert_in_group">Alert in %1$s</string>
     <string name="message_in_group">Message in %1$s</string>
+    <string name="alert_direct">Alert for your account</string>
+    <string name="message_direct">Message for your account</string>
     <string name="alert_stop">Stop alarm</string>
     <string name="alert_close">Close</string>
     <string name="alert_permissions_missing">Permissions are missing. A critical alert may not ring.</string>
@@ -71,6 +73,7 @@
     <string name="server_groups">Groups</string>
     <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the sound mode of the phone. Ring sounds even in silent mode. Alarm stays on screen until you stop it.</string>
     <string name="server_groups_subscribed">Followed: %1$d/%2$d</string>
+    <string name="server_direct_desc">Alerts sent to your account, not to a group. Ring by default. The server does not know this level.</string>
     <string name="server_groups_none">Groups appear after the first connection.</string>
     <string name="server_remove">Delete server</string>
     <string name="server_remove_title">Delete %1$s?</string>

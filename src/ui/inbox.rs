@@ -18,7 +18,7 @@ use super::components::{
 };
 use super::settings::{notice_html, plural, Frame, Notice, Tab};
 use crate::inbox::admin::{
-    AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceRow, DeviceState,
+    AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceRow, DeviceState, Target,
 };
 use crate::util::{html_escape, percent_encode_query_component, time_tag};
 
@@ -51,16 +51,6 @@ pub struct UserChoice {
     pub phones: usize,
 }
 
-/// Where an alert went: a group, or one account (all its phones).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Group(String),
-    /// One account. The page draws and filters it. The back end of the direct alerts fills it: no
-    /// alert has this target yet.
-    #[allow(dead_code)]
-    User(String),
-}
-
 /// What the account may do in the tab. Each part of the page needs one of these rights.
 #[derive(Clone, Debug, Default)]
 pub struct Rights {
@@ -76,8 +66,7 @@ pub struct Rights {
     pub own_phones: bool,
     /// The groups with `alert.send`.
     pub send: Vec<GroupChoice>,
-    /// `alert.send_user`: the account may send an alert to one account. It is `false` while the
-    /// document of the portal has no such action.
+    /// `alert.send_user`: the account may send an alert to any account.
     pub send_user: bool,
 }
 
@@ -105,6 +94,15 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "bad_group" => ("Choose a group that you may send to.", false),
+        "bad_target" => (
+            "Choose a group or an account that you may send to.",
+            false,
+        ),
+        "bad_user" => ("That account does not exist.", false),
+        "no_phone" => (
+            "That account has no phone that can receive the alert: no phone is enrolled, or each phone is revoked.",
+            false,
+        ),
         "unknown_device" => ("That phone does not exist, or you cannot revoke it.", false),
         "too_many_codes" => (
             "You have the largest number of codes that are not used. Use one, or wait until it ends.",
@@ -428,6 +426,7 @@ impl Origin {
         match source {
             "portal" => Origin::Watch,
             "admin" => Origin::Account,
+            other if other.starts_with("admin:") => Origin::Account,
             other => {
                 let name = other.split_once(':').map_or(other, |(_, name)| name);
                 match name.strip_prefix("key:") {
@@ -442,8 +441,6 @@ impl Origin {
 pub struct AlertRow {
     pub summary: AlertSummary,
     pub origin: Origin,
-    /// Where the alert went. The page filters and draws the column "To" from it.
-    pub target: Target,
 }
 
 /// The zone "Sent".
@@ -902,7 +899,7 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     let query = view.query;
     // The group chips count the alerts of the state that is on. The state chips count the alerts
     // of the group that is on.
-    let in_group = |a: &&AlertRow| match &a.target {
+    let in_group = |a: &&AlertRow| match &a.summary.target {
         Target::Group(id) => !query.to_user && query.group.as_deref().is_none_or(|g| g == id),
         Target::User(_) => query.to_user || query.group.is_none(),
     };
@@ -924,14 +921,14 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
         sent.alerts
             .iter()
             .filter(in_state)
-            .filter(|a| matches!(&a.target, Target::Group(group) if group == id))
+            .filter(|a| matches!(&a.summary.target, Target::Group(group) if group == id))
             .count()
     };
     let user_count = sent
         .alerts
         .iter()
         .filter(in_state)
-        .filter(|a| matches!(a.target, Target::User(_)))
+        .filter(|a| matches!(a.summary.target, Target::User(_)))
         .count();
     let total = sent.alerts.iter().filter(in_group).filter(in_state).count();
 
@@ -1074,14 +1071,6 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
     )
 }
 
-/// The target as text: `group:infra` or `@alice`.
-fn to_text(target: &Target) -> String {
-    match target {
-        Target::Group(id) => format!("group:{id}"),
-        Target::User(login) => format!("@{login}"),
-    }
-}
-
 /// The column "To": a chip `group:infra`, with the mark of a critical group, or `@alice` with the
 /// icon of an account.
 fn to_cell(view: &InboxView, target: &Target) -> String {
@@ -1129,11 +1118,12 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
     };
     let _ = write!(
         out,
-        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-to="{to}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{to_cell}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
+        r#"<tr id="a-{id}" class="{open_class}" data-alert="{id}" data-kind="{kind}" data-group="{group}" data-to="{to}" data-source="{source}" data-title="{title}" data-received="{received}" data-targets="{targets}" data-expired="{expired}" data-created="{created}"><td>{icon}</td><td>{when}</td><td>{to_cell}</td><td><a class="rowLink" href="{href}" title="{title}"{expanded}>{title}</a></td><td>{origin}</td></tr>"#,
         id = html_escape(&a.id),
         open_class = if open { "is-selected" } else { "" },
         kind = a.kind.as_str(),
-        to = html_escape(&to_text(&row.target)),
+        group = html_escape(a.target.group().unwrap_or("")),
+        to = html_escape(&a.target.to_string()),
         source = html_escape(&a.source),
         title = html_escape(&a.title),
         received = a.received,
@@ -1142,7 +1132,7 @@ fn alert_row(out: &mut String, view: &InboxView, sent: &SentData, row: &AlertRow
         created = a.created_at,
         icon = alert_icon(state, a),
         when = when(a.created_at),
-        to_cell = to_cell(view, &row.target),
+        to_cell = to_cell(view, &a.target),
         href = html_escape(&href),
         expanded = if open {
             r#" aria-expanded="true""#
@@ -1753,7 +1743,7 @@ mod tests {
         AlertSummary {
             id: id.into(),
             kind: inbox_core::proto::Kind::Alert,
-            group: group.into(),
+            target: Target::Group(group.into()),
             title: title.into(),
             source: "producer:ci".into(),
             created_at: NOW - 60_000,
@@ -1765,12 +1755,7 @@ mod tests {
     }
 
     fn row(summary: AlertSummary, origin: Origin) -> AlertRow {
-        let target = Target::Group(summary.group.clone());
-        AlertRow {
-            summary,
-            origin,
-            target,
-        }
+        AlertRow { summary, origin }
     }
 
     fn device(id: &str, name: &str, login: &str, state: DeviceState, pending: i64) -> DeviceRow {
@@ -1894,8 +1879,8 @@ mod tests {
     /// The alerts of the tests, and one more that went to the account alice.
     fn sent_with_direct() -> SentData {
         let mut data = sent(None);
-        let mut direct = row(summary("u1", "", "Call me <back>", 1, 0), Origin::Account);
-        direct.target = Target::User("alice".into());
+        let mut direct = row(summary("u1", "x", "Call me <back>", 1, 0), Origin::Account);
+        direct.summary.target = Target::User("alice".into());
         data.alerts.push(direct);
         data
     }
@@ -2062,6 +2047,52 @@ mod tests {
         assert!(!html.contains("composer--both") && !html.contains("rcpt-group"));
         assert!(html.contains("rcptForm--user") && !html.contains("rcptForm--group"));
         assert!(html.contains("New alert"));
+    }
+
+    #[test]
+    fn an_account_with_only_the_right_to_alert_an_account_has_the_popup_with_the_user_form_alone() {
+        let rights = Rights {
+            send_user: true,
+            ..Rights::default()
+        };
+        assert!(rights.any() && rights.can_send());
+        let (query, groups) = (Query::default(), groups());
+        let users = [
+            UserChoice {
+                login: "alice".into(),
+                phones: 1,
+            },
+            UserChoice {
+                login: "bob".into(),
+                phones: 0,
+            },
+        ];
+        let mut view = full_view(&rights, &query, &groups);
+        view.sent = None;
+        view.phones = None;
+        view.connections = None;
+        view.users = &users;
+        let html = page(&view);
+        assert!(
+            html.contains("New alert"),
+            "the button shows with this right alone"
+        );
+        // One kind of recipient: no switch, one form, the list of accounts.
+        assert!(
+            !html.contains("rcpt-group")
+                && !html.contains("rcpt-user")
+                && !html.contains("composer--both")
+        );
+        assert!(html.contains("rcptForm--user") && !html.contains("rcptForm--group"));
+        assert!(html.contains(r#"value="user:alice" data-phones="1" required"#));
+        assert!(
+            html.contains(r#"value="user:bob" disabled><b>bob</b>"#)
+                && html.contains("no phone enrolled")
+        );
+        // The notices of the handler have their words.
+        for code in ["bad_target", "bad_user", "no_phone"] {
+            assert!(notice_for(code).is_some_and(|n| !n.ok), "{code}");
+        }
     }
 
     #[test]

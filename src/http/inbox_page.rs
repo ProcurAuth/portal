@@ -15,19 +15,16 @@
 
 use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
-use crate::inbox::admin::{self, DeviceRow};
+use crate::inbox::admin::{self, DeviceRow, Target};
 use crate::inbox::App as InboxApp;
 use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
 use crate::ui::inbox::{
     AlertRow, CodeData, ConnData, DocsData, GroupChoice, GroupLine, InboxView, Origin, PhonesData,
-    Query, Rights, SentData, Target, UserChoice,
+    Query, Rights, SentData, UserChoice,
 };
 
 pub(super) const PREFIX: &str = ui_inbox::PAGE;
-/// The right to send an alert to one account. The document of the portal has it when the
-/// back end of the direct alerts is in the tree: the popup then offers the chip "User".
-const ALERT_SEND_USER: &str = "alert.send_user";
 /// The purpose of the anti-CSRF tokens of the forms of the inbox.
 const INBOX_TOKEN: &str = "inbox";
 /// The largest body of a form of the inbox.
@@ -64,12 +61,6 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
         critical: inbox.groups[id].critical,
         members: members.get(id).copied().unwrap_or(0),
     };
-    // The right to alert one account exists only when the document of the portal names it. The
-    // superadmin has every right of the document, so it follows the document too.
-    let document = state.actions.declared(actions::SERVICE);
-    let has_send_user = document
-        .as_ref()
-        .is_some_and(|d| d.actions.iter().any(|a| a.name == ALERT_SEND_USER));
     // A critical group comes last: the form never starts on it.
     let ordered = |mut ids: Vec<String>| {
         ids.sort_by_key(|id| inbox.groups[id].critical);
@@ -85,7 +76,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
                 connections: true,
                 own_phones: !ids.is_empty(),
                 send: ordered(ids.clone()).iter().map(choice).collect(),
-                send_user: has_send_user,
+                send_user: true,
             },
             read_groups: None,
             named: None,
@@ -99,18 +90,20 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
     let send_ids = on(actions::ALERT_SEND);
     let read_ids = on(actions::ALERT_READ);
     let devices = at_service(actions::PHONE_READ);
+    let send_user = at_service(actions::ALERT_SEND_USER);
     let mut named: Vec<String> = read_ids.iter().chain(send_ids.iter()).cloned().collect();
     named.sort();
     named.dedup();
     Some(Held {
         ui: Rights {
-            sent: !read_ids.is_empty(),
+            // An account that may alert any account sees the alerts that it sent.
+            sent: !read_ids.is_empty() || send_user,
             phones: devices,
             revoke: devices && at_service(actions::PHONE_REVOKE),
             connections: at_service(actions::PHONE_LOG),
             own_phones: !on(actions::INBOX_RECEIVE).is_empty(),
             send: ordered(send_ids.clone()).iter().map(choice).collect(),
-            send_user: has_send_user && at_service(ALERT_SEND_USER),
+            send_user,
         },
         read_groups: Some(read_ids),
         named: Some(named),
@@ -129,6 +122,45 @@ impl Held {
             .as_ref()
             .is_none_or(|groups| groups.iter().any(|g| g == group))
     }
+}
+
+/// Whether the viewer may read the alert. An alert for a group needs `alert.read` on the group. An
+/// alert for an account can be read by its sender, by the target account and by the superadmin: a
+/// right on a group does not fit a target that is not a group. The sender is the account that used
+/// the form, or the owner of the key that sent the alert.
+fn may_read_alert(state: &AppState, ctx: &Context<'_>, summary: &admin::AlertSummary) -> bool {
+    match &summary.target {
+        Target::Group(group) => ctx.held.may_read(group),
+        Target::User(login) => {
+            is_superadmin(&ctx.viewer)
+                || *login == ctx.viewer.login
+                || sender_login(state, &summary.source).is_some_and(|l| l == ctx.viewer.login)
+        }
+    }
+}
+
+/// The login of the account that sent an alert, from its `source`. The form of the page writes
+/// `admin:<login>`. A key of the database gives its id: the sender is the owner of the key. A key
+/// of the file gives its name: the sender is the owner that the file names.
+fn sender_login(state: &AppState, source: &str) -> Option<String> {
+    use crate::users::KeyOwner;
+    if let Some(login) = admin::account_of_source(source) {
+        return Some(login.to_string());
+    }
+    if let Some(id) = admin::key_of_source(source) {
+        return match &state.users.key_by_id(id)?.owner {
+            KeyOwner::User(login) | KeyOwner::File(login) => Some(login.clone()),
+            KeyOwner::Superadmin => Some(state.superadmin_login.clone()),
+        };
+    }
+    let name = source.split_once(':').map(|(_, name)| name)?;
+    state
+        .config
+        .inbox
+        .as_ref()?
+        .api_keys
+        .get(name)
+        .map(|key| key.owner.clone())
 }
 
 /// Whether the viewer sees the tab "Inbox".
@@ -340,7 +372,10 @@ fn key_name(state: &AppState, id: &str) -> Option<String> {
 /// The accounts that the popup may send an alert to, by login, each with its active phones. The
 /// accounts are the accounts of the database and of the file. The superadmin is not a row.
 /// This is the one place that builds the choices of the popup.
-fn user_choices(state: &AppState, devices: &[DeviceRow]) -> Vec<UserChoice> {
+fn user_choices(
+    state: &AppState,
+    phones: &std::collections::BTreeMap<String, u32>,
+) -> Vec<UserChoice> {
     let mut logins: Vec<String> = state
         .users
         .list()
@@ -353,10 +388,7 @@ fn user_choices(state: &AppState, devices: &[DeviceRow]) -> Vec<UserChoice> {
     logins
         .into_iter()
         .map(|login| UserChoice {
-            phones: devices
-                .iter()
-                .filter(|row| row.device.user_name == login && row.device.revoked_at.is_none())
-                .count(),
+            phones: phones.get(&login).copied().unwrap_or(0) as usize,
             login,
         })
         .collect()
@@ -389,8 +421,8 @@ async fn page(
     groups.sort_by_key(|g| g.critical);
     let sent = if rights.sent {
         let since_ms = now_ms - query.period.millis();
-        let only = ctx.held.read_groups.as_deref();
-        let (alerts, truncated) = match admin::alerts(&ctx.app, ALERTS_SHOWN, since_ms, only).await
+        let keep = |summary: &admin::AlertSummary| may_read_alert(state, ctx, summary);
+        let (alerts, truncated) = match admin::alerts(&ctx.app, ALERTS_SHOWN, since_ms, keep).await
         {
             Ok(v) => v,
             Err(_) => return unavailable(),
@@ -402,7 +434,7 @@ async fn page(
             };
         let opened = match &query.open {
             Some(id) => match admin::alert(&ctx.app, id).await {
-                Ok(Some(detail)) if ctx.held.may_read(&detail.summary.group) => Some(detail),
+                Ok(Some(detail)) if may_read_alert(state, ctx, &detail.summary) => Some(detail),
                 Ok(_) => None,
                 Err(_) => return unavailable(),
             },
@@ -413,8 +445,6 @@ async fn page(
             .into_iter()
             .map(|summary| AlertRow {
                 origin: Origin::of(&summary.source, &resolve),
-                // An alert has a group today. The alerts to an account will name it here.
-                target: Target::Group(summary.group.clone()),
                 summary,
             })
             .collect();
@@ -428,22 +458,20 @@ async fn page(
     } else {
         None
     };
-    let devices = if rights.phones || rights.own_phones || rights.send_user {
-        match admin::devices(&ctx.app).await {
-            Ok(rows) => Some(rows),
+    // The accounts that the popup may send to, with their active phones.
+    let users = if rights.send_user && !ctx.viewer.session.impersonated {
+        match admin::active_phone_counts(&ctx.app).await {
+            Ok(counts) => user_choices(state, &counts),
             Err(_) => return unavailable(),
         }
-    } else {
-        None
-    };
-    // The accounts that the popup may send to, with their phones.
-    let users = if rights.send_user {
-        user_choices(state, devices.as_deref().unwrap_or_default())
     } else {
         Vec::new()
     };
     let phones = if rights.phones || rights.own_phones {
-        let mut rows = devices.unwrap_or_default();
+        let mut rows = match admin::devices(&ctx.app).await {
+            Ok(rows) => rows,
+            Err(_) => return unavailable(),
+        };
         if !rights.phones {
             rows.retain(|row| row.device.user_name == ctx.viewer.login);
         }
@@ -576,9 +604,21 @@ async fn post(
     }
 }
 
-/// `POST /auth/settings/inbox/send`: the title and the target of an alert (the field `to`). The account needs
-/// `alert.send` on the group. The decision counts one use, as for a key, unless the group is
-/// critical.
+/// The target that the field `to` of the form names: `group:<id>` or `user:<login>`. `None`: the
+/// text has another form.
+fn parse_to(text: &str) -> Option<Target> {
+    let (kind, id) = text.split_once(':')?;
+    if id.is_empty() || id.len() > 64 || id.chars().any(char::is_control) {
+        return None;
+    }
+    Target::from_columns(kind, id.to_string())
+}
+
+/// `POST /auth/settings/inbox/send`: the title and the target of an alert. The field `to` is
+/// `group:<id>` or `user:<login>`. For a group, the account needs `alert.send` on the group. The
+/// decision counts one use, as for a key, unless the group is critical. For an account, the account
+/// needs `alert.send_user`: the decision always counts one use of the same budget, because an alert
+/// to an account is never critical. The superadmin may do both.
 async fn send(
     state: &Arc<AppState>,
     ctx: &Context<'_>,
@@ -601,13 +641,9 @@ async fn send(
         return forbidden();
     }
     let back = ui_inbox::PAGE;
-    // The field `to` is `group:<id>` or `user:<login>`. The send to an account is not here yet.
-    let Some(group) = to.strip_prefix("group:").map(str::to_string) else {
-        return back_with(back, "bad_group");
+    let Some(target) = parse_to(&to) else {
+        return back_with(back, "bad_target");
     };
-    if !ctx.held.ui.send.iter().any(|g| g.id == group) {
-        return back_with(back, "bad_group");
-    }
     let title = title.trim().to_string();
     if title.is_empty() {
         return back_with(back, "no_title");
@@ -615,25 +651,50 @@ async fn send(
     if title.chars().count() > ui_inbox::MAX_TITLE || title.chars().any(char::is_control) {
         return back_with(back, "bad_title");
     }
-    let Some(chain) = actions::group_chain(&group) else {
-        return back_with(back, "bad_group");
+    let (action, chain, count_use) = match &target {
+        Target::Group(group) => {
+            if !ctx.held.ui.send.iter().any(|g| g.id == *group) {
+                return back_with(back, "bad_group");
+            }
+            let Some(chain) = actions::group_chain(group) else {
+                return back_with(back, "bad_group");
+            };
+            (actions::ALERT_SEND, chain, !ctx.app.is_critical(group))
+        }
+        Target::User(login) => {
+            if !ctx.held.ui.send_user {
+                return back_with(back, "bad_target");
+            }
+            let known = *login == state.superadmin_login || state.users.get(login).is_some();
+            if !known {
+                return back_with(back, "bad_user");
+            }
+            // An account with no phone gets nothing, and the refused alert uses no budget.
+            match admin::active_phone_counts(&ctx.app).await {
+                Ok(phones) if phones.contains_key(login) => {}
+                Ok(_) => return back_with(back, "no_phone"),
+                Err(_) => return back_with(back, "failed"),
+            }
+            (actions::ALERT_SEND_USER, Vec::new(), true)
+        }
     };
-    let count_use = !ctx.app.is_critical(&group);
     let verdict = {
         let (state, login) = (Arc::clone(state), ctx.viewer.login.clone());
-        decide_person_for(
-            &state,
-            &login,
-            actions::SERVICE,
-            actions::ALERT_SEND,
-            &chain,
-            count_use,
-        )
+        decide_person_for(&state, &login, actions::SERVICE, action, &chain, count_use)
     };
     match verdict {
         UseVerdict::Allowed => {}
         UseVerdict::Limited(_) => return back_with(back, "limited"),
-        UseVerdict::Denied | UseVerdict::UnknownSubject => return back_with(back, "bad_group"),
+        UseVerdict::Denied | UseVerdict::UnknownSubject => {
+            return back_with(
+                back,
+                if matches!(target, Target::Group(_)) {
+                    "bad_group"
+                } else {
+                    "bad_target"
+                },
+            )
+        }
         UseVerdict::NotReady | UseVerdict::Unavailable => return back_with(back, "failed"),
     }
     log(
@@ -642,20 +703,33 @@ async fn send(
         "inbox_admin_send",
         &[
             ("actor", ctx.viewer.login.clone()),
-            ("group", group.clone()),
+            ("target", target.to_string()),
         ],
     );
-    let accepted =
-        match admin::send_alert(&ctx.app, group.clone(), title, format!("admin:{key}")).await {
-            Ok(accepted) => accepted,
-            Err(_) => return back_with(back, "failed"),
-        };
+    let readable = match &target {
+        Target::Group(group) => ctx.held.may_read(group),
+        // The sender reads the alert that it sent, when the page has the zone "Sent".
+        Target::User(_) => ctx.held.ui.sent,
+    };
+    let accepted = match admin::send_alert(
+        &ctx.app,
+        &ctx.viewer.login,
+        target,
+        title,
+        format!("admin:{key}"),
+    )
+    .await
+    {
+        Ok(accepted) => accepted,
+        Err(e) if e.code() == "no_phone" => return back_with(back, "no_phone"),
+        Err(_) => return back_with(back, "failed"),
+    };
     let code = if accepted.duplicate {
         "duplicate"
     } else {
         "sent"
     };
-    if ctx.held.may_read(&group) {
+    if readable {
         // The page opens the new alert in place.
         return redirect_response(
             StatusCode::SEE_OTHER,

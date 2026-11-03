@@ -63,13 +63,15 @@ A requirement has one of two states. A requirement without a mark is in force in
 
 3.3.2 A key of the file MUST NOT depend on the state of the portal at run time. It works when the portal is not ready and when PostgreSQL is away. Its owner MUST be an account of the file. The start decides its groups.
 
-3.3.3 A key of the database MUST have `alert.send` on the group, and its owner MUST have it too. A key follows its owner for both kinds. The Inbox asks the PDP of the portal in process.
+3.3.3 A key of the database MUST have `alert.send` on the group, and its owner MUST have it too. For an alert to an account, the key and its owner MUST have `alert.send_user` on the service `portal`. A key follows its owner for both kinds. The Inbox asks the PDP of the portal in process.
 
-3.3.4 The Inbox MUST offer these routes: a JSON alert, a generic webhook, and a webhook with the payload of Alertmanager and Grafana. A sender MAY read the delivery status of an alert with `alert.read` on its group.
+3.3.4 The Inbox MUST offer these routes: a JSON alert, a generic webhook, and a webhook with the payload of Alertmanager and Grafana. A sender MAY read the delivery status of an alert with `alert.read` on its group. For an alert to an account, only the key that sent it MAY read the status.
+
+3.3.4a An alert has one target: a group or one account. A request MUST give exactly one of `group` and `user`, or it MUST get `400`. An alert to an account MUST go to each phone of the account that is not revoked, and it MUST need no subscription. An account that does not exist MUST get `404`. An account with no phone MUST get `409`, and the Inbox MUST NOT store the alert. The level of the alert is Ring. It MUST NOT be critical. The protocol of the phones MUST NOT change: the frame has the group id `@direct`.
 
 3.3.5 A sender SHOULD send an `Idempotency-Key`. Two requests with the same key MUST make one alert. A key that belongs to a different alert MUST get `409`.
 
-3.3.6 The action `alert.send` MAY have a budget (`alerts`). A critical group MUST NOT have a limit.
+3.3.6 The actions `alert.send` and `alert.send_user` MAY have a budget (`alerts`). They use one count. A critical group MUST NOT have a limit. An alert to an account is never critical, so the budget MUST count it.
 
 3.3.7 The kind `api` MUST be on only with the block `inbox`. The switch is `keys.api`, and its default is `false`. A file with a block `api_key` and `keys.api` not `true` MUST stop at start.
 
@@ -167,7 +169,7 @@ The details are in [`SECURITY.md`](SECURITY.md) and [`protocol.md`](protocol.md)
 
 6.7 The tests use the emulator and the end-to-end tests of the binary. No physical phone is needed.
 
-6.8 The permissions of the Inbox are on the one internal scope of the portal, the service `portal`. The actions are `inbox.receive`, `alert.send`, `alert.read`, `phone.read`, `phone.revoke` and `phone.log`. The first three apply to the resource type `inbox_group`.
+6.8 The permissions of the Inbox are on the one internal scope of the portal, the service `portal`. The actions are `inbox.receive`, `alert.send`, `alert.send_user`, `alert.read`, `phone.read`, `phone.revoke` and `phone.log`. `inbox.receive`, `alert.send` and `alert.read` apply to the resource type `inbox_group`. The other four apply to the service.
 
 ## 7. Integration
 

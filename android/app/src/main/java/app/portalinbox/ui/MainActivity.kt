@@ -347,7 +347,7 @@ class MainActivity : BaseActivity() {
     private fun renderAlerts(servers: List<Server>) {
         val store = Store.get(this)
         val missing = Permissions.missing(this)
-        val wantsAlarm = servers.any { s -> store.subscriptions(s.id).values.any { it == "alarm" } }
+        val wantsAlarm = servers.any { s -> store.levels(s.id).values.any { it == "alarm" } }
         if (wantsAlarm && !Settings.canDrawOverlays(this)) {
             body.addView(banner(getString(R.string.alert_overlay_missing), getString(R.string.alert_overlay_fix),
                 color(R.color.danger), color(R.color.danger_soft)) {

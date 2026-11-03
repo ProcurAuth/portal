@@ -3,7 +3,8 @@
 //! The inbox does not read the state of the portal. The portal gives it one object at start, an
 //! [`Authorizer`]. The inbox uses it in three places:
 //! - A sender that gives a key of the kind `api` as its token. The inbox checks the key, then asks for
-//!   the decision on the action `alert.send` on the group (see `api.rs`).
+//!   the decision on the action `alert.send` on the group, or on the action `alert.send_user` on the
+//!   service (see `api.rs`).
 //! - A phone that subscribes to a group, and the list of groups in the message `welcome` (see
 //!   `device.rs`). The account of the phone needs `inbox.receive` on the group.
 //! - A change of the directory of the portal. The task [`run`] then removes the subscriptions that an
@@ -74,6 +75,14 @@ pub trait Authorizer: Send + Sync {
     /// Decides whether the key may do `action` on the group `group`. When `count_use` is true, a
     /// decision `Allowed` has taken one unit from each limit of the key and of its owner.
     fn decide(&self, key_id: &str, action: &str, group: &str, count_use: bool) -> Decision;
+
+    /// The same decision for an action on the service `portal` itself, with no group: the action
+    /// `alert.send_user` is flat.
+    fn decide_service(&self, key_id: &str, action: &str, count_use: bool) -> Decision;
+
+    /// Whether an account with this login exists, the superadmin included. `None`: the portal
+    /// cannot tell, because the directory is not ready or is old.
+    fn user_exists(&self, login: &str) -> Option<bool>;
 
     /// The groups that the account may subscribe to, among the groups of the inbox.
     fn subscribable(&self, login: &str) -> Subscribable;
@@ -236,6 +245,12 @@ pub mod testing {
         }
         fn decide(&self, _key: &str, _action: &str, _group: &str, _count: bool) -> Decision {
             Decision::NotReady
+        }
+        fn decide_service(&self, _key: &str, _action: &str, _count: bool) -> Decision {
+            Decision::NotReady
+        }
+        fn user_exists(&self, _login: &str) -> Option<bool> {
+            None
         }
         fn subscribable(&self, login: &str) -> Subscribable {
             self.answers

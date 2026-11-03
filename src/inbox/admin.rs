@@ -16,6 +16,7 @@ pub use super::db::{AlertCount, AlertDetail, AlertSummary, ConnectionView, Devic
 use super::hub::LiveInfo;
 use super::log;
 use super::state::App;
+pub use super::target::{account_of_source, key_of_source, Target};
 use super::util::{is_hex_id, now_ms};
 
 /// The state of a phone, as the pages show it.
@@ -84,13 +85,16 @@ pub async fn devices(app: &App) -> Result<Vec<DeviceRow>, ApiError> {
         .collect())
 }
 
-/// The most recent alerts since `since_ms`, newest first, of the groups in `only` (`None`: all the
-/// groups). The second value is `true` when the store gave `limit` alerts: older ones can exist.
+/// The most recent alerts since `since_ms`, newest first, that `may_read` keeps. The second value
+/// is `true` when the store gave `limit` alerts: older ones can exist. The store gives all the
+/// alerts and the page decides which ones the account may see: an alert for a group needs
+/// `alert.read` on the group, an alert for an account is for its sender, its target and the
+/// superadmin.
 pub async fn alerts(
     app: &App,
     limit: u32,
     since_ms: i64,
-    only: Option<&[String]>,
+    may_read: impl Fn(&AlertSummary) -> bool,
 ) -> Result<(Vec<AlertSummary>, bool), ApiError> {
     let limit = limit.clamp(1, 500);
     let list = app
@@ -100,15 +104,20 @@ pub async fn alerts(
         .map_err(ApiError::storage)?;
     let truncated = list.len() >= limit as usize;
     Ok((
-        match only {
-            Some(groups) => list
-                .into_iter()
-                .filter(|a| groups.contains(&a.group))
-                .collect(),
-            None => list,
-        },
+        list.into_iter().filter(|a| may_read(a)).collect(),
         truncated,
     ))
+}
+
+/// The number of phones that are not revoked, for each login that has one at least. An account
+/// that has no phone is not in the map: a direct alert to it answers 409 `no_phone`.
+pub async fn active_phone_counts(
+    app: &App,
+) -> Result<std::collections::BTreeMap<String, u32>, ApiError> {
+    app.db
+        .active_phones_by_login()
+        .await
+        .map_err(ApiError::storage)
 }
 
 /// The alerts since `since_ms`, counted for each bucket of `bucket_ms` and each group: the data of
@@ -148,11 +157,15 @@ pub async fn connections(
         .map_err(ApiError::storage)
 }
 
-/// Sends an alert for an account of the portal. The portal checked `alert.send` on the group.
-/// `idempotency_key` makes a double click of the form send one alert.
+/// Sends an alert for an account of the portal. The portal checked the right of the sender:
+/// `alert.send` on the group, or `alert.send_user` for an account. The portal checked that the
+/// account of the target exists. `sender` is the login of the account that uses the form: it is
+/// in the source of the alert, so the alert has its sender. `idempotency_key` makes a double
+/// click of the form send one alert. An account with no phone gives 409 `no_phone`.
 pub async fn send_alert(
     app: &App,
-    group: String,
+    sender: &str,
+    target: Target,
     title: String,
     idempotency_key: String,
 ) -> Result<Accepted, ApiError> {
@@ -167,9 +180,9 @@ pub async fn send_alert(
         app,
         NewAlert {
             kind: Kind::Alert,
-            group,
+            target,
             title,
-            source: "admin".into(),
+            source: format!("admin:{sender}"),
             idempotency_key,
         },
         "admin",

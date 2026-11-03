@@ -23,6 +23,7 @@ import android.util.Log
 import app.portalinbox.R
 import app.portalinbox.data.Alert
 import app.portalinbox.data.Kind
+import app.portalinbox.data.Levels
 import app.portalinbox.data.Store
 import app.portalinbox.service.Registry
 import app.portalinbox.ui.AlarmActivity
@@ -93,6 +94,9 @@ object Alerter {
     private fun requestCode(a: Alert, salt: Int) = (tag(a).hashCode() * 31) + salt
 
     fun present(context: Context, a: Alert) {
+        // An alert to the account that the user turned off: it stays in the list, with no sound
+        // and no notification.
+        if (a.action == Levels.OFF) return
         // Phone in use and allowed to draw over apps: the alarm page is opened directly,
         // so the notification must not add a heads-up on top of it. Otherwise the
         // full-screen intent (locked / screen off) or its heads-up fallback is used.
@@ -122,9 +126,13 @@ object Alerter {
 
     private fun post(context: Context, a: Alert, direct: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java)
-        val body = context.getString(
-            if (a.kind == Kind.ALERT) R.string.alert_in_group else R.string.message_in_group, a.groupName
-        )
+        val body = if (Levels.isDirect(a.group)) {
+            context.getString(if (a.kind == Kind.ALERT) R.string.alert_direct else R.string.message_direct)
+        } else {
+            context.getString(
+                if (a.kind == Kind.ALERT) R.string.alert_in_group else R.string.message_in_group, a.groupName
+            )
+        }
         // Tapping the notification opens the alert in the app, which marks it read.
         val open = PendingIntent.getActivity(
             context, requestCode(a, 1),

@@ -37,7 +37,7 @@ All accounts are database accounts. `seed.sh` sets their grants through the page
 | Account | Grants |
 |---|---|
 | `admin` | Superadmin. Every right. No limit. |
-| `alice` | `access` on notes, files and wiki. Read of all notebooks, with at most 2 notes in one read. Write and delete in the notebook `work`. A budget of 5 uses each minute on notes. In the inbox: `inbox.receive` on `infra` and `critical`, `alert.send` and `alert.read` on `infra`. The rights to make and use the keys of both kinds, to read and to revoke a key. |
+| `alice` | `access` on notes, files and wiki. Read of all notebooks, with at most 2 notes in one read. Write and delete in the notebook `work`. A budget of 5 uses each minute on notes. In the inbox: `inbox.receive` on `infra` and `critical`, `alert.send` and `alert.read` on `infra`, and `alert.send_user` (an alert to any account). The rights to make and use the keys of both kinds, to read and to revoke a key. |
 | `bob` | `access` on notes and wiki. Read of the notebook `public` only. In the inbox: `inbox.receive` on `infra`. |
 | `carol` | No grant. |
 

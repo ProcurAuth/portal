@@ -499,9 +499,9 @@ pub fn bulk_all_box(b: &Bulk) -> String {
     )
 }
 
-/// The button of the bulk action. Put it in the head of the panel. With script the button is
-/// absent until a row is ticked, and shows the count. Without script it is always there, with no
-/// count.
+/// The button of the bulk action. Put it in the head of the panel. With script the button shows
+/// the count of the ticked rows, "(0)" and dimmed while none is ticked. Without script it is
+/// always there, with no count.
 pub fn bulk_button(b: &Bulk) -> String {
     format!(
         r#"<details class="ask bulk__ask{danger}" data-bulk="{id}" data-verb="{verb}" data-one="{one}" data-many="{many}"><summary class="button{btn}"><span>{verb}</span><span class="bulk__n num" data-bulk-n></span></summary><div class="ask__panel"><span class="ask__q" data-bulk-q>{verb} the ticked {many}?</span><button class="button{confirm}" type="submit" form="{id}">{verb}</button></div></details>"#,

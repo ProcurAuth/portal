@@ -32,6 +32,7 @@ use super::http::{empty, json, read_body, text, Resp};
 use super::log;
 use super::spool::{Accepted, WireAlert};
 use super::state::App;
+use super::target::Target;
 use super::util::{hex, is_hex_id, now_ms};
 use crate::config::ClusterConfig;
 
@@ -371,10 +372,14 @@ fn spool(app: &App, body: &[u8]) -> Resp {
     let Ok(alert) = serde_json::from_slice::<WireAlert>(body) else {
         return text(StatusCode::BAD_REQUEST, "malformed alert");
     };
-    if !is_hex_id(&alert.id) || !app.group_names.contains_key(&alert.group) {
+    let known_target = match &alert.target {
+        Target::Group(group) => app.group_names.contains_key(group),
+        Target::User(login) => !login.is_empty(),
+    };
+    if !is_hex_id(&alert.id) || !known_target {
         return text(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "unknown group or malformed id",
+            "unknown target or malformed id",
         );
     }
     let Some(spool) = app.db.spool() else {

@@ -805,7 +805,7 @@ mod tests {
             accounts.contains(r#"role="img" aria-label="Keys: 2 of 8 rights""#),
             "{accounts}"
         );
-        assert!(accounts.contains(r#"aria-label="Inbox: 1 of 6 rights""#));
+        assert!(accounts.contains(r#"aria-label="Inbox: 1 of 7 rights""#));
         assert!(
             accounts.contains(r#"<td class="r num wide">3</td>"#),
             "the keys of alice"

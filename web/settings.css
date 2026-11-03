@@ -1410,8 +1410,10 @@ input.keyText {
   gap: 4px;
 }
 
-.js .bulk__ask:not(.has-count) {
-  display: none;
+/* With no row ticked the button shows "(0)" and does nothing. */
+.js .bulk__ask:not(.has-count) > summary {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 /* Fields and tools in the row of an account ------------------------------------------------ */

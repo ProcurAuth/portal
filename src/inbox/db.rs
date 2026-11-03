@@ -16,6 +16,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use super::log;
+use super::target::Target;
 use super::util::{now_ms, random_id};
 
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -183,6 +184,13 @@ CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at_ms);
 -- Each message has a kind. Protocol 4 knows one kind: `alert`.
 ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
 "#,
+    r#"
+-- A message has one target: a group or one account. The column `group_id` becomes the id of the
+-- target (the id of the group, or the login). The rows that exist are messages for a group.
+ALTER TABLE alerts RENAME COLUMN group_id TO target_id;
+ALTER TABLE alerts ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'group'
+    CHECK (target_kind IN ('group', 'user'));
+"#,
 ];
 
 /// The schema version this binary writes: the number of SQLite migrations. The inbox keeps it in
@@ -308,6 +316,17 @@ pub struct DeviceKey {
     pub revoked: bool,
     pub name: String,
     pub user_name: String,
+}
+
+/// The number of phones that are not revoked, for each login that has one at least.
+pub fn active_phones_by_login(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::BTreeMap<String, u32>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT user_name, COUNT(*) FROM devices WHERE revoked_at IS NULL GROUP BY user_name",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+    rows.collect()
 }
 
 pub fn count_active_devices(conn: &Connection) -> rusqlite::Result<u32> {
@@ -614,7 +633,7 @@ pub fn prune_subscriptions(conn: &Connection, groups: &[String]) -> rusqlite::Re
 #[derive(Clone)]
 pub struct NewAlert {
     pub kind: Kind,
-    pub group: String,
+    pub target: Target,
     pub title: String,
     pub source: String,
     pub idempotency_key: String,
@@ -631,6 +650,8 @@ pub enum InsertOutcome {
     },
     /// Same idempotency key, different content.
     Conflict,
+    /// The target is an account that has no phone to use: the alert is not stored.
+    NoPhone,
 }
 
 /// Stores the alert and one delivery row per subscribed, non-revoked device, in a
@@ -640,19 +661,20 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let existing = tx
         .query_row(
-            "SELECT id, group_id, title FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
+            "SELECT id, target_kind, target_id, title FROM alerts WHERE source = ?1 AND idempotency_key = ?2",
             params![alert.source, alert.idempotency_key],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((id, group, title)) = existing {
-        if group != alert.group || title != alert.title {
+    if let Some((id, kind, target, title)) = existing {
+        if kind != alert.target.kind() || target != alert.target.id() || title != alert.title {
             return Ok(InsertOutcome::Conflict);
         }
         let devices = delivery_devices(&tx, &id)?;
@@ -661,29 +683,50 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
             devices,
         });
     }
+    // An account with no phone to use gets nothing: the alert would wait for no one.
+    if let Target::User(login) = &alert.target {
+        let phones: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM devices WHERE user_name = ?1 AND revoked_at IS NULL",
+            params![login],
+            |r| r.get(0),
+        )?;
+        if phones == 0 {
+            return Ok(InsertOutcome::NoPhone);
+        }
+    }
     let id = random_id();
     let now = now_ms();
     tx.execute(
-        "INSERT INTO alerts (id, kind, group_id, title, source, idempotency_key, created_at)
-         VALUES (?1, ?7, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
+         VALUES (?1, ?7, ?8, ?2, ?3, ?4, ?5, ?6)",
         params![
             id,
-            alert.group,
+            alert.target.id(),
             alert.title,
             alert.source,
             alert.idempotency_key,
             now,
-            alert.kind.as_str()
+            alert.kind.as_str(),
+            alert.target.kind()
         ],
     )?;
-    tx.execute(
-        "INSERT INTO deliveries (alert_id, device_id)
-         SELECT ?1, s.device_id FROM subscriptions s
-         JOIN devices d ON d.id = s.device_id
-         WHERE s.group_id = ?2 AND d.revoked_at IS NULL
-         ORDER BY s.device_id",
-        params![id, alert.group],
-    )?;
+    match &alert.target {
+        Target::Group(group) => tx.execute(
+            "INSERT INTO deliveries (alert_id, device_id)
+             SELECT ?1, s.device_id FROM subscriptions s
+             JOIN devices d ON d.id = s.device_id
+             WHERE s.group_id = ?2 AND d.revoked_at IS NULL
+             ORDER BY s.device_id",
+            params![id, group],
+        )?,
+        Target::User(login) => tx.execute(
+            "INSERT INTO deliveries (alert_id, device_id)
+             SELECT ?1, d.id FROM devices d
+             WHERE d.user_name = ?2 AND d.revoked_at IS NULL
+             ORDER BY d.id",
+            params![id, login],
+        )?,
+    };
     let devices = delivery_devices(&tx, &id)?;
     tx.commit()?;
     Ok(InsertOutcome::Created {
@@ -705,7 +748,7 @@ pub struct PendingDelivery {
     pub seq: i64,
     pub alert_id: String,
     pub kind: Kind,
-    pub group: String,
+    pub target: Target,
     pub title: String,
     pub created_at: i64,
 }
@@ -719,7 +762,7 @@ pub fn pending_deliveries(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT d.seq, a.id, a.group_id, a.title, a.created_at, a.kind
+        "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
@@ -728,13 +771,27 @@ pub fn pending_deliveries(
         Ok(PendingDelivery {
             seq: r.get(0)?,
             alert_id: r.get(1)?,
-            group: r.get(2)?,
-            title: r.get(3)?,
-            created_at: r.get(4)?,
-            kind: kind_column(r, 5)?,
+            target: target_columns(r, 2)?,
+            title: r.get(4)?,
+            created_at: r.get(5)?,
+            kind: kind_column(r, 6)?,
         })
     })?;
     rows.collect()
+}
+
+/// Reads the two columns of a target: the kind at `index`, the id at `index + 1`. An unknown
+/// kind is a conversion error.
+fn target_columns(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Target> {
+    let kind: String = r.get(index)?;
+    let id: String = r.get(index + 1)?;
+    Target::from_columns(&kind, id).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            format!("unknown target kind {kind:?}").into(),
+        )
+    })
 }
 
 /// Reads a column that holds the kind of a message. An unknown text is a conversion error.
@@ -856,10 +913,12 @@ pub fn list_devices(conn: &Connection, cutoff: i64) -> rusqlite::Result<Vec<Devi
 pub struct AlertSummary {
     pub id: String,
     pub kind: Kind,
-    pub group: String,
+    /// Who the alert is for: a group, or one account.
+    pub target: Target,
     pub title: String,
     pub source: String,
     pub created_at: i64,
+    /// The number of phones that the alert goes to.
     pub targets: i64,
     pub received: i64,
     /// Targets that never received the alert before it expired.
@@ -868,20 +927,21 @@ pub struct AlertSummary {
     pub missing: Vec<String>,
 }
 
-const ALERT_SUMMARY: &str = "SELECT a.id, a.group_id, a.title, a.source, a.created_at,
+const ALERT_SUMMARY: &str =
+    "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at,
         COUNT(d.seq), COUNT(d.received_at), a.kind
      FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id";
 
 fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
     Ok(AlertSummary {
         id: r.get(0)?,
-        group: r.get(1)?,
-        title: r.get(2)?,
-        source: r.get(3)?,
-        created_at: r.get(4)?,
-        targets: r.get(5)?,
-        received: r.get(6)?,
-        kind: kind_column(r, 7)?,
+        target: target_columns(r, 1)?,
+        title: r.get(3)?,
+        source: r.get(4)?,
+        created_at: r.get(5)?,
+        targets: r.get(6)?,
+        received: r.get(7)?,
+        kind: kind_column(r, 8)?,
         expired: 0,
         missing: Vec::new(),
     })
@@ -909,6 +969,7 @@ pub fn recent_alerts(
 }
 
 /// The number of alerts of one group in one bucket of time: the data of the graph of the page.
+/// The alerts for an account are not in the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertCount {
     /// The number of the bucket. Bucket 0 starts at `since_ms`.
@@ -926,7 +987,8 @@ pub fn alert_counts(
     bucket_ms: i64,
 ) -> rusqlite::Result<Vec<AlertCount>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT (created_at - ?1) / ?2, group_id, COUNT(*) FROM alerts WHERE created_at >= ?1
+        "SELECT (created_at - ?1) / ?2, target_id, COUNT(*) FROM alerts
+         WHERE created_at >= ?1 AND target_kind = 'group'
          GROUP BY 1, 2 ORDER BY 1, 2",
     )?;
     let rows = stmt.query_map(params![since_ms, bucket_ms.max(1)], |r| {
@@ -1142,7 +1204,7 @@ mod tests {
     fn alert(key: &str) -> NewAlert {
         NewAlert {
             kind: Kind::Alert,
-            group: "infra".into(),
+            target: Target::Group("infra".into()),
             title: "t".into(),
             source: "producer:test".into(),
             idempotency_key: key.into(),
@@ -1186,7 +1248,7 @@ mod tests {
         assert_eq!(recent_alerts(&c, 10, 0, 0).unwrap()[0].kind, Kind::Alert);
         // The column has the default `alert`.
         c.execute(
-            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
+            "INSERT INTO alerts (id, target_id, title, source, idempotency_key, created_at)
              VALUES ('x', 'infra', 't', 's', 'k2', 1)",
             [],
         )
@@ -1208,7 +1270,7 @@ mod tests {
             ("e", "infra", 10),
         ] {
             let mut alert = alert(key);
-            alert.group = group.into();
+            alert.target = Target::Group(group.into());
             insert_alert(&mut c, &alert).unwrap();
             c.execute(
                 "UPDATE alerts SET created_at = ?1 WHERE idempotency_key = ?2",
@@ -1587,5 +1649,156 @@ mod tests {
             assert!(versions.1 > 0, "the portal wrote its own version");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn user_alert(key: &str, login: &str) -> NewAlert {
+        NewAlert {
+            target: Target::User(login.into()),
+            ..alert(key)
+        }
+    }
+
+    #[test]
+    fn an_alert_for_an_account_goes_to_each_active_phone_of_the_account() {
+        let mut c = mem();
+        let enroll = |c: &Connection, n: u8, login: &str| {
+            insert_device(c, &format!("p{n}"), login, &[n; 32], "ip").unwrap()
+        };
+        let (a1, a2, a3) = (
+            enroll(&c, 1, "alice"),
+            enroll(&c, 2, "alice"),
+            enroll(&c, 3, "alice"),
+        );
+        let bob = enroll(&c, 4, "bob");
+        // The account has no subscription: a direct alert does not need one.
+        revoke_device(&mut c, &a3).unwrap();
+        let InsertOutcome::Created { devices, .. } =
+            insert_alert(&mut c, &user_alert("k", "alice")).unwrap()
+        else {
+            panic!("created")
+        };
+        let mut expected = vec![a1.clone(), a2.clone()];
+        expected.sort();
+        assert_eq!(devices, expected);
+        assert!(pending_deliveries(&c, &bob, 10, 0).unwrap().is_empty());
+        assert!(pending_deliveries(&c, &a3, 10, 0).unwrap().is_empty());
+        let pending = pending_deliveries(&c, &a1, 10, 0).unwrap();
+        assert_eq!(pending[0].target, Target::User("alice".into()));
+        let (kind, id): (String, String) = c
+            .query_row("SELECT target_kind, target_id FROM alerts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((kind.as_str(), id.as_str()), ("user", "alice"));
+        let summary = &recent_alerts(&c, 10, 0, 0).unwrap()[0];
+        assert_eq!(summary.target, Target::User("alice".into()));
+        assert_eq!(summary.targets, 2);
+    }
+
+    #[test]
+    fn an_account_with_no_active_phone_gets_no_alert_and_nothing_is_stored() {
+        let mut c = mem();
+        let phone = insert_device(&c, "p", "alice", &[1; 32], "ip").unwrap();
+        revoke_device(&mut c, &phone).unwrap();
+        for login in ["alice", "nobody"] {
+            assert!(matches!(
+                insert_alert(&mut c, &user_alert("k", login)).unwrap(),
+                InsertOutcome::NoPhone
+            ));
+        }
+        let stored: i64 = c
+            .query_row("SELECT COUNT(*) FROM alerts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, 0);
+    }
+
+    #[test]
+    fn the_same_key_for_another_target_kind_is_a_conflict_and_a_retry_is_a_duplicate() {
+        let mut c = mem();
+        insert_device(&c, "p", "infra", &[1; 32], "ip").unwrap();
+        assert!(matches!(
+            insert_alert(&mut c, &user_alert("k", "infra")).unwrap(),
+            InsertOutcome::Created { .. }
+        ));
+        assert!(matches!(
+            insert_alert(&mut c, &user_alert("k", "infra")).unwrap(),
+            InsertOutcome::Duplicate { .. }
+        ));
+        // A group and an account can have the same id: they are two targets.
+        assert!(matches!(
+            insert_alert(&mut c, &alert("k")).unwrap(),
+            InsertOutcome::Conflict
+        ));
+    }
+
+    #[test]
+    fn the_graph_counts_the_alerts_of_groups_only() {
+        let mut c = mem();
+        insert_device(&c, "p", "infra", &[1; 32], "ip").unwrap();
+        insert_alert(&mut c, &user_alert("u", "infra")).unwrap();
+        insert_alert(&mut c, &alert("g")).unwrap();
+        let counts = alert_counts(&c, 0, 1_000_000_000_000_000).unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!((counts[0].group.as_str(), counts[0].count), ("infra", 1));
+    }
+
+    #[test]
+    fn the_active_phones_are_counted_for_each_login() {
+        let mut c = mem();
+        let a1 = insert_device(&c, "p1", "alice", &[1; 32], "ip").unwrap();
+        insert_device(&c, "p2", "alice", &[2; 32], "ip").unwrap();
+        insert_device(&c, "p3", "bob", &[3; 32], "ip").unwrap();
+        let gone = insert_device(&c, "p4", "carol", &[4; 32], "ip").unwrap();
+        revoke_device(&mut c, &gone).unwrap();
+        let counts = active_phones_by_login(&c).unwrap();
+        assert_eq!(
+            counts
+                .iter()
+                .map(|(l, n)| (l.as_str(), *n))
+                .collect::<Vec<_>>(),
+            vec![("alice", 2), ("bob", 1)]
+        );
+        revoke_device(&mut c, &a1).unwrap();
+        assert_eq!(active_phones_by_login(&c).unwrap()["alice"], 1);
+    }
+
+    #[test]
+    fn the_migration_of_the_target_keeps_the_alerts_that_exist_as_alerts_for_a_group() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        // The chain up to the version before the change of the target.
+        let before = MIGRATIONS.len() - 1;
+        c.execute_batch("CREATE TABLE inbox_schema_version (version INTEGER NOT NULL) STRICT;")
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.execute(
+            "INSERT INTO inbox_schema_version (version) VALUES (?1)",
+            [before as i64],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at)
+             VALUES ('old', 'infra', 't', 's', 'k', 1)",
+            [],
+        )
+        .unwrap();
+        migrate(&mut c).unwrap();
+        assert_eq!(schema_version(&c).unwrap(), SCHEMA_VERSION);
+        let (kind, id): (String, String) = c
+            .query_row(
+                "SELECT target_kind, target_id FROM alerts WHERE id = 'old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind.as_str(), id.as_str()), ("group", "infra"));
+        let refused = c.execute(
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at)
+             VALUES ('bad', 'team', 'x', 't', 's', 'k2', 1)",
+            [],
+        );
+        assert!(refused.is_err(), "the kind of the target is checked");
     }
 }

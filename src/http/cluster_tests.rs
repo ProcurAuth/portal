@@ -6394,6 +6394,111 @@ mod inbox_rights_tests {
     }
 
     #[test]
+    fn the_right_to_alert_an_account_is_flat_and_uses_the_same_budget_as_the_right_for_a_group() {
+        each_backend(|backend| {
+            let (node, authorizer) = inbox_node(backend);
+            let mut owner = vec![
+                Grant::new("access", "portal")
+                    .unwrap()
+                    .with_limits(limits(r#"{"alerts":[{"amount":2,"window":"minute"}]}"#)),
+                Grant::parse("keys.own.use on service:portal/key_kind:api").unwrap(),
+                Grant::parse("alert.send on service:portal/inbox_group:infra").unwrap(),
+                Grant::parse("alert.send_user on service:portal").unwrap(),
+            ];
+            owner.sort();
+            let row = |login: &str, grants: Vec<Grant>| crate::store::UserRow {
+                login: login.into(),
+                password_hash: password_hash(PASSWORD),
+                grants,
+                created_at: 1,
+            };
+            node.state.store.insert_user(&row("alice", owner)).unwrap();
+            // The second owner has the right for a group only.
+            node.state
+                .store
+                .insert_user(&row(
+                    "bob",
+                    vec![
+                        Grant::parse("keys.own.use on service:portal/key_kind:api").unwrap(),
+                        Grant::parse("alert.send on service:portal/inbox_group:infra").unwrap(),
+                    ],
+                ))
+                .unwrap();
+            node.state.users.refresh(&node.state.store).unwrap();
+            let (_, id) = add_real_key(
+                &node,
+                crate::keys::KeyKind::Api,
+                Some("alice"),
+                &[
+                    "alert.send on service:portal/inbox_group:infra",
+                    "alert.send_user on service:portal",
+                ],
+            );
+            // A key without the right: refused. A key whose owner lacks the right: refused too.
+            let (_, group_only) = add_real_key(
+                &node,
+                crate::keys::KeyKind::Api,
+                Some("alice"),
+                &["alert.send on service:portal/inbox_group:infra"],
+            );
+            let (_, owner_lacks) = add_real_key(
+                &node,
+                crate::keys::KeyKind::Api,
+                Some("bob"),
+                &[
+                    "alert.send on service:portal/inbox_group:infra",
+                    "alert.send_user on service:portal",
+                ],
+            );
+            let refused = |decision: Decision| matches!(decision, Decision::Refused { .. });
+            assert!(refused(authorizer.decide_service(
+                &group_only,
+                "alert.send_user",
+                true
+            )));
+            assert!(refused(authorizer.decide_service(
+                &owner_lacks,
+                "alert.send_user",
+                true
+            )));
+            // One unit for an alert to an account, one for an alert to a group: the budget is
+            // one count. The third use finds no room, for either action.
+            assert_eq!(
+                authorizer.decide_service(&id, "alert.send_user", true),
+                Decision::Allowed
+            );
+            assert_eq!(
+                authorizer.decide(&id, "alert.send", "infra", true),
+                Decision::Allowed
+            );
+            assert!(matches!(
+                authorizer.decide_service(&id, "alert.send_user", true),
+                Decision::Limited { .. }
+            ));
+            assert!(matches!(
+                authorizer.decide(&id, "alert.send", "infra", true),
+                Decision::Limited { .. }
+            ));
+            // A decision without a use takes no unit and does not look at the budget.
+            assert_eq!(
+                authorizer.decide_service(&id, "alert.send_user", false),
+                Decision::Allowed
+            );
+            // The accounts that exist: the accounts of the directory and the superadmin.
+            assert_eq!(authorizer.user_exists("alice"), Some(true));
+            assert_eq!(
+                authorizer.user_exists(&node.state.superadmin_login),
+                Some(true)
+            );
+            assert_eq!(authorizer.user_exists("ghost"), Some(false));
+            if node.state.store.is_shared() {
+                node.state.users.set_last_success(0);
+                assert_eq!(authorizer.user_exists("alice"), None);
+            }
+        });
+    }
+
+    #[test]
     fn the_decision_for_a_key_follows_both_sides_the_limit_and_the_critical_group() {
         each_backend(|backend| {
             let (node, authorizer) = inbox_node(backend);
@@ -6867,7 +6972,10 @@ mod kinds_tests {
                 .iter()
                 .map(|a| a["name"].as_str().unwrap())
                 .collect();
-            assert_eq!(names, ["access", "alert.send", "alert.read"]);
+            assert_eq!(
+                names,
+                ["access", "alert.send", "alert.send_user", "alert.read"]
+            );
             // The form of an MCP key holds the services and no portal feature.
             let mcp = get_new_key(&node, &alice, "?kind=mcp");
             let editor = editor_json(&mcp.body);

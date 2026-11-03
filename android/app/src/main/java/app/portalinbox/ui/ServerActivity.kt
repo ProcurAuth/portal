@@ -3,6 +3,7 @@ package app.portalinbox.ui
 import android.os.Bundle
 import android.widget.LinearLayout
 import app.portalinbox.R
+import app.portalinbox.data.Levels
 import app.portalinbox.data.Store
 import app.portalinbox.service.LinkState
 import app.portalinbox.service.InboxService
@@ -167,19 +168,20 @@ class ServerActivity : BaseActivity() {
 
     /** One compact row per group: name and description, then the level for this phone. */
     private fun renderGroups(store: Store) {
-        val subs = store.subscriptions(serverId) // local levels; the server only knows the group ids
-        val groups = store.groups(serverId)
-        body.addView(sectionTitle(getString(R.string.server_groups), if (groups.isEmpty()) null else
-            getString(R.string.server_groups_subscribed, groups.count { subs[it.id] != null }, groups.size)))
-        if (groups.isEmpty()) {
+        val levels = store.levels(serverId) // local levels; the server only knows the group ids
+        val real = store.groups(serverId)
+        body.addView(sectionTitle(getString(R.string.server_groups), if (real.isEmpty()) null else
+            getString(R.string.server_groups_subscribed, real.count { Levels.shown(it.id, levels) != null }, real.size)))
+        if (real.isEmpty()) {
             body.addView(label(getString(R.string.server_groups_none), SP_M, color(R.color.text_muted)).apply {
                 setPadding(dp(4), 0, dp(4), dp(4))
             })
-            return
         }
         body.addView(label(getString(R.string.server_groups_hint), SP_S, color(R.color.text_muted)).apply {
             setPadding(dp(4), 0, dp(4), dp(10))
         })
+        // The pseudo group of the alerts to the account is always listed, so the user can set it.
+        val groups = Levels.withDirect(real, getString(R.string.server_direct_desc))
         val labels = listOf(getString(R.string.seg_off), getString(R.string.seg_notify), getString(R.string.seg_ring), getString(R.string.seg_alarm))
         val names = listOf(getString(R.string.action_off), getString(R.string.action_notify), getString(R.string.action_ring), getString(R.string.action_alarm))
         // Side by side when there is room, else the level control goes under the name.
@@ -187,7 +189,7 @@ class ServerActivity : BaseActivity() {
         val list = panel()
         groups.forEachIndexed { i, g ->
             if (i > 0) list.addView(divider())
-            val current = ACTIONS.indexOf(subs[g.id]).coerceAtLeast(0)
+            val current = ACTIONS.indexOf(Levels.shown(g.id, levels)).coerceAtLeast(0)
             val style = actionStyle(ACTIONS[current])
             val row = lin(vertical = false)
             row.addView(android.view.View(this).apply { setBackgroundColor(if (current == 0) 0x00000000 else style.fg) }, lp(dp(3), MATCH))

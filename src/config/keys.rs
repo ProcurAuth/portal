@@ -1366,7 +1366,7 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, and `alert.send` on each group of the key.",
+        doc: "The login of the owner of the key. The owner must be an account of the file: a block `user`. The owner must hold `keys.own.use` on `service:portal/key_kind:api`, `alert.send` on each group of the key, and `alert.send_user` on `service:portal` when `direct_alerts` is `true`.",
     },
     Key {
         block: "api_key",
@@ -1386,7 +1386,15 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The groups that the key can send alerts to. The list has at least one group. Each group must exist, and the owner must hold `alert.send` on it.",
+        doc: "The groups that the key can send alerts to. The list has at least one group, except when `direct_alerts` is `true`: then it can be empty. Each group must exist, and the owner must hold `alert.send` on it.",
+    },
+    Key {
+        block: "api_key",
+        name: "direct_alerts",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::LabeledBlock,
+        doc: "`true`: the key can send an alert to any account (`POST /api/v1/alerts` with the field `user`). The owner must hold `alert.send_user` on `service:portal`. `false`: the key sends to groups only.",
     },
     Key {
         block: "api_key",

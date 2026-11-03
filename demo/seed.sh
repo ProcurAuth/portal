@@ -4,7 +4,8 @@
 # It is safe to run again: a grant that is already set stays, and the key of alice is made one time.
 #
 #   alice   the grants of the demo on notes, files and wiki; inbox.receive on infra and critical,
-#           alert.send and alert.read on infra; the rights to make and use the keys of both kinds
+#           alert.send and alert.read on infra, alert.send_user (an alert to any account); the rights
+#           to make and use the keys of both kinds
 #   bob     the grants of the demo on notes and wiki; inbox.receive on infra
 #   carol   an account without a grant
 #   alice   an API key `demo-sender` with alert.send on infra: .secrets/alice_key
@@ -65,6 +66,7 @@ give alice \
   "inbox.receive on service:portal/inbox_group:infra" \
   "inbox.receive on service:portal/inbox_group:critical" \
   "alert.send on service:portal/inbox_group:infra" \
+  "alert.send_user on service:portal" \
   "alert.read on service:portal/inbox_group:infra" \
   "keys.own.read on service:portal" \
   "keys.own.revoke on service:portal" \

@@ -34,6 +34,7 @@ use super::hub::LiveInfo;
 use super::log;
 use super::spool::{DbAck, Entry, Spool};
 use super::store::Stats;
+use super::target::Target;
 use super::util::{now_ms, random_id};
 
 /// An instance that has not updated its heartbeat for this long is lost: its sessions are closed.
@@ -149,11 +150,24 @@ CREATE INDEX enrollment_codes_expires ON enrollment_codes(expires_at_ms);
 -- Each message has a kind. Protocol 4 knows one kind: `alert`.
 ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
 "#,
+    r#"
+-- A message has one target: a group or one account. The column `group_id` becomes the id of the
+-- target (the id of the group, or the login). The rows that exist are messages for a group.
+ALTER TABLE alerts RENAME COLUMN group_id TO target_id;
+ALTER TABLE alerts ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'group'
+    CHECK (target_kind IN ('group', 'user'));
+"#,
 ];
 
 /// The kind that a stored text names. An unknown text is a storage error.
 fn kind_of(text: String) -> Result<Kind, DbError> {
     Kind::parse(&text).ok_or_else(|| DbError::Pg(format!("unknown message kind {text:?}")))
+}
+
+/// The target that two stored columns name. An unknown kind is a storage error.
+fn target_of(kind: String, id: String) -> Result<Target, DbError> {
+    Target::from_columns(&kind, id)
+        .ok_or_else(|| DbError::Pg(format!("unknown target kind {kind:?}")))
 }
 
 /// The database clock, in milliseconds: liveness is judged by one clock, not by the instances' own.
@@ -236,7 +250,7 @@ struct CachedDevice {
 #[derive(Clone)]
 pub struct RecentAlert {
     pub id: String,
-    pub group: String,
+    pub target: Target,
     pub title: String,
     /// Unix ms: when the alert was stored.
     pub at: i64,
@@ -499,7 +513,7 @@ impl PgStore {
             .map_err(db_error)?;
         let alerts = c
             .query(
-                "SELECT source, idempotency_key, id, group_id, title, created_at FROM alerts
+                "SELECT source, idempotency_key, id, target_kind, target_id, title, created_at FROM alerts
                  WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
                 &[&(now_ms() - RECENT_ALERTS_MS), &RECENT_ALERTS_MAX],
             )
@@ -531,9 +545,9 @@ impl PgStore {
                 (r.get(0), r.get(1)),
                 RecentAlert {
                     id: r.get(2),
-                    group: r.get(3),
-                    title: r.get(4),
-                    at: r.get(5),
+                    target: target_of(r.get(3), r.get(4))?,
+                    title: r.get(5),
+                    at: r.get(6),
                 },
             );
         }
@@ -547,13 +561,20 @@ impl PgStore {
         Ok(())
     }
 
-    /// The devices subscribed to `group`, as last seen in the database.
-    pub fn cached_targets(&self, group: &str) -> Vec<String> {
+    /// The devices that the target names, as last seen in the database: the devices subscribed to
+    /// the group, or the phones of the account. A revoked device is never in the list.
+    pub fn cached_targets(&self, target: &Target) -> Vec<String> {
         let cache = self.cache.read().expect("cache lock");
         let mut ids: Vec<String> = cache
             .devices
             .iter()
-            .filter(|(_, d)| !d.key.revoked && d.subscriptions.iter().any(|g| g == group))
+            .filter(|(_, d)| {
+                !d.key.revoked
+                    && match target {
+                        Target::Group(group) => d.subscriptions.iter().any(|g| g == group),
+                        Target::User(login) => d.key.user_name == *login,
+                    }
+            })
             .map(|(id, _)| id.clone())
             .collect();
         ids.sort();
@@ -658,11 +679,12 @@ impl PgStore {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         tx.execute(
-            "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (source, idempotency_key) DO NOTHING",
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (source, idempotency_key) DO NOTHING",
             &[
                 &e.id,
-                &e.group,
+                &e.target.kind(),
+                &e.target.id(),
                 &e.title,
                 &e.source,
                 &e.key,
@@ -675,13 +697,14 @@ impl PgStore {
         // Another instance (or this one, before the outage) may have stored it under another id.
         let row = tx
             .query_one(
-                "SELECT id, group_id, title FROM alerts WHERE source = $1 AND idempotency_key = $2",
+                "SELECT id, target_kind, target_id, title FROM alerts WHERE source = $1 AND idempotency_key = $2",
                 &[&e.source, &e.key],
             )
             .await
             .map_err(db_error)?;
-        let (stored, group, title): (String, String, String) = (row.get(0), row.get(1), row.get(2));
-        if group != e.group || title != e.title {
+        let (stored, kind, target, title): (String, String, String, String) =
+            (row.get(0), row.get(1), row.get(2), row.get(3));
+        if kind != e.target.kind() || target != e.target.id() || title != e.title {
             log::warn!(event = "spool_alert_conflict", alert.id = %e.id, alert.source = %e.source);
             self.spool.remove_if_unchanged(&e.id, e.rev);
             return Ok(None);
@@ -720,7 +743,7 @@ impl PgStore {
             &e.key,
             RecentAlert {
                 id: stored,
-                group: e.group.clone(),
+                target: e.target.clone(),
                 title: e.title.clone(),
                 at: e.created_at,
             },
@@ -1326,12 +1349,13 @@ impl PgStore {
         let id = random_id();
         let created = tx
             .query_opt(
-                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING id",
                 &[
                     &id,
-                    &alert.group,
+                    &alert.target.kind(),
+                    &alert.target.id(),
                     &alert.title,
                     &alert.source,
                     &alert.idempotency_key,
@@ -1345,14 +1369,14 @@ impl PgStore {
             // Another request, possibly on another instance, stored it first: it has committed by now.
             let row = tx
                 .query_one(
-                    "SELECT id, group_id, title FROM alerts WHERE source = $1 AND idempotency_key = $2",
+                    "SELECT id, target_kind, target_id, title FROM alerts WHERE source = $1 AND idempotency_key = $2",
                     &[&alert.source, &alert.idempotency_key],
                 )
                 .await
                 .map_err(db_error)?;
-            let (existing, group, title): (String, String, String) =
-                (row.get(0), row.get(1), row.get(2));
-            if group != alert.group || title != alert.title {
+            let (existing, kind, target, title): (String, String, String, String) =
+                (row.get(0), row.get(1), row.get(2), row.get(3));
+            if kind != alert.target.kind() || target != alert.target.id() || title != alert.title {
                 return Ok(InsertOutcome::Conflict);
             }
             let devices = Self::delivery_devices(&*tx, &existing).await?;
@@ -1361,16 +1385,44 @@ impl PgStore {
                 devices,
             });
         }
-        tx.execute(
-            "INSERT INTO deliveries (alert_id, device_id)
-             SELECT $1, s.device_id FROM subscriptions s
-             JOIN devices d ON d.id = s.device_id
-             WHERE s.group_id = $2 AND d.revoked_at IS NULL
-             ORDER BY s.device_id",
-            &[&id, &alert.group],
-        )
-        .await
-        .map_err(db_error)?;
+        // An account with no phone to use gets nothing: the alert would wait for no one.
+        if let Target::User(login) = &alert.target {
+            let phones: i64 = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM devices WHERE user_name = $1 AND revoked_at IS NULL",
+                    &[login],
+                )
+                .await
+                .map_err(db_error)?
+                .get(0);
+            if phones == 0 {
+                tx.rollback().await.map_err(db_error)?;
+                return Ok(InsertOutcome::NoPhone);
+            }
+        }
+        match &alert.target {
+            Target::Group(group) => tx
+                .execute(
+                    "INSERT INTO deliveries (alert_id, device_id)
+                     SELECT $1, s.device_id FROM subscriptions s
+                     JOIN devices d ON d.id = s.device_id
+                     WHERE s.group_id = $2 AND d.revoked_at IS NULL
+                     ORDER BY s.device_id",
+                    &[&id, group],
+                )
+                .await
+                .map_err(db_error)?,
+            Target::User(login) => tx
+                .execute(
+                    "INSERT INTO deliveries (alert_id, device_id)
+                     SELECT $1, d.id FROM devices d
+                     WHERE d.user_name = $2 AND d.revoked_at IS NULL
+                     ORDER BY d.id",
+                    &[&id, login],
+                )
+                .await
+                .map_err(db_error)?,
+        };
         let devices = Self::delivery_devices(&*tx, &id).await?;
         // Delivered at commit: the devices connected to the other instances are woken only for a stored alert.
         for chunk in devices.chunks(WAKE_CHUNK) {
@@ -1408,7 +1460,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT d.seq, a.id, a.group_id, a.title, a.created_at, a.kind
+                "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind
                  FROM deliveries d JOIN alerts a ON a.id = d.alert_id
                  WHERE d.device_id = $1 AND d.received_at IS NULL AND a.created_at >= $3
                  ORDER BY d.seq LIMIT $2",
@@ -1421,13 +1473,31 @@ impl PgStore {
                 Ok(PendingDelivery {
                     seq: r.get(0),
                     alert_id: r.get(1),
-                    group: r.get(2),
-                    title: r.get(3),
-                    created_at: r.get(4),
-                    kind: kind_of(r.get(5))?,
+                    target: target_of(r.get(2), r.get(3))?,
+                    title: r.get(4),
+                    created_at: r.get(5),
+                    kind: kind_of(r.get(6))?,
                 })
             })
             .collect()
+    }
+
+    /// The number of phones that are not revoked, for each login that has one at least.
+    pub async fn active_phones_by_login(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u32>, DbError> {
+        let c = self.client().await?;
+        let rows = c
+            .query(
+                "SELECT user_name, COUNT(*)::bigint FROM devices WHERE revoked_at IS NULL GROUP BY user_name",
+                &[],
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as u32))
+            .collect())
     }
 
     pub async fn mark_sent(&self, seqs: &[i64]) -> Result<(), DbError> {
@@ -1542,13 +1612,13 @@ impl PgStore {
     fn summary(r: &tokio_postgres::Row) -> Result<AlertSummary, DbError> {
         Ok(AlertSummary {
             id: r.get(0),
-            kind: kind_of(r.get(7))?,
-            group: r.get(1),
-            title: r.get(2),
-            source: r.get(3),
-            created_at: r.get(4),
-            targets: r.get(5),
-            received: r.get(6),
+            kind: kind_of(r.get(8))?,
+            target: target_of(r.get(1), r.get(2))?,
+            title: r.get(3),
+            source: r.get(4),
+            created_at: r.get(5),
+            targets: r.get(6),
+            received: r.get(7),
             expired: 0,
             missing: Vec::new(),
         })
@@ -1563,7 +1633,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
+                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id
                  WHERE a.created_at >= $2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
                 &[&i64::from(limit), &since_ms],
@@ -1602,7 +1672,8 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT (created_at - $1) / $2, group_id, COUNT(*) FROM alerts WHERE created_at >= $1
+                "SELECT (created_at - $1) / $2, target_id, COUNT(*) FROM alerts
+                 WHERE created_at >= $1 AND target_kind = 'group'
                  GROUP BY 1, 2 ORDER BY 1, 2",
                 &[&since_ms, &bucket_ms.max(1)],
             )
@@ -1626,7 +1697,7 @@ impl PgStore {
         let c = self.client().await?;
         let Some(row) = c
             .query_opt(
-                "SELECT a.id, a.group_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
+                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id WHERE a.id = $1 GROUP BY a.id",
                 &[&id],
             )
@@ -1905,25 +1976,34 @@ impl PgStore {
 
         let mut stmt = lite
             .prepare(
-                "SELECT id, group_id, title, source, idempotency_key, created_at, kind FROM alerts",
+                "SELECT id, target_kind, target_id, title, source, idempotency_key, created_at, kind FROM alerts",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
-            let (id, group, title, source, key, at): (String, String, String, String, String, i64) = (
+            let (id, target_kind, target_id, title, source, key, at): (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                i64,
+            ) = (
                 r.get(0).unwrap(),
                 r.get(1).unwrap(),
                 r.get(2).unwrap(),
                 r.get(3).unwrap(),
                 r.get(4).unwrap(),
                 r.get(5).unwrap(),
+                r.get(6).unwrap(),
             );
-            let kind: String = r.get(6).unwrap();
+            let kind: String = r.get(7).unwrap();
             let kind = Kind::parse(&kind)
                 .ok_or_else(|| format!("alert {id} has the unknown message kind {kind:?}"))?;
             tx.execute(
-                "INSERT INTO alerts (id, group_id, title, source, idempotency_key, created_at, kind) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                &[&id, &group, &title, &source, &key, &at, &kind.as_str()],
+                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                &[&id, &target_kind, &target_id, &title, &source, &key, &at, &kind.as_str()],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -2348,7 +2428,7 @@ mod tests {
             store
                 .insert_alert(&NewAlert {
                     kind: Kind::Alert,
-                    group: group.into(),
+                    target: Target::Group(group.into()),
                     title: "t".into(),
                     source: "producer:test".into(),
                     idempotency_key: key.into(),
@@ -2372,6 +2452,130 @@ mod tests {
         assert!(store.alert_counts(100_000, 1_000).await.unwrap().is_empty());
     }
 
+    fn alert_for(target: Target, key: &str) -> NewAlert {
+        NewAlert {
+            kind: Kind::Alert,
+            target,
+            title: "t".into(),
+            source: "producer:test".into(),
+            idempotency_key: key.into(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_alert_for_an_account_goes_to_each_active_phone_of_the_account() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        for (n, login) in [(1u8, "alice"), (2, "alice"), (3, "alice"), (4, "bob")] {
+            store
+                .create_code(&[n; 32], login, 10 * MINUTE_MS, 5)
+                .await
+                .unwrap();
+        }
+        let mut ids = Vec::new();
+        for n in 1u8..=4 {
+            let Redeem::Enrolled { device_id, .. } = redeem(&store, [n; 32], n).await else {
+                panic!("enrolled")
+            };
+            ids.push(device_id);
+        }
+        assert!(store.revoke_device(&ids[2]).await.unwrap());
+        let InsertOutcome::Created { devices, .. } = store
+            .insert_alert(&alert_for(Target::User("alice".into()), "k"))
+            .await
+            .unwrap()
+        else {
+            panic!("created")
+        };
+        let mut expected = vec![ids[0].clone(), ids[1].clone()];
+        expected.sort();
+        assert_eq!(devices, expected);
+        // The cache of the degraded mode knows the same phones.
+        store.refresh_cache().await.unwrap();
+        assert_eq!(
+            store.cached_targets(&Target::User("alice".into())),
+            expected
+        );
+        assert_eq!(
+            store.cached_targets(&Target::User("bob".into())),
+            vec![ids[3].clone()]
+        );
+        let pending = store.pending_deliveries(&ids[0], 10, 0).await.unwrap();
+        assert_eq!(pending[0].target, Target::User("alice".into()));
+        assert!(store
+            .pending_deliveries(&ids[3], 10, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        let alerts = store.recent_alerts(10, 0, 0).await.unwrap();
+        assert_eq!(alerts[0].target, Target::User("alice".into()));
+        assert_eq!(alerts[0].targets, 2);
+        let counts = store.active_phones_by_login().await.unwrap();
+        assert_eq!(
+            counts
+                .iter()
+                .map(|(l, n)| (l.as_str(), *n))
+                .collect::<Vec<_>>(),
+            vec![("alice", 2), ("bob", 1)]
+        );
+        // The graph counts the alerts of groups only.
+        assert!(store
+            .alert_counts(0, 1_000_000_000_000_000)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_account_with_no_active_phone_gets_no_alert_and_nothing_is_stored() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        store
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        let Redeem::Enrolled { device_id, .. } = redeem(&store, [1; 32], 1).await else {
+            panic!("enrolled")
+        };
+        store.revoke_device(&device_id).await.unwrap();
+        for login in ["alice", "nobody"] {
+            assert!(matches!(
+                store
+                    .insert_alert(&alert_for(Target::User(login.into()), "k"))
+                    .await
+                    .unwrap(),
+                InsertOutcome::NoPhone
+            ));
+        }
+        assert!(store.recent_alerts(10, 0, 0).await.unwrap().is_empty());
+        // The same key for a group and for an account with the same id are two alerts.
+        store
+            .create_code(&[2; 32], "infra", 10 * MINUTE_MS, 5)
+            .await
+            .unwrap();
+        redeem(&store, [2; 32], 2).await;
+        assert!(matches!(
+            store
+                .insert_alert(&alert_for(Target::User("infra".into()), "k2"))
+                .await
+                .unwrap(),
+            InsertOutcome::Created { .. }
+        ));
+        assert!(matches!(
+            store
+                .insert_alert(&alert_for(Target::Group("infra".into()), "k2"))
+                .await
+                .unwrap(),
+            InsertOutcome::Conflict
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn postgres_the_import_of_a_sqlite_file_carries_the_enrollment_codes() {
         let Some(db) = TestDatabase::create().await else {
@@ -2392,9 +2596,9 @@ mod tests {
                     c,
                     &NewAlert {
                         kind: Kind::Alert,
-                        group: "infra".into(),
+                        target: Target::Group("infra".into()),
                         title: "disk full".into(),
-                        source: "admin".into(),
+                        source: "admin:root".into(),
                         idempotency_key: "k".into(),
                     },
                 )?;

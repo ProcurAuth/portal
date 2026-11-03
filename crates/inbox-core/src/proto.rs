@@ -257,6 +257,25 @@ mod tests {
     }
 
     #[test]
+    fn an_alert_to_an_account_is_a_normal_alert_frame() {
+        // The server sends the fixed group id `@direct` and the fixed name `Direct`.
+        // Protocol 4 does not change: the phone applies its own level for this id.
+        let frame = r#"{"t":"alert","alert_id":"ab","kind":"alert","group":"@direct","group_name":"Direct","title":"x","created_at_ms":1}"#;
+        match serde_json::from_str::<ServerMsg>(frame).unwrap() {
+            ServerMsg::Alert(a) => {
+                assert_eq!(a.group, "@direct");
+                assert_eq!(a.group_name, "Direct");
+                assert_eq!(serde_json::to_string(&ServerMsg::Alert(a)).unwrap(), frame);
+            }
+            other => panic!("not an alert: {other:?}"),
+        }
+        // The phone never subscribes to this id on the server: the app sends no frame for it.
+        // The frame of a subscription keeps the same shape as for any group.
+        let sub = serde_json::to_string(&ClientMsg::Subscribe { group: "ops".into() }).unwrap();
+        assert_eq!(sub, r#"{"t":"subscribe","group":"ops"}"#);
+    }
+
+    #[test]
     fn user_name_is_read_only() {
         // The device cannot change the login of the account.
         assert!(

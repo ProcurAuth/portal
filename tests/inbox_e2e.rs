@@ -1249,7 +1249,8 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
                     let number = |name: &str| attr(tag, name).unwrap().parse::<i64>().unwrap();
                     json!({
                         "id": attr(tag, "data-alert").unwrap(),
-                        "group": attr(tag, "data-to").unwrap().trim_start_matches("group:"),
+                        "group": attr(tag, "data-group").unwrap(),
+                        "to": attr(tag, "data-to").unwrap(),
                         "source": attr(tag, "data-source").unwrap(),
                         "title": attr(tag, "data-title").unwrap(),
                         "received": number("data-received"),
@@ -1290,9 +1291,15 @@ fn admin(s: &Server, method: &str, path: &str, body: &str) -> (u16, Value) {
         }
         ("POST", "/auth/inbox/api/alerts") => {
             let v: Value = serde_json::from_str(body).unwrap();
+            // The page form names the target: `group:<id>` or `user:<login>`.
+            let to = match (v["group"].as_str(), v["user"].as_str()) {
+                (Some(group), None) => format!("group:{group}"),
+                (None, Some(user)) => format!("user:{user}"),
+                _ => panic!("one target: group or user"),
+            };
             let fields = format!(
                 "to={}&title={}&key={}",
-                form_value(&format!("group:{}", v["group"].as_str().unwrap())),
+                form_value(&to),
                 form_value(v["title"].as_str().unwrap()),
                 form_value(v["idempotency_key"].as_str().unwrap()),
             );
@@ -2049,7 +2056,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(b_row["device"]["user_name"], "bob");
     let session = s.session();
     let csrf = inbox_csrf(ap, &session.cookie);
-    let send = format!("csrf={csrf}&to=group%3Aother&title=manual&key=m1");
+    let send = format!("csrf={csrf}&to=group:other&title=manual&key=m1");
     let post = |extra: &[(&str, String)], body: &str| {
         let mut headers = vec![("Cookie", session.cookie.clone())];
         headers.extend_from_slice(extra);
@@ -2084,7 +2091,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(
         post(
             &[form_type.clone(), origin.clone()],
-            "to=group%3Aother&title=manual&key=m1"
+            "to=group:other&title=manual&key=m1"
         ),
         403,
         "POST without the anti-CSRF token"
@@ -2092,10 +2099,7 @@ async fn delivery_guarantees_end_to_end() {
     assert_eq!(
         post(
             &[form_type.clone(), origin.clone()],
-            &format!(
-                "csrf={}&to=group%3Aother&title=manual&key=m1",
-                "x".repeat(43)
-            )
+            &format!("csrf={}&to=group:other&title=manual&key=m1", "x".repeat(43))
         ),
         403,
         "POST with a wrong anti-CSRF token"
@@ -2217,9 +2221,9 @@ async fn delivery_guarantees_end_to_end() {
     );
     assert_eq!(st, 200);
     for expected in [
-        "portal_inbox_alerts_accepted_total{source=\"webhook\",kind=\"alert\"} 1",
-        "portal_inbox_alerts_accepted_total{source=\"admin\",kind=\"alert\"} 1",
-        "portal_inbox_alerts_duplicate_total{source=\"webhook\",kind=\"alert\"} 1",
+        "portal_inbox_alerts_accepted_total{source=\"webhook\",kind=\"alert\",target=\"group\"} 1",
+        "portal_inbox_alerts_accepted_total{source=\"admin\",kind=\"alert\",target=\"group\"} 1",
+        "portal_inbox_alerts_duplicate_total{source=\"webhook\",kind=\"alert\",target=\"group\"} 1",
         "portal_inbox_delivery_receipts_total ",
         "portal_inbox_delivery_latency_seconds_count ",
         "portal_inbox_deliveries_pending ",
@@ -4894,7 +4898,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "to=group%3Aother&title=no&key=pia1",
+        "to=group:other&title=no&key=pia1",
     );
     assert_eq!(st, 303);
     assert!(location(&head).contains("s=bad_group"), "{head}");
@@ -4902,7 +4906,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "to=group%3Ainfra&title=+&key=pia2",
+        "to=group:infra&title=+&key=pia2",
     );
     assert_eq!(st, 303);
     assert!(location(&head).contains("s=no_title"), "{head}");
@@ -4911,14 +4915,14 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        &format!("to=group%3Ainfra&title={long}&key=pia3"),
+        &format!("to=group:infra&title={long}&key=pia3"),
     );
     assert!(location(&head).contains("s=bad_title"), "{head}");
     let (st, head, _) = inbox_form(
         &s,
         &pia.cookie,
         "/auth/settings/inbox/send",
-        "to=group%3Ainfra&title=Disk+full&key=pia4",
+        "to=group:infra&title=Disk+full&key=pia4",
     );
     assert_eq!(st, 303);
     let sent = location(&head);
@@ -5265,4 +5269,366 @@ fn check_config_refuses_the_old_names_of_the_feature() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(stderr.contains(&old_watch), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// An alert to one account: the right `alert.send_user`, the phones of the account, the codes of
+// the refusals.
+
+/// `POST /api/v1/alerts` with a body that the test builds.
+fn send_to(s: &Server, token: &str, key: &str, body: Value) -> (u16, Value) {
+    let (status, _, v) = producer_call(s, "POST", "/api/v1/alerts", token, key, &body.to_string());
+    (status, v)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_api_key_with_the_right_sends_an_alert_to_each_active_phone_of_an_account() {
+    let mut s = Server::setup();
+    s.start();
+    // The windows of a budget are fixed windows of the clock: start the count early in a minute.
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        % 60
+        > 15
+    {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // The owner of the key may alert any account and the group infra. Its budget is 3 alerts each
+    // minute, for the groups and the accounts together.
+    let owner_grants = [
+        "access on service:portal",
+        "keys.own.read on service:portal",
+        "keys.own.create on service:portal/key_kind:api",
+        "keys.own.use on service:portal/key_kind:api",
+        "alert.send_user on service:portal",
+        "alert.send on service:portal/inbox_group:infra",
+        "alert.read on service:portal/inbox_group:infra",
+    ];
+    add_account_with(&s, "svc", &[]);
+    set_grants_with(&s, "svc", &owner_grants, "limit0.alerts.minute=3");
+    let svc = sign_in_as(s.port, "svc", ACCOUNT_PASSWORD).cookie;
+    let direct = make_key(
+        &s,
+        &svc,
+        "api",
+        "direct",
+        &["alert.send_user on service:portal"],
+    );
+    let other = make_key(
+        &s,
+        &svc,
+        "api",
+        "other",
+        &[
+            "alert.send_user on service:portal",
+            "alert.send on service:portal/inbox_group:infra",
+        ],
+    );
+    let group_only = make_key(
+        &s,
+        &svc,
+        "api",
+        "group-only",
+        &["alert.send on service:portal/inbox_group:infra"],
+    );
+    // The owner of a second key lacks the right: the key cannot carry it.
+    add_account_with(
+        &s,
+        "plain",
+        &[
+            "keys.own.read on service:portal",
+            "keys.own.create on service:portal/key_kind:api",
+            "keys.own.use on service:portal/key_kind:api",
+            "alert.send on service:portal/inbox_group:infra",
+        ],
+    );
+    let plain = sign_in_as(s.port, "plain", ACCOUNT_PASSWORD).cookie;
+    // The key form refuses the right: the owner does not hold it, so the key cannot carry it.
+    let host = format!("127.0.0.1:{}", s.port);
+    let (st, _, page) = http_full(
+        s.port,
+        &host,
+        "GET",
+        "/auth/keys/new?kind=api",
+        &[("Cookie", plain.clone())],
+        "",
+    );
+    assert_eq!(st, 200, "{page}");
+    let form = page.find("id=\"key-form\"").unwrap();
+    let marker = "name=\"csrf\" value=\"";
+    let start = form + page[form..].find(marker).unwrap() + marker.len();
+    let csrf = page[start..].split('"').next().unwrap().to_string();
+    let (_, _, refused) = http_full(
+        s.port,
+        &host,
+        "POST",
+        "/auth/keys/create",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Origin", format!("http://{host}")),
+            ("Cookie", plain.clone()),
+        ],
+        &format!(
+            "csrf={csrf}&kind=api&name=too-much&expires_at=&grant0={}",
+            form_value("alert.send_user on service:portal")
+        ),
+    );
+    assert!(
+        !refused.contains("id=\"key-text\""),
+        "an owner without the right cannot give it to a key"
+    );
+
+    // alice has three phones. The third is revoked. bob has one phone. dora has none.
+    add_account(&s, "alice");
+    add_account(&s, "bob");
+    add_account(&s, "dora");
+    let a1 = enroll_as(&s, "alice-1", "alice").await.unwrap();
+    let a2 = enroll_as(&s, "alice-2", "alice").await.unwrap();
+    let a3 = enroll_as(&s, "alice-3", "alice").await.unwrap();
+    let b1 = enroll_as(&s, "bob-1", "bob").await.unwrap();
+    let (st, _) = admin(
+        &s,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", a3.device_id),
+        "{}",
+    );
+    assert_eq!(st, 200);
+    let (mut c1, _) = Conn::open(s.port, &a1).await.unwrap();
+    let (mut c2, _) = Conn::open(s.port, &a2).await.unwrap();
+    let (mut cb, _) = Conn::open(s.port, &b1).await.unwrap();
+    // Not one of them subscribes to any group: a direct alert needs no subscription.
+
+    let (st, v) = send_to(
+        &s,
+        &direct,
+        "d1",
+        json!({"user": "alice", "title": "wake up"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 2, "the two active phones: {v}");
+    let first = take(&mut c1).await;
+    let second = take(&mut c2).await;
+    assert_eq!(first.alert_id, second.alert_id);
+    assert_eq!(first.title, "wake up");
+    // The frame is the frame of any alert. It names no group of the file.
+    assert_eq!(first.group, "@direct");
+    assert_eq!(first.group_name, "Direct");
+    cb.no_alert(Duration::from_millis(1500)).await;
+    assert_eq!(
+        Conn::open(s.port, &a3).await.err(),
+        Some(inbox_core::proto::close::REVOKED),
+        "the revoked phone gets nothing"
+    );
+    // The same Idempotency-Key makes no second alert.
+    let (st, v) = send_to(
+        &s,
+        &direct,
+        "d1",
+        json!({"user": "alice", "title": "wake up"}),
+    );
+    assert_eq!(st, 200, "{v}");
+    c1.no_alert(Duration::from_millis(1200)).await;
+
+    // The key that sent the alert reads it. Its target is an account.
+    let id = first.alert_id.clone();
+    let (st, _, v) = producer_call(&s, "GET", &format!("/api/v1/alerts/{id}"), &direct, "", "");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["target"], json!({"kind": "user", "id": "alice"}), "{v}");
+    assert_eq!(v["kind"], "alert");
+    assert_eq!(v["targets"], 2);
+    // Another key of the same owner is not the sender: it reads nothing. A key that has the right
+    // on a group reads nothing here either: the alert has no group.
+    for token in [&other, &group_only] {
+        let (st, _, v) = producer_call(&s, "GET", &format!("/api/v1/alerts/{id}"), token, "", "");
+        assert_eq!(st, 404, "{v}");
+    }
+
+    // The target: exactly one of group and user.
+    let (st, v) = send_to(
+        &s,
+        &direct,
+        "t1",
+        json!({"user": "alice", "group": "infra", "title": "both"}),
+    );
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_target", "{v}");
+    let (st, v) = send_to(&s, &direct, "t2", json!({"title": "none"}));
+    assert_eq!(st, 400, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_target", "{v}");
+    // An account that does not exist: 404. An account with no phone: 409. Neither stores an alert,
+    // and neither uses the budget.
+    let (st, v) = send_to(&s, &direct, "u1", json!({"user": "ghost", "title": "x"}));
+    assert_eq!(st, 404, "{v}");
+    assert_eq!(v["error"]["code"], "unknown_user", "{v}");
+    let (st, v) = send_to(&s, &direct, "p1", json!({"user": "dora", "title": "x"}));
+    assert_eq!(st, 409, "{v}");
+    assert_eq!(v["error"]["code"], "no_phone", "{v}");
+    // The account of a revoked phone only has no phone to use either.
+    add_account(&s, "gina");
+    let g1 = enroll_as(&s, "gina-1", "gina").await.unwrap();
+    admin(
+        &s,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", g1.device_id),
+        "{}",
+    );
+    let (st, v) = send_to(&s, &direct, "p2", json!({"user": "gina", "title": "x"}));
+    assert_eq!((st, v["error"]["code"].as_str()), (409, Some("no_phone")));
+    // The key without the right: 403, and the code names the user target.
+    let (st, v) = send_to(
+        &s,
+        &group_only,
+        "g1",
+        json!({"user": "alice", "title": "x"}),
+    );
+    assert_eq!(st, 403, "{v}");
+    assert_eq!(v["error"]["code"], "forbidden_user", "{v}");
+    // Its right for a group works as before, and a key with the user right needs the group right
+    // to send to a group.
+    let (st, _) = send_to(
+        &s,
+        &group_only,
+        "g2",
+        json!({"group": "infra", "title": "g"}),
+    );
+    assert_eq!(st, 201);
+    let (st, v) = send_to(&s, &direct, "g3", json!({"group": "infra", "title": "g"}));
+    assert_eq!(st, 403, "{v}");
+    assert_eq!(v["error"]["code"], "forbidden_group", "{v}");
+
+    // The budget `alerts` counts the alerts to an account and the alerts to a group together: the
+    // first alert (d1) and the repeat of it used two units, the group alert used the third.
+    let (st, v) = send_to(
+        &s,
+        &direct,
+        "d2",
+        json!({"user": "alice", "title": "limit"}),
+    );
+    assert_eq!(st, 429, "{v}");
+    assert_eq!(v["error"]["code"], "rate_limited", "{v}");
+    c1.no_alert(Duration::from_millis(500)).await;
+
+    // The owner loses the right: the key loses it at once.
+    set_grants(
+        &s,
+        "svc",
+        &[
+            "keys.own.read on service:portal",
+            "keys.own.create on service:portal/key_kind:api",
+            "keys.own.use on service:portal/key_kind:api",
+        ],
+    );
+    let (st, v) = send_to(&s, &other, "r1", json!({"user": "alice", "title": "x"}));
+    assert_eq!(st, 403, "{v}");
+    assert_eq!(v["error"]["code"], "forbidden_user", "{v}");
+
+    // The metrics count the alert for each kind of target.
+    let metrics = metrics_of(&s);
+    assert!(
+        metrics.contains("portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\",target=\"user\"} 1"),
+        "{metrics}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_form_of_the_page_sends_an_alert_to_a_group_or_to_an_account() {
+    let mut s = Server::setup();
+    s.start();
+    add_account(&s, "alice");
+    add_account(&s, "dora");
+    let a1 = enroll_as(&s, "alice-1", "alice").await.unwrap();
+    let (mut c1, _) = Conn::open(s.port, &a1).await.unwrap();
+    // An account that holds `alert.send` on a group and `alert.read`, but not `alert.send_user`.
+    let group_only = s.account_with(
+        "gwen",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:infra",
+        ],
+    );
+    // An account that holds both rights.
+    let both = s.account_with(
+        "boris",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:infra",
+            "alert.send_user on service:portal",
+        ],
+    );
+    let root = s.session();
+    let post = |cookie: &str, to: &str, key: &str| {
+        let (st, head, text) = inbox_form(
+            &s,
+            cookie,
+            "/auth/settings/inbox/send",
+            &format!("to={}&title=hello&key={key}", form_value(to)),
+        );
+        assert_eq!(st, 303, "{text}");
+        location(&head)
+    };
+    // The superadmin may do both.
+    let loc = post(&root.cookie, "user:alice", "f1");
+    assert!(loc.contains("s=sent&open="), "{loc}");
+    let msg = take(&mut c1).await;
+    assert_eq!(
+        (msg.title.as_str(), msg.group.as_str()),
+        ("hello", "@direct")
+    );
+    // The page of the sender shows the alert, with its target.
+    let (st, page) = inbox_page_as(&s, &root.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200);
+    assert!(
+        page.contains("data-to=\"user:alice\"") && page.contains("@alice"),
+        "{page}"
+    );
+    assert!(post(&root.cookie, "group:infra", "f2").contains("s=sent"));
+    // A forced form of an account without the right for an account is refused.
+    assert!(post(&group_only.cookie, "user:alice", "f3").contains("s=bad_target"));
+    assert!(post(&group_only.cookie, "group:infra", "f4").contains("s=sent"));
+    // An account with both rights sends to an account and reads its own alert (the sender).
+    let loc = post(&both.cookie, "user:alice", "f5");
+    assert!(loc.contains("s=sent&open="), "{loc}");
+    let id = loc
+        .split("open=")
+        .nth(1)
+        .and_then(|r| r.split(['&', '#']).next())
+        .unwrap()
+        .to_string();
+    let (st, page) = inbox_page_as(&s, &both.cookie, &format!("/auth/settings/inbox?open={id}"));
+    assert_eq!(st, 200);
+    assert!(
+        page.contains(&format!("id=\"a-{id}\"")),
+        "the sender reads the alert"
+    );
+    // The forms of the page refuse an unknown account, an account with no phone and a bad target.
+    assert!(post(&both.cookie, "user:ghost", "f6").contains("s=bad_user"));
+    assert!(post(&both.cookie, "user:dora", "f7").contains("s=no_phone"));
+    assert!(post(&both.cookie, "alice", "f8").contains("s=bad_target"));
+    assert!(post(&both.cookie, "team:infra", "f9").contains("s=bad_target"));
+    assert!(post(&both.cookie, "group:nowhere", "f10").contains("s=bad_group"));
+    // The old field `group` is gone: the form answers 400.
+    let (st, _, _) = inbox_form(
+        &s,
+        &both.cookie,
+        "/auth/settings/inbox/send",
+        "group=infra&title=old&key=old1",
+    );
+    assert_eq!(st, 400);
+    // The target account and an account that only reads groups: gwen reads infra, and the alert
+    // for alice is not hers. The alert that boris sent is not in her list.
+    let (st, page) = inbox_page_as(&s, &group_only.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200);
+    assert!(
+        !page.contains("data-to=\"user:alice\""),
+        "an alert for an account is not for a reader of a group"
+    );
+    let (st, page) = inbox_page_as(
+        &s,
+        &group_only.cookie,
+        &format!("/auth/settings/inbox?open={id}"),
+    );
+    assert_eq!(st, 200);
+    assert!(!page.contains(&format!("id=\"a-{id}\"")));
 }

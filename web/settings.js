@@ -194,7 +194,7 @@
     var control = document.querySelector('[data-bulk="' + esc(id) + '"]');
     if (control) {
       control.classList.toggle("has-count", n > 0);
-      control.querySelector("[data-bulk-n]").textContent = n ? "(" + n + ")" : "";
+      control.querySelector("[data-bulk-n]").textContent = "(" + n + ")";
       control.querySelector("[data-bulk-q]").textContent =
         control.getAttribute("data-verb") + " " + n + " " +
         (n === 1 ? control.getAttribute("data-one") : control.getAttribute("data-many")) + "?";
@@ -340,7 +340,7 @@
     }
     var readIds = groupIds(feature, held, "alert.read");
     if (readIds.length) lines.push("GET /api/v1/alerts/{id}  (alerts of: " + readIds.join(", ") + ")");
-    if (toUser) lines.push("POST /api/v1/alerts  (user: an account)  [proposed]");
+    if (toUser) lines.push("POST /api/v1/alerts  (user: an account)");
     calls.textContent = "";
     if (!lines.length) {
       calls.textContent = "No call yet. Tick a right.";

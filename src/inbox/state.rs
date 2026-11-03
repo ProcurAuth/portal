@@ -26,6 +26,9 @@ pub struct FileKey {
     pub name: String,
     pub digest: [u8; 32],
     pub groups: Vec<String>,
+    /// The key sends alerts to accounts (`direct_alerts = true`). The start checked that its
+    /// owner holds `alert.send_user`.
+    pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
 }
 
@@ -70,6 +73,7 @@ impl Secrets {
                 name: name.clone(),
                 digest,
                 groups: block.groups.clone(),
+                direct_alerts: block.direct_alerts,
                 webhook_send_resolved: block.webhook_send_resolved,
             });
         }

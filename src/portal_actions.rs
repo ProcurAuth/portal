@@ -10,16 +10,17 @@
 //!   `key_kind:mcp` and `key_kind:api` are in the code, and the file turns each kind on (`keys.mcp`,
 //!   `keys.api`).
 //! - **Inbox** (the block `inbox`): `inbox.receive`, `alert.send` and `alert.read` apply to the
-//!   resource type `inbox_group`. The nodes are the groups of the block `inbox`. `phone.read`,
-//!   `phone.revoke` and `phone.log` apply to the service. The action `alert.send` lists the budget
-//!   `alerts`. The value of a budget is on the grant `access` of the service, as for each other
-//!   service. The PDP counts it as a use of the key or of the account. A group with `critical =
-//!   true` never counts a use, so it never has a limit.
+//!   resource type `inbox_group`. The nodes are the groups of the block `inbox`. `alert.send_user`,
+//!   `phone.read`, `phone.revoke` and `phone.log` apply to the service. The actions `alert.send`
+//!   and `alert.send_user` list the budget `alerts`. The value of a budget is on the grant `access`
+//!   of the service, as for each other service. The PDP counts it as a use of the key or of the
+//!   account. A group with `critical = true` never counts a use, so it never has a limit. An
+//!   alert to an account is never critical: it always counts.
 //!
 //! The actions of `keys.own` need `keys.own.read` to show their page, and the actions of
 //! `keys.all` need `users.read` (portal 6.3). The PDP treats an action as absent when the user
 //! does not have the action that it needs (portal 6.3a). A key never holds a `keys.*` action. An
-//! API key can hold `alert.send` and `alert.read` (see [`KEY_ACTIONS`]).
+//! API key can hold `alert.send`, `alert.send_user` and `alert.read` (see [`KEY_ACTIONS`]).
 
 #![allow(dead_code)]
 
@@ -48,6 +49,7 @@ pub const KEYS_ALL_REVOKE: &str = "keys.all.revoke";
 pub const USERS_READ: &str = "users.read";
 pub const INBOX_RECEIVE: &str = "inbox.receive";
 pub const ALERT_SEND: &str = "alert.send";
+pub const ALERT_SEND_USER: &str = "alert.send_user";
 pub const ALERT_READ: &str = "alert.read";
 pub const PHONE_READ: &str = "phone.read";
 pub const PHONE_REVOKE: &str = "phone.revoke";
@@ -71,9 +73,10 @@ const KEY_GROUP: [&str; 8] = [
 ];
 
 /// The actions of the inbox, in the order of the document.
-const INBOX_GROUP_ACTIONS: [&str; 6] = [
+const INBOX_GROUP_ACTIONS: [&str; 7] = [
     INBOX_RECEIVE,
     ALERT_SEND,
+    ALERT_SEND_USER,
     ALERT_READ,
     PHONE_READ,
     PHONE_REVOKE,
@@ -82,7 +85,7 @@ const INBOX_GROUP_ACTIONS: [&str; 6] = [
 
 /// The actions of the service `portal` that a key can hold, other than `access`. A key never holds
 /// a `keys.*` action (portal 6.5). The kind of the key limits the list (see [`key_actions`]).
-pub const KEY_ACTIONS: [&str; 2] = [ALERT_SEND, ALERT_READ];
+pub const KEY_ACTIONS: [&str; 3] = [ALERT_SEND, ALERT_READ, ALERT_SEND_USER];
 
 /// The actions that a key of this kind can hold. An MCP key has none today: the tools map of the
 /// agents gives the first one.
@@ -166,6 +169,11 @@ fn action_json(name: &str) -> serde_json::Value {
             &[],
         ),
         ALERT_SEND => (&[INBOX_GROUP], "Send an alert to the group.", &[ALERTS]),
+        ALERT_SEND_USER => (
+            &["service"],
+            "Send an alert to any account. The alert goes to each phone of the account.",
+            &[ALERTS],
+        ),
         ALERT_READ => (
             &[INBOX_GROUP],
             "See the alerts of the group and their delivery.",
@@ -207,7 +215,7 @@ pub fn document(features: &Features) -> Arc<Document> {
         );
         actions.extend(INBOX_GROUP_ACTIONS.iter().map(|a| action_json(a)));
         limits.push(serde_json::json!({ "name": ALERTS, "label": "Alerts sent",
-            "description": "The alerts that the subject sends in a time window. A critical group has no limit.",
+            "description": "The alerts that the subject sends in a time window. A critical group has no limit. An alert to an account always counts.",
             "unit": "alert", "kind": "budget" }));
     }
     let text = serde_json::json!({ "server": SERVICE, "resource_types": types,
@@ -547,7 +555,7 @@ mod tests {
         let document = document(&all_features());
         let names: Vec<&str> = document.actions.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, action_names(&all_features()));
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
         let types: Vec<&str> = document.types.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(types, [KEY_KIND, INBOX_GROUP]);
         assert!(document.types.iter().all(|t| t.parent == "service"));
@@ -568,6 +576,7 @@ mod tests {
             KEYS_ALL_READ,
             KEYS_ALL_REVOKE,
             USERS_READ,
+            ALERT_SEND_USER,
             PHONE_READ,
             PHONE_REVOKE,
             PHONE_LOG,
@@ -575,6 +584,11 @@ mod tests {
             assert_eq!(find(&document, name).resource_types, ["service"], "{name}");
         }
         assert_eq!(find(&document, ALERT_SEND).limits, [ALERTS]);
+        assert_eq!(
+            find(&document, ALERT_SEND_USER).limits,
+            [ALERTS],
+            "the same budget counts the alerts to a group and to an account"
+        );
         assert_eq!(find(&document, KEYS_OWN_USE).limits, [MAX_KEY_LIFETIME]);
         let limit = |name: &str| document.limits.iter().find(|l| l.name == name).unwrap();
         assert_eq!(limit(ALERTS).kind, crate::limits::Kind::Budget);
@@ -642,6 +656,7 @@ mod tests {
             KEYS_OWN_USE,
             INBOX_RECEIVE,
             ALERT_SEND,
+            ALERT_SEND_USER,
             ALERT_READ,
             PHONE_READ,
             PHONE_LOG,
@@ -766,7 +781,7 @@ mod tests {
 
     #[test]
     fn the_actions_that_a_key_can_hold_follow_its_kind() {
-        assert_eq!(KEY_ACTIONS, [ALERT_SEND, ALERT_READ]);
+        assert_eq!(KEY_ACTIONS, [ALERT_SEND, ALERT_READ, ALERT_SEND_USER]);
         assert_eq!(key_actions(KeyKind::Api), KEY_ACTIONS);
         assert!(key_actions(KeyKind::Mcp).is_empty());
         let good = grants(&[
@@ -794,12 +809,46 @@ mod tests {
     }
 
     #[test]
+    fn the_action_to_alert_an_account_is_flat_on_the_service() {
+        let features = all_features();
+        let document = document(&features);
+        let held = grants(&["alert.send_user on service:portal"]);
+        assert!(check_user_grants(&features, &held).is_ok());
+        assert!(allows(&document, "bob", &held, ALERT_SEND_USER, None));
+        assert!(
+            !allows(&document, "bob", &held, ALERT_SEND, Some("infra")),
+            "the right to alert an account is not the right to alert a group"
+        );
+        let group_only = grants(&["alert.send on service:portal/inbox_group:infra"]);
+        assert!(!allows(
+            &document,
+            "bob",
+            &group_only,
+            ALERT_SEND_USER,
+            None
+        ));
+        // The action has no node: a grant on a group is a bad grant.
+        let error = check_user_grants(
+            &features,
+            &grants(&["alert.send_user on service:portal/inbox_group:infra"]),
+        )
+        .unwrap_err();
+        assert!(error.contains("alert.send_user"), "{error}");
+        // A key can hold it. A file without the block `inbox` has no such action.
+        assert!(check_key_grants(KeyKind::Api, &held).is_ok());
+        assert!(check_key_grants(KeyKind::Mcp, &held).is_err());
+        assert!(check_user_grants(&Features::default(), &held).is_err());
+        assert!(features.has_action(ALERT_SEND_USER));
+        assert!(is_action(ALERT_SEND_USER));
+    }
+
+    #[test]
     fn the_document_of_a_key_holds_only_what_the_kind_can_use() {
         let features = all_features();
         assert!(key_document(&features, KeyKind::Mcp).is_none());
         let api = key_document(&features, KeyKind::Api).unwrap();
         let names: Vec<&str> = api.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, [ALERT_SEND, ALERT_READ]);
+        assert_eq!(names, [ALERT_SEND, ALERT_SEND_USER, ALERT_READ]);
         assert_eq!(api.types.len(), 1);
         assert_eq!(api.types[0].name, INBOX_GROUP);
         assert!(api.resources.iter().all(|r| r.path[0].kind == INBOX_GROUP));

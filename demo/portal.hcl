@@ -61,6 +61,7 @@ user "local" {
     "keys.own.use on service:portal/key_kind:api",
     "alert.send on service:portal/inbox_group:infra",
     "alert.send on service:portal/inbox_group:critical",
+    "alert.send_user on service:portal",
   ]
 }
 
@@ -108,6 +109,8 @@ inbox {
     owner       = "local"
     secret_file = "/run/secrets/inbox_api_key"
     groups      = ["infra", "critical"]
+    # The key can send an alert to an account too: the owner holds alert.send_user.
+    direct_alerts = true
   }
 
   # The portal tells the group infra when a service stays unhealthy. 10 seconds is the shortest value.

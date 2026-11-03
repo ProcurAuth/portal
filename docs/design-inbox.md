@@ -20,7 +20,7 @@ The third column gives the answers and the changes that the work made later.
 | D2 | In production, PostgreSQL and at least two active instances. SQLite stays for development. The standby replica of SQLite stays. | See section 10. |
 | D3 | A sender is a key of the portal or a token of the file. Both work at the same time. | Batch C replaced the token of the file with the key of the file (the block `api_key`). Section 7 gives the order of the checks. The exception to 11.2 of the specification is removed. |
 | D4 | A phone enrolls through an account of the portal. The pseudonym is the login. The shared password is gone. | Step 5 made protocol 4 (section 5). An account needs `inbox.receive` to make a code. |
-| D5 | The Inbox has the resource `group:<id>`. Six actions. | Batch C moved them to the service `portal`. The type is `inbox_group`. The actions are `inbox.receive`, `alert.send`, `alert.read`, `phone.read`, `phone.revoke` and `phone.log`. Section 6. |
+| D5 | The Inbox has the resource `group:<id>`. Six actions. | Batch C moved them to the service `portal`. The type is `inbox_group`. The actions are `inbox.receive`, `alert.send`, `alert.send_user`, `alert.read`, `phone.read`, `phone.revoke` and `phone.log`. Section 6. |
 | D6 | A limit can apply to `alert.send`. A group marked `critical` never has a limit. | The limit is the budget `alerts`. Section 6. |
 | D7 | The admin front has no mode without a password. The pages are in the style of the portal, in the tab Inbox. | Section 9. The JSON admin API is gone. |
 | D8 | The code lives in the private repository `portal`. The history of the standalone project is kept. The standalone repository is archived at the end. | The history is in the git log. The archive is not done yet (section 16). |
@@ -30,6 +30,7 @@ The third column gives the answers and the changes that the work made later.
 | D12 | The portal sends an alert when a service is unhealthy and when sign-ins fail in a burst. | Step 6. The feature has the name "watch" (batch A). Section 12. |
 | D13 | Tests use the emulator. No physical phone. | `tools/android/emulator.sh`. |
 | D14 | The rework of 2026-11-02. | Section 2.1. |
+| D15 | An alert has one target: a group or one account. | Section 2.2. The right is `alert.send_user`. |
 
 ### 2.1 D14: the answers of the rework
 
@@ -42,6 +43,22 @@ The owner answered these points. The plan of the rework lists them as answered.
 - **Pages.** Four tabs: Users, Services, Keys and Inbox. Dense pages with panels and chips. The row action is variant A: a selection and **Revoke (N)**.
 - **Roadmap.** Step 1 is alerts. Step 2 is agents that send alerts. Step 3 is questions and approvals. The one-way rule for alerts ends at step 3 for the new kinds (section 17). The field `kind` exists from step 1.
 - **Open questions with defaults.** The plan lists questions Q1 to Q6. The defaults apply. File keys replace the token blocks. The owner of a file key is a file account. The CRC-32 covers the prefix. The page of an account tells the number of keys. The switch defaults are `keys.mcp = true`, `keys.api = false` and `users.allow_creation = true`. Agents use an `api_` key of their own at step 2.
+
+### 2.2 D15: an alert to one account
+
+The owner asked: "il faut pouvoir alerter un user ou un groupe directement". The owner approved the defaults of the questions Q9, Q10 and Q11 of the plan.
+
+- **Target.** A message has one target: a group or an account. The store keeps two columns, `target_kind` (`group` or `user`) and `target_id` (the id of the group, or the login). The type in the code is `Target`, in `src/inbox/target.rs`. The field `kind` of the message stays `alert`.
+- **Migration.** The production database can hold rows. The Inbox chain gets one more migration, for SQLite and for PostgreSQL. It renames the column `group_id` of the table `alerts` to `target_id` and adds `target_kind` with the default `group` and a check of its two values. The rows that exist stay valid: they are alerts to a group. The rule is the rule of the column `kind`: an additive migration at the end of the chain. The command `import-sqlite` copies both columns. The snapshot of the replica copies the whole file.
+- **Right (Q9).** One flat action, `alert.send_user`, on `service:portal`, with no resource type. It lists the budget `alerts`, the same budget as `alert.send`. The cost is that a sender with this right can alert any account. The other choice was a resource type with one node for each account.
+- **Level (Q10).** An alert to an account has the level Ring and is never critical. A critical group never counts a use, so a budget never limits it. An alert to an account has no group, so it always counts.
+- **Read (Q11).** The sender, the target account and the superadmin read an alert to an account. A right on a group does not fit. The page of the Inbox applies this rule. The route `GET /api/v1/alerts/{id}` lets only the key that sent the alert read it: a key must not read what only its owner receives.
+- **Delivery.** An alert to an account goes to each phone of the account that is not revoked, with no subscription. It uses the same spool, time to live, resend, receipt, rate limit and budget. An account with no active phone gets `409` with the code `no_phone`, and the Inbox stores nothing. The check comes before the count of the budget, so a refused alert uses no unit.
+- **Protocol.** Protocol 4 does not change. The frame of an alert has `group` and `group_name`. A direct alert has the group id `@direct` and the group name `Direct`. The id of a group of the file has only the characters `a-z`, `0-9`, `-` and `_`, so the two never collide. The app applies one local level to this id (Ring by default). The change of the app is not part of this decision.
+- **Routes.** `POST /api/v1/alerts` takes exactly one of `group` and `user`. `POST /api/v1/notify/{group}` and the webhook of Alertmanager do not change. The form of the page sends the field `to` with the value `group:<id>` or `user:<login>`.
+- **Source.** The source of an alert from the form of the page is `admin:<login>`, so the alert has a sender. The source of a key is `producer:key:<id>`, as before.
+- **File key.** A block `api_key` has the key `direct_alerts` (default `false`). With `true`, the owner must hold `alert.send_user`, and `groups` can be empty.
+- **Metrics.** The counters `portal_inbox_alerts_accepted_total`, `portal_inbox_alerts_duplicate_total` and `portal_inbox_alerts_spooled_total` have the label `target` (`group` or `user`). The graph of the page counts the alerts to a group only.
 
 ## 3. Layout of the repository
 
@@ -115,7 +132,7 @@ The pinned key replaces OPAQUE. The crate `opaque-ke` is not in the build. An ea
 
 ### 5.3 The field `kind` (batch B)
 
-Each alert frame has the field `kind`. The value is `alert`. The core parser refuses any other value and a frame without the field. The table `alerts` has the column `kind`, with the default `alert`. It is the last migration of the Inbox chain, for SQLite and for PostgreSQL. The command `import-sqlite` copies the column. The snapshot of the replica copies the whole file, so it carries it too. The rows of the page have the field `kind`, and the table of alerts has the attribute `data-kind`. The metrics `portal_inbox_alerts_accepted_total`, `portal_inbox_alerts_duplicate_total` and `portal_inbox_alerts_spooled_total` have the label `kind`. The protocol version stays 4.
+Each alert frame has the field `kind`. The value is `alert`. The core parser refuses any other value and a frame without the field. The table `alerts` has the column `kind`, with the default `alert`. It is the last migration of the Inbox chain, for SQLite and for PostgreSQL. The command `import-sqlite` copies the column. The snapshot of the replica copies the whole file, so it carries it too. The rows of the page have the field `kind`, and the table of alerts has the attribute `data-kind`. The metrics `portal_inbox_alerts_accepted_total`, `portal_inbox_alerts_duplicate_total` and `portal_inbox_alerts_spooled_total` have the label `kind`, and, since D15, the label `target`. The protocol version stays 4.
 
 The metric `portal_inbox_auth_failures_total` already had a label `kind` that names the kind of failure. It is not the kind of a message. The name stays, to keep the meaning of the metric.
 
@@ -136,13 +153,14 @@ The portal has one internal scope for its features: the service `portal`. The PD
 | `users.read`, `keys.all.read`, `keys.all.revoke` | service | as before (portal 6.3) | none |
 | `inbox.receive` | `inbox_group` | none | none |
 | `alert.send` | `inbox_group` | none | the budget `alerts` |
+| `alert.send_user` | service | none | the budget `alerts` |
 | `alert.read` | `inbox_group` | none | none |
 | `phone.read` | service | none | none |
 | `phone.revoke` | service | `phone.read` | none |
 | `phone.log` | service | none | none |
 
 - **Presence.** The document follows the file. Without the block `keys`, it has no action of the keys and no `users.read`. Without the block `inbox`, it has no action of the Inbox. A block `user` that names an action that the document does not hold stops the start.
-- **Types.** `inbox.receive`, `alert.send` and `alert.read` list only the type `inbox_group`. A permission on the whole service is not valid for them: the editor gives one permission for each group. A group that the file adds later needs a new permission. The resource type `inbox_group` has the parent `service`. A group receives all kinds of message. Step 3 adds actions, not types.
+- **Types.** `inbox.receive`, `alert.send` and `alert.read` list only the type `inbox_group`. `alert.send_user` is flat: it lists the type `service`, and a grant on a group is not valid for it (D15). A permission on the whole service is not valid for them: the editor gives one permission for each group. A group that the file adds later needs a new permission. The resource type `inbox_group` has the parent `service`. A group receives all kinds of message. Step 3 adds actions, not types.
 - **Names.** The names share a prefix. The editor groups the actions by the first part of the name.
 - **Text of a grant.** `alert.send on service:portal/inbox_group:infra`. No migration reads an older text or an older action name. The seed of a demo database sets the new grants.
 - **Name of the limit.** The limit of `alert.send` is the budget `alerts`, not `max_alerts`. A name that starts with `max_` is a ceiling by the protocol, and a ceiling has no window. A budget has windows (second, minute, hour, day). The value is on the permission `access on service:portal`, like the budgets of each other service. For this service, `access` opens no path: it carries the budget only. The editor offers the budget only when the file has the block `inbox`. The counters are the counters of `counting.rs`. No second mechanism exists.
@@ -166,13 +184,18 @@ A key has exactly one kind. The prefix of the text gives the kind. The kind deci
 - **A key follows its owner.** This holds for both kinds. The rights of a key are the rights of the key and the current rights of its owner. The portal has no service account. When the owner loses a right, the key loses it at once. Other instances follow within `keys.directory_max_age`. The check also needs `keys.own.use` on the kind of the key.
 - **Delete.** When an account of the database is deleted, its keys, their grants and their counters go with it (`ON DELETE CASCADE`). The page of the account names the number of keys: "Delete carol and 3 keys?". A pane that is open for a key of a deleted owner closes at the next directory version.
 - **By kind.** `keys.own.create` and `keys.own.use` apply to the type `key_kind`, with the nodes `key_kind:mcp` and `key_kind:api`. The pane of a new key shows only the kinds that the account may make. With one kind, the selector is absent. With none, **New key** is absent. The ceiling `max_key_lifetime` has one value for each kind.
-- **What a key holds.** An MCP key holds grants on services and no action of the portal. An API key holds `alert.send` and `alert.read` on groups, and the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on a service, because no gate opens for it. The form and the save refuse it.
+- **What a key holds.** An MCP key holds grants on services and no action of the portal. An API key holds `alert.send` and `alert.read` on groups, `alert.send_user` on the service, and the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on a service, because no gate opens for it. The form and the save refuse it.
 - **The edge reads headers only** (portal 2). A translator that reads an MCP body and calls a REST route cannot live in the edge. The portal is itself the service of the Inbox, so it can read bodies. A generic translator for other services is a later and separate component.
 - **Migration.** The column `kind` of the table `keys` is the schema version 7 of SQLite and of PostgreSQL. A key of an earlier version is an MCP key. The plan said "no old data". A migration is still safe and small.
 - **The kind is in the address.** `GET /auth/keys/new?kind=api` shows the pane of this kind. A selector with two or more kinds is a small GET form that loads the pane again. It works without script. The summary row of a revoked key has no kind, so the list shows the kind chip for the keys that exist only.
 - **Key of the file of a service.** A block `api_key "<name>"` of the block `inbox` replaced the earlier token block, with no alias. It names an owner, which is the login of an account of the file, a secret by `_env` or `_file`, and the groups. The owner of a file key is a file account (portal 3.4a). The earlier token of 32 printable characters is not valid: the text must be an API key (`portal inbox token` makes one).
+<<<<<<< ours
 - **A file key decides its groups at start.** The key follows its owner, a file account. The rights of a file account do not change while the server runs. The start checks the secret and keeps only the groups that the owner may send to. The check of the key reads no directory and no database. A key of the file works when the portal is not ready and when PostgreSQL is away. It has no budget, as the earlier tokens had none. The list of keys does not list it. The file is its only source.
 - **Check at start.** The secret has the form of an API key. The owner holds `keys.own.use` on the kind `api` and `alert.send` on each group. A fault stops the program. The error names the key and the expected value, and never the secret.
+=======
+- **A file key decides its groups at start.** The key follows its owner, a file account. The rights of a file account do not change while the server runs. The start checks the secret and keeps only the groups that the owner may send to. The check of the key reads no directory and no database. A key of the file works when the portal is not ready and when PostgreSQL is away. It has no budget, as the earlier tokens had none. The list of keys does not list it. The file is its only source.
+- **Check at start.** The secret has the form of an API key. The owner holds `keys.own.use` on the kind `api` and `alert.send` on each group, and `alert.send_user` when the block has `direct_alerts = true`. A fault stops the program. The error names the key and the expected value, and never the secret.
+>>>>>>> theirs
 - **The MCP key of the file.** A block `key` of a block `user` has the kind `mcp`. A key of the file that uses `key_sha256_env` or `key_sha256_file` is an MCP key, because the portal cannot read the prefix of a digest. The text is checked only when the file gives it in clear.
 - **The file needs a mode.** A block `user` is not valid in the mode `dynamic`. A file with a file key needs `access.grants_mode` set to `static` or `hybrid`. The shipped configurations use `hybrid`.
 - **Order of the checks of a sender.** The API of the Inbox checks the form and the kind of the text first. It then looks at the keys of the file in constant time. Only a text that is none of them goes to the check of a key of the database. A key of the file never waits for the portal.
@@ -238,7 +261,7 @@ The list is on the left, with a box and a kind icon in each row. The form of a k
 - **Code.** The plus button is a form (section 5.2). With script, **Done** removes the popover. Without script, **Done** is a link to the page.
 - **Impersonation.** A session that the superadmin opened as an account can read the page and make a code. It cannot send an alert and cannot revoke a phone.
 - **Revoke.** A phone is revoked with `phone.revoke` and `phone.read`, or by its owner who holds `inbox.receive`. A request for a phone of another account answers like a request for a phone that does not exist.
-- **Dedupe of the form.** The form of an alert carries a random key. A double click sends one alert. The source of the alert is `admin`.
+- **Dedupe of the form.** The form of an alert carries a random key. A double click sends one alert. The source of the alert is `admin:<login>` (see D15).
 - **Tests.** The end-to-end tests read the page. The rows of the tables carry `data-*` attributes for them (`data-device`, `data-state`, `data-alert`, `data-reason` and others). The filter `since_ms` of the old alert list is gone, and so is the field `live.ip`. A database account has no permission of the Inbox at the start. The tests give `inbox.receive` on the two groups of the test server. The test `an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner` blocked the runtime while it waited for the start of a clock minute, and the phone session closed with the code 1001. The test now waits first with an async sleep and then opens the phone session.
 - **Lost with the old front.** The embedded front, the single page of the standalone server and the page `/doc` are gone. The book icon with its popover replaces `/doc`.
 
