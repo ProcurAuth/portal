@@ -2211,10 +2211,25 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
         );
         // The create page sends the grants with the account. A right on a service with no grant
         // `access` on it does nothing: the account is not made.
-        assert_eq!(
-            add("login=uma&grants=1&grant0=query.run.read+on+service%3Adb"),
-            Some("/auth/settings/new-user?s=needs-access".into())
+        // The page comes back with the login and the grants, names the service, and never sends
+        // the password back.
+        let refused = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "password=a-long-password-1&login=uma&grants=1&grant0=query.run.read+on+service%3Adb",
         );
+        assert_eq!(refused.status, 422, "{}", refused.body);
+        assert!(refused
+            .body
+            .contains(r#"id="new-login" name="login" type="text" value="uma""#));
+        assert!(refused
+            .body
+            .contains("a permission needs the switch Can open"));
+        assert!(refused.body.contains("query.run.read on service:db"));
+        assert!(!refused.body.contains("a-long-password-1"));
+        assert_eq!(refused.header("cache-control"), Some("no-store"));
         assert!(node.state.users.get("uma").is_none());
         // An account without a grant has none.
         assert_eq!(
@@ -5272,11 +5287,6 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
                 "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Aprod&limit0.max_rows=0",
                 "bad_limits",
             ),
-            // A right on a service, and no grant `access` on it: the key would do nothing.
-            (
-                "name=x&grant0=data.read+on+service%3Adb%2Fhost%3Aprod",
-                "needs_access",
-            ),
         ] {
             let reply = keys_post(&node, &alice, "create", fields);
             assert_eq!(reply.status, 303, "{fields}: {}", reply.body);
@@ -5286,6 +5296,36 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
                 "{fields}"
             );
         }
+        // A right on a service, and no grant `access` on it: the key would do nothing. The form
+        // comes back with the name and the grants, and the message names the
+        // service.
+        let refused = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=my+agent&grant0=data.read+on+service%3Adb%2Fhost%3Aprod",
+        );
+        assert_eq!(refused.status, 422, "{}", refused.body);
+        assert!(refused.body.contains(r#"value="my agent""#));
+        assert!(refused
+            .body
+            .contains("a permission needs the switch Can open"));
+        assert!(refused.body.contains("data.read on service:db/host:prod"));
+        // The same for the change of a key.
+        let refused = keys_post(
+            &node,
+            &alice,
+            "edit",
+            &format!(
+                "id={}&name=renamed&grant0=data.read+on+service%3Adb%2Fhost%3Aprod",
+                key.id
+            ),
+        );
+        assert_eq!(refused.status, 422, "{}", refused.body);
+        assert!(refused.body.contains(r#"value="renamed""#));
+        assert!(refused
+            .body
+            .contains("a permission needs the switch Can open"));
         // A bad request: an unknown field, a bad token, a repeated field.
         assert_eq!(
             keys_post(&node, &alice, "create", "name=x&colour=red").status,
@@ -6989,8 +7029,9 @@ mod kinds_tests {
                 r#"<a class="segmented__option is-active" href="/auth/keys/new?kind=api""#
             ));
             assert!(
-                api.body.contains("This key can"),
-                "the summary of an API key"
+                api.body.contains("Calls that these rights allow")
+                    && !api.body.contains("This key can"),
+                "the calls of an API key, and no list that repeats the boxes"
             );
             assert!(api
                 .body

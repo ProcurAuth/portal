@@ -195,7 +195,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "needs-access" => (
-            "A permission on a service does not work without the permission to open the service. Tick the switch of the service, and save.",
+            "A permission on a service needs the switch Can open on that service. Tick the switch, then save.",
             false,
         ),
         "keys-needs" => (
@@ -942,6 +942,22 @@ pub fn user_field_of(code: &str) -> Option<UserField> {
     }
 }
 
+/// A form that the server refused: a right has no grant `access` on its service. The page draws the
+/// form again with what the person typed, and the message names the service.
+pub struct NeedsAccess {
+    /// The id of the service that has the right and not `access`.
+    pub service: String,
+    /// The login that was typed. Not the password: the page never sends it back.
+    pub login: String,
+    /// The grants that were ticked.
+    pub grants: Vec<Grant>,
+}
+
+/// The message of a refusal because of `access`. `name` is the name of the service.
+pub fn needs_access_text(name: &str) -> String {
+    format!("{name}: a permission needs the switch Can open {name}. Tick the switch, then save.")
+}
+
 /// The data of the page "New user".
 pub struct NewUserView<'a> {
     pub notice: Option<Notice>,
@@ -953,6 +969,8 @@ pub struct NewUserView<'a> {
     pub groups: Vec<GroupChip>,
     /// The anti-CSRF token of the administration forms.
     pub token: &'a str,
+    /// The form that the server refused for `access`, with its values.
+    pub refused: Option<NeedsAccess>,
 }
 
 /// The message under a field that a refused form names, and the attributes that tie it to the
@@ -983,12 +1001,23 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
             cancel_link()
         ),
     }));
-    match (view.field, view.notice) {
-        (Some(_), Some(notice)) if !notice.ok => out.push_str(&banner_error(
-            "The account is not made. Fix the field that shows an error.",
-        )),
-        _ => notice_html(&mut out, view.notice),
+    if let Some(refused) = &view.refused {
+        let name = view
+            .services
+            .iter()
+            .chain(view.features.iter())
+            .find(|s| s.id == refused.service)
+            .map_or(refused.service.as_str(), |s| s.name.as_str());
+        out.push_str(&banner_error(&needs_access_text(name)));
+    } else {
+        match (view.field, view.notice) {
+            (Some(_), Some(notice)) if !notice.ok => out.push_str(&banner_error(
+                "The account is not made. Fix the field that shows an error.",
+            )),
+            _ => notice_html(&mut out, view.notice),
+        }
     }
+    let typed_login = view.refused.as_ref().map_or("", |r| r.login.as_str());
     let message = |field: UserField| {
         view.notice
             .filter(|n| !n.ok && view.field == Some(field))
@@ -998,8 +1027,9 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
     let (_, password_error) = field_error("new-password", message(UserField::Password));
     let _ = write!(
         out,
-        r##"<form class="fgrid fgrid--user" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><div class="field"><label class="field__label" for="new-login">Login</label><input class="uiInput{login_class}" id="new-login" name="login" type="text" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1 to 32 characters" title="1 to 32 characters: letters, digits, dot, dash, underscore">{login_error}</div><div class="field"><label class="field__label" for="new-password">Password</label><span class="pwRow">{}</span>{password_error}</div>{}</form>"##,
+        r##"<form class="fgrid fgrid--user" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><div class="field"><label class="field__label" for="new-login">Login</label><input class="uiInput{login_class}" id="new-login" name="login" type="text" value="{}" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1 to 32 characters" title="1 to 32 characters: letters, digits, dot, dash, underscore">{login_error}</div><div class="field"><label class="field__label" for="new-password">Password</label><span class="pwRow">{}</span>{password_error}</div>{}</form>"##,
         html_escape(view.token),
+        html_escape(typed_login),
         password_input(
             "new-password",
             "Password",
@@ -1016,7 +1046,9 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
             view.features.as_ref(),
             None,
             |_| true,
-            Vec::new(),
+            view.refused
+                .as_ref()
+                .map_or_else(Vec::new, |r| r.grants.clone()),
             true,
         );
         grant_editor::render(
@@ -1025,7 +1057,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
             Place {
                 form: Some("add-user"),
                 title: "Permissions",
-                blank_rows: 0,
+                blank_rows: 3,
                 groups: true,
             },
         );
@@ -1517,6 +1549,7 @@ mod tests {
                         services: services(),
                         features: Some(features()),
                         token: "tok<en",
+                        refused: None,
                     },
                 ),
             ),
@@ -1900,6 +1933,7 @@ mod tests {
             services: services(),
             features: Some(features()),
             token: "tok<en",
+            refused: None,
         }
     }
 
@@ -2002,6 +2036,34 @@ mod tests {
         assert!(limit.contains("The account limit is reached") && !limit.contains("field__error"));
         // The editor is still there: the person corrects and sends again.
         assert!(refused.contains("grantEditor"));
+    }
+
+    #[test]
+    fn a_form_refused_for_access_comes_back_with_the_login_and_the_grants_and_names_the_service() {
+        let mut view = new_user_view(Vec::new());
+        view.refused = Some(NeedsAccess {
+            service: "infra-grafana".into(),
+            login: "ma<x>".into(),
+            grants: vec![grant("dashboards.read", "infra-grafana")],
+        });
+        let html = new_user_page(&frame(), &view);
+        assert!(html.contains(r#"value="ma&lt;x&gt;""#) && !html.contains("ma<x>"));
+        assert!(
+            html.contains("Grafana: a permission needs the switch Can open Grafana."),
+            "{html}"
+        );
+        assert!(
+            html.contains("dashboards.read"),
+            "the grant is ticked again"
+        );
+        // The password is never sent back.
+        assert!(!html.contains(r#"name="password" type="password" value"#));
+    }
+
+    #[test]
+    fn without_script_the_page_new_user_keeps_three_rows_for_the_rights() {
+        let html = new_user_page(&frame(), &new_user_view(Vec::new()));
+        assert_eq!(html.matches("Another grant").count(), 3, "{html}");
     }
 
     #[test]

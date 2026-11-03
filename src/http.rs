@@ -1266,6 +1266,7 @@ async fn handle_settings(
                     features: features_service(state),
                     groups: group_chips(state),
                     token: &users_token,
+                    refused: None,
                 },
             )
         }
@@ -2708,6 +2709,46 @@ fn new_user_redirect(code: &str) -> HttpResponse {
     )
 }
 
+/// The page "New user" again after a form that the server refuses because a right has no `access`.
+/// It keeps the login and the grants, and the status is 422. The password is not sent back.
+fn new_user_refused(
+    state: &AppState,
+    viewer: &Viewer,
+    refused: ui::settings::NeedsAccess,
+) -> HttpResponse {
+    let (Ok(logout_token), Ok(users_token)) = (
+        sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token),
+        sign_action_token(&state.signing_secret, USERS_TOKEN, &viewer.token),
+    ) else {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    };
+    let frame = ui::Frame {
+        logout_token: &logout_token,
+        keys: keys_page::list_visible(state, viewer),
+        inbox: inbox_page::tab_visible(state, viewer),
+        superadmin: is_superadmin(viewer),
+    };
+    let workloads = current_catalog(state);
+    let html = ui::new_user_page(
+        &frame,
+        &ui::NewUserView {
+            notice: None,
+            field: None,
+            services: service_grants(state, &workloads),
+            features: features_service(state),
+            groups: group_chips(state),
+            token: &users_token,
+            refused: Some(refused),
+        },
+    );
+    let mut response = html_response(StatusCode::UNPROCESSABLE_ENTITY, html);
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// The response returns to the page of the account `login`, with the outcome of the action. The
 /// login is the login as the server keeps it: it needs no encoding in a path.
 fn user_redirect(login: &str, code: &str) -> HttpResponse {
@@ -2771,6 +2812,37 @@ fn account_grants(
     unknown_code: &'static str,
 ) -> Result<Vec<Grant>, GrantsError> {
     let raw = key_forms::read(fields, true).map_err(|_| GrantsError::Bad)?;
+    account_context(state, old_grants, |context| {
+        key_forms::check_grants(&raw, context, key_forms::Holder::Account)
+            .map(drop_covered)
+            .map_err(|code| {
+                GrantsError::Refused(match code {
+                    key_forms::BAD_LIMITS => "bad-limits",
+                    key_forms::NEEDS_ACCESS => "needs-access",
+                    _ => unknown_code,
+                })
+            })
+    })
+}
+
+/// The grants of a form of an account that the check refuses because a right has no `access`, and
+/// the service. `None`: the form has another fault.
+fn account_needs_access(
+    state: &AppState,
+    fields: std::collections::HashMap<String, String>,
+) -> Option<(Vec<Grant>, String)> {
+    let raw = key_forms::read(fields, true).ok()?;
+    account_context(state, None, |context| {
+        key_forms::grants_without_access(&raw, context, key_forms::Holder::Account)
+    })
+}
+
+/// Runs `run` with the context of the check of the grants of an account.
+fn account_context<R>(
+    state: &AppState,
+    old_grants: Option<&[Grant]>,
+    run: impl FnOnce(&key_forms::Context<'_>) -> R,
+) -> R {
     let catalog = current_catalog(state);
     let known: std::collections::HashSet<&str> = catalog
         .groups()
@@ -2788,15 +2860,7 @@ fn account_grants(
         service_exists: &exists,
         old_grants,
     };
-    key_forms::check_grants(&raw, &context, key_forms::Holder::Account)
-        .map(drop_covered)
-        .map_err(|code| {
-            GrantsError::Refused(match code {
-                key_forms::BAD_LIMITS => "bad-limits",
-                key_forms::NEEDS_ACCESS => "needs-access",
-                _ => unknown_code,
-            })
-        })
+    run(&context)
 }
 
 async fn handle_users_add(
@@ -2842,10 +2906,27 @@ async fn handle_users_add(
         return rejected(code);
     }
     let grants = if with_grants {
+        let typed = fields.clone();
         let mut ticked = match account_grants(state, fields, None, "unknown-grant") {
             Ok(grants) => grants,
             Err(GrantsError::Bad) => {
                 return text_response(StatusCode::BAD_REQUEST, "Bad Request\n")
+            }
+            Err(GrantsError::Refused("needs-access")) => {
+                // The form comes back with its login and its grants, and names the service.
+                if let Some((grants, service)) = account_needs_access(state, typed) {
+                    state.metrics.user_admin("add", "rejected");
+                    return new_user_refused(
+                        state,
+                        &viewer,
+                        ui::settings::NeedsAccess {
+                            service,
+                            login,
+                            grants,
+                        },
+                    );
+                }
+                return rejected("needs-access");
             }
             Err(GrantsError::Refused(code)) => return rejected(code),
         };
