@@ -3,7 +3,7 @@
    of the launcher and the login page; the settings pages add settings.js. */
 (function () {
   "use strict";
-  var KEY = "portal.theme";
+  var KEY = "ui-color-mode";
   var root = document.documentElement;
   var mode = "system";
   try {

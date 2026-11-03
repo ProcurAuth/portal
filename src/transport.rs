@@ -44,9 +44,9 @@ pub fn session_cookie_name(configured: &str, https: bool) -> &str {
 
 pub fn csrf_cookie_name(https: bool) -> &'static str {
     if https {
-        "__Host-portal-csrf"
+        "__Host-lc"
     } else {
-        "portal-csrf"
+        "lc"
     }
 }
 
@@ -308,8 +308,8 @@ mod tests {
     fn cookie_names_follow_the_scheme() {
         assert_eq!(session_cookie_name("__Host-portal", true), "__Host-portal");
         assert_eq!(session_cookie_name("__Host-portal", false), "portal");
-        assert_eq!(csrf_cookie_name(true), "__Host-portal-csrf");
-        assert_eq!(csrf_cookie_name(false), "portal-csrf");
+        assert_eq!(csrf_cookie_name(true), "__Host-lc");
+        assert_eq!(csrf_cookie_name(false), "lc");
     }
 
     #[test]

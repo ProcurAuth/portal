@@ -749,14 +749,18 @@ async fn handle_request(
         keys_page::handle_keys_revoke(&state, request, &client).await
     } else if method == Method::GET && path == HOME_PATH {
         handle_home(&state, request.headers(), &client).await
+    } else if method == Method::GET && path == ui::assets().css_path {
+        hashed_response("text/css; charset=utf-8", &ui::assets().css)
+    } else if method == Method::GET && path == ui::assets().js_path {
+        hashed_response("text/javascript; charset=utf-8", &ui::assets().js)
     } else if method == Method::GET && path == STYLE_PATH {
-        static_response("text/css; charset=utf-8", ui::CSS)
+        static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
         handle_icon(&state, &path)
     } else if method == Method::GET && path == SETTINGS_STYLE_PATH {
         static_response("text/css; charset=utf-8", ui::SETTINGS_CSS)
     } else if method == Method::GET && path == THEME_JS_PATH {
-        static_response("text/javascript; charset=utf-8", ui::THEME_JS)
+        static_response("text/javascript; charset=utf-8", &ui::assets().js)
     } else if method == Method::GET && path == SETTINGS_JS_PATH {
         static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
     } else if method == Method::GET && is_settings_path(&path) {
@@ -903,7 +907,8 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     if matches!(
         original_path,
         LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH
-    ) {
+    ) || is_neutral_asset(original_path)
+    {
         state.metrics.verify_allowed();
         return empty_response(StatusCode::NO_CONTENT);
     }
@@ -3771,6 +3776,22 @@ fn static_response(content_type: &'static str, body: &str) -> HttpResponse {
     response
 }
 
+/// Whether `path` is the neutral path of the stylesheet or of the script that every page loads.
+fn is_neutral_asset(path: &str) -> bool {
+    path == ui::assets().css_path || path == ui::assets().js_path
+}
+
+/// An asset with a hashed path. The path changes when the content changes. Therefore, the browser
+/// can keep the file for a long time.
+fn hashed_response(content_type: &'static str, body: &str) -> HttpResponse {
+    let mut response = static_response(content_type, body);
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
 fn text_response(status: StatusCode, body: &str) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::copy_from_slice(body.as_bytes()));
     response.headers_mut().insert(
@@ -3920,6 +3941,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         READY_PATH => "ready",
         _ if crate::inbox::owns(path) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
+        _ if is_neutral_asset(path) => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",
