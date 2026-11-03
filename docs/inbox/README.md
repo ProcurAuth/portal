@@ -191,6 +191,8 @@ For each group, the user chooses one action. This choice stays on the phone.
 | `ring` | One notification sound, also in silent or vibrate mode. |
 | `notify` | A standard notification. It follows the mode of the phone. |
 
+The app lists one more entry, **Direct**, under the groups of the server. It is not a group of the server. An alert that the server sends to one account arrives with the group id `@direct` and the group name `Direct`. The app always lists this entry, also before the first direct alert. Its default action is `ring`. The default is never `alarm`. The user can choose `notify`, `ring` or `alarm`, or turn it off. With **Off**, the app stores the alert in its list and makes no sound and no notification. This choice stays on the phone. The app never subscribes to `@direct` and never unsubscribes from it. The server does not know this action. The notification of a direct alert uses the same channel as the action: Rings, Notifications or Alarms.
+
 The app asks for these permissions on its first screen.
 
 | Permission | Reason |

@@ -66,8 +66,8 @@ class Store private constructor(private val appContext: Context) :
                 instance ?: Store(context.applicationContext).also { instance = it }
             }
 
-        const val LEVEL_OFF = "off"
-        const val LEVEL_NOTIFY = "notify"
+        const val LEVEL_OFF = Levels.OFF
+        const val LEVEL_NOTIFY = Levels.NOTIFY
         const val DEFAULT_HEARTBEAT_MS = 20_000L
         const val DEFAULT_OFFLINE_WARNING_MS = 180_000L
 
@@ -205,14 +205,12 @@ class Store private constructor(private val appContext: Context) :
         writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
     }
 
-    /** What the session must send so the server's subscriptions match the local levels. */
-    data class Reconcile(val subscribe: List<String>, val unsubscribe: List<String>)
-
     /**
      * Stores the server's groups and reconciles the local levels with the groups the
      * server says this phone subscribes to: a subscribed group without a local level
      * gets NOTIF; a local level the server does not know is subscribed again; a group
-     * turned off while offline is unsubscribed.
+     * turned off while offline is unsubscribed. The pseudo group `@direct` keeps its local
+     * level and is never part of the reconciliation: see [Levels].
      */
     fun saveWelcome(
         id: Long, serverName: String, userName: String?, groups: List<Group>, serverSubscriptions: Set<String>,
@@ -229,22 +227,16 @@ class Store private constructor(private val appContext: Context) :
                 put("offline_warning_ms", offlineWarningMs)
             }, "id = ?", arrayOf(id.toString()))
             db.delete("groups", "server_id = ?", arrayOf(id.toString()))
-            for (g in groups) {
+            for (g in groups.filterNot { Levels.isDirect(it.id) }) {
                 db.insertOrThrow("groups", null, ContentValues().apply {
                     put("server_id", id); put("group_id", g.id); put("name", g.name); put("description", g.description)
                 })
             }
-            val known = groups.map { it.id }.toSet()
-            val levels = levels(id).filterKeys { it in known }
+            val plan = Levels.reconcile(levels(id), groups.map { it.id }.toSet(), serverSubscriptions)
             db.delete("subscriptions", "server_id = ?", arrayOf(id.toString()))
-            val merged = levels.toMutableMap()
-            for (g in serverSubscriptions) if (g in known && g !in merged) merged[g] = LEVEL_NOTIFY
-            for ((g, a) in merged) insertLevel(db, id, g, a)
+            for ((g, a) in plan.levels) insertLevel(db, id, g, a)
             db.setTransactionSuccessful()
-            return Reconcile(
-                subscribe = merged.filter { it.value != LEVEL_OFF && it.key !in serverSubscriptions }.keys.sorted(),
-                unsubscribe = merged.filter { it.value == LEVEL_OFF && it.key in serverSubscriptions }.keys.sorted(),
-            )
+            return plan.reconcile
         } finally {
             db.endTransaction()
         }
@@ -271,8 +263,12 @@ class Store private constructor(private val appContext: Context) :
         "SELECT group_id, action FROM subscriptions WHERE server_id = ?", arrayOf(serverId.toString())
     ).use { c -> buildMap { while (c.moveToNext()) put(c.getString(0), c.getString(1)) } }
 
-    /** Groups this phone is subscribed to, with their level (off groups excluded). */
-    fun subscriptions(serverId: Long): Map<String, String> = levels(serverId).filterValues { it != LEVEL_OFF }
+    /**
+     * Groups of the server that this phone is subscribed to, with their level (off groups
+     * excluded). The pseudo group `@direct` is not a subscription: use [levels] for it.
+     */
+    fun subscriptions(serverId: Long): Map<String, String> =
+        levels(serverId).filter { Levels.isServerGroup(it.key) && it.value != LEVEL_OFF }
 
     // ------------------------------------------------------------ alerts
 
