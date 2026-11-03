@@ -654,13 +654,8 @@ fn groups_field(groups: &[GroupChip], member_of: &[String], editable: bool) -> S
             );
         }
     }
-    let hint = if editable {
-        r#"<span class="hint">A group chip gives the right <code>inbox.receive</code> on that group. The account then gets its alerts.</span>"#
-    } else {
-        ""
-    };
     format!(
-        r#"<div class="field field--groups"><span class="field__label">Groups</span><span class="chips" role="group" aria-label="Groups of the account">{chips}</span>{hint}</div>"#
+        r#"<div class="field field--groups"><span class="field__label">Groups</span><span class="chips" role="group" aria-label="Groups of the account">{chips}</span></div>"#
     )
 }
 
@@ -2078,9 +2073,8 @@ mod tests {
         assert!(form.contains(r#"<button class="chip chip--toggle" type="button" data-group-chip="infra" aria-pressed="false""#), "{form}");
         assert!(form.contains(r#"<span class="num">11</span>"#));
         assert!(form.contains("#i-bell-ringing"), "the critical mark");
-        assert!(
-            form.contains("A group chip gives the right <code>inbox.receive</code> on that group.")
-        );
+        assert!(!form.contains(r#"class="hint""#), "no help sentence");
+        assert!(form.contains("the right inbox.receive on service:portal/inbox_group:infra"));
         // The editor sits under the fields and belongs to the form.
         assert!(
             html.contains(r#"data-title="Permissions" data-layout="groups" data-form="add-user">"#)
