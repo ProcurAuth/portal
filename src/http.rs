@@ -2202,6 +2202,8 @@ async fn handle_login_post(
 
     // Exactly one Argon2 check runs, whatever account the login names.
     // The check uses the superadmin hash, the account hash, or a dummy hash when the login does not exist. Time and budget tell nothing about the login.
+    // The portal reads the shared accounts here, for every login. If it read them only for an unknown login, the time would tell.
+    refresh_directory_if_due(state);
     let who = identify(state, &login_input);
     // The portal keeps this information about the attempt: the login as typed, made safe, and whether it names an account.
     // The password is not kept.
@@ -2422,28 +2424,26 @@ fn identify(state: &AppState, typed: &str) -> Who {
     if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
         return Who::Superadmin;
     }
-    match state.users.get(&login) {
-        Some(record) => Some(record),
-        // The account can have been created a moment ago on another instance.
-        None if refresh_directory_if_due(state) => state.users.get(&login),
-        None => None,
-    }
-    // An account of the file has a password only when its block gives the digest (portal 3.4b).
-    .or_else(|| {
-        let digest = state
-            .config
-            .access
-            .accounts
-            .get(&login)?
-            .password_hash
-            .clone()?;
-        Some(UserRecord {
-            password_hash: digest,
-            grants: Vec::new(),
-            created_at: 0,
+    // The caller reads the accounts of the shared database before, for every login: see `handle_login_post`.
+    state
+        .users
+        .get(&login)
+        // An account of the file has a password only when its block gives the digest (portal 3.4b).
+        .or_else(|| {
+            let digest = state
+                .config
+                .access
+                .accounts
+                .get(&login)?
+                .password_hash
+                .clone()?;
+            Some(UserRecord {
+                password_hash: digest,
+                grants: Vec::new(),
+                created_at: 0,
+            })
         })
-    })
-    .map_or(Who::Unknown, |record| Who::User(login, record))
+        .map_or(Who::Unknown, |record| Who::User(login, record))
 }
 
 /// The `Set-Cookie` value of a session. `max_age_secs` is the time left before the session ends.
