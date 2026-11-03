@@ -75,14 +75,17 @@ pub fn give_target(login: &str, service: &str) -> String {
     format!("{}&give=1", user_service_path(login, service))
 }
 
-/// The Services page with a selected service and a filter.
-fn services_href(selected: Option<&str>, only_check: bool) -> String {
+/// The Services page with a selected service, a filter and a view of the detail.
+fn services_href(selected: Option<&str>, only_check: bool, checks: bool) -> String {
     let mut query = Vec::new();
     if let Some(id) = selected {
         query.push(format!("svc={}", percent_encode_query_component(id)));
     }
     if only_check {
         query.push("f=check".to_string());
+    }
+    if checks {
+        query.push("v=checks".to_string());
     }
     if query.is_empty() {
         SERVICES_PATH.to_string()
@@ -1058,8 +1061,11 @@ pub struct ServicesView<'a> {
     /// The service that the query selects. `None`, or an id that the catalogue does not hold: the
     /// first service.
     pub selected: Option<String>,
-    /// The chip "to check" is on.
+    /// The chip "to check" of the list is on.
     pub only_check: bool,
+    /// The chip "To check" of the detail is on: the detail lists the grants to check, not the
+    /// accounts that open the service.
+    pub checks: bool,
 }
 
 impl ServicesView<'_> {
@@ -1115,14 +1121,14 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
             label_html: "All",
             name: "",
             count,
-            href: &services_href(selected, false),
+            href: &services_href(selected, false, false),
             on: !view.only_check,
         },
         Chip {
             label_html: &check_icon,
             name: "Services to check",
             count: to_check,
-            href: &services_href(selected, true),
+            href: &services_href(selected, true, false),
             on: view.only_check,
         },
     ]);
@@ -1161,7 +1167,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         &Zone {
             id: "services-title",
             title: "Services",
-            count: "",
+            count: &count.to_string(),
             count_title: "",
             chips_html: &chip_list,
             tools_html: "",
@@ -1170,8 +1176,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
         },
         &table,
     );
-    let right = format!("{}{}", opened_by_zone(view, selected), checks_zone(view));
-    out.push_str(&split("services", &left, &right));
+    out.push_str(&split("services", &left, &detail_zone(view, selected)));
     fill_page(Tab::Services, frame, "Services", &out)
 }
 
@@ -1194,7 +1199,7 @@ fn service_row(
         } else {
             ""
         },
-        html_escape(&services_href(Some(&service.id), view.only_check)),
+        html_escape(&services_href(Some(&service.id), view.only_check, false)),
         if selected {
             r#" aria-current="true""#
         } else {
@@ -1253,20 +1258,10 @@ fn service_row(
     );
 }
 
-/// The panel "Opened by": the accounts that open the selected service, then the accounts that do
-/// not, each with a link that gives access.
-fn opened_by_zone(view: &ServicesView, selected: Option<&str>) -> String {
-    let Some(id) = selected else {
-        return String::new();
-    };
+/// The accounts that open the selected service, then the accounts that do not, each with a link
+/// that gives access.
+fn opened_by_body(view: &ServicesView, id: &str, name: &str) -> String {
     let found = view.actions_of(id);
-    let name = view
-        .catalog
-        .groups()
-        .iter()
-        .flat_map(|g| g.services.iter())
-        .find(|s| s.id == id)
-        .map_or(id, |s| s.name.as_str());
     let (with, without): (Vec<&Holder>, Vec<&Holder>) = view
         .holders
         .iter()
@@ -1324,28 +1319,16 @@ fn opened_by_zone(view: &ServicesView, selected: Option<&str>) -> String {
         }
     }
     body.push_str("</tbody></table>");
-    zone(
-        &Zone {
-            id: "opened-title",
-            title: "Opened by",
-            count: name,
-            count_title: "",
-            chips_html: "",
-            tools_html: "",
-            class: " zone--short",
-            above_html: "",
-        },
-        &body,
-    )
+    body
 }
 
 /// The grants below a service that do not follow its document: the action does not list the
 /// type, or the path does not follow the parents.
 /// At start, the server does not know the services: the catalogue and the actions documents come
 /// at run time. Thus a grant of the configuration can name a type that the service does not
-/// declare. This panel shows each such grant with its problem and a link to its account. The
-/// panel is absent when there is none.
-fn checks_zone(view: &ServicesView) -> String {
+/// declare. This list shows each such grant with its problem and a link to its account. The rows
+/// and their number: the chip "To check" has the number, and it is absent when there is none.
+fn checks_body(view: &ServicesView) -> (String, usize) {
     let mut rows = String::new();
     let mut count = 0;
     for holder in view.holders {
@@ -1371,22 +1354,74 @@ fn checks_zone(view: &ServicesView) -> String {
         }
     }
     if rows.is_empty() {
-        return String::new();
+        return (String::new(), 0);
     }
+    (
+        format!(
+            r#"<table class="grid grid--checks"><colgroup><col class="w88"><col><col class="w180"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Grant</th><th scope="col">Problem</th></tr></thead><tbody>{rows}</tbody></table>"#
+        ),
+        count,
+    )
+}
+
+/// The detail of the selected service. Its head has the name of the service and two chips that
+/// switch the list: **Opened by** and **To check**. The chips are links, so the switch works
+/// without script. The chip **To check** is absent when no grant needs a check.
+fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
+    let Some(id) = selected else {
+        return String::new();
+    };
+    let name = view
+        .catalog
+        .groups()
+        .iter()
+        .flat_map(|g| g.services.iter())
+        .find(|s| s.id == id)
+        .map_or(id, |s| s.name.as_str());
+    let opened = view
+        .holders
+        .iter()
+        .filter(|h| holds(&h.grants, ACCESS, id))
+        .count();
+    let (checks_html, to_check) = checks_body(view);
+    let on_checks = view.checks && to_check > 0;
+    let user_label = icon("user");
+    let check_label = icon("alert-triangle");
+    let opened_href = services_href(selected, view.only_check, false);
+    let checks_href = services_href(selected, view.only_check, true);
+    let chip_list = chips(&[
+        Chip {
+            label_html: &format!("{user_label}Opened by"),
+            name: "Opened by: the accounts that open the service",
+            count: opened,
+            href: &opened_href,
+            on: !on_checks,
+        },
+        Chip {
+            label_html: &format!("{check_label}To check"),
+            name: "To check: grants that name a resource that is gone",
+            count: to_check,
+            href: &checks_href,
+            on: on_checks,
+        },
+    ]);
+    let body = if on_checks {
+        checks_html
+    } else {
+        opened_by_body(view, id, name)
+    };
     zone(
         &Zone {
-            id: "checks-title",
-            title: "To check",
-            count: &count.to_string(),
+            id: "detail-title",
+            title: name,
+            count: "",
             count_title: "",
-            chips_html: "",
+            chips_html: &chip_list,
             tools_html: "",
             class: "",
             above_html: "",
         },
-        &format!(
-            r#"<table class="grid grid--checks"><colgroup><col class="w88"><col><col class="w180"></colgroup><thead><tr><th scope="col">Account</th><th scope="col">Grant</th><th scope="col">Problem</th></tr></thead><tbody>{rows}</tbody></table>"#
-        ),
+        &body,
     )
 }
 
@@ -2123,10 +2158,12 @@ mod tests {
             !html.contains("/auth/settings/services/infra-"),
             "no page for one service"
         );
-        // The panel "Opened by" belongs to the selected row.
-        let panel = &html[html.find(r#"aria-labelledby="opened-title""#).unwrap()..];
+        // The detail belongs to the selected row: its title is the name of the service, and the chip
+        // "Opened by" is on.
+        let panel = &html[html.find(r#"aria-labelledby="detail-title""#).unwrap()..];
         let panel = &panel[..panel.find("</section>").unwrap()];
-        assert!(panel.contains(r#"<span class="count">Grafana</span>"#));
+        assert!(panel.contains(r#"<h2 class="title" id="detail-title">Grafana</h2>"#));
+        assert!(panel.contains(r#"class="chip is-on" href="/auth/settings/services?svc=infra-grafana" aria-current="true" aria-label="Opened by: the accounts that open the service 1""#), "{panel}");
         assert!(panel.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
         assert!(
             !panel.contains(">bob</a></td><td class=\"r muted\">"),
@@ -2147,7 +2184,7 @@ mod tests {
         v.selected = Some("infra-mixed".into());
         let html = services_page(&frame(), &v);
         assert!(html.contains(r#"<tr id="row-2" class="is-selected">"#));
-        assert!(html.contains(r#"<span class="count">Mixed</span>"#));
+        assert!(html.contains(r#"id="detail-title">Mixed</h2>"#));
         // A value that names no service selects the first one.
         v.selected = Some("<nope>".into());
         let html = services_page(&frame(), &v);
@@ -2221,7 +2258,22 @@ mod tests {
             holder("bob", vec![sub("x.read on service:infra-notes/a:b")]),
         ];
         let html = services_page(&frame(), &services_view(&cat, &actions, &holders));
-        assert!(html.contains(r#"<h2 class="title" id="checks-title">To check</h2>"#));
+        // The chip "To check" has the number of grants and is a link. The list shows with `v=checks`.
+        assert!(
+            html.contains(r#"href="/auth/settings/services?svc=infra-grafana&amp;v=checks""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"aria-label="To check: grants that name a resource that is gone 3""#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("grid--checks"),
+            "the list of the accounts is on first"
+        );
+        let mut view = services_view(&cat, &actions, &holders);
+        view.checks = true;
+        let html = services_page(&frame(), &view);
         assert!(html.contains(r#"<a href="/auth/settings/users/alice">alice</a>"#));
         assert!(
             html.contains("dashboards.read on service:infra-grafana/folder:ops/dashboard:1</code>")
@@ -2233,12 +2285,13 @@ mod tests {
             "a declared grant is fine"
         );
         assert!(html.contains(r#"<a href="/auth/settings/users/bob">bob</a>"#));
-        // The panel is absent when there is nothing to check.
-        let none = services_page(
-            &frame(),
-            &services_view(&cat, &actions, &[holder("alice", access(&["grafana"]))]),
-        );
-        assert!(!none.contains("checks-title"));
+        // The chip is absent when there is nothing to check, also when the address asks for it.
+        let mut clean = services_view(&cat, &actions, &[]);
+        let one = [holder("alice", access(&["grafana"]))];
+        clean.holders = &one;
+        clean.checks = true;
+        let none = services_page(&frame(), &clean);
+        assert!(!none.contains("grid--checks") && !none.contains("v=checks"));
     }
 
     #[test]
@@ -2265,7 +2318,7 @@ mod tests {
         let empty = Catalog::build(Vec::new(), Vec::new());
         let html = services_page(&frame(), &services_view(&empty, &[], &[]));
         assert!(html.contains("No service in the catalogue yet."));
-        assert!(!html.contains("opened-title"));
+        assert!(!html.contains("detail-title"));
     }
 
     #[test]

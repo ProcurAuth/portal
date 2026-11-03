@@ -351,6 +351,7 @@ pub(super) fn services_view<'a>(
         mode: Mode::Dynamic,
         selected: None,
         only_check: false,
+        checks: false,
     }
 }
 

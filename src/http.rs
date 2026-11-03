@@ -1200,6 +1200,7 @@ async fn handle_settings(
                     mode: state.policy.mode,
                     selected: query_value_up_to(uri, "svc", grants::MAX_SERVICE_CHARS * 4),
                     only_check: query_value(uri, "f").as_deref() == Some("check"),
+                    checks: query_value(uri, "v").as_deref() == Some("checks"),
                 },
             )
         }

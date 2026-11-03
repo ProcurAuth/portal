@@ -403,6 +403,7 @@ fn is_mine(me: &Me, owner: Option<&str>) -> bool {
 
 /// The keys of the tab Access: the keys of the viewer, or of all the accounts when the viewer may
 /// read them. The error is the response. `None`: the list is not for this viewer.
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
 pub(super) async fn list(
     state: &Arc<AppState>,
     viewer: &Viewer,

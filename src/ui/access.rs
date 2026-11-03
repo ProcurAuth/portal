@@ -421,7 +421,7 @@ fn accounts_matching<'a>(
         .users
         .iter()
         .filter(|u| query.user.is_empty() || u.login == query.user)
-        .filter(|u| query.group.is_empty() || u.groups.iter().any(|g| *g == query.group))
+        .filter(|u| query.group.is_empty() || u.groups.contains(&query.group))
         .filter(|u| {
             service.as_deref().is_none_or(|id| {
                 u.grants.iter().any(|g| g.service == id) && holds(&u.grants, ACCESS, id)

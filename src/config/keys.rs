@@ -214,7 +214,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ),
     (
         "keys",
-        "This block is optional. If it is present, the server accepts keys: a user makes keys on the page Keys. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox. The keys `mcp` and `api` turn each kind on or off. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. The block needs one kind on at least.",
+        "This block is optional. If it is present, the server accepts keys: a user makes keys in the tab Access. A key has one kind: `mcp` for an agent, verified at the key edge and by the PDP, and `api` for a service, verified by the API of the inbox. The keys `mcp` and `api` turn each kind on or off. The kind `mcp` needs the blocks `identity` and `pdp`. The kind `api` needs the block `inbox`. The block needs one kind on at least.",
     ),
     ("storage", "The history, and the SQLite file."),
     (
@@ -1270,7 +1270,7 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
     (
         "api_key",
         "<name>",
-        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the page Keys.",
+        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the list of keys.",
     ),
     (
         "pdp_client",

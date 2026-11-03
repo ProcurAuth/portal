@@ -125,7 +125,7 @@ pub struct Zone<'a> {
     pub count_title: &'a str,
     pub chips_html: &'a str,
     pub tools_html: &'a str,
-    /// More classes of the panel, with a space before the first: " zone--short". Empty: none.
+    /// More classes of the panel, with a space before the first: " zone--sent". Empty: none.
     pub class: &'a str,
     /// Markup between the head and the list that does not scroll: a small graph. Empty: none.
     pub above_html: &'a str,
@@ -192,8 +192,7 @@ pub fn toolbar(title: &str, count: &str, tools_html: &str) -> String {
     out
 }
 
-/// Two panels side by side. They stack under 1000 px. `class` names the proportion: `users`,
-/// `services` or `even`.
+/// Two panels side by side. They stack under 1000 px. `class` names the proportion: `services`.
 pub fn split(class: &str, left_html: &str, right_html: &str) -> String {
     format!(
         r#"<div class="split split--{}">{left_html}<div class="stackcol">{right_html}</div></div>"#,
@@ -725,7 +724,7 @@ mod tests {
         assert!(html.contains(r#"aria-labelledby="signins-title""#));
         assert!(html.contains(r#"<h2 class="title" id="signins-title">Sign-ins</h2>"#));
         assert!(html.contains(r#"<div class="scroll"><table></table></div>"#));
-        let two = split("users", "<section></section>", "<section></section>");
-        assert!(two.contains("split split--users") && two.contains("stackcol"));
+        let two = split("services", "<section></section>", "<section></section>");
+        assert!(two.contains("split split--services") && two.contains("stackcol"));
     }
 }

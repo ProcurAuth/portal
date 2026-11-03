@@ -171,7 +171,7 @@ A key has exactly one kind. The prefix of the text gives the kind. The kind deci
 - **Migration.** The column `kind` of the table `keys` is the schema version 7 of SQLite and of PostgreSQL. A key of an earlier version is an MCP key. The plan said "no old data". A migration is still safe and small.
 - **The kind is in the address.** `GET /auth/keys/new?kind=api` shows the pane of this kind. A selector with two or more kinds is a small GET form that loads the pane again. It works without script. The summary row of a revoked key has no kind, so the list shows the kind chip for the keys that exist only.
 - **Key of the file of a service.** A block `api_key "<name>"` of the block `inbox` replaced the earlier token block, with no alias. It names an owner, which is the login of an account of the file, a secret by `_env` or `_file`, and the groups. The owner of a file key is a file account (portal 3.4a). The earlier token of 32 printable characters is not valid: the text must be an API key (`portal inbox token` makes one).
-- **A file key decides its groups at start.** The key follows its owner, a file account. The rights of a file account do not change while the server runs. The start checks the secret and keeps only the groups that the owner may send to. The check of the key reads no directory and no database. A key of the file works when the portal is not ready and when PostgreSQL is away. It has no budget, as the earlier tokens had none. The page Keys does not list it. The file is its only source.
+- **A file key decides its groups at start.** The key follows its owner, a file account. The rights of a file account do not change while the server runs. The start checks the secret and keeps only the groups that the owner may send to. The check of the key reads no directory and no database. A key of the file works when the portal is not ready and when PostgreSQL is away. It has no budget, as the earlier tokens had none. The list of keys does not list it. The file is its only source.
 - **Check at start.** The secret has the form of an API key. The owner holds `keys.own.use` on the kind `api` and `alert.send` on each group. A fault stops the program. The error names the key and the expected value, and never the secret.
 - **The MCP key of the file.** A block `key` of a block `user` has the kind `mcp`. A key of the file that uses `key_sha256_env` or `key_sha256_file` is an MCP key, because the portal cannot read the prefix of a digest. The text is checked only when the file gives it in clear.
 - **The file needs a mode.** A block `user` is not valid in the mode `dynamic`. A file with a file key needs `access.grants_mode` set to `static` or `hybrid`. The shipped configurations use `hybrid`.
@@ -220,7 +220,7 @@ A key has exactly one kind. The prefix of the text gives the kind. The kind deci
 ### 9.2 Users, account, new user, Services
 
 - **Users.** The accounts stand on the left. The panels **Sign-ins** and **Recent changes** stand on the right. The sign-in log and the audit events are the data of these panels. The store gives the counts of the chips: `LoginPage.total` and `LoginPage.refused`.
-- **New user.** The button opens `/auth/settings/new-user`. This is the page of an account in create mode. The login and the password stand in the row of tools. The editor of grants is under them. `POST /auth/users/add` accepts the grants of the editor with the field `grants=1`. It makes the account and its grants in one request. A request without `grants=1` makes an account with no grant, as before. A refused try returns to the create page with a code. The route answers 404 when `users.allow_creation` is `false` or the grants are read-only. The form that made accounts on the Users page is gone.
+- **New user.** The button opens `/auth/settings/new-user`. This is the page of an account in create mode. The login, the password and the groups stand in one row. The editor of grants is under them. `POST /auth/users/add` accepts the grants of the editor with the field `grants=1`. It makes the account and its grants in one request. A request without `grants=1` makes an account with no grant, as before. A refused try returns to the create page with a code. The route answers 404 when `users.allow_creation` is `false` or the grants are read-only. The form that made accounts on the page of the accounts is gone.
 - **The account page.** One row of tools: log in as, the password (a popover), the activity (a popover), delete (a confirmation in place), two facts, Save. Under it, the groups **Services** and **Portal features** stand side by side. An account of the file has a page too. Its grants have a lock and the page changes nothing.
 - **Services.** The table has a selection by link: `?svc=<id>`. The panel **Opened by** shows who opens the selected service and who does not. The page of one service is gone. Its route answers 404, with no redirect. The route `/auth/settings/give` stays: the plus link of the panel uses it. The route `/auth/users/portal-rights` is gone. The grants of the features post to `/auth/users/update`.
 
@@ -301,7 +301,7 @@ The portal can run as a panel of services only. A part that is off is absent fro
 | Switch | Default | When off or absent |
 |---|---|---|
 | Block `inbox` | absent | No tab Inbox, no routes `/v1/*`, `/api/v1/*`, `/api/version`, no phone endpoint, no group of Inbox permissions, no kind `api`. |
-| Block `keys` | absent | No tab Keys, no group of key permissions, no key count in Users. |
+| Block `keys` | absent | No list of keys, no group of key permissions, no key count in the list of accounts. |
 | `keys.mcp` | `true` | The key edge refuses `mcp_` keys. No MCP chip, no MCP right. |
 | `keys.api` | `false` | The API of the Inbox refuses `api_` keys. No API chip, no API right. |
 | `users.allow_creation` | `true` | The create route answers 404. No **New user** button, no form and no entry that makes a user. |
@@ -469,7 +469,7 @@ The first plan had one chain of migrations, one admin front without a password, 
 | The old names exist in two tests that prove their refusal. | 14 |
 | The Android build: the labels, the strings and the themes only had a plain replacement. | 14 |
 | The service id `inbox` was a placeholder. Batch C made the scope `portal`. The module `src/inbox_actions.rs` moved to `src/portal_actions.rs`. | 6 |
-| A file key decides its groups at start, has no budget and is not in the page Keys. | 7 |
+| A file key decides its groups at start, has no budget and is not in the list of keys. | 7 |
 | An API key holds no grant on a service. | 7 |
 | The kind of a new key is in the address. | 7 |
 | The sixth contradiction of the switches. | 11.1 |

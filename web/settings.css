@@ -1035,10 +1035,6 @@ input.keyText {
   grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
 }
 
-.split--even {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-}
-
 .stackcol {
   display: grid;
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
@@ -1067,14 +1063,6 @@ input.keyText {
   gap: 6px;
   min-height: 0;
   min-width: 0;
-}
-
-.zone--bare {
-  grid-template-rows: minmax(0, 1fr);
-}
-
-.zone--short .scroll {
-  max-height: 36vh;
 }
 
 .scroll {
@@ -1206,6 +1194,10 @@ input.keyText {
 .settings .grid a.rowLink {
   color: var(--text);
   text-decoration: none;
+}
+
+.settings .grid--users a.rowLink {
+  color: var(--accent-text);
 }
 
 .rowLink::after {
@@ -1485,10 +1477,6 @@ input.keyText {
   width: 17rem;
 }
 
-.accountBar__login {
-  width: 11rem;
-}
-
 /* "Generate" and "Save" need script: the editor of grants is drawn by the script, so without it a
    Save would send the grants as they are. Without script these two are not shown. */
 .generate,
@@ -1672,12 +1660,7 @@ input.keyText {
 
   .split,
   .split--services,
-  .split--even {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: none;
-  }
-
-  .stackcol,
+    .stackcol,
   .split--services .stackcol {
     grid-template-rows: none;
   }

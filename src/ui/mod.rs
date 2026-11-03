@@ -1000,6 +1000,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     mode: users.mode,
                     selected: None,
                     only_check: false,
+                    checks: false,
                 },
             )
         }
@@ -1015,6 +1016,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     mode: crate::grants::Mode::Dynamic,
                     selected: None,
                     only_check: false,
+                    checks: false,
                 },
             )
         }

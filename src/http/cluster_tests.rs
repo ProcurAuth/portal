@@ -7395,10 +7395,10 @@ mod kinds_tests {
             let root = sign_in(&node, "root", PASSWORD);
             let first = page(&node, &root, "/auth/settings/services");
             assert_eq!(first.status, 200, "{}", first.body);
-            assert!(first.body.contains(r#"aria-labelledby="opened-title""#));
+            assert!(first.body.contains(r#"aria-labelledby="detail-title""#));
             let db = page(&node, &root, "/auth/settings/services?svc=db");
             assert!(
-                db.body.contains(r#"<span class="count">Db</span>"#),
+                db.body.contains(r#"id="detail-title">Db</h2>"#),
                 "{}",
                 db.body
             );

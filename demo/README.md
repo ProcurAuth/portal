@@ -41,14 +41,14 @@ All accounts are database accounts. `seed.sh` sets their grants through the page
 | `bob` | `access` on notes and wiki. Read of the notebook `public` only. In the inbox: `inbox.receive` on `infra`. |
 | `carol` | No grant. |
 
-The superadmin can add users and change grants in the settings page. The superadmin can also make keys on the page `/auth/keys`. The button **New key** opens a pane on the right of the list. The pane has a selector for the kind of key: API for services, MCP for agents. The service **ClickHouse Dash** looks like ChDash: three hosts, their databases (listed by the service, page by page) and the actions of ChDash. The service **Big database** publishes 424 actions and 220 resources. Use it to try the editor of grants and the tables with a large action document.
+The superadmin can add users and change grants in the settings page. The superadmin can also make keys in the tab **Access**. The button **New key** opens a page that fills the window. The page has a selector for the kind of key: API for services, MCP for agents. The service **ClickHouse Dash** looks like ChDash: three hosts, their databases (listed by the service, page by page) and the actions of ChDash. The service **Big database** publishes 424 actions and 220 resources. Use it to try the editor of grants and the tables with a large action document.
 
 ## Seed
 
 `up.sh` runs `seed.sh` after the portal is ready. It is safe to run again. It does these steps through the pages of the portal:
 
 1. It signs in as `admin` and adds the accounts `alice`, `bob` and `carol`.
-2. It saves the grants of `alice` and `bob` on the page of each account. It saves the rights on keys of `alice` in the section **Keys** of her page.
+2. It saves the grants of `alice` and `bob` on the page of each account. It saves the rights on keys of `alice` in the group **Portal features** of her page.
 3. It signs in as `alice` and makes the API key `demo-sender` on `/auth/keys/new?kind=api`. The key has `alert.send` on `infra`. The portal shows the key one time, and the script keeps it in `demo/.secrets/alice_key`.
 
 The inbox has these groups and API keys:
@@ -101,8 +101,8 @@ Tests to do with the phone:
 3. **Ceiling.** As `alice`, open a notebook that has 3 notes. The list shows 2 notes. The ceiling `max_results` is 2.
 4. **Budget.** As `alice`, press "Read 8 times". The first reads give 200, and then the answer is 429 with `Retry-After`. The budget is 5 uses each minute. Wait for the window to end, and read again.
 5. **PDP playground.** Ask `notes.read` on `notebook:work/note:1`. Ask `notes.read` on `notebook:work` with `subtree`. Ask a resource that the tree does not have, for example `folder:x`: the answer is `invalid_resource`.
-6. **Users page.** As `admin`, open the settings, then Users. Add a user and give permissions with limits. Sign in as this user in a private window and look at the effect.
-7. **Keys.** As `admin`, open `/auth/keys` and click **New key**. Choose the kind MCP and make a key with the grants `access on service:notes` and `notes.read on service:notes`. The pane shows the key text one time, with Copy and Done. Copy the text. Paste it in "Use a key" in Notes. The key acts for its owner, and it never gets more than its owner.
+6. **Access tab.** As `admin`, open the settings, then Access. Click **New user**, choose its groups and give permissions with limits. Try the filters by user, group and service. Sign in as this user in a private window and look at the effect.
+7. **Keys.** As `admin`, open the tab Access and click **New key**. Choose the kind MCP and make a key with the grants `access on service:notes` and `notes.read on service:notes`. The next page shows the key text one time, with Copy and Done. Copy the text. Paste it in "Use a key" in Notes. The key acts for its owner, and it never gets more than its owner.
 8. **Key from a terminal.** Run `curl -i -H "Authorization: Bearer mcp_..." http://localhost:8088/notes/api/notebooks`. A bad key gives 401 with an empty body and the header `WWW-Authenticate`.
 9. **Revoke.** Revoke the key on the page. The next call gives 401 within seconds.
 10. **Limits on a key.** Make a key with a budget on `access on service:notes`. The counters of the key and of its owner both count each use.

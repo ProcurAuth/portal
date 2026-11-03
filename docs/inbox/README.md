@@ -73,8 +73,8 @@ The routes of the Inbox accept `api_` keys only. They answer `401` with no detai
 
 Two sources of `api_` key work at the same time.
 
-- **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. The page **Keys** does not list it. Make its text with `portal inbox token --out FILE`.
-- **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it on the page **Keys**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api` and `alert.send` on the group.
+- **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. The list of keys does not list it. Make its text with `portal inbox token --out FILE`.
+- **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it in the tab **Access**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api` and `alert.send` on the group.
 
 The switch `keys.api` turns the kind on. The default is `false`. The kind needs the block `inbox`. The root `README.md` has the example of a file key and of the account that owns it.
 
@@ -298,6 +298,6 @@ At step 2, an agent first sends alerts through the same REST route with an `api_
 | After a rights change, a phone lost a group. | The account lost `inbox.receive`. The Inbox removed the subscription. Give the permission again. |
 | Every phone is invalid after a restart. | The key file of the server changed. Restore the old file. Else, every phone must enroll again. |
 | The tab Inbox is absent. | The file has no block `inbox`, or the account has no permission of the Inbox. |
-| The tab Keys has no kind API. | `keys.api` is `false`, or the account has no `keys.own.create` on `key_kind:api`. |
+| The tab Access has no kind API for a new key. | `keys.api` is `false`, or the account has no `keys.own.create` on `key_kind:api`. |
 
 The log of the Inbox is in the JSON log of the portal. Each line has the field `event`.

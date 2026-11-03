@@ -1112,10 +1112,8 @@ mod tests {
 
     #[test]
     fn a_page_of_a_key_has_no_inline_style_and_no_inline_script() {
-        for pane in [Pane::New] {
-            let html = page(&view(pane, &BOTH));
-            assert!(!html.contains(" style=") && !html.contains("<style"));
-            assert!(!html.contains("<script>"));
-        }
+        let html = page(&view(Pane::New, &BOTH));
+        assert!(!html.contains(" style=") && !html.contains("<style"));
+        assert!(!html.contains("<script>"));
     }
 }

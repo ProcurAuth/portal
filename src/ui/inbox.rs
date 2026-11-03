@@ -2104,7 +2104,7 @@ mod tests {
         assert!(html.contains(r#"href="/auth/settings/inbox?g=infra""#));
         // The address with this parameter is read back.
         let pairs = vec![("tu".to_string(), "1".to_string())];
-        assert_eq!(Query::parse(&pairs).unwrap().to_user, true);
+        assert!(Query::parse(&pairs).unwrap().to_user);
         assert!(Query::parse(&[("tu".to_string(), "2".to_string())]).is_none());
     }
 

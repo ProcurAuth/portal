@@ -78,9 +78,9 @@ give bob \
   "access on service:wiki" \
   "inbox.receive on service:portal/inbox_group:infra"
 
-# The key of alice: made on her page of keys, shown one time, kept in .secrets/alice_key.
+# The key of alice: made in the tab Access, shown one time, kept in .secrets/alice_key.
 [ "$(login alice "$alice")" = 303 ] || { echo "seed: alice cannot sign in" >&2; exit 1; }
-if [ ! -s .secrets/alice_key ] || ! curl -s -b "$alice" "$base/auth/keys" | grep -q 'demo-sender'; then
+if [ ! -s .secrets/alice_key ] || ! curl -s -b "$alice" "$base/auth/settings" | grep -q 'demo-sender'; then
   page=$(curl -s -b "$alice" "$base/auth/keys/new?kind=api")
   csrf=$(form_csrf "$page" /auth/keys/create)
   created=$(curl -s -b "$alice" "${origin[@]}" --data-urlencode "csrf=$csrf" --data-urlencode "kind=api" --data-urlencode "name=demo-sender" \
