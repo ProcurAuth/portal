@@ -82,7 +82,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,7 +279,9 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
     );
     hidden_fields(out, data, place.form);
     out.push_str(ICONS);
-    out.push_str("</div>");
+    // The script says here what it did that the person did not tick: a service that opens by
+    // itself, rights that go with the switch. A screen reader reads it.
+    out.push_str(r#"</div><span class="visually-hidden" role="status" data-ge-live></span>"#);
     if place.groups {
         // Without script the page cannot draw the editor. It lists the grants as text.
         out.push_str(r#"<noscript><ul class="grantList">"#);
@@ -904,6 +906,32 @@ mod tests {
     }
 
     #[test]
+    fn the_editor_has_a_live_region_and_the_symbols_of_the_source_lines() {
+        let mut out = String::new();
+        render(&mut out, &data(), PLACE);
+        assert!(out.contains(r#"role="status" data-ge-live"#), "{out}");
+        for symbol in ["#i-circle-check", "#i-clock", "#i-ban"] {
+            assert!(out.contains(symbol), "{symbol}");
+        }
+    }
+
+    #[test]
+    fn the_script_keeps_the_note_the_undo_and_the_focus() {
+        let script = include_str!("../../web/settings.js");
+        for needle in [
+            "data-undo",
+            "function undoClose(serviceId)",
+            "function headFocus()",
+            "restore: function (kept)",
+            "aria-level",
+        ] {
+            assert!(script.contains(needle), "{needle}");
+        }
+        // The timer of the note is gone: the note stays until the next change.
+        assert!(!script.contains("}, 5000)"));
+    }
+
+    #[test]
     fn the_script_ticks_access_for_each_right_and_removes_the_rights_with_access() {
         // The page has no script test harness: the rule is in one function that every path uses.
         let script = include_str!("../../web/settings.js");
@@ -916,8 +944,8 @@ mod tests {
             assert!(script.contains(needle), "{needle}");
         }
         // The only direct writes to the map of the grants are the load, the one function, the
-        // budget of the portal and the "give access" link.
+        // budget of the portal, the "give access" link and the undo of "Access off".
         let writes = script.matches("ticked.set(").count();
-        assert_eq!(writes, 6, "a new write must go through setGrant");
+        assert_eq!(writes, 7, "a new write must go through setGrant");
     }
 }

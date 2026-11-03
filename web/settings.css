@@ -558,7 +558,7 @@ input.keyText {
 
 .ge {
   display: grid;
-  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
   gap: 12px;
   height: clamp(20rem, 52vh, 34rem);
 }
@@ -620,6 +620,57 @@ input.keyText {
 
 .ge__toggle {
   gap: 4px;
+}
+
+/* The note of a row that ends with Undo: a button with no frame, in the colour of a link. */
+.ge__undo {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ge__undo:hover {
+  text-decoration: underline;
+}
+
+/* The line of the source, and the limits of `access` at its right. */
+.ge__svcTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ge__svcTop > .srcLine {
+  min-width: 0;
+}
+
+/* The button of a group of actions: the chevron. The head of the group is not a control. */
+.ge__chev {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* "Same as mine" has no frame: it is a quiet action of the row. */
+.ge__svcHead .ge__same {
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent-text);
+}
+
+.ge__svcHead .ge__same:disabled {
+  color: var(--muted);
+  cursor: default;
 }
 
 .ge__svcBody {
@@ -720,6 +771,10 @@ input.keyText {
   background: var(--border-strong);
 }
 
+.ge__node.is-selected .ge__kind {
+  color: var(--text);
+}
+
 .ge__twist {
   display: inline-flex;
   flex: none;
@@ -803,7 +858,7 @@ input.keyText {
 
 .ge__act {
   display: grid;
-  grid-template-columns: 16px minmax(10rem, 18rem) minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(8rem, 14rem) minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   height: var(--row-compact);
@@ -1150,6 +1205,19 @@ input.keyText {
   width: 152px;
 }
 
+.grid col.w128 {
+  width: 128px;
+}
+
+/* A time that the script shows with no year: 11-03 14:03. Without script it keeps the full UTC time. */
+.grid col.wtime {
+  width: 152px;
+}
+
+.js .grid col.wtime {
+  width: 108px;
+}
+
 .grid col.w160 {
   width: 160px;
 }
@@ -1297,7 +1365,7 @@ input.keyText {
   display: none;
 }
 
-.pop[open] > summary {
+.pop[open] > summary:not(.button--primary) {
   color: var(--text);
 }
 
@@ -1564,8 +1632,32 @@ input.keyText {
   animation: none;
 }
 
+/* The open service takes the height that the list leaves: no empty space under a short panel. */
+.ge__groups .ge__svcList {
+  display: flex;
+  flex-direction: column;
+}
+
+.ge__groups .ge__svc {
+  flex: none;
+}
+
+.ge__groups .ge__svc.is-expanded {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: calc(var(--row) + 260px);
+}
+
+.ge__groups .ge__svc.is-expanded > .ge__svcBody {
+  flex: 1 1 auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
 .ge__groups .ge__svcBody .ge {
-  height: clamp(220px, 38vh, 340px);
+  height: auto;
+  min-height: 220px;
 }
 
 .ge__featBody .ge {
@@ -1692,12 +1784,6 @@ input.keyText {
   flex-wrap: nowrap;
 }
 
-.bar__kinds {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .bar__range {
   min-width: 0;
   overflow: hidden;
@@ -1785,13 +1871,6 @@ input.keyText {
   height: 14px;
   margin: 0 4px;
   background: var(--border-strong);
-}
-
-.settings .chip.chip--future {
-  border-style: dashed;
-  background: transparent;
-  opacity: 0.65;
-  cursor: not-allowed;
 }
 
 .chip:disabled {
@@ -1996,18 +2075,38 @@ input.keyText {
 
 .composer--alert .rcptForm {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
+/* A long reason wraps inside the popup: it does not widen the form. */
+.composer .hint {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.composer .field {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 /* With both kinds of recipient, a radio button that the chips label shows one of the forms. It
-   works without script. */
+   works without script. The two forms share one grid cell, so the popup keeps the height of the
+   taller form: the title and the button stay where they are. The recipient field takes the
+   difference. A form that is not shown is hidden, so the keyboard skips it. */
 .composer--both .rcptForm {
-  display: none;
+  grid-row: 2;
+  grid-column: 1;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  visibility: hidden;
+}
+
+.composer--both .rcptForm > .field:first-of-type {
+  align-content: start;
 }
 
 .composer--both .rcpt__group:checked ~ .rcptForm--group,
 .composer--both .rcpt__user:checked ~ .rcptForm--user {
-  display: grid;
+  visibility: visible;
 }
 
 .rcpt__group:checked ~ .field label[for="rcpt-group"],
@@ -2094,10 +2193,6 @@ input.keyText {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-}
-
-.composer .searchBox {
-  display: flex;
 }
 
 .composer .searchBox .uiInput {
@@ -2243,10 +2338,6 @@ input.keyText {
 
 .split--one {
   grid-template-columns: minmax(0, 1fr);
-}
-
-.split--solo {
-  max-width: 760px;
 }
 
 .split--one > .zone {
@@ -2784,6 +2875,11 @@ input.keyText {
   display: flex;
   align-items: center;
   min-height: var(--control);
+}
+
+.hint.hint--bad,
+.field .hint.hint--bad {
+  color: var(--danger);
 }
 
 .field__error {
