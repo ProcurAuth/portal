@@ -82,7 +82,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -676,7 +676,7 @@ mod tests {
         let script = include_str!("../../web/settings.js");
         assert!(
             script.contains(r#"var DIRECT_ROWS = ["alert.send_user"];"#)
-                && script.contains(r#"flatSection("inbox", "Direct alerts", DIRECT_ROWS);"#)
+                && script.contains(r#"flatSection("user", "Direct alerts", DIRECT_ROWS);"#)
         );
     }
 
