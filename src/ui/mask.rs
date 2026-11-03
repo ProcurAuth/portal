@@ -49,6 +49,10 @@ const WRAPPABLE: [&str; 16] = [
     "div", "main", "section", "header", "form", "p", "h1", "h2", "ul", "a", "span", "strong",
     "code", "label", "svg", "footer",
 ];
+/// The elements that a `span` cannot hold.
+const BLOCK_ELEMENTS: [&str; 10] = [
+    "div", "main", "section", "header", "form", "p", "h1", "h2", "ul", "footer",
+];
 const VOID_TAGS: [&str; 14] = [
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
@@ -789,9 +793,11 @@ fn insert_inert(tokens: Vec<Tok>, rng: &mut Rng) -> Option<Vec<Tok>> {
         }
         let parent = open_name(&tokens[tree.parent[index]?]);
         if WRAPPABLE.contains(&name.as_str()) {
+            let block = BLOCK_ELEMENTS.contains(&name.as_str());
             if BLOCK_PARENTS.contains(&parent) {
-                wrappable.push((index, &["div", "span"]));
-            } else if PHRASE_PARENTS.contains(&parent) {
+                // A `span` can hold a phrase only.
+                wrappable.push((index, if block { &["div"] } else { &["div", "span"] }));
+            } else if PHRASE_PARENTS.contains(&parent) && !block {
                 wrappable.push((index, &["span"]));
             }
         }
@@ -824,7 +830,8 @@ fn insert_inert(tokens: Vec<Tok>, rng: &mut Rng) -> Option<Vec<Tok>> {
         }
     }
     // An outer wrapper opens first and closes last.
-    wraps.sort_by_key(|(first, last, _, _)| (*first, std::cmp::Reverse(*last)));
+    // Two wrappers of one element: the `div` is the outer one, because a `span` cannot hold it.
+    wraps.sort_by_key(|(first, last, tag, _)| (*first, std::cmp::Reverse(*last), *tag != "div"));
 
     let mut out = Vec::with_capacity(tokens.len() + 12);
     for (index, token) in tokens.into_iter().enumerate() {
@@ -1122,8 +1129,8 @@ mod tests {
         assert!(mask
             .assets()
             .css
-            .contains("@media (prefers-color-scheme:light)"));
-        assert!(mask.assets().css.contains("--bg:#0d0f12"));
+            .contains("@media (prefers-color-scheme: light)"));
+        assert!(mask.assets().css.contains("--bg: #0d0f12"));
         assert!(!mask.assets().css.contains(r#"[data-theme="dark"]"#));
         let theme = format!(r#"[data-{}="dark"]"#, mask.name("data-theme"));
         assert!(mask.assets().css.contains(&theme), "{theme}");
@@ -1369,7 +1376,7 @@ mod tests {
             let end = tree(&tokens).unwrap().end[form];
             assert!(form < login && trap < end, "{seed}");
             // The wrappers have no content of their own and no tab stop.
-            for token in &tokens {
+            for (index, token) in tokens.iter().enumerate() {
                 if let Tok::Open { name, attrs, .. } = token {
                     let inert = attrs.iter().any(|a| {
                         a.name == "class"
@@ -1382,6 +1389,9 @@ mod tests {
                     });
                     if inert {
                         assert!(name == "div" || name == "span", "{name}");
+                        // A `span` never holds a block, and a `div` is never in a phrase.
+                        let next = open_name(&tokens[index + 1]);
+                        assert!(name == "div" || !BLOCK_ELEMENTS.contains(&next), "{next}");
                         assert!(!attrs
                             .iter()
                             .any(|a| a.name == "tabindex" || a.name == "href"));
