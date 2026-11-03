@@ -2268,7 +2268,7 @@ input.keyText {
   white-space: nowrap;
 }
 
-.to > span:first-child {
+.to > span:not(.crit) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
