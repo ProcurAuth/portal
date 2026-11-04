@@ -1181,29 +1181,37 @@ fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
 }
 
 /// The preferences of an account. An account that has no row gets one, with the marker at `now`:
-/// the unread count starts at the first sight of the account, not at the oldest alert.
+/// the unread count starts at the first sight of the account, not at the oldest alert. An account
+/// that has a row costs one read and no write.
 fn notify_prefs(conn: &Connection, login: &str, now: i64) -> rusqlite::Result<Prefs> {
+    let read = |conn: &Connection| {
+        conn.query_row(
+            "SELECT read_up_to, level FROM web_notify WHERE login = ?1",
+            params![login],
+            |r| {
+                let level: String = r.get(1)?;
+                Ok(Prefs {
+                    read_up_to: r.get(0)?,
+                    level: Level::parse(&level).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            format!("unknown level {level:?}").into(),
+                        )
+                    })?,
+                })
+            },
+        )
+        .optional()
+    };
+    if let Some(prefs) = read(conn)? {
+        return Ok(prefs);
+    }
     conn.execute(
         "INSERT INTO web_notify (login, read_up_to) VALUES (?1, ?2) ON CONFLICT(login) DO NOTHING",
         params![login, now],
     )?;
-    conn.query_row(
-        "SELECT read_up_to, level FROM web_notify WHERE login = ?1",
-        params![login],
-        |r| {
-            let level: String = r.get(1)?;
-            Ok(Prefs {
-                read_up_to: r.get(0)?,
-                level: Level::parse(&level).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        1,
-                        rusqlite::types::Type::Text,
-                        format!("unknown level {level:?}").into(),
-                    )
-                })?,
-            })
-        },
-    )
+    read(conn)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
 /// The alerts that `scope` receives: the preferences, the count of unread ones and the newest

@@ -1677,24 +1677,33 @@ impl PgStore {
     // ------------------------------------------------------------ notifications of the web
 
     /// The preferences of an account. An account that has no row gets one, with the marker at
-    /// `now`.
+    /// `now`. An account that has a row costs one read and no write.
     async fn notify_prefs(c: &Object, login: &str, now: i64) -> Result<Prefs, DbError> {
-        c.execute(
-            "INSERT INTO web_notify (login, read_up_to) VALUES ($1, $2) ON CONFLICT (login) DO NOTHING",
-            &[&login, &now],
-        )
-        .await
-        .map_err(db_error)?;
-        let r = c
-            .query_one(
+        let read = || async {
+            c.query_opt(
                 "SELECT read_up_to, level FROM web_notify WHERE login = $1",
                 &[&login],
             )
             .await
-            .map_err(db_error)?;
-        let level: String = r.get(1);
+            .map_err(db_error)
+        };
+        let row = match read().await? {
+            Some(row) => row,
+            None => {
+                c.execute(
+                    "INSERT INTO web_notify (login, read_up_to) VALUES ($1, $2) ON CONFLICT (login) DO NOTHING",
+                    &[&login, &now],
+                )
+                .await
+                .map_err(db_error)?;
+                read()
+                    .await?
+                    .ok_or_else(|| DbError::Pg("the row of the notifications is missing".into()))?
+            }
+        };
+        let level: String = row.get(1);
         Ok(Prefs {
-            read_up_to: r.get(0),
+            read_up_to: row.get(0),
             level: Level::parse(&level)
                 .ok_or_else(|| DbError::Pg(format!("unknown level {level:?}")))?,
         })
@@ -2029,11 +2038,13 @@ pub struct Imported {
     pub deliveries: usize,
     pub connections: usize,
     pub enrollment_codes: usize,
+    /// The settings of the notifications of the web: the marker and the level of each account.
+    pub notifications: usize,
 }
 
 impl PgStore {
     /// Copies a SQLite database (an Inbox SQLite file or one of its snapshots) into this empty PostgreSQL database, in one
-    /// transaction: devices, subscriptions, alerts, deliveries, the connection log and the enrollment codes. Refuses a database
+    /// transaction: devices, subscriptions, alerts, deliveries, the connection log, the enrollment codes and the settings of the notifications. Refuses a database
     /// that is not empty.
     pub async fn import_sqlite(&self, path: &Path) -> Result<Imported, String> {
         use rusqlite::{Connection, OpenFlags};
@@ -2245,6 +2256,22 @@ impl PgStore {
             .await
             .map_err(|e| e.to_string())?;
             out.enrollment_codes += 1;
+        }
+
+        let mut stmt = lite
+            .prepare("SELECT login, read_up_to, level FROM web_notify")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let (login, read_up_to, level): (String, i64, String) =
+                (r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap());
+            tx.execute(
+                "INSERT INTO web_notify (login, read_up_to, level) VALUES ($1, $2, $3)",
+                &[&login, &read_up_to, &level],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            out.notifications += 1;
         }
 
         // The sequences continue after the imported rows.
@@ -2762,6 +2789,7 @@ mod tests {
                         idempotency_key: "k".into(),
                     },
                 )?;
+                super::super::db::notify_set_level(c, "alice", Level::Important, 55)?;
                 Ok(())
             })
             .await
@@ -2772,6 +2800,14 @@ mod tests {
         let store = db.store().await;
         let imported = store.import_sqlite(&path).await.unwrap();
         assert_eq!((imported.devices, imported.enrollment_codes), (1, 2));
+        // The level of the notifications of an account comes with it.
+        assert_eq!(imported.notifications, 1);
+        let prefs = store
+            .notify_view(&scope(Some(&[]), "alice"), &ASK)
+            .await
+            .unwrap()
+            .prefs;
+        assert_eq!((prefs.level, prefs.read_up_to), (Level::Important, 55));
         // The kind of the message comes with the alert.
         let alerts = store.recent_alerts(10, 0, 0).await.unwrap();
         assert_eq!(alerts.len(), 1);
