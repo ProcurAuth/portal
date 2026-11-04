@@ -3182,3 +3182,8 @@ input.keyText {
 .mfaBody .mfaBox {
   width: 100%;
 }
+
+.mfaForm .inline {
+  display: flex;
+  gap: 8px;
+}
