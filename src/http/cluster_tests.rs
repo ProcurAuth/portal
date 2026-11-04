@@ -932,6 +932,21 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
     });
 }
 
+/// Replaces the grants of an account as the portal does: the database first, then the directory of the instance.
+/// A change of the directory alone is lost at the next read of the shared accounts, which a login starts when the last
+/// read is older than one second.
+fn change_grants(node: &Node, login: &str, mut grants: Vec<Grant>) {
+    grants.sort();
+    assert!(
+        node.state
+            .store
+            .update_user(login, None, Some(&grants))
+            .unwrap(),
+        "the account {login} exists"
+    );
+    assert!(node.state.users.update(login, None, Some(grants)));
+}
+
 /// An account of the database that exists before the mode is `static`: the create route does not
 /// exist in this mode, so the test puts the row in the database.
 fn insert_account(node: &Node, login: &str, password: &str) {
@@ -6445,13 +6460,10 @@ mod inbox_rights_tests {
             assert_eq!(authorizer.subscribable("nobody"), Subscribable::Unknown);
             // The stamp changes with the directory.
             let before = authorizer.directory_stamp().unwrap();
-            node.state.users.update(
+            change_grants(
+                &node,
                 "alice",
-                None,
-                Some(vec![Grant::parse(
-                    "inbox.receive on service:portal/inbox_group:oncall",
-                )
-                .unwrap()]),
+                vec![Grant::parse("inbox.receive on service:portal/inbox_group:oncall").unwrap()],
             );
             assert_ne!(authorizer.directory_stamp().unwrap(), before);
             assert_eq!(authorizer.subscribable("alice"), groups(&["oncall"]));
@@ -6891,11 +6903,11 @@ mod kinds_tests {
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Allowed
             );
-            let grants = |texts: &[&str]| -> Option<Vec<Grant>> {
-                Some(texts.iter().map(|t| Grant::parse(t).unwrap()).collect())
+            let grants = |texts: &[&str]| -> Vec<Grant> {
+                texts.iter().map(|t| Grant::parse(t).unwrap()).collect()
             };
             // The owner loses the permission on the group: the key loses it with no wait.
-            node.state.users.update("alice", None, grants(&[usage]));
+            change_grants(&node, "alice", grants(&[usage]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Refused {
@@ -6903,15 +6915,13 @@ mod kinds_tests {
                 }
             );
             // The owner gets it again: the key has it again.
-            node.state
-                .users
-                .update("alice", None, grants(&[usage, send]));
+            change_grants(&node, "alice", grants(&[usage, send]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Allowed
             );
             // The owner loses the right to use the keys of the kind: the key is not valid.
-            node.state.users.update("alice", None, grants(&[send]));
+            change_grants(&node, "alice", grants(&[send]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Refused {
@@ -6919,9 +6929,9 @@ mod kinds_tests {
                 }
             );
             // The right to use the keys of the other kind does not count.
-            node.state.users.update(
+            change_grants(
+                &node,
                 "alice",
-                None,
                 grants(&[send, "keys.own.use on service:portal/key_kind:mcp"]),
             );
             assert_eq!(
@@ -7395,13 +7405,13 @@ mod kinds_tests {
             assert_eq!(seen.inbox_page, 404);
             // The new-key form has no selector: one kind is possible.
             let alice = {
-                node.state.users.update(
+                change_grants(
+                    &node,
                     "alice",
-                    None,
-                    Some(vec![
+                    vec![
                         Grant::parse("keys.own.read on service:portal").unwrap(),
                         Grant::parse("keys.own.create on service:portal/key_kind:mcp").unwrap(),
-                    ]),
+                    ],
                 );
                 sign_in(&node, "alice", PASSWORD)
             };
