@@ -95,6 +95,8 @@ pub struct SessionStart {
     pub login: String,
     pub superadmin: bool,
     pub impersonated: bool,
+    /// The person asked "Keep me signed in" and the session got the remembered rule.
+    pub remembered: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     pub at: i64,

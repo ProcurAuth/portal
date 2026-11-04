@@ -244,6 +244,13 @@ INSERT INTO directory_version (id, version) VALUES (1, 0);
 -- existed.
 ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
 ",
+    "
+-- Version 8: the remembered sessions (\"Keep me signed in\"). A remembered session has a longer life
+-- and a longer idle time. The history row keeps the flag for the list of the sessions. A session
+-- that exists before this version is not remembered.
+ALTER TABLE sessions ADD COLUMN remembered BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sessions_log ADD COLUMN remembered BOOLEAN NOT NULL DEFAULT false;
+",
 ];
 
 /// The grants of the rows of `user_grants`: action, resource type, resource id, resource path and
@@ -747,8 +754,8 @@ impl Pg {
                     Event::SessionStarted(start) => {
                         tx.execute(
                             "INSERT INTO sessions_log
-                               (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                               (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
                              ON CONFLICT (sid) DO NOTHING",
                             &[
                                 &(start.sid as i64),
@@ -758,6 +765,7 @@ impl Pg {
                                 &start.ip,
                                 &start.user_agent,
                                 &start.at,
+                                &start.remembered,
                             ],
                         )?;
                     }
@@ -888,7 +896,7 @@ impl Pg {
                 let days = day_stats(c, first_day, Some((login, *superadmin)))?;
                 let recent = c
                     .query(
-                        "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated
+                        "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered
                            FROM sessions_log WHERE login = $1 AND superadmin = $2
                           ORDER BY started_at DESC, sid DESC LIMIT $3",
                         &[login, superadmin, &RECENT_SESSIONS],
@@ -902,6 +910,7 @@ impl Pg {
                         ip: row.get(4),
                         user_agent: row.get(5),
                         impersonated: row.get(6),
+                        remembered: row.get(7),
                     })
                     .collect();
                 let services = c
@@ -980,9 +989,9 @@ impl Pg {
             let inserted = tx.execute(
                 "INSERT INTO sessions
                    (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at,
-                    admin_generation)
+                    admin_generation, remembered)
                  SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint,
-                        $9::bytea
+                        $9::bytea, $10::boolean
                   WHERE (SELECT COUNT(*) FROM sessions WHERE expires_at > $6) < $8",
                 &[
                     &digest.as_slice(),
@@ -994,6 +1003,7 @@ impl Pg {
                     &session.expires_at,
                     &(max_active as i64),
                     &generation.as_slice(),
+                    &session.remembered,
                 ],
             )?;
             if inserted == 0 {
@@ -1001,8 +1011,8 @@ impl Pg {
             }
             tx.execute(
                 "INSERT INTO sessions_log
-                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
                  ON CONFLICT (sid) DO NOTHING",
                 &[
                     &(start.sid as i64),
@@ -1012,6 +1022,7 @@ impl Pg {
                     &start.ip,
                     &start.user_agent,
                     &start.at,
+                    &start.remembered,
                 ],
             )?;
             tx.commit()?;
@@ -1028,20 +1039,22 @@ impl Pg {
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
-        idle_secs: i64,
+        idle: Idle,
         generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
                 "UPDATE sessions SET last_seen_at = $3
-                  WHERE digest = $1 AND binding = $2 AND expires_at > $3 AND last_seen_at > $3 - $4
-                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $5)
-              RETURNING sid, login, impersonated, expires_at",
+                  WHERE digest = $1 AND binding = $2 AND expires_at > $3
+                    AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
+                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)
+              RETURNING sid, login, impersonated, expires_at, remembered",
                 &[
                     &digest.as_slice(),
                     &binding.as_slice(),
                     &now,
-                    &idle_secs,
+                    &idle.normal,
+                    &idle.remembered,
                     &generation.as_slice(),
                 ],
             )?
@@ -1055,19 +1068,21 @@ impl Pg {
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
-        idle_secs: i64,
+        idle: Idle,
         generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
-                "SELECT sid, login, impersonated, expires_at FROM sessions
-                  WHERE digest = $1 AND binding = $2 AND expires_at > $3 AND last_seen_at > $3 - $4
-                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $5)",
+                "SELECT sid, login, impersonated, expires_at, remembered FROM sessions
+                  WHERE digest = $1 AND binding = $2 AND expires_at > $3
+                    AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
+                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)",
                 &[
                     &digest.as_slice(),
                     &binding.as_slice(),
                     &now,
-                    &idle_secs,
+                    &idle.normal,
+                    &idle.remembered,
                     &generation.as_slice(),
                 ],
             )?
@@ -1100,7 +1115,7 @@ impl Pg {
         self.run(|c| {
             Ok(c.query_opt(
                 "DELETE FROM sessions WHERE digest = $1
-                 RETURNING sid, login, impersonated, expires_at",
+                 RETURNING sid, login, impersonated, expires_at, remembered",
                 &[&digest.as_slice()],
             )?
             .map(shared_session))
@@ -1130,14 +1145,17 @@ impl Pg {
         })
     }
 
-    /// Ends the sessions past their lifetime or unused for `idle_secs`. Each result states whether the session expired, or whether it idled out.
+    /// Ends the sessions past their lifetime or unused for their idle time. A remembered session has its own idle time.
+    /// Each result states whether the session expired, or whether it idled out.
     /// Exactly one caller gets any given session back.
-    pub fn sessions_expire(&self, now: i64, idle_secs: i64) -> Result<Vec<(u64, bool)>, String> {
+    pub fn sessions_expire(&self, now: i64, idle: Idle) -> Result<Vec<(u64, bool)>, String> {
         self.run(|c| {
             Ok(c.query(
-                "DELETE FROM sessions WHERE expires_at <= $1 OR last_seen_at <= $1 - $2
+                "DELETE FROM sessions
+                  WHERE expires_at <= $1
+                     OR last_seen_at <= $1 - (CASE WHEN remembered THEN $3::bigint ELSE $2::bigint END)
              RETURNING sid, expires_at <= $1",
-                &[&now, &idle_secs],
+                &[&now, &idle.normal, &idle.remembered],
             )?
             .into_iter()
             .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, bool>(1)))
@@ -1238,8 +1256,8 @@ impl Pg {
             keys::bump(&mut tx)?;
             let session = tx.prepare(
                 "INSERT INTO sessions_log
-                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason, remembered)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             )?;
             for row in &dump.sessions {
                 let open = row.ended_at.is_none();
@@ -1261,6 +1279,7 @@ impl Pg {
                         &row.last_seen_at,
                         &ended_at,
                         &end_reason,
+                        &row.remembered,
                     ],
                 )?;
             }
@@ -1403,6 +1422,7 @@ fn shared_session(row: postgres::Row) -> SharedSession {
         login: row.get(1),
         impersonated: row.get(2),
         expires_at: row.get(3),
+        remembered: row.get(4),
     }
 }
 
@@ -1558,7 +1578,7 @@ mod tests {
         let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
             unreachable!()
         };
-        assert_eq!(SCHEMA.len(), 7);
+        assert_eq!(SCHEMA.len(), 8);
         let config = fresh.pool.config.clone();
         let mut admin = config.connect(NoTls).unwrap();
         // This database was made by the portal before version 6: the tables and the column did
@@ -1568,6 +1588,7 @@ mod tests {
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
                  DROP TABLE keys; DROP TABLE directory_version;
                  ALTER TABLE user_grants DROP COLUMN limits;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
             )
@@ -1645,6 +1666,50 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_to_version_eight_adds_the_remembered_flag_and_the_old_sessions_are_not_remembered(
+    ) {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // This database was made by the portal before version 8: the columns did not exist. A session is open.
+        admin
+            .batch_execute(&format!(
+                "ALTER TABLE sessions DROP COLUMN remembered;
+                 ALTER TABLE sessions_log DROP COLUMN remembered;
+                 DELETE FROM schema_migrations WHERE version > 7;
+                 INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
+                   VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10);
+                 INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
+                   VALUES (1, 'alice', false, false, 'ua', 10, 10);",
+                i64::MAX / 2
+            ))
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let version: i64 = admin
+            .query_one("SELECT MAX(version) FROM schema_migrations", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(version as usize, SCHEMA.len());
+        for table in ["sessions", "sessions_log"] {
+            let remembered: bool = admin
+                .query_one(&format!("SELECT remembered FROM {table}"), &[])
+                .unwrap()
+                .get(0);
+            assert!(!remembered, "{table}");
+        }
+        assert_eq!(migrated.sessions_count().unwrap(), 1, "the session stays");
+        // The migration is applied once: a second start changes nothing.
+        assert!(Pg::start(migrated.pool.config.clone(), 1, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
     fn the_migration_to_version_seven_adds_the_kind_of_a_key_and_its_keys_are_mcp_keys() {
         use crate::store::testing::{postgres, Backend};
         let Some(Backend::Postgres(url)) = postgres() else {
@@ -1662,6 +1727,7 @@ mod tests {
                  INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )
             .unwrap();
@@ -1695,6 +1761,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1749,6 +1816,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1804,6 +1872,7 @@ mod tests {
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -1846,6 +1915,7 @@ mod tests {
         admin
             .batch_execute(&format!(
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
+                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
                  DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (

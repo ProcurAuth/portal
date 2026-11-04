@@ -252,6 +252,8 @@ pub struct SessionRow {
     pub ip: Option<String>,
     pub user_agent: String,
     pub impersonated: bool,
+    /// The session had the remembered rule ("Keep me signed in").
+    pub remembered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -338,6 +340,30 @@ impl Snapshot {
     }
 }
 
+/// The idle times of the two rules of a session, in seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Idle {
+    /// A session without the remembered rule.
+    pub normal: i64,
+    /// A remembered session.
+    pub remembered: i64,
+}
+
+impl Idle {
+    pub fn new(normal: Duration, remembered: Duration) -> Self {
+        Self {
+            normal: normal.as_secs() as i64,
+            remembered: remembered.as_secs() as i64,
+        }
+    }
+
+    /// The same time for both rules.
+    #[cfg(test)]
+    pub fn same(idle: Duration) -> Self {
+        Self::new(idle, idle)
+    }
+}
+
 /// A live session as the shared store keeps it. The store keeps only data that is not secret and not derived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SharedSession {
@@ -345,6 +371,8 @@ pub struct SharedSession {
     /// `None`: the superadmin.
     pub login: Option<String>,
     pub impersonated: bool,
+    /// The session has the remembered rule: its life and its idle time are the longer ones.
+    pub remembered: bool,
     /// Unix time.
     pub expires_at: i64,
 }
@@ -356,6 +384,7 @@ pub struct LoggedSession {
     pub login: String,
     pub superadmin: bool,
     pub impersonated: bool,
+    pub remembered: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     pub started_at: i64,
@@ -714,16 +743,17 @@ impl Store {
 
     /// Returns the live session of `digest` for `binding`. Its idle timer is renewed to `now`.
     /// A superadmin or impersonated session must carry `generation`.
+    /// `idle` is the idle time of a session. A remembered session has `remember_idle`.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
-        idle: Duration,
+        idle: Idle,
         generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.shared()?
-            .session_touch(digest, binding, now, idle.as_secs() as i64, generation)
+            .session_touch(digest, binding, now, idle, generation)
     }
 
     /// The same as [`Self::session_touch`], and the idle timer stays as it is. The call writes
@@ -733,11 +763,11 @@ impl Store {
         digest: &[u8; 32],
         binding: &[u8; 32],
         now: i64,
-        idle: Duration,
+        idle: Idle,
         generation: &[u8; 32],
     ) -> Result<Option<SharedSession>, String> {
         self.shared()?
-            .session_peek(digest, binding, now, idle.as_secs() as i64, generation)
+            .session_peek(digest, binding, now, idle, generation)
     }
 
     /// Ends the superadmin and impersonated sessions of every other credential generation.
@@ -792,8 +822,8 @@ impl Store {
     }
 
     /// Ends the sessions past their lifetime or idle time. Each result states whether the session expired. Otherwise, the session idled.
-    pub fn sessions_expire(&self, now: i64, idle: Duration) -> Result<Vec<(u64, bool)>, String> {
-        self.shared()?.sessions_expire(now, idle.as_secs() as i64)
+    pub fn sessions_expire(&self, now: i64, idle: Idle) -> Result<Vec<(u64, bool)>, String> {
+        self.shared()?.sessions_expire(now, idle)
     }
 
     pub fn sessions_count(&self) -> Result<usize, String> {
@@ -914,6 +944,7 @@ mod tests {
             login: login.into(),
             superadmin,
             impersonated,
+            remembered: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             at,
@@ -2152,6 +2183,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn the_history_keeps_whether_a_session_was_remembered() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let mut kept = start(1, "alice", false, false, NOW);
+            if let Event::SessionStarted(start) = &mut kept {
+                start.remembered = true;
+            }
+            store
+                .apply(&Batch {
+                    events: vec![kept, start(2, "alice", false, false, NOW + 1)],
+                    ..Batch::default()
+                })
+                .unwrap();
+            let snap = store.snapshot(&[("alice".into(), false)], NOW + 2).unwrap();
+            let recent = &snap.accounts[0].recent;
+            assert_eq!(recent.len(), 2);
+            // The newest session first.
+            assert!(!recent[0].remembered);
+            assert!(recent[1].remembered);
+        });
+    }
+
     // PostgreSQL only: shared sessions, several instances, the import --------------------------
 
     const HERE: [u8; 32] = [7; 32];
@@ -2169,6 +2223,7 @@ mod tests {
             sid,
             login: login.map(str::to_string),
             impersonated: false,
+            remembered: false,
             expires_at,
         }
     }
@@ -2179,6 +2234,7 @@ mod tests {
             login: login.into(),
             superadmin: false,
             impersonated: false,
+            remembered: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             at,
@@ -2224,19 +2280,19 @@ mod tests {
         assert_eq!(snap.accounts[0].recent[0].ended_at, None);
 
         let found = store
-            .session_touch(&digest(1), &HERE, NOW + 10, IDLE, &GEN)
+            .session_touch(&digest(1), &HERE, NOW + 10, Idle::same(IDLE), &GEN)
             .unwrap();
         assert_eq!(found, Some(session));
         assert_eq!(
             store
-                .session_touch(&digest(1), &ELSEWHERE, NOW + 11, IDLE, &GEN)
+                .session_touch(&digest(1), &ELSEWHERE, NOW + 11, Idle::same(IDLE), &GEN)
                 .unwrap(),
             None,
             "another binding finds nothing"
         );
         assert_eq!(
             store
-                .session_touch(&digest(2), &HERE, NOW + 11, IDLE, &GEN)
+                .session_touch(&digest(2), &HERE, NOW + 11, Idle::same(IDLE), &GEN)
                 .unwrap(),
             None
         );
@@ -2247,7 +2303,7 @@ mod tests {
                     &digest(1),
                     &HERE,
                     NOW + 10 + 100,
-                    Duration::from_secs(60),
+                    Idle::same(Duration::from_secs(60)),
                     &GEN
                 )
                 .unwrap(),
@@ -2258,6 +2314,92 @@ mod tests {
             store.sessions_count().unwrap(),
             1,
             "found idle, but only a sweep ends it"
+        );
+    }
+
+    #[test]
+    fn a_remembered_session_has_its_own_idle_time_and_keeps_its_flag() {
+        let Some(pg) = postgres() else { return };
+        let (first, second) = pg.fresh_pair();
+        let idle = Idle::new(Duration::from_secs(60), Duration::from_secs(600));
+        let mut remembered = shared_session(1, Some("alice"), NOW + 100_000);
+        remembered.remembered = true;
+        for (n, session) in [
+            (1u8, remembered.clone()),
+            (2, shared_session(2, Some("alice"), NOW + 100_000)),
+        ] {
+            first
+                .session_insert(
+                    &digest(n),
+                    &HERE,
+                    &session,
+                    &started(u64::from(n), "alice", NOW),
+                    10,
+                    &GEN,
+                )
+                .unwrap();
+        }
+        // The other instance reads the flag with the session.
+        assert_eq!(
+            second
+                .session_peek(&digest(1), &HERE, NOW + 30, idle, &GEN)
+                .unwrap(),
+            Some(remembered.clone())
+        );
+        // After 300 s: past the idle time of a normal session, inside the idle time of a remembered one.
+        assert_eq!(
+            second
+                .session_touch(&digest(2), &HERE, NOW + 300, idle, &GEN)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            second
+                .session_touch(&digest(1), &HERE, NOW + 300, idle, &GEN)
+                .unwrap(),
+            Some(remembered.clone())
+        );
+        // The sweep ends the normal session as idle, and keeps the remembered one.
+        assert_eq!(
+            first.sessions_expire(NOW + 300, idle).unwrap(),
+            [(2, false)]
+        );
+        assert_eq!(first.sessions_count().unwrap(), 1);
+        // After the remembered idle time, the remembered session idles out too.
+        assert_eq!(
+            second
+                .session_touch(&digest(1), &HERE, NOW + 300 + 601, idle, &GEN)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            first.sessions_expire(NOW + 300 + 601, idle).unwrap(),
+            [(1, false)]
+        );
+        // The absolute end still applies to a remembered session that is in use.
+        first
+            .session_insert(
+                &digest(3),
+                &HERE,
+                &SharedSession {
+                    sid: 3,
+                    expires_at: NOW + 1_000,
+                    ..remembered
+                },
+                &started(3, "alice", NOW),
+                10,
+                &GEN,
+            )
+            .unwrap();
+        assert_eq!(
+            second
+                .session_touch(&digest(3), &HERE, NOW + 1_000, idle, &GEN)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            first.sessions_expire(NOW + 1_000, idle).unwrap(),
+            [(3, true)]
         );
     }
 
@@ -2277,7 +2419,7 @@ mod tests {
             )
             .unwrap();
         assert!(second
-            .session_touch(&digest(1), &HERE, NOW + 1, IDLE, &GEN)
+            .session_touch(&digest(1), &HERE, NOW + 1, Idle::same(IDLE), &GEN)
             .unwrap()
             .is_some());
         assert!(first.session_delete(&digest(1)).unwrap().is_some());
@@ -2286,7 +2428,7 @@ mod tests {
             "already ended"
         );
         assert!(second
-            .session_touch(&digest(1), &HERE, NOW + 2, IDLE, &GEN)
+            .session_touch(&digest(1), &HERE, NOW + 2, Idle::same(IDLE), &GEN)
             .unwrap()
             .is_none());
     }
@@ -2311,10 +2453,10 @@ mod tests {
         insert(2, NOW + 3600); // goes idle
         insert(3, NOW + 3600);
         second
-            .session_touch(&digest(3), &HERE, NOW + 100, IDLE, &GEN)
+            .session_touch(&digest(3), &HERE, NOW + 100, Idle::same(IDLE), &GEN)
             .unwrap(); // kept alive
         let mut ended = first
-            .sessions_expire(NOW + 60, Duration::from_secs(90))
+            .sessions_expire(NOW + 60, Idle::same(Duration::from_secs(90)))
             .unwrap();
         ended.sort();
         assert_eq!(
@@ -2323,7 +2465,7 @@ mod tests {
             "only the first lived out its lifetime so far"
         );
         let mut ended = second
-            .sessions_expire(NOW + 100, Duration::from_secs(90))
+            .sessions_expire(NOW + 100, Idle::same(Duration::from_secs(90)))
             .unwrap();
         ended.sort();
         assert_eq!(
@@ -2332,7 +2474,7 @@ mod tests {
             "the second idled out; the third was used at NOW + 100"
         );
         assert!(first
-            .sessions_expire(NOW + 100, Duration::from_secs(90))
+            .sessions_expire(NOW + 100, Idle::same(Duration::from_secs(90)))
             .unwrap()
             .is_empty());
         assert_eq!(first.sessions_count().unwrap(), 1);
@@ -2387,16 +2529,16 @@ mod tests {
         }
         for n in [1, 2] {
             assert!(store
-                .session_touch(&digest(n), &HERE, NOW + 1, IDLE, &other)
+                .session_touch(&digest(n), &HERE, NOW + 1, Idle::same(IDLE), &other)
                 .unwrap()
                 .is_none());
             assert!(store
-                .session_touch(&digest(n), &HERE, NOW + 1, IDLE, &GEN)
+                .session_touch(&digest(n), &HERE, NOW + 1, Idle::same(IDLE), &GEN)
                 .unwrap()
                 .is_some());
         }
         assert!(store
-            .session_touch(&digest(3), &HERE, NOW + 1, IDLE, &other)
+            .session_touch(&digest(3), &HERE, NOW + 1, Idle::same(IDLE), &other)
             .unwrap()
             .is_some());
         let mut ended = store.sessions_end_other_generations(&other).unwrap();

@@ -886,15 +886,18 @@ fn session_row(out: &mut String, session: &SessionRow) {
             status_icon("ok", "check", "Active"),
         ),
     };
+    let mut badges = String::new();
+    if session.impersonated {
+        badges.push_str(r#" <span class="badge" title="Opened by the superadmin">su</span>"#);
+    }
+    if session.remembered {
+        badges.push_str(r#" <span class="badge" title="Kept signed in">kept</span>"#);
+    }
     let _ = write!(
         out,
         r#"<tr><td>{}{}</td><td>{}</td><td title="{}">{}</td><td>{}</td><td>{}</td></tr>"#,
         time_tag(session.started_at, false),
-        if session.impersonated {
-            r#" <span class="badge" title="Opened by the superadmin">su</span>"#
-        } else {
-            ""
-        },
+        badges,
         opt(&session.ip),
         html_escape(&session.user_agent),
         html_escape(&short_agent(&session.user_agent)),
@@ -1914,6 +1917,7 @@ mod tests {
             user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
                 .into(),
             impersonated: false,
+            remembered: false,
         });
         alice.activity.services.push(crate::store::ServiceUse {
             service_id: "infra-grafana".into(),
@@ -2294,6 +2298,26 @@ mod tests {
     }
 
     #[test]
+    fn a_remembered_session_has_a_badge_in_the_activity_of_the_account() {
+        let cat = catalog();
+        let mut alice = card("alice", &[]);
+        for remembered in [false, true] {
+            alice.activity.recent.push(SessionRow {
+                started_at: 1_791_000_000,
+                last_seen_at: 1_791_000_100,
+                ended_at: None,
+                end_reason: None,
+                ip: None,
+                user_agent: "x".into(),
+                impersonated: false,
+                remembered,
+            });
+        }
+        let html = user_page(&frame(), &user_view(&cat, alice));
+        assert_eq!(html.matches(r#"title="Kept signed in""#).count(), 1);
+    }
+
+    #[test]
     fn what_comes_from_outside_is_escaped() {
         let cat = catalog();
         let mut user = card("<b>x</b>", &[]);
@@ -2305,6 +2329,7 @@ mod tests {
             ip: Some("<script>1</script>".into()),
             user_agent: "\"><img src=x onerror=1>".into(),
             impersonated: true,
+            remembered: false,
         });
         let html = user_page(&frame(), &user_view(&cat, user));
         assert!(!html.contains("<b>x</b>"));

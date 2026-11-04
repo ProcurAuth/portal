@@ -884,7 +884,11 @@ fn the_remember_keys_have_documented_defaults_and_show_in_the_effective_configur
         ("session.remember_idle_timeout", "\"7d\""),
     ] {
         let found = line(&cfg, key);
-        assert_eq!((found.value.as_str(), found.source.as_str()), (value, "default"), "{key}");
+        assert_eq!(
+            (found.value.as_str(), found.source.as_str()),
+            (value, "default"),
+            "{key}"
+        );
     }
     let (cfg, _) = ok(&with(
         r#"session { remember_ttl = "90d" remember_idle_timeout = "14d" ttl = "7d" }"#,
@@ -897,7 +901,9 @@ fn the_remember_keys_have_documented_defaults_and_show_in_the_effective_configur
         })
     );
     assert_eq!(line(&cfg, "session.remember_ttl").source, "file");
-    assert!(cfg.render_effective().contains("session.remember_ttl = \"90d\""));
+    assert!(cfg
+        .render_effective()
+        .contains("session.remember_ttl = \"90d\""));
 }
 
 #[test]
@@ -905,8 +911,14 @@ fn the_remember_keys_refuse_values_out_of_range() {
     for (extra, key) in [
         (r#"remember_ttl = "91d""#, "session.remember_ttl"),
         (r#"remember_ttl = "30s""#, "session.remember_ttl"),
-        (r#"remember_idle_timeout = "91d""#, "session.remember_idle_timeout"),
-        (r#"remember_idle_timeout = "30s""#, "session.remember_idle_timeout"),
+        (
+            r#"remember_idle_timeout = "91d""#,
+            "session.remember_idle_timeout",
+        ),
+        (
+            r#"remember_idle_timeout = "30s""#,
+            "session.remember_idle_timeout",
+        ),
         (r#"remember = "true""#, "session.remember"),
         (r#"remember = 1"#, "session.remember"),
     ] {
@@ -914,7 +926,10 @@ fn the_remember_keys_refuse_values_out_of_range() {
         assert!(message.contains(key), "{extra}: {message}");
     }
     let message = err(&with(r#"session { remember_ttl = "91d" }"#));
-    assert!(message.contains("91d") && message.contains("90d"), "{message}");
+    assert!(
+        message.contains("91d") && message.contains("90d"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -924,10 +939,14 @@ fn the_remember_keys_contradict_the_other_session_keys() {
         r#"session { ttl = "7d" remember_ttl = "3d" remember_idle_timeout = "1d" }"#,
     ));
     assert!(
-        message.contains("session.remember_ttl") && message.contains("3d") && message.contains("7d"),
+        message.contains("session.remember_ttl")
+            && message.contains("3d")
+            && message.contains("7d"),
         "{message}"
     );
-    ok(&with(r#"session { ttl = "3d" remember_ttl = "3d" remember_idle_timeout = "1d" }"#));
+    ok(&with(
+        r#"session { ttl = "3d" remember_ttl = "3d" remember_idle_timeout = "1d" }"#,
+    ));
     // remember_idle_timeout is not longer than remember_ttl. The default 7d is too long for 2d.
     let message = err(&with(r#"session { remember_ttl = "2d" }"#));
     assert!(
@@ -936,7 +955,9 @@ fn the_remember_keys_contradict_the_other_session_keys() {
             && message.contains("2d"),
         "{message}"
     );
-    ok(&with(r#"session { remember_ttl = "2d" remember_idle_timeout = "2d" }"#));
+    ok(&with(
+        r#"session { remember_ttl = "2d" remember_idle_timeout = "2d" }"#,
+    ));
     // remember_idle_timeout is not shorter than idle_timeout.
     let message = err(&with(
         r#"session { ttl = "7d" idle_timeout = "2d" remember_idle_timeout = "1d" }"#,
@@ -969,7 +990,9 @@ fn session_remember_false_turns_the_option_off_and_refuses_its_values() {
         );
     }
     // With the option off, the values of the option do not stop the start.
-    ok(&with(r#"session { remember = false ttl = "7d" idle_timeout = "7d" }"#));
+    ok(&with(
+        r#"session { remember = false ttl = "7d" idle_timeout = "7d" }"#,
+    ));
 }
 
 #[test]

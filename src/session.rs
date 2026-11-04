@@ -13,7 +13,8 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
-use crate::store::{SharedSession, Store};
+use crate::config::Remember;
+use crate::store::{Idle, SharedSession, Store};
 use crate::tracking::{log_error, unix_now, EndReason, Event, SessionStart, Tracker};
 use crate::util::blocking;
 
@@ -57,6 +58,9 @@ pub struct Session {
     pub principal: Principal,
     /// The superadmin browses as this user. This is not a connection of the user.
     pub impersonated: bool,
+    /// The person asked "Keep me signed in" at the sign-in. The session has the longer life and the longer
+    /// idle time of `session.remember_ttl` and `session.remember_idle_timeout`.
+    pub remembered: bool,
     /// The absolute end of the session, in Unix time.
     pub expires_at: i64,
 }
@@ -68,11 +72,15 @@ pub struct NewSession {
     /// The login shown in the history. For the superadmin, this is the superadmin's own login.
     pub login: String,
     pub impersonated: bool,
+    /// The person asked "Keep me signed in". The store ignores the request when `session.remember` is
+    /// `false`, and for an impersonated session: such a session always has the short rule.
+    pub remember: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     /// The latest end of the new session, in Unix time. A switch of session ("Log in as",
     /// "Back to superadmin") gives the end of the current session. Thus a switch never extends
-    /// the lifetime that the password sign-in gave. `None` gives the full `session.ttl`.
+    /// the lifetime that the password sign-in gave. `None` gives the full `session.ttl`, or
+    /// `session.remember_ttl` for a remembered session.
     pub not_after: Option<i64>,
 }
 
@@ -91,6 +99,8 @@ pub struct SessionStore {
     sessions: Mutex<HashMap<[u8; 32], Entry>>,
     ttl: Duration,
     idle: Duration,
+    /// The rule of the remembered sessions. `None`: the store opens no remembered session.
+    remember: Option<Remember>,
     max_active: usize,
     tracker: Arc<Tracker>,
     shared: Option<Arc<Store>>,
@@ -109,6 +119,7 @@ impl SessionStore {
             sessions: Mutex::new(HashMap::new()),
             ttl,
             idle,
+            remember: None,
             max_active,
             tracker,
             shared: None,
@@ -117,6 +128,38 @@ impl SessionStore {
             shared_active: AtomicUsize::new(0),
             shared_errors: AtomicU64::new(0),
         }
+    }
+
+    /// Lets a sign-in open a remembered session, with the life and the idle time of `remember`.
+    pub fn remember(mut self, remember: Remember) -> Self {
+        self.remember = Some(remember);
+        self
+    }
+
+    /// Whether a new session gets the remembered rule.
+    fn is_remembered(&self, new: &NewSession) -> bool {
+        new.remember && !new.impersonated && self.remember.is_some()
+    }
+
+    /// The life of a session of the rule that `remembered` selects.
+    fn ttl_of(&self, remembered: bool) -> Duration {
+        match (remembered, &self.remember) {
+            (true, Some(remember)) => remember.ttl,
+            _ => self.ttl,
+        }
+    }
+
+    /// The idle time of a session of the rule that `remembered` selects.
+    fn idle_of(&self, remembered: bool) -> Duration {
+        match (remembered, &self.remember) {
+            (true, Some(remember)) => remember.idle_timeout,
+            _ => self.idle,
+        }
+    }
+
+    /// The idle times of both rules, for the shared database.
+    fn idle_pair(&self) -> Idle {
+        Idle::new(self.idle, self.idle_of(true))
     }
 
     /// Keeps the sessions in the shared `store`, not in memory. `generation` is the credential
@@ -128,19 +171,18 @@ impl SessionStore {
         self
     }
 
-    /// The end of a session issued at `now`: `session.ttl` later, but not after `not_after`.
-    fn expiry(&self, now: i64, not_after: Option<i64>) -> i64 {
-        let full = now.saturating_add(self.ttl.as_secs() as i64);
+    /// The end of a session issued at `now`: the life of its rule later, but not after `not_after`.
+    fn expiry(&self, now: i64, not_after: Option<i64>, remembered: bool) -> i64 {
+        let full = now.saturating_add(self.ttl_of(remembered).as_secs() as i64);
         not_after.map_or(full, |bound| bound.min(full))
     }
 
-    /// The life of a session issued at `now`: `session.ttl`, but not past `not_after`.
-    fn lifetime(&self, now: i64, not_after: Option<i64>) -> Duration {
+    /// The life of a session issued at `now`: the life of its rule, but not past `not_after`.
+    fn lifetime(&self, now: i64, not_after: Option<i64>, remembered: bool) -> Duration {
+        let ttl = self.ttl_of(remembered);
         match not_after {
-            None => self.ttl,
-            Some(bound) => self
-                .ttl
-                .min(Duration::from_secs(bound.saturating_sub(now).max(0) as u64)),
+            None => ttl,
+            Some(bound) => ttl.min(Duration::from_secs(bound.saturating_sub(now).max(0) as u64)),
         }
     }
 
@@ -184,8 +226,9 @@ impl SessionStore {
             return self.issue_shared(store, binding, new);
         }
         let now_unix = unix_now();
-        let expires_unix = self.expiry(now_unix, new.not_after);
-        let lifetime = self.lifetime(now_unix, new.not_after);
+        let remembered = self.is_remembered(&new);
+        let expires_unix = self.expiry(now_unix, new.not_after, remembered);
+        let lifetime = self.lifetime(now_unix, new.not_after, remembered);
         let now = Instant::now();
         let mut sessions = self.sessions.lock().expect("session store mutex poisoned");
         self.prune(&mut sessions, now);
@@ -216,6 +259,7 @@ impl SessionStore {
                 sid: u64::from_be_bytes(sid),
                 principal: new.principal.clone(),
                 impersonated: new.impersonated,
+                remembered,
                 expires_at: expires_unix,
             };
             self.tracker.emit(Event::SessionStarted(SessionStart {
@@ -223,6 +267,7 @@ impl SessionStore {
                 login: new.login,
                 superadmin: new.principal == Principal::Superadmin,
                 impersonated: new.impersonated,
+                remembered,
                 ip: new.ip,
                 user_agent: new.user_agent,
                 at: unix_now(),
@@ -387,11 +432,13 @@ impl SessionStore {
         raw.zeroize();
 
         let now = unix_now();
-        let expires_at = self.expiry(now, new.not_after);
+        let remembered = self.is_remembered(&new);
+        let expires_at = self.expiry(now, new.not_after, remembered);
         let session = Session {
             sid: u64::from_be_bytes(sid),
             principal: new.principal.clone(),
             impersonated: new.impersonated,
+            remembered,
             expires_at,
         };
         let stored = SharedSession {
@@ -401,6 +448,7 @@ impl SessionStore {
                 Principal::User(login) => Some(login.clone()),
             },
             impersonated: new.impersonated,
+            remembered,
             expires_at,
         };
         // The history row is written with the session. Therefore, no instance meets a session without a history row.
@@ -409,6 +457,7 @@ impl SessionStore {
             login: new.login,
             superadmin: new.principal == Principal::Superadmin,
             impersonated: new.impersonated,
+            remembered,
             ip: new.ip,
             user_agent: new.user_agent,
             at: now,
@@ -432,7 +481,7 @@ impl SessionStore {
             }
         }
         let at = Instant::now();
-        let lifetime = self.lifetime(now, new.not_after);
+        let lifetime = self.lifetime(now, new.not_after, remembered);
         let mut cache = self.sessions.lock().expect("session store mutex poisoned");
         self.prune_copies(&mut cache, at);
         cache.insert(
@@ -473,7 +522,9 @@ impl SessionStore {
             }
         }
         let at = unix_now();
-        match blocking(|| store.session_touch(&digest, binding, at, self.idle, &self.generation)) {
+        match blocking(|| {
+            store.session_touch(&digest, binding, at, self.idle_pair(), &self.generation)
+        }) {
             Ok(Some(stored)) => {
                 let session = session_of(stored.clone());
                 let left = Duration::from_secs(stored.expires_at.saturating_sub(at).max(0) as u64);
@@ -526,7 +577,13 @@ impl SessionStore {
             }
         }
         match blocking(|| {
-            store.session_peek(&digest, binding, unix_now(), self.idle, &self.generation)
+            store.session_peek(
+                &digest,
+                binding,
+                unix_now(),
+                self.idle_pair(),
+                &self.generation,
+            )
         }) {
             Ok(Some(stored)) => Some(session_of(stored)),
             Ok(None) => {
@@ -593,7 +650,7 @@ impl SessionStore {
     pub fn sweep(&self) {
         let Some(store) = &self.shared else { return };
         let now = unix_now();
-        match store.sessions_expire(now, self.idle) {
+        match store.sessions_expire(now, self.idle_pair()) {
             Ok(ended) => {
                 for (sid, expired) in ended {
                     self.ended_sid(
@@ -637,7 +694,8 @@ impl SessionStore {
     fn prune(&self, sessions: &mut HashMap<[u8; 32], Entry>, now: Instant) {
         sessions.retain(|_, entry| {
             let live = entry.expires_at > now;
-            let active = now.duration_since(entry.last_seen) < self.idle;
+            let active =
+                now.duration_since(entry.last_seen) < self.idle_of(entry.session.remembered);
             if !(live && active) {
                 let reason = if live {
                     EndReason::Idle
@@ -659,6 +717,7 @@ fn session_of(stored: SharedSession) -> Session {
             None => Principal::Superadmin,
         },
         impersonated: stored.impersonated,
+        remembered: stored.remembered,
         expires_at: stored.expires_at,
     }
 }
@@ -702,6 +761,7 @@ mod tests {
             principal: Principal::User(login.into()),
             login: login.into(),
             impersonated: false,
+            remember: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             not_after: None,
@@ -735,6 +795,7 @@ mod tests {
                     principal: Principal::Superadmin,
                     login: "root".into(),
                     impersonated: false,
+                    remember: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -856,6 +917,7 @@ mod tests {
                     principal: Principal::Superadmin,
                     login: "root".into(),
                     impersonated: false,
+                    remember: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -915,6 +977,122 @@ mod tests {
             store.validate(&t2, &HERE).unwrap().sid
         );
     }
+
+    fn remembering(ttl: Duration, idle: Duration, remember: Remember) -> SessionStore {
+        store(ttl, idle, 8).remember(remember)
+    }
+
+    fn remembered(login: &str) -> NewSession {
+        NewSession {
+            remember: true,
+            ..user(login)
+        }
+    }
+
+    const DAY: Duration = Duration::from_secs(86_400);
+
+    #[test]
+    fn a_remembered_session_lives_for_the_remember_ttl_and_the_others_for_the_ttl() {
+        let remember = Remember {
+            ttl: 30 * DAY,
+            idle_timeout: 7 * DAY,
+        };
+        let store = remembering(DAY, Duration::from_secs(1800), remember);
+        let now = unix_now();
+        let short = store.issue(HERE, user("alice")).unwrap();
+        let long = store.issue(HERE, remembered("alice")).unwrap();
+        let short = store.validate(&short, &HERE).unwrap();
+        let long = store.validate(&long, &HERE).unwrap();
+        assert!(!short.remembered);
+        assert!(long.remembered);
+        assert!((now + 86_399..=now + 86_401).contains(&short.expires_at));
+        let thirty = 30 * 86_400;
+        assert!((now + thirty - 1..=now + thirty + 1).contains(&long.expires_at));
+    }
+
+    #[test]
+    fn a_remember_request_is_ignored_without_the_rule_and_for_an_impersonated_session() {
+        // `session.remember = false`: the store has no rule.
+        let store = store(HOUR, HOUR, 8);
+        let token = store.issue(HERE, remembered("alice")).unwrap();
+        let session = store.validate(&token, &HERE).unwrap();
+        assert!(!session.remembered);
+        let now = unix_now();
+        assert!((now + 3599..=now + 3600).contains(&session.expires_at));
+
+        // "Log in as": the short rule, whatever the request says.
+        let remember = Remember {
+            ttl: 30 * DAY,
+            idle_timeout: 7 * DAY,
+        };
+        let store = remembering(HOUR, HOUR, remember);
+        let mut new = remembered("alice");
+        new.impersonated = true;
+        let token = store.issue(HERE, new).unwrap();
+        let session = store.validate(&token, &HERE).unwrap();
+        assert!(session.impersonated && !session.remembered);
+        assert!((now + 3599..=now + 3601).contains(&session.expires_at));
+    }
+
+    #[test]
+    fn a_remembered_session_has_its_own_idle_time() {
+        let remember = Remember {
+            ttl: HOUR,
+            idle_timeout: Duration::from_secs(5),
+        };
+        let store = remembering(HOUR, Duration::from_millis(120), remember);
+        let short = store.issue(HERE, user("alice")).unwrap();
+        let long = store.issue(HERE, remembered("alice")).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            store.validate(&short, &HERE).is_none(),
+            "idle for longer than the idle time of the normal rule"
+        );
+        assert!(
+            store.validate(&long, &HERE).is_some(),
+            "the idle time of a remembered session is longer"
+        );
+        assert_eq!(store.active_count(), 1);
+    }
+
+    #[test]
+    fn a_remembered_session_in_use_still_ends_at_its_absolute_life() {
+        let remember = Remember {
+            ttl: Duration::from_millis(300),
+            idle_timeout: Duration::from_millis(250),
+        };
+        let store = remembering(HOUR, HOUR, remember);
+        let token = store.issue(HERE, remembered("alice")).unwrap();
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(60));
+            assert!(
+                store.validate(&token, &HERE).is_some(),
+                "in use, inside its life"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(store.validate(&token, &HERE).is_none(), "past its life");
+    }
+
+    #[test]
+    fn the_history_row_of_a_session_says_whether_it_is_remembered() {
+        let remember = Remember {
+            ttl: HOUR,
+            idle_timeout: HOUR,
+        };
+        let (tracker, events) = Tracker::recording();
+        let store = SessionStore::new(HOUR, HOUR, 8, tracker).remember(remember);
+        store.issue(HERE, user("alice")).unwrap();
+        store.issue(HERE, remembered("alice")).unwrap();
+        let flags: Vec<bool> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::SessionStarted(start) => Some(start.remembered),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags, [false, true]);
+    }
 }
 
 #[cfg(test)]
@@ -944,12 +1122,17 @@ mod shared_tests {
             max: usize,
             cache_ttl: Duration,
         ) -> Self {
-            Self::build(store, ttl, idle, max, cache_ttl, [0; 32])
+            Self::build(store, ttl, idle, max, cache_ttl, [0; 32], None)
+        }
+
+        /// An instance that opens remembered sessions with the rule `remember`.
+        fn remembering(store: Store, ttl: Duration, idle: Duration, remember: Remember) -> Self {
+            Self::build(store, ttl, idle, 8, Duration::ZERO, [0; 32], Some(remember))
         }
 
         /// An instance whose superadmin credentials give `generation`.
         fn with_generation(store: Store, generation: [u8; 32]) -> Self {
-            Self::build(store, HOUR, HOUR, 8, Duration::ZERO, generation)
+            Self::build(store, HOUR, HOUR, 8, Duration::ZERO, generation, None)
         }
 
         fn build(
@@ -959,11 +1142,15 @@ mod shared_tests {
             max: usize,
             cache_ttl: Duration,
             generation: [u8; 32],
+            remember: Option<Remember>,
         ) -> Self {
             let store = Arc::new(store);
             let (tracker, events) = Tracker::recording();
             let mut sessions =
                 SessionStore::new(ttl, idle, max, tracker).shared(Arc::clone(&store), generation);
+            if let Some(remember) = remember {
+                sessions = sessions.remember(remember);
+            }
             sessions.set_cache_ttl(cache_ttl);
             Self {
                 sessions,
@@ -1002,6 +1189,7 @@ mod shared_tests {
             principal: Principal::User(login.into()),
             login: login.into(),
             impersonated: false,
+            remember: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             not_after: None,
@@ -1048,6 +1236,7 @@ mod shared_tests {
                     principal: Principal::Superadmin,
                     login: "root".into(),
                     impersonated: false,
+                    remember: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -1229,12 +1418,14 @@ mod shared_tests {
                 principal: Principal::Superadmin,
                 login: "root".into(),
                 impersonated: false,
+                remember: false,
                 ip: None,
                 user_agent: String::new(),
                 not_after: None,
             },
             Some(login) => NewSession {
                 impersonated: true,
+                remember: false,
                 ..user(login)
             },
         }
@@ -1346,5 +1537,98 @@ mod shared_tests {
             a.sessions.issue(HERE, user("bob")),
             Err(SessionIssueError::Storage)
         );
+    }
+
+    const DAY: Duration = Duration::from_secs(86_400);
+
+    fn remembered(login: &str) -> NewSession {
+        NewSession {
+            remember: true,
+            ..user(login)
+        }
+    }
+
+    #[test]
+    fn a_remembered_session_has_the_long_life_on_every_instance_and_survives_a_restart() {
+        let (first, second) = postgres().map(|pg| pg.fresh_pair()).unzip();
+        let (Some(first), Some(second)) = (first, second) else {
+            return;
+        };
+        let remember = Remember {
+            ttl: 30 * DAY,
+            idle_timeout: 7 * DAY,
+        };
+        let a = Instance::remembering(first, DAY, Duration::from_secs(1800), remember);
+        let b = Instance::remembering(second, DAY, Duration::from_secs(1800), remember);
+        let now = unix_now();
+        let short = a.sessions.issue(HERE, user("alice")).unwrap();
+        let long = a.sessions.issue(HERE, remembered("alice")).unwrap();
+        let seen_short = b.sessions.validate(&short, &HERE).unwrap();
+        let seen_long = b.sessions.validate(&long, &HERE).unwrap();
+        assert!(!seen_short.remembered && seen_long.remembered);
+        assert!((now + 86_399..=now + 86_401).contains(&seen_short.expires_at));
+        let thirty = 30 * 86_400;
+        assert!((now + thirty - 1..=now + thirty + 1).contains(&seen_long.expires_at));
+        // The history row of the shared database carries the flag.
+        let snapshot = b
+            .store
+            .snapshot(&[("alice".into(), false)], unix_now())
+            .unwrap();
+        let flags: Vec<bool> = snapshot.accounts[0]
+            .recent
+            .iter()
+            .map(|r| r.remembered)
+            .collect();
+        assert_eq!(flags.iter().filter(|f| **f).count(), 1, "{flags:?}");
+        // A restart: a new store on the same database finds both sessions, with their flag.
+        let (tracker, _events) = Tracker::recording();
+        let mut restarted = SessionStore::new(DAY, Duration::from_secs(1800), 8, tracker)
+            .shared(Arc::clone(&b.store), [0; 32])
+            .remember(remember);
+        restarted.set_cache_ttl(Duration::ZERO);
+        assert!(restarted.validate(&long, &HERE).unwrap().remembered);
+        assert!(!restarted.validate(&short, &HERE).unwrap().remembered);
+        // A logout ends it on every instance.
+        assert!(a.sessions.revoke(&long, EndReason::Logout).is_some());
+        assert!(b.sessions.validate(&long, &HERE).is_none());
+        assert!(restarted.validate(&long, &HERE).is_none());
+    }
+
+    #[test]
+    fn the_idle_rule_of_a_remembered_session_holds_on_every_instance_and_in_the_sweep() {
+        let (first, second) = postgres().map(|pg| pg.fresh_pair()).unzip();
+        let (Some(first), Some(second)) = (first, second) else {
+            return;
+        };
+        let remember = Remember {
+            ttl: HOUR,
+            idle_timeout: Duration::from_secs(600),
+        };
+        let a = Instance::remembering(first, HOUR, Duration::from_secs(1), remember);
+        let b = Instance::remembering(second, HOUR, Duration::from_secs(1), remember);
+        let short = a.sessions.issue(HERE, user("alice")).unwrap();
+        let long = a.sessions.issue(HERE, remembered("alice")).unwrap();
+        sleep(Duration::from_millis(2_200));
+        assert!(
+            b.sessions.validate(&short, &HERE).is_none(),
+            "idle for longer than the idle time of the normal rule"
+        );
+        assert!(
+            b.sessions.validate(&long, &HERE).is_some(),
+            "the remembered session is still inside its idle time"
+        );
+        // The sweep ends the sessions of the normal rule that idled out. It keeps the remembered session.
+        let third = a.sessions.issue(HERE, user("bob")).unwrap();
+        sleep(Duration::from_millis(2_200));
+        a.sessions.sweep();
+        let reasons: Vec<EndReason> = a
+            .ended()
+            .into_iter()
+            .chain(b.ended())
+            .map(|(_, r)| r)
+            .collect();
+        assert!(reasons.contains(&EndReason::Idle), "{reasons:?}");
+        assert!(b.sessions.validate(&third, &HERE).is_none());
+        assert!(b.sessions.validate(&long, &HERE).is_some());
     }
 }

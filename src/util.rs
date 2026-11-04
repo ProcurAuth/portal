@@ -388,6 +388,19 @@ pub fn format_duration(seconds: i64) -> String {
     }
 }
 
+/// A time for a sentence, in whole words when it fits: `30 days`, `1 day`, `12 hours`, `5 minutes`.
+/// Any other time has the form of [`format_duration`].
+pub fn format_duration_words(seconds: u64) -> String {
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    for (unit, size) in [("day", 86_400), ("hour", 3_600), ("minute", 60)] {
+        if seconds > 0 && seconds % size == 0 {
+            let count = seconds / size;
+            return format!("{count} {unit}{}", if count == 1 { "" } else { "s" });
+        }
+    }
+    format_duration(seconds)
+}
+
 /// Reduces a User-Agent to what a person recognises, for example `Firefox 131 · Linux`. The
 /// function cuts short anything that it does not recognise. The result is never trusted. The
 /// caller escapes it.
@@ -597,6 +610,11 @@ mod tests {
         assert_eq!(format_duration(7_500), "2 h 5 min");
         assert_eq!(format_duration(7_200), "2 h");
         assert_eq!(format_duration(100_000), "1 d 3 h");
+        assert_eq!(format_duration_words(30 * 86_400), "30 days");
+        assert_eq!(format_duration_words(86_400), "1 day");
+        assert_eq!(format_duration_words(12 * 3_600), "12 hours");
+        assert_eq!(format_duration_words(300), "5 minutes");
+        assert_eq!(format_duration_words(100_000), "1 d 3 h");
     }
 
     #[test]

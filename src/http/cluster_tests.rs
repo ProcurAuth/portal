@@ -201,6 +201,8 @@ fn start_with(store: Arc<Store>, cache_ttl: Option<Duration>, extra: &str) -> No
 struct Custom {
     /// More keys of the `server` block.
     server: &'static str,
+    /// More keys of the `session` block.
+    session: &'static str,
     /// The body of the `discovery` block.
     discovery: &'static str,
     /// The superadmin login, its password and the session secret.
@@ -224,6 +226,7 @@ impl Default for Custom {
     fn default() -> Self {
         Self {
             server: r#"trusted_proxies = ["127.0.0.1/32"]"#,
+            session: "",
             discovery: r#"interval = "1h""#,
             login: "root",
             password: PASSWORD,
@@ -247,6 +250,7 @@ fn start_custom(
     let key = crate::identity::testing::new_key_pem();
     let Custom {
         server,
+        session,
         discovery,
         login,
         password,
@@ -266,7 +270,7 @@ fn start_custom(
           superadmin_password_env = "PORTAL_TEST_PASSWORD"
         }}
         users {{ max_users = {max_users} allow_creation = {allow_creation} }}
-        session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
+        session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" {session} }}
         discovery {{ {discovery} }}
         {extra}
         "#
@@ -7646,6 +7650,21 @@ fn sign_in_node(extra: &str) -> Node {
     node
 }
 
+/// The same as [`sign_in_node`], with more keys in the block `session`.
+fn sign_in_node_with_session(session: &'static str) -> Node {
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            session,
+            ..Custom::default()
+        },
+        "metrics { enabled = true }",
+    );
+    insert_account(&node, "alice", "alice-correct-password");
+    node
+}
+
 /// Posts one body to the sign-in route from the local address `source`.
 fn post_login(node: &Node, source: &str, csrf: &str, body: &str) -> Reply {
     let origin = format!("http://127.0.0.1:{}", node.port);
@@ -8086,4 +8105,313 @@ fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
         .body
         .contains(&format!(r#"href="{}""#, ui::assets().css_path)));
     assert!(!settings.body.contains(&css_path));
+}
+
+// "Keep me signed in": the box of the sign-in form, the cookie and the session.
+
+/// The binding of a session that a test client opens from the address `source`, with the test User-Agent.
+fn client_binding(node: &Node, source: &str) -> Binding {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(AGENT));
+    transport::binding(
+        node.state.config.session.bind,
+        &headers,
+        Some(source.parse().unwrap()),
+    )
+}
+
+/// Posts the sign-in form from `source`. `keep` is the value of the field of the box: `None` sends no field.
+fn sign_in_with_box(
+    node: &Node,
+    source: &str,
+    login: &str,
+    password: &str,
+    keep: Option<&str>,
+) -> Reply {
+    let csrf = "K".repeat(32);
+    let token = form_token_issued(node, &csrf, 5_000);
+    let mut body = login_body_with(node, &csrf, login, password, &token, "");
+    if let Some(value) = keep {
+        body.push_str(&format!("&{KEEP_FIELD}={value}"));
+    }
+    post_login(node, source, &csrf, &body)
+}
+
+/// The `Set-Cookie` line of the session cookie of a reply.
+fn session_set_cookie(node: &Node, reply: &Reply) -> String {
+    let prefix = format!("{}=", session_cookie_name(node));
+    reply
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "set-cookie")
+        .map(|(_, value)| value.clone())
+        .find(|value| value.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no session cookie in {:?}", reply.headers))
+}
+
+#[test]
+fn the_cookie_of_a_remembered_session_is_persistent_and_the_others_are_session_cookies() {
+    each_backend(|backend| {
+        let node = start(Arc::new(backend.fresh()), Some(Duration::ZERO));
+        let binding = client_binding(&node, "127.0.0.1");
+        let ttl = node.state.config.session.ttl.as_secs();
+        let remember_ttl = node.state.config.session.remember.unwrap().ttl.as_secs();
+        assert_eq!((ttl, remember_ttl), (86_400, 30 * 86_400), "the defaults");
+
+        // Without the box, also with a value that is not the value of a ticked box.
+        for keep in [None, Some("0"), Some("on"), Some("")] {
+            let reply = sign_in_with_box(&node, "127.0.0.1", "root", PASSWORD, keep);
+            assert_eq!(reply.status, 303, "{keep:?}");
+            let cookie = session_set_cookie(&node, &reply);
+            assert!(!cookie.contains("Max-Age"), "{keep:?}: {cookie}");
+            assert!(!cookie.contains("Expires"), "{keep:?}: {cookie}");
+            assert!(
+                cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
+                "{cookie}"
+            );
+            let session = node
+                .state
+                .sessions
+                .validate(
+                    &reply.cookie(&session_cookie_name(&node)).unwrap(),
+                    &binding,
+                )
+                .unwrap();
+            assert!(!session.remembered, "{keep:?}");
+            let left = session.expires_at.saturating_sub(unix_now()) as u64;
+            assert!((ttl - 2..=ttl + 2).contains(&left), "{keep:?}: {left}");
+        }
+
+        // With the box: Max-Age is the life of the session.
+        let reply = sign_in_with_box(&node, "127.0.0.1", "root", PASSWORD, Some("1"));
+        assert_eq!(reply.status, 303);
+        let cookie = session_set_cookie(&node, &reply);
+        assert!(
+            cookie.contains(&format!("Max-Age={remember_ttl};")),
+            "{cookie}"
+        );
+        assert!(
+            cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
+            "{cookie}"
+        );
+        let token = reply.cookie(&session_cookie_name(&node)).unwrap();
+        let session = node.state.sessions.validate(&token, &binding).unwrap();
+        assert!(session.remembered);
+        let left = session.expires_at.saturating_sub(unix_now()) as u64;
+        assert!(
+            (remember_ttl - 2..=remember_ttl + 2).contains(&left),
+            "{left}"
+        );
+        // The remembered session works on a page, and a logout ends it.
+        assert_eq!(verify(&node, &token, AGENT), 204);
+        assert_eq!(
+            post(&node, &token, LOGOUT_PATH, LOGOUT_TOKEN, "").status,
+            303
+        );
+        assert_eq!(verify(&node, &token, AGENT), 302);
+    });
+}
+
+#[test]
+fn the_box_works_for_an_account_and_follows_the_keys_of_the_file() {
+    let node = sign_in_node_with_session(
+        r#"remember_ttl = "90d" remember_idle_timeout = "2d" ttl = "12h""#,
+    );
+    let reply = sign_in_with_box(
+        &node,
+        "127.0.3.1",
+        "alice",
+        "alice-correct-password",
+        Some("1"),
+    );
+    assert_eq!(reply.status, 303);
+    let cookie = session_set_cookie(&node, &reply);
+    assert!(
+        cookie.contains(&format!("Max-Age={};", 90 * 86_400)),
+        "{cookie}"
+    );
+    let token = reply.cookie(&session_cookie_name(&node)).unwrap();
+    let session = node
+        .state
+        .sessions
+        .validate(&token, &client_binding(&node, "127.0.3.1"))
+        .unwrap();
+    assert_eq!(session.principal, Principal::User("alice".into()));
+    assert!(session.remembered);
+    // The session of the same account without the box has the short life.
+    let reply = sign_in_with_box(&node, "127.0.3.2", "alice", "alice-correct-password", None);
+    let session = node
+        .state
+        .sessions
+        .validate(
+            &reply.cookie(&session_cookie_name(&node)).unwrap(),
+            &client_binding(&node, "127.0.3.2"),
+        )
+        .unwrap();
+    assert!(!session.remembered);
+    let left = session.expires_at - unix_now();
+    assert!((12 * 3600 - 2..=12 * 3600 + 2).contains(&left), "{left}");
+}
+
+#[test]
+fn the_sign_in_page_shows_the_box_with_the_number_of_days_of_the_file() {
+    let node = sign_in_node("");
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
+    assert!(
+        Mask::has_element(
+            &page,
+            "input",
+            &[
+                ("type", Some("checkbox")),
+                ("name", Some("keep")),
+                ("value", Some("1"))
+            ]
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains("Keep me signed in for 30 days</label>"),
+        "{page}"
+    );
+    assert!(!page.contains("checked"), "the box is not ticked: {page}");
+    // The box is a plain control in a label: no inline style, no identifier, no script of its own.
+    assert!(!page.contains("style="), "{page}");
+    // The class of the label is a mapped name, like all other classes of the page.
+    let plain = crate::ui::mask::names_in_stylesheet(&ui::assets().css);
+    assert!(plain.contains("keep"));
+    assert!(!Mask::names_in_page(&page, false).contains(&"keep".to_string()));
+    // Another life, another number.
+    let node = sign_in_node_with_session(r#"remember_ttl = "90d" remember_idle_timeout = "7d""#);
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
+    assert!(page.contains("Keep me signed in for 90 days"), "{page}");
+    let node =
+        sign_in_node_with_session(r#"ttl = "1h" remember_ttl = "1d" remember_idle_timeout = "1d""#);
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
+    assert!(page.contains("Keep me signed in for 1 day<"), "{page}");
+}
+
+#[test]
+fn without_the_option_the_page_has_no_box_and_the_server_ignores_the_field() {
+    let node = sign_in_node_with_session("remember = false");
+    assert_eq!(node.state.config.session.remember, None);
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
+    assert!(!page.contains("keep"), "{page}");
+    assert!(!page.contains("checkbox"), "{page}");
+    assert!(!page.contains("Keep me signed in"), "{page}");
+    // A post with the field is not refused, and its session is a normal one.
+    let reply = sign_in_with_box(&node, "127.0.4.1", "root", PASSWORD, Some("1"));
+    assert_eq!(reply.status, 303);
+    let cookie = session_set_cookie(&node, &reply);
+    assert!(!cookie.contains("Max-Age"), "{cookie}");
+    let session = node
+        .state
+        .sessions
+        .validate(
+            &reply.cookie(&session_cookie_name(&node)).unwrap(),
+            &client_binding(&node, "127.0.4.1"),
+        )
+        .unwrap();
+    assert!(!session.remembered);
+    let left = session.expires_at - unix_now();
+    assert!((86_400 - 2..=86_400 + 2).contains(&left), "{left}");
+    // Even a value that is not "1" is not refused.
+    assert_eq!(
+        sign_in_with_box(&node, "127.0.4.2", "root", PASSWORD, Some("zzz")).status,
+        303
+    );
+}
+
+#[test]
+fn a_refused_sign_in_gives_the_same_answer_with_the_box_ticked_or_not() {
+    let node = sign_in_node("");
+    let csrf = "B".repeat(32);
+    let mut replies = Vec::new();
+    let mut index = 0;
+    // The same causes as the test of the refusals, each with and without the box.
+    for (login, password) in [
+        ("nobody", "x-wrong-password"),
+        ("root", "x-wrong-password"),
+        ("alice", "x-wrong-password"),
+    ] {
+        for keep in [None, Some("1")] {
+            index += 1;
+            let token = form_token_issued(&node, &csrf, 5_000);
+            let mut body = login_body_with(&node, &csrf, login, password, &token, "");
+            if let Some(value) = keep {
+                body.push_str(&format!("&{KEEP_FIELD}={value}"));
+            }
+            let reply = post_login(&node, &format!("127.0.5.{index}"), &csrf, &body);
+            assert_eq!(reply.status, 401, "{login} {keep:?}");
+            assert!(reply.body.contains("Invalid login or password"));
+            // The page after the refusal does not keep the box ticked.
+            assert!(!reply.body.contains("checked"), "{login} {keep:?}");
+            assert!(!reply
+                .headers
+                .iter()
+                .any(|(name, value)| name == "set-cookie"
+                    && value.starts_with(&format!("{}=", session_cookie_name(&node)))));
+            replies.push(reply);
+        }
+    }
+    // A failed check of the form with the box ticked is the same refusal.
+    let token = form_token_issued(&node, &csrf, 0);
+    let body = format!(
+        "{}&{KEEP_FIELD}=1",
+        login_body_with(&node, &csrf, "alice", "alice-correct-password", &token, "")
+    );
+    replies.push(post_login(&node, "127.0.5.99", &csrf, &body));
+    assert_eq!(replies.last().unwrap().status, 401);
+    let first = &replies[0];
+    for reply in &replies {
+        assert_eq!(reply.status, first.status);
+        assert_eq!(shape_of(reply), shape_of(first));
+        assert_eq!(
+            without_random(&node, &reply.body),
+            without_random(&node, &first.body)
+        );
+    }
+}
+
+#[test]
+fn an_impersonated_session_never_gets_the_remembered_rule() {
+    each_backend(|backend| {
+        let node = start(Arc::new(backend.fresh()), Some(Duration::ZERO));
+        let binding = client_binding(&node, "127.0.0.1");
+        let reply = sign_in_with_box(&node, "127.0.0.1", "root", PASSWORD, Some("1"));
+        let root = reply.cookie(&session_cookie_name(&node)).unwrap();
+        assert!(
+            node.state
+                .sessions
+                .validate(&root, &binding)
+                .unwrap()
+                .remembered
+        );
+        let _alice = user_without_grant(&node, &root, "alice");
+        let reply = post(&node, &root, IMPERSONATE_PATH, USERS_TOKEN, "login=alice");
+        assert_eq!(reply.status, 303);
+        let as_alice = reply.cookie(&session_cookie_name(&node)).unwrap();
+        let session = node.state.sessions.validate(&as_alice, &binding).unwrap();
+        assert!(session.impersonated && !session.remembered);
+        let left = session.expires_at - unix_now();
+        assert!(left <= 86_400, "the short rule: {left}");
+        let cookie = session_set_cookie(&node, &reply);
+        let max_age: u64 = cookie
+            .split("; ")
+            .find_map(|part| part.strip_prefix("Max-Age="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(max_age <= 86_400, "{cookie}");
+        // The way back is not remembered either.
+        let reply = post(&node, &as_alice, IMPERSONATE_END_PATH, USERS_TOKEN, "");
+        let back = reply.cookie(&session_cookie_name(&node)).unwrap();
+        assert!(
+            !node
+                .state
+                .sessions
+                .validate(&back, &binding)
+                .unwrap()
+                .remembered
+        );
+    });
 }
