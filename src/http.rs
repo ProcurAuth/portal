@@ -128,6 +128,9 @@ pub struct AppState {
     /// The hash that the portal checks when the login does not exist. An unknown login then takes the same time as a known login.
     pub dummy_hash: String,
     pub signing_secret: Vec<u8>,
+    /// The second factor: the keys that seal the TOTP secrets. `None` when `authentication.mfa` is `off`: the
+    /// portal then shows no page of the second factor and never asks for a code.
+    pub mfa: Option<crate::mfa::Mfa>,
     /// The names, the stylesheet and the script of the pages that load only the shared stylesheet.
     /// Every instance with the same secret makes the same ones.
     pub mask: ui::mask::Mask,
@@ -193,6 +196,8 @@ pub struct AppState {
 pub struct AccessSecrets {
     pub identity_key: Option<Secret>,
     pub pdp_tokens: Vec<(String, Secret)>,
+    /// The key of the TOTP secrets. The value is `None` exactly when `authentication.mfa` is `off`.
+    pub totp_key: Option<Secret>,
 }
 
 impl AppState {
@@ -220,6 +225,25 @@ impl AppState {
                 .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
                 .collect(),
         )?;
+        let mfa = match (config.authentication.mfa.is_on(), &access.totp_key) {
+            (true, Some(key)) => {
+                let key = crate::secretbox::SecretBox::parse_key(key.as_bytes())
+                    .map_err(|e| format!("authentication.totp_key: {e}"))?;
+                let sealbox = crate::secretbox::SecretBox::new(&key)?;
+                // The database keeps the check value of the key that sealed its secrets. The server stops, and
+                // changes no secret, when the key of the file is another key.
+                if !store.totp_bind_key(&sealbox.check_value())? {
+                    return Err("authentication.totp_key is not the key that sealed the TOTP secrets of this database: use that key, or run `portal reset-two-factor --all` to remove all the TOTP secrets before a new key".into());
+                }
+                Some(crate::mfa::Mfa::new(sealbox))
+            }
+            (false, None) => None,
+            _ => {
+                return Err(
+                    "internal error: authentication.mfa and authentication.totp_key do not agree".into(),
+                )
+            }
+        };
         drop(access);
         let policy = Policy::new(
             config.access.grants_mode,
@@ -306,6 +330,7 @@ impl AppState {
             superadmin_hash: superadmin.password_hash,
             dummy_hash,
             signing_secret,
+            mfa,
         })
     }
 }
@@ -2382,6 +2407,7 @@ async fn handle_login_post(
                 login: session_login,
                 impersonated: false,
                 remember: keep,
+                mfa: false,
                 ip: ip_text(client),
                 user_agent: user_agent_text(&headers),
                 // A sign-in with the password gets the full `session.ttl`, or the full
@@ -3546,6 +3572,7 @@ fn switch_session(
             impersonated,
             // A switch of session never gives the remembered rule.
             remember: false,
+            mfa: false,
             ip: ip_text(client),
             user_agent: user_agent_text(headers),
             not_after: Some(current.session.expires_at),

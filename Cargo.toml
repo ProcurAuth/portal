@@ -51,6 +51,9 @@ rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 # Ed25519 signatures of the identity tokens. The same crate and version as the TLS stack of reqwest
 # (rustls), so the build adds no new C library.
 aws-lc-rs = { version = "=1.18.1", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+# The QR code of the enrolment of the second factor, as inline SVG markup. Pure Rust. The features `image` and `pdf`
+# (default) are off: they pull the image crates. The code needs only the SVG renderer.
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 # PostgreSQL (several active instances share one database). Blocking client over plain TCP: no TLS stack, no C dependency.
 postgres = { version = "=0.19.14", default-features = false }
 

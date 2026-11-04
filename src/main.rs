@@ -20,6 +20,7 @@ mod keys;
 mod keys_metrics;
 mod limits;
 mod metrics;
+mod mfa;
 mod options;
 mod portal_actions;
 mod rate_limit;
@@ -111,6 +112,7 @@ fn real_main() -> Result<(), String> {
             let access = AccessSecrets {
                 identity_key: secrets.identity_key.take(),
                 pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
+                totp_key: secrets.totp_key.take(),
             };
             // The program erases the secrets that it still holds from memory here.
             drop(secrets);

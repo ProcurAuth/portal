@@ -133,6 +133,21 @@ pub fn ui_name_digest(key: &[u8; 32], name: &str) -> [u8; 32] {
     sign(key, name.as_bytes()).unwrap_or([0u8; 32])
 }
 
+/// The MAC of `data` in the domain `domain`. Two domains never give the same MAC for the same data, so a token of one
+/// purpose is never valid for another.
+pub fn mac(secret: &[u8], domain: &str, data: &[u8]) -> Result<[u8; 32], String> {
+    let mut input = format!("{domain}\n").into_bytes();
+    input.extend_from_slice(data);
+    sign(secret, &input)
+}
+
+/// Tells whether `expected` is the MAC of `data` in `domain`. The comparison takes the same time whatever the bytes.
+pub fn mac_matches(secret: &[u8], domain: &str, data: &[u8], expected: &[u8]) -> bool {
+    let mut input = format!("{domain}\n").into_bytes();
+    input.extend_from_slice(data);
+    verify_mac(secret, &input, expected)
+}
+
 /// A key of 32 bytes for one purpose, derived from `key` with HMAC-SHA-256 and a `label` of that purpose.
 /// Two labels give two unrelated keys.
 pub fn derive_key(key: &[u8], label: &[u8]) -> Result<[u8; 32], String> {

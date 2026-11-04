@@ -16,6 +16,8 @@ use crate::ui::mask::Mask;
 const PASSWORD: &str = "correct-horse-battery-staple";
 const SECRET: [u8; 32] = [b'k'; 32];
 const AGENT: &str = "ClusterTest/1.0";
+/// The key of the second factor of the harness: 32 bytes as 64 hexadecimal characters.
+const TOTP_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 const PDP_DB_TOKEN: &str = "the PDP token of the server db, 32 bytes or more";
 const PDP_CHAT_TOKEN: &str = "the PDP token of the server chat, 32 bytes or more";
 
@@ -216,6 +218,8 @@ struct Custom {
     max_users: usize,
     /// `users.allow_creation`. The mode `static` needs `false`.
     allow_creation: bool,
+    /// The value of `authentication.mfa`. The key of the second factor is given unless the value is `off`.
+    mfa: &'static str,
     /// More environment variables of the configuration.
     env: Vec<(String, String)>,
     /// The stop of the server, in place of SIGTERM. The server stops when it gets a value.
@@ -234,6 +238,7 @@ impl Default for Custom {
             wait_complete: true,
             max_users: 10,
             allow_creation: true,
+            mfa: "optional",
             env: Vec::new(),
             stop: None,
         }
@@ -258,9 +263,15 @@ fn start_custom(
         wait_complete,
         max_users,
         allow_creation,
+        mfa,
         env,
         stop,
     } = custom;
+    let totp_key = if mfa == "off" {
+        ""
+    } else {
+        r#"totp_key_env = "PORTAL_TEST_TOTP_KEY""#
+    };
     let (config, mut secrets) = Config::parse(
         &format!(
             r#"
@@ -268,6 +279,8 @@ fn start_custom(
         authentication {{
           superadmin_login_env    = "PORTAL_TEST_LOGIN"
           superadmin_password_env = "PORTAL_TEST_PASSWORD"
+          mfa                     = "{mfa}"
+          {totp_key}
         }}
         users {{ max_users = {max_users} allow_creation = {allow_creation} }}
         session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" {session} }}
@@ -279,6 +292,7 @@ fn start_custom(
             "PORTAL_TEST_LOGIN" => Some(login.to_string()),
             "PORTAL_TEST_PASSWORD" => Some(password.to_string()),
             "PORTAL_TEST_SESSION" => Some(session_secret.to_string()),
+            "PORTAL_TEST_TOTP_KEY" => Some(TOTP_KEY.to_string()),
             "TEST_IDENTITY_KEY" => Some(key.clone()),
             "TEST_PDP_DB" => Some(PDP_DB_TOKEN.to_string()),
             "TEST_PDP_CHAT" => Some(PDP_CHAT_TOKEN.to_string()),
@@ -309,6 +323,7 @@ fn start_custom(
     let access = AccessSecrets {
         identity_key: secrets.identity_key.take(),
         pdp_tokens: std::mem::take(&mut secrets.pdp_tokens),
+        totp_key: secrets.totp_key.take(),
     };
     let mut state =
         AppState::new(config, superadmin, signing_secret, store, tracker, access).unwrap();
