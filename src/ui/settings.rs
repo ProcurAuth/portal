@@ -135,6 +135,9 @@ pub struct Frame<'a> {
     pub inbox: bool,
     /// The viewer is the superadmin, who sees the accounts, the services and the activity.
     pub superadmin: bool,
+    /// The notifications of the viewer: the badge of the tab Inbox, and the data of the script.
+    /// `None`: the page has none (the file has no block `inbox`, or the viewer has no right).
+    pub notify: Option<super::notify::Header>,
 }
 
 impl Frame<'_> {
@@ -239,7 +242,7 @@ pub(super) fn fill_page(tab: Tab, frame: &Frame, title: &str, content: &str) -> 
 
 /// The tabs of the header: one link for each tab, and the current one marked. With one tab the
 /// strip is absent, because a control with one choice is no control.
-fn tab_strip(tabs: &[Tab], current: Tab) -> String {
+fn tab_strip(tabs: &[Tab], current: Tab, notify: Option<&super::notify::Header>) -> String {
     if tabs.len() < 2 {
         return String::new();
     }
@@ -250,9 +253,13 @@ fn tab_strip(tabs: &[Tab], current: Tab) -> String {
         } else {
             ""
         };
+        let badge = match (each, notify) {
+            (Tab::Inbox, Some(header)) => super::notify::badge(header),
+            _ => String::new(),
+        };
         let _ = write!(
             out,
-            r#"<a class="contentTabs__tab{mark}" href="{}">{}</a>"#,
+            r#"<a class="contentTabs__tab{mark}" href="{}">{}{badge}</a>"#,
             each.path(),
             each.label()
         );
@@ -276,11 +283,15 @@ fn shell_class(
     let _ = write!(
         body,
         r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
-        tab_strip(tabs, tab),
+        tab_strip(tabs, tab, frame.notify.as_ref()),
         theme_switch(),
         sign_out_form(frame.logout_token),
         html_escape(title)
     );
+    if let Some(header) = &frame.notify {
+        body.push_str(&super::notify::toasts(header));
+        body.push_str(&notify_script_tag());
+    }
     body.push_str(&script_tag());
     let icons = icon_ids(&body);
     document_class(
@@ -306,12 +317,21 @@ fn asset_version() -> &'static str {
         for byte in super::SETTINGS_CSS
             .bytes()
             .chain(super::SETTINGS_JS.bytes())
+            .chain(super::NOTIFY_JS.bytes())
         {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         format!("{hash:016x}")[..10].to_string()
     })
+}
+
+/// The script of the notifications, with its version. It loads after the page, as the other one.
+fn notify_script_tag() -> String {
+    format!(
+        r#"<script src="/auth/assets/notify.js?v={}" defer></script>"#,
+        asset_version()
+    )
 }
 
 /// The script of the settings pages, with its version.
@@ -1696,6 +1716,7 @@ mod tests {
                 keys,
                 inbox,
                 superadmin,
+                notify: None,
             }
             .tabs()
         };

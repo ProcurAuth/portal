@@ -22,6 +22,7 @@ pub mod inbox;
 pub mod keys;
 pub mod mask;
 pub mod minify;
+pub mod notify;
 pub mod settings;
 
 use std::fmt::Write as _;
@@ -40,6 +41,7 @@ pub const CSS: &str = include_str!("../../web/portal.css");
 pub const SETTINGS_CSS: &str = include_str!("../../web/settings.css");
 pub const THEME_JS: &str = include_str!("../../web/theme.js");
 pub const SETTINGS_JS: &str = include_str!("../../web/settings.js");
+pub const NOTIFY_JS: &str = include_str!("../../web/notify.js");
 const SPRITE: &str = include_str!("../../web/sprite.svg");
 
 const MAX_LISTED_PROBLEMS: usize = 3;
@@ -55,6 +57,9 @@ pub struct Assets {
     pub css: String,
     pub js_path: String,
     pub js: String,
+    /// The script of the notifications. Only a page with the inbox icon loads it.
+    pub notify_path: String,
+    pub notify: String,
 }
 
 /// The assets that every page loads. The server makes them once, at the first call.
@@ -65,11 +70,14 @@ pub fn assets() -> &'static Assets {
         // The shipped script is inside the subset that the minifier accepts: a test proves it.
         // If the transform fails, the page keeps the source: a script that works is better.
         let js = minify::script(THEME_JS).unwrap_or_else(|_| THEME_JS.to_string());
+        let notify = minify::script(NOTIFY_JS).unwrap_or_else(|_| NOTIFY_JS.to_string());
         Assets {
             css_path: asset_path(&css, "css"),
             js_path: asset_path(&js, "js"),
+            notify_path: asset_path(&notify, "js"),
             css,
             js,
+            notify,
         }
     })
 }
@@ -105,6 +113,9 @@ pub struct HomeContext<'a> {
     /// that holds a permission of the inbox gets the tab Inbox: the inbox is a feature of the
     /// portal, and the launcher has no tile for it.
     pub settings: Option<&'a str>,
+    /// The inbox icon next to the gear, with its popover. `None`: the viewer receives no
+    /// notification, and the page has no icon.
+    pub bell: Option<&'a notify::Bell<'a>>,
 }
 
 /// The launcher. It has one full-width row for each group and one tile for each service.
@@ -148,6 +159,22 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
     let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
     if ctx.settings.is_some() {
         icons.push("i-settings");
+    }
+    if let Some(bell) = ctx.bell {
+        // The toasts and the script come after the page. The script loads once the page is read.
+        body.push_str(&notify::toasts(&bell.header));
+        let _ = write!(
+            body,
+            r#"<script src="{}" defer></script>"#,
+            assets().notify_path
+        );
+        icons.extend([
+            "i-inbox",
+            "i-x",
+            "i-alert-triangle",
+            "i-bell",
+            "i-bell-ringing",
+        ]);
     }
     document("Portal", "", &icons, &body)
 }
@@ -268,6 +295,9 @@ fn sign_out_form(token: &str) -> String {
 fn header(ctx: &HomeContext) -> String {
     let mut out = String::new();
     out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
+    if let Some(bell) = ctx.bell {
+        out.push_str(&notify::bell(bell));
+    }
     if let Some(target) = ctx.settings {
         let _ = write!(
             out,
@@ -933,6 +963,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         keys: !panel_only,
         inbox: !panel_only,
         superadmin: true,
+        notify: None,
     };
     let holders = |users: &Accounts| -> Vec<Holder> {
         users
@@ -956,6 +987,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 users_token: "demo",
                 hidden_services: 0,
                 settings: Some("/auth/settings"),
+                bell: None,
             },
         ),
         "access" | "access-panel-only" => access_page(
@@ -1103,6 +1135,52 @@ mod tests {
     }
 
     #[test]
+    fn the_notify_script_is_inside_the_subset_and_has_no_inline_or_dynamic_code() {
+        let minified = minify::script(NOTIFY_JS).expect("the minifier accepts the script");
+        assert!(minified.len() < NOTIFY_JS.len() * 3 / 4);
+        assert!(!minified.contains("/*") && !minified.contains("//"));
+        for banned in [
+            "eval(",
+            "innerHTML",
+            "document.write",
+            "Function(",
+            "setTimeout(\"",
+        ] {
+            assert!(!NOTIFY_JS.contains(banned), "{banned}");
+        }
+        // The script uses attributes to find its elements: no class name goes through the pass.
+        assert!(!NOTIFY_JS.contains("classList") && !NOTIFY_JS.contains("className"));
+        assert!(!NOTIFY_JS.contains("\"js\""));
+        let plain = assets();
+        assert_eq!(plain.notify_path, asset_path(&plain.notify, "js"));
+        assert!(plain.notify_path.starts_with("/auth/a/"));
+        // The same script runs for a masked page: the pass changes no string of it.
+        let mask = mask::Mask::new(b"a secret of the tests").unwrap();
+        assert_eq!(mask.assets().notify, plain.notify);
+    }
+
+    #[test]
+    fn the_notify_script_passes_a_syntax_check_when_node_is_present() {
+        let dir = std::env::temp_dir().join(format!("notify-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("script.js");
+        std::fs::write(&file, &assets().notify).unwrap();
+        match std::process::Command::new("node")
+            .arg("--check")
+            .arg(&file)
+            .output()
+        {
+            Ok(output) => assert!(
+                output.status.success(),
+                "node --check: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(_) => eprintln!("node is not in this image: the syntax check is skipped"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_served_script_passes_a_syntax_check_when_node_is_present() {
         let dir = std::env::temp_dir().join(format!("assets-script-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1132,6 +1210,7 @@ mod tests {
             users_token: "u",
             hidden_services: 0,
             settings: None,
+            bell: None,
         }
     }
 

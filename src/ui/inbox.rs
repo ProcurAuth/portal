@@ -535,6 +535,8 @@ pub struct InboxView<'a> {
     pub impersonated: bool,
     /// The send form that the server refused.
     pub send_error: Option<SendError<'a>>,
+    /// The level of the toasts of the account. `None`: the page has no control of it.
+    pub notify_level: Option<crate::inbox::notify::Level>,
 }
 
 // Small parts ----------------------------------------------------------------------------------
@@ -875,6 +877,15 @@ fn bar(view: &InboxView) -> String {
             short_time(sent.since_ms / 1000),
             short_time(view.now_ms / 1000)
         );
+    }
+    if let Some(level) = view.notify_level {
+        if !view.impersonated {
+            out.push_str(&super::notify::level_form(
+                level,
+                view.csrf,
+                super::notify::BACK_INBOX,
+            ));
+        }
     }
     if let Some(docs) = &view.docs {
         out.push_str(&docs_popover(view, docs));
@@ -1759,7 +1770,10 @@ pub fn status_page(frame: &Frame, text: &str) -> String {
 pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
-    let has_bar = view.sent.is_some() || view.docs.is_some() || view.rights.can_send();
+    let has_bar = view.sent.is_some()
+        || view.docs.is_some()
+        || view.rights.can_send()
+        || view.notify_level.is_some();
     if has_bar {
         out.push_str(&bar(view));
     }
@@ -1793,6 +1807,7 @@ mod tests {
             keys: true,
             inbox: true,
             superadmin: false,
+            notify: None,
         }
     }
 
@@ -1971,6 +1986,7 @@ mod tests {
             code: None,
             impersonated: false,
             send_error: None,
+            notify_level: None,
         }
     }
 

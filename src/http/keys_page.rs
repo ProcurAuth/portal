@@ -751,6 +751,7 @@ async fn draw(
         keys: list_visible(state, viewer),
         inbox: inbox_page::tab_visible(state, viewer),
         superadmin: is_superadmin(viewer),
+        notify: inbox_page::notify_header(state, viewer).await,
     };
     let status = if view.needs_access.is_some() {
         StatusCode::UNPROCESSABLE_ENTITY

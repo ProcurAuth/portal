@@ -75,6 +75,8 @@ impl Mask {
                 css: String::new(),
                 js_path: String::new(),
                 js: String::new(),
+                notify_path: String::new(),
+                notify: String::new(),
             },
         };
         let plain = assets();
@@ -92,11 +94,14 @@ impl Mask {
         css.push_str(&rule(&WRAPPER_CLASSES, "display:contents"));
         css.push_str(&rule(&EMPTY_CLASSES, "display:none"));
         let js = map_script(&plain.js, &mut |name| mask.name(name));
+        let notify = map_script(&plain.notify, &mut |name| mask.name(name));
         mask.assets = Assets {
             css_path: asset_path(&css, "css"),
             js_path: asset_path(&js, "js"),
+            notify_path: asset_path(&notify, "js"),
             css,
             js,
+            notify,
         };
         Ok(mask)
     }
@@ -167,6 +172,7 @@ impl Mask {
                 }
             }
             "src" if *value == plain.js_path => *value = self.assets.js_path.clone(),
+            "src" if *value == plain.notify_path => *value = self.assets.notify_path.clone(),
             _ => {}
         }
     }
@@ -970,7 +976,40 @@ mod tests {
         )
     }
 
+    /// The launcher of an account that receives notifications: the inbox icon, its popover with
+    /// two rows, the toasts and the script.
     fn launcher() -> String {
+        use crate::inbox::notify::{Importance, Level};
+        let rows = [
+            crate::ui::notify::Row {
+                id: "aa".into(),
+                title: "Disk full".into(),
+                group: "Infra".into(),
+                importance: Importance::Critical,
+                created_at_ms: 1_000,
+                href: Some("/auth/settings/inbox?open=aa#a-aa".into()),
+                unread: true,
+            },
+            crate::ui::notify::Row {
+                id: "bb".into(),
+                title: "Hello".into(),
+                group: "Direct".into(),
+                importance: Importance::Ring,
+                created_at_ms: 500,
+                href: None,
+                unread: false,
+            },
+        ];
+        let bell = crate::ui::notify::Bell {
+            header: crate::ui::notify::Header {
+                level: Level::All,
+                unread: 1,
+                cursor_ms: 2_000,
+            },
+            rows: &rows,
+            now_ms: 2_000,
+            csrf: "tok",
+        };
         home_page(
             &demo_catalog(),
             &Icons::empty(),
@@ -981,6 +1020,7 @@ mod tests {
                 users_token: "u",
                 hidden_services: 0,
                 settings: Some("/auth/settings/access"),
+                bell: Some(&bell),
             },
         )
     }

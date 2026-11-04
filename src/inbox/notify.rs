@@ -16,6 +16,7 @@
 use super::api::ApiError;
 use super::state::App;
 use super::target::Target;
+pub use super::target::DIRECT_NAME;
 
 /// The most alerts that one answer carries.
 pub const ITEMS_MAX: u32 = 10;
@@ -111,6 +112,7 @@ pub struct Scope {
 impl Scope {
     /// Whether the account receives an alert for `target`. The store applies the same rule in its
     /// queries. A test keeps the two in agreement.
+    #[cfg(test)]
     pub fn receives(&self, target: &Target) -> bool {
         match target {
             Target::Group(group) => self
