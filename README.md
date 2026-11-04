@@ -117,9 +117,9 @@ The superadmin adds and deletes **users** from the settings pages (the gear of t
 
 A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. With SQLite, the server keeps the active-session set in bounded RAM. Each session has an expiration time. Logout deletes the session at once. A restart of the process clears all sessions. With PostgreSQL, the sessions are in the shared database. Only the SHA-256 of the cookie is stored. The sessions are valid on every instance and survive a restart. A session of the superadmin is valid only with the superadmin credentials that opened it. A session that the superadmin opened with **Log in as** follows the same rule. A new superadmin login, password or session secret ends these sessions on every instance (see [Several instances](#several-instances-postgresql)).
 
-### Keep me signed in
+### Remember me
 
-The sign-in form has a box "Keep me signed in for 30 days". The box is not ticked at first. The number of days comes from `session.remember_ttl`. The box needs no script, and the label is a part of the box: a click on the words ticks it.
+The sign-in form has a box "Remember me", in the middle of the card under the password field. The box is not ticked at first. The row has the title "Stay signed in for 30 days", and a hidden text with the same words describes the box for a screen reader. The number of days comes from `session.remember_ttl`. The box needs no script, and the label is a part of the box: a click on the words ticks it.
 
 | | Box not ticked | Box ticked |
 |---|---|---|
@@ -156,7 +156,7 @@ The key `authentication.mfa` sets the policy:
 
 Any value other than `off` needs the key `authentication.totp_key_env` or `authentication.totp_key_file`. It has 64 hexadecimal characters: make it with `openssl rand -hex 32`. All instances use the same key. The program stops at start when the key is absent, when its format is wrong, or when it is not the key that sealed the secrets of the database. The default `optional` therefore needs a key in each configuration. No separate key sets the policy of the superadmin. Under `optional`, the sign-in of the superadmin stays a password sign-in, so that scripts that sign in keep working. Use `required` to force it.
 
-**Sign-in.** The first step is the sign-in form. A wrong password, an unknown login and a failed check of the form give the same answer as before (see `docs/login-hardening.md`). When the password is right and the account has a second factor, the portal opens no session. It shows a card with one field for the code. The field takes a code of the app. The card has a section "Use a recovery code". The state between the two steps is a signed token in a hidden field. It lives 5 minutes. It is bound to the account, to the client (the session binding), to the page, and to the box "Keep me signed in". No instance keeps a state, so the second step can go to another instance. Only a person who knows the password reaches the second step. This is accepted.
+**Sign-in.** The first step is the sign-in form. A wrong password, an unknown login and a failed check of the form give the same answer as before (see `docs/login-hardening.md`). When the password is right and the account has a second factor, the portal opens no session. It shows a card with one field for the code. The field takes a code of the app. The card has a section "Use a recovery code". The state between the two steps is a signed token in a hidden field. It lives 5 minutes. It is bound to the account, to the client (the session binding), to the page, and to the box "Remember me". No instance keeps a state, so the second step can go to another instance. Only a person who knows the password reaches the second step. This is accepted.
 
 **Enrolment.** The page **Security** (the gear, for each account) shows the state. **Turn on** shows a QR code as inline SVG markup. The page also shows the secret in groups of four characters and the `otpauth://` link as text. The person types the first code. The portal then shows 10 recovery codes one time (`xxxxx-xxxxx`) with a **Copy** button (script only). The portal stores the secret sealed with AES-256-GCM, and the recovery codes as keyed hashes. A recovery code works one time. **New recovery codes** and **Turn off** ask the password and a code. The page works without script.
 
@@ -657,7 +657,7 @@ Each use writes one audit event, `sessions_ended`. The chip **Changes** of the t
 
 The history is stored in the database (SQLite or PostgreSQL). The program keeps the history for `storage.retention_days` days. The default is 90 days. The history contains these records:
 
-- sessions: login, address, user agent, start, last seen, end, the reason for the end, and whether the person ticked "Keep me signed in";
+- sessions: login, address, user agent, start, last seen, end, the reason for the end, and whether the person ticked "Remember me";
 - the services that each session used. The history holds counts per service. It never holds a path or a query;
 - administrative events: users added or deleted, impersonation, all sessions ended, and failed sign-ins;
 - the sign-in attempts above.
@@ -1299,7 +1299,7 @@ The sessions and the signing key.
 | `cookie_name` | text: a cookie name that starts with __Host- | `"__Host-portal"` | The name of the session cookie over HTTPS. Over plain HTTP the server uses the same name without the prefix, because browsers refuse `__Host-` cookies there. |
 | `ttl` | duration, 1m to 7d | `"24h"` | The lifetime of a session from the sign-in. The session ends at this time, even when it is in use. The cookie of this session is a browser-session cookie. |
 | `idle_timeout` | duration, 1m to 7d | `"30m"` | A session that nobody uses for this time ends. The value is at most `session.ttl`. A remembered session uses `session.remember_idle_timeout`. |
-| `remember` | `true` or `false` | `true` | The sign-in form shows a box "Keep me signed in". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field. |
+| `remember` | `true` or `false` | `true` | The sign-in form shows a box "Remember me". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field. |
 | `remember_ttl` | duration, 1m to 90d | `"30d"` | The lifetime of a remembered session from the sign-in. The cookie has the same life. The value is at least `session.ttl`. An impersonated session is never remembered. Applies only when `session.remember` is `true`. |
 | `remember_idle_timeout` | duration, 1m to 90d | `"7d"` | A remembered session that nobody uses for this time ends. The value is at least `session.idle_timeout` and at most `session.remember_ttl`. Applies only when `session.remember` is `true`. |
 | `bind` | `ip_user_agent`, `user_agent`, `none` | `"ip_user_agent"` | What a session cookie is tied to: the client address and the User-Agent, the User-Agent only, or nothing. |
@@ -1538,7 +1538,7 @@ __Host-portal=<opaque random token>; Path=/; HttpOnly; SameSite=Strict; Secure  
 portal=<opaque random token>; Path=/; HttpOnly; SameSite=Strict                                 (plain HTTP)
 ```
 
-These cookies have no `Max-Age`. The browser deletes them when it ends its session. The server ends the session after `session.ttl`. When the person ticks "Keep me signed in", the cookie has `Max-Age=<session.remember_ttl>`, for example `Max-Age=2592000` (see [Keep me signed in](#keep-me-signed-in)).
+These cookies have no `Max-Age`. The browser deletes them when it ends its session. The server ends the session after `session.ttl`. When the person ticks "Remember me", the cookie has `Max-Age=<session.remember_ttl>`, for example `Max-Age=2592000` (see [Remember me](#remember-me)).
 
 After **Log in as** or **Back to superadmin**, `Max-Age` is the time left: the new session ends when the session of the password sign-in would have ended. A switch never gives a fresh `session.ttl`, and it never gives the remembered rule.
 
@@ -1565,11 +1565,11 @@ Only failed password checks use the failure budgets. A successful authentication
 
 ## Hardening of the sign-in page
 
-The sign-in page has five measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key. The box "Keep me signed in" has its own keys (see [Keep me signed in](#keep-me-signed-in)).
+The sign-in page has five measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key. The box "Remember me" has its own keys (see [Remember me](#remember-me)).
 
 - **Anti-enumeration (real protection).** An unknown login, a wrong password and a failed check of the form give the same answer: status 401, the same page, the same headers. Each of them runs one Argon2 check and counts as one failure. A refusal of a limiter (status 429) is the only visible difference. It does not depend on the login, with one documented exception: the budget of the superadmin login.
 - **Hide the product (obscurity, not security).** The page has a neutral title, no comment and no version. The stylesheet and the script have neutral paths, `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The cookie of the form is `lc`. The default name of the session cookie is not changed: set `session.cookie_name` for a neutral name.
-- **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. The box "Keep me signed in" is read with the other fields. It never changes the answer to a refusal. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
+- **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. The box "Remember me" is read with the other fields. It never changes the answer to a refusal. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
 - **Script minification (obscurity, not security).** The script and the stylesheet that every page loads are minified at the first request, with no tool at build time. A test runs `node --check` on the script when `node` exists.
 - **Random names and structure (obscurity, not security).** The sign-in page, the status pages and the launcher load only the shared stylesheet and the theme script. Their classes, identifiers and data attributes have short names that look random. The names are an HMAC of the plain names, under a key that comes from the session secret. All instances with the same secret use the same names, and a restart does not change them. The server also changes the structure of the HTML at each render: it inserts 0 to 3 inert elements, and it changes the order of the attributes and of the elements of the head. The look of the page does not change. The settings pages keep the plain names. The documentation lists what still identifies the product.
 

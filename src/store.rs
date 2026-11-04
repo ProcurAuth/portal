@@ -252,7 +252,7 @@ pub struct SessionRow {
     pub ip: Option<String>,
     pub user_agent: String,
     pub impersonated: bool,
-    /// The session had the remembered rule ("Keep me signed in").
+    /// The session had the remembered rule ("Remember me").
     pub remembered: bool,
     /// The sign-in used the second factor.
     pub mfa: bool,

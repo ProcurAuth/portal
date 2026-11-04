@@ -759,7 +759,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Bool,
         presence: Presence::Default("true"),
         when: When::Always,
-        doc: "The sign-in form shows a box \"Keep me signed in\". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field.",
+        doc: "The sign-in form shows a box \"Remember me\". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field.",
     },
     Key {
         block: "session",

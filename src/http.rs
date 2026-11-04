@@ -79,7 +79,7 @@ const GLOBAL_RATE_LIMIT_KEY: &str = "global";
 const FORM_TOKEN_FIELD: &str = "token";
 /// The name of the trap field of the sign-in form. A person never fills it.
 const TRAP_FIELD: &str = "website";
-/// The box "Keep me signed in" of the sign-in form, and the value that a ticked box sends.
+/// The box "Remember me" of the sign-in form, and the value that a ticked box sends.
 const KEEP_FIELD: &str = "keep";
 const KEEP_VALUE: &str = "1";
 /// The budget of the global limiter for the sign-ins that name the superadmin. Failures against
@@ -2297,7 +2297,7 @@ async fn handle_login_post(
     let form_token = form.remove(FORM_TOKEN_FIELD).unwrap_or_default();
     // A person never sees this field. A script that fills every field of the form fills it.
     let trap_filled = form.remove(TRAP_FIELD).is_some_and(|v| !v.is_empty());
-    // The box "Keep me signed in". It is read here, with the other fields, so that it never makes
+    // The box "Remember me". It is read here, with the other fields, so that it never makes
     // the form unknown. Only the value of a ticked box counts. With `session.remember = false`, the
     // server reads the field and ignores it.
     let keep = form.remove(KEEP_FIELD).as_deref() == Some(KEEP_VALUE);
@@ -2530,7 +2530,7 @@ struct SignedIn {
     /// The login as typed, made safe, for the log and the sign-in list.
     typed: String,
     known: bool,
-    /// The person ticked "Keep me signed in".
+    /// The person ticked "Remember me".
     keep: bool,
     /// The sign-in used the second factor.
     mfa: bool,

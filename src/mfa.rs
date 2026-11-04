@@ -54,7 +54,7 @@ impl Stage {
 pub struct Pending {
     pub stage: Stage,
     pub principal: Principal,
-    /// The person ticked "Keep me signed in" at the password step.
+    /// The person ticked "Remember me" at the password step.
     pub keep: bool,
     /// The wrong codes that this token took.
     pub tries: u8,
@@ -95,7 +95,7 @@ fn payload(pending: &Pending) -> String {
 
 /// The token of a pending sign-in. It is bound to the browser (the `binding` of the session rule, which holds the
 /// client address under the default rule) and to the anti-CSRF token of the page. It holds the account, the
-/// choice "Keep me signed in", the count of wrong codes and the time of the issue.
+/// choice "Remember me", the count of wrong codes and the time of the issue.
 pub fn sign_pending(
     secret: &[u8],
     pending: &Pending,

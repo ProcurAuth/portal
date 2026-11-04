@@ -113,7 +113,7 @@ pub struct SessionStart {
     pub login: String,
     pub superadmin: bool,
     pub impersonated: bool,
-    /// The person asked "Keep me signed in" and the session got the remembered rule.
+    /// The person asked "Remember me" and the session got the remembered rule.
     pub remembered: bool,
     /// The sign-in used the second factor.
     pub mfa: bool,

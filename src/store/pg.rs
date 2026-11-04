@@ -246,7 +246,7 @@ INSERT INTO directory_version (id, version) VALUES (1, 0);
 ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
 ",
     "
--- Version 8: the remembered sessions (\"Keep me signed in\"). A remembered session has a longer life
+-- Version 8: the remembered sessions (\"Remember me\"). A remembered session has a longer life
 -- and a longer idle time. The history row keeps the flag for the list of the sessions. A session
 -- that exists before this version is not remembered.
 -- The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
