@@ -834,6 +834,18 @@ async fn handle_request(
         handle_impersonate_end(&state, request, &client).await
     } else if method == Method::POST && path == END_SESSIONS_PATH {
         handle_end_sessions(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::CODE_PATH {
+        mfa_page::handle_code_post(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::ENROL_PATH {
+        mfa_page::handle_enrol_post(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::SECURITY_ENABLE_PATH {
+        mfa_page::handle_security_enable(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::SECURITY_DISABLE_PATH {
+        mfa_page::handle_security_disable(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::SECURITY_RECOVERY_PATH {
+        mfa_page::handle_security_recovery(&state, request, &client).await
+    } else if method == Method::POST && path == ui::mfa::RESET_PATH {
+        mfa_page::handle_reset(&state, request, &client).await
     } else if method == Method::GET && path == LOGIN_PATH {
         handle_login_get(&state, &uri, request.headers(), &client)
     } else if method == Method::POST && path == LOGIN_PATH {
@@ -959,7 +971,12 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     let original_path = path_only(original_uri);
     if matches!(
         original_path,
-        LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH
+        LOGIN_PATH
+            | LOGOUT_PATH
+            | ui::mfa::CODE_PATH
+            | ui::mfa::ENROL_PATH
+            | STYLE_PATH
+            | THEME_JS_PATH
     ) || is_neutral_asset(state, original_path)
     {
         state.metrics.verify_allowed();
@@ -1172,6 +1189,8 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         Some(ui::settings::ACCESS_PATH)
     } else if inbox_page::tab_visible(state, &viewer) {
         Some(ui::settings::INBOX_PATH)
+    } else if mfa_page::tab_visible(state, &viewer) {
+        Some(ui::mfa::SECURITY_PATH)
     } else {
         None
     };
@@ -1213,6 +1232,7 @@ fn is_settings_path(path: &str) -> bool {
             | ui::settings::ACTIVITY_PATH
             | ui::settings::NEW_USER_PATH
             | ui::settings::GIVE_PATH
+            | ui::mfa::SECURITY_PATH
     ) || path.starts_with(ui::settings::USER_PATH_PREFIX)
 }
 
@@ -1234,6 +1254,14 @@ async fn handle_settings(
     // An account that is not the superadmin sees the tab Access with the list of its keys, and
     // nothing else: the other pages do not exist for it.
     let superadmin = is_superadmin(&viewer);
+    if path == ui::mfa::SECURITY_PATH {
+        // The page of the second factor is the person's own page: every account has it, and a session of
+        // "Log in as" has none.
+        if !mfa_page::tab_visible(state, &viewer) {
+            return handle_not_found(state, &Method::GET, uri, headers, client);
+        }
+        return mfa_page::handle_security_get(state, uri, &viewer).await;
+    }
     if !superadmin
         && !(path == ui::settings::ACCESS_PATH && keys_page::list_visible(state, &viewer))
     {
@@ -1252,6 +1280,7 @@ async fn handle_settings(
         inbox: inbox_page::tab_visible(state, &viewer),
         superadmin,
         notify: inbox_page::notify_header(state, &viewer).await,
+        security: mfa_page::tab_visible(state, &viewer),
     };
     // The portal features are not in the catalogue: the pages of the services list the workloads
     // only.
@@ -1362,6 +1391,7 @@ async fn handle_settings(
                 .strip_prefix(ui::settings::USER_PATH_PREFIX)
                 .unwrap_or_default();
             let (users, snapshot) = load_admin_data(state).await;
+            let two_factor = mfa_page::enabled_logins(state).await;
             match user_view(
                 state,
                 &workloads,
@@ -1370,6 +1400,7 @@ async fn handle_settings(
                 asked,
                 users,
                 &snapshot,
+                two_factor.as_ref(),
             ) {
                 Some(view) => ui::user_page(&frame, &view),
                 None => return handle_not_found(state, &Method::GET, uri, headers, client),
@@ -1729,6 +1760,7 @@ fn user_view<'a>(
     asked: &str,
     users: Vec<(String, UserRecord)>,
     snapshot: &Snapshot,
+    two_factor: Option<&std::collections::HashSet<String>>,
 ) -> Option<ui::UserView<'a>> {
     let mut activities = activities_of(snapshot);
     let mut found = None;
@@ -1776,6 +1808,7 @@ fn user_view<'a>(
         owned_keys: user.keys,
         groups: group_chips(state),
         keys: key_chips(state, &user.login),
+        two_factor: two_factor.map(|logins| logins.contains(&user.login)),
         user,
         token: users_token,
     })
@@ -2091,11 +2124,21 @@ fn handle_success(state: &AppState, headers: &HeaderMap, client: &Client) -> Htt
     )
 }
 
-async fn handle_login_post(
+/// The sign-in form after the checks that every post of the sign-in needs: the same origin, a form, a limited number of
+/// bodies read at the same time, a limited body, and fields that parse. The sign-in and the second step share them.
+struct LoginForm {
+    headers: HeaderMap,
+    /// The anti-CSRF cookie of the browser.
+    csrf_cookie: Option<String>,
+    form: std::collections::HashMap<String, String>,
+}
+
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
+async fn login_form(
     state: &Arc<AppState>,
     request: Request<Incoming>,
     client: &Client,
-) -> HttpResponse {
+) -> Result<LoginForm, HttpResponse> {
     let client_ip = client.ip;
     if !validate_post_origin(request.headers()) {
         state.metrics.login_origin_failure();
@@ -2113,14 +2156,14 @@ async fn handle_login_post(
                 ),
             ],
         );
-        return text_response(StatusCode::FORBIDDEN, "Origin validation failed\n");
+        return Err(text_response(StatusCode::FORBIDDEN, "Origin validation failed\n"));
     }
     if !content_type_is_form(request.headers()) {
         state.metrics.login_invalid_request();
-        return text_response(
+        return Err(text_response(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Unsupported Media Type\n",
-        );
+        ));
     }
 
     let csrf_cookie = cookie_value(
@@ -2155,9 +2198,9 @@ async fn handle_login_post(
         );
         let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n");
         if set_dynamic_header(&mut response, RETRY_AFTER, "1").is_err() {
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+            return Err(text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n"));
         }
-        return response;
+        return Err(response);
     };
     let body = read_limited_body(
         request.into_body(),
@@ -2170,24 +2213,45 @@ async fn handle_login_post(
         Ok(v) => Zeroizing::new(v),
         Err(BodyReadError::TooLarge) => {
             state.metrics.login_invalid_request();
-            return text_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large\n");
+            return Err(text_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large\n"));
         }
         Err(BodyReadError::Timeout) => {
             state.metrics.login_invalid_request();
-            return text_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n");
+            return Err(text_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n"));
         }
         Err(BodyReadError::Io) => {
             state.metrics.login_invalid_request();
-            return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+            return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n"));
         }
     };
 
-    let mut form = match parse_form(&body) {
+    let form = match parse_form(&body) {
         Ok(v) => v,
         Err(_) => {
             state.metrics.login_invalid_request();
-            return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+            return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n"));
         }
+    };
+    Ok(LoginForm {
+        headers,
+        csrf_cookie,
+        form,
+    })
+}
+
+async fn handle_login_post(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    let client_ip = client.ip;
+    let LoginForm {
+        headers,
+        csrf_cookie,
+        mut form,
+    } = match login_form(state, request, client).await {
+        Ok(v) => v,
+        Err(response) => return response,
     };
 
     let login_input = form.remove("login").unwrap_or_default();
@@ -2390,15 +2454,82 @@ async fn handle_login_post(
         );
     }
 
-    if state.config.security.login_rate_limit_enabled {
-        state.ip_limiter.success(&ip_key);
-    }
-
     let (principal, session_login) = match &who {
         Who::Superadmin => (Principal::Superadmin, state.superadmin_login.clone()),
         Who::User(login, _) => (Principal::User(login.clone()), login.clone()),
         Who::Unknown => unreachable!("an unknown login never authenticates"),
     };
+    // With the second factor on, the password opens no session: the person goes on to the second step. The failures
+    // of the address stay on record until a person finishes the second step, so a script that knows a password
+    // cannot clear them.
+    if let Some(response) =
+        mfa_page::after_password(state, client, &principal, keep, &csrf, &rd, &sig).await
+    {
+        return response;
+    }
+    if state.config.security.login_rate_limit_enabled {
+        state.ip_limiter.success(&ip_key);
+    }
+    finish_sign_in(
+        state,
+        client,
+        &headers,
+        &rd,
+        SignedIn {
+            principal,
+            session_login,
+            typed,
+            known,
+            keep,
+            mfa: false,
+        },
+        Landing::Redirect,
+    )
+}
+
+/// The account that has given all the proofs that the configuration asks, and what the session records about it.
+struct SignedIn {
+    principal: Principal,
+    /// The login that the history of the sessions shows.
+    session_login: String,
+    /// The login as typed, made safe, for the log and the sign-in list.
+    typed: String,
+    known: bool,
+    /// The person ticked "Keep me signed in".
+    keep: bool,
+    /// The sign-in used the second factor.
+    mfa: bool,
+}
+
+/// What the person sees when the session starts.
+enum Landing {
+    /// The page that the person asked for.
+    Redirect,
+    /// The recovery codes that the forced enrolment made, shown once, with a link to the page that the person asked for.
+    Codes(Vec<String>),
+}
+
+/// Opens the session and sets its cookie. The password step, and the second step when the account has one, call this.
+fn finish_sign_in(
+    state: &Arc<AppState>,
+    client: &Client,
+    headers: &HeaderMap,
+    rd: &str,
+    signed: SignedIn,
+    landing: Landing,
+) -> HttpResponse {
+    let SignedIn {
+        principal,
+        session_login,
+        typed,
+        known,
+        keep,
+        mfa,
+    } = signed;
+    let client_ip_text = client
+        .ip
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unknown".into());
     let token = Zeroizing::new(
         match state.sessions.issue(
             client.binding,
@@ -2407,9 +2538,9 @@ async fn handle_login_post(
                 login: session_login,
                 impersonated: false,
                 remember: keep,
-                mfa: false,
+                mfa,
                 ip: ip_text(client),
-                user_agent: user_agent_text(&headers),
+                user_agent: user_agent_text(headers),
                 // A sign-in with the password gets the full `session.ttl`, or the full
                 // `session.remember_ttl` for a remembered session.
                 not_after: None,
@@ -2444,7 +2575,14 @@ async fn handle_login_post(
         },
     );
 
-    let mut response = redirect_response(StatusCode::SEE_OTHER, &rd);
+    let mut response = match landing {
+        Landing::Redirect => redirect_response(StatusCode::SEE_OTHER, rd),
+        Landing::Codes(codes) => masked_response(
+            state,
+            StatusCode::OK,
+            ui::mfa::codes_card(&codes, rd),
+        ),
+    };
     // A remembered session has a persistent cookie with the life of the session. Any other session
     // has a cookie that the browser deletes at the end of its session.
     let cookie_life = match state.config.session.remember {
@@ -2472,14 +2610,18 @@ async fn handle_login_post(
         known,
         success: true,
         ip: ip_text(client),
-        user_agent: user_agent_text(&headers),
+        user_agent: user_agent_text(headers),
         at: unix_now(),
     }));
     log(
         state,
         LogLevel::Info,
         "login_success",
-        &[("client_ip", client_ip_text), ("login", typed)],
+        &[
+            ("client_ip", client_ip_text),
+            ("login", typed),
+            ("second_factor", mfa.to_string()),
+        ],
     );
     response
 }
@@ -2753,6 +2895,18 @@ async fn admin_request(
     client: &Client,
     action: &'static str,
 ) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
+    form_request(state, request, client, action, USERS_TOKEN).await
+}
+
+/// The same checks for a form whose anti-CSRF token has the purpose `purpose`.
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
+async fn form_request(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+    action: &'static str,
+    purpose: &'static str,
+) -> Result<(Viewer, std::collections::HashMap<String, String>), HttpResponse> {
     if !validate_post_origin(request.headers()) {
         state.metrics.users_origin_failure();
         log(
@@ -2804,7 +2958,7 @@ async fn admin_request(
         Err(_) => return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n")),
     };
     let csrf = form.remove("csrf").unwrap_or_default();
-    if !verify_action_token(&state.signing_secret, USERS_TOKEN, &viewer.token, &csrf) {
+    if !verify_action_token(&state.signing_secret, purpose, &viewer.token, &csrf) {
         state.metrics.user_admin(action, "forbidden");
         return Err(text_response(
             StatusCode::FORBIDDEN,
@@ -2864,6 +3018,7 @@ async fn new_user_refused(
         inbox: inbox_page::tab_visible(state, viewer),
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
+        security: mfa_page::tab_visible(state, viewer),
     };
     let workloads = current_catalog(state);
     let html = ui::new_user_page(
@@ -4116,6 +4271,12 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",
         LOGIN_PATH => "login",
+        ui::mfa::CODE_PATH => "login_code",
+        ui::mfa::ENROL_PATH => "login_enrol",
+        ui::mfa::SECURITY_ENABLE_PATH
+        | ui::mfa::SECURITY_DISABLE_PATH
+        | ui::mfa::SECURITY_RECOVERY_PATH => "security",
+        ui::mfa::RESET_PATH => "users_reset_two_factor",
         LOGOUT_PATH => "logout",
         DENIED_PATH => "denied",
         USERS_ADD_PATH => "users_add",
@@ -4167,6 +4328,7 @@ mod edge;
 mod inbox_page;
 mod inbox_rights;
 mod keys_page;
+mod mfa_page;
 mod options_page;
 mod pdp;
 

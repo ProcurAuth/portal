@@ -240,6 +240,7 @@ impl Context<'_> {
             inbox: true,
             superadmin: is_superadmin(&self.viewer),
             notify: None,
+            security: super::mfa_page::tab_visible(state, &self.viewer),
         }
     }
 }

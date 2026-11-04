@@ -20,6 +20,26 @@
   root.classList.add("js");
   apply(mode);
 
+  // A Copy button (the attribute data-copy, with no value) copies the field that stands in the same box. The page
+  // finds the field from the button, so the names of the elements can change.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-copy]");
+    if (!button || !button.parentNode || button.getAttribute("data-copy") !== "") return;
+    var field = button.parentNode.querySelector("textarea");
+    if (!field) return;
+    field.focus();
+    field.select();
+    var label = button.textContent;
+    try {
+      window.navigator.clipboard.writeText(field.value).then(function () {
+        button.textContent = "Copied";
+        window.setTimeout(function () {
+          button.textContent = label;
+        }, 2000);
+      }, function () {});
+    } catch (e) {}
+  });
+
   document.addEventListener("DOMContentLoaded", function () {
     var group = document.querySelector("[data-theme-switch]");
     if (!group) return;

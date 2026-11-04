@@ -788,6 +788,101 @@ a {
   color: var(--danger);
 }
 
+/* The second factor: the QR code, the secret, the link and the recovery codes. The same blocks are in the cards of the
+   sign-in and in the settings. The QR code keeps a white ground in both color schemes, because a scanner needs it. */
+.mfaScan {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 6px;
+}
+
+.qr {
+  display: block;
+  width: 184px;
+  height: 184px;
+  max-width: 100%;
+  margin: 0 auto 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: #fff;
+}
+
+.mfaLabel {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.card .mfaLabel {
+  margin: 6px 0 0;
+}
+
+.mfaSecret,
+.mfaUri {
+  display: block;
+  padding: 7px 10px;
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.mfaSecret {
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+.otp {
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+}
+
+.card .altCode {
+  margin: 16px 0 0;
+  font-size: 13px;
+}
+
+.card .altCode summary {
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.card .altCode form {
+  margin: 8px 0 0;
+}
+
+.mfaBox {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.mfaCopy {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  resize: none;
+}
+
+.mfaBox .copyBtn {
+  display: none;
+  width: 100%;
+  margin-top: 0;
+}
+
+.js .mfaBox .copyBtn {
+  display: inline-flex;
+}
+
 /* The trap field of the sign-in form. A person never sees it. A script that fills every field fills it. */
 .hp {
   display: none;

@@ -1808,6 +1808,7 @@ mod tests {
             inbox: true,
             superadmin: false,
             notify: None,
+            security: false,
         }
     }
 

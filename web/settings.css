@@ -3131,3 +3131,54 @@ input.keyText {
 .contentTabs__tab .nbadge {
   margin-left: 6px;
 }
+
+/* The page "Security": one panel with the state, the secret to scan and the forms of the actions. The forms
+   open in place, under their button, and they stack on a narrow screen. */
+.mfaBody {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  max-width: 460px;
+  padding: 8px 2px;
+}
+
+.mfaForm {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.mfaActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.mfaDo summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.mfaDo summary::-webkit-details-marker {
+  display: none;
+}
+
+.mfaPanel {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 320px);
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-compact);
+  background: var(--panel);
+}
+
+.mfaDo[open] {
+  flex-basis: 100%;
+}
+
+.mfaBody .mfaBox {
+  width: 100%;
+}

@@ -71,6 +71,7 @@ pub(super) fn frame() -> Frame<'static> {
         inbox: false,
         superadmin: true,
         notify: None,
+        security: false,
     }
 }
 
@@ -330,6 +331,7 @@ pub(super) fn user_view(catalog: &Catalog, user: UserCard) -> UserView<'_> {
         owned_keys: 0,
         groups: Vec::new(),
         keys: Vec::new(),
+        two_factor: None,
     }
 }
 

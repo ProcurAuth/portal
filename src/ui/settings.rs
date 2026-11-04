@@ -102,6 +102,8 @@ pub enum Tab {
     Activity,
     /// The pages of the inbox. Each user with a right of the inbox features sees it.
     Inbox,
+    /// The second factor of the signed-in account. Each account sees it when `authentication.mfa` is not `off`.
+    Security,
 }
 
 impl Tab {
@@ -111,6 +113,7 @@ impl Tab {
             Self::Services => SERVICES_PATH,
             Self::Activity => ACTIVITY_PATH,
             Self::Inbox => INBOX_PATH,
+            Self::Security => super::mfa::SECURITY_PATH,
         }
     }
 
@@ -120,6 +123,7 @@ impl Tab {
             Self::Services => "Services",
             Self::Activity => "Activity",
             Self::Inbox => "Inbox",
+            Self::Security => "Security",
         }
     }
 }
@@ -138,6 +142,9 @@ pub struct Frame<'a> {
     /// The notifications of the viewer: the badge of the tab Inbox, and the data of the script.
     /// `None`: the page has none (the file has no block `inbox`, or the viewer has no right).
     pub notify: Option<super::notify::Header>,
+    /// The viewer sees the tab "Security": `authentication.mfa` is not `off`, and the session is not a session of
+    /// "Log in as".
+    pub security: bool,
 }
 
 impl Frame<'_> {
@@ -153,6 +160,9 @@ impl Frame<'_> {
         }
         if self.inbox {
             tabs.push(Tab::Inbox);
+        }
+        if self.security {
+            tabs.push(Tab::Security);
         }
         tabs
     }
@@ -211,6 +221,21 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "grant-limit" => ("This account has the largest number of grants.", false),
         "no-user" => ("That account does not exist.", false),
+        "mfa-enabled" => ("Two-factor is on.", true),
+        "mfa-disabled" => ("Two-factor is off.", true),
+        "mfa-reset" => (
+            "Two-factor reset. The sessions of this account are closed.",
+            true,
+        ),
+        "mfa-refused" => ("The password or the code is not right.", false),
+        "mfa-bad-code" => ("The code is not right.", false),
+        "mfa-locked" => ("Too many attempts. Try again later.", false),
+        "mfa-required" => (
+            "The configuration requires the second factor. It cannot be turned off.",
+            false,
+        ),
+        "mfa-none" => ("This account has no second factor.", false),
+        "mfa-stale" => ("The page was open too long. Start again.", false),
         "error" => ("The action failed. See the portal logs.", false),
         _ => return None,
     };
@@ -540,6 +565,8 @@ pub struct UserView<'a> {
     pub groups: Vec<GroupChip>,
     /// The keys of the account, for the chips of the page.
     pub keys: Vec<KeyChip>,
+    /// The second factor of the account: `None` when `authentication.mfa` is `off`.
+    pub two_factor: Option<bool>,
 }
 
 /// A group of the inbox with the number of its members, for the chips "Groups" of the pages of an
@@ -757,6 +784,16 @@ fn account_bar(view: &UserView, editable: bool) -> String {
             false,
             &password_form(&user.login, view.token),
         ));
+    }
+    // The second factor: the state of the account, and for another account a reset with a confirmation in place.
+    if let Some(enabled) = view.two_factor {
+        if user.superadmin {
+            if enabled {
+                tools.push_str(&status_icon("ok", "circle-check", "Two-factor is on"));
+            }
+        } else {
+            tools.push_str(&super::mfa::account_tool(&user.login, enabled, view.token));
+        }
     }
     tools.push_str(&popover(
         "Activity of the account",
@@ -1723,6 +1760,7 @@ mod tests {
                 inbox,
                 superadmin,
                 notify: None,
+                security: false,
             }
             .tabs()
         };

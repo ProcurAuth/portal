@@ -48,6 +48,7 @@ pub struct Metrics {
 
     login_success: AtomicU64,
     login_failure: AtomicU64,
+    login_mfa_failure: AtomicU64,
     login_rate_limited_ip: AtomicU64,
     login_rate_limited_global: AtomicU64,
     login_invalid_request: AtomicU64,
@@ -93,6 +94,7 @@ impl Metrics {
             http_duration: DurationHistogram::new(),
             login_success: AtomicU64::new(0),
             login_failure: AtomicU64::new(0),
+            login_mfa_failure: AtomicU64::new(0),
             login_rate_limited_ip: AtomicU64::new(0),
             login_rate_limited_global: AtomicU64::new(0),
             login_invalid_request: AtomicU64::new(0),
@@ -166,11 +168,17 @@ impl Metrics {
         self.login_failure.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The sign-ins that the portal refused since the start: a wrong password, an unknown login
-    /// and a sign-in that a limiter blocked. The alerts of the portal read it.
+    /// A wrong second-factor code, or a code that a limiter refused, for an account whose password was right.
+    pub fn login_mfa_failure(&self) {
+        self.login_mfa_failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The sign-ins that the portal refused since the start: a wrong password, an unknown login,
+    /// a wrong second-factor code and a sign-in that a limiter blocked. The alerts of the portal read it.
     pub fn refused_sign_ins(&self) -> u64 {
         [
             &self.login_failure,
+            &self.login_mfa_failure,
             &self.login_rate_limited_ip,
             &self.login_rate_limited_global,
         ]
@@ -385,6 +393,13 @@ impl Metrics {
             "result",
             "failure",
             &self.login_failure,
+        );
+        write_counter(
+            &mut out,
+            "portal_login_attempts_total",
+            "result",
+            "mfa_failure",
+            &self.login_mfa_failure,
         );
         write_counter(
             &mut out,

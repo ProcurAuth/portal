@@ -238,7 +238,9 @@ impl Default for Custom {
             wait_complete: true,
             max_users: 10,
             allow_creation: true,
-            mfa: "optional",
+            // The harness runs with the second factor off, so the tests of the other features see the pages that they
+            // always saw. The tests of the second factor set `optional` or `required`.
+            mfa: "off",
             env: Vec::new(),
             stop: None,
         }

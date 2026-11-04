@@ -21,6 +21,7 @@ pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
 pub mod mask;
+pub mod mfa;
 pub mod minify;
 pub mod notify;
 pub mod settings;
@@ -968,6 +969,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         inbox: !panel_only,
         superadmin: true,
         notify: None,
+        security: false,
     };
     let holders = |users: &Accounts| -> Vec<Holder> {
         users
@@ -1055,6 +1057,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                             kind: crate::keys::KeyKind::Mcp,
                         },
                     ],
+                    two_factor: Some(true),
                 },
             )
         }

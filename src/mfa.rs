@@ -249,6 +249,19 @@ impl Mfa {
         })
     }
 
+    /// The page of an enrolment that a person already has: the same secret, from its token. `None` when the token is not
+    /// one that this server made for this account, or it is old.
+    pub fn resume(&self, login: &str, token: &str, issuer: &str, now: i64) -> Option<Enrolment> {
+        let secret = self.open_enrolment(login, token, now)?;
+        let uri = totp::otpauth_uri(issuer, login, &secret);
+        Some(Enrolment {
+            token: token.to_string(),
+            grouped: totp::grouped(&secret),
+            qr: qr_svg(&uri),
+            uri,
+        })
+    }
+
     fn open_enrolment(&self, login: &str, token: &str, now: i64) -> Option<Zeroizing<Vec<u8>>> {
         let (expires, sealed) = token.split_once('.')?;
         let expires: i64 = expires.parse().ok()?;
