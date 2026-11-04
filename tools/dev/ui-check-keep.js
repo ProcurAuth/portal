@@ -1,4 +1,4 @@
-// Checks the box "Keep me signed in" of the sign-in page in a real browser: the box, its label, the
+// Checks the box "Remember me" of the sign-in page in a real browser: the box, its label, the
 // keyboard, the dark and the light scheme, the widths 1280 and 390, with and without script, and the
 // attributes of the session cookie that the browser keeps after a real sign-in. Run it with
 // tools/dev/ui-check.sh and UI_CHECK_SCRIPT=ui-check-keep.js. The check signs in many times: use a
@@ -12,7 +12,7 @@
 //   UI_CHECK_LOGIN         login of the superadmin (default admin)
 //   UI_CHECK_PASSWORD      its password
 //   UI_CHECK_REMEMBER_TTL  the life of a remembered session, in seconds (default 2592000)
-//   UI_CHECK_DAYS          the number in the label (default 30)
+//   UI_CHECK_DAYS          the number in the title and in the description (default 30)
 //   UI_CHECK_SHOTS         a directory for the screenshots (optional)
 const { chromium } = require("playwright");
 
@@ -59,6 +59,18 @@ async function state(page) {
     return {
       checked: box.checked,
       text: label.textContent.trim(),
+      title: label.title,
+      described: Array.from((box.getAttribute("aria-describedby") || "").split(" "))
+        .map((id) => (document.getElementById(id) || {}).textContent || "")
+        .join(" ")
+        .trim(),
+      // The offset of the middle of the row from the middle of the card, in pixels.
+      centre: (() => {
+        let card = box.form;
+        while (card && getComputedStyle(card).borderTopWidth === "0px") card = card.parentElement;
+        const c = card.getBoundingClientRect();
+        return Math.round(((l.left + l.right) / 2 - (c.left + c.right) / 2) * 10) / 10;
+      })(),
       box: [Math.round(b.width), Math.round(b.height)],
       label: [Math.round(l.width), Math.round(l.height)],
       buttonTop: Math.round(button.top),
@@ -100,8 +112,10 @@ async function sessionCookie(context) {
           continue;
         }
         check(`the box is not ticked (${tag})`, before.checked === false, "ticked");
-        check(`the label has the number of days (${tag})`, before.text === `Keep me signed in for ${DAYS} days`, before.text);
-        check(`no inline style and no identifier (${tag})`, before.inlineStyle === 0 && before.ids === 0, JSON.stringify(before));
+        check(`the label says Remember me (${tag})`, before.text === "Remember me", before.text);
+        check(`the title of the row and the description of the box have the number of days (${tag})`, before.title === `Stay signed in for ${DAYS} days` && before.described === before.title, JSON.stringify([before.title, before.described]));
+        check(`the row is in the middle of the card (${tag})`, Math.abs(before.centre) <= 1, String(before.centre));
+        check(`no inline style and no identifier on the box or its label (${tag})`, before.inlineStyle === 0 && before.ids === 0, JSON.stringify(before));
         check(`no horizontal overflow (${tag})`, before.overflow === false, "overflow");
         const wanted = width < 600 ? 20 : 16;
         check(`the box has its size (${tag})`, before.box[0] === wanted && before.box[1] === wanted, before.box.join("x"));
@@ -136,9 +150,11 @@ async function sessionCookie(context) {
     check(`Space clears the box (${tag})`, (await state(page)).checked === false, "ticked");
     await page.keyboard.press("Tab");
     check(`Tab leaves the box for the button (${tag})`, await page.evaluate(() => document.activeElement.type === "submit"), "not on the button");
-    // The accessible name of the box is the text of its label.
+    // The accessible name of the box is the text of its label. The number of days is its description.
     const name = await page.locator("input[name=keep]").evaluate((e) => e.labels[0].textContent.trim());
-    check(`the box has the name of its label (${tag})`, name === `Keep me signed in for ${DAYS} days`, name);
+    check(`the box has the name of its label (${tag})`, name === "Remember me", name);
+    const described = await page.locator("input[name=keep]").evaluate((e) => document.getElementById(e.getAttribute("aria-describedby")).textContent.trim());
+    check(`the box is described with the number of days (${tag})`, described === `Stay signed in for ${DAYS} days`, described);
     await context.close();
   }
 
