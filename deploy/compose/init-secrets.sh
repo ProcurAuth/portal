@@ -4,6 +4,7 @@
 #   superadmin_login       login of the superadmin ("admin")
 #   superadmin_password    random password of the superadmin
 #   session_secret         signing key of the forms (all instances use the same key)
+#   totp_key               key that encrypts the TOTP secrets (64 hexadecimal characters)
 #   db_password            password of the PostgreSQL user
 #   inbox_server_key       Noise key of the inbox server (portal inbox keygen)
 #   inbox_api_key   bearer key of the sender "local" (portal inbox token)
@@ -58,6 +59,10 @@ fi
 if [ ! -f "$dir/session_secret" ]; then
   random 48 > "$dir/session_secret"
   seal session_secret
+fi
+if [ ! -f "$dir/totp_key" ]; then
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$dir/totp_key"
+  seal totp_key
 fi
 if [ ! -f "$dir/db_password" ]; then
   random 32 > "$dir/db_password"

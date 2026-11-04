@@ -9,6 +9,10 @@ server {
 authentication {
   superadmin_login_file    = "/run/secrets/superadmin_login"
   superadmin_password_file = "/run/secrets/superadmin_password"
+  # The second factor is optional: nobody has it until a person turns it on in the page Security. The sign-in of
+  # the demo scripts does not change. up.sh makes the key.
+  mfa                      = "optional"
+  totp_key_file            = "/run/secrets/totp_key"
 }
 
 # The grants of the accounts of the database come from the settings pages. seed.sh sets those of alice

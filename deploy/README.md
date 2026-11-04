@@ -76,6 +76,7 @@ Create the Secret `portal-secret` in the namespace `edge` before the pods start.
 | `superadmin_login` | Login of the superadmin | Choose it. |
 | `superadmin_password` | Password of the superadmin | Make a long random value. |
 | `session_secret` | Key that signs the forms. At least 32 bytes. | Make a random value. All instances share it. |
+| `totp_key` | Key that encrypts the TOTP secrets: 64 hexadecimal characters. All instances share it. | `openssl rand -hex 32` |
 | `db_password` | Password of the role `portal` | The same value as in the database. |
 | `identity_key` | Ed25519 key of the identity tokens | `openssl genpkey -algorithm ed25519` |
 | `inbox_server_key` | Noise key of the inbox server | `portal inbox keygen --out FILE` |
@@ -85,7 +86,7 @@ Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the con
 
 ```sh
 kubectl -n edge create secret generic portal-secret \
-  --from-file=superadmin_login --from-file=superadmin_password --from-file=session_secret \
+  --from-file=superadmin_login --from-file=superadmin_password --from-file=session_secret --from-file=totp_key \
   --from-file=db_password --from-file=identity_key --from-file=inbox_server_key \
   --from-file=inbox_alerting_key
 ```

@@ -23,6 +23,8 @@ umask 077
 for user in alice bob carol; do
   [ -f "$secrets/${user}_password" ] || random 20 > "$secrets/${user}_password"
 done
+# The key of the TOTP secrets: 32 random bytes as 64 hexadecimal characters.
+[ -f "$secrets/totp_key" ] || openssl rand -hex 32 > "$secrets/totp_key"
 [ -f "$secrets/pdp_token_notes" ] || random 43 > "$secrets/pdp_token_notes"
 if [ ! -f "$secrets/identity_key.pem" ]; then
   openssl genpkey -algorithm ed25519 -out "$secrets/identity_key.pem" 2> /dev/null

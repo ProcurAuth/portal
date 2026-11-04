@@ -20,6 +20,13 @@ server {
 authentication {
   superadmin_login_file    = "/run/secrets/superadmin_login"
   superadmin_password_file = "/run/secrets/superadmin_password"
+
+  # The second factor (TOTP, RFC 6238). "off": no second factor. "optional" (default): each account chooses to turn it on
+  # in the page Security. "required": each account, the superadmin too, must enrol at the next sign-in.
+  # Any value other than "off" needs the key that encrypts the TOTP secrets in the database: 64 hexadecimal
+  # characters, made with `openssl rand -hex 32`. All instances use the same key.
+  # mfa = "optional"
+  totp_key_file = "/run/secrets/totp_key"
 }
 
 # "hybrid": the settings pages give the grants of the accounts of the database, and the blocks `user`

@@ -44,6 +44,7 @@ services:
       - pdp_token_notes
       - inbox_server_key
       - inbox_api_key
+      - totp_key
     ports:
       # The listener of the portal without Traefik, for the metrics and the health check from the
       # host. Loopback only. The pages, the producers and the phones use Traefik (8088).
@@ -223,3 +224,5 @@ secrets:
     file: ./.secrets/inbox_server_key
   inbox_api_key:
     file: ./.secrets/inbox_api_key
+  totp_key:
+    file: ./.secrets/totp_key

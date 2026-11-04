@@ -16,6 +16,7 @@ random() { head -c 256 /dev/urandom | base64 | tr -d '=+/\n' | head -c "$1"; }
 printf '%s' admin > "$secrets/superadmin_login"
 random 24 > "$secrets/superadmin_password"
 random 48 > "$secrets/session_secret"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$secrets/totp_key"
 random 32 > "$secrets/db_password"
 openssl genpkey -algorithm ed25519 -out "$secrets/identity_key" 2>/dev/null
 portal() { docker run --rm --network none -u "$(id -u):$(id -g)" -v "$secrets:/out" "$image" "$@" >/dev/null; }

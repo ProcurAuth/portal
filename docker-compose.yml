@@ -58,6 +58,7 @@ services:
       - superadmin_login
       - superadmin_password
       - session_secret
+      - totp_key
       - db_password
       - inbox_server_key
       - inbox_api_key
@@ -88,6 +89,8 @@ secrets:
     file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/superadmin_password
   session_secret:
     file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/session_secret
+  totp_key:
+    file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/totp_key
   db_password:
     file: ${PORTAL_SECRETS_DIR:-./deploy/compose/secrets}/db_password
   inbox_server_key:
