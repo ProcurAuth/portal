@@ -5736,3 +5736,389 @@ async fn the_form_of_the_page_sends_an_alert_to_a_group_or_to_an_account() {
     assert_eq!(st, 200);
     assert!(!page.contains(&format!("id=\"a-{id}\"")));
 }
+
+// The notifications of the signed-in person.
+
+/// `GET /auth/settings/inbox/notifications` with the cookie of an account. `query` is the query
+/// string with its `?`, or empty.
+fn notifications(s: &Server, cookie: &str, query: &str) -> (u16, Value) {
+    let host = format!("127.0.0.1:{}", s.port);
+    let (st, _, body) = http_full(
+        s.port,
+        &host,
+        "GET",
+        &format!("/auth/settings/inbox/notifications{query}"),
+        &[
+            ("Cookie", cookie.to_string()),
+            ("Accept", "application/json".into()),
+        ],
+        "",
+    );
+    (st, serde_json::from_str(&body).unwrap_or(Value::Null))
+}
+
+/// The token of the forms of the popover, from the launcher. A page of the tab Inbox would move the
+/// marker "read up to" of the account.
+fn home_csrf(s: &Server, cookie: &str) -> String {
+    let (st, page) = inbox_page_as(s, cookie, "/");
+    assert_eq!(st, 200);
+    let at = page
+        .find("/auth/settings/inbox/read")
+        .expect("the popover has the form of the marker");
+    let after = &page[at..];
+    let name = after.find("name=\"csrf\"").expect("a token");
+    let tag_start = at + after[..name].rfind('<').unwrap();
+    let tag_end = at + name + after[name..].find('>').unwrap();
+    attr(&page[tag_start..tag_end], "value").expect("the token has a value")
+}
+
+/// A form of the notifications. `json` asks for the answer of the script.
+fn notify_form(
+    s: &Server,
+    cookie: &str,
+    path: &str,
+    fields: &str,
+    json: bool,
+) -> (u16, String, String) {
+    let host = format!("127.0.0.1:{}", s.port);
+    let csrf = home_csrf(s, cookie);
+    let body = if fields.is_empty() {
+        format!("csrf={csrf}")
+    } else {
+        format!("csrf={csrf}&{fields}")
+    };
+    let mut headers = vec![
+        (
+            "Content-Type",
+            "application/x-www-form-urlencoded".to_string(),
+        ),
+        ("Origin", format!("http://{host}")),
+        ("Cookie", cookie.to_string()),
+    ];
+    if json {
+        headers.push(("Accept", "application/json".into()));
+    }
+    http_full(s.port, &host, "POST", path, &headers, &body)
+}
+
+fn titles(answer: &Value) -> Vec<String> {
+    answer["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|i| i["title"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_notifications_follow_the_rights_of_the_account() {
+    let mut s = Server::setup();
+    s.add_to_inbox("  group \"crit\" {\n    name = \"Critical\"\n    critical = true\n  }");
+    s.start();
+    let root = s.session();
+    let mia = s.account_with(
+        "mia",
+        &[
+            "inbox.receive on service:portal/inbox_group:infra",
+            "inbox.receive on service:portal/inbox_group:crit",
+        ],
+    );
+    let otto = s.account_with(
+        "otto",
+        &["inbox.receive on service:portal/inbox_group:other"],
+    );
+    let nina = s.account_with("nina", &["keys.own.read on service:portal"]);
+    enroll_as(&s, "mia-phone", "mia").await.unwrap();
+
+    // The first sight of an account: the level All, nothing unread, no alert, no cursor.
+    let (st, first) = notifications(&s, &mia.cookie, "");
+    assert_eq!(st, 200, "{first}");
+    assert_eq!(first["level"], "all");
+    assert_eq!(first["unread"], 0);
+    assert_eq!(first["items"], json!([]));
+    assert!(first["cursor"].is_null(), "{first}");
+    let begin = first["now"].as_i64().unwrap();
+    assert_eq!(notifications(&s, &otto.cookie, "").1["unread"], 0);
+    std::thread::sleep(Duration::from_millis(20));
+
+    // An alert for each group, and one for the account.
+    assert_eq!(
+        post_alert(&s, "k1", json!({"group": "infra", "title": "for infra"})).0,
+        201
+    );
+    let send = |to: &str, title: &str, key: &str| {
+        let (st, head, _) = inbox_form(
+            &s,
+            &root.cookie,
+            "/auth/settings/inbox/send",
+            &format!(
+                "to={}&title={}&key={key}",
+                form_value(to),
+                form_value(title)
+            ),
+        );
+        assert_eq!(st, 303, "{head}");
+    };
+    send("group:other", "for other", "f1");
+    send("group:crit", "for crit", "f2");
+    send("user:mia", "for mia", "f3");
+    let after = format!("?after={begin}");
+
+    // A member gets the alerts of its groups and its own, and no other.
+    let (st, mine) = notifications(&s, &mia.cookie, &after);
+    assert_eq!(st, 200, "{mine}");
+    assert_eq!(
+        titles(&mine),
+        ["for infra", "for crit", "for mia"],
+        "{mine}"
+    );
+    assert!(!mine.to_string().contains("for other"));
+    assert_eq!(mine["unread"], 3);
+    let levels: Vec<&str> = mine["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["level"].as_str().unwrap())
+        .collect();
+    assert_eq!(levels, ["alert", "critical", "ring"]);
+    let groups: Vec<&str> = mine["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["group"].as_str().unwrap())
+        .collect();
+    assert_eq!(groups, ["Infra", "Critical", "Direct"]);
+    // The account has no `alert.read`: the alert has no row to open for it.
+    assert!(mine["items"][0]["href"].is_null(), "{mine}");
+    assert!(mine["cursor"].as_i64().unwrap() >= begin);
+    // Another account sees its own group, and not the alert for the account of another.
+    let (_, others) = notifications(&s, &otto.cookie, &after);
+    assert_eq!(titles(&others), ["for other"], "{others}");
+    // An account with no right of the inbox gets the same answer as for any other page of it.
+    assert_eq!(notifications(&s, &nina.cookie, &after).0, 403);
+    // The superadmin has all the groups, and not the alert for another account. Its rows open.
+    let (_, all) = notifications(&s, &root.cookie, &after);
+    assert_eq!(
+        titles(&all),
+        ["for infra", "for other", "for crit"],
+        "{all}"
+    );
+    let href = all["items"][0]["href"].as_str().unwrap();
+    assert!(href.starts_with("/auth/settings/inbox?open="), "{href}");
+
+    // The cursor: the window of the lookback is 5 seconds. Past it the answer has no alert.
+    let cursor = mine["cursor"].as_i64().unwrap();
+    let (_, later) = notifications(&s, &mia.cookie, &format!("?after={}", cursor + 6_000));
+    assert_eq!(later["items"], json!([]), "{later}");
+    assert_eq!(later["unread"], 3);
+    assert_eq!(later["cursor"].as_i64().unwrap(), cursor + 6_000);
+    // The query is strict.
+    for bad in [
+        "?after=abc",
+        "?after=-1",
+        "?x=1",
+        "?after=1&after=2",
+        "?after=",
+    ] {
+        assert_eq!(notifications(&s, &mia.cookie, bad).0, 400, "{bad}");
+    }
+
+    // Without a session the answer is the redirect of the other pages of the settings.
+    let host = format!("127.0.0.1:{}", s.port);
+    let (st, head, _) = http_full(
+        s.port,
+        &host,
+        "GET",
+        "/auth/settings/inbox/notifications?after=1",
+        &[],
+        "",
+    );
+    let (st_page, head_page, _) = http_full(s.port, &host, "GET", "/auth/settings/inbox", &[], "");
+    assert_eq!((st, st_page), (303, 303));
+    assert!(location(&head).starts_with("/auth/login"), "{head}");
+    assert!(location(&head_page).starts_with("/auth/login"));
+
+    // The level "Alert and Critical only" drops the toast of an alert for the account. The count
+    // still has it.
+    let (st, head, _) = notify_form(
+        &s,
+        &mia.cookie,
+        "/auth/settings/inbox/notify",
+        "level=important",
+        false,
+    );
+    assert_eq!(
+        (st, location(&head).as_str()),
+        (303, "/auth/settings/inbox")
+    );
+    send("user:mia", "ring two", "f4");
+    let (_, mine) = notifications(&s, &mia.cookie, &after);
+    assert_eq!(mine["level"], "important");
+    assert_eq!(titles(&mine), ["for infra", "for crit"], "{mine}");
+    assert_eq!(mine["unread"], 4);
+    // The popover of the launcher lists the four, newest first.
+    let (_, home) = inbox_page_as(&s, &mia.cookie, "/");
+    for title in ["for infra", "for crit", "for mia", "ring two"] {
+        assert!(home.contains(title), "{title}");
+    }
+    assert!(!home.contains("for other"));
+
+    // "Mark all read" moves the marker. The script asks for JSON and gets the state.
+    let (st, _, body) = notify_form(
+        &s,
+        &mia.cookie,
+        "/auth/settings/inbox/read",
+        "back=home",
+        true,
+    );
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        (state["unread"].clone(), state["level"].clone()),
+        (json!(0), json!("important"))
+    );
+    let (st, head, _) = notify_form(
+        &s,
+        &mia.cookie,
+        "/auth/settings/inbox/read",
+        "back=home",
+        false,
+    );
+    assert_eq!((st, location(&head).as_str()), (303, "/"));
+    assert_eq!(notifications(&s, &mia.cookie, "").1["unread"], 0);
+    // The alerts that come after the marker are unread, and the page Inbox moves the marker too.
+    send("group:crit", "for crit again", "f5");
+    assert_eq!(notifications(&s, &mia.cookie, "").1["unread"], 1);
+    let (st, _) = inbox_page_as(&s, &mia.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200);
+    assert_eq!(notifications(&s, &mia.cookie, "").1["unread"], 0);
+
+    // The level Off: no count, no alert. The account of the other still has the default.
+    let (st, _, body) = notify_form(
+        &s,
+        &mia.cookie,
+        "/auth/settings/inbox/notify",
+        "level=off",
+        true,
+    );
+    assert_eq!(st, 200, "{body}");
+    send("group:crit", "for crit three", "f6");
+    let (_, off) = notifications(&s, &mia.cookie, &after);
+    assert_eq!(
+        (
+            off["level"].clone(),
+            off["unread"].clone(),
+            off["items"].clone()
+        ),
+        (json!("off"), json!(0), json!([]))
+    );
+    assert_eq!(notifications(&s, &otto.cookie, "").1["level"], "all");
+    // The popover of the launcher still lists what the account received, with no badge.
+    let (_, home) = inbox_page_as(&s, &mia.cookie, "/");
+    assert!(home.contains("for crit three"));
+    // The forms are strict: a level, a page, a field that does not exist, the token.
+    for (fields, expected) in [
+        ("level=loud", 400),
+        ("level=all&back=elsewhere", 400),
+        ("level=all&extra=1", 400),
+        ("", 400),
+    ] {
+        let (st, _, body) = notify_form(
+            &s,
+            &mia.cookie,
+            "/auth/settings/inbox/notify",
+            fields,
+            false,
+        );
+        assert_eq!(st, expected, "{fields}: {body}");
+    }
+    let host = format!("127.0.0.1:{}", s.port);
+    let (st, _, _) = http_full(
+        s.port,
+        &host,
+        "POST",
+        "/auth/settings/inbox/notify",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Origin", format!("http://{host}")),
+            ("Cookie", mia.cookie.clone()),
+        ],
+        "csrf=wrong&level=all",
+    );
+    assert_eq!(st, 403);
+    // A GET of a form address is not allowed.
+    let (st, _) = inbox_page_as(&s, &mia.cookie, "/auth/settings/inbox/notify");
+    assert_eq!(st, 405);
+
+    // The launcher: the icon is for an account that has a right of the inbox, and its names go
+    // through the pass of the launcher.
+    for (name, cookie, has_icon) in [
+        ("mia", &mia.cookie, true),
+        ("otto", &otto.cookie, true),
+        ("root", &root.cookie, true),
+        ("nina", &nina.cookie, false),
+    ] {
+        let (st, home) = inbox_page_as(&s, cookie, "/");
+        assert_eq!(st, 200, "{name}");
+        assert_eq!(home.contains("data-notify-bell"), has_icon, "{name}");
+        assert_eq!(home.contains("data-notify-toast"), has_icon, "{name}");
+        for plain in [
+            "nbell", "nrow", "nlist", "nbadge", "nlevel", "toasts", "toast__",
+        ] {
+            assert!(
+                !home.contains(&format!("class=\"{plain}"))
+                    && !home.contains(&format!(" {plain}\"")),
+                "{name}: the class {plain} is not mapped"
+            );
+        }
+    }
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_instances_give_the_same_notifications() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    let mut b = a.sibling("instance-b");
+    a.start();
+    b.start();
+    let grants = ["inbox.receive on service:portal/inbox_group:infra"];
+    let on_a = a.account_with("mia", &grants);
+    let on_b = b.account_with("mia", &grants);
+
+    let (_, first) = notifications(&b, &on_b.cookie, "");
+    assert_eq!(first["unread"], 0);
+    let begin = first["now"].as_i64().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    // An alert accepted by A is in the answer of B at once: the store is the only state.
+    assert_eq!(
+        post_alert(&a, "shared", json!({"group": "infra", "title": "from a"})).0,
+        201
+    );
+    let (st, seen) = notifications(&b, &on_b.cookie, &format!("?after={begin}"));
+    assert_eq!(st, 200, "{seen}");
+    assert_eq!(titles(&seen), ["from a"]);
+    assert_eq!(seen["unread"], 1);
+    assert_eq!(notifications(&a, &on_a.cookie, "").1["unread"], 1);
+    // The marker that A moves is the marker that B reads. So is the level.
+    let (st, _, _) = notify_form(&a, &on_a.cookie, "/auth/settings/inbox/read", "", true);
+    assert_eq!(st, 200);
+    assert_eq!(notifications(&b, &on_b.cookie, "").1["unread"], 0);
+    let (st, _, _) = notify_form(
+        &b,
+        &on_b.cookie,
+        "/auth/settings/inbox/notify",
+        "level=off",
+        true,
+    );
+    assert_eq!(st, 200);
+    assert_eq!(notifications(&a, &on_a.cookie, "").1["level"], "off");
+    a.stop();
+    b.stop();
+}
