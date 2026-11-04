@@ -665,6 +665,404 @@ a {
 }
 
 
+/* The sign-in page and the card of the second step ---------------------------------------------------
+   A flat card with a hairline border, a solid band with the destination (only when the sign-in has one),
+   and fields with a floating label. The classes are plain classes and no rule depends on the structure:
+   these pages go through the pass that changes their names and their elements (see src/ui/mask.rs).
+   The label floats with :focus, :placeholder-shown and the autofill states, through :has() on the box of the
+   field. A browser that does not know :has() keeps the label floated, so the label never covers the text. */
+
+.signin {
+  width: min(100%, 320px);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.signin__band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 16px;
+  background: var(--accent-fill);
+  color: var(--on-fill);
+  font: 12px/16px var(--font-mono);
+}
+
+.signin__lock {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* The address is text from outside: it is cut with an ellipsis, and it never reorders the text around it. */
+.signin__to {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.signin__host {
+  font-weight: 400;
+}
+
+.signin__path {
+  font-weight: 700;
+}
+
+.signin__form {
+  margin: 0;
+  padding: 0 16px 16px;
+}
+
+/* The form of the code card is followed by the link of the recovery code. */
+.signin__form--head {
+  padding-bottom: 0;
+}
+
+/* A card with no band has more space above its first field. */
+.signin__form--bare {
+  padding-top: 8px;
+}
+
+/* A field: a box with the underline, the input, the floating label and, for a password, the button. */
+.signin__field {
+  --fh: 48px;
+  --pt: 18px;
+  --rest: 33px;
+  --up: 10px;
+  --fs: 0.846;
+  --float: translateY(calc(var(--up) - var(--rest))) scale(var(--fs));
+  position: relative;
+  margin-top: 4px;
+  border-bottom: 1px solid var(--input-border);
+}
+
+.signin__in {
+  display: block;
+  width: 100%;
+  height: var(--fh);
+  margin: 0;
+  padding: var(--pt) 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  caret-color: var(--accent-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.signin__in:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 0;
+}
+
+.signin__field--pw .signin__in {
+  padding-right: 40px;
+}
+
+/* The 6 digits, or the recovery code: tabular, spaced out. */
+.signin__field--code .signin__in {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  letter-spacing: 0.3em;
+  font-variant-numeric: tabular-nums;
+}
+
+.signin__label {
+  position: absolute;
+  left: 0;
+  top: calc(var(--rest) - 10px);
+  max-width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: var(--float);
+  transform-origin: left center;
+  transition: transform 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signin__label {
+    transition: none;
+  }
+}
+
+/* With :has(), the label rests over the empty field. It floats when the field has the focus, has a value, or is
+   filled by the browser. The two autofill rules are separate: a browser that drops one keeps the other. */
+@supports selector(:has(*)) {
+  .signin__label {
+    transform: none;
+  }
+
+  .signin__field:has(.signin__in:focus) .signin__label {
+    transform: var(--float);
+  }
+
+  .signin__field:has(.signin__in:not(:placeholder-shown)) .signin__label {
+    transform: var(--float);
+  }
+
+  .signin__field:has(.signin__in:-webkit-autofill) .signin__label {
+    transform: var(--float);
+  }
+
+  .signin__field:has(.signin__in:autofill) .signin__label {
+    transform: var(--float);
+  }
+
+  .signin__in:focus-visible {
+    outline: 0;
+  }
+
+  .signin__field:has(.signin__in[aria-invalid="true"]) {
+    border-bottom-color: var(--danger);
+    box-shadow: 0 1px 0 var(--danger);
+  }
+
+  .signin__field:has(.signin__in:focus-visible) {
+    border-bottom-color: var(--accent-fill);
+    box-shadow: 0 1px 0 var(--accent-fill);
+  }
+
+  .signin__field:has(.signin__in:focus-visible) .signin__label {
+    color: var(--accent-text);
+  }
+}
+
+/* Browser autofill keeps the surface of the card, so a floating label never sits on a coloured patch. */
+.signin__in:-webkit-autofill,
+.signin__in:-webkit-autofill:hover,
+.signin__in:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  box-shadow: 0 0 0 100px var(--panel) inset;
+  transition: background-color 9999s ease-out;
+}
+
+.signin__in:autofill {
+  color: var(--text);
+  caret-color: var(--text);
+  box-shadow: 0 0 0 100px var(--panel) inset;
+}
+
+/* The button that shows the password. The page has it hidden: the script shows it. */
+.signin__reveal {
+  position: absolute;
+  right: 0;
+  top: calc(var(--rest) - 14px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.signin__reveal[hidden] {
+  display: none;
+}
+
+.signin__reveal:hover {
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.signin__show,
+.signin__hide {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.signin__reveal[aria-pressed="true"] .signin__show {
+  display: none;
+}
+
+.signin__reveal:not([aria-pressed="true"]) .signin__hide {
+  display: none;
+}
+
+/* The message line keeps its place, so the card does not move when a message appears. */
+.signin__msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 16px;
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.signin__mi {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.signin__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 6px 0 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.signin__check input {
+  appearance: none;
+  display: grid;
+  place-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--inset);
+  cursor: pointer;
+}
+
+.signin__check input:checked {
+  border-color: var(--accent-fill);
+  background: var(--accent-fill);
+}
+
+.signin__check input:checked::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  margin-top: -2px;
+  border-bottom: 2px solid var(--on-fill);
+  border-left: 2px solid var(--on-fill);
+  transform: rotate(-45deg);
+}
+
+.signin__check input:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 2px;
+}
+
+.signin__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 36px;
+  margin: 8px 0 0;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--accent-fill);
+  color: var(--on-fill);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease);
+}
+
+.signin__btn:hover {
+  background: var(--accent-fill-hover);
+}
+
+.signin__btn:active {
+  transform: translateY(1px);
+}
+
+.signin__btn--sec {
+  border-color: var(--border-strong);
+  background: var(--raised);
+  color: var(--text);
+}
+
+.signin__btn--sec:hover {
+  background: var(--raised);
+  border-color: var(--input-border);
+}
+
+/* The recovery code: a quiet link that opens a second form. It needs no script. */
+.signin__alt {
+  margin: 0;
+  padding: 4px 16px 12px;
+}
+
+.signin__sum {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.signin__sum::-webkit-details-marker {
+  display: none;
+}
+
+.signin__sum:hover {
+  color: var(--text);
+}
+
+.signin__recovery {
+  margin: 4px 0 0;
+}
+
+/* Touch: every target reaches 44px, as the other controls of the shared stylesheet. */
+@media (pointer: coarse) {
+  .signin__btn {
+    height: 44px;
+  }
+
+  .signin__check,
+  .signin__sum {
+    min-height: 44px;
+  }
+
+  .signin__check input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .signin__reveal {
+    min-width: 44px;
+    height: 44px;
+    top: calc(var(--rest) - 22px);
+  }
+
+  .signin__field--pw .signin__in {
+    padding-right: 48px;
+  }
+}
+
 .hint {
   margin: 4px 0;
   color: var(--muted);

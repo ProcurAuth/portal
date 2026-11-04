@@ -25,6 +25,7 @@ pub mod mfa;
 pub mod minify;
 pub mod notify;
 pub mod settings;
+pub mod signin;
 
 use std::fmt::Write as _;
 
@@ -184,6 +185,14 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
 pub fn auth_document(title: &str, card_html: &str) -> String {
     let body = format!(r#"<main class="authShell"><div class="card">{card_html}</div></main>"#);
     document(title, "", &[], &body)
+}
+
+/// The shell of the sign-in page and of the card of the second step. The card has its own class, so none of the
+/// rules of the other cards applies to it. `icons` names the sprite symbols that the card draws. The title is
+/// always "Authentication": a page title that changed would tell which step a person is on.
+fn sign_in_document(card_html: &str, icons: &[&str]) -> String {
+    let body = format!(r#"<main class="authShell"><div class="signin">{card_html}</div></main>"#);
+    document("Authentication", "", icons, &body)
 }
 
 /// A card with a title, a sentence and one button back to the launcher. The 404 and the 403 pages

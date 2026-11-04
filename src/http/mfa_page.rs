@@ -128,6 +128,7 @@ fn step_page(
         csrf: posted.csrf,
         rd: posted.rd,
         sig: posted.sig,
+        host: client.host.as_deref(),
         pending: &token,
     };
     let body = match pending.stage {
@@ -173,7 +174,7 @@ fn start_again(
     };
     login_page(
         state,
-        client.https,
+        client,
         rd,
         sig,
         &fresh,
@@ -351,7 +352,7 @@ fn wrong_code(state: &AppState, client: &Client, step: &Step, message: &str) -> 
         };
         return login_page(
             state,
-            client.https,
+            client,
             &step.rd,
             &step.sig,
             &fresh,
@@ -473,7 +474,7 @@ pub(super) async fn handle_code_post(
                     &step,
                     u64::try_from(until - unix_now()).unwrap_or(1),
                 ),
-                None => wrong_code(state, client, &step, "Invalid code"),
+                None => wrong_code(state, client, &step, ui_mfa::INVALID_CODE),
             }
         }
         Verdict::Locked { until } => {
@@ -589,7 +590,7 @@ pub(super) async fn handle_enrol_post(
         Enrolled::WrongCode => {
             count_address_failure(state, client);
             record_wrong_code(state, client, &step, &login);
-            wrong_code(state, client, &step, "Invalid code")
+            wrong_code(state, client, &step, ui_mfa::INVALID_CODE)
         }
         // A page that nobody made, or an old page, or an account that has a second factor already.
         Enrolled::BadPage | Enrolled::Already => start_again(
