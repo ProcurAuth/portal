@@ -5182,17 +5182,20 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert_eq!(st, 403);
     let (_, home) = inbox_page_as(&s, &pia.cookie, "/");
     // The launcher changes the order of the attributes at each render: read the tag of the gear.
-    let at = home
-        .find(r#"href="/auth/settings/inbox""#)
-        .unwrap_or_else(|| panic!("{home}"));
-    let gear = &home[home[..at].rfind('<').unwrap()..at + home[at..].find('>').unwrap()];
+    let gear_of = |home: &str, href: &str| {
+        let at = home
+            .find(&format!(r#"href="{href}""#))
+            .unwrap_or_else(|| panic!("{home}"));
+        home[home[..at].rfind('<').unwrap()..at + home[at..].find('>').unwrap()].to_string()
+    };
+    let gear = gear_of(&home, "/auth/settings/inbox");
     assert!(gear.contains(r#"aria-label="Settings""#), "{gear}");
     assert!(
         !has(&home, "inbox-tile") && !has(&home, "<h2"),
         "no tile of the inbox: {home}"
     );
     let (_, home) = inbox_page_as(&s, &s.session().cookie, "/");
-    assert!(has(&home, r#"href="/auth/settings" aria-label="Settings""#));
+    assert!(gear_of(&home, "/auth/settings").contains(r#"aria-label="Settings""#));
     assert!(
         !has(&home, r#"href="/auth/settings/inbox""#),
         "no tile of the inbox"
