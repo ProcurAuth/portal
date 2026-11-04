@@ -273,6 +273,7 @@ async function main() {
   {
     const { context, page } = await open(browser, "dark", 1280, true);
     await page.goto(await signedLogin(context, DEST));
+    await page.waitForTimeout(400);
     const i = await inspect(page);
     check("login has the focus at load", i.fields[0].focused, JSON.stringify(i.fields[0]));
     await page.fill("input[name=password]", "secret-text");
