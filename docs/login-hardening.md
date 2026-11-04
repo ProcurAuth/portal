@@ -14,7 +14,7 @@ Five measures protect or hide the page. Two of them are real protections. Three 
 
 Obscurity does not stop an attacker who reads the page. It only removes the easy marks. Do not count on items 2, 4 and 5 for security. The limiters and Argon2 stay the protection against password guessing.
 
-None of the five measures adds a configuration key. No new key means no new default to document. The box "Keep me signed in" is not a measure of this page, and it has its own keys: see "The box Keep me signed in" at the end of this file.
+None of the five measures adds a configuration key. No new key means no new default to document. The box "Keep me signed in" is not a measure of this page, and it has its own keys: see "The box Keep me signed in" at the end of this file. The second factor is not a measure of this page either: see "The second step".
 
 ## 1. Anti-enumeration
 
@@ -196,6 +196,19 @@ The form has a box with the field name `keep`. The value of a ticked box is `1`.
 - The box has no identifier and no script. The label holds the box, and its class goes through the mask like all other classes of the page. The mask never wraps a label that holds a field.
 - With `session.remember = false`, the page has no box. The server still reads the field and ignores its value.
 - The name `keep` is a common word. It does not name the product.
+
+## The second step
+
+With `authentication.mfa` other than `off`, an account can have a second factor (see the README and `SECURITY.md`). This changes the sign-in as follows. The five measures above stay. The second factor adds no measure to this list. It adds the keys `authentication.mfa` and `authentication.totp_key`, which the configuration reference documents.
+
+- **Step 1 does not change.** A wrong password, an unknown login and a failed check of the form give the same answer. An account with a second factor and an account without give the same refusal. The test `a_wrong_password_looks_the_same_for_an_account_with_and_without_a_second_factor` compares the canonical form and the headers.
+- **Step 2 is for a person who knows the password.** When the password is right and the account has a second factor, the answer is a card with a field for the code. A person who sees this card learns that the account has a second factor. This is accepted: the person has the password. A person without the password never reaches the card.
+- **The state is a token.** The hidden field `pending` holds a token that the server signs. It holds the account, the box "Keep me signed in", the count of wrong codes and the time. It is bound to the client binding and to the anti-CSRF token. It lives 5 minutes. Any instance with the session secret can check it. A damaged, old or foreign token gives the page "The page was open too long", with status 403.
+- **The routes.** `POST /auth/login/code` and `POST /auth/login/enrol`. The `Origin` check, the content type, the limit of the bodies read at the same time and the size of the body are the checks of the first step. ForwardAuth lets both paths pass without a session, as it does for `/auth/login`.
+- **The cards go through the pass of the names.** Their classes and identifiers are mapped like the classes of the sign-in card. They have no inline script and no inline style. A test checks that no plain class name is in the page. The copy button of the recovery codes finds its field from its place in the box, not from an identifier, so that the mapping does not break it.
+- **Counters.** A wrong code counts in the database row of the account (5 in 10 minutes lock the second step for 5 minutes), and in the limiter of the address with the key `mfa:<address>`. The limits of the address are the keys `security.login_attempts_per_ip`, `security.login_window` and `security.login_lockout`. The metric `portal_login_attempts_total{result="mfa_failure"}` counts the wrong codes. They add to the refused sign-ins that the alerts of the portal read. The log line `login_failed` has `reason=mfa`.
+- **A password that is right does not clear the failures of the address at once.** The limiter of the address is cleared when the person finishes the second step, not at the password step. A script that knows a password cannot clear the failures that way.
+- **A database from before the second factor.** The schema version 8 got the tables of the second factor in place, with no migration. A database that the earlier version 8 made stops the portal at start with a message that names the missing objects.
 
 ## Operation notes
 

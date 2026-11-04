@@ -104,6 +104,8 @@ The **superadmin** is the one account that is not in the database. Its login and
 authentication {
   superadmin_login_file    = "/run/secrets/portal_superadmin_login"
   superadmin_password_file = "/run/secrets/portal_superadmin_password"
+  # The key of the TOTP secrets (64 hexadecimal characters). The policy `authentication.mfa` is "optional" by default.
+  totp_key_file            = "/run/secrets/portal_totp_key"
 }
 ```
 
@@ -139,6 +141,34 @@ A persistent cookie is the usual risk of this option (OWASP Session Management C
 - Keep `session.remember_ttl` as short as the site accepts. The maximum is 90 days.
 - Use HTTPS, so that the cookie has the `Secure` attribute.
 - Recommendation, not done in this version: ask for a new sign-in before a sensitive action in a remembered session. Examples are to create a key, to use **Log in as** and to change a password.
+
+### Second factor (TOTP)
+
+An account can have a second factor: a code of 6 digits from an authenticator app. The code follows RFC 6238 (HMAC-SHA-1, a step of 30 seconds). Google Authenticator, Aegis, 1Password and the other usual apps read it. The portal accepts the code of the current step and of the step before and after it. Passkeys (WebAuthn) are the next step: they stop phishing, and TOTP does not.
+
+The key `authentication.mfa` sets the policy:
+
+| Value | Effect |
+|---|---|
+| `off` | The portal shows no page of the second factor and never asks for a code. The key `authentication.totp_key` must not be set. |
+| `optional` (default) | Each account chooses to turn it on in the page **Security**. An account that did not choose signs in with the password only. |
+| `required` | Each account, the superadmin too, must enrol after the password step. The session starts only after the enrolment. The account cannot turn it off. |
+
+Any value other than `off` needs the key `authentication.totp_key_env` or `authentication.totp_key_file`. It has 64 hexadecimal characters: make it with `openssl rand -hex 32`. All instances use the same key. The program stops at start when the key is absent, when its format is wrong, or when it is not the key that sealed the secrets of the database. The default `optional` therefore needs a key in each configuration. No separate key sets the policy of the superadmin. Under `optional`, the sign-in of the superadmin stays a password sign-in, so that scripts that sign in keep working. Use `required` to force it.
+
+**Sign-in.** The first step is the sign-in form. A wrong password, an unknown login and a failed check of the form give the same answer as before (see `docs/login-hardening.md`). When the password is right and the account has a second factor, the portal opens no session. It shows a card with one field for the code. The field takes a code of the app. The card has a section "Use a recovery code". The state between the two steps is a signed token in a hidden field. It lives 5 minutes. It is bound to the account, to the client (the session binding), to the page, and to the box "Keep me signed in". No instance keeps a state, so the second step can go to another instance. Only a person who knows the password reaches the second step. This is accepted.
+
+**Enrolment.** The page **Security** (the gear, for each account) shows the state. **Turn on** shows a QR code as inline SVG markup. The page also shows the secret in groups of four characters and the `otpauth://` link as text. The person types the first code. The portal then shows 10 recovery codes one time (`xxxxx-xxxxx`) with a **Copy** button (script only). The portal stores the secret sealed with AES-256-GCM, and the recovery codes as keyed hashes. A recovery code works one time. **New recovery codes** and **Turn off** ask the password and a code. The page works without script.
+
+**Lost phone.** Use a recovery code. When the person has no code left, the superadmin resets the second factor of the account: the page of the account in the tab Access has a button **Reset the two-factor** with a confirmation in place. The reset ends the sessions of the account, as a new password does. Activity shows the event. The superadmin has no account above it: use the command `portal reset-two-factor --config FILE --user LOGIN`. The command works with a stopped SQLite portal, or with PostgreSQL. `--all` removes every second factor and the check value of the key, so that a new `authentication.totp_key` can serve.
+
+**Brute force.** A wrong code counts against the account in the database, so every instance adds to the count. Five wrong codes in 10 minutes lock the second step of the account for 5 minutes. The answer is status 429 with `Retry-After`. No lock is permanent. One pending token takes 5 wrong codes. The address has its own budget: the limiter of the sign-in, with the keys `security.login_attempts_per_ip`, `security.login_window` and `security.login_lockout`. The counter `portal_login_attempts_total{result="mfa_failure"}` counts the wrong codes. The log line `login_failed` has `reason=mfa`. The portal records the last accepted time step of each account in the database: a code of the same step or of an older step is refused. A code is good one time.
+
+**Sessions.** A session records `mfa` like `remembered`. Activity marks a session of the second factor with the badge "2fa". A session of **Log in as** needs no code of the account. It has no `mfa` flag, and it has no page **Security**: the session of the superadmin is the one that counts. Keys (`mcp_`, `api_`), the enrollment codes of the phones and the ForwardAuth path do not change: a session exists only after the full sign-in. Recommendation, not done in this version: ask for a fresh second factor before a sensitive action.
+
+**Dependency.** The QR code needs the crate `qrcode` (pure Rust, no dependency of its own, features `svg` only). HMAC-SHA-1 and AES-256-GCM come from `aws-lc-rs`, which the portal already uses.
+
+**Schema.** The portal has no deployment with users. The second factor changed the schema version 8 in place: it did not add a version, and it has no migration. A database that the earlier version 8 made lacks the tables `totp_credentials`, `totp_recovery` and `totp_key_check` and the column `mfa`. The portal stops at start and says so. Make a new database.
 
 ## Grants and the gate
 
@@ -1014,6 +1044,8 @@ server {
 authentication {
   superadmin_login_file    = "/run/secrets/portal_superadmin_login"
   superadmin_password_file = "/run/secrets/portal_superadmin_password"
+  # The key of the TOTP secrets (64 hexadecimal characters). The policy `authentication.mfa` is "optional" by default.
+  totp_key_file            = "/run/secrets/portal_totp_key"
 }
 
 users {
@@ -1602,6 +1634,7 @@ portal healthcheck --config FILE
 portal import-sqlite --config FILE --from SQLITE_FILE
 portal end-sessions --config FILE
 portal revoke-keys --config FILE (--user LOGIN | --all)
+portal reset-two-factor --config FILE (--user LOGIN | --all)
 portal hash-password < password.txt
 portal inbox keygen --out FILE
 portal inbox token --out FILE
@@ -1697,7 +1730,8 @@ Roll the instances one at a time. A new instance opens its ports only when its c
 - The Android app accepts a plain `http://` address, and it accepts an `https://` address with the trust store of the phone. The app has no network security configuration and no certificate code of its own. The manifest allows clear text for each address, because the portal is often on a private network. A narrower rule is an open point.
 - With SQLite, only one instance is active. A standby needs the block `inbox.replica`.
 - An alert that the Inbox accepts while the database has no writable primary exists only in memory until the database returns. If every instance that holds it stops, the Inbox loses it.
-- Each instance has its own rate limits and its own counter of refused sign-ins.
+- Each instance has its own rate limits and its own counter of refused sign-ins. The counters of the wrong second-factor codes of an account are in the database.
+- The second factor is a TOTP code. A person can give it to a false page, as a password. WebAuthn stops this, and it is the next step. The portal has no fresh second factor for sensitive actions yet.
 - The phone settings `alarm`, `ring` and `notify` are local to the phone. The server does not know them.
 - The enrollment code is text. There is no QR code in this version.
 - The permissions `inbox.receive`, `alert.send` and `alert.read` are given one group at a time. No permission covers all groups.

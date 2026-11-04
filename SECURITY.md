@@ -241,6 +241,37 @@ Hyper's HTTP/1 connection parser receives the header limits and timeouts. The ap
 
 The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. The server reads the header from the right. It skips the trusted addresses and takes the first address that is not trusted. A peer that is not trusted, a missing header, two headers, or an entry that is not an address give the address of the peer. Keep the networks of this list small. In K3s, the NetworkPolicy `allow-portal-http` admits only the Traefik and Prometheus pods to the port 4181.
 
+## Second factor (TOTP)
+
+The key `authentication.mfa` (`off`, `optional` or `required`) sets the policy. The code follows RFC 6238: HMAC-SHA-1, 6 digits, a step of 30 seconds, and a window of one step before and after.
+
+### What it stops
+
+- A password that a thief knows or guesses. A thief needs the code of the app too.
+- A password that comes from a leak of another site (credential stuffing). The attacker reaches the second step and no further.
+- A copy of the database. The secrets are sealed with AES-256-GCM under `authentication.totp_key`, and the associated data names the login. A reader of the database cannot read a secret, and cannot move it to another account. The recovery codes are keyed HMAC-SHA-256 values: a reader without the key cannot test a guess.
+
+### What it does not stop
+
+- Phishing. A person can type a TOTP code in a false page, and the attacker uses it at once. Only a passkey (WebAuthn, the next step) is bound to the real site.
+- A thief who has the password and the key and the database. This person can read the secrets.
+- A stolen session cookie. The cookie is a session: it has passed the second factor already. The binding `session.bind` and the idle time limit this risk.
+- A loss of the phone and of the recovery codes. The superadmin resets the account. The superadmin itself uses `portal reset-two-factor`, which needs access to the host and the configuration.
+- HMAC-SHA-1 is safe for TOTP: the attacks on SHA-1 are collision attacks, and an HMAC does not depend on collision resistance. The portal uses HMAC-SHA-1 for TOTP only.
+
+### Design
+
+- **State between the two steps.** The password step gives no session. It gives a token that the server signs (HMAC-SHA-256 under the session secret). The token holds the account, the choice "Keep me signed in", the count of wrong codes and the time of issue. It is bound to the client binding and to the anti-CSRF token of the page. It lives 5 minutes. A token that is changed, old, or used by another client gives the page "The page was open too long". A person cannot tell these causes apart.
+- **Anti-enumeration.** The first step does not change: a wrong password gives the same answer for an unknown login, for an account with a second factor and for an account without. Only a person who knows the password reaches the second step, and learns that the account has one. This is accepted.
+- **Brute force.** The counters of an account are in its database row: failures, start of the window, end of the lock. One statement or one transaction with a row lock changes them, so two instances never lose a failure. Five failures in 10 minutes lock the second step for 5 minutes. No account stays locked for ever. A lock needs the password first: an anonymous attacker cannot lock an account. An attacker who has the password can lock the second step for the person. The address limiter of the sign-in counts the wrong codes too. A TOTP code has 10^6 values and three are valid at a time: the lock keeps the chance of a guess below 1 in 10^5 for each 5 minutes.
+- **Replay.** The row keeps the last accepted time step. A statement accepts a step only if it is more than the stored step, so two instances never accept the same code. A code of the same step, or of an older step, is refused. The code that confirms an enrolment is used up.
+- **Recovery codes.** Ten codes of 50 bits, shown one time, stored as keyed hashes. The delete of the hash is the use: it succeeds for one caller only.
+- **Wrong key.** At start, the server compares a check value of the key with the value in the database. A key that does not match stops the server. A secret that a key does not open gives an error of the server, never a wrong code, and no secret changes. The server never replaces a secret under another key.
+- **Cookie and pages.** The pages of the second step go through the pass of the random names. They have no inline script and no inline style. The QR code is inline SVG markup: no image request. The pages have `Cache-Control: no-store`.
+- **Log in as.** A session of **Log in as** needs no code of the target account. The session of the superadmin is the one that counts. The session is not marked as a session of the second factor.
+
+Recommendations, not done in this version: ask for a fresh second factor before a sensitive action (create a key, **Log in as**, change a password), and add passkeys.
+
 ## Password controls
 
 Two limiters protect against password failures. The first is a limited per-IP limiter. The second is a separate global limiter. The global limiter is not reset on purpose by a successful login. Both stores are process-local.

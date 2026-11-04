@@ -2363,6 +2363,44 @@ mod tests {
     }
 
     #[test]
+    fn a_session_of_the_second_factor_has_a_badge_and_the_page_has_the_state_and_the_reset() {
+        let cat = catalog();
+        let mut alice = card("alice", &[]);
+        for mfa in [false, true] {
+            alice.activity.recent.push(SessionRow {
+                started_at: 1_791_000_000,
+                last_seen_at: 1_791_000_100,
+                ended_at: None,
+                end_reason: None,
+                ip: None,
+                user_agent: "x".into(),
+                impersonated: false,
+                remembered: false,
+                mfa,
+            });
+        }
+        let mut view = user_view(&cat, alice);
+        let html = user_page(&frame(), &view);
+        assert_eq!(
+            html.matches(r#"title="Signed in with the second factor""#)
+                .count(),
+            1
+        );
+        assert!(
+            !html.contains("/auth/users/reset-two-factor"),
+            "the second factor is off"
+        );
+        // With the second factor on for the account, the page has the state and a reset with a confirmation in place.
+        view.two_factor = Some(true);
+        let html = user_page(&frame(), &view);
+        assert!(html.contains(r#"action="/auth/users/reset-two-factor""#));
+        assert!(html.contains("Reset the two-factor of alice"));
+        // An account without one has nothing to reset.
+        view.two_factor = Some(false);
+        assert!(!user_page(&frame(), &view).contains("/auth/users/reset-two-factor"));
+    }
+
+    #[test]
     fn what_comes_from_outside_is_escaped() {
         let cat = catalog();
         let mut user = card("<b>x</b>", &[]);
