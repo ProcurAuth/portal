@@ -1049,6 +1049,32 @@ impl Pg {
         })
     }
 
+    /// The same as [`Self::session_touch`], and the idle timer stays as it is. The call only reads.
+    pub fn session_peek(
+        &self,
+        digest: &[u8; 32],
+        binding: &[u8; 32],
+        now: i64,
+        idle_secs: i64,
+        generation: &[u8; 32],
+    ) -> Result<Option<SharedSession>, String> {
+        self.run(|c| {
+            Ok(c.query_opt(
+                "SELECT sid, login, impersonated, expires_at FROM sessions
+                  WHERE digest = $1 AND binding = $2 AND expires_at > $3 AND last_seen_at > $3 - $4
+                    AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $5)",
+                &[
+                    &digest.as_slice(),
+                    &binding.as_slice(),
+                    &now,
+                    &idle_secs,
+                    &generation.as_slice(),
+                ],
+            )?
+            .map(shared_session))
+        })
+    }
+
     /// Ends the superadmin and impersonated sessions whose generation is not `generation`.
     /// Returns the identifiers that this call ended.
     pub fn sessions_end_other_generations(

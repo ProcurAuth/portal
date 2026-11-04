@@ -755,3 +755,416 @@ a {
 .hp {
   display: none;
 }
+
+/* Notifications: the badge, the inbox icon with its popover, and the toasts. They are on the launcher
+   and on the settings pages. The names are classes only, and no rule depends on the structure: the
+   launcher goes through the pass that changes its names and its elements (see src/ui/mask.rs). */
+
+.nbadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-fill);
+  color: var(--on-fill);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.nbadge[hidden] {
+  display: none;
+}
+
+.nbell {
+  position: relative;
+  display: inline-block;
+}
+
+.nbell summary {
+  position: relative;
+  list-style: none;
+  cursor: pointer;
+}
+
+.nbell summary::-webkit-details-marker {
+  display: none;
+}
+
+.nbell .nbadge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+.nbell[open] summary {
+  border-color: var(--border-strong);
+}
+
+.nbell__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  width: min(360px, calc(100vw - 28px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.nbell__head,
+.nbell__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.nbell__head {
+  border-bottom: 1px solid var(--border);
+}
+
+.nbell__foot {
+  border-top: 1px solid var(--border);
+}
+
+.nbell__head form {
+  margin: 0;
+}
+
+.nbell__title {
+  font-weight: 700;
+}
+
+.nbell__act {
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nbell__act:hover,
+.nbell__open:hover {
+  text-decoration: underline;
+}
+
+.nbell__open {
+  color: var(--accent-text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nbell__empty {
+  margin: 0;
+  padding: 22px 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.nbell__empty[hidden],
+.nlist[hidden] {
+  display: none;
+}
+
+.nlist {
+  max-height: min(60vh, 340px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.nrow {
+  border-bottom: 1px solid var(--border);
+}
+
+.nrow[data-unread] {
+  box-shadow: inset 3px 0 0 var(--accent-fill);
+  background: var(--accent-tint);
+}
+
+.nrow__in {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 12px;
+  color: inherit;
+  text-decoration: none;
+}
+
+a.nrow__in:hover {
+  background: var(--raised);
+}
+
+.nrow__ico {
+  display: inline-flex;
+  flex: none;
+  padding-top: 1px;
+  color: var(--muted);
+}
+
+.nrow[data-level="critical"] .nrow__ico {
+  color: var(--danger);
+}
+
+.nrow[data-level="alert"] .nrow__ico {
+  color: var(--warning);
+}
+
+.nrow[data-level="ring"] .nrow__ico {
+  color: var(--accent-text);
+}
+
+.nrow__body {
+  display: grid;
+  flex: 1;
+  gap: 1px;
+  min-width: 0;
+}
+
+.nrow__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nrow[data-unread] .nrow__title {
+  font-weight: 700;
+}
+
+.nrow__meta,
+.nrow__time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.nrow__time {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.nlevel {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--raised);
+}
+
+.nlevel__b {
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nlevel__b:hover {
+  color: var(--text);
+}
+
+.nlevel__b[aria-pressed="true"] {
+  background: var(--accent-tint);
+  box-shadow: inset 0 -2px 0 var(--accent-fill);
+  color: var(--accent-text);
+}
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toasts__live {
+  margin: 0;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px 8px 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-left-width: 3px;
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  animation: toast-in 0.18s var(--ease);
+}
+
+.toast[hidden] {
+  display: none;
+}
+
+.toast[data-level="critical"] {
+  border-left-color: var(--danger);
+  background: linear-gradient(var(--danger-bg), var(--danger-bg)), var(--panel);
+}
+
+.toast[data-level="alert"] {
+  border-left-color: var(--warning);
+}
+
+.toast[data-level="ring"] {
+  border-left-color: var(--accent-fill);
+}
+
+.toast__ico {
+  display: inline-flex;
+  flex: none;
+  padding-top: 1px;
+  color: var(--muted);
+}
+
+.toast[data-level="critical"] .toast__ico {
+  color: var(--danger);
+}
+
+.toast[data-level="alert"] .toast__ico {
+  color: var(--warning);
+}
+
+.toast[data-level="ring"] .toast__ico {
+  color: var(--accent-text);
+}
+
+.toast__body {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toast__title {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.toast__meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.toast__link {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.toast__close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.toast__close:hover {
+  background: var(--raised);
+  color: var(--text);
+}
+
+.toasts__more {
+  display: block;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  pointer-events: auto;
+}
+
+.toasts__more[hidden] {
+  display: none;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .nbell {
+    position: static;
+  }
+
+  .nbell__panel {
+    position: fixed;
+    top: 60px;
+    right: 14px;
+    left: 14px;
+    width: auto;
+  }
+
+  .toasts {
+    right: 14px;
+    bottom: 12px;
+    left: 14px;
+    width: auto;
+  }
+}
+
+@media (pointer: coarse) {
+  .nlevel__b {
+    height: 36px;
+    padding: 0 12px;
+  }
+
+  .nbell__act,
+  .nbell__open {
+    padding: 10px 8px;
+  }
+
+  .toast__close {
+    width: 40px;
+    height: 40px;
+  }
+}

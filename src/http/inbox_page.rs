@@ -16,6 +16,7 @@
 use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
 use crate::inbox::admin::{self, DeviceRow, Target};
+use crate::inbox::notify::{self, Ask, Importance, Level, Scope};
 use crate::inbox::App as InboxApp;
 use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
@@ -23,10 +24,13 @@ use crate::ui::inbox::{
     AlertRow, CodeData, ConnData, DocsData, GroupChoice, GroupLine, InboxView, Origin, PhonesData,
     Query, Rights, SendError, SentData, UserChoice,
 };
+use crate::ui::notify as ui_notify;
 
 pub(super) const PREFIX: &str = ui_inbox::PAGE;
 /// The purpose of the anti-CSRF tokens of the forms of the inbox.
 const INBOX_TOKEN: &str = "inbox";
+/// The address of the poll of the notifications, after the prefix.
+const POLL: &str = "/notifications";
 /// The largest body of a form of the inbox.
 const MAX_FORM_BYTES: usize = 16 * 1024;
 /// The alerts that the zone "Sent" asks for, and the lines of the connection log.
@@ -46,15 +50,31 @@ pub(super) struct Held {
     pub ui: Rights,
     /// The groups with `alert.read`. `None`: all the groups (the superadmin).
     read_groups: Option<Vec<String>>,
+    /// The groups with `inbox.receive`. `None`: all the groups (the superadmin).
+    receive_groups: Option<Vec<String>>,
     /// The groups that the page names: the groups that the account may read or send to.
     named: Option<Vec<String>>,
 }
 
 /// The rights of the viewer. `None`: the file has no block `inbox`.
 pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
+    held_with(state, viewer, true)
+}
+
+/// The same, with no count of the members of the groups: the count reads the grants of every
+/// account, and a request that comes every few seconds does not need it.
+fn held_light(state: &AppState, viewer: &Viewer) -> Option<Held> {
+    held_with(state, viewer, false)
+}
+
+fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<Held> {
     let inbox = state.config.inbox.as_ref()?;
     let ids: Vec<String> = inbox.groups.keys().cloned().collect();
-    let members = super::group_members(state);
+    let members = if count_members {
+        super::group_members(state)
+    } else {
+        Default::default()
+    };
     let choice = |id: &String| GroupChoice {
         id: id.clone(),
         name: inbox.groups[id].name.clone(),
@@ -79,6 +99,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
                 send_user: true,
             },
             read_groups: None,
+            receive_groups: None,
             named: None,
         });
     };
@@ -89,6 +110,7 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
     let at_service = |action: &str| actions::allows(&document, login, grants, action, None);
     let send_ids = on(actions::ALERT_SEND);
     let read_ids = on(actions::ALERT_READ);
+    let receive_ids = on(actions::INBOX_RECEIVE);
     let devices = at_service(actions::PHONE_READ);
     let send_user = at_service(actions::ALERT_SEND_USER);
     let mut named: Vec<String> = read_ids.iter().chain(send_ids.iter()).cloned().collect();
@@ -101,16 +123,26 @@ pub(super) fn held(state: &AppState, viewer: &Viewer) -> Option<Held> {
             phones: devices,
             revoke: devices && at_service(actions::PHONE_REVOKE),
             connections: at_service(actions::PHONE_LOG),
-            own_phones: !on(actions::INBOX_RECEIVE).is_empty(),
+            own_phones: !receive_ids.is_empty(),
             send: ordered(send_ids.clone()).iter().map(choice).collect(),
             send_user,
         },
         read_groups: Some(read_ids),
+        receive_groups: Some(receive_ids),
         named: Some(named),
     })
 }
 
 impl Held {
+    /// The alerts that the account receives: the groups with `inbox.receive`, and the alerts for
+    /// the account (see `inbox::notify`).
+    fn scope(&self, login: &str) -> Scope {
+        Scope {
+            groups: self.receive_groups.clone(),
+            login: login.to_string(),
+        }
+    }
+
     fn may_read(&self, group: &str) -> bool {
         self.read_groups
             .as_ref()
@@ -207,6 +239,7 @@ impl Context<'_> {
             keys: super::keys_page::list_visible(state, &self.viewer),
             inbox: true,
             superadmin: is_superadmin(&self.viewer),
+            notify: None,
         }
     }
 }
@@ -219,17 +252,41 @@ fn open<'a>(
     headers: &HeaderMap,
     client: &Client,
 ) -> Result<Context<'a>, HttpResponse> {
+    open_with(state, uri, headers, client, false)
+}
+
+/// The same. With `passive`, the request does not renew the idle timer of the session, and the
+/// rights are read without the count of the members of the groups: the poll of the notifications
+/// comes every few seconds.
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
+fn open_with<'a>(
+    state: &AppState,
+    uri: &'a str,
+    headers: &HeaderMap,
+    client: &Client,
+    passive: bool,
+) -> Result<Context<'a>, HttpResponse> {
     let Some(app) = state.inbox.app() else {
         return Err(not_found());
     };
-    let Some(viewer) = current_viewer(state, headers, client) else {
+    let viewer = if passive {
+        current_viewer_passive(state, headers, client)
+    } else {
+        current_viewer(state, headers, client)
+    };
+    let Some(viewer) = viewer else {
         let path = uri.split('?').next().unwrap_or(PREFIX);
         return Err(match login_location(state, path) {
             Ok(location) => redirect_response(StatusCode::SEE_OTHER, &location),
             Err(()) => redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH),
         });
     };
-    let Some(held) = held(state, &viewer) else {
+    let held = if passive {
+        held_light(state, &viewer)
+    } else {
+        held(state, &viewer)
+    };
+    let Some(held) = held else {
         return Err(not_found());
     };
     let (Ok(logout_token), Ok(inbox_token)) = (
@@ -308,10 +365,15 @@ pub(super) async fn handle(
     let rest = path.strip_prefix(PREFIX).unwrap_or_default();
     let method = request.method().clone();
     if method == Method::GET {
-        let ctx = match open(state, &uri, request.headers(), client) {
+        // The poll of the notifications must not keep the session alive.
+        let poll = rest == POLL;
+        let ctx = match open_with(state, &uri, request.headers(), client, poll) {
             Ok(ctx) => ctx,
             Err(response) => return response,
         };
+        if poll {
+            return poll_answer(state, &ctx).await;
+        }
         return get(state, &ctx, rest).await;
     }
     if method == Method::POST {
@@ -341,7 +403,7 @@ fn query_pairs(uri: &str) -> Option<Vec<(String, String)>> {
 async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpResponse {
     // The page has one address. Each other address under the prefix is gone.
     if !rest.is_empty() {
-        return if matches!(rest, "/send" | "/revoke" | "/code") {
+        return if matches!(rest, "/send" | "/revoke" | "/code" | "/read" | "/notify") {
             text_response(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed\n")
         } else {
             not_found()
@@ -364,6 +426,10 @@ async fn get(state: &Arc<AppState>, ctx: &Context<'_>, rest: &str) -> HttpRespon
     let notice = code.and_then(|code| ui_inbox::notice_for(code));
     if code.is_some() && notice.is_none() {
         return refuse(StatusCode::BAD_REQUEST, "Bad request");
+    }
+    // Opening the page moves the marker "read up to". The session of "Log in as" changes nothing.
+    if !ctx.viewer.session.impersonated {
+        let _ = notify::mark_read(&ctx.app, &ctx.held.scope(&ctx.viewer.login)).await;
     }
     page(state, ctx, &query, notice, None, None).await
 }
@@ -501,7 +567,9 @@ async fn page(
     let key = refused
         .as_ref()
         .map_or_else(random_key, |refused| refused.key.to_string());
+    let header = header_for(&ctx.app, &ctx.held, &ctx.viewer.login).await;
     let view = InboxView {
+        notify_level: header.map(|h| h.level),
         rights,
         notice,
         csrf: &ctx.inbox_token,
@@ -521,7 +589,9 @@ async fn page(
         impersonated: ctx.viewer.session.impersonated,
         send_error: refused,
     };
-    let html = ui_inbox::inbox_page(&ctx.frame(state), &view);
+    let mut frame = ctx.frame(state);
+    frame.notify = header;
+    let html = ui_inbox::inbox_page(&frame, &view);
     let mut response = html_response(StatusCode::OK, html);
     if view.send_error.is_some() {
         *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
@@ -542,7 +612,8 @@ async fn form<'a>(
     state: &AppState,
     request: Request<Incoming>,
     client: &Client,
-) -> Result<(Context<'a>, std::collections::HashMap<String, String>), HttpResponse> {
+) -> Result<(Context<'a>, std::collections::HashMap<String, String>, bool), HttpResponse> {
+    let json = accepts_json(request.headers());
     if !validate_post_origin(request.headers()) {
         state.metrics.users_origin_failure();
         return Err(text_response(
@@ -593,7 +664,15 @@ async fn form<'a>(
             "CSRF validation failed\n",
         ));
     }
-    Ok((ctx, fields))
+    Ok((ctx, fields, json))
+}
+
+/// Whether the request asks for JSON: the script of the notifications does.
+fn accepts_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(hyper::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"))
 }
 
 async fn post(
@@ -602,16 +681,18 @@ async fn post(
     client: &Client,
     rest: &str,
 ) -> HttpResponse {
-    if !matches!(rest, "/send" | "/revoke" | "/code") {
+    if !matches!(rest, "/send" | "/revoke" | "/code" | "/read" | "/notify") {
         return not_found();
     }
-    let (ctx, fields) = match form(state, request, client).await {
+    let (ctx, fields, json) = match form(state, request, client).await {
         Ok(v) => v,
         Err(response) => return response,
     };
     match rest {
         "/send" => send(state, &ctx, fields).await,
         "/revoke" => revoke(state, &ctx, fields).await,
+        "/read" => read(state, &ctx, fields, json).await,
+        "/notify" => set_level(state, &ctx, fields, json).await,
         _ => code(state, &ctx, fields).await,
     }
 }
@@ -886,4 +967,276 @@ async fn code(
         Some(Err(_)) => back_with(ui_inbox::PAGE, "failed"),
         None => not_found(),
     }
+}
+
+// The notifications ---------------------------------------------------------------------------
+
+/// The data that the badge of the tab and the script need. `None`: the account receives no
+/// notification, or the store does not answer: the page then has no badge.
+async fn header_for(app: &InboxApp, held: &Held, login: &str) -> Option<ui_notify::Header> {
+    if !held.ui.any() {
+        return None;
+    }
+    let ask = Ask {
+        since_ms: 0,
+        limit: 0,
+        skip_if_off: true,
+    };
+    let view = notify::view(app, &held.scope(login), ask).await.ok()?;
+    Some(ui_notify::Header {
+        level: view.prefs.level,
+        unread: view.unread,
+        cursor_ms: unix_now() * 1000,
+    })
+}
+
+/// The data of the badge for a settings page.
+pub(super) async fn notify_header(state: &AppState, viewer: &Viewer) -> Option<ui_notify::Header> {
+    let app = state.inbox.app()?;
+    let held = held_light(state, viewer)?;
+    header_for(&app, &held, &viewer.login).await
+}
+
+/// The row of the page Inbox for an alert, when the account can read it there. The page has the
+/// zone "Sent" for an account with `alert.read` on a group, or with `alert.send_user`. The rule
+/// is the one of [`may_read_alert`]: an alert for the account is readable by its target.
+fn alert_href(held: &Held, target: &Target, id: &str) -> Option<String> {
+    let readable = held.ui.sent
+        && match target {
+            Target::Group(group) => held.may_read(group),
+            Target::User(_) => true,
+        };
+    readable.then(|| format!("{}?open={id}#a-{id}", ui_inbox::PAGE))
+}
+
+/// The name that the notifications show for an alert: the name of the group, or "Direct".
+fn target_name(state: &AppState, target: &Target) -> String {
+    match target {
+        Target::Group(id) => state
+            .config
+            .inbox
+            .as_ref()
+            .and_then(|inbox| inbox.groups.get(id))
+            .map_or_else(|| id.clone(), |group| group.name.clone()),
+        Target::User(_) => notify::DIRECT_NAME.to_string(),
+    }
+}
+
+/// What the launcher draws for the inbox icon.
+pub(super) struct LauncherBell {
+    pub header: ui_notify::Header,
+    pub rows: Vec<ui_notify::Row>,
+    pub csrf: String,
+    pub now_ms: i64,
+}
+
+/// The icon of the launcher and its list. `None`: the account has no right of the inbox features,
+/// or the store does not answer.
+pub(super) async fn launcher_bell(state: &AppState, viewer: &Viewer) -> Option<LauncherBell> {
+    let app = state.inbox.app()?;
+    let held = held_light(state, viewer)?;
+    if !held.ui.any() {
+        return None;
+    }
+    let ask = Ask {
+        since_ms: 0,
+        limit: ui_notify::ROWS_SHOWN as u32,
+        skip_if_off: false,
+    };
+    let view = notify::view(&app, &held.scope(&viewer.login), ask)
+        .await
+        .ok()?;
+    let now_ms = unix_now() * 1000;
+    let rows = view
+        .items
+        .iter()
+        .map(|item| ui_notify::Row {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            group: target_name(state, &item.target),
+            importance: Importance::of(&item.target, |g| app.is_critical(g)),
+            created_at_ms: item.created_at,
+            href: alert_href(&held, &item.target, &item.id),
+            unread: item.created_at > view.prefs.read_up_to,
+        })
+        .collect();
+    Some(LauncherBell {
+        header: ui_notify::Header {
+            level: view.prefs.level,
+            unread: view.unread,
+            cursor_ms: now_ms,
+        },
+        rows,
+        csrf: sign_action_token(&state.signing_secret, INBOX_TOKEN, &viewer.token).ok()?,
+        now_ms,
+    })
+}
+
+/// The answer of the poll and of the forms of the notifications: the level, the unread count, and
+/// with `after` the alerts newer than this time. The alerts come from the store with the scope of
+/// the account in the query, so no other alert leaves the database. An alert for the account is
+/// level Ring: with the level "Alert and Critical only" it gives no toast, and it stays in the
+/// list: each item has the flag `toast`.
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
+async fn answer(
+    state: &AppState,
+    ctx: &Context<'_>,
+    after: Option<i64>,
+) -> Result<serde_json::Value, HttpResponse> {
+    let ask = Ask {
+        since_ms: after.map_or(0, |a| a.saturating_sub(notify::LOOKBACK_MS)),
+        limit: if after.is_some() {
+            notify::ITEMS_MAX
+        } else {
+            0
+        },
+        skip_if_off: true,
+    };
+    let scope = ctx.held.scope(&ctx.viewer.login);
+    let view = notify::view(&ctx.app, &scope, ask)
+        .await
+        .map_err(|_| unavailable())?;
+    let level = view.prefs.level;
+    let mut cursor = after;
+    let mut items = Vec::new();
+    // The store gives the newest first. The browser wants the oldest first.
+    for item in view.items.iter().rev() {
+        cursor = cursor.max(Some(item.created_at));
+        let importance = Importance::of(&item.target, |g| ctx.app.is_critical(g));
+        items.push(serde_json::json!({
+            "toast": importance.toasts_at(level),
+            "id": item.id,
+            "title": item.title,
+            "group": target_name(state, &item.target),
+            "level": importance.as_str(),
+            "word": ui_notify::importance_word(importance),
+            "at": item.created_at,
+            "href": alert_href(&ctx.held, &item.target, &item.id),
+        }));
+    }
+    let mut out = serde_json::json!({
+        "level": level.as_str(),
+        "unread": view.unread,
+        "now": unix_now() * 1000,
+        "items": items,
+    });
+    if let Some(cursor) = cursor {
+        out["cursor"] = cursor.into();
+    }
+    Ok(out)
+}
+
+/// `GET /auth/settings/inbox/notifications?after=<ms>`: the poll. The query has the one field
+/// `after`, whole milliseconds. Without it the answer has the count and the level only.
+async fn poll_answer(state: &AppState, ctx: &Context<'_>) -> HttpResponse {
+    if !ctx.held.ui.any() {
+        return forbidden();
+    }
+    let Some(pairs) = query_pairs(ctx.uri) else {
+        return bad_request();
+    };
+    let mut after = None;
+    for (name, value) in &pairs {
+        let parsed = (name == "after" && after.is_none())
+            .then(|| {
+                value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|v| *v >= 0 && value.len() <= 16)
+            })
+            .flatten();
+        match parsed {
+            Some(value) => after = Some(value),
+            None => return bad_request(),
+        }
+    }
+    match answer(state, ctx, after).await {
+        Ok(body) => json_response(StatusCode::OK, body.to_string()),
+        Err(response) => response,
+    }
+}
+
+/// The page that a form of the notifications returns to: the field `back`.
+fn back_target(fields: &mut std::collections::HashMap<String, String>) -> Option<&'static str> {
+    match fields.remove("back").as_deref() {
+        None | Some(ui_notify::BACK_INBOX) => Some(ui_inbox::PAGE),
+        Some(ui_notify::BACK_HOME) => Some("/"),
+        Some(_) => None,
+    }
+}
+
+/// The reply to a form of the notifications: the state as JSON for the script, a redirect for a
+/// browser without script.
+async fn reply(state: &AppState, ctx: &Context<'_>, json: bool, back: &str) -> HttpResponse {
+    if !json {
+        return redirect_response(StatusCode::SEE_OTHER, back);
+    }
+    match answer(state, ctx, None).await {
+        Ok(body) => json_response(StatusCode::OK, body.to_string()),
+        Err(response) => response,
+    }
+}
+
+/// `POST /auth/settings/inbox/read`: moves the marker "read up to" of the account to its newest
+/// alert. The marker never goes back. The session of "Log in as" cannot do it.
+async fn read(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    mut fields: std::collections::HashMap<String, String>,
+    json: bool,
+) -> HttpResponse {
+    let Some(back) = back_target(&mut fields) else {
+        return bad_request();
+    };
+    if !fields.is_empty() {
+        return bad_request();
+    }
+    if ctx.viewer.session.impersonated {
+        return forbidden();
+    }
+    if notify::mark_read(&ctx.app, &ctx.held.scope(&ctx.viewer.login))
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    reply(state, ctx, json, back).await
+}
+
+/// `POST /auth/settings/inbox/notify`: sets the level of the toasts of the account: `all`,
+/// `important` or `off`.
+async fn set_level(
+    state: &Arc<AppState>,
+    ctx: &Context<'_>,
+    mut fields: std::collections::HashMap<String, String>,
+    json: bool,
+) -> HttpResponse {
+    let Some(back) = back_target(&mut fields) else {
+        return bad_request();
+    };
+    let Some(level) = fields.remove("level").as_deref().and_then(Level::parse) else {
+        return bad_request();
+    };
+    if !fields.is_empty() {
+        return bad_request();
+    }
+    if ctx.viewer.session.impersonated {
+        return forbidden();
+    }
+    if notify::set_level(&ctx.app, &ctx.viewer.login, level)
+        .await
+        .is_err()
+    {
+        return unavailable();
+    }
+    log(
+        state,
+        LogLevel::Info,
+        "inbox_notify_level",
+        &[
+            ("actor", ctx.viewer.login.clone()),
+            ("level", level.as_str().to_string()),
+        ],
+    );
+    reply(state, ctx, json, back).await
 }

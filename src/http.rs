@@ -72,6 +72,7 @@ const STYLE_PATH: &str = "/auth/style.css";
 const SETTINGS_STYLE_PATH: &str = "/auth/settings.css";
 const THEME_JS_PATH: &str = "/auth/assets/theme.js";
 const SETTINGS_JS_PATH: &str = "/auth/assets/settings.js";
+const NOTIFY_JS_PATH: &str = "/auth/assets/notify.js";
 const ICONS_PREFIX: &str = "/auth/icons/";
 const GLOBAL_RATE_LIMIT_KEY: &str = "global";
 /// The hidden field that holds the signed token of the sign-in form.
@@ -767,6 +768,11 @@ async fn handle_request(
         hashed_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path == ui::assets().js_path {
         hashed_response("text/javascript; charset=utf-8", &ui::assets().js)
+    } else if method == Method::GET && path == state.mask.assets().notify_path {
+        hashed_response(
+            "text/javascript; charset=utf-8",
+            &state.mask.assets().notify,
+        )
     } else if method == Method::GET && path == STYLE_PATH {
         static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
@@ -777,6 +783,8 @@ async fn handle_request(
         static_response("text/javascript; charset=utf-8", &ui::assets().js)
     } else if method == Method::GET && path == SETTINGS_JS_PATH {
         static_response("text/javascript; charset=utf-8", ui::SETTINGS_JS)
+    } else if method == Method::GET && path == NOTIFY_JS_PATH {
+        static_response("text/javascript; charset=utf-8", ui::NOTIFY_JS)
     } else if method == Method::GET && is_settings_path(&path) {
         handle_settings(&state, &path, &uri, request.headers(), &client).await
     } else if method == Method::GET && path == SUCCESS_PATH {
@@ -1137,10 +1145,19 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         None
     };
 
+    let bell_data = inbox_page::launcher_bell(state, &viewer).await;
+    let bell = bell_data.as_ref().map(|b| ui::notify::Bell {
+        header: b.header,
+        rows: &b.rows,
+        now_ms: b.now_ms,
+        csrf: &b.csrf,
+        forms: !viewer.session.impersonated,
+    });
     let page = ui::home_page(
         &shown,
         &state.icons,
         &ui::HomeContext {
+            bell: bell.as_ref(),
             viewer: &viewer.login,
             impersonating: viewer.session.impersonated,
             logout_token: &logout_token,
@@ -1203,6 +1220,7 @@ async fn handle_settings(
         keys: keys_page::list_visible(state, &viewer),
         inbox: inbox_page::tab_visible(state, &viewer),
         superadmin,
+        notify: inbox_page::notify_header(state, &viewer).await,
     };
     // The portal features are not in the catalogue: the pages of the services list the workloads
     // only.
@@ -1858,11 +1876,35 @@ struct Viewer {
 }
 
 fn current_viewer(state: &AppState, headers: &HeaderMap, client: &Client) -> Option<Viewer> {
+    viewer_of(state, headers, client, false)
+}
+
+/// The same viewer, and the use does not renew the idle timer of the session. The request of a
+/// page that asks in the background uses this.
+fn current_viewer_passive(
+    state: &AppState,
+    headers: &HeaderMap,
+    client: &Client,
+) -> Option<Viewer> {
+    viewer_of(state, headers, client, true)
+}
+
+fn viewer_of(
+    state: &AppState,
+    headers: &HeaderMap,
+    client: &Client,
+    passive: bool,
+) -> Option<Viewer> {
     let Some(token) = session_cookie(state, headers, client) else {
         state.metrics.session_missing();
         return None;
     };
-    let Some(session) = state.sessions.validate(token, &client.binding) else {
+    let session = if passive {
+        state.sessions.peek(token, &client.binding)
+    } else {
+        state.sessions.validate(token, &client.binding)
+    };
+    let Some(session) = session else {
         state.metrics.session_invalid();
         return None;
     };
@@ -2765,7 +2807,7 @@ fn new_user_redirect(code: &str) -> HttpResponse {
 
 /// The page "New user" again after a form that the server refuses because a right has no `access`.
 /// It keeps the login and the grants, and the status is 422. The password is not sent back.
-fn new_user_refused(
+async fn new_user_refused(
     state: &AppState,
     viewer: &Viewer,
     refused: ui::settings::NeedsAccess,
@@ -2781,6 +2823,7 @@ fn new_user_refused(
         keys: keys_page::list_visible(state, viewer),
         inbox: inbox_page::tab_visible(state, viewer),
         superadmin: is_superadmin(viewer),
+        notify: inbox_page::notify_header(state, viewer).await,
     };
     let workloads = current_catalog(state);
     let html = ui::new_user_page(
@@ -2978,7 +3021,8 @@ async fn handle_users_add(
                             login,
                             grants,
                         },
-                    );
+                    )
+                    .await;
                 }
                 return rejected("needs-access");
             }
@@ -3841,8 +3885,10 @@ fn is_neutral_asset(state: &AppState, path: &str) -> bool {
     [
         &ui::assets().css_path,
         &ui::assets().js_path,
+        &ui::assets().notify_path,
         &mapped.css_path,
         &mapped.js_path,
+        &mapped.notify_path,
     ]
     .iter()
     .any(|known| path == known.as_str())
@@ -4007,7 +4053,9 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         HEALTH_PATH => "health",
         READY_PATH => "ready",
         _ if crate::inbox::owns(path) => "inbox_api",
-        STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
+        STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH | NOTIFY_JS_PATH => {
+            "assets"
+        }
         _ if is_neutral_asset(state, path) => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
@@ -4110,6 +4158,7 @@ mod tests {
             SETTINGS_STYLE_PATH,
             THEME_JS_PATH,
             SETTINGS_JS_PATH,
+            NOTIFY_JS_PATH,
             ICONS_PREFIX,
             ui::keys::PATH,
             ui::keys::NEW_PATH,

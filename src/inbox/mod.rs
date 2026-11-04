@@ -26,6 +26,7 @@ mod hub;
 mod internal;
 pub mod log;
 pub mod metrics;
+pub mod notify;
 mod peer;
 mod pg;
 mod ratelimit;

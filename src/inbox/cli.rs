@@ -136,13 +136,14 @@ fn import_sqlite(config_path: &std::path::Path, from: &std::path::Path) -> Resul
         result
     })?;
     println!(
-        "imported {} devices, {} subscriptions, {} alerts, {} deliveries, {} connections, {} enrollment codes from {}",
+        "imported {} devices, {} subscriptions, {} alerts, {} deliveries, {} connections, {} enrollment codes, {} notification settings from {}",
         imported.devices,
         imported.subscriptions,
         imported.alerts,
         imported.deliveries,
         imported.connections,
         imported.enrollment_codes,
+        imported.notifications,
         from.display()
     );
     Ok(())

@@ -70,6 +70,7 @@ pub(super) fn frame() -> Frame<'static> {
         keys: false,
         inbox: false,
         superadmin: true,
+        notify: None,
     }
 }
 
