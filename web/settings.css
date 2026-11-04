@@ -60,7 +60,7 @@
 }
 
 .contentTabs__tab.is-active {
-  border-bottom-color: var(--accent-fill);
+  border-bottom-color: var(--accent-line);
   color: var(--text);
 }
 
@@ -225,7 +225,7 @@ code {
 }
 
 .uiBanner--ok {
-  border-color: color-mix(in srgb, var(--accent-fill) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--accent-line) 40%, var(--border));
   background: var(--accent-tint);
   color: var(--accent-text);
 }
@@ -424,7 +424,7 @@ time.when {
 }
 
 .uiInput:focus {
-  border-color: var(--accent-fill);
+  border-color: var(--accent-line);
   outline: 2px solid var(--accent-tint);
   outline-offset: 0;
 }
@@ -532,7 +532,7 @@ input.keyText {
 }
 
 .spark__bar--today {
-  fill: var(--accent-fill);
+  fill: var(--accent-line);
   opacity: 1;
 }
 
@@ -1309,7 +1309,7 @@ input.keyText {
 }
 
 .rowLink:focus-visible::after {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -1361,7 +1361,7 @@ input.keyText {
 }
 
 .spark--mini .spark__bar {
-  fill: var(--accent-fill);
+  fill: var(--accent-line);
   opacity: 0.8;
 }
 
@@ -1375,7 +1375,7 @@ input.keyText {
 }
 
 .spark--strip .spark__bar {
-  fill: var(--accent-fill);
+  fill: var(--accent-line);
   opacity: 0.8;
 }
 
@@ -2021,7 +2021,7 @@ input.keyText {
 }
 
 .chart .bar-a {
-  fill: var(--accent-fill);
+  fill: var(--accent-line);
 }
 
 .chart .bar-c {
@@ -2193,7 +2193,7 @@ input.keyText {
 
 .rcpt__group:focus-visible ~ .field label[for="rcpt-group"],
 .rcpt__user:focus-visible ~ .field label[for="rcpt-user"] {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
 }
 
 .settings label.chip {
@@ -2254,7 +2254,7 @@ input.keyText {
 }
 
 .urow:has(input:focus-visible) {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 
@@ -2595,7 +2595,7 @@ input.keyText {
 }
 
 .num-input:focus {
-  border-color: var(--accent-fill);
+  border-color: var(--accent-line);
   outline: 2px solid var(--accent-tint);
   outline-offset: 0;
 }

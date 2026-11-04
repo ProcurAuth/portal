@@ -1207,7 +1207,7 @@ mod tests {
             .assets()
             .css
             .contains("@media (prefers-color-scheme: light)"));
-        assert!(mask.assets().css.contains("--bg: #0d0f12"));
+        assert!(mask.assets().css.contains("--bg: #0b0f18"));
         assert!(!mask.assets().css.contains(r#"[data-theme="dark"]"#));
         let theme = format!(r#"[data-{}="dark"]"#, mask.name("data-theme"));
         assert!(mask.assets().css.contains(&theme), "{theme}");

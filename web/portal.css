@@ -1,31 +1,44 @@
 /* portal: the stylesheet of every page (launcher, authentication, settings header). The settings pages
    add settings.css; the launcher and the login page never load those rules.
    Components name tokens; only the token blocks below hold colour literals.
-   Surfaces, state colours and the accent follow the graphite system of ClickHouse Dash. */
+   The brand colours are named once, in the first block. Every other colour token refers to them.
+   Surfaces and state colours follow the graphite system of ClickHouse Dash, shifted a little toward the navy of the logo. */
 
 :root {
+  /* The colours of the logo that the interface uses. The whole spec is in assets/brand/README.md. */
+  --brand: #1238f0;
+  --brand-cyan: #7ff0ff;
+  --brand-cyan-deep: #38b6ff;
+  --brand-300: #7d98ff;
+  --brand-ink: #0b1220;
   color-scheme: dark;
-  --bg: #0d0f12;
-  --panel: #13161a;
-  --raised: #191d22;
-  --inset: #0d0f12;
+  --bg: #0b0f18;
+  --panel: #111620;
+  --raised: #171d29;
+  --inset: #0b0f18;
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #e6e8eb;
-  --muted: #959ba5;
+  --text: #e6e9f0;
+  --muted: #98a0b0;
   --danger: #f87171;
   --danger-bg: rgba(239, 68, 68, 0.12);
   --warning: #fbbf24;
   --warning-bg: rgba(245, 158, 11, 0.12);
   --success-bg: rgba(34, 197, 94, 0.12);
   --success: #34d399;
-  --accent-fill: #356fe6;
-  --accent-fill-hover: #2c62d4;
-  --accent-tint: rgba(53, 111, 230, 0.16);
-  --accent-text: #93b4ff;
+  /* The fill of a primary control, with white text (7.4:1). */
+  --accent-fill: var(--brand);
+  --accent-fill-hover: color-mix(in srgb, var(--brand) 85%, white);
+  --accent-tint: color-mix(in srgb, var(--brand) 28%, transparent);
+  /* Text and thin marks of the accent. Signal Blue is too dark for them on a dark surface. */
+  --accent-text: var(--brand-300);
+  --accent-line: var(--brand-300);
+  --focus-ring: var(--brand-cyan);
   --on-fill: #ffffff;
+  --logo-ink: var(--on-fill);
+  --logo-dot: var(--brand-cyan);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.28);
-  --input-border: #6b7280;
+  --input-border: #6e7789;
   /* Monochrome icon sets draw in black inside an <img>; dark surfaces flip them to light. */
   --mono-filter: invert(0.92);
 }
@@ -33,23 +46,27 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     color-scheme: light;
-    --bg: #f6f7f9;
+    --bg: #f4f6fc;
     --panel: #ffffff;
-    --raised: #f3f5f8;
+    --raised: #eff2fa;
     --inset: #ffffff;
-    --border: rgba(15, 18, 25, 0.1);
-    --border-strong: rgba(15, 18, 25, 0.2);
-    --text: #15181d;
-    --muted: #5b6270;
+    --border: rgba(11, 18, 32, 0.1);
+    --border-strong: rgba(11, 18, 32, 0.2);
+    --text: var(--brand-ink);
+    --muted: #566074;
     --danger: #b91c1c;
     --warning: #9a5b00;
     --success: #137333;
-    --accent-fill: #2558d9;
-    --accent-fill-hover: #1e49bd;
-    --accent-tint: rgba(37, 88, 217, 0.1);
-    --accent-text: #1d4ed8;
-    --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(15, 18, 25, 0.08);
-    --input-border: #767e8a;
+    --accent-fill: var(--brand);
+    --accent-fill-hover: color-mix(in srgb, var(--brand) 85%, black);
+    --accent-tint: color-mix(in srgb, var(--brand) 8%, transparent);
+    --accent-text: var(--brand);
+    --accent-line: var(--brand);
+    --focus-ring: var(--brand);
+    --logo-ink: var(--brand);
+    --logo-dot: var(--brand-cyan-deep);
+    --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(11, 18, 32, 0.08);
+    --input-border: #727c91;
     --mono-filter: none;
   }
 }
@@ -61,23 +78,27 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #f6f7f9;
+  --bg: #f4f6fc;
   --panel: #ffffff;
-  --raised: #f3f5f8;
+  --raised: #eff2fa;
   --inset: #ffffff;
-  --border: rgba(15, 18, 25, 0.1);
-  --border-strong: rgba(15, 18, 25, 0.2);
-  --text: #15181d;
-  --muted: #5b6270;
+  --border: rgba(11, 18, 32, 0.1);
+  --border-strong: rgba(11, 18, 32, 0.2);
+  --text: var(--brand-ink);
+  --muted: #566074;
   --danger: #b91c1c;
   --warning: #9a5b00;
   --success: #137333;
-  --accent-fill: #2558d9;
-  --accent-fill-hover: #1e49bd;
-  --accent-tint: rgba(37, 88, 217, 0.1);
-  --accent-text: #1d4ed8;
-  --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(15, 18, 25, 0.08);
-  --input-border: #767e8a;
+  --accent-fill: var(--brand);
+  --accent-fill-hover: color-mix(in srgb, var(--brand) 85%, black);
+  --accent-tint: color-mix(in srgb, var(--brand) 8%, transparent);
+  --accent-text: var(--brand);
+  --accent-line: var(--brand);
+  --focus-ring: var(--brand);
+  --logo-ink: var(--brand);
+  --logo-dot: var(--brand-cyan-deep);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(11, 18, 32, 0.08);
+  --input-border: #727c91;
   --mono-filter: none;
 }
 
@@ -132,7 +153,7 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -268,7 +289,7 @@ a {
 
 .themeSwitch button[aria-pressed="true"] {
   background: var(--accent-tint);
-  box-shadow: inset 0 -2px 0 var(--accent-fill);
+  box-shadow: inset 0 -2px 0 var(--accent-line);
   color: var(--accent-text);
 }
 
@@ -591,7 +612,7 @@ a {
 }
 
 .card .keep input:focus-visible {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -610,7 +631,7 @@ a {
 
 .card input[type="text"]:focus-visible,
 .card input[type="password"]:focus-visible {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -762,7 +783,7 @@ a {
 }
 
 .signin__in:focus-visible {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 0;
 }
 
@@ -836,8 +857,8 @@ a {
   }
 
   .signin__field:has(.signin__in:focus-visible) {
-    border-bottom-color: var(--accent-fill);
-    box-shadow: 0 1px 0 var(--accent-fill);
+    border-bottom-color: var(--accent-line);
+    box-shadow: 0 1px 0 var(--accent-line);
   }
 
   .signin__field:has(.signin__in:focus-visible) .signin__label {
@@ -978,7 +999,7 @@ a {
 }
 
 .signin__check input:focus-visible {
-  outline: 2px solid var(--accent-fill);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -1437,7 +1458,7 @@ a {
 }
 
 .nrow[data-unread] {
-  box-shadow: inset 3px 0 0 var(--accent-fill);
+  box-shadow: inset 3px 0 0 var(--accent-line);
   background: var(--accent-tint);
 }
 
@@ -1530,7 +1551,7 @@ a.nrow__in:hover {
 
 .nlevel__b[aria-pressed="true"] {
   background: var(--accent-tint);
-  box-shadow: inset 0 -2px 0 var(--accent-fill);
+  box-shadow: inset 0 -2px 0 var(--accent-line);
   color: var(--accent-text);
 }
 
@@ -1576,7 +1597,7 @@ a.nrow__in:hover {
 }
 
 .toast[data-level="ring"] {
-  border-left-color: var(--accent-fill);
+  border-left-color: var(--accent-line);
 }
 
 .toast__ico {
