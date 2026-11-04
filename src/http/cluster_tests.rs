@@ -2661,9 +2661,7 @@ fn options_service() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
             }
             let (status, body) = if first.contains("/.well-known/procurauth/actions") {
                 ("200 OK", TREE_DOCUMENT)
-            } else if first.contains("type=database")
-                && first.contains("parent=host%3Aprod")
-            {
+            } else if first.contains("type=database") && first.contains("parent=host%3Aprod") {
                 (
                     "200 OK",
                     r#"{"items":[{"id":"test1","label":"test1","has_children":true},{"id":"a/b","label":"a/b"}],"next":"p2"}"#,
