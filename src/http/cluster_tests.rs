@@ -346,14 +346,13 @@ fn start_custom(
     if !wait_complete {
         return node;
     }
-    wait_until(Duration::from_secs(10), || {
+    // A start has time to be late: the whole suite starts hundreds of servers at once on a busy machine.
+    wait_until(START_LIMIT, || {
         TcpStream::connect(("127.0.0.1", port)).is_ok()
             && send(port, "GET", "/healthz", &[], "").status == 200
     });
     // The first discovery round publishes an empty catalogue. The next round starts an hour later.
-    wait_until(Duration::from_secs(10), || {
-        node.state.discovery.refreshes() >= 1
-    });
+    wait_until(START_LIMIT, || node.state.discovery.refreshes() >= 1);
     assert!(
         current_catalog(&node.state).is_complete(),
         "the first round of a harness without a source is complete"
@@ -377,6 +376,9 @@ fn cluster(backend: &Backend, cache_ttl: Option<Duration>) -> (Node, Node) {
         }
     }
 }
+
+/// The time that a harness server has to start. The checks of a delay (a few seconds) use their own limits.
+const START_LIMIT: Duration = Duration::from_secs(60);
 
 fn wait_until(limit: Duration, mut condition: impl FnMut() -> bool) -> Duration {
     let begun = Instant::now();
