@@ -1236,8 +1236,11 @@ The sessions and the signing key.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `cookie_name` | text: a cookie name that starts with __Host- | `"__Host-portal"` | The name of the session cookie over HTTPS. Over plain HTTP the server uses the same name without the prefix, because browsers refuse `__Host-` cookies there. |
-| `ttl` | duration, 1m to 7d | `"8h"` | The lifetime of a session. |
-| `idle_timeout` | duration, 1m to 7d | `"30m"` | A session that nobody uses for this time ends. The value is at most `session.ttl`. |
+| `ttl` | duration, 1m to 7d | `"24h"` | The lifetime of a session from the sign-in. The session ends at this time, even when it is in use. The cookie of this session is a browser-session cookie. |
+| `idle_timeout` | duration, 1m to 7d | `"30m"` | A session that nobody uses for this time ends. The value is at most `session.ttl`. A remembered session uses `session.remember_idle_timeout`. |
+| `remember` | `true` or `false` | `true` | The sign-in form shows a box "Keep me signed in". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field. |
+| `remember_ttl` | duration, 1m to 90d | `"30d"` | The lifetime of a remembered session from the sign-in. The cookie has the same life. The value is at least `session.ttl`. An impersonated session is never remembered. Applies only when `session.remember` is `true`. |
+| `remember_idle_timeout` | duration, 1m to 90d | `"7d"` | A remembered session that nobody uses for this time ends. The value is at least `session.idle_timeout` and at most `session.remember_ttl`. Applies only when `session.remember` is `true`. |
 | `bind` | `ip_user_agent`, `user_agent`, `none` | `"ip_user_agent"` | What a session cookie is tied to: the client address and the User-Agent, the User-Agent only, or nothing. |
 | `same_site` | `Strict`, `Lax` | `"Strict"` | The SameSite attribute of the session cookie. |
 | `secret_mode` | `ephemeral`, `provided` | `"ephemeral"` | `ephemeral`: the server makes a new random signing key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key. |

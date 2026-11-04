@@ -72,6 +72,8 @@ pub enum When {
     MetricsOn,
     /// `session.secret_mode` is `provided`.
     SecretProvided,
+    /// `session.remember` is `true`.
+    RememberOn,
     /// The block `identity` is present.
     IdentityBlock,
     /// The block `pdp` is present.
@@ -100,6 +102,7 @@ impl When {
             When::AnyLimiterOn => "both login limiters are off",
             When::MetricsOn => "metrics.enabled is false",
             When::SecretProvided => "session.secret_mode is ephemeral",
+            When::RememberOn => "session.remember is false",
         }
     }
 
@@ -124,6 +127,7 @@ impl When {
             When::AnyLimiterOn => "Applies only when at least one login limiter is on.",
             When::MetricsOn => "Applies only when `metrics.enabled` is `true`.",
             When::SecretProvided => "Applies only when `session.secret_mode` is `provided`.",
+            When::RememberOn => "Applies only when `session.remember` is `true`.",
         }
     }
 }
@@ -717,9 +721,9 @@ pub static KEYS: &[Key] = &[
         block: "session",
         name: "ttl",
         kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
-        presence: Presence::Default("8h"),
+        presence: Presence::Default("24h"),
         when: When::Always,
-        doc: "The lifetime of a session.",
+        doc: "The lifetime of a session from the sign-in. The session ends at this time, even when it is in use. The cookie of this session is a browser-session cookie.",
     },
     Key {
         block: "session",
@@ -727,7 +731,31 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(MINUTE), max: secs(7 * DAY) },
         presence: Presence::Default("30m"),
         when: When::Always,
-        doc: "A session that nobody uses for this time ends. The value is at most `session.ttl`.",
+        doc: "A session that nobody uses for this time ends. The value is at most `session.ttl`. A remembered session uses `session.remember_idle_timeout`.",
+    },
+    Key {
+        block: "session",
+        name: "remember",
+        kind: Kind::Bool,
+        presence: Presence::Default("true"),
+        when: When::Always,
+        doc: "The sign-in form shows a box \"Keep me signed in\". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field.",
+    },
+    Key {
+        block: "session",
+        name: "remember_ttl",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(90 * DAY) },
+        presence: Presence::Default("30d"),
+        when: When::RememberOn,
+        doc: "The lifetime of a remembered session from the sign-in. The cookie has the same life. The value is at least `session.ttl`. An impersonated session is never remembered.",
+    },
+    Key {
+        block: "session",
+        name: "remember_idle_timeout",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(90 * DAY) },
+        presence: Presence::Default("7d"),
+        when: When::RememberOn,
+        doc: "A remembered session that nobody uses for this time ends. The value is at least `session.idle_timeout` and at most `session.remember_ttl`.",
     },
     Key {
         block: "session",
