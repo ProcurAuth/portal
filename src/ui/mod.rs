@@ -190,8 +190,15 @@ pub fn auth_document(title: &str, card_html: &str) -> String {
 /// The shell of the sign-in page and of the card of the second step. The card has its own class, so none of the
 /// rules of the other cards applies to it. `icons` names the sprite symbols that the card draws. The title is
 /// always "Authentication": a page title that changed would tell which step a person is on.
-fn sign_in_document(card_html: &str, icons: &[&str]) -> String {
-    let body = format!(r#"<main class="authShell"><div class="signin">{card_html}</div></main>"#);
+fn sign_in_document(card_html: &str, icons: &[&str], with_strip: bool) -> String {
+    // A card with a strip is higher than a card without one. The class makes room for the strip above the card, so
+    // the fields stay at the same place when a refusal gives the page again.
+    let class = if with_strip {
+        "signin signin--strip"
+    } else {
+        "signin"
+    };
+    let body = format!(r#"<main class="authShell"><div class="{class}">{card_html}</div></main>"#);
     document("Authentication", "", icons, &body)
 }
 
