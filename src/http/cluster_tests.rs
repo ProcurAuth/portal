@@ -8358,6 +8358,128 @@ fn attribute_of(page: &str, tag: &str, attribute: &str) -> String {
     element[value..value + element[value..].find('"').unwrap()].to_string()
 }
 
+/// The `href` of the link of the stylesheet. A page after sign-in has a second link, the tab icon, and the pass
+/// that masks the page changes the order of the elements of the head.
+fn stylesheet_of(page: &str) -> String {
+    let marker = r#" rel="stylesheet""#;
+    let mut rest = page;
+    while let Some(start) = rest.find("<link ") {
+        let element = &rest[start..start + rest[start..].find('>').unwrap()];
+        if element.contains(marker) {
+            let value = element.find(r#" href=""#).unwrap() + r#" href=""#.len();
+            return element[value..value + element[value..].find('"').unwrap()].to_string();
+        }
+        rest = &rest[start + 1..];
+    }
+    panic!("no stylesheet link in {page}");
+}
+
+#[test]
+fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
+    let node = sign_in_node("");
+    let icon = ui::favicon_path();
+    // The sign-in page, masked: no mark, no icon link, no product word, and one link in its head.
+    let login = send(node.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(login.status, 200);
+    assert!(!login.body.contains("rel=\"icon\""), "{}", login.body);
+    assert!(!login.body.contains(icon) && !login.body.contains("image/svg+xml"));
+    assert_eq!(
+        login.body.matches("<symbol").count(),
+        4,
+        "the four icons of the sign-in page"
+    );
+    assert!(!login.body.to_ascii_lowercase().contains("portal"));
+    assert_eq!(login.body.matches("<link ").count(), 1);
+    // The 404 page and the status pages: the same.
+    let missing = send(
+        node.port,
+        "GET",
+        "/auth/nothing-here",
+        &[("Accept", "text/html")],
+        "",
+    );
+    assert_eq!(missing.status, 302);
+    let root = sign_in(&node, "root", PASSWORD);
+    for path in ["/auth/nothing-here", SUCCESS_PATH, DENIED_PATH] {
+        let reply = page(&node, &root, path);
+        assert!(
+            !reply.body.contains("rel=\"icon\"") && !reply.body.contains(icon),
+            "{path}"
+        );
+        assert!(!reply.body.contains("<symbol"), "{path}");
+        assert_eq!(reply.body.matches("<link ").count(), 1, "{path}");
+    }
+    // The launcher: the mark, the lockup and the icon link. The mask keeps the path of the icon, which has no class.
+    let home = page(&node, &root, "/");
+    assert_eq!(home.status, 200);
+    assert!(
+        home.body.contains(&format!(r#"href="{icon}""#)),
+        "{}",
+        home.body
+    );
+    assert!(home.body.contains("rel=\"icon\"") && home.body.contains("<symbol"));
+    assert_eq!(
+        stylesheet_of(&home.body),
+        attribute_of(&login.body, "link", "href")
+    );
+    for name in [
+        Mask::names_in_page(&home.body, false),
+        Mask::names_in_page(&home.body, true),
+    ]
+    .concat()
+    {
+        assert!(![
+            "appMark__glyph",
+            "appMark__lockup",
+            "logoDot",
+            "appSep",
+            "i-logo"
+        ]
+        .contains(&name.as_str()));
+    }
+    assert!(
+        !home.body.contains("appMark")
+            && !home.body.contains("i-logo")
+            && !home.body.contains("logoDot")
+    );
+    // A settings page: the mark, and the icon link too.
+    let settings = page(&node, &root, "/auth/settings/services");
+    assert!(settings.body.contains(&format!(r#"href="{icon}""#)));
+    assert!(settings.body.contains(r##"<use href="#i-logo"/>"##));
+    // The file: a signed-in browser gets it with a private cache and the image type. Nobody else does.
+    let cookie = format!("{}={root}", session_cookie_name(&node));
+    let file = send(node.port, "GET", icon, &[("Cookie", &cookie)], "");
+    assert_eq!(file.status, 200);
+    assert_eq!(file.header("content-type"), Some("image/svg+xml"));
+    assert_eq!(
+        file.header("cache-control"),
+        Some("private, max-age=31536000, immutable")
+    );
+    assert_eq!(file.body, ui::FAVICON_SVG);
+    for anonymous in [
+        send(node.port, "GET", icon, &[], ""),
+        send(
+            node.port,
+            "GET",
+            icon,
+            &[("Cookie", &format!("{}=garbage", session_cookie_name(&node)))],
+            "",
+        ),
+    ] {
+        assert_eq!(anonymous.status, 404);
+        assert!(!anonymous.body.contains("svg"));
+    }
+    // ForwardAuth does not let the icon pass without a session: it is not a neutral asset.
+    let verify = send(
+        node.port,
+        "GET",
+        "/auth/verify",
+        &[("X-Forwarded-Uri", icon), ("X-Forwarded-Method", "GET")],
+        "",
+    );
+    assert_ne!(verify.status, 204);
+}
+
 #[test]
 fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
     let node = sign_in_node("");
@@ -8421,7 +8543,7 @@ fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
             assert!(!plain.contains(&name), "{name}");
             assert!(ruled.contains(&name), "{name} has no rule");
         }
-        assert_eq!(attribute_of(&reply.body, "link", "href"), css_path);
+        assert_eq!(stylesheet_of(&reply.body), css_path);
     }
     // The settings pages keep the plain names and the plain files.
     let settings = page(&node, &root, "/auth/settings/services");

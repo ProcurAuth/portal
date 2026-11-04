@@ -219,6 +219,43 @@ a {
   color: var(--text);
 }
 
+/* The logo, on the pages after sign-in only. It is a picture and not a control. The mark takes the text
+   colour of the logo and the dot takes its own colour, both from the tokens. */
+.appMark__glyph,
+.appMark__lockup {
+  display: block;
+  flex: none;
+  color: var(--logo-ink);
+}
+
+.appMark__glyph {
+  width: 22px;
+  height: 22px;
+}
+
+.appMark__glyph--narrow {
+  display: none;
+  width: 24px;
+  height: 24px;
+}
+
+.appMark__lockup {
+  width: 106px;
+  height: 24px;
+}
+
+.logoDot {
+  fill: var(--logo-dot);
+}
+
+.appSep {
+  flex: none;
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: var(--border-strong);
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -1136,6 +1173,15 @@ a {
     padding-right: 14px;
   }
 
+  /* Not enough room for the word: the mark stands alone. */
+  .appMark__lockup {
+    display: none;
+  }
+
+  .appMark__glyph--narrow {
+    display: block;
+  }
+
   .notice {
     width: calc(100% - 28px);
   }
@@ -1146,6 +1192,13 @@ a {
 
   .tiles {
     grid-template-columns: 1fr;
+  }
+}
+
+/* A phone: the controls of the header fill the line, so the mark has no room. */
+@media (max-width: 440px) {
+  .appMark__glyph--narrow {
+    display: none;
   }
 }
 

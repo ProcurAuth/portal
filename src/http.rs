@@ -808,6 +808,8 @@ async fn handle_request(
             "text/javascript; charset=utf-8",
             &state.mask.assets().notify,
         )
+    } else if method == Method::GET && path == ui::favicon_path() {
+        handle_favicon(&state, request.headers(), &client)
     } else if method == Method::GET && path == STYLE_PATH {
         static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
@@ -1164,6 +1166,21 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+    );
+    response
+}
+
+/// The icon of the tab. Only a signed-in browser gets it: the file shows the logo, and a visitor who is not signed in
+/// must not find the product with it. Its use does not renew the idle timer, as the poll of the notifications.
+fn handle_favicon(state: &AppState, headers: &HeaderMap, client: &Client) -> HttpResponse {
+    if current_viewer_passive(state, headers, client).is_none() {
+        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
+    }
+    let mut response = hashed_response("image/svg+xml", ui::FAVICON_SVG);
+    // The cache is private: a shared cache must not keep a file that needs a session.
+    response.headers_mut().insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
     response
 }
@@ -4296,7 +4313,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH | NOTIFY_JS_PATH => {
             "assets"
         }
-        _ if is_neutral_asset(state, path) => "assets",
+        _ if is_neutral_asset(state, path) || path == ui::favicon_path() => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",
