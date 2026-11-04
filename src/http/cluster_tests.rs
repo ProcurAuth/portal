@@ -2631,12 +2631,11 @@ fn publish_hosts(node: &Node) {
 }
 
 /// The document of `db` with a tree: `host` below the service, `database` below `host`.
+/// The document of actions of the service `db` of the tests of the options.
+const TREE_DOCUMENT: &str = r#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"The type host."},{"name":"database","parent":"host","description":"The type database."}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."},{"name":"query.run.write","resource_types":["service","host","database"],"description":"The action query.run.write."},{"name":"system.read","resource_types":["service","host"],"description":"The action system.read."}]}"#;
+
 fn publish_tree(node: &Node) {
-    let document = crate::actions::parse(
-        "db",
-        br#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"The type host."},{"name":"database","parent":"host","description":"The type database."}],"actions":[{"name":"query.run.read","resource_types":["service","host","database"],"description":"The action query.run.read."},{"name":"query.run.write","resource_types":["service","host","database"],"description":"The action query.run.write."},{"name":"system.read","resource_types":["service","host"],"description":"The action system.read."}]}"#,
-    )
-    .unwrap();
+    let document = crate::actions::parse("db", TREE_DOCUMENT.as_bytes()).unwrap();
     node.state.actions.set_document("db", document);
 }
 
@@ -2654,8 +2653,15 @@ fn options_service() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
             let n = stream.read(&mut buffer).unwrap_or(0);
             let request = String::from_utf8_lossy(&buffer[..n]).to_string();
             let first = request.lines().next().unwrap_or("").to_string();
-            log.lock().unwrap().push(request.to_lowercase());
-            let (status, body) = if first.contains("type=database")
+            // The loop of the actions of the portal reads the document of the service at each tick of 5 seconds, also
+            // after the test changed the catalogue. It gets the same document that the test published. The log keeps
+            // the requests for the options only.
+            if !first.contains("/.well-known/procurauth/actions") {
+                log.lock().unwrap().push(request.to_lowercase());
+            }
+            let (status, body) = if first.contains("/.well-known/procurauth/actions") {
+                ("200 OK", TREE_DOCUMENT)
+            } else if first.contains("type=database")
                 && first.contains("parent=host%3Aprod")
             {
                 (
