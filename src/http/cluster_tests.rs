@@ -3356,6 +3356,16 @@ const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
     {"name":"max_rows","label":"Rows","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000},
     {"name":"max_duration","label":"Duration","description":"d","unit":"second","kind":"ceiling","min":1,"max":3600}]}"#;
 
+/// The budgets count in windows that start at a multiple of their length of the clock. A test that counts several
+/// uses of a budget of one minute must not see the end of the window in the middle: the count starts again and a
+/// use that must be refused is good. The test waits for the next window when the end is near.
+fn stay_in_a_minute() {
+    let left = 60 - unix_now().rem_euclid(60);
+    if left < 12 {
+        std::thread::sleep(Duration::from_secs(left as u64 + 1));
+    }
+}
+
 fn limits(text: &str) -> crate::limits::Limits {
     crate::limits::Limits::from_json(text).unwrap()
 }
@@ -3396,6 +3406,7 @@ fn key_node(backend: &Backend) -> (Node, u16) {
 
 /// Alice reads `host:prod` with `max_rows` 5000 and a budget of 3 each minute. She can use keys.
 fn add_alice(node: &Node, extra: &[Grant]) {
+    stay_in_a_minute();
     let mut grants = vec![
         Grant::new("access", "db")
             .unwrap()
@@ -3458,6 +3469,7 @@ fn read_body(subject: &str, database: &str, context: serde_json::Value) -> Strin
 
 #[test]
 fn the_pdp_decides_for_a_key_with_its_owner_its_ceilings_and_its_counters() {
+    stay_in_a_minute();
     each_backend(|backend| {
         let (node, port) = key_node(backend);
         add_alice(&node, &[]);
@@ -3648,6 +3660,7 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
 
 #[test]
 fn a_key_of_the_superadmin_has_only_its_own_grants_and_its_own_counters() {
+    stay_in_a_minute();
     each_backend(|backend| {
         let (node, port) = key_node(backend);
         add_key(
@@ -4953,6 +4966,7 @@ mod conformance_e {
 
 #[test]
 fn the_rounds_write_the_key_checks_prune_the_old_keys_and_make_the_rows_of_a_new_directory() {
+    stay_in_a_minute();
     each_backend(|backend| {
         let (node, _port) = key_node(backend);
         add_alice(
@@ -5042,6 +5056,7 @@ fn the_rounds_write_the_key_checks_prune_the_old_keys_and_make_the_rows_of_a_new
 
 #[test]
 fn a_new_version_of_the_directory_makes_the_counter_rows_it_needs_and_clears_the_refusal_memo() {
+    stay_in_a_minute();
     each_backend(|backend| {
         let (node, port) = key_node(backend);
         add_alice(&node, &[]);
@@ -6131,6 +6146,7 @@ fn editor_json(body: &str) -> serde_json::Value {
 
 #[test]
 fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
+    stay_in_a_minute();
     each_backend(|backend| {
         let (node, _pdp) = key_node(backend);
         let root = sign_in(&node, "root", PASSWORD);
@@ -6612,6 +6628,7 @@ mod inbox_rights_tests {
 
     #[test]
     fn the_right_to_alert_an_account_is_flat_and_uses_the_same_budget_as_the_right_for_a_group() {
+        stay_in_a_minute();
         each_backend(|backend| {
             let (node, authorizer) = inbox_node(backend);
             let mut owner = vec![
@@ -6717,6 +6734,7 @@ mod inbox_rights_tests {
 
     #[test]
     fn the_decision_for_a_key_follows_both_sides_the_limit_and_the_critical_group() {
+        stay_in_a_minute();
         each_backend(|backend| {
             let (node, authorizer) = inbox_node(backend);
             // The owner has a budget of 2 each minute on the service inbox.
