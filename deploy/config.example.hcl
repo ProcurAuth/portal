@@ -25,6 +25,15 @@ authentication {
 session {
   secret_mode = "provided"
   secret_file = "/run/secrets/session_secret"
+
+  # A session ends this time after the sign-in, also when it is in use (default "24h").
+  # ttl = "24h"
+  # The box "Keep me signed in": a session with the box lives for remember_ttl and has a persistent
+  # cookie. With remember = false, the form has no box. A change of the client address ends the use
+  # of a session when bind is "ip_user_agent" (default). "user_agent" is the usual choice for phones.
+  # remember              = true
+  # remember_ttl          = "30d"
+  # remember_idle_timeout = "7d"
 }
 
 # "hybrid": the settings pages give the grants of the accounts of the database, and the blocks `user` of
