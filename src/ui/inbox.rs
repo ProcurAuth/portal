@@ -674,7 +674,7 @@ fn docs_popover(view: &InboxView, docs: &DocsData) -> String {
         );
     }
     let body = format!(
-        r#"<div class="twoCols"><div><h2 class="sectionLabel">Endpoints</h2><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div></div><div><h2 class="sectionLabel">Groups</h2>{}</div></div>"#,
+        r#"<div class="twoCols"><div><h2 class="sectionLabel">Endpoints</h2><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div><p class="muted">Body: <code>title</code> and one of <code>group</code> (a group id) and <code>user</code> (a login). The login is any account of the portal: an account of the database or of the file.</p></div><div><h2 class="sectionLabel">Groups</h2>{}</div></div>"#,
         html_escape(&docs.base),
         if groups.is_empty() {
             r#"<span class="muted">No group</span>"#.to_string()
@@ -2072,6 +2072,11 @@ mod tests {
         view.connections = None;
         let html = page(&view);
         assert!(html.contains("New alert") && html.contains("Documentation for senders"));
+        // The documentation says that a login is an account of the database or of the file.
+        assert!(
+            html.contains("an account of the database or of the file"),
+            "{html}"
+        );
         assert!(!html.contains(r#"id="sent-title""#) && !html.contains("Period"));
         assert!(!html.contains(r#"id="phones-title""#));
         assert!(!html.contains(r#"aria-label="Add a phone""#));

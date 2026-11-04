@@ -157,6 +157,14 @@ pub fn person_grants_on(
     }
 }
 
+/// Whether the login names a person: the superadmin, an account of the file or an account of the
+/// database. This is the one check that the inbox uses for the target of an alert to an account:
+/// an account of the file is an account like any other. It reads memory only.
+pub fn person_exists(state: &AppState, login: &str) -> bool {
+    crate::util::constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes())
+        || person_grants_on(state, login, portal_actions::SERVICE).is_some()
+}
+
 /// The directory of the key is too old (portal 10.3): the last good read of the database is older
 /// than `keys.directory_max_age`. With SQLite, the one instance holds the directory, so it is
 /// never too old.

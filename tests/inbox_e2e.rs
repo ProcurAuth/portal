@@ -513,6 +513,16 @@ inbox {{
         self.account_with(login, &DEFAULT_GRANTS)
     }
 
+    /// The session of an account of the configuration file (see `add_file_account`). The server
+    /// is started. No database account is made.
+    fn file_account(&self, login: &str) -> std::sync::Arc<AdminSession> {
+        let mut accounts = self.accounts.lock().unwrap();
+        accounts
+            .entry(login.to_string())
+            .or_insert_with(|| std::sync::Arc::new(sign_in_as(self.port, login, ACCOUNT_PASSWORD)))
+            .clone()
+    }
+
     /// The same, with the permissions that the test chooses for a new account.
     fn account_with(&self, login: &str, grants: &[&str]) -> std::sync::Arc<AdminSession> {
         if login == SUPERADMIN {
@@ -5250,6 +5260,15 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
 async fn demo_for_the_eyes() {
     let out = PathBuf::from(std::env::var("INBOX_DEMO_OUT").expect("INBOX_DEMO_OUT"));
     let mut s = Server::setup();
+    // Two accounts of the file for the browser check of an alert to such an account (see
+    // tools/dev/ui-check-notify.js, section fileaccount): fiona has a phone, fran has none.
+    for login in ["fiona", "fran"] {
+        add_file_account(
+            &s,
+            login,
+            &["inbox.receive on service:portal/inbox_group:infra"],
+        );
+    }
     s.add_to_inbox(
         "  group \"crit\" {\n    name = \"Critical outages of the production cluster\"\n    description = \"Pages the on-call team\"\n    critical = true\n  }",
     );
@@ -5291,6 +5310,8 @@ async fn demo_for_the_eyes() {
         let (mut c, _) = Conn::open(s.port, &alice2).await.unwrap();
         c.subscribe("infra").await;
     }
+    s.file_account("fiona");
+    enroll_as(&s, "Phone of Fiona", "fiona").await.unwrap();
     let root = enroll_as(&s, "Galaxy of root", SUPERADMIN).await.unwrap();
     {
         let (mut c, _) = Conn::open(s.port, &root).await.unwrap();
@@ -5742,6 +5763,260 @@ async fn the_form_of_the_page_sends_an_alert_to_a_group_or_to_an_account() {
     );
     assert_eq!(st, 200);
     assert!(!page.contains(&format!("id=\"a-{id}\"")));
+}
+
+// An alert to an account that the configuration file declares (a block `user`).
+
+/// Adds an account of the file before the start. Its password is `ACCOUNT_PASSWORD`.
+fn add_file_account(s: &Server, login: &str, grants: &[&str]) {
+    let hash = portal(&["hash-password"], Some(ACCOUNT_PASSWORD));
+    assert!(hash.status.success());
+    let path = s.dir.join(format!("{login}.hash"));
+    std::fs::write(&path, String::from_utf8(hash.stdout).unwrap().trim()).unwrap();
+    let list: Vec<String> = grants.iter().map(|g| format!("\"{g}\"")).collect();
+    s.add_block(&format!(
+        "user \"{login}\" {{\n  password_hash_file = \"{}\"\n  grants = [{}]\n}}\n",
+        path.display(),
+        list.join(", ")
+    ));
+}
+
+/// Adds a key of the file before the start. The result is the text of its secret.
+fn add_file_key(s: &Server, name: &str, owner: &str, direct_alerts: bool) -> String {
+    let path = s.dir.join(format!("{name}.token"));
+    portal_ok(&["inbox", "token", "--out", &path.to_string_lossy()]);
+    s.add_to_inbox(&format!(
+        "  api_key \"{name}\" {{\n    owner = \"{owner}\"\n    secret_file = \"{}\"\n    groups = [\"infra\"]\n    direct_alerts = {direct_alerts}\n  }}",
+        path.display()
+    ));
+    std::fs::read_to_string(path).unwrap().trim().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_alert_to_an_account_of_the_file_goes_to_its_phones_and_its_notifications() {
+    let mut s = Server::setup();
+    // The sender, and the accounts of the file that get alerts. fred has a phone. frida has none.
+    // Both can read the group infra, so the list of the alerts shows the alerts that they receive.
+    let sender = [
+        "access on service:portal",
+        "keys.own.use on service:portal/key_kind:api",
+        "alert.send on service:portal/inbox_group:infra",
+        "alert.read on service:portal/inbox_group:infra",
+        "alert.send_user on service:portal",
+    ];
+    let receiver = [
+        "inbox.receive on service:portal/inbox_group:infra",
+        "alert.read on service:portal/inbox_group:infra",
+    ];
+    add_file_account(&s, "gus", &sender);
+    add_file_account(&s, "fred", &receiver);
+    add_file_account(&s, "frida", &receiver);
+    // The key of gus alerts accounts. The key of ci, the key of the group, does not.
+    let direct = add_file_key(&s, "direct", "gus", true);
+    s.start();
+    add_account(&s, "alice");
+    let gus = s.file_account("gus");
+    let fred = s.file_account("fred");
+    let frida = s.file_account("frida");
+    let alice = s.account_with(
+        "alice",
+        &["inbox.receive on service:portal/inbox_group:infra"],
+    );
+
+    let fred_phone = enroll_as(&s, "fred-1", "fred").await.unwrap();
+    assert_eq!(fred_phone.user_name, "fred", "the login is the key");
+    let (mut conn, _) = Conn::open(s.port, &fred_phone).await.unwrap();
+    let alice_phone = enroll_as(&s, "alice-1", "alice").await.unwrap();
+    let (mut conn_alice, _) = Conn::open(s.port, &alice_phone).await.unwrap();
+    let begin = notifications(&s, &fred.cookie, "").1["now"]
+        .as_i64()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+
+    // The key sends to the account of the file. The phone gets the frame of an alert to an account.
+    let (st, v) = send_to(
+        &s,
+        &direct,
+        "d1",
+        json!({"user": "fred", "title": "wake fred"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["targets"], 1, "{v}");
+    let msg = take(&mut conn).await;
+    assert_eq!(
+        (msg.title.as_str(), msg.group.as_str()),
+        ("wake fred", "@direct")
+    );
+    conn_alice.no_alert(Duration::from_millis(800)).await;
+
+    // An account of the file with no phone: 409, as for an account of the database. The
+    // superadmin and an account of the file that has no password exist too.
+    for (key, login) in [("p1", "frida"), ("p2", "ci"), ("p3", SUPERADMIN)] {
+        let (st, v) = send_to(&s, &direct, key, json!({"user": login, "title": "x"}));
+        assert_eq!(
+            (st, v["error"]["code"].as_str()),
+            (409, Some("no_phone")),
+            "{login}: {v}"
+        );
+    }
+    // A login that does not exist gets the same answer, whatever its form. The message is the
+    // same text with the login in it.
+    let (st, ghost) = send_to(&s, &direct, "u1", json!({"user": "ghost", "title": "x"}));
+    assert_eq!(
+        (st, ghost["error"]["code"].as_str()),
+        (404, Some("unknown_user"))
+    );
+    let (st, other) = send_to(&s, &direct, "u2", json!({"user": "Fred", "title": "x"}));
+    assert_eq!(
+        (st, other["error"]["code"].as_str()),
+        (404, Some("unknown_user"))
+    );
+    assert_eq!(ghost["error"]["message"], "unknown user \"ghost\"");
+    assert_eq!(other["error"]["message"], "unknown user \"Fred\"");
+    // The key of the group has no `direct_alerts`: the owner may alert, the key may not.
+    let (st, v) = send_to(&s, &s.token, "g1", json!({"user": "fred", "title": "x"}));
+    assert_eq!(
+        (st, v["error"]["code"].as_str()),
+        (403, Some("forbidden_user"))
+    );
+    // The key that sent the alert reads it. The target is the login.
+    let (st, _, v) = producer_call(
+        &s,
+        "GET",
+        &format!("/api/v1/alerts/{}", msg.alert_id),
+        &direct,
+        "",
+        "",
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["target"], json!({"kind": "user", "id": "fred"}), "{v}");
+
+    // The notifications of fred have the alert, with the level Ring and a toast. The other
+    // accounts, of the file or of the database, get nothing.
+    let after = format!("?after={begin}");
+    let (st, mine) = notifications(&s, &fred.cookie, &after);
+    assert_eq!(st, 200, "{mine}");
+    assert_eq!(titles(&mine), ["wake fred"], "{mine}");
+    assert_eq!(mine["unread"], 1);
+    assert_eq!(mine["items"][0]["level"], "ring");
+    assert_eq!(mine["items"][0]["group"], "Direct");
+    assert_eq!(mine["items"][0]["toast"], true);
+    for (name, session) in [("frida", &frida), ("gus", &gus), ("alice", &alice)] {
+        let (st, theirs) = notifications(&s, &session.cookie, &after);
+        assert_eq!(st, 200, "{name}: {theirs}");
+        assert_eq!(theirs["items"], json!([]), "{name}: {theirs}");
+        assert_eq!(theirs["unread"], 0, "{name}");
+    }
+    // The superadmin has all the groups, and not the alert for an account.
+    let root = s.session();
+    assert_eq!(
+        notifications(&s, &root.cookie, &after).1["items"],
+        json!([])
+    );
+
+    // The list of the alerts: the target, the sender (the owner of the key) and the superadmin
+    // read it. A reader of the group that is not the target does not.
+    for (name, session, shown) in [
+        ("fred", &fred, true),
+        ("gus", &gus, true),
+        ("root", &root, true),
+        ("frida", &frida, false),
+    ] {
+        let (st, page) = inbox_page_as(&s, &session.cookie, "/auth/settings/inbox");
+        assert_eq!(st, 200, "{name}");
+        assert_eq!(page.contains("data-to=\"user:fred\""), shown, "{name}");
+    }
+    // The metrics count one alert to an account of the key.
+    assert!(metrics_of(&s).contains(
+        "portal_inbox_alerts_accepted_total{source=\"producer\",kind=\"alert\",target=\"user\"} 1"
+    ));
+    s.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_popup_offers_the_accounts_of_the_file_and_sends_to_them() {
+    let mut s = Server::setup();
+    add_file_account(
+        &s,
+        "gus",
+        &[
+            "alert.send_user on service:portal",
+            "alert.read on service:portal/inbox_group:infra",
+        ],
+    );
+    add_file_account(
+        &s,
+        "fred",
+        &["inbox.receive on service:portal/inbox_group:infra"],
+    );
+    add_file_account(&s, "frida", &[]);
+    s.start();
+    add_account(&s, "alice");
+    let gus = s.file_account("gus");
+    let fred = s.file_account("fred");
+    enroll_as(&s, "fred-1", "fred").await.unwrap();
+    let a1 = enroll_as(&s, "alice-1", "alice").await.unwrap();
+    let (mut conn_alice, _) = Conn::open(s.port, &a1).await.unwrap();
+    let fred_phone = enroll_as(&s, "fred-2", "fred").await.unwrap();
+    let (mut conn, _) = Conn::open(s.port, &fred_phone).await.unwrap();
+
+    // The list of the popup has the accounts of the database and of the file, each with its
+    // phones. An account with no phone is disabled. The superadmin is not a row.
+    let (st, page) = inbox_page_as(&s, &gus.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200, "{page}");
+    assert!(
+        page.contains(r#"name="to" value="user:fred" data-phones="2""#),
+        "{page}"
+    );
+    assert!(page.contains(r#"name="to" value="user:alice" data-phones="1""#));
+    assert!(page.contains(r#"name="to" value="user:frida" disabled"#));
+    assert!(page.contains(r#"name="to" value="user:gus" disabled"#));
+    assert!(!page.contains(&format!("value=\"user:{SUPERADMIN}\"")));
+    // An account without the right has no list.
+    let (_, page) = inbox_page_as(&s, &fred.cookie, "/auth/settings/inbox");
+    assert!(!page.contains("value=\"user:alice\""), "{page}");
+
+    // The form sends to an account of the file, and the answers are the answers of any account.
+    let post = |to: &str, key: &str| {
+        let (st, head, text) = inbox_form(
+            &s,
+            &gus.cookie,
+            "/auth/settings/inbox/send",
+            &format!("to={}&title=hello&key={key}", form_value(to)),
+        );
+        match st {
+            303 => location(&head),
+            422 => {
+                let code = text.split("data-send-error=\"").nth(1).unwrap_or_default();
+                format!("s={}", code.split('"').next().unwrap_or_default())
+            }
+            _ => panic!("{st}: {text}"),
+        }
+    };
+    let begin = notifications(&s, &fred.cookie, "").1["now"]
+        .as_i64()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    let loc = post("user:fred", "f1");
+    assert!(loc.contains("open="), "{loc}");
+    let msg = take(&mut conn).await;
+    assert_eq!(
+        (msg.title.as_str(), msg.group.as_str()),
+        ("hello", "@direct")
+    );
+    conn_alice.no_alert(Duration::from_millis(800)).await;
+    assert!(post("user:frida", "f2").contains("s=no_phone"));
+    assert!(post("user:ghost", "f3").contains("s=bad_user"));
+    // The sender reads the alert that it sent, and fred sees it in its notifications.
+    let (st, page) = inbox_page_as(&s, &gus.cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200);
+    assert!(page.contains("data-to=\"user:fred\""), "{page}");
+    let after = format!("?after={begin}");
+    assert_eq!(
+        titles(&notifications(&s, &fred.cookie, &after).1),
+        ["hello"]
+    );
+    s.stop();
 }
 
 // The notifications of the signed-in person.

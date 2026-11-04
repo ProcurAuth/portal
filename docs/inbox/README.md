@@ -65,7 +65,7 @@ The budget `alerts` limits `alert.send` and `alert.send_user`. The two actions u
 An alert has one target: a group or one account. An alert to an account goes to each phone of the account that is not revoked. The phone needs no subscription. The alert has the same life as an alert to a group: the same spool, time to live, resend, receipt, rate limit and budget.
 
 - An account with no phone, or with only revoked phones, gets no alert. The Inbox answers `409` with the code `no_phone` and stores nothing. The refused alert uses no budget.
-- An account that does not exist gets `404` with the code `unknown_user`.
+- An account that does not exist gets `404` with the code `unknown_user`. A login that is not an account gets the same answer in each case. An account is an account of the database or of the configuration file (a block `user`), and the superadmin. The file account has the same rules as the database account: its phones, its notifications in the browser and its rights.
 - The level of an alert to an account is Ring. It is never critical.
 - The protocol of the phones does not change. The frame of the alert has the group id `@direct` and the group name `Direct`. A group of the file cannot have this id.
 - The account that is the target, the sender and the superadmin can read the alert. A right on a group does not apply, because the alert has no group.

@@ -11,13 +11,23 @@
 //   groups infra, other, and crit with critical = true
 //   an API key with alert.send on the three groups and alert.send_user, and direct_alerts = true
 //
+// The section fileaccount needs two accounts that the configuration file declares (blocks `user`):
+//   fiona  inbox.receive on infra, with one active phone
+//   fran   inbox.receive on infra, with no phone
+// An account of the file is an account like any other: root sends to it from the popup New alert,
+// and it gets the toast and the badge. The test `demo_for_the_eyes` of tests/inbox_e2e.rs starts a
+// portal with these two accounts and writes the port and the passwords in demo.json.
+//
 // Environment:
 //   UI_CHECK_BASE      base URL of the portal (default http://127.0.0.1:18741)
 //   UI_CHECK_TOKEN     the text of the API key
 //   UI_CHECK_USER_PASSWORD  the password of mia, otto and nina (default pw-notify-test-1)
 //   UI_CHECK_ROOT_PASSWORD  the password of root
+//   UI_CHECK_FILE_USER      the account of the file with a phone (default fiona)
+//   UI_CHECK_FILE_NO_PHONE  the account of the file with no phone (default fran)
+//   UI_CHECK_FILE_PASSWORD  the password of these two accounts (default: UI_CHECK_USER_PASSWORD)
 //   UI_CHECK_ONLY      sections to run, with commas: empty, noscript, flow, critical, settings, load,
-//                      off, mobile, keyboard (default: all)
+//                      off, mobile, keyboard, fileaccount (default: all)
 //   UI_CHECK_SHOTS     a directory for the screenshots (optional)
 const { chromium } = require("playwright");
 
@@ -374,6 +384,46 @@ function wants(name) {
     await page.keyboard.press("Escape");
     check("Escape closes the popover", !(await page.locator("[data-notify-bell]").evaluate((e) => e.open)), "open");
     await context.close();
+  }
+
+  // 10. An alert to an account of the file, sent from the popup New alert by the superadmin. The
+  // account gets the toast and the badge. The account with no phone is disabled in the list.
+  if (wants("fileaccount")) {
+    const fileUser = process.env.UI_CHECK_FILE_USER || "fiona";
+    const fileNoPhone = process.env.UI_CHECK_FILE_NO_PHONE || "fran";
+    const filePw = process.env.UI_CHECK_FILE_PASSWORD || PW;
+    const title = "Ring for a file account " + Date.now();
+    const target = await login(browser, fileUser, filePw, { colorScheme: "dark" });
+    await target.page.goto(BASE + "/");
+    check("the account of the file has the icon", (await target.page.locator("[data-notify-bell]").count()) === 1, "no icon");
+    // The account can have older alerts: the badge must grow by one.
+    await target.page.waitForTimeout(1500);
+    const unreadBefore = parseInt(await target.page.locator("[data-notify-n]").first().innerText(), 10) || 0;
+    const sender = await login(browser, "root", ROOT_PW, { colorScheme: "dark" });
+    await sender.page.goto(BASE + "/auth/settings/inbox");
+    await sender.page.click("details.pop > summary.button--primary");
+    await sender.page.click('label[for="rcpt-user"]');
+    const row = sender.page.locator(`input[name="to"][value="user:${fileUser}"]`);
+    check("the list of the popup has the account of the file", (await row.count()) === 1, "no row");
+    check("the account of the file with a phone is enabled", (await row.isDisabled()) === false, "disabled");
+    const none = sender.page.locator(`input[name="to"][value="user:${fileNoPhone}"]`);
+    check("the account of the file with no phone is listed and disabled", (await none.count()) === 1 && (await none.isDisabled()), "not disabled");
+    await sender.page.fill("#send-find", fileUser);
+    check("the search finds the account of the file", await row.locator("xpath=..").isVisible(), "hidden");
+    await row.locator("xpath=..").click();
+    await sender.page.fill("#send-user-form-title", title);
+    await Promise.all([sender.page.waitForNavigation(), sender.page.click(".rcptForm--user button[type=submit]")]);
+    check("the popup shows no refusal", (await sender.page.locator("[data-send-error]").count()) === 0, "refused");
+    check("the list Sent shows the alert for the account of the file", (await sender.page.locator(`tr[data-alert][data-to="user:${fileUser}"]`).count()) >= 1, "no row");
+    await shot(sender.page, "fileaccount-sent");
+    await target.page.waitForSelector("[data-toast-title]", { timeout: 20000 });
+    const toast = await target.page.locator("[data-toast-polite]").innerText();
+    check("the account of the file gets the toast", toast.includes(title), toast);
+    const badge = await target.page.locator("[data-notify-n]").first().innerText();
+    check("the badge of the account of the file counts the new alert", parseInt(badge, 10) === unreadBefore + 1, `${unreadBefore} -> ${badge}`);
+    await shot(target.page, "fileaccount-toast");
+    await sender.context.close();
+    await target.context.close();
   }
 
   await browser.close();

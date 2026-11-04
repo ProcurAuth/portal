@@ -780,8 +780,7 @@ async fn send(
             if !ctx.held.ui.send_user {
                 return refuse("bad_target").await;
             }
-            let known = *login == state.superadmin_login || state.users.get(login).is_some();
-            if !known {
+            if !crate::keyauth::person_exists(state, login) {
                 return refuse("bad_user").await;
             }
             // An account with no phone gets nothing, and the refused alert uses no budget.

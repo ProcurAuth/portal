@@ -67,7 +67,7 @@ A requirement has one of two states. A requirement without a mark is in force in
 
 3.3.4 The Inbox MUST offer these routes: a JSON alert, a generic webhook, and a webhook with the payload of Alertmanager and Grafana. A sender MAY read the delivery status of an alert with `alert.read` on its group. For an alert to an account, only the key that sent it MAY read the status.
 
-3.3.4a An alert has one target: a group or one account. A request MUST give exactly one of `group` and `user`, or it MUST get `400`. An alert to an account MUST go to each phone of the account that is not revoked, and it MUST need no subscription. An account that does not exist MUST get `404`. An account with no phone MUST get `409`, and the Inbox MUST NOT store the alert. The level of the alert is Ring. It MUST NOT be critical. The protocol of the phones MUST NOT change: the frame has the group id `@direct`.
+3.3.4a An alert has one target: a group or one account. A request MUST give exactly one of `group` and `user`, or it MUST get `400`. An alert to an account MUST go to each phone of the account that is not revoked, and it MUST need no subscription. An account is an account of the database, an account of the file, or the superadmin: the Inbox MUST use one check for the three kinds. An account that does not exist MUST get `404`. An account with no phone MUST get `409`, and the Inbox MUST NOT store the alert. The level of the alert is Ring. It MUST NOT be critical. The protocol of the phones MUST NOT change: the frame has the group id `@direct`.
 
 3.3.5 A sender SHOULD send an `Idempotency-Key`. Two requests with the same key MUST make one alert. A key that belongs to a different alert MUST get `409`.
 

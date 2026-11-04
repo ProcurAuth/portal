@@ -162,10 +162,7 @@ impl Authorizer for PortalAuthorizer {
         if !directory_fresh(&state) {
             return None;
         }
-        Some(
-            constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes())
-                || state.users.get(login).is_some(),
-        )
+        Some(keyauth::person_exists(&state, login))
     }
 
     fn subscribable(&self, login: &str) -> Subscribable {
