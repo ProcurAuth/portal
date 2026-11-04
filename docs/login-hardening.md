@@ -141,6 +141,7 @@ The code is in `src/ui/mask.rs`. The renderers still write plain names. A last s
 - The mapped files have their own paths `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The hash follows the mapped content. The files are the same for all visitors, so the browser keeps them for one year (`immutable`).
 - The settings pages, and the old paths `/auth/style.css` and `/auth/assets/theme.js`, keep the plain files. A browser that visits both kinds of page loads both pairs of files. A page that loads the plain files and a page that loads the mapped files never mix their names.
 - ForwardAuth lets the mapped paths pass without a session, as it does for the plain paths.
+- A launcher of an account that receives notifications loads a third file, the script of the notifications (`web/notify.js`). It has a neutral path `/auth/a/<hash>.js`. The pass changes no string of this script: it finds its elements by data attributes, and the page has the classes of its parts in the shared stylesheet. The markup of the inbox icon, of the popover and of the toasts goes through the same pass as the rest of the launcher. The settings pages load the file at `/auth/assets/notify.js?v=<version>`.
 
 ### The structure
 

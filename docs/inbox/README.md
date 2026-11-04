@@ -199,6 +199,16 @@ The zone **Sent** holds the 500 newest alerts of the period. The count shows `50
 
 A session that the superadmin opens with **Log in as** can read the page and make a code. It cannot send an alert and it cannot revoke a phone.
 
+## Notifications in the browser
+
+A person that is signed in gets a notification when an alert arrives for a group of the person or for the account. The person needs a permission of the Inbox features. The account receives the alerts for each group where it holds `inbox.receive`, and the alerts for the account itself.
+
+The person sees three things. A badge with the unread count is on the tab Inbox. A toast shows each new alert in the open page. An inbox icon is on the launcher, next to the gear, and it opens a list of the newest 8 notifications. The toast of a critical group stays until the person closes it. The other toasts go after 8 seconds.
+
+Each account has a level: **All**, **Alerts** (Alert and Critical only) or **Off**. An alert for an account is level Ring. With **Alerts**, a Ring alert gives no toast, but the list and the badge keep it. With **Off**, the browser sends no request. The store keeps the level and the marker "read up to" of each account. The marker moves when the person opens the tab Inbox or uses **Mark all read**.
+
+The browser asks the portal every 10 to 15 seconds. This is 4 to 6 requests each minute for an open tab. A hidden tab sends none. The portal reads the shared store for each request, so any instance gives the same answer. The request writes nothing and does not renew the idle timer of the session. The README of the portal gives the details, the forms and the migration.
+
 ## The Android app
 
 The app has the name Portal Inbox. Its application id is `app.portalinbox`. It only receives alerts. It does not send alerts. It does not use Firebase or any push service of a third party. It keeps one encrypted connection for each server in a foreground service. One app can enroll in several servers. The app shows the name of the server (`server.name` of the portal) in its lists and screens.
@@ -277,7 +287,7 @@ With the block `postgres`, any number of instances can be active. They are behin
 - The limiter of enrollment attempts is in memory in each instance. N instances give N times the attempts.
 - For the same guarantees as SQLite, use a PostgreSQL that is replicated with synchronous commit.
 
-To move from SQLite to PostgreSQL, stop the SQLite instance. Run `portal inbox import-sqlite --config FILE --from SQLITE_FILE` with a configuration that has a block `postgres`. The target database must be empty. Then start the PostgreSQL instances. The command copies phones, subscriptions, alerts, deliveries, enrollment codes and the connection log. The source can be a file of the portal.
+To move from SQLite to PostgreSQL, stop the SQLite instance. Run `portal inbox import-sqlite --config FILE --from SQLITE_FILE` with a configuration that has a block `postgres`. The target database must be empty. Then start the PostgreSQL instances. The command copies phones, subscriptions, alerts, deliveries, enrollment codes, the connection log and the settings of the notifications. The source can be a file of the portal.
 
 ### Degraded mode: the database has no primary
 

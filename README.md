@@ -12,7 +12,7 @@ portal is one Rust program. It has one binary, one configuration file and one da
 
 Each part except the launcher, the gate and the accounts is optional. A file with no block `keys` and no block `inbox` runs the portal as a panel of services only. See "Settings pages and history" for the switches.
 
-The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only scripts are the theme selector and the script of the settings pages. This script draws the editor of grants and the matrices. It also gives the Copy buttons. There is no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
+The runtime image is `FROM scratch`. The HTTP stack is Hyper 1.x on Tokio. Discovery uses `reqwest` (rustls) for the Kubernetes API and for health probes. Pages are rendered in Rust. The only scripts are the theme selector, the script of the settings pages and the script of the notifications. The script of the settings pages draws the editor of grants and the matrices. It also gives the Copy buttons. The script of the notifications asks for new alerts, shows the toasts and updates the badge. There is no JavaScript framework, no CDN and no runtime shell. Nothing is fetched from the internet at runtime.
 
 The data lives in one database. By default it is one SQLite file. The SQLite library is bundled in the static binary. To run several active instances, use a shared PostgreSQL database instead (see [Several instances](#several-instances-postgresql)). There is no Redis.
 
@@ -886,6 +886,36 @@ Each part of the page needs a permission. A part that the account may not use is
 - **New alert:** a form that the server refuses gives the page again with status 422. The popup is open, with the title, the recipient and the reason. A new alert opens its row, with no banner. A revoke shows no banner: the row of the phone shows the state.
 - **Phones:** the columns are the state (one icon), the phone, the owner and the app. The owner is in the zone **Phones** only. The last columns are the last time seen and the number of alerts that wait. **Revoke (N)** shows when a box is ticked. A click asks "Revoke N phones?" in the same place. The form sends the fields `id.<id>` with the value `1`.
 - **Connections:** the newest 200 connections. The search is a form with the method GET. The last column shows the reason, or "open".
+
+### Notifications in the browser
+
+A person that is signed in gets a notification when an alert arrives for a group of the person or for the account. The person needs a permission of the Inbox features, as for the tab Inbox. A person with no such permission sees nothing of this. The feature has no key in the configuration.
+
+**Which alerts.** An account receives the alerts for each group where it holds `inbox.receive`, and the alerts that are for the account itself. The superadmin receives the alerts for all groups. The permission `alert.read` is not necessary. It only decides if a notification has a link to the row of the alert in the tab Inbox. An alert that the account does not receive never leaves the database: the query holds the groups of the account.
+
+**What the person sees.**
+
+- **A badge on the tab Inbox.** It shows the number of unread alerts, up to `99+`. It changes on each settings page without a reload. A person with one tab only has no strip of tabs, so it has no badge.
+- **A toast.** A toast shows the title, the group (or "Direct"), the level and a link to the row of the alert. A toast of a critical group stays until the person closes it. The other toasts go after 8 seconds. A pointer or the focus on a toast stops its timer. At most 3 toasts show. The rest is one link "+2 more" to the tab Inbox. A toast has no sound, does not take the focus and has a close button. The key Escape closes the newest toast. A screen reader reads a toast with `aria-live="polite"`. It reads a critical toast with `aria-live="assertive"`. The browser animation stops for a person that asks for less motion.
+- **An inbox icon on the launcher**, next to the gear. It has the badge. A click opens a popover with the newest 8 notifications, newest first: the icon of the level, the title, the group, the age and a link. The popover has **Mark all read**, **Open the inbox** and the control of the level. A `details` element makes the popover, so it opens without script.
+
+**The level.** Each account has a level of the toasts: **All** (the default), **Alerts** or **Off**. The control is in the popover and in the bar of the tab Inbox. The portal knows three levels of an alert. **Critical** is an alert for a group with `critical = true`. **Alert** is an alert for another group. **Ring** is an alert for an account. The phones choose their own action, so the portal has no other level. **Alerts** means Alert and Critical only: a Ring alert gives no toast. It stays in the list, and the badge counts it. **Off** gives no toast and no badge, and the script sends no request. The icon stays, so the person can turn the level on again. The store keeps the level for each account, in the table `web_notify`.
+
+**Unread.** The store keeps a marker "read up to" for each account. It is the time of the newest alert that the person has seen. An alert that is newer than the marker is unread. The marker only moves forward. It moves when the person opens the tab Inbox and when the person uses **Mark all read**. The first visit of an account sets the marker to that moment: the older alerts are not unread. The marker is for the web only. The Android app has its own state. A session that "Log in as" opens can read the notifications. It moves no marker and sets no level.
+
+**How the browser asks.** The script `web/notify.js` asks `GET /auth/settings/inbox/notifications?after=<ms>` every 10 to 15 seconds. The delay has a random part. The answer is JSON: the level, the unread count, and the alerts newer than the cursor, at most 10. The portal gives the answer from the shared store, so any instance gives the same answer. The portal has no state in memory for this, and no stream. The script keeps the cursor and the ids that it has shown in `sessionStorage`. A new page of the same tab shows no alert twice. The first request of a page shows no old alert. The cursor starts at the time of the page. The answer also holds the alerts of the 5 seconds before the cursor, and the script drops the ones that it knows. So a difference of up to 5 seconds between the clocks of two instances loses no toast. A tab that is hidden sends no request. When the tab shows again, the script asks at once. After an error, the delay doubles, up to 2 minutes. A redirect, a `401`, a `403` or a `404` stops the script: the session or the permission is gone.
+
+**The cost.** An open tab that shows sends 4 to 6 requests each minute (4.8 on average). A request does this work:
+
+1. It reads the session without a renewal of its idle timer and without a write. An open tab does not keep a session alive. With PostgreSQL, the request reads the table `sessions` at most one time for each 5 seconds, as any request does.
+2. It reads the permissions of the account in memory.
+3. It reads three small things in the store: the row of the account, the count of unread alerts (it stops at 100) and the alerts newer than the cursor. Each read uses an index (`alerts_created`, `alerts_target` and the key of `web_notify`).
+
+It writes nothing, except for the first request of an account. 100 open tabs make about 8 requests each second on the instances together. The request is rate limited as any request of a page is.
+
+**Forms.** Two forms change the state: `POST /auth/settings/inbox/read` and `POST /auth/settings/inbox/notify` (the field `level` is `all`, `important` or `off`). They need the `Origin` of the portal, the content type of a form and the field `csrf` of the purpose `inbox`. The field `back` is `home` or `inbox`: the page that the redirect returns to. With the header `Accept: application/json`, the answer is the state as JSON, with no redirect. The script uses this. Without script, the redirect is the answer, so the popover and its forms work. An unknown field, a bad level and a bad `back` give `400`. A request with no session has the same answer as any other settings page: a redirect to the sign-in page.
+
+**Migration.** The migration adds the table `web_notify` and the index `alerts_target` to the chain of the Inbox, for SQLite and for PostgreSQL. `portal inbox import-sqlite` copies the rows of `web_notify`. During a rolling update, an instance that already runs keeps working. An old instance that starts after the first new instance refuses the new schema, as in "Upgrades".
 
 ### Metrics
 
