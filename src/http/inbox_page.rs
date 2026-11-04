@@ -1075,7 +1075,8 @@ pub(super) async fn launcher_bell(state: &AppState, viewer: &Viewer) -> Option<L
 /// The answer of the poll and of the forms of the notifications: the level, the unread count, and
 /// with `after` the alerts newer than this time. The alerts come from the store with the scope of
 /// the account in the query, so no other alert leaves the database. An alert for the account is
-/// level Ring: with the level "Alert and Critical only" it gives no toast.
+/// level Ring: with the level "Alert and Critical only" it gives no toast, and it stays in the
+/// list: each item has the flag `toast`.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
 async fn answer(
     state: &AppState,
@@ -1102,10 +1103,8 @@ async fn answer(
     for item in view.items.iter().rev() {
         cursor = cursor.max(Some(item.created_at));
         let importance = Importance::of(&item.target, |g| ctx.app.is_critical(g));
-        if !importance.toasts_at(level) {
-            continue;
-        }
         items.push(serde_json::json!({
+            "toast": importance.toasts_at(level),
             "id": item.id,
             "title": item.title,
             "group": target_name(state, &item.target),

@@ -1151,6 +1151,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
         rows: &b.rows,
         now_ms: b.now_ms,
         csrf: &b.csrf,
+        forms: !viewer.session.impersonated,
     });
     let page = ui::home_page(
         &shown,

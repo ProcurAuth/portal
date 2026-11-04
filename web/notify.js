@@ -218,7 +218,7 @@
       seen.push(items[i].id);
       if (level === "off") continue;
       addRow(items[i]);
-      toast(items[i]);
+      if (items[i].toast) toast(items[i]);
     }
     if (seen.length > 50) seen = seen.slice(-50);
     save();

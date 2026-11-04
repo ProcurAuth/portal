@@ -1009,6 +1009,7 @@ mod tests {
             rows: &rows,
             now_ms: 2_000,
             csrf: "tok",
+            forms: true,
         };
         home_page(
             &demo_catalog(),

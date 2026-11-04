@@ -1,8 +1,8 @@
 //! Server-rendered pages: the launcher, the authentication cards and the settings pages.
 //!
-//! The browser receives finished HTML. Every page has one script only: the theme selector. The Users
-//! settings page adds the password generator and the rule that ties the boxes of a service to its
-//! tree. Everything else works without JavaScript. No page references anything outside this binary. The server serves the CSS and the scripts from `/auth/`.
+//! The browser receives finished HTML. Every page has the theme selector as its first script. The
+//! settings pages add `settings.js`, and a page of an account that receives notifications adds
+//! `notify.js`. Everything works without JavaScript. No page references anything outside this binary. The server serves the CSS and the scripts from `/auth/`.
 //! The server puts the icon sprite into the HTML, reduced to the symbols that the page draws.
 //!
 //! The cost of a page for the browser is a design input. A page carries only what it shows. The
@@ -1273,6 +1273,91 @@ mod tests {
             r##"<a class="button button--icon" href="/auth/settings" aria-label="Settings""##
         ));
         assert!(page.contains(r#"<symbol id="i-settings""#));
+    }
+
+    #[test]
+    fn the_inbox_icon_sits_next_to_the_gear_with_a_popover_that_opens_without_script() {
+        use crate::inbox::notify::{Importance, Level};
+        let rows = [notify::Row {
+            id: "aa".into(),
+            title: "Disk <full>".into(),
+            group: "Infra".into(),
+            importance: Importance::Alert,
+            created_at_ms: 0,
+            href: None,
+            unread: true,
+        }];
+        let bell = notify::Bell {
+            header: notify::Header {
+                level: Level::All,
+                unread: 1,
+                cursor_ms: 0,
+            },
+            rows: &rows,
+            now_ms: 0,
+            csrf: "tok",
+            forms: true,
+        };
+        let page = |bell: Option<&notify::Bell>| {
+            home_page(
+                &demo_catalog(),
+                &Icons::empty(),
+                &HomeContext {
+                    settings: Some("/auth/settings"),
+                    bell,
+                    ..ctx()
+                },
+            )
+        };
+        let html = page(Some(&bell));
+        let (icon, gear) = (
+            html.find("data-notify-bell").unwrap(),
+            html.find(r#"aria-label="Settings""#).unwrap(),
+        );
+        let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
+        assert!(header.contains("data-notify-bell") && header.contains("Settings"));
+        assert!(
+            icon < gear,
+            "the icon comes before the gear, in the same group"
+        );
+        assert!(html.contains("<details") && html.contains("<summary"));
+        assert!(html.contains("Disk &lt;full&gt;") && !html.contains("Disk <full>"));
+        // One more script, a file with a neutral path that the pass maps. The toasts are in the page.
+        assert_eq!(html.matches("<script").count(), 2);
+        assert!(html.contains(&format!(r#"src="{}" defer"#, assets().notify_path)));
+        assert!(html.contains("data-notify-toast"));
+        for symbol in [
+            "i-inbox",
+            "i-x",
+            "i-alert-triangle",
+            "i-bell",
+            "i-bell-ringing",
+        ] {
+            assert!(
+                html.contains(&format!(r#"<symbol id="{symbol}""#)),
+                "{symbol}"
+            );
+        }
+        // No icon and no script without the right.
+        let plain = page(None);
+        for gone in ["data-notify", "notify", "nbell", "<details"] {
+            assert!(!plain.contains(gone), "{gone}");
+        }
+        assert_eq!(plain.matches("<script").count(), 1);
+        // The session of "Log in as" has the list and no form.
+        let read_only = notify::Bell {
+            forms: false,
+            ..notify::Bell {
+                header: bell.header,
+                rows: &rows,
+                now_ms: 0,
+                csrf: "tok",
+                forms: true,
+            }
+        };
+        let html = page(Some(&read_only));
+        assert!(html.contains("data-notify-list") && !html.contains("Mark all read"));
+        assert!(!html.contains("data-notify-level"));
     }
 
     #[test]

@@ -2618,4 +2618,62 @@ mod tests {
             assert!(notice_for(code).is_some(), "{code}");
         }
     }
+
+    #[test]
+    fn the_badge_is_on_the_tab_inbox_and_the_page_loads_the_script_of_the_notifications() {
+        use crate::inbox::notify::Level;
+        let cat = catalog();
+        let with = |header| {
+            access_page(
+                &Frame {
+                    notify: header,
+                    ..full_frame()
+                },
+                &view(&cat),
+            )
+        };
+        let header = super::super::notify::Header {
+            level: Level::All,
+            unread: 4,
+            cursor_ms: 1_700_000_000_000,
+        };
+        let html = with(Some(header));
+        let strip = &html[html.find("<nav").unwrap()..html.find("</nav>").unwrap()];
+        // Only the tab Inbox has the badge, with the count and a word for a screen reader.
+        assert_eq!(strip.matches("data-notify-badge").count(), 1, "{strip}");
+        let inbox = &strip[strip.find("/auth/settings/inbox").unwrap()..];
+        assert!(
+            inbox.contains("Inbox<span class=\"nbadge\" data-notify-badge>"),
+            "{inbox}"
+        );
+        assert!(inbox.contains(">4<") && inbox.contains("unread"));
+        // The toasts and the script come once, after the page. The script is a file: no inline code.
+        assert_eq!(html.matches("data-notify-toast").count(), 1);
+        assert_eq!(html.matches("/auth/assets/notify.js?v=").count(), 1);
+        assert!(html.contains(&format!(
+            r#"<script src="/auth/assets/notify.js?v={}" defer></script>"#,
+            asset_version()
+        )));
+        assert!(html.contains(r#"data-notify="/auth/settings/inbox/notifications""#));
+        assert!(html.contains(r#"data-cursor="1700000000000""#));
+        // The symbols of the toasts are in the sprite.
+        for symbol in ["i-x", "i-alert-triangle", "i-bell", "i-bell-ringing"] {
+            assert!(
+                html.contains(&format!(r#"<symbol id="{symbol}""#)),
+                "{symbol}"
+            );
+        }
+        // A page of an account with no notification has none of it.
+        let without = with(None);
+        for gone in ["data-notify", "notify.js", "nbadge", "toasts"] {
+            assert!(!without.contains(gone), "{gone}");
+        }
+        // The level Off hides the badge: the count is not asked.
+        let off = with(Some(super::super::notify::Header {
+            level: Level::Off,
+            ..header
+        }));
+        assert!(off.contains("data-notify-badge hidden"));
+        assert!(off.contains(r#"data-level="off""#));
+    }
 }

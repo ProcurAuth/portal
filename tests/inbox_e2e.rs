@@ -5884,6 +5884,11 @@ async fn the_notifications_follow_the_rights_of_the_account() {
         .map(|i| i["level"].as_str().unwrap())
         .collect();
     assert_eq!(levels, ["alert", "critical", "ring"]);
+    assert!(mine["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["toast"] == true));
     let groups: Vec<&str> = mine["items"]
         .as_array()
         .unwrap()
@@ -5957,7 +5962,19 @@ async fn the_notifications_follow_the_rights_of_the_account() {
     send("user:mia", "ring two", "f4");
     let (_, mine) = notifications(&s, &mia.cookie, &after);
     assert_eq!(mine["level"], "important");
-    assert_eq!(titles(&mine), ["for infra", "for crit"], "{mine}");
+    // The list has the alert for the account. The flag `toast` says it gives no toast.
+    assert_eq!(
+        titles(&mine),
+        ["for infra", "for crit", "for mia", "ring two"],
+        "{mine}"
+    );
+    let toasts: Vec<bool> = mine["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["toast"].as_bool().unwrap())
+        .collect();
+    assert_eq!(toasts, [true, true, false, false], "{mine}");
     assert_eq!(mine["unread"], 4);
     // The popover of the launcher lists the four, newest first.
     let (_, home) = inbox_page_as(&s, &mia.cookie, "/");

@@ -57,6 +57,9 @@ pub struct Bell<'a> {
     pub now_ms: i64,
     /// The token of the forms (the purpose `inbox`).
     pub csrf: &'a str,
+    /// The popover has the forms "Mark all read" and the level. The session of "Log in as" has
+    /// none: it changes nothing for the account.
+    pub forms: bool,
 }
 
 /// The word of a level of an alert.
@@ -206,7 +209,7 @@ pub fn level_form(level: Level, csrf: &str, back: &str) -> String {
 /// assertive one.
 pub fn toasts(header: &Header) -> String {
     format!(
-        r##"<div class="toasts" data-notify="{POLL_PATH}" data-cursor="{}" data-level="{}"><div class="toasts__live" role="status" aria-live="polite" data-toast-polite></div><div class="toasts__live" role="alert" aria-live="assertive" data-toast-assertive></div><a class="toasts__more" href="{}" data-notify-more hidden></a><template data-notify-toast><div class="toast" data-level=""><span class="toast__ico">{}</span><span class="toast__body"><span class="toast__title" data-toast-title></span><span class="toast__meta"><span data-toast-group></span> <span data-toast-level></span></span><a class="toast__link" href="{}" data-toast-link>Open</a></span><button class="toast__close" type="button" data-toast-close aria-label="Dismiss"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div></template></div>"##,
+        r##"<div class="toasts" data-notify="{POLL_PATH}" data-cursor="{}" data-level="{}"><div class="toasts__live" role="status" aria-live="polite" data-toast-polite></div><div class="toasts__live" role="alert" aria-live="assertive" data-toast-assertive></div><a class="toasts__more" href="{}" data-notify-more hidden></a><template data-notify-toast><div class="toast" data-level=""><span class="toast__ico">{}</span><span class="toast__body"><span class="toast__title" data-toast-title></span><span class="toast__meta"><span data-toast-group></span> &middot; <span data-toast-level></span></span><a class="toast__link" href="{}" data-toast-link>Open</a></span><button class="toast__close" type="button" data-toast-close aria-label="Dismiss"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></div></template></div>"##,
         header.cursor_ms,
         header.level.as_str(),
         super::settings::INBOX_PATH,
@@ -223,16 +226,26 @@ pub fn bell(bell: &Bell) -> String {
         list.push_str(&row(Some(r), bell.now_ms));
     }
     let empty = bell.rows.is_empty();
+    let (mark, level) = if bell.forms {
+        (
+            format!(
+                r#"<form method="post" action="{READ_PATH}" data-notify-form><input type="hidden" name="csrf" value="{}"><input type="hidden" name="back" value="{BACK_HOME}"><button class="nbell__act" type="submit">Mark all read</button></form>"#,
+                html_escape(bell.csrf)
+            ),
+            level_form(h.level, bell.csrf, BACK_HOME),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     format!(
-        r##"<details class="nbell" data-notify-bell><summary class="button button--icon" title="Notifications">{}<span class="visually-hidden">Notifications</span>{}</summary><div class="nbell__panel"><div class="nbell__head"><span class="nbell__title">Notifications</span><form method="post" action="{READ_PATH}" data-notify-form><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="back" value="{BACK_HOME}"><button class="nbell__act" type="submit">Mark all read</button></form></div><ul class="nlist" data-notify-list{}>{list}</ul><p class="nbell__empty" data-notify-empty{}>No notification</p><div class="nbell__foot"><a class="nbell__open" href="{}">Open the inbox</a>{}</div><template data-notify-row>{}</template></div></details>"##,
+        r##"<details class="nbell" data-notify-bell><summary class="button button--icon" title="Notifications">{}<span class="visually-hidden">Notifications</span>{}</summary><div class="nbell__panel"><div class="nbell__head"><span class="nbell__title">Notifications</span>{mark}</div><ul class="nlist" data-notify-list{}>{list}</ul><p class="nbell__empty" data-notify-empty{}>No notification</p><div class="nbell__foot"><a class="nbell__open" href="{}">Open the inbox</a>{}</div><template data-notify-row>{}</template></div></details>"##,
         icon("inbox"),
         badge(h),
         hidden_if(empty),
         hidden_if(!empty),
         super::settings::INBOX_PATH,
-        level_form(h.level, bell.csrf, BACK_HOME),
+        level,
         row(None, bell.now_ms),
-        csrf = html_escape(bell.csrf),
     )
 }
 
@@ -290,6 +303,7 @@ mod tests {
             rows: &rows,
             now_ms: 1_700_000_000_000,
             csrf: "tok\"en",
+            forms: true,
         });
         assert!(html.starts_with(r#"<details class="nbell""#), "{html}");
         assert!(html.contains("<summary"), "it opens without script");
@@ -316,6 +330,7 @@ mod tests {
             rows: &[],
             now_ms: 0,
             csrf: "t",
+            forms: false,
         });
         assert!(
             empty.contains("data-notify-list hidden")
