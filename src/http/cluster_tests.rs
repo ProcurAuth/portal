@@ -174,22 +174,9 @@ fn start(store: Arc<Store>, cache_ttl: Option<Duration>) -> Node {
     start_with(store, cache_ttl, "")
 }
 
-/// A free local port. A port that this function gave once is never given again, so two servers of
-/// a test never get the same port when the first one has not bound it yet.
+/// A free local port. The ports of all the tests of the process come from one list: see `util::test_ports`.
 fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
+    crate::util::test_ports::free()
 }
 
 /// A node with more configuration. The `extra` text is added to the file.
@@ -334,25 +321,60 @@ fn start_custom(
     }
     let state = Arc::new(state);
     let serving = Arc::clone(&state);
+    // The thread of the server tells how it ended. A start that fails (an address in use, a panic) is a failure of
+    // the test at once, with the reason, and not a wait of 60 seconds.
+    let ended: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let report = Arc::clone(&ended);
     std::thread::spawn(move || {
-        let _ = match stop {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match stop {
             Some(stop) => super::serve_with(serving, async move {
                 let _ = stop.await;
             }),
             None => super::serve_with(serving, std::future::pending()),
+        }));
+        let text = match run {
+            Ok(Ok(())) => "the server ended without an error".to_string(),
+            Ok(Err(error)) => format!("the server stopped with an error: {error}"),
+            Err(_) => "the server thread panicked".to_string(),
         };
+        *report.lock().unwrap_or_else(|p| p.into_inner()) = Some(text);
     });
     let node = Node { port, state };
     if !wait_complete {
         return node;
     }
     // A start has time to be late: the whole suite starts hundreds of servers at once on a busy machine.
-    wait_until(START_LIMIT, || {
-        TcpStream::connect(("127.0.0.1", port)).is_ok()
-            && send(port, "GET", "/healthz", &[], "").status == 200
-    });
+    let begun = Instant::now();
+    loop {
+        if let Some(text) = ended.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            panic!("the server on port {port} is gone before it answered /healthz: {text}");
+        }
+        let seen = match TcpStream::connect(("127.0.0.1", port)) {
+            Err(error) => format!("connect: {error}"),
+            Ok(stream) => {
+                drop(stream);
+                let status = send(port, "GET", "/healthz", &[], "").status;
+                if status == 200 {
+                    break;
+                }
+                format!("/healthz answered {status}")
+            }
+        };
+        assert!(
+            begun.elapsed() < START_LIMIT,
+            "the server on port {port} did not answer /healthz 200 in {START_LIMIT:?}; last try: {seen}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     // The first discovery round publishes an empty catalogue. The next round starts an hour later.
-    wait_until(START_LIMIT, || node.state.discovery.refreshes() >= 1);
+    let waited = Instant::now();
+    while node.state.discovery.refreshes() < 1 {
+        assert!(
+            waited.elapsed() < START_LIMIT,
+            "the server on port {port} answers /healthz but its first discovery round did not end in {START_LIMIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
         current_catalog(&node.state).is_complete(),
         "the first round of a harness without a source is complete"
@@ -2621,7 +2643,7 @@ fn publish_tree(node: &Node) {
 /// A service that lists options. It answers `GET /.well-known/procurauth/resources`: the databases
 /// of the host `prod` and a 404 for the rest. It records each request line and its headers.
 fn options_service() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::util::test_ports::listener();
     let port = listener.local_addr().unwrap().port();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
@@ -8132,7 +8154,13 @@ fn a_refusal_shows_the_message_as_a_strip_after_the_button_and_the_normal_page_h
     let form_end = page.find("</form>").unwrap();
     assert!(page[..form_end].contains("type=\"submit\""), "{page}");
     assert!(form_end < strip, "{page}");
-    assert!(page[strip..].contains("Invalid login or password</span></p>"));
+    // The variation of the page can wrap the span in an inert element: the canonical form has none.
+    let canonical = node.state.mask.canonical(&page);
+    let canonical_strip = canonical.find("role=\"alert\"").unwrap();
+    assert!(
+        canonical[canonical_strip..].contains("Invalid login or password</span></p>"),
+        "{canonical}"
+    );
     // Both fields point to the strip with the mapped identifier, and the identifier exists.
     let id = node.state.mask.name("signin-msg");
     assert!(Mask::names_in_page(&page, true).contains(&id), "{page}");

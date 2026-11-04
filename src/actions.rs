@@ -1041,7 +1041,6 @@ mod tests {
     use crate::catalog::parse_labels;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
 
     /// A document with these actions. An action that lacks `resource_types` lists `service`, and
     /// one that lacks `description` gets one. Each type that an action lists is declared with the
@@ -1464,7 +1463,7 @@ mod tests {
     }
 
     fn serve(answers: Vec<(&'static str, String)>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = crate::util::test_ports::listener();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for (stream, (status, body)) in listener.incoming().zip(answers) {
