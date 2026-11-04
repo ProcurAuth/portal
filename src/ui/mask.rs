@@ -798,7 +798,12 @@ fn insert_inert(tokens: Vec<Tok>, rng: &mut Rng) -> Option<Vec<Tok>> {
             continue;
         }
         let parent = open_name(&tokens[tree.parent[index]?]);
-        if WRAPPABLE.contains(&name.as_str()) {
+        // A label that holds a field (the box "Keep me signed in", the trap field) stays as it is.
+        let holds_field = name == "label"
+            && tokens[index..=tree.end[index]]
+                .iter()
+                .any(|t| matches!(t, Tok::Open { name, .. } if name == "input"));
+        if WRAPPABLE.contains(&name.as_str()) && !holds_field {
             let block = BLOCK_ELEMENTS.contains(&name.as_str());
             if BLOCK_PARENTS.contains(&parent) {
                 // A `span` can hold a phrase only.
@@ -972,7 +977,7 @@ mod tests {
     fn login_page_html() -> String {
         auth_document(
             "Authentication",
-            r#"<div class="error" role="alert">Invalid login or password</div><form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="c"><input type="hidden" name="rd" value="/"><input type="hidden" name="sig" value="s"><input type="hidden" name="token" value="t"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="website" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form><p class="return-target">After authentication: <code>/x</code></p>"#,
+            r#"<div class="error" role="alert">Invalid login or password</div><form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="c"><input type="hidden" name="rd" value="/"><input type="hidden" name="sig" value="s"><input type="hidden" name="token" value="t"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><label class="keep"><input type="checkbox" name="keep" value="1">Keep me signed in for 30 days</label><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="website" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form><p class="return-target">After authentication: <code>/x</code></p>"#,
         )
     }
 
@@ -1313,6 +1318,7 @@ mod tests {
             r#"name="login""#,
             r#"name="password""#,
             r#"name="website""#,
+            r#"name="keep""#,
             r#"data-lpignore="true""#,
             r#"data-1p-ignore="true""#,
             r#"data-bwignore="true""#,

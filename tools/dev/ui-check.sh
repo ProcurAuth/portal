@@ -8,6 +8,7 @@
 # UI_CHECK_SHOTS: see the header of tools/dev/ui-check.js. UI_CHECK_SHOTS must be a directory of the
 # host: the script mounts it and gives the path in the container.
 # UI_CHECK_SCRIPT: the script to run (default ui-check.js). ui-check-notify.js checks the notifications: see its header.
+# ui-check-keep.js checks the box "Keep me signed in" of the sign-in page and the session cookie: see its header.
 # PLAYWRIGHT_IMAGE: the image of the browser (default mcr.microsoft.com/playwright:v1.49.1-noble).
 # The container uses the network of the host, so the base URL can be localhost. The image needs
 # access to the npm registry to install the `playwright` package of the same version.
@@ -21,7 +22,7 @@ if [ -n "${UI_CHECK_SHOTS:-}" ]; then
 fi
 # shellcheck disable=SC2086
 exec docker run --rm --network host -v "$here":/check:ro $shots \
-  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD -e UI_CHECK_INBOX -e UI_CHECK_BOB_PASSWORD -e UI_CHECK_CAROL_PASSWORD -e UI_CHECK_WIDE -e UI_CHECK_LIMITS_NAME -e UI_CHECK_SCRIPT -e UI_CHECK_TOKEN -e UI_CHECK_USER_PASSWORD -e UI_CHECK_ROOT_PASSWORD -e UI_CHECK_ONLY \
+  -e UI_CHECK_BASE -e UI_CHECK_LOGIN -e UI_CHECK_PASSWORD -e UI_CHECK_KEY_LOGIN -e UI_CHECK_KEY_PASSWORD -e UI_CHECK_INBOX -e UI_CHECK_BOB_PASSWORD -e UI_CHECK_CAROL_PASSWORD -e UI_CHECK_WIDE -e UI_CHECK_LIMITS_NAME -e UI_CHECK_SCRIPT -e UI_CHECK_TOKEN -e UI_CHECK_USER_PASSWORD -e UI_CHECK_ROOT_PASSWORD -e UI_CHECK_ONLY -e UI_CHECK_REMEMBER_TTL -e UI_CHECK_DAYS \
   ${UI_CHECK_SHOTS:+-e UI_CHECK_SHOTS=/shots} \
   -e NODE_PATH=/tmp/node_modules -w /tmp "$image" \
   sh -c 'npm install --silent --no-audit --no-fund --prefix /tmp playwright@1.49.1 && node /check/${UI_CHECK_SCRIPT:-ui-check.js}'

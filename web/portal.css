@@ -569,6 +569,32 @@ a {
   margin-top: 0;
 }
 
+/* The box "Keep me signed in". The label holds the box, so a click on the words ticks it. The box has a
+   fixed size, so the form does not move. */
+.card .keep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 0;
+  color: var(--text);
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.card .keep input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent-fill);
+  cursor: pointer;
+}
+
+.card .keep input:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 2px;
+}
+
 .card input[type="text"],
 .card input[type="password"] {
   width: 100%;
@@ -712,6 +738,16 @@ a {
   .card input[type="text"],
   .card input[type="password"] {
     height: 44px;
+  }
+
+  .card .keep {
+    min-height: 44px;
+    margin-top: 4px;
+  }
+
+  .card .keep input {
+    width: 20px;
+    height: 20px;
   }
 }
 

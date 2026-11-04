@@ -63,6 +63,11 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 - A session works only from the client address and User-Agent that logged in (`session.bind`).
 - The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. For any other peer, the client address is the address of the peer.
 - A session ends after `session.idle_timeout` without use.
+- A session has an absolute life of `session.ttl` (24 hours at first), also when it is in use. Its cookie has no `Max-Age`: the browser deletes it at the end of its session.
+- The box "Keep me signed in" is the only way to a persistent cookie. It is not ticked at first, and the person must tick it. A remembered session has the life `session.remember_ttl` (30 days at first, 90 days at most), the idle time `session.remember_idle_timeout` (7 days at first) and a cookie with the same life. `session.remember = false` removes the box, and the server then ignores the field.
+- A remembered session is stored with the other sessions. It follows the same rules for a logout, a deleted account, a new password and **End all sessions**. A new superadmin login, password or session secret ends a remembered session of the superadmin.
+- **Log in as** never opens a remembered session. **Back to superadmin** does not open one either.
+- The page after a refused sign-in has the same form for every cause of the refusal, and it never shows the box ticked.
 - The server renders the launcher. The launcher references nothing outside the binary.
 - The CSP of the launcher is `default-src 'none'`. The launcher uses its own style, its own script, and its own images.
 - The server HTML-escapes every value taken from a label.
@@ -166,6 +171,18 @@ The store is limited by `session.max_active_sessions`. The server removes expire
 With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the last use are rows of the shared database. The instance that served the login writes these rows. The same statement enforces the binding and the idle timeout, and finds the session. A refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most. A revocation made on another instance takes up to 5 seconds to reach the copy. While the database is unreachable, a copy checked less than 2 minutes ago is still honoured. This copy is bounded by the session's own expiry. This rule prevents the sign-out of every user. Logins fail closed. The failed-login limiters stay per instance. With N instances, an attacker has N times the budget.
 
 A row also holds the credential generation of the superadmin: HMAC-SHA-256 under the session secret of the superadmin login and password. The database never holds a plain hash of the superadmin password. Thus a reader of the database cannot test password guesses without the secret. A superadmin or impersonated row is valid only with the generation of the instance that reads it. At start, each instance deletes the superadmin and impersonated rows of the other generations. After a suspected theft of a superadmin cookie, rotate the superadmin password or the session secret: the rotation ends the stolen session on every instance.
+
+### Remembered sessions
+
+The standard guidance is the OWASP Session Management Cheat Sheet. It asks for an idle timeout and an absolute timeout. It allows a persistent cookie only when the person asks for it. The portal follows this guidance.
+
+- The session without the box has an absolute life of `session.ttl` and an idle time of `session.idle_timeout`.
+- The session with the box has an absolute life of `session.remember_ttl` and an idle time of `session.remember_idle_timeout`. The idle time of a remembered session is longer. Otherwise, `session.idle_timeout` would end the session at each pause of 30 minutes.
+- The server checks the two rules with the same statement in the memory store and in the PostgreSQL store. The row of the session holds the flag `remembered`. Each instance reads the flag with the session.
+- The server refuses at start a file where `session.remember_ttl` is shorter than `session.ttl`, where `session.remember_idle_timeout` is longer than `session.remember_ttl`, or where it is shorter than `session.idle_timeout`.
+- The binding `session.bind` stays as the file sets it. With `ip_user_agent`, a change of the client address makes the session useless. This happens often on mobile networks. The person then signs in again. `user_agent` is the usual choice for a site where people keep remembered sessions on phones. The default does not change.
+
+Recommendation, not done in this version: ask for a fresh sign-in before a sensitive action in a remembered session. The actions to protect are the creation of a key, **Log in as** and a change of the password.
 
 ### Incident action: end all sessions
 
@@ -281,6 +298,7 @@ Measures:
 - Better: give the portal its own host name, and give each service that you do not trust its own host name. A host-only `__Host-` cookie then never reaches these services.
 - Use the identity token (`X-Identity-Token`) in the services, not the cookie.
 - Keep `session.bind = "ip_user_agent"` and a short `session.idle_timeout`.
+- Keep `session.remember_ttl` as short as the site accepts, or set `session.remember = false`. A persistent cookie stays valid on a device that other persons can use. A stolen cookie of a remembered session works for up to 30 days, until the owner signs out, or until the superadmin ends the sessions.
 
 ### The settings pages share the origin of the services
 

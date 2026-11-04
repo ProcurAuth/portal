@@ -115,6 +115,31 @@ The superadmin adds and deletes **users** from the settings pages (the gear of t
 
 A successful login creates a 256-bit random **opaque session ID**. The browser receives only that random ID. With SQLite, the server keeps the active-session set in bounded RAM. Each session has an expiration time. Logout deletes the session at once. A restart of the process clears all sessions. With PostgreSQL, the sessions are in the shared database. Only the SHA-256 of the cookie is stored. The sessions are valid on every instance and survive a restart. A session of the superadmin is valid only with the superadmin credentials that opened it. A session that the superadmin opened with **Log in as** follows the same rule. A new superadmin login, password or session secret ends these sessions on every instance (see [Several instances](#several-instances-postgresql)).
 
+### Keep me signed in
+
+The sign-in form has a box "Keep me signed in for 30 days". The box is not ticked at first. The number of days comes from `session.remember_ttl`. The box needs no script, and the label is a part of the box: a click on the words ticks it.
+
+| | Box not ticked | Box ticked |
+|---|---|---|
+| Life of the session from the sign-in | `session.ttl`, default 24 hours | `session.remember_ttl`, default 30 days |
+| Idle time | `session.idle_timeout`, default 30 minutes | `session.remember_idle_timeout`, default 7 days |
+| Cookie | No `Max-Age`: the browser deletes it when it ends its session | `Max-Age` is the life of the session |
+
+Each life is absolute. A session that is in use still ends at the end of its life. The idle time of a remembered session is separate. Without it, the idle time of 30 minutes would end a remembered session at each pause. The value of `session.remember_idle_timeout` is at least `session.idle_timeout` and at most `session.remember_ttl`. The server refuses the file at start when these keys contradict each other.
+
+- Set `session.remember = false` to remove the box. The form then has no box, and the server ignores the field.
+- A remembered session is in the shared store like any other session. With PostgreSQL, it is valid on every instance and survives a restart. With SQLite, the sessions are in memory. A restart ends them, so the cookie of a remembered session does not outlive the process.
+- A logout, a deleted account, a new password, a new superadmin login and **End all sessions** end a remembered session, as they end any other session.
+- **Log in as** never gives the remembered rule. The impersonated session has the life `session.ttl`, and it ends at the latest when the session of the superadmin ends. **Back to superadmin** opens a session that is not remembered. The superadmin ticks the box again at the next sign-in.
+- The page after a refused sign-in never shows the box ticked. This way the answer to a refusal does not depend on what the client sent (see `docs/login-hardening.md`). The Activity list marks a remembered session with the badge "kept".
+- `session.bind` stays as it is. With the default `ip_user_agent`, the session works only from the address that signed in. A change of address, for example on a mobile network, ends the use of a remembered session: the person signs in again. `user_agent` is the usual choice for sites that use remembered sessions on phones. It is less strict: the session then works from any address with the same User-Agent. The default does not change.
+
+A persistent cookie is the usual risk of this option (OWASP Session Management Cheat Sheet). Use these measures:
+
+- Keep `session.remember_ttl` as short as the site accepts. The maximum is 90 days.
+- Use HTTPS, so that the cookie has the `Secure` attribute.
+- Recommendation, not done in this version: ask for a new sign-in before a sensitive action in a remembered session. Examples are to create a key, to use **Log in as** and to change a password.
+
 ## Grants and the gate
 
 The settings pages say "permission" where this document and the protocol say "grant". The two words name the same thing.
@@ -342,6 +367,8 @@ The resource tree (portal 4.2.0) needs one more change. SQLite goes to schema ve
 The keys and limits need one more change. SQLite goes to schema version 6. PostgreSQL goes to version 6. The migration adds the tables `keys`, `key_grants`, `key_history`, `budget_counters` and `directory_version`, and it adds the column `limits` to `user_grants`. A key belongs to one user. The table `keys` holds the SHA-256 digest of a key and a short hint, never the key. When a user is deleted, the database deletes the keys of the user, and with them their grants. Each write of a user or a key adds 1 to `directory_version`, and the other instances read the directory again at the next round. The migration keeps all other data. An earlier portal refuses the new schema: it does not start on it. Therefore, a return to an earlier portal needs a restore of the database from before the migration.
 
 The kind of a key needs one more change. SQLite goes to schema version 7. PostgreSQL goes to version 7. The table `keys` gets the column `kind` with the values `mcp` and `api`. A key that exists before this version is an MCP key. The migration keeps all other data. An earlier portal refuses version 7: it does not start on it. The grants of the Inbox have no migration. A database that holds grants with the names of an earlier version needs new grants (see "Upgrades").
+
+The remembered sessions need one more change. SQLite goes to schema version 8. PostgreSQL goes to version 8. The tables `sessions` (PostgreSQL only) and `sessions_log` get the column `remembered`. A session that exists before this version is not remembered. The migration keeps all other data. An earlier portal refuses version 8: it does not start on it. During a rolling update, update all instances before you rely on the remembered sessions. The default of `session.ttl` is now 24 hours, not 8 hours. A file that sets no value gets the longer life.
 
 ### Paths open without a session (`portal.exclude`)
 
@@ -600,7 +627,7 @@ Each use writes one audit event, `sessions_ended`. The chip **Changes** of the t
 
 The history is stored in the database (SQLite or PostgreSQL). The program keeps the history for `storage.retention_days` days. The default is 90 days. The history contains these records:
 
-- sessions: login, address, user agent, start, last seen, end, and the reason for the end;
+- sessions: login, address, user agent, start, last seen, end, the reason for the end, and whether the person ticked "Keep me signed in";
 - the services that each session used. The history holds counts per service. It never holds a path or a query;
 - administrative events: users added or deleted, impersonation, all sessions ended, and failed sign-ins;
 - the sign-in attempts above.
@@ -609,7 +636,7 @@ The per-account failed counters count only logins that name an account. A login 
 
 Requests only touch memory. One writer thread flushes every 15 seconds in a single transaction. An event is dropped rather than make a request slower. The program counts a dropped event in `portal_tracking_dropped_total`.
 
-With SQLite, sessions that a previous run left open end with the reason *restart*. With PostgreSQL, sessions outlive a restart. Only a session whose instance stopped before it recorded its end is closed in this way. This happens after the session has been idle for longer than `session.idle_timeout`. Times are UTC.
+With SQLite, sessions that a previous run left open end with the reason *restart*. With PostgreSQL, sessions outlive a restart. Only a session whose instance stopped before it recorded its end is closed in this way. This happens after the session has been idle for longer than `session.idle_timeout`. A session that is still in the shared database is never closed in this way. Times are UTC.
 
 ```hcl
 users {
@@ -1016,7 +1043,7 @@ storage {
 session {
   secret_mode         = "ephemeral"
   cookie_name         = "__Host-portal"
-  ttl                 = "8h"
+  ttl                 = "24h"
   same_site           = "Strict"
   max_active_sessions = 4096
 }
@@ -1063,7 +1090,7 @@ The program reads one HCL file. The HCL parser is a small, strict subset parser.
 - **A unit is mandatory.** A duration ends with `ms`, `s`, `m`, `h` or `d`. A size ends with `B`, `KiB` or `MiB`.
 - **A name of a choice has the exact case of the reference.** `Strict` is valid and `strict` is not. `warning` is not a log level.
 - **A key that does not apply must not be in the file.** When `security.login_rate_limit_enabled` is `false`, the keys `login_attempts_per_ip`, `login_window` and `login_lockout` stop the program. The same rule applies to the global limiter. It also applies to `metrics.path` when `metrics.enabled` is `false`. It also applies to `storage.database` with the `postgres` block.
-- **Two keys that contradict each other stop the program.** For example, `session.idle_timeout` is longer than `session.ttl`.
+- **Two keys that contradict each other stop the program.** For example, `session.idle_timeout` is longer than `session.ttl`, or `session.remember_ttl` is shorter than `session.ttl`.
 
 ### Secrets: `_env` and `_file`
 
@@ -1236,8 +1263,11 @@ The sessions and the signing key.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `cookie_name` | text: a cookie name that starts with __Host- | `"__Host-portal"` | The name of the session cookie over HTTPS. Over plain HTTP the server uses the same name without the prefix, because browsers refuse `__Host-` cookies there. |
-| `ttl` | duration, 1m to 7d | `"8h"` | The lifetime of a session. |
-| `idle_timeout` | duration, 1m to 7d | `"30m"` | A session that nobody uses for this time ends. The value is at most `session.ttl`. |
+| `ttl` | duration, 1m to 7d | `"24h"` | The lifetime of a session from the sign-in. The session ends at this time, even when it is in use. The cookie of this session is a browser-session cookie. |
+| `idle_timeout` | duration, 1m to 7d | `"30m"` | A session that nobody uses for this time ends. The value is at most `session.ttl`. A remembered session uses `session.remember_idle_timeout`. |
+| `remember` | `true` or `false` | `true` | The sign-in form shows a box "Keep me signed in". A person who ticks it gets a remembered session with a persistent cookie. With `false`, the form has no box and the server ignores the field. |
+| `remember_ttl` | duration, 1m to 90d | `"30d"` | The lifetime of a remembered session from the sign-in. The cookie has the same life. The value is at least `session.ttl`. An impersonated session is never remembered. Applies only when `session.remember` is `true`. |
+| `remember_idle_timeout` | duration, 1m to 90d | `"7d"` | A remembered session that nobody uses for this time ends. The value is at least `session.idle_timeout` and at most `session.remember_ttl`. Applies only when `session.remember` is `true`. |
 | `bind` | `ip_user_agent`, `user_agent`, `none` | `"ip_user_agent"` | What a session cookie is tied to: the client address and the User-Agent, the User-Agent only, or nothing. |
 | `same_site` | `Strict`, `Lax` | `"Strict"` | The SameSite attribute of the session cookie. |
 | `secret_mode` | `ephemeral`, `provided` | `"ephemeral"` | `ephemeral`: the server makes a new random signing key at each start. `provided`: the key comes from `session.secret_env` or `session.secret_file`. The `postgres` block needs `provided`, because all instances use the same key. |
@@ -1470,13 +1500,15 @@ Authentication pages return `Referrer-Policy: same-origin`. The Referer fallback
 Session cookies use:
 
 ```text
-__Host-portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict; Secure   (HTTPS)
-portal=<opaque random token>; Path=/; Max-Age=<ttl>; HttpOnly; SameSite=Strict                       (plain HTTP)
+__Host-portal=<opaque random token>; Path=/; HttpOnly; SameSite=Strict; Secure                  (HTTPS)
+portal=<opaque random token>; Path=/; HttpOnly; SameSite=Strict                                 (plain HTTP)
 ```
 
-After **Log in as** or **Back to superadmin**, `Max-Age` is the time left: the new session ends when the session of the password sign-in would have ended. A switch never gives a fresh `session.ttl`.
+These cookies have no `Max-Age`. The browser deletes them when it ends its session. The server ends the session after `session.ttl`. When the person ticks "Keep me signed in", the cookie has `Max-Age=<session.remember_ttl>`, for example `Max-Age=2592000` (see [Keep me signed in](#keep-me-signed-in)).
 
-The program reads the scheme for each request from `X-Forwarded-Proto`. A session is bound to the client address and the User-Agent of the login. The client address follows the rule of `server.trusted_proxies` (see "Anti-bruteforce"). The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`.
+After **Log in as** or **Back to superadmin**, `Max-Age` is the time left: the new session ends when the session of the password sign-in would have ended. A switch never gives a fresh `session.ttl`, and it never gives the remembered rule.
+
+The program reads the scheme for each request from `X-Forwarded-Proto`. A session is bound to the client address and the User-Agent of the login. The client address follows the rule of `server.trusted_proxies` (see "Anti-bruteforce"). The binding is set by `session.bind = "ip_user_agent"`. The other values are `user_agent` and `none`. A session ends after `session.idle_timeout` without use. The default is `30m`. A remembered session ends after `session.remember_idle_timeout` without use. The default is `7d`.
 
 The token contains no identity, no expiration timestamp, no claims and no signed application data. The server stores only a SHA-256 digest of each token. It also stores the expiration time. With SQLite, this data is in memory. With PostgreSQL, this data is in the shared database.
 
@@ -1499,11 +1531,11 @@ Only failed password checks use the failure budgets. A successful authentication
 
 ## Hardening of the sign-in page
 
-The sign-in page has five measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key.
+The sign-in page has five measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key. The box "Keep me signed in" has its own keys (see [Keep me signed in](#keep-me-signed-in)).
 
 - **Anti-enumeration (real protection).** An unknown login, a wrong password and a failed check of the form give the same answer: status 401, the same page, the same headers. Each of them runs one Argon2 check and counts as one failure. A refusal of a limiter (status 429) is the only visible difference. It does not depend on the login, with one documented exception: the budget of the superadmin login.
 - **Hide the product (obscurity, not security).** The page has a neutral title, no comment and no version. The stylesheet and the script have neutral paths, `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The cookie of the form is `lc`. The default name of the session cookie is not changed: set `session.cookie_name` for a neutral name.
-- **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
+- **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. The box "Keep me signed in" is read with the other fields. It never changes the answer to a refusal. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
 - **Script minification (obscurity, not security).** The script and the stylesheet that every page loads are minified at the first request, with no tool at build time. A test runs `node --check` on the script when `node` exists.
 - **Random names and structure (obscurity, not security).** The sign-in page, the status pages and the launcher load only the shared stylesheet and the theme script. Their classes, identifiers and data attributes have short names that look random. The names are an HMAC of the plain names, under a key that comes from the session secret. All instances with the same secret use the same names, and a restart does not change them. The server also changes the structure of the HTML at each render: it inserts 0 to 3 inert elements, and it changes the order of the attributes and of the elements of the head. The look of the page does not change. The settings pages keep the plain names. The documentation lists what still identifies the product.
 

@@ -52,9 +52,11 @@ pub fn csrf_cookie_name(https: bool) -> &'static str {
 
 /// This function sets the cookie attributes `Path`, `Max-Age`, `HttpOnly`, `SameSite`, and `Secure`.
 /// The attribute `Secure` is set over HTTPS only.
-pub fn cookie_attributes(https: bool, same_site: &str, max_age_secs: u64) -> String {
+/// Without `max_age_secs`, the cookie has no `Max-Age`: the browser deletes it at the end of its session.
+pub fn cookie_attributes(https: bool, same_site: &str, max_age_secs: Option<u64>) -> String {
     let secure = if https { "; Secure" } else { "" };
-    format!("Path=/; Max-Age={max_age_secs}; HttpOnly; SameSite={same_site}{secure}")
+    let max_age = max_age_secs.map_or_else(String::new, |secs| format!(" Max-Age={secs};"));
+    format!("Path=/;{max_age} HttpOnly; SameSite={same_site}{secure}")
 }
 
 /// This function returns the binding of a session that is issued now. The result is a hash. The
@@ -315,12 +317,24 @@ mod tests {
     #[test]
     fn secure_is_set_over_https_only() {
         assert_eq!(
-            cookie_attributes(true, "Strict", 60),
+            cookie_attributes(true, "Strict", Some(60)),
             "Path=/; Max-Age=60; HttpOnly; SameSite=Strict; Secure"
         );
         assert_eq!(
-            cookie_attributes(false, "Lax", 0),
+            cookie_attributes(false, "Lax", Some(0)),
             "Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn a_cookie_without_a_life_has_no_max_age() {
+        assert_eq!(
+            cookie_attributes(true, "Strict", None),
+            "Path=/; HttpOnly; SameSite=Strict; Secure"
+        );
+        assert_eq!(
+            cookie_attributes(false, "Lax", None),
+            "Path=/; HttpOnly; SameSite=Lax"
         );
     }
 

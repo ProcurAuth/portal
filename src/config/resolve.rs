@@ -264,6 +264,7 @@ impl Resolved {
             When::SecretProvided => self
                 .text("session", "secret_mode")
                 .is_ok_and(|mode| mode == "provided"),
+            When::RememberOn => self.bool("session", "remember").unwrap_or(false),
             When::IdentityBlock => self.has_block("identity"),
             When::PdpBlock => self.has_block("pdp"),
             When::KeysBlock => self.has_block("keys"),

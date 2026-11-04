@@ -24,7 +24,7 @@ storage {
 session {
   secret_mode = "ephemeral"
   cookie_name = "__Host-portal"
-  ttl         = "8h"
+  ttl         = "24h"
 }
 
 discovery {

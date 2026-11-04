@@ -14,7 +14,7 @@ Five measures protect or hide the page. Two of them are real protections. Three 
 
 Obscurity does not stop an attacker who reads the page. It only removes the easy marks. Do not count on items 2, 4 and 5 for security. The limiters and Argon2 stay the protection against password guessing.
 
-None of the five measures adds a configuration key. No new key means no new default to document.
+None of the five measures adds a configuration key. No new key means no new default to document. The box "Keep me signed in" is not a measure of this page, and it has its own keys: see "The box Keep me signed in" at the end of this file.
 
 ## 1. Anti-enumeration
 
@@ -185,6 +185,17 @@ Not done:
 - No random names for the fields of the form. Item 3 gives the reason.
 - No per-render change of the class names. A name that changes at each render cannot go into a file that the browser keeps. The structure changes at each render. The names do not.
 - No change to the pages of the settings.
+
+## The box "Keep me signed in"
+
+The form has a box with the field name `keep`. The value of a ticked box is `1`. The box is a part of the form for the anti-enumeration and the anti-bot checks. These rules apply:
+
+- The server reads the field with the other fields, before it checks for an unknown field. The box never makes the form invalid. Only the value `1` counts as ticked. Any other value is the same as no field.
+- A failed check of the form and a wrong password give the same answer, with the box ticked or not. The box changes only the session that a good sign-in opens. It does not change a refusal.
+- The page after a refusal never shows the box ticked. The answer to a refusal therefore does not depend on what the client sent. The login and the password are not shown again either.
+- The box has no identifier and no script. The label holds the box, and its class goes through the mask like all other classes of the page. The mask never wraps a label that holds a field.
+- With `session.remember = false`, the page has no box. The server still reads the field and ignores its value.
+- The name `keep` is a common word. It does not name the product.
 
 ## Operation notes
 

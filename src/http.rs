@@ -79,6 +79,9 @@ const GLOBAL_RATE_LIMIT_KEY: &str = "global";
 const FORM_TOKEN_FIELD: &str = "token";
 /// The name of the trap field of the sign-in form. A person never fills it.
 const TRAP_FIELD: &str = "website";
+/// The box "Keep me signed in" of the sign-in form, and the value that a ticked box sends.
+const KEEP_FIELD: &str = "keep";
+const KEEP_VALUE: &str = "1";
 /// The budget of the global limiter for the sign-ins that name the superadmin. Failures against
 /// other logins never use it. Anonymous failures thus cannot refuse the sign-in of the superadmin.
 const SUPERADMIN_RATE_LIMIT_KEY: &str = "superadmin";
@@ -228,6 +231,9 @@ impl AppState {
             config.session.max_active_sessions,
             Arc::clone(&tracker),
         );
+        if let Some(remember) = config.session.remember {
+            sessions = sessions.remember(remember);
+        }
         if store.is_shared() {
             sessions = sessions.shared(Arc::clone(&store), superadmin.generation);
             // A new superadmin login, password or session secret ends the old superadmin and
@@ -2167,6 +2173,10 @@ async fn handle_login_post(
     let form_token = form.remove(FORM_TOKEN_FIELD).unwrap_or_default();
     // A person never sees this field. A script that fills every field of the form fills it.
     let trap_filled = form.remove(TRAP_FIELD).is_some_and(|v| !v.is_empty());
+    // The box "Keep me signed in". It is read here, with the other fields, so that it never makes
+    // the form unknown. Only the value of a ticked box counts. With `session.remember = false`, the
+    // server reads the field and ignores it.
+    let keep = form.remove(KEEP_FIELD).as_deref() == Some(KEEP_VALUE);
 
     if !form.is_empty()
         || password.len() > state.config.security.max_password_bytes
@@ -2371,9 +2381,11 @@ async fn handle_login_post(
                 principal,
                 login: session_login,
                 impersonated: false,
+                remember: keep,
                 ip: ip_text(client),
                 user_agent: user_agent_text(&headers),
-                // A sign-in with the password gets the full `session.ttl`.
+                // A sign-in with the password gets the full `session.ttl`, or the full
+                // `session.remember_ttl` for a remembered session.
                 not_after: None,
             },
         ) {
@@ -2407,12 +2419,13 @@ async fn handle_login_post(
     );
 
     let mut response = redirect_response(StatusCode::SEE_OTHER, &rd);
-    let cookie = session_cookie_header(
-        state,
-        client,
-        token.as_str(),
-        state.config.session.ttl.as_secs(),
-    );
+    // A remembered session has a persistent cookie with the life of the session. Any other session
+    // has a cookie that the browser deletes at the end of its session.
+    let cookie_life = match state.config.session.remember {
+        Some(remember) if keep => Some(remember.ttl.as_secs()),
+        _ => None,
+    };
+    let cookie = session_cookie_header(state, client, token.as_str(), cookie_life);
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err()
         || append_dynamic_header(
             &mut response,
@@ -2501,11 +2514,12 @@ fn identify(state: &AppState, typed: &str) -> Who {
 }
 
 /// The `Set-Cookie` value of a session. `max_age_secs` is the time left before the session ends.
+/// `None` makes a cookie without `Max-Age`.
 fn session_cookie_header(
     state: &AppState,
     client: &Client,
     token: &str,
-    max_age_secs: u64,
+    max_age_secs: Option<u64>,
 ) -> Zeroizing<String> {
     Zeroizing::new(format!(
         "{}={}; {}",
@@ -3489,7 +3503,11 @@ fn signed_out_response(state: &AppState, client: &Client, location: &str) -> Htt
     let expired_session = format!(
         "{}=; {}",
         transport::session_cookie_name(&state.config.session.cookie_name, client.https),
-        transport::cookie_attributes(client.https, state.config.session.same_site.as_str(), 0),
+        transport::cookie_attributes(
+            client.https,
+            state.config.session.same_site.as_str(),
+            Some(0),
+        ),
     );
     if append_dynamic_header(&mut response, SET_COOKIE, &expired_session).is_err()
         || append_dynamic_header(
@@ -3526,6 +3544,8 @@ fn switch_session(
             principal,
             login,
             impersonated,
+            // A switch of session never gives the remembered rule.
+            remember: false,
             ip: ip_text(client),
             user_agent: user_agent_text(headers),
             not_after: Some(current.session.expires_at),
@@ -3554,7 +3574,7 @@ fn switch_session(
         state,
         client,
         token.as_str(),
-        left.min(state.config.session.ttl.as_secs()),
+        Some(left.min(state.config.session.ttl.as_secs())),
     );
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err() {
         state.sessions.revoke(token.as_str(), EndReason::Revoked);
@@ -3595,10 +3615,18 @@ fn login_page(
     let Ok(form_token) = sign_form_token(&state.signing_secret, csrf, unix_millis()) else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
+    // The box is never ticked, also on the page that follows a refusal: the page of a refusal does
+    // not depend on what the person sent. It needs no script and no identifier. The label holds the box.
+    let keep_html = state.config.session.remember.map_or_else(String::new, |remember| {
+        format!(
+            r#"<label class="keep"><input type="checkbox" name="{KEEP_FIELD}" value="{KEEP_VALUE}">Keep me signed in for {}</label>"#,
+            crate::util::format_duration_words(remember.ttl.as_secs())
+        )
+    });
     let body = ui::auth_document(
         "Authentication",
         &format!(
-            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
+            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required>{keep_html}<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
             error_html,
             html_escape(csrf),
             html_escape(rd),
@@ -4017,7 +4045,7 @@ fn csrf_cookie(state: &AppState, csrf: &str, https: bool) -> String {
         transport::cookie_attributes(
             https,
             state.config.session.same_site.as_str(),
-            CSRF_COOKIE_SECS,
+            Some(CSRF_COOKIE_SECS),
         )
     )
 }
@@ -4026,7 +4054,7 @@ fn expired_csrf_cookie(state: &AppState, https: bool) -> String {
     format!(
         "{}=; {}",
         transport::csrf_cookie_name(https),
-        transport::cookie_attributes(https, state.config.session.same_site.as_str(), 0)
+        transport::cookie_attributes(https, state.config.session.same_site.as_str(), Some(0))
     )
 }
 

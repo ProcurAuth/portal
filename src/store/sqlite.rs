@@ -15,7 +15,7 @@ use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
 mod keys;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Starts a transaction that takes the write lock now. Another connection writes to the same file
 /// (the inbox). A deferred transaction that reads first and writes after fails at once with
@@ -200,6 +200,12 @@ const KEY_KIND_SCHEMA: &str = "
 ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
 ";
 
+/// Schema version 8: the history keeps whether a session had the remembered rule ("Keep me signed
+/// in"). A session of an older file is not remembered. With SQLite the live sessions are in memory.
+const SESSION_REMEMBERED_SCHEMA: &str = "
+ALTER TABLE sessions_log ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The columns of `user_grants` in a file of a given schema version.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GrantColumns {
@@ -382,6 +388,7 @@ impl Sqlite {
                 migrate_to_resource_path(&tx)?;
                 tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
                 tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
+                tx.execute_batch(SESSION_REMEMBERED_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -390,6 +397,7 @@ impl Sqlite {
                 let tx = conn.transaction().map_err(db)?;
                 tx.execute_batch(KEYS_SCHEMA).map_err(db)?;
                 tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
+                tx.execute_batch(SESSION_REMEMBERED_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -397,6 +405,14 @@ impl Sqlite {
             6 => {
                 let tx = conn.transaction().map_err(db)?;
                 tx.execute_batch(KEY_KIND_SCHEMA).map_err(db)?;
+                tx.execute_batch(SESSION_REMEMBERED_SCHEMA).map_err(db)?;
+                tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+                    .map_err(db)?;
+                tx.commit().map_err(db)?;
+            }
+            7 => {
+                let tx = conn.transaction().map_err(db)?;
+                tx.execute_batch(SESSION_REMEMBERED_SCHEMA).map_err(db)?;
                 tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
@@ -548,8 +564,8 @@ impl Sqlite {
                 Event::SessionStarted(start) => {
                     tx.execute(
                         "INSERT OR IGNORE INTO sessions_log
-                           (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                           (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
                         params![
                             start.sid as i64,
                             start.login,
@@ -557,7 +573,8 @@ impl Sqlite {
                             start.impersonated,
                             start.ip,
                             start.user_agent,
-                            start.at
+                            start.at,
+                            start.remembered
                         ],
                     )
                     .map_err(db)?;
@@ -698,7 +715,7 @@ impl Sqlite {
             let days = day_stats(&conn, first_day, Some((login, *superadmin)))?;
             let recent = conn
                 .prepare(
-                    "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated
+                    "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered
                        FROM sessions_log WHERE login = ?1 AND superadmin = ?2
                       ORDER BY started_at DESC, sid DESC LIMIT ?3",
                 )
@@ -712,6 +729,7 @@ impl Sqlite {
                         ip: row.get(4)?,
                         user_agent: row.get(5)?,
                         impersonated: row.get(6)?,
+                        remembered: row.get(7)?,
                     })
                 })
                 .map_err(db)?
@@ -913,11 +931,12 @@ impl Sqlite {
             with_grants.push((id, user));
         }
         let sessions = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT sid, login, superadmin, impersonated, ip, user_agent, started_at,
-                        last_seen_at, ended_at, end_reason
-                   FROM sessions_log ORDER BY started_at, sid",
-            )
+                            last_seen_at, ended_at, end_reason, {}
+                       FROM sessions_log ORDER BY started_at, sid",
+                if version >= 8 { "remembered" } else { "0" }
+            ))
             .map_err(db)?
             .query_map([], |row| {
                 Ok(LoggedSession {
@@ -931,6 +950,7 @@ impl Sqlite {
                     last_seen_at: row.get(7)?,
                     ended_at: row.get(8)?,
                     end_reason: row.get(9)?,
+                    remembered: row.get(10)?,
                 })
             })
             .map_err(db)?
@@ -1128,7 +1148,7 @@ mod tests {
     #[test]
     fn a_new_database_has_the_tables_of_the_keys() {
         let store = Sqlite::open_in_memory();
-        assert_eq!(version(&store), 7);
+        assert_eq!(version(&store), SCHEMA_VERSION);
         assert!(has_column(&store, "keys", "kind"));
         for table in KEY_TABLES {
             assert!(has_table(&store, table), "{table}");
@@ -1157,8 +1177,11 @@ mod tests {
         drop(store);
         // This is the file of the portal before version 7: the column `kind` did not exist.
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("ALTER TABLE keys DROP COLUMN kind; PRAGMA user_version = 6;")
-            .unwrap();
+        conn.execute_batch(
+            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered;
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
         drop(conn);
         let store = Sqlite::open(&path).unwrap();
         assert_eq!(version(&store), SCHEMA_VERSION);
@@ -1182,6 +1205,35 @@ mod tests {
     }
 
     #[test]
+    fn a_database_at_version_seven_gains_the_remembered_flag_of_the_history() {
+        let dir = std::env::temp_dir().join(format!("portal-v7-remembered-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        drop(store);
+        // This is the file of the portal before version 8: the column did not exist. The file has one open session.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE sessions_log DROP COLUMN remembered;
+             INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
+               VALUES (1, 'alice', 0, 0, 'ua', 10, 10);
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Sqlite::open(&path).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(has_column(&store, "sessions_log", "remembered"));
+        let dump = store.dump().unwrap();
+        assert_eq!(dump.sessions.len(), 1);
+        assert!(
+            !dump.sessions[0].remembered,
+            "an old session is not remembered"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_database_at_version_five_gains_the_tables_of_the_keys_and_keeps_its_rows() {
         let dir = std::env::temp_dir().join(format!("portal-v5-keys-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1195,6 +1247,7 @@ mod tests {
             "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
              DROP TABLE keys; DROP TABLE directory_version;
              ALTER TABLE user_grants DROP COLUMN limits;
+             ALTER TABLE sessions_log DROP COLUMN remembered;
              PRAGMA user_version = 5;",
         )
         .unwrap();

@@ -250,10 +250,21 @@ pub struct SessionConfig {
     pub ttl: Duration,
     /// A session unused for this long ends, even before `ttl`.
     pub idle_timeout: Duration,
+    /// The remembered sessions. `None` when `session.remember` is `false`: the form has no box.
+    pub remember: Option<Remember>,
     /// What a session cookie is bound to. A stolen cookie is then useless from another machine.
     pub bind: SessionBind,
     pub same_site: SameSite,
     pub max_active_sessions: usize,
+}
+
+/// The rule of a remembered session, the one that a person asks with "Keep me signed in".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Remember {
+    /// The lifetime from the sign-in. The persistent cookie has the same life.
+    pub ttl: Duration,
+    /// A remembered session unused for this long ends, even before `ttl`.
+    pub idle_timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +392,37 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             keys::show_duration(ttl)
         ));
     }
+    let remember = if r.bool("session", "remember")? {
+        let remember_ttl = r.duration("session", "remember_ttl")?;
+        let remember_idle = r.duration("session", "remember_idle_timeout")?;
+        if remember_ttl < ttl {
+            return Err(format!(
+                "session.remember_ttl must not be shorter than session.ttl: remember_ttl is {}, ttl is {}",
+                keys::show_duration(remember_ttl),
+                keys::show_duration(ttl)
+            ));
+        }
+        if remember_idle > remember_ttl {
+            return Err(format!(
+                "session.remember_idle_timeout must not be longer than session.remember_ttl: remember_idle_timeout is {}, remember_ttl is {}",
+                keys::show_duration(remember_idle),
+                keys::show_duration(remember_ttl)
+            ));
+        }
+        if remember_idle < idle_timeout {
+            return Err(format!(
+                "session.remember_idle_timeout must not be shorter than session.idle_timeout: remember_idle_timeout is {}, idle_timeout is {}",
+                keys::show_duration(remember_idle),
+                keys::show_duration(idle_timeout)
+            ));
+        }
+        Some(Remember {
+            ttl: remember_ttl,
+            idle_timeout: remember_idle,
+        })
+    } else {
+        None
+    };
     let max_connections = r.count("server", "max_connections")?;
     let max_login_body_reads = r.count("server", "max_login_body_reads")?;
     if max_login_body_reads >= max_connections {
@@ -517,6 +559,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             cookie_name: r.text("session", "cookie_name")?,
             ttl,
             idle_timeout,
+            remember,
             bind: match r.text("session", "bind")?.as_str() {
                 "ip_user_agent" => SessionBind::IpUserAgent,
                 "user_agent" => SessionBind::UserAgent,
