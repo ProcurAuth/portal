@@ -911,7 +911,7 @@ A person that is signed in gets a notification when an alert arrives for a group
 2. It reads the permissions of the account in memory.
 3. It reads three small things in the store: the row of the account, the count of unread alerts (it stops at 100) and the alerts newer than the cursor. Each read uses an index (`alerts_created`, `alerts_target` and the key of `web_notify`).
 
-It writes nothing, except for the first request of an account. 100 open tabs make about 8 requests each second on the instances together. The request is rate limited as any request of a page is.
+It writes nothing, except for the first request of an account. 100 open tabs make about 8 requests each second on the instances together. The request has no limit of its own. It uses the connection budget `server.max_connections`, as any page does.
 
 **Forms.** Two forms change the state: `POST /auth/settings/inbox/read` and `POST /auth/settings/inbox/notify` (the field `level` is `all`, `important` or `off`). They need the `Origin` of the portal, the content type of a form and the field `csrf` of the purpose `inbox`. The field `back` is `home` or `inbox`: the page that the redirect returns to. With the header `Accept: application/json`, the answer is the state as JSON, with no redirect. The script uses this. Without script, the redirect is the answer, so the popover and its forms work. An unknown field, a bad level and a bad `back` give `400`. A request with no session has the same answer as any other settings page: a redirect to the sign-in page.
 
