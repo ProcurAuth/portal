@@ -32,6 +32,7 @@ use super::db::{
 };
 use super::hub::LiveInfo;
 use super::log;
+use super::notify::{Ask, Item, Level, Prefs, Scope, View, UNREAD_CAP};
 use super::spool::{DbAck, Entry, Spool};
 use super::store::Stats;
 use super::target::Target;
@@ -156,6 +157,16 @@ ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
 ALTER TABLE alerts RENAME COLUMN group_id TO target_id;
 ALTER TABLE alerts ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'group'
     CHECK (target_kind IN ('group', 'user'));
+"#,
+    r#"
+-- The notifications of the web pages: for each account, the marker "read up to" and the level of
+-- the toasts. The index serves the queries of the alerts that one account receives.
+CREATE TABLE web_notify (
+    login      TEXT PRIMARY KEY,
+    read_up_to BIGINT NOT NULL,
+    level      TEXT NOT NULL DEFAULT 'all' CHECK (level IN ('all', 'important', 'off'))
+);
+CREATE INDEX alerts_target ON alerts(target_id, created_at);
 "#,
 ];
 
@@ -1663,6 +1674,155 @@ impl PgStore {
         Ok(alerts)
     }
 
+    // ------------------------------------------------------------ notifications of the web
+
+    /// The preferences of an account. An account that has no row gets one, with the marker at
+    /// `now`.
+    async fn notify_prefs(c: &Object, login: &str, now: i64) -> Result<Prefs, DbError> {
+        c.execute(
+            "INSERT INTO web_notify (login, read_up_to) VALUES ($1, $2) ON CONFLICT (login) DO NOTHING",
+            &[&login, &now],
+        )
+        .await
+        .map_err(db_error)?;
+        let r = c
+            .query_one(
+                "SELECT read_up_to, level FROM web_notify WHERE login = $1",
+                &[&login],
+            )
+            .await
+            .map_err(db_error)?;
+        let level: String = r.get(1);
+        Ok(Prefs {
+            read_up_to: r.get(0),
+            level: Level::parse(&level)
+                .ok_or_else(|| DbError::Pg(format!("unknown level {level:?}")))?,
+        })
+    }
+
+    /// The condition of the alerts that `scope` receives, with the parameters from `$first` on.
+    /// The second value is the list of groups for the first parameter, or `None` when the scope
+    /// has all the groups. The third is the number of the parameter of the login.
+    fn scope_sql(scope: &Scope, first: usize) -> (String, Option<Vec<String>>, usize) {
+        match &scope.groups {
+            None => (
+                format!("(target_kind = 'group' OR (target_kind = 'user' AND target_id = ${first}))"),
+                None,
+                first,
+            ),
+            Some(ids) => (
+                format!(
+                    "((target_kind = 'group' AND target_id = ANY(${first}::text[])) OR (target_kind = 'user' AND target_id = ${}))",
+                    first + 1
+                ),
+                Some(ids.clone()),
+                first + 1,
+            ),
+        }
+    }
+
+    /// The alerts that `scope` receives: the preferences, the count of unread ones and the newest
+    /// ones.
+    pub async fn notify_view(&self, scope: &Scope, ask: &Ask) -> Result<View, DbError> {
+        let c = self.client().await?;
+        let prefs = Self::notify_prefs(&c, &scope.login, now_ms()).await?;
+        if ask.skip_if_off && prefs.level == Level::Off {
+            return Ok(View {
+                prefs,
+                unread: 0,
+                items: Vec::new(),
+            });
+        }
+        let cap = i64::from(UNREAD_CAP);
+        let limit = i64::from(ask.limit);
+        // The groups, when the scope has a list, then the login, as the last parameter.
+        let (condition, groups, login_at) = Self::scope_sql(scope, 2);
+        let unread_sql = format!(
+            "SELECT COUNT(*)::bigint FROM (SELECT 1 FROM alerts WHERE created_at > $1 AND {condition} LIMIT ${})",
+            login_at + 1
+        );
+        let unread: i64 = match &groups {
+            Some(ids) => {
+                c.query_one(&unread_sql, &[&prefs.read_up_to, ids, &scope.login, &cap])
+                    .await
+            }
+            None => {
+                c.query_one(&unread_sql, &[&prefs.read_up_to, &scope.login, &cap])
+                    .await
+            }
+        }
+        .map_err(db_error)?
+        .get(0);
+        let items = if ask.limit == 0 {
+            Vec::new()
+        } else {
+            let sql = format!(
+                "SELECT id, target_kind, target_id, title, created_at FROM alerts
+                 WHERE created_at > $1 AND {condition} ORDER BY created_at DESC, id DESC LIMIT ${}",
+                login_at + 1
+            );
+            let rows = match &groups {
+                Some(ids) => {
+                    c.query(&sql, &[&ask.since_ms, ids, &scope.login, &limit])
+                        .await
+                }
+                None => c.query(&sql, &[&ask.since_ms, &scope.login, &limit]).await,
+            }
+            .map_err(db_error)?;
+            rows.iter()
+                .map(|r| {
+                    Ok(Item {
+                        id: r.get(0),
+                        target: target_of(r.get(1), r.get(2))?,
+                        title: r.get(3),
+                        created_at: r.get(4),
+                    })
+                })
+                .collect::<Result<_, DbError>>()?
+        };
+        Ok(View {
+            prefs,
+            unread: u32::try_from(unread).unwrap_or(UNREAD_CAP),
+            items,
+        })
+    }
+
+    /// Moves the marker of the account to the time of its newest alert. The marker never goes
+    /// back. The result is the marker.
+    pub async fn notify_mark_read(&self, scope: &Scope) -> Result<i64, DbError> {
+        let c = self.client().await?;
+        Self::notify_prefs(&c, &scope.login, now_ms()).await?;
+        let (condition, groups, _) = Self::scope_sql(scope, 1);
+        let sql = format!("SELECT MAX(created_at)::bigint FROM alerts WHERE {condition}");
+        let newest: Option<i64> = match &groups {
+            Some(ids) => c.query_one(&sql, &[ids, &scope.login]).await,
+            None => c.query_one(&sql, &[&scope.login]).await,
+        }
+        .map_err(db_error)?
+        .get(0);
+        let r = c
+            .query_one(
+                "UPDATE web_notify SET read_up_to = GREATEST(read_up_to, $2) WHERE login = $1 RETURNING read_up_to",
+                &[&scope.login, &newest.unwrap_or(0)],
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(r.get(0))
+    }
+
+    /// Sets the level of the toasts of an account.
+    pub async fn notify_set_level(&self, login: &str, level: Level) -> Result<(), DbError> {
+        let c = self.client().await?;
+        c.execute(
+            "INSERT INTO web_notify (login, read_up_to, level) VALUES ($1, $2, $3)
+             ON CONFLICT (login) DO UPDATE SET level = EXCLUDED.level",
+            &[&login, &now_ms(), &level.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+        Ok(())
+    }
+
     /// The alerts created at or after `since_ms`, counted for each bucket and each group.
     pub async fn alert_counts(
         &self,
@@ -2626,5 +2786,153 @@ mod tests {
             Redeem::Enrolled { .. }
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scope(groups: Option<&[&str]>, login: &str) -> Scope {
+        Scope {
+            groups: groups.map(|g| g.iter().map(|s| s.to_string()).collect()),
+            login: login.into(),
+        }
+    }
+
+    fn ids(view: &View) -> Vec<&str> {
+        view.items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    const ASK: Ask = Ask {
+        since_ms: 0,
+        limit: 10,
+        skip_if_off: false,
+    };
+
+    async fn put(db: &TestDatabase, id: &str, kind: &str, target: &str, at: i64) {
+        db.sql(&format!(
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at)
+             VALUES ('{id}', '{kind}', '{target}', '{id}', 'producer:test', '{id}', {at})"
+        ))
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_account_gets_the_alerts_of_its_groups_and_its_own_and_no_other() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        put(&db, "g-infra", "group", "infra", 100).await;
+        put(&db, "g-other", "group", "other", 110).await;
+        put(&db, "d-alice", "user", "alice", 120).await;
+        put(&db, "d-bob", "user", "bob", 130).await;
+        let member = store
+            .notify_view(&scope(Some(&["infra"]), "alice"), &ASK)
+            .await
+            .unwrap();
+        assert_eq!(ids(&member), ["d-alice", "g-infra"], "newest first");
+        let outsider = store
+            .notify_view(&scope(Some(&[]), "carol"), &ASK)
+            .await
+            .unwrap();
+        assert!(outsider.items.is_empty());
+        let all = store.notify_view(&scope(None, "root"), &ASK).await.unwrap();
+        assert_eq!(ids(&all), ["g-other", "g-infra"]);
+        // The store and the rule of the code agree.
+        for s in [
+            scope(Some(&["infra"]), "alice"),
+            scope(Some(&[]), "bob"),
+            scope(None, "alice"),
+        ] {
+            let got = store.notify_view(&s, &ASK).await.unwrap();
+            for (id, kind, target) in [
+                ("g-infra", "group", "infra"),
+                ("g-other", "group", "other"),
+                ("d-alice", "user", "alice"),
+                ("d-bob", "user", "bob"),
+            ] {
+                let target = Target::from_columns(kind, target.into()).unwrap();
+                assert_eq!(ids(&got).contains(&id), s.receives(&target), "{s:?} {id}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_the_cursor_the_marker_and_the_level_work() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let s = scope(Some(&["infra"]), "alice");
+        // The first sight of the account sets the marker at the time of the call.
+        let first = store.notify_view(&s, &ASK).await.unwrap();
+        assert!(first.prefs.read_up_to > 0 && first.unread == 0);
+        let far = now_ms() + 3_600_000;
+        for n in 1..=5 {
+            put(&db, &format!("a{n}"), "group", "infra", far + n * 10).await;
+        }
+        let page = store
+            .notify_view(
+                &s,
+                &Ask {
+                    since_ms: far + 30,
+                    limit: 2,
+                    skip_if_off: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ids(&page), ["a5", "a4"]);
+        assert_eq!(page.unread, 5);
+        assert_eq!(store.notify_mark_read(&s).await.unwrap(), far + 50);
+        assert_eq!(store.notify_view(&s, &ASK).await.unwrap().unread, 0);
+        // The marker never goes back.
+        db.sql("DELETE FROM alerts").await;
+        put(&db, "old", "group", "infra", 10).await;
+        assert_eq!(store.notify_mark_read(&s).await.unwrap(), far + 50);
+        // The level is for one account. Off skips the reads.
+        store.notify_set_level("alice", Level::Off).await.unwrap();
+        let off = Ask {
+            skip_if_off: true,
+            ..ASK
+        };
+        assert!(store.notify_view(&s, &off).await.unwrap().items.is_empty());
+        assert_eq!(
+            store
+                .notify_view(&scope(Some(&["infra"]), "bob"), &off)
+                .await
+                .unwrap()
+                .prefs
+                .level,
+            Level::All
+        );
+        store
+            .notify_set_level("carol", Level::Important)
+            .await
+            .unwrap();
+        let carol = store
+            .notify_view(&scope(Some(&[]), "carol"), &ASK)
+            .await
+            .unwrap();
+        assert_eq!(carol.prefs.level, Level::Important);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_alert_made_on_one_instance_shows_on_the_other() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let (a, b) = (db.store().await, db.store().await);
+        let s = scope(Some(&["infra"]), "alice");
+        assert!(b.notify_view(&s, &ASK).await.unwrap().items.is_empty());
+        a.insert_alert(&alert_for(Target::Group("infra".into()), "k1"))
+            .await
+            .unwrap();
+        let seen = b.notify_view(&s, &ASK).await.unwrap();
+        assert_eq!(seen.items.len(), 1);
+        assert_eq!(seen.unread, 1);
+        // The marker that one instance moves is the marker that the other reads.
+        a.notify_mark_read(&s).await.unwrap();
+        assert_eq!(b.notify_view(&s, &ASK).await.unwrap().unread, 0);
     }
 }

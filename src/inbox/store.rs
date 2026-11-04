@@ -12,6 +12,7 @@ use super::db::{
     DeviceKey, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem,
 };
 use super::hub::LiveInfo;
+use super::notify::{Ask, Level, Scope, View};
 use super::pg::{PgStore, RecentAlert};
 use super::spool::Spool;
 use super::util::now_ms;
@@ -449,6 +450,44 @@ impl Store {
                     .await
             }
             Store::Pg(pg) => pg.guard(pg.recent_alerts(limit, since_ms, cutoff)).await,
+        }
+    }
+
+    // ------------------------------------------------------------ notifications of the web
+
+    /// The alerts that an account receives, with its preferences (see `notify.rs`).
+    pub async fn notify_view(&self, scope: &Scope, ask: Ask) -> Result<View, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                let scope = scope.clone();
+                db.call(move |c| Ok(db::notify_view(c, &scope, &ask, now_ms())?))
+                    .await
+            }
+            Store::Pg(pg) => pg.guard(pg.notify_view(scope, &ask)).await,
+        }
+    }
+
+    /// Moves the marker "read up to" of an account to its newest alert.
+    pub async fn notify_mark_read(&self, scope: &Scope) -> Result<i64, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                let scope = scope.clone();
+                db.call(move |c| Ok(db::notify_mark_read(c, &scope, now_ms())?))
+                    .await
+            }
+            Store::Pg(pg) => pg.guard(pg.notify_mark_read(scope)).await,
+        }
+    }
+
+    /// Sets the level of the toasts of an account.
+    pub async fn notify_set_level(&self, login: &str, level: Level) -> Result<(), DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                let login = login.to_string();
+                db.call(move |c| Ok(db::notify_set_level(c, &login, level, now_ms())?))
+                    .await
+            }
+            Store::Pg(pg) => pg.guard(pg.notify_set_level(login, level)).await,
         }
     }
 

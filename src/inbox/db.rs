@@ -16,6 +16,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use super::log;
+use super::notify::{Ask, Item, Level, Prefs, Scope, View, UNREAD_CAP};
 use super::target::Target;
 use super::util::{now_ms, random_id};
 
@@ -190,6 +191,16 @@ ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'alert';
 ALTER TABLE alerts RENAME COLUMN group_id TO target_id;
 ALTER TABLE alerts ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'group'
     CHECK (target_kind IN ('group', 'user'));
+"#,
+    r#"
+-- The notifications of the web pages: for each account, the marker "read up to" and the level of
+-- the toasts. The index serves the queries of the alerts that one account receives.
+CREATE TABLE web_notify (
+    login      TEXT PRIMARY KEY,
+    read_up_to INTEGER NOT NULL,
+    level      TEXT NOT NULL DEFAULT 'all' CHECK (level IN ('all', 'important', 'off'))
+) STRICT;
+CREATE INDEX alerts_target ON alerts(target_id, created_at);
 "#,
 ];
 
@@ -1147,6 +1158,144 @@ pub fn subscribed_devices(conn: &Connection) -> rusqlite::Result<Vec<(String, Op
     rows.collect()
 }
 
+// ---------------------------------------------------------------- notifications of the web
+
+/// The condition on `target_kind` and `target_id` for the alerts that `scope` receives, with `?`
+/// placeholders, and the values of the placeholders in order. The index `alerts_target` serves it.
+fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
+    let mut values: Vec<String> = Vec::new();
+    let groups = match &scope.groups {
+        None => "target_kind = 'group'".to_string(),
+        Some(ids) if ids.is_empty() => "0".to_string(),
+        Some(ids) => {
+            values.extend(ids.iter().cloned());
+            let marks = vec!["?"; ids.len()].join(", ");
+            format!("target_kind = 'group' AND target_id IN ({marks})")
+        }
+    };
+    values.push(scope.login.clone());
+    (
+        format!("(({groups}) OR (target_kind = 'user' AND target_id = ?))"),
+        values,
+    )
+}
+
+/// The preferences of an account. An account that has no row gets one, with the marker at `now`:
+/// the unread count starts at the first sight of the account, not at the oldest alert.
+fn notify_prefs(conn: &Connection, login: &str, now: i64) -> rusqlite::Result<Prefs> {
+    conn.execute(
+        "INSERT INTO web_notify (login, read_up_to) VALUES (?1, ?2) ON CONFLICT(login) DO NOTHING",
+        params![login, now],
+    )?;
+    conn.query_row(
+        "SELECT read_up_to, level FROM web_notify WHERE login = ?1",
+        params![login],
+        |r| {
+            let level: String = r.get(1)?;
+            Ok(Prefs {
+                read_up_to: r.get(0)?,
+                level: Level::parse(&level).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        format!("unknown level {level:?}").into(),
+                    )
+                })?,
+            })
+        },
+    )
+}
+
+/// The alerts that `scope` receives: the preferences, the count of unread ones and the newest
+/// ones. Each read uses an index.
+pub fn notify_view(
+    conn: &Connection,
+    scope: &Scope,
+    ask: &Ask,
+    now: i64,
+) -> rusqlite::Result<View> {
+    let prefs = notify_prefs(conn, &scope.login, now)?;
+    if ask.skip_if_off && prefs.level == Level::Off {
+        return Ok(View {
+            prefs,
+            unread: 0,
+            items: Vec::new(),
+        });
+    }
+    let (condition, values) = scope_sql(scope);
+    let unread: u32 = {
+        let sql = format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM alerts WHERE created_at > ? AND {condition} LIMIT ?)"
+        );
+        let mut args: Vec<rusqlite::types::Value> = vec![prefs.read_up_to.into()];
+        args.extend(values.iter().cloned().map(Into::into));
+        args.push(i64::from(UNREAD_CAP).into());
+        conn.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))?
+    };
+    let items = if ask.limit == 0 {
+        Vec::new()
+    } else {
+        let sql = format!(
+            "SELECT id, target_kind, target_id, title, created_at FROM alerts
+             WHERE created_at > ? AND {condition} ORDER BY created_at DESC, id DESC LIMIT ?"
+        );
+        let mut args: Vec<rusqlite::types::Value> = vec![ask.since_ms.into()];
+        args.extend(values.into_iter().map(Into::into));
+        args.push(i64::from(ask.limit).into());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+            Ok(Item {
+                id: r.get(0)?,
+                target: target_columns(r, 1)?,
+                title: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    Ok(View {
+        prefs,
+        unread,
+        items,
+    })
+}
+
+/// Moves the marker of the account to the time of its newest alert. The marker never goes back.
+/// The result is the marker.
+pub fn notify_mark_read(conn: &Connection, scope: &Scope, now: i64) -> rusqlite::Result<i64> {
+    notify_prefs(conn, &scope.login, now)?;
+    let (condition, values) = scope_sql(scope);
+    let newest: Option<i64> = conn.query_row(
+        &format!("SELECT MAX(created_at) FROM alerts WHERE {condition}"),
+        rusqlite::params_from_iter(values),
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "UPDATE web_notify SET read_up_to = MAX(read_up_to, ?2) WHERE login = ?1",
+        params![scope.login, newest.unwrap_or(0)],
+    )?;
+    conn.query_row(
+        "SELECT read_up_to FROM web_notify WHERE login = ?1",
+        params![scope.login],
+        |r| r.get(0),
+    )
+}
+
+/// Sets the level of the toasts of an account.
+pub fn notify_set_level(
+    conn: &Connection,
+    login: &str,
+    level: Level,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO web_notify (login, read_up_to, level) VALUES (?1, ?2, ?3)
+         ON CONFLICT(login) DO UPDATE SET level = excluded.level",
+        params![login, now, level.as_str()],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- retention
 
 /// An enrollment code stays in the table this long after it expires. A used or expired code is
@@ -1766,8 +1915,9 @@ mod tests {
     fn the_migration_of_the_target_keeps_the_alerts_that_exist_as_alerts_for_a_group() {
         let mut c = Connection::open_in_memory().unwrap();
         c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        // The chain up to the version before the change of the target.
-        let before = MIGRATIONS.len() - 1;
+        // The chain up to the version before the change of the target. The migration of the
+        // notifications of the web comes after it.
+        let before = MIGRATIONS.len() - 2;
         c.execute_batch("CREATE TABLE inbox_schema_version (version INTEGER NOT NULL) STRICT;")
             .unwrap();
         for sql in &MIGRATIONS[..before] {
@@ -1800,5 +1950,147 @@ mod tests {
             [],
         );
         assert!(refused.is_err(), "the kind of the target is checked");
+    }
+
+    fn put(c: &Connection, id: &str, kind: &str, target: &str, at: i64) {
+        c.execute(
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at)
+             VALUES (?1, ?2, ?3, ?1, 'producer:test', ?1, ?4)",
+            params![id, kind, target, at],
+        )
+        .unwrap();
+    }
+
+    fn scope(groups: Option<&[&str]>, login: &str) -> Scope {
+        Scope {
+            groups: groups.map(|g| g.iter().map(|s| s.to_string()).collect()),
+            login: login.into(),
+        }
+    }
+
+    const ASK: Ask = Ask {
+        since_ms: 0,
+        limit: 10,
+        skip_if_off: false,
+    };
+
+    fn ids(view: &View) -> Vec<&str> {
+        view.items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn an_account_gets_the_alerts_of_its_groups_and_its_own_and_no_other() {
+        let c = mem();
+        put(&c, "g-infra", "group", "infra", 100);
+        put(&c, "g-other", "group", "other", 110);
+        put(&c, "d-alice", "user", "alice", 120);
+        put(&c, "d-bob", "user", "bob", 130);
+        let member = notify_view(&c, &scope(Some(&["infra"]), "alice"), &ASK, 0).unwrap();
+        assert_eq!(ids(&member), ["d-alice", "g-infra"], "newest first");
+        // A non-member sees the alert for the account only.
+        let outsider = notify_view(&c, &scope(Some(&[]), "carol"), &ASK, 0).unwrap();
+        assert!(outsider.items.is_empty() && outsider.unread == 0);
+        // The superadmin has all the groups, and not the alerts for the others.
+        let all = notify_view(&c, &scope(None, "root"), &ASK, 0).unwrap();
+        assert_eq!(ids(&all), ["g-other", "g-infra"]);
+        // The store and the rule of the code agree.
+        for s in [
+            scope(Some(&["infra"]), "alice"),
+            scope(Some(&[]), "bob"),
+            scope(None, "alice"),
+        ] {
+            let got = notify_view(&c, &s, &ASK, 0).unwrap();
+            for (id, kind, target) in [
+                ("g-infra", "group", "infra"),
+                ("g-other", "group", "other"),
+                ("d-alice", "user", "alice"),
+                ("d-bob", "user", "bob"),
+            ] {
+                let target = Target::from_columns(kind, target.into()).unwrap();
+                assert_eq!(ids(&got).contains(&id), s.receives(&target), "{s:?} {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cursor_and_the_limit_cut_the_list_and_the_count_follows_the_marker() {
+        let c = mem();
+        for n in 1..=5 {
+            put(&c, &format!("a{n}"), "group", "infra", 1_000 + n * 10);
+        }
+        let s = scope(Some(&["infra"]), "alice");
+        // The first sight of the account sets the marker at `now`: nothing is unread.
+        let first = notify_view(&c, &s, &ASK, 5_000).unwrap();
+        assert_eq!(first.prefs.read_up_to, 5_000);
+        assert_eq!(first.unread, 0);
+        assert_eq!(first.items.len(), 5);
+        let after = notify_view(
+            &c,
+            &s,
+            &Ask {
+                since_ms: 1_030,
+                limit: 2,
+                skip_if_off: false,
+            },
+            5_000,
+        )
+        .unwrap();
+        assert_eq!(ids(&after), ["a5", "a4"]);
+        put(&c, "a6", "group", "infra", 6_000);
+        let later = notify_view(&c, &s, &ASK, 7_000).unwrap();
+        assert_eq!(later.unread, 1);
+        // The marker moves to the newest alert, and it never goes back.
+        assert_eq!(notify_mark_read(&c, &s, 7_000).unwrap(), 6_000);
+        assert_eq!(notify_view(&c, &s, &ASK, 7_000).unwrap().unread, 0);
+        let empty = scope(Some(&[]), "alice");
+        assert_eq!(notify_mark_read(&c, &empty, 7_000).unwrap(), 6_000);
+        c.execute("DELETE FROM alerts", []).unwrap();
+        put(&c, "old", "group", "infra", 10);
+        assert_eq!(notify_mark_read(&c, &s, 7_000).unwrap(), 6_000);
+    }
+
+    #[test]
+    fn the_unread_count_stops_at_the_cap() {
+        let c = mem();
+        let s = scope(Some(&["infra"]), "alice");
+        notify_view(&c, &s, &ASK, 0).unwrap();
+        for n in 0..(UNREAD_CAP + 20) {
+            put(&c, &format!("a{n}"), "group", "infra", 10 + i64::from(n));
+        }
+        assert_eq!(notify_view(&c, &s, &ASK, 0).unwrap().unread, UNREAD_CAP);
+    }
+
+    #[test]
+    fn the_level_is_stored_for_each_account_and_off_skips_the_reads() {
+        let c = mem();
+        put(&c, "a", "group", "infra", 100);
+        let s = scope(Some(&["infra"]), "alice");
+        assert_eq!(
+            notify_view(&c, &s, &ASK, 0).unwrap().prefs.level,
+            Level::All
+        );
+        notify_set_level(&c, "alice", Level::Off, 0).unwrap();
+        let off = Ask {
+            skip_if_off: true,
+            ..ASK
+        };
+        let view = notify_view(&c, &s, &off, 0).unwrap();
+        assert_eq!(view.prefs.level, Level::Off);
+        assert!(view.items.is_empty());
+        assert_eq!(notify_view(&c, &s, &ASK, 0).unwrap().items.len(), 1);
+        // Another account keeps the default.
+        let bob = scope(Some(&["infra"]), "bob");
+        assert_eq!(
+            notify_view(&c, &bob, &off, 0).unwrap().prefs.level,
+            Level::All
+        );
+        // A level for an account that has no row creates it.
+        notify_set_level(&c, "carol", Level::Important, 77).unwrap();
+        let carol = scope(Some(&[]), "carol");
+        let prefs = notify_view(&c, &carol, &ASK, 0).unwrap().prefs;
+        assert_eq!((prefs.level, prefs.read_up_to), (Level::Important, 77));
+        assert!(c
+            .execute("UPDATE web_notify SET level = 'loud'", [])
+            .is_err());
     }
 }
