@@ -133,6 +133,12 @@ pub fn ui_name_digest(key: &[u8; 32], name: &str) -> [u8; 32] {
     sign(key, name.as_bytes()).unwrap_or([0u8; 32])
 }
 
+/// A key of 32 bytes for one purpose, derived from `key` with HMAC-SHA-256 and a `label` of that purpose.
+/// Two labels give two unrelated keys.
+pub fn derive_key(key: &[u8], label: &[u8]) -> Result<[u8; 32], String> {
+    sign(key, label)
+}
+
 /// Fills `buf` with bytes of the operating system generator.
 pub fn random_bytes(buf: &mut [u8]) -> Result<(), String> {
     fill_random(buf)
