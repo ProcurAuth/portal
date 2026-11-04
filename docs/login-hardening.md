@@ -152,7 +152,7 @@ At each render, the mask makes these changes. A change has no effect on the look
 - It changes the order of the attributes of each tag.
 - It changes the order of the elements of the head. `<meta charset>` stays first. Order has no effect for the stylesheet and the script: the browser loads both before the first paint.
 
-The stylesheet of these pages has no rule that depends on the structure. It has no child combinator (`>`), no sibling combinator (`+`, `~`) and no `:first-child` or `:first-of-type`. A test reads the stylesheet and fails if such a rule comes back. A rule for a case that needs the structure uses a class.
+The stylesheet of these pages has no rule that depends on the structure. It has no child combinator (`>`), no sibling combinator (`+`, `~`) and no `:first-child` or `:first-of-type`. A test reads the stylesheet and fails if such a rule comes back. A rule for a case that needs the structure uses a class. A selector with `:has()` is allowed when its argument is a descendant: a wrapper that the pass inserts does not break it. The floating labels of the sign-in card use it.
 
 The order of the login field and the password field does not change. The trap field stays after them. The form fields and their attributes stay in the form. Password managers find them as before.
 
@@ -209,6 +209,20 @@ With `authentication.mfa` other than `off`, an account can have a second factor 
 - **Counters.** A wrong code counts in the database row of the account (5 in 10 minutes lock the second step for 5 minutes), and in the limiter of the address with the key `mfa:<address>`. The limits of the address are the keys `security.login_attempts_per_ip`, `security.login_window` and `security.login_lockout`. The metric `portal_login_attempts_total{result="mfa_failure"}` counts the wrong codes. They add to the refused sign-ins that the alerts of the portal read. The log line `login_failed` has `reason=mfa`.
 - **A password that is right does not clear the failures of the address at once.** The limiter of the address is cleared when the person finishes the second step, not at the password step. A script that knows a password cannot clear the failures that way.
 - **A database from before the second factor.** The schema version 8 got the tables of the second factor in place, with no migration. A database that the earlier version 8 made stops the portal at start with a message that names the missing objects.
+
+## The look of the sign-in page
+
+The sign-in page and the card of the second step have one look: a flat card, 320 px wide, with fields that have a floating label. The code is in `src/ui/signin.rs`. The rules are in `web/portal.css`. These rules are plain classes, and they go through the pass of item 5.
+
+- **The band.** A solid band at the top of the card shows the host and the path that the visitor asked for. The portal derives them from the signed `rd` of the page and from the host of the request (`X-Forwarded-Host`, or `Host`). The band does not show the query. It shows a path of 96 characters at most, and the stylesheet cuts what does not fit. The band is plain text. It never has a link, whatever `rd` holds. The code drops the control characters and the characters that change the order of text. The code escapes the rest.
+- **No destination, no band.** When `rd` is the default `/`, the card has no band and starts with the fields. A page that has a band and a page that has none look the same in all other parts.
+- **The band does not leak.** The band depends on `rd` and on the host of the request. It does not depend on the login, on the password or on the cause of a refusal. The test `a_refusal_with_a_destination_has_the_same_band_for_each_cause` compares the refused pages. The host of the request is not secret: it is the host that the visitor typed.
+- **The message line.** The card always has the line of the message, empty or not. A refusal fills it and does not move the card. A refused sign-in marks the two fields as invalid. A limit or an expired form does not mark them.
+- **The floating label.** The label is a real `<label for>`. It floats with `:focus`, `:placeholder-shown` and the autofill states. No script is needed. A browser that does not know `:has()` keeps the label floated, so the label never covers the text.
+- **The button that shows the password.** The page has the button with the attribute `hidden`. The shared script shows it, and it changes the type of the field. Without script, there is no button. The script finds the button by a data attribute that the pass maps.
+- **The title and the heading.** The title is always `Authentication`. A heading that is hidden from the eye names the page: `Authentication` for the password step and `Verification` for the second step.
+- **The check in a browser.** `tools/dev/ui-check-login.js` checks the band, the labels, the button, the message line, the targets, the contrast and the position of the card. It also signs in, with and without a destination, and it checks the second step. See the header of the file.
+- **Other cards do not change.** The 404, the denied page, the success page and the forced enrolment keep the card `card`. None of the new rules applies to them.
 
 ## Operation notes
 

@@ -96,7 +96,7 @@ The file [`SECURITY.md`](SECURITY.md) gives the invariants. The page [`docs/inbo
 
 ## Authentication model
 
-The login page asks for a **login** and a **password**.
+The login page asks for a **login** and a **password**. When the visitor comes from a protected address, a band at the top of the card shows the host and the path of that address. Without a protected address, the card has no band. See `docs/login-hardening.md`.
 
 The **superadmin** is the one account that is not in the database. Its login and its password come from an environment variable or from a file. The configuration names the source (see [Secrets](#secrets-_env-and-_file)):
 

@@ -23,11 +23,12 @@ use super::{asset_path, assets, Assets};
 use crate::crypto;
 
 /// The data attributes of the shared stylesheet and script. The longest name is first.
-const DATA_ATTRS: [&str; 4] = [
+const DATA_ATTRS: [&str; 5] = [
     "data-theme-switch",
     "data-theme-value",
     "data-theme-mode",
     "data-theme",
+    "data-reveal",
 ];
 
 /// The plain names of the classes of the inert wrappers (`display: contents`) and of the empty
@@ -963,8 +964,7 @@ mod tests {
     use super::*;
     use crate::icons::Icons;
     use crate::ui::{
-        auth_document, demo_catalog, denied_page, home_page, message_page, HomeContext, CSS,
-        THEME_JS,
+        demo_catalog, denied_page, home_page, message_page, HomeContext, CSS, THEME_JS,
     };
 
     const SECRET: &[u8] = b"a secret of the tests, long enough for the key";
@@ -973,12 +973,41 @@ mod tests {
         Mask::new(SECRET).unwrap()
     }
 
-    /// The card of the sign-in page, as `login_page` writes it.
+    /// The sign-in page, as the server writes it. `rd` is the return target: `/` has no band.
+    fn login_page_for(rd: &str) -> String {
+        crate::ui::signin::login_page(&crate::ui::signin::Login {
+            csrf: "c",
+            rd,
+            sig: "s",
+            form_token: "t",
+            host: Some("app.example.com"),
+            error: Some(crate::ui::signin::INVALID_CREDENTIALS),
+            max_password_bytes: 1024,
+            keep_for: Some("30 days"),
+            names: crate::ui::signin::LoginNames {
+                form_token: "token",
+                trap: "website",
+                keep: "keep",
+                keep_value: "1",
+            },
+        })
+    }
+
+    /// The sign-in page with a band.
     fn login_page_html() -> String {
-        auth_document(
-            "Authentication",
-            r#"<div class="error" role="alert">Invalid login or password</div><form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="c"><input type="hidden" name="rd" value="/"><input type="hidden" name="sig" value="s"><input type="hidden" name="token" value="t"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required><label class="keep"><input type="checkbox" name="keep" value="1">Keep me signed in for 30 days</label><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="website" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form><p class="return-target">After authentication: <code>/x</code></p>"#,
-        )
+        login_page_for("/x")
+    }
+
+    /// The card of the second step, with a band.
+    fn code_page_html() -> String {
+        crate::ui::signin::code_page(&crate::ui::signin::Code {
+            hidden: r#"<input type="hidden" name="csrf" value="c"><input type="hidden" name="pending" value="p">"#,
+            rd: "/x",
+            host: Some("app.example.com"),
+            error: Some("Invalid code"),
+            invalid: "Invalid code",
+            action: "/auth/login/code",
+        })
     }
 
     /// The launcher of an account that receives notifications: the inbox icon, its popover with
@@ -1035,6 +1064,8 @@ mod tests {
     fn pages() -> Vec<(&'static str, String)> {
         vec![
             ("login", login_page_html()),
+            ("login without band", login_page_for("/")),
+            ("code", code_page_html()),
             ("denied", denied_page("No.", "alice", "t")),
             ("message", message_page("Page not found", "x", "Back")),
             ("launcher", launcher()),
@@ -1249,7 +1280,11 @@ mod tests {
         let mapped_css = names_in_stylesheet(&mask.assets().css);
         for (name, html) in pages() {
             let (plain_classes, plain_ids) = names_of(&html);
-            assert!(plain_classes.contains("card") || name == "launcher");
+            assert!(
+                plain_classes.contains("card")
+                    || plain_classes.contains("signin")
+                    || name == "launcher"
+            );
             let page = mask.page(&html);
             let (classes, ids) = names_of(&page);
             for plain in plain_classes.iter().chain(plain_ids.iter()) {
@@ -1281,6 +1316,10 @@ mod tests {
                 "button--primary",
                 "appHeader",
                 "tile__",
+                "signin",
+                "data-reveal",
+                "visually-hidden",
+                "reveal",
             ] {
                 assert!(!page.contains(word), "{name}: {word}");
             }
@@ -1302,7 +1341,9 @@ mod tests {
                         continue;
                     };
                     let target = match attr.name.as_str() {
-                        "for" | "aria-labelledby" => Some(value.as_str()),
+                        "for" | "aria-labelledby" | "aria-controls" | "aria-describedby" => {
+                            Some(value.as_str())
+                        }
                         "href" => value.strip_prefix('#'),
                         _ => None,
                     };
@@ -1462,6 +1503,49 @@ mod tests {
                 };
                 assert!(attrs.iter().any(|a| a.name == keep), "{keep}");
             }
+        }
+    }
+
+    #[test]
+    fn the_masked_sign_in_page_keeps_its_hidden_button_its_heading_and_its_script_hook() {
+        let mask = mask();
+        for seed in 0..50 {
+            let page = mask.page_with(&login_page_html(), &mut Rng::seeded(seed));
+            let tokens = tokenize(&page);
+            // The button that shows the password is hidden in the page. Its mapped data attribute is in the script.
+            let hook = format!("data-{}", mask.name("data-reveal"));
+            let button = tokens.iter().find(|t| {
+                matches!(t, Tok::Open { name, attrs, .. }
+                    if name == "button" && attrs.iter().any(|a| a.name == hook))
+            });
+            let Some(Tok::Open { attrs, .. }) = button else {
+                panic!("no button with {hook}: {page}");
+            };
+            assert!(attrs
+                .iter()
+                .any(|a| a.name == "hidden" && a.value.is_none()));
+            assert!(attrs.iter().any(|a| a.name == "aria-pressed"));
+            assert!(mask.assets().js.contains(&format!("[{hook}]")));
+            // One heading, with a mapped class and an identifier that the form names.
+            assert_eq!(page.matches("<h1").count(), 1, "{page}");
+            let heading = tokens
+                .iter()
+                .find_map(|t| match t {
+                    Tok::Open { name, attrs, .. } if name == "h1" => Some(attrs.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let id = heading
+                .iter()
+                .find(|a| a.name == "id")
+                .and_then(|a| a.value.as_ref().map(|(_, v)| v.clone()))
+                .unwrap();
+            assert_eq!(id, mask.name("signin-title"));
+            assert!(tokens
+                .iter()
+                .any(|t| matches!(t, Tok::Open { name, attrs, .. }
+                if name == "form" && attrs.iter().any(|a| a.name == "aria-labelledby"
+                    && a.value.as_ref().is_some_and(|(_, v)| *v == id)))));
         }
     }
 

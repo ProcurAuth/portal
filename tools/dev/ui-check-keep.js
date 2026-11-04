@@ -120,11 +120,13 @@ async function sessionCookie(context) {
     }
   }
 
-  // 2. The keyboard: Tab from the password reaches the box, Space ticks it, Tab reaches the button.
+  // 2. The keyboard: Tab from the password reaches the box (after the button that shows the password, with script), Space ticks it, Tab reaches the button.
   for (const script of [true, false]) {
     const { context, page } = await open(browser, "dark", 1280, script);
     const tag = script ? "script" : "noscript";
     await page.focus("input[name=password]");
+    // With script, the button that shows the password stands between the password and the box.
+    if (script) await page.keyboard.press("Tab");
     await page.keyboard.press("Tab");
     check(`Tab from the password reaches the box (${tag})`, await page.evaluate(() => document.activeElement.name === "keep"), "not focused");
     await shot(page, `keep-focus-${tag}`);

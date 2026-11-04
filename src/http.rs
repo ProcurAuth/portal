@@ -42,8 +42,8 @@ use crate::transport;
 use crate::ui;
 use crate::users::{check_new_password, normalize_login, Directory, KeyOwner, UserRecord};
 use crate::util::{
-    blocking, constant_time_eq, html_escape, json_escape, parse_form, path_only,
-    percent_decode_form, percent_encode_query_component, typed_login, validate_return_uri,
+    blocking, constant_time_eq, json_escape, parse_form, path_only, percent_decode_form,
+    percent_encode_query_component, typed_login, validate_return_uri,
 };
 
 const HOME_PATH: &str = "/";
@@ -96,6 +96,8 @@ type HttpResponse = Response<ResponseBody>;
 struct Client {
     /// True when the browser uses HTTPS. This value sets the cookie names and the `Secure` attribute.
     https: bool,
+    /// The host that the browser asked for. The sign-in pages show it. See [`transport::display_host`].
+    host: Option<String>,
     ip: Option<IpAddr>,
     /// The value that a session issued to this client is bound to.
     binding: Binding,
@@ -105,6 +107,7 @@ impl Client {
     fn new(state: &AppState, headers: &HeaderMap, ip: Option<IpAddr>) -> Self {
         Self {
             https: transport::is_https(headers),
+            host: transport::display_host(headers),
             ip,
             binding: transport::binding(state.config.session.bind, headers, ip),
         }
@@ -2090,7 +2093,7 @@ fn handle_login_get(
             }
         },
     };
-    login_page(state, client.https, &rd, &sig, &csrf, None, StatusCode::OK)
+    login_page(state, client, &rd, &sig, &csrf, None, StatusCode::OK)
 }
 
 /// The anti-CSRF token that the browser already holds. The token must be one that this portal issued.
@@ -2299,7 +2302,7 @@ async fn handle_login_post(
         };
         login_page(
             state,
-            client.https,
+            client,
             &rd,
             &sig,
             &fresh,
@@ -2334,7 +2337,7 @@ async fn handle_login_post(
 
     if let Some(response) = login_rate_limit_response(
         state,
-        client.https,
+        client,
         &ip_key,
         global_key,
         &client_ip_text,
@@ -2356,7 +2359,7 @@ async fn handle_login_post(
     // This check stops a burst that the portal admitted before the first failures were recorded. Such a burst cannot drain the expensive password-check budget afterwards.
     if let Some(response) = login_rate_limit_response(
         state,
-        client.https,
+        client,
         &ip_key,
         global_key,
         &client_ip_text,
@@ -2459,11 +2462,11 @@ async fn handle_login_post(
         };
         return login_page(
             state,
-            client.https,
+            client,
             &rd,
             &sig,
             &csrf,
-            Some("Invalid login or password"),
+            Some(ui::signin::INVALID_CREDENTIALS),
             StatusCode::UNAUTHORIZED,
         );
     }
@@ -2718,7 +2721,7 @@ fn session_cookie_header(
 #[allow(clippy::too_many_arguments)]
 fn login_rate_limit_response(
     state: &AppState,
-    https: bool,
+    client: &Client,
     ip_key: &str,
     global_key: &str,
     client_ip_text: &str,
@@ -2743,7 +2746,7 @@ fn login_rate_limit_response(
             );
             return Some(rate_limited_login_page(
                 state,
-                https,
+                client,
                 rd,
                 sig,
                 "Too many sign-in attempts from this address. Try again later.",
@@ -2770,7 +2773,7 @@ fn login_rate_limit_response(
             );
             return Some(rate_limited_login_page(
                 state,
-                https,
+                client,
                 rd,
                 sig,
                 "Authentication is temporarily rate limited. Try again shortly.",
@@ -2784,7 +2787,7 @@ fn login_rate_limit_response(
 
 fn rate_limited_login_page(
     state: &AppState,
-    https: bool,
+    client: &Client,
     rd: &str,
     sig: &str,
     message: &str,
@@ -2798,7 +2801,7 @@ fn rate_limited_login_page(
     };
     let mut response = login_page(
         state,
-        https,
+        client,
         rd,
         sig,
         &csrf,
@@ -3783,54 +3786,47 @@ fn switch_session(
 
 fn login_page(
     state: &AppState,
-    https: bool,
+    client: &Client,
     rd: &str,
     sig: &str,
     csrf: &str,
     error: Option<&str>,
     status: StatusCode,
 ) -> HttpResponse {
-    let error_html = error
-        .map(|msg| {
-            format!(
-                r#"<div class="error" role="alert">{}</div>"#,
-                html_escape(msg)
-            )
-        })
-        .unwrap_or_default();
-    let redirect_html = if rd != HOME_PATH {
-        format!(
-            r#"<p class="return-target">After authentication: <code>{}</code></p>"#,
-            html_escape(rd)
-        )
-    } else {
-        String::new()
-    };
     let Ok(form_token) = sign_form_token(&state.signing_secret, csrf, unix_millis()) else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
     // The box is never ticked, also on the page that follows a refusal: the page of a refusal does
     // not depend on what the person sent. It needs no script and no identifier. The label holds the box.
-    let keep_html = state.config.session.remember.map_or_else(String::new, |remember| {
-        format!(
-            r#"<label class="keep"><input type="checkbox" name="{KEEP_FIELD}" value="{KEEP_VALUE}">Keep me signed in for {}</label>"#,
-            crate::util::format_duration_words(remember.ttl.as_secs())
-        )
+    let keep_for = state
+        .config
+        .session
+        .remember
+        .map(|remember| crate::util::format_duration_words(remember.ttl.as_secs()));
+    let body = ui::signin::login_page(&ui::signin::Login {
+        csrf,
+        rd,
+        sig,
+        form_token: &form_token,
+        host: client.host.as_deref(),
+        error,
+        max_password_bytes: state.config.security.max_password_bytes,
+        keep_for: keep_for.as_deref(),
+        names: ui::signin::LoginNames {
+            form_token: FORM_TOKEN_FIELD,
+            trap: TRAP_FIELD,
+            keep: KEEP_FIELD,
+            keep_value: KEEP_VALUE,
+        },
     });
-    let body = ui::auth_document(
-        "Authentication",
-        &format!(
-            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required>{keep_html}<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
-            error_html,
-            html_escape(csrf),
-            html_escape(rd),
-            html_escape(sig),
-            state.config.security.max_password_bytes,
-            redirect_html,
-        ),
-    );
     let mut response = masked_response(state, status, body);
-    if append_dynamic_header(&mut response, SET_COOKIE, &csrf_cookie(state, csrf, https)).is_err() {
+    if append_dynamic_header(
+        &mut response,
+        SET_COOKIE,
+        &csrf_cookie(state, csrf, client.https),
+    )
+    .is_err()
+    {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
     response

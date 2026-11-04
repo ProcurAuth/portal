@@ -30,6 +30,8 @@ pub struct Fields<'a> {
     pub csrf: &'a str,
     pub rd: &'a str,
     pub sig: &'a str,
+    /// The host that the visitor asked for. The band of the card shows it.
+    pub host: Option<&'a str>,
     /// The pending token (see [`crate::mfa::sign_pending`]).
     pub pending: &'a str,
 }
@@ -55,17 +57,21 @@ fn error_line(error: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// The sentence of a wrong code. The code field takes the mark "invalid" for it.
+pub const INVALID_CODE: &str = "Invalid code";
+
 /// The card of the second step: one field for the code of the app, and under it a place for a recovery code. Both
-/// forms post to the same address, and the server accepts either kind of code in either field.
+/// forms post to the same address, and the server accepts either kind of code in either field. The card has the
+/// look of the sign-in page (see [`super::signin`]).
 pub fn code_card(f: &Fields, error: Option<&str>) -> String {
-    let hidden = hidden(f);
-    auth_document(
-        "Authentication",
-        &format!(
-            r#"{}<form method="post" action="{CODE_PATH}" autocomplete="off">{hidden}<label class="field--first" for="code">Authentication code</label><input class="otp" id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" maxlength="7" pattern="[0-9 ]{{6,7}}" required autofocus><button class="button button--primary" type="submit">Continue</button></form><details class="altCode"><summary>Use a recovery code</summary><form method="post" action="{CODE_PATH}" autocomplete="off">{hidden}<label class="field--first" for="recovery">Recovery code</label><input class="otp" id="recovery" name="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="11" pattern="[A-Za-z2-7 \-]{{10,11}}" required><button class="button" type="submit">Continue</button></form></details>"#,
-            error_line(error),
-        ),
-    )
+    super::signin::code_page(&super::signin::Code {
+        hidden: &hidden(f),
+        rd: f.rd,
+        host: f.host,
+        error,
+        invalid: INVALID_CODE,
+        action: CODE_PATH,
+    })
 }
 
 /// The secret of an enrolment: the QR code, the secret in groups of four characters and the link, both as text.
@@ -266,6 +272,7 @@ mod tests {
             csrf: "csrf-value",
             rd: "/x?a=1&b=2",
             sig: "sig",
+            host: Some("app.example.com"),
             pending: "pending.token",
         }
     }
@@ -282,7 +289,9 @@ mod tests {
         assert!(page.contains(r#"autocomplete="one-time-code""#));
         assert!(page.contains(r#"inputmode="numeric""#));
         assert!(page.contains(r#"maxlength="11""#));
-        assert!(page.contains(r#"role="alert" aria-live="assertive">Invalid code<"#));
+        assert!(
+            page.contains(r#"role="alert"><svg"#) && page.contains("<span>Invalid code</span>")
+        );
         assert!(
             page.contains("value=\"/x?a=1&amp;b=2\""),
             "the target is escaped"
