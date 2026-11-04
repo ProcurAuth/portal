@@ -1981,12 +1981,14 @@ fn viewer_of(
     let (grants, login) = match &session.principal {
         Principal::Superadmin => (None, state.superadmin_login.clone()),
         Principal::User(login) => match grants_of_known_user(state, login) {
-            Some(grants) => (Some(grants), login.clone()),
-            None => {
+            Known::Grants(grants) => (Some(grants), login.clone()),
+            Known::Deleted => {
                 // The account was deleted while the session was open.
                 state.sessions.revoke(token, EndReason::Revoked);
                 return None;
             }
+            // The database did not answer. The session stays: the next request asks again.
+            Known::Unknown => return None,
         },
     };
     Some(Viewer {
@@ -1997,16 +1999,32 @@ fn viewer_of(
     })
 }
 
+/// What the portal knows about the account of a session.
+enum Known {
+    Grants(Vec<Grant>),
+    /// The database has no such account.
+    Deleted,
+    /// The database did not answer: the portal cannot tell.
+    Unknown,
+}
+
 /// The stored grants of an account. When the directory does not know the account, the portal reads the grants again first from the shared database.
 /// The account can have been created on another instance a moment ago, and its session can have been opened there.
-/// A session must not end for this reason.
-fn grants_of_known_user(state: &AppState, login: &str) -> Option<Vec<Grant>> {
+/// A session must not end for this reason. The read has no minimum gap: the gap of the unknown logins would end the session of a new account when another request read the accounts less than a second before.
+/// A request needs a valid session for this read. It is not a way to make the database work with unknown logins.
+fn grants_of_known_user(state: &AppState, login: &str) -> Known {
     let grants = |state: &AppState| keyauth::person_grants(state, login).map(|(grants, _)| grants);
-    grants(state).or_else(|| {
-        refresh_directory_if_due(state)
-            .then(|| grants(state))
-            .flatten()
-    })
+    if let Some(grants) = grants(state) {
+        return Known::Grants(grants);
+    }
+    if !state.store.is_shared() {
+        return Known::Deleted;
+    }
+    let since = crate::users::Directory::clock_millis();
+    if !blocking(|| state.users.refresh_since(&state.store, since)) {
+        return Known::Unknown;
+    }
+    grants(state).map_or(Known::Deleted, Known::Grants)
 }
 
 /// A rate-limited read of the accounts from the shared database, for a request with a login that the directory does not hold.

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::decision::CounterOwner;
@@ -189,6 +189,11 @@ pub struct Directory {
     loaded_changes: AtomicU64,
     /// Unix milliseconds when the last refresh started.
     refreshed_at: AtomicU64,
+    /// Unix milliseconds when the last refresh that the database answered started. A read that
+    /// started at this time or later shows every account that existed at this time.
+    read_from: AtomicU64,
+    /// Makes the requests that need a fresh read wait for one read, one after the other.
+    flight: Mutex<()>,
     /// Unix milliseconds when the database last answered a read of the accounts. A directory
     /// that a failed refresh leaves as it was grows older. The value starts at the creation.
     last_success: AtomicU64,
@@ -225,6 +230,8 @@ impl Directory {
             changes: AtomicU64::new(0),
             loaded_changes: AtomicU64::new(0),
             refreshed_at: AtomicU64::new(0),
+            read_from: AtomicU64::new(0),
+            flight: Mutex::new(()),
             last_success: AtomicU64::new(now_millis()),
             refresh_errors: AtomicU64::new(0),
             version: AtomicI64::new(version),
@@ -258,7 +265,8 @@ impl Directory {
     /// `true` when it replaced. A refresh that finds the same version only marks the round as
     /// successful (portal 10.7).
     pub fn refresh(&self, store: &Store) -> Result<bool, String> {
-        self.refreshed_at.store(now_millis(), Ordering::Relaxed);
+        let started = now_millis();
+        self.refreshed_at.store(started, Ordering::Relaxed);
         let seen = self.changes.load(Ordering::Acquire);
         let version = store.directory_version().inspect_err(|_| {
             self.refresh_errors.fetch_add(1, Ordering::Relaxed);
@@ -267,12 +275,14 @@ impl Directory {
             && seen == self.loaded_changes.load(Ordering::Acquire)
         {
             self.last_success.store(now_millis(), Ordering::Relaxed);
+            self.read_from.fetch_max(started, Ordering::AcqRel);
             return Ok(false);
         }
         let snapshot = store.load_directory().inspect_err(|_| {
             self.refresh_errors.fetch_add(1, Ordering::Relaxed);
         })?;
         self.last_success.store(now_millis(), Ordering::Relaxed);
+        self.read_from.fetch_max(started, Ordering::AcqRel);
         Ok(self.replace_unless_changed(seen, snapshot))
     }
 
@@ -292,6 +302,25 @@ impl Directory {
             return false;
         }
         self.refresh(store).unwrap_or(false)
+    }
+
+    /// A read of the accounts for a request that holds a session of an account that the directory does not
+    /// know. The account can be new, and its session can come from another instance. A request must not end the
+    /// session for this reason, so the read has no minimum gap. The requests that arrive together wait for one read,
+    /// and a read that started at `since_ms` or later is enough for all of them. Returns `true` when the database
+    /// answered: an account that the directory still does not hold does not exist. Returns `false` when the read
+    /// failed: nothing is known.
+    pub fn refresh_since(&self, store: &Store, since_ms: u64) -> bool {
+        let _flight = self.flight.lock().unwrap_or_else(|p| p.into_inner());
+        if self.read_from.load(Ordering::Acquire) >= since_ms {
+            return true;
+        }
+        self.refresh(store).is_ok()
+    }
+
+    /// The Unix time in milliseconds, in the unit of [`Directory::refresh_since`].
+    pub fn clock_millis() -> u64 {
+        now_millis()
     }
 
     pub fn refresh_errors(&self) -> u64 {

@@ -652,6 +652,52 @@ fn a_session_opened_for_an_account_the_instance_has_not_heard_of_yet_is_not_ende
 }
 
 #[test]
+fn a_read_of_the_accounts_that_just_ran_does_not_end_the_session_of_a_new_account() {
+    each_backend(|backend| {
+        let (a, b) = cluster(backend, Some(Duration::ZERO));
+        // The hash is made before the test starts its clock. The steps below take a few milliseconds.
+        let hash = password_hash("a-long-password-1");
+        // The instance `b` reads the accounts now: the next read for an unknown login is less than a second away.
+        b.state.users.refresh(&b.state.store).unwrap();
+        a.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "gina".into(),
+                password_hash: hash,
+                grants: Vec::new(),
+                created_at: 1,
+            })
+            .unwrap();
+        a.state.users.refresh(&a.state.store).unwrap();
+        let gina = a
+            .state
+            .sessions
+            .issue(
+                client_binding(&a, "127.0.0.1"),
+                crate::session::NewSession {
+                    principal: Principal::User("gina".into()),
+                    login: "gina".into(),
+                    impersonated: false,
+                    remember: false,
+                    mfa: false,
+                    ip: None,
+                    user_agent: AGENT.into(),
+                    not_after: None,
+                },
+            )
+            .unwrap();
+        // The account is new for `b`, and the last read of `b` is too old to show it. The session is good all the same.
+        assert_eq!(verify(&b, &gina, AGENT), 204, "{}", backend.name());
+        assert_eq!(
+            verify(&a, &gina, AGENT),
+            204,
+            "{}: the check on the other instance ended nothing",
+            backend.name()
+        );
+    });
+}
+
+#[test]
 fn deleting_an_account_ends_its_sessions_on_every_instance() {
     each_backend(|backend| {
         let (a, b) = cluster(backend, Some(Duration::ZERO));
