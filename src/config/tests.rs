@@ -1846,7 +1846,9 @@ fn a_key_of_the_file_gives_its_digest_its_id_and_its_grants() {
 #[test]
 fn a_bad_block_key_stops_the_start_and_never_shows_the_text_of_a_key() {
     let (mut vars, text) = vars_with_key();
-    vars.push(("BAD_FORM".into(), format!("{}x", &text[..52])));
+    // The last character is the end of the checksum. The new one differs from it, or the key stays good in 1 run of 62.
+    let wrong_last = if text.ends_with('x') { 'y' } else { 'x' };
+    vars.push(("BAD_FORM".into(), format!("{}{wrong_last}", &text[..52])));
     vars.push(("BAD_SUM".into(), "not hexadecimal".into()));
     vars.push(("SHORT_SUM".into(), "ab".repeat(31)));
     let key = |attributes: &str, grants: &str| {
