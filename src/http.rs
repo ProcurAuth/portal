@@ -240,7 +240,8 @@ impl AppState {
             (false, None) => None,
             _ => {
                 return Err(
-                    "internal error: authentication.mfa and authentication.totp_key do not agree".into(),
+                    "internal error: authentication.mfa and authentication.totp_key do not agree"
+                        .into(),
                 )
             }
         };
@@ -1752,6 +1753,7 @@ fn groups_of(state: &AppState, grants: &[Grant]) -> Vec<String> {
 
 /// The data of the page of one account. `None`: no account and not the superadmin has the login
 /// `asked`. The login of the address must be the login as the server keeps it.
+#[allow(clippy::too_many_arguments)]
 fn user_view<'a>(
     state: &'a AppState,
     catalog: &'a Catalog,
@@ -2156,7 +2158,10 @@ async fn login_form(
                 ),
             ],
         );
-        return Err(text_response(StatusCode::FORBIDDEN, "Origin validation failed\n"));
+        return Err(text_response(
+            StatusCode::FORBIDDEN,
+            "Origin validation failed\n",
+        ));
     }
     if !content_type_is_form(request.headers()) {
         state.metrics.login_invalid_request();
@@ -2198,7 +2203,10 @@ async fn login_form(
         );
         let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n");
         if set_dynamic_header(&mut response, RETRY_AFTER, "1").is_err() {
-            return Err(text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n"));
+            return Err(text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "authentication error\n",
+            ));
         }
         return Err(response);
     };
@@ -2213,11 +2221,17 @@ async fn login_form(
         Ok(v) => Zeroizing::new(v),
         Err(BodyReadError::TooLarge) => {
             state.metrics.login_invalid_request();
-            return Err(text_response(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large\n"));
+            return Err(text_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Payload Too Large\n",
+            ));
         }
         Err(BodyReadError::Timeout) => {
             state.metrics.login_invalid_request();
-            return Err(text_response(StatusCode::REQUEST_TIMEOUT, "Request Timeout\n"));
+            return Err(text_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "Request Timeout\n",
+            ));
         }
         Err(BodyReadError::Io) => {
             state.metrics.login_invalid_request();
@@ -2577,11 +2591,9 @@ fn finish_sign_in(
 
     let mut response = match landing {
         Landing::Redirect => redirect_response(StatusCode::SEE_OTHER, rd),
-        Landing::Codes(codes) => masked_response(
-            state,
-            StatusCode::OK,
-            ui::mfa::codes_card(&codes, rd),
-        ),
+        Landing::Codes(codes) => {
+            masked_response(state, StatusCode::OK, ui::mfa::codes_card(&codes, rd))
+        }
     };
     // A remembered session has a persistent cookie with the life of the session. Any other session
     // has a cookie that the browser deletes at the end of its session.

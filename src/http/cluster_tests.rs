@@ -8432,3 +8432,869 @@ fn an_impersonated_session_never_gets_the_remembered_rule() {
         );
     });
 }
+
+/// The second factor over HTTP: the two steps of the sign-in, the forced enrolment, the section "Security", the reset by the
+/// superadmin, and what the second factor leaves unchanged.
+mod mfa_tests {
+    use super::*;
+    use crate::totp;
+
+    const ALICE: &str = "alice-correct-password";
+    /// The address of the requests. The sessions of the sign-ins are bound to it, and `verify` and `page` use the same one.
+    const SOURCE: &str = "127.0.0.1";
+
+    /// A node with the account `alice` (database) and the policy `policy`. `extra` is more configuration.
+    fn mfa_node(backend: &Backend, policy: &'static str, extra: &str) -> Node {
+        let store = Arc::new(backend.fresh());
+        let node = start_custom(
+            store,
+            None,
+            Custom {
+                mfa: policy,
+                env: vec![("FRED_HASH".into(), password_hash("fred-correct-password"))],
+                ..Custom::default()
+            },
+            &format!("metrics {{ enabled = true }} {extra}"),
+        );
+        insert_account(&node, "alice", ALICE);
+        node
+    }
+
+    fn file_account_extra() -> String {
+        r#"access { grants_mode = "hybrid" } user "fred" { grants = [] password_hash_env = "FRED_HASH" }"#
+            .to_string()
+    }
+
+    /// Turns the second factor of `login` on, as the page does. It returns the secret and the recovery codes.
+    fn enrol(node: &Node, login: &str) -> (Vec<u8>, Vec<String>) {
+        let mfa = node.state.mfa.as_ref().expect("the second factor is on");
+        let now = unix_now();
+        let page = mfa.begin(login, "Portal", now).unwrap();
+        let secret = totp::base32_decode(&page.grouped.replace(' ', "")).unwrap();
+        // The code of the confirmation is the code of the step before: the codes of the next steps stay free.
+        let code = totp::code_for_step(&secret, totp::step_of(now) - 1, totp::DIGITS);
+        match mfa
+            .confirm(&node.state.store, login, &page.token, &code, now)
+            .unwrap()
+        {
+            crate::mfa::Enrolled::Done(codes) => (secret, codes),
+            other => panic!("enrolment: {other:?}"),
+        }
+    }
+
+    /// The code of the app at the current step plus `offset` steps. The window of the server holds -1, 0 and +1.
+    fn code(secret: &[u8], offset: i64) -> String {
+        totp::code_for_step(secret, totp::step_of(unix_now()) + offset, totp::DIGITS)
+    }
+
+    /// The value of the hidden field `name` in a page, whatever the order of the attributes.
+    fn hidden_value(body: &str, name: &str) -> String {
+        let marker = format!(r#"name="{name}""#);
+        for (at, _) in body.match_indices(&marker) {
+            let start = body[..at].rfind('<').unwrap();
+            let end = at + body[at..].find('>').unwrap();
+            let tag = &body[start..end];
+            if tag.contains(r#"type="hidden""#) {
+                let value = tag.split_once(r#"value=""#).expect("a value").1;
+                return value.split('"').next().unwrap().replace("&amp;", "&");
+            }
+        }
+        panic!("no hidden field {name} in {body}")
+    }
+
+    /// The first step, as a browser posts it. It returns the reply and the anti-CSRF token that the page uses.
+    fn step_one(node: &Node, login: &str, password: &str, keep: bool) -> (Reply, String) {
+        let csrf = "M".repeat(32);
+        let mut body = login_body(node, &csrf, login, password);
+        if keep {
+            body.push_str("&keep=1");
+        }
+        (post_login(node, SOURCE, &csrf, &body), csrf)
+    }
+
+    /// A post of the second step with the body that the caller gives.
+    fn post_step(node: &Node, path: &str, csrf: &str, body: &str, agent: &str) -> Reply {
+        let origin = format!("http://127.0.0.1:{}", node.port);
+        let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
+        send_from(
+            SOURCE,
+            node.port,
+            "POST",
+            path,
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", &cookie),
+                ("User-Agent", agent),
+            ],
+            body,
+        )
+    }
+
+    /// The body of the form of the page `page`, with the code `code`.
+    fn code_body(page: &Reply, csrf: &str, code: &str) -> String {
+        format!(
+            "csrf={csrf}&rd={}&sig={}&pending={}&code={code}",
+            percent_encode_query_component(&hidden_value(&page.body, "rd")),
+            hidden_value(&page.body, "sig"),
+            hidden_value(&page.body, "pending"),
+        )
+    }
+
+    fn second(node: &Node, page: &Reply, csrf: &str, code: &str) -> Reply {
+        post_step(
+            node,
+            ui::mfa::CODE_PATH,
+            csrf,
+            &code_body(page, csrf, code),
+            AGENT,
+        )
+    }
+
+    /// The history of the sessions of `login`: the flag `mfa` of each, newest first.
+    fn mfa_flags(node: &Node, login: &str) -> Vec<bool> {
+        let mut flags = Vec::new();
+        wait_until(Duration::from_secs(10), || {
+            flags = node
+                .state
+                .store
+                .snapshot(&[(login.to_string(), false)], unix_now())
+                .unwrap()
+                .accounts[0]
+                .recent
+                .iter()
+                .map(|s| s.mfa)
+                .collect();
+            !flags.is_empty()
+        });
+        flags
+    }
+
+    fn audit_kinds(node: &Node) -> Vec<String> {
+        node.state
+            .store
+            .snapshot(&[], unix_now())
+            .unwrap()
+            .recent_events
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    #[test]
+    fn an_account_with_a_second_factor_signs_in_in_two_steps_on_any_instance() {
+        each_backend(|backend| {
+            let (a, b) = match backend {
+                Backend::Sqlite => {
+                    let node = mfa_node(backend, "optional", "");
+                    (node.clone(), node)
+                }
+                Backend::Postgres(_) => {
+                    let (first, second) = backend.fresh_pair();
+                    let custom = || Custom {
+                        mfa: "optional",
+                        ..Custom::default()
+                    };
+                    let a = start_custom(Arc::new(first), None, custom(), "");
+                    let b = start_custom(Arc::new(second), None, custom(), "");
+                    insert_account(&a, "alice", ALICE);
+                    (a, b)
+                }
+            };
+            let (secret, _) = enrol(&a, "alice");
+            let (page, csrf) = step_one(&a, "alice", ALICE, true);
+            assert_eq!(page.status, 200, "{}", page.body);
+            assert!(
+                page.cookie(&session_cookie_name(&a)).is_none(),
+                "no session yet"
+            );
+            assert!(page.body.contains(ui::mfa::CODE_PATH));
+            assert!(page
+                .header("cache-control")
+                .is_some_and(|v| v.contains("no-store")));
+            // The second step goes to the other instance: the state is in the token.
+            let reply = second(&b, &page, &csrf, &code(&secret, 0));
+            assert_eq!(reply.status, 303, "{}", reply.body);
+            let session = reply
+                .cookie(&session_cookie_name(&b))
+                .expect("a session cookie");
+            let cookie = reply.header("set-cookie").unwrap();
+            assert!(
+                cookie.contains("Max-Age"),
+                "the box Keep me signed in survives the second step"
+            );
+            assert_eq!(verify(&b, &session, AGENT), 204);
+            assert_eq!(verify(&a, &session, AGENT), 204);
+            // The history records the second factor.
+            assert_eq!(mfa_flags(&a, "alice"), [true]);
+            // The same code is refused at once on both instances: a code is good once.
+            let (page, csrf) = step_one(&a, "alice", ALICE, false);
+            for node in [&a, &b] {
+                let replay = second(node, &page, &csrf, &code(&secret, 0));
+                assert_eq!(replay.status, 401, "{}", replay.body);
+                assert!(replay.body.contains("Invalid code"));
+            }
+            let reply = second(&b, &page, &csrf, &code(&secret, 1));
+            assert_eq!(
+                reply.status, 303,
+                "the next step of the clock is good: {}",
+                reply.body
+            );
+        });
+    }
+
+    #[test]
+    fn the_superadmin_and_an_account_of_the_file_have_the_second_factor_too() {
+        let node = mfa_node(&Backend::Sqlite, "optional", &file_account_extra());
+        for (login, password) in [("root", PASSWORD), ("fred", "fred-correct-password")] {
+            let (secret, _) = enrol(&node, login);
+            let (page, csrf) = step_one(&node, login, password, false);
+            assert_eq!(page.status, 200, "{login}: {}", page.body);
+            let reply = second(&node, &page, &csrf, &code(&secret, 0));
+            assert_eq!(reply.status, 303, "{login}: {}", reply.body);
+            assert!(reply.cookie(&session_cookie_name(&node)).is_some());
+        }
+        // Alice has none: the sign-in is the sign-in of before.
+        let session = sign_in(&node, "alice", ALICE);
+        assert_eq!(verify(&node, &session, AGENT), 204);
+        assert_eq!(mfa_flags(&node, "alice"), [false]);
+    }
+
+    #[test]
+    fn a_wrong_code_a_used_code_and_a_recovery_code_are_answered_as_they_must() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let (secret, recovery) = enrol(&node, "alice");
+        let failures = |n: &Node| metric(n, r#"portal_login_attempts_total{result="mfa_failure"}"#);
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let wrong = second(&node, &page, &csrf, "000000");
+        assert_eq!(wrong.status, 401);
+        assert!(wrong.body.contains("Invalid code") && wrong.body.contains(r#"role="alert""#));
+        assert!(wrong.cookie(&session_cookie_name(&node)).is_none());
+        assert_eq!(failures(&node), 1);
+        // A new token counts the try, and it works with a good code.
+        let again = second(&node, &wrong, &csrf, &code(&secret, 0));
+        assert_eq!(again.status, 303, "{}", again.body);
+        // A recovery code, typed in capitals, works once.
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let typed = recovery[0].to_uppercase();
+        let ok = second(&node, &page, &csrf, &typed);
+        assert_eq!(ok.status, 303, "{}", ok.body);
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let used = second(&node, &page, &csrf, &recovery[0]);
+        assert_eq!(used.status, 401);
+        wait_until(Duration::from_secs(10), || {
+            audit_kinds(&node).contains(&"recovery_used".to_string())
+        });
+        assert!(audit_kinds(&node).contains(&"mfa_failed".to_string()));
+        // A wrong password never reaches the second step.
+        let (page, _) = step_one(&node, "alice", "x-wrong-password", false);
+        assert_eq!(page.status, 401);
+        assert!(page.body.contains("Invalid login or password"));
+    }
+
+    #[test]
+    fn five_wrong_codes_on_the_account_lock_it_for_a_while_and_the_lock_has_an_end() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let (secret, _) = enrol(&node, "alice");
+        let (mut page, csrf) = step_one(&node, "alice", ALICE, false);
+        for n in 1..crate::mfa::MAX_TRIES {
+            page = second(&node, &page, &csrf, "000000");
+            assert_eq!(page.status, 401, "try {n}: {}", page.body);
+            assert!(page.body.contains(ui::mfa::CODE_PATH));
+        }
+        // The fifth wrong code is the fifth failure of the account: it locks the account, and the answer is 429.
+        let last = second(&node, &page, &csrf, "000000");
+        assert_eq!(last.status, 429, "{}", last.body);
+        assert!(last.header("retry-after").is_some());
+        // The account is locked, also for a good code. The lock is in the database, so every instance sees it.
+        let locked = second(&node, &page, &csrf, &code(&secret, 0));
+        assert_eq!(locked.status, 429);
+        assert!(locked.cookie(&session_cookie_name(&node)).is_none());
+        assert!(
+            node.state
+                .store
+                .totp_get("alice")
+                .unwrap()
+                .unwrap()
+                .locked_until
+                > unix_now(),
+            "the lock has an end"
+        );
+        assert!(
+            metric(
+                &node,
+                r#"portal_login_attempts_total{result="mfa_failure"}"#
+            ) >= 5
+        );
+    }
+
+    #[test]
+    fn a_pending_token_that_took_its_last_wrong_code_sends_the_person_back_to_the_password() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        enrol(&node, "alice");
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(AGENT));
+        let binding = transport::binding(
+            node.state.config.session.bind,
+            &headers,
+            Some(SOURCE.parse().unwrap()),
+        );
+        let pending = hidden_value(&page.body, "pending");
+        let with_tries = |tries: u8| {
+            crate::mfa::sign_pending(
+                &node.state.signing_secret,
+                &crate::mfa::Pending {
+                    stage: crate::mfa::Stage::Code,
+                    principal: Principal::User("alice".into()),
+                    keep: false,
+                    tries,
+                    issued: unix_now(),
+                },
+                &binding,
+                &csrf,
+            )
+            .unwrap()
+        };
+        let body =
+            |tries: u8| code_body(&page, &csrf, "000000").replace(&pending, &with_tries(tries));
+        let almost = post_step(
+            &node,
+            ui::mfa::CODE_PATH,
+            &csrf,
+            &body(crate::mfa::MAX_TRIES - 2),
+            AGENT,
+        );
+        assert_eq!(almost.status, 401);
+        assert!(almost.body.contains(ui::mfa::CODE_PATH), "one try is left");
+        let last = post_step(
+            &node,
+            ui::mfa::CODE_PATH,
+            &csrf,
+            &body(crate::mfa::MAX_TRIES - 1),
+            AGENT,
+        );
+        assert_eq!(last.status, 401);
+        assert!(
+            last.body.contains("Too many wrong codes") && last.body.contains("name=\"password\"")
+        );
+    }
+
+    #[test]
+    fn the_address_has_its_own_budget_of_wrong_codes() {
+        let node = mfa_node(
+            &Backend::Sqlite,
+            "optional",
+            r#"security { login_attempts_per_ip = 3 }"#,
+        );
+        enrol(&node, "alice");
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let mut last = second(&node, &page, &csrf, "000000");
+        for _ in 0..2 {
+            last = second(&node, &page, &csrf, "000000");
+        }
+        assert_eq!(last.status, 401, "three failures count");
+        let blocked = second(&node, &page, &csrf, "000000");
+        assert_eq!(blocked.status, 429, "{}", blocked.body);
+        assert!(blocked.header("retry-after").is_some());
+    }
+
+    #[test]
+    fn a_pending_token_that_is_changed_old_or_used_by_another_client_gives_the_page_open_too_long()
+    {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let (secret, _) = enrol(&node, "alice");
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        let good = code(&secret, 0);
+        let stale = |reply: &Reply, why: &str| {
+            assert_eq!(reply.status, 403, "{why}: {}", reply.body);
+            assert!(reply.body.contains("The page was open too long"), "{why}");
+            assert!(reply.cookie(&session_cookie_name(&node)).is_none(), "{why}");
+        };
+        // Another browser: the token is bound to the client.
+        let other = post_step(
+            &node,
+            ui::mfa::CODE_PATH,
+            &csrf,
+            &code_body(&page, &csrf, &good),
+            "Other/1.0",
+        );
+        stale(&other, "another client");
+        // Another page: the anti-CSRF token is part of the signature.
+        let other_csrf = "N".repeat(32);
+        let reply = post_step(
+            &node,
+            ui::mfa::CODE_PATH,
+            &other_csrf,
+            &code_body(&page, &other_csrf, &good),
+            AGENT,
+        );
+        stale(&reply, "another page");
+        // A changed token and a token of the other stage.
+        let pending = hidden_value(&page.body, "pending");
+        let broken = code_body(&page, &csrf, &good).replace(&pending, &format!("x{pending}"));
+        stale(
+            &post_step(&node, ui::mfa::CODE_PATH, &csrf, &broken, AGENT),
+            "a changed token",
+        );
+        let to_enrol = post_step(
+            &node,
+            ui::mfa::ENROL_PATH,
+            &csrf,
+            &code_body(&page, &csrf, &good),
+            AGENT,
+        );
+        stale(&to_enrol, "the token of the other stage");
+        // An old token: the server signs a token that was issued 6 minutes ago, for this client and this page.
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(AGENT));
+        let binding = transport::binding(
+            node.state.config.session.bind,
+            &headers,
+            Some(SOURCE.parse().unwrap()),
+        );
+        let old = crate::mfa::sign_pending(
+            &node.state.signing_secret,
+            &crate::mfa::Pending {
+                stage: crate::mfa::Stage::Code,
+                principal: Principal::User("alice".into()),
+                keep: false,
+                tries: 0,
+                issued: unix_now() - crate::mfa::PENDING_TTL_SECS - 60,
+            },
+            &binding,
+            &csrf,
+        )
+        .unwrap();
+        let body = code_body(&page, &csrf, &good).replace(&pending, &old);
+        stale(
+            &post_step(&node, ui::mfa::CODE_PATH, &csrf, &body, AGENT),
+            "an old token",
+        );
+        // The same body with the right token works: the checks above were the only obstacle.
+        let reply = second(&node, &page, &csrf, &good);
+        assert_eq!(reply.status, 303, "{}", reply.body);
+    }
+
+    #[test]
+    fn a_wrong_password_looks_the_same_for_an_account_with_and_without_a_second_factor() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        insert_account(&node, "bob", "bob-correct-password");
+        enrol(&node, "alice");
+        let csrf = "M".repeat(32);
+        let mut replies = Vec::new();
+        for (index, login) in ["alice", "bob", "nobody", "root"].iter().enumerate() {
+            let body = login_body(&node, &csrf, login, "x-wrong-password");
+            let reply = post_login(&node, &format!("127.0.3.{}", index + 1), &csrf, &body);
+            assert_eq!(reply.status, 401, "{login}");
+            replies.push(reply);
+        }
+        for reply in &replies[1..] {
+            assert_eq!(
+                without_random(&node, &reply.body),
+                without_random(&node, &replies[0].body)
+            );
+            assert_eq!(shape_of(reply), shape_of(&replies[0]));
+        }
+    }
+
+    #[test]
+    fn the_pages_of_the_second_step_have_no_plain_class_name_and_no_inline_script_or_style() {
+        let required = mfa_node(&Backend::Sqlite, "required", "");
+        let (enrol_page, _) = step_one(&required, "alice", ALICE, false);
+        assert_eq!(enrol_page.status, 200, "{}", enrol_page.body);
+        let optional = mfa_node(&Backend::Sqlite, "optional", "");
+        enrol(&optional, "alice");
+        let (code_page, _) = step_one(&optional, "alice", ALICE, false);
+        let plain = [
+            "otp",
+            "altCode",
+            "mfaScan",
+            "qr",
+            "mfaSecret",
+            "mfaUri",
+            "mfaBox",
+            "mfaCopy",
+            "copyBtn",
+            "mfaLabel",
+            "card",
+            "authShell",
+            "button",
+            "error",
+            "field--first",
+        ];
+        for (name, body) in [
+            ("the enrolment", &enrol_page.body),
+            ("the code", &code_page.body),
+        ] {
+            let mut classes = 0;
+            for chunk in body.split("class=\"").skip(1) {
+                for token in chunk.split('"').next().unwrap().split_whitespace() {
+                    classes += 1;
+                    assert!(
+                        !plain.contains(&token),
+                        "{name}: the plain class {token} is in the page"
+                    );
+                }
+            }
+            assert!(classes > 3, "{name}: the page has classes");
+            assert!(
+                !body.contains("<script>") && !body.contains("style="),
+                "{name}"
+            );
+            assert!(!body.contains("<img"), "{name}: the QR code is markup");
+        }
+        assert!(enrol_page.body.contains("<svg") && enrol_page.body.contains("otpauth://totp/"));
+    }
+
+    #[test]
+    fn with_the_policy_required_an_account_without_a_second_factor_enrols_before_its_session_starts(
+    ) {
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        assert_eq!(page.status, 200, "{}", page.body);
+        assert!(page.body.contains(ui::mfa::ENROL_PATH) && page.body.contains("<svg"));
+        assert!(
+            page.cookie(&session_cookie_name(&node)).is_none(),
+            "no session before the enrolment"
+        );
+        let enrol_token = hidden_value(&page.body, "enrol");
+        // The secret is in the link, as text.
+        let uri_start = page.body.find("otpauth://").unwrap();
+        let uri = page.body[uri_start..]
+            .split('<')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&");
+        let secret_text = uri
+            .split("secret=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let secret = totp::base32_decode(secret_text).unwrap();
+        let body = |code: &str| {
+            format!(
+                "csrf={csrf}&rd={}&sig={}&pending={}&enrol={enrol_token}&code={code}",
+                percent_encode_query_component(&hidden_value(&page.body, "rd")),
+                hidden_value(&page.body, "sig"),
+                hidden_value(&page.body, "pending"),
+            )
+        };
+        let wrong = post_step(&node, ui::mfa::ENROL_PATH, &csrf, &body("000000"), AGENT);
+        assert_eq!(wrong.status, 401, "{}", wrong.body);
+        assert!(wrong.body.contains("<svg"), "the same secret again");
+        assert!(wrong.cookie(&session_cookie_name(&node)).is_none());
+        let done = post_step(
+            &node,
+            ui::mfa::ENROL_PATH,
+            &csrf,
+            &body(&code(&secret, -1)),
+            AGENT,
+        );
+        assert_eq!(done.status, 200, "{}", done.body);
+        let session = done
+            .cookie(&session_cookie_name(&node))
+            .expect("the session starts");
+        assert!(
+            done.body.contains("textarea")
+                && done.header("cache-control").unwrap().contains("no-store")
+        );
+        assert!(done.body.matches('-').count() >= 10, "ten recovery codes");
+        assert_eq!(verify(&node, &session, AGENT), 204);
+        assert_eq!(mfa_flags(&node, "alice"), [true]);
+        assert!(node.state.store.totp_get("alice").unwrap().is_some());
+        // The next sign-in asks for a code, and the code of the enrolment is used up.
+        let (page, csrf) = step_one(&node, "alice", ALICE, false);
+        assert!(page.body.contains(ui::mfa::CODE_PATH));
+        assert_eq!(second(&node, &page, &csrf, &code(&secret, -1)).status, 401);
+        assert_eq!(second(&node, &page, &csrf, &code(&secret, 1)).status, 303);
+        // The superadmin is under the same rule.
+        let (page, _) = step_one(&node, "root", PASSWORD, false);
+        assert!(page.body.contains(ui::mfa::ENROL_PATH));
+    }
+
+    #[test]
+    fn with_the_policy_off_nothing_changes_and_nothing_is_shown() {
+        let node = mfa_node(&Backend::Sqlite, "off", "");
+        assert!(node.state.mfa.is_none());
+        let session = sign_in(&node, "alice", ALICE);
+        let home = page(&node, &session, "/");
+        assert!(
+            !home.body.contains("/auth/settings"),
+            "no gear for an account with nothing to set"
+        );
+        assert_eq!(page(&node, &session, ui::mfa::SECURITY_PATH).status, 404);
+        let origin = format!("http://127.0.0.1:{}", node.port);
+        let csrf = "M".repeat(32);
+        let cookie = format!("{}={csrf}", transport::csrf_cookie_name(false));
+        let reply = send(
+            node.port,
+            "POST",
+            ui::mfa::CODE_PATH,
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", &cookie),
+            ],
+            "code=1",
+        );
+        assert_eq!(reply.status, 404);
+        let root = sign_in(&node, "root", PASSWORD);
+        let access = page(&node, &root, "/auth/settings");
+        assert!(!access.body.contains(">Security<"), "no tab");
+    }
+
+    #[test]
+    fn an_account_turns_the_second_factor_on_renews_the_recovery_codes_and_turns_it_off_on_the_page(
+    ) {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let session = sign_in(&node, "alice", ALICE);
+        let home = page(&node, &session, "/");
+        assert!(
+            home.body.contains(ui::mfa::SECURITY_PATH),
+            "the gear opens the page Security"
+        );
+        let off = page(&node, &session, ui::mfa::SECURITY_PATH);
+        assert_eq!(off.status, 200);
+        assert!(off.body.contains("Turn on") && !off.body.contains("Recovery codes left"));
+        // The enrolment page: the QR code, the secret and the link as text.
+        let enrolment = page(
+            &node,
+            &session,
+            &format!("{}?enable=1", ui::mfa::SECURITY_PATH),
+        );
+        assert!(
+            enrolment.body.contains("<svg class=\"qr\"")
+                && enrolment.body.contains("otpauth://totp/")
+        );
+        let token = hidden_value(&enrolment.body, "enrol");
+        let uri = enrolment.body[enrolment.body.find("otpauth://").unwrap()..]
+            .split('<')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&");
+        let secret = totp::base32_decode(
+            uri.split("secret=")
+                .nth(1)
+                .unwrap()
+                .split('&')
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        // A wrong code shows the same secret again.
+        let wrong = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_ENABLE_PATH,
+            "security",
+            &format!("enrol={token}&code=000000"),
+        );
+        assert_eq!(wrong.status, 200, "{}", wrong.body);
+        assert!(wrong.body.contains("The code is not right") && wrong.body.contains(&token));
+        let done = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_ENABLE_PATH,
+            "security",
+            &format!("enrol={token}&code={}", code(&secret, -1)),
+        );
+        assert_eq!(done.status, 200, "{}", done.body);
+        assert!(
+            done.body.contains("textarea")
+                && done.header("cache-control").unwrap().contains("no-store")
+        );
+        let on = page(&node, &session, ui::mfa::SECURITY_PATH);
+        assert!(
+            on.body.contains("Recovery codes left") && on.body.contains(">10<"),
+            "{}",
+            on.body
+        );
+        // New recovery codes need the password and a code.
+        let refused = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_RECOVERY_PATH,
+            "security",
+            &format!("password=x-wrong&code={}", code(&secret, 0)),
+        );
+        assert_eq!(
+            refused.location(),
+            Some("/auth/settings/security?s=mfa-refused")
+        );
+        let renewed = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_RECOVERY_PATH,
+            "security",
+            &format!("password={ALICE}&code={}", code(&secret, 0)),
+        );
+        assert_eq!(renewed.status, 200, "{}", renewed.body);
+        assert!(renewed.body.contains("textarea"));
+        // Turning it off needs the password and a code, and a code is good once.
+        let again = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_DISABLE_PATH,
+            "security",
+            &format!("password={ALICE}&code={}", code(&secret, 0)),
+        );
+        assert_eq!(
+            again.location(),
+            Some("/auth/settings/security?s=mfa-refused"),
+            "the code was used"
+        );
+        let off = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_DISABLE_PATH,
+            "security",
+            &format!("password={ALICE}&code={}", code(&secret, 1)),
+        );
+        assert_eq!(
+            off.location(),
+            Some("/auth/settings/security?s=mfa-disabled")
+        );
+        assert!(node.state.store.totp_get("alice").unwrap().is_none());
+        wait_until(Duration::from_secs(10), || {
+            audit_kinds(&node).contains(&"totp_disabled".to_string())
+        });
+        let kinds = audit_kinds(&node);
+        for kind in ["totp_enabled", "recovery_regenerated", "totp_disabled"] {
+            assert!(kinds.contains(&kind.to_string()), "{kind}: {kinds:?}");
+        }
+        // A form needs its own token and the same origin.
+        let origin = format!("http://127.0.0.1:{}", node.port);
+        let cookie = format!("{}={session}", session_cookie_name(&node));
+        let forged = send(
+            node.port,
+            "POST",
+            ui::mfa::SECURITY_DISABLE_PATH,
+            &[
+                ("Origin", &origin),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Cookie", &cookie),
+            ],
+            "csrf=wrong&password=x&code=1",
+        );
+        assert_eq!(forged.status, 403);
+    }
+
+    #[test]
+    fn with_the_policy_required_the_second_factor_cannot_be_turned_off() {
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        let (secret, _) = enrol(&node, "alice");
+        let (page_one, csrf) = step_one(&node, "alice", ALICE, false);
+        let reply = second(&node, &page_one, &csrf, &code(&secret, 0));
+        let session = reply.cookie(&session_cookie_name(&node)).unwrap();
+        let on = page(&node, &session, ui::mfa::SECURITY_PATH);
+        assert!(!on.body.contains("Turn off"), "no button");
+        let off = post(
+            &node,
+            &session,
+            ui::mfa::SECURITY_DISABLE_PATH,
+            "security",
+            &format!("password={ALICE}&code={}", code(&secret, 1)),
+        );
+        assert_eq!(
+            off.location(),
+            Some("/auth/settings/security?s=mfa-required")
+        );
+        assert!(node.state.store.totp_get("alice").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_superadmin_resets_the_second_factor_of_an_account_and_it_is_audited() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        insert_account(&node, "bob", "bob-correct-password");
+        let (secret, _) = enrol(&node, "alice");
+        let (page_one, csrf) = step_one(&node, "alice", ALICE, false);
+        let alice = second(&node, &page_one, &csrf, &code(&secret, 0))
+            .cookie(&session_cookie_name(&node))
+            .unwrap();
+        let root = sign_in(&node, "root", PASSWORD);
+        // The page of the account shows the state and a reset with a confirmation in place.
+        let account = page(&node, &root, "/auth/settings/users/alice");
+        assert!(
+            account.body.contains("Reset the two-factor of alice")
+                && account.body.contains(ui::mfa::RESET_PATH)
+        );
+        let bob = page(&node, &root, "/auth/settings/users/bob");
+        assert!(
+            !bob.body.contains(ui::mfa::RESET_PATH),
+            "an account without it has nothing to reset"
+        );
+        // An account that is not the superadmin cannot reset.
+        let denied = post(&node, &alice, ui::mfa::RESET_PATH, "users", "login=alice");
+        assert_eq!(denied.status, 403);
+        assert_eq!(
+            post(&node, &root, ui::mfa::RESET_PATH, "users", "login=bob").location(),
+            Some("/auth/settings/users/bob?s=mfa-none")
+        );
+        let reply = post(&node, &root, ui::mfa::RESET_PATH, "users", "login=alice");
+        assert_eq!(
+            reply.location(),
+            Some("/auth/settings/users/alice?s=mfa-reset")
+        );
+        assert!(node.state.store.totp_get("alice").unwrap().is_none());
+        assert_eq!(
+            verify(&node, &alice, AGENT),
+            302,
+            "the sessions of the account end"
+        );
+        wait_until(Duration::from_secs(10), || {
+            audit_kinds(&node).contains(&"totp_reset".to_string())
+        });
+        let changes = page(&node, &root, "/auth/settings/activity?v=changes");
+        assert!(
+            changes.body.contains("Two-factor reset"),
+            "the event is in Activity"
+        );
+        // The account signs in with the password alone again.
+        let session = sign_in(&node, "alice", ALICE);
+        assert_eq!(verify(&node, &session, AGENT), 204);
+    }
+
+    #[test]
+    fn a_session_of_log_in_as_needs_no_code_has_no_flag_and_has_no_page_security() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        enrol(&node, "alice");
+        let root = sign_in(&node, "root", PASSWORD);
+        let reply = post(
+            &node,
+            &root,
+            "/auth/users/impersonate",
+            "users",
+            "login=alice",
+        );
+        assert_eq!(reply.status, 303, "{}", reply.body);
+        let browsing = reply
+            .cookie(&session_cookie_name(&node))
+            .expect("a session of Log in as");
+        assert_eq!(verify(&node, &browsing, AGENT), 204);
+        assert_eq!(page(&node, &browsing, ui::mfa::SECURITY_PATH).status, 404);
+        assert!(!page(&node, &browsing, "/")
+            .body
+            .contains(ui::mfa::SECURITY_PATH));
+        let flags = mfa_flags(&node, "alice");
+        assert!(flags.iter().all(|f| !f), "{flags:?}");
+    }
+
+    #[test]
+    fn the_pages_of_the_second_step_pass_forward_auth_without_a_session() {
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        assert_eq!(verify(&node, "nothing", AGENT), 302);
+        for path in [ui::mfa::CODE_PATH, ui::mfa::ENROL_PATH] {
+            let reply = send(
+                node.port,
+                "GET",
+                VERIFY_PATH,
+                &[("X-Forwarded-Uri", path), ("X-Forwarded-Method", "POST")],
+                "",
+            );
+            assert_eq!(reply.status, 204, "{path}");
+        }
+    }
+}

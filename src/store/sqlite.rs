@@ -1003,7 +1003,11 @@ impl Sqlite {
                        FROM sessions_log ORDER BY started_at, sid",
                 if version >= 8 { "remembered" } else { "0" },
                 // A file of version 8 can be older than the second factor: it has no column.
-                if has_column(conn, "sessions_log", "mfa")? { "mfa" } else { "0" }
+                if has_column(conn, "sessions_log", "mfa")? {
+                    "mfa"
+                } else {
+                    "0"
+                }
             ))
             .map_err(db)?
             .query_map([], |row| {

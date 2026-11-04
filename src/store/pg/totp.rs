@@ -50,10 +50,13 @@ impl Pg {
 
     pub fn totp_logins(&self) -> Result<Vec<String>, String> {
         self.run(|c| {
-            Ok(c.query("SELECT login FROM totp_credentials ORDER BY login COLLATE \"C\"", &[])?
-                .into_iter()
-                .map(|row| row.get(0))
-                .collect())
+            Ok(c.query(
+                "SELECT login FROM totp_credentials ORDER BY login COLLATE \"C\"",
+                &[],
+            )?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect())
         })
     }
 

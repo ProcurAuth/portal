@@ -931,7 +931,9 @@ fn session_row(out: &mut String, session: &SessionRow) {
         badges.push_str(r#" <span class="badge" title="Kept signed in">kept</span>"#);
     }
     if session.mfa {
-        badges.push_str(r#" <span class="badge" title="Signed in with the second factor">2fa</span>"#);
+        badges.push_str(
+            r#" <span class="badge" title="Signed in with the second factor">2fa</span>"#,
+        );
     }
     let _ = write!(
         out,

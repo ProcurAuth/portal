@@ -146,7 +146,10 @@ mod tests {
         let a = SecretBox::new(&key(1)).unwrap();
         let sealed = a.seal(b"twenty bytes secret!", b"alice").unwrap();
         assert!(!sealed.windows(6).any(|w| w == b"twenty"), "not in clear");
-        assert_eq!(&**a.open(&sealed, b"alice").unwrap(), b"twenty bytes secret!");
+        assert_eq!(
+            &**a.open(&sealed, b"alice").unwrap(),
+            b"twenty bytes secret!"
+        );
         assert!(a.open(&sealed, b"bob").is_none(), "another account");
         let b = SecretBox::new(&key(2)).unwrap();
         assert!(b.open(&sealed, b"alice").is_none(), "another key");

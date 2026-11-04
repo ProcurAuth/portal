@@ -112,7 +112,8 @@ pub fn normalize_code(typed: &str) -> Option<String> {
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
         .collect();
-    (digits.len() == DIGITS as usize && digits.bytes().all(|b| b.is_ascii_digit())).then_some(digits)
+    (digits.len() == DIGITS as usize && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(digits)
 }
 
 /// Checks a typed code at `now` against the steps `now - WINDOW` to `now + WINDOW`.
@@ -261,11 +262,7 @@ mod tests {
         assert_eq!(verify(RFC_SECRET, &here, now, step), None);
         assert_eq!(verify(RFC_SECRET, &before, now, step), None);
         assert_eq!(verify(RFC_SECRET, &after, now, step), Some(step + 1));
-        assert_eq!(
-            verify(RFC_SECRET, "000000x", now, 0),
-            None,
-            "not a code"
-        );
+        assert_eq!(verify(RFC_SECRET, "000000x", now, 0), None, "not a code");
     }
 
     #[test]
@@ -290,7 +287,10 @@ mod tests {
         );
         // A name with a space or a colon cannot break the link.
         let odd = otpauth_uri("My Server", "a:b", RFC_SECRET);
-        assert!(odd.starts_with("otpauth://totp/My%20Server:a%3Ab?"), "{odd}");
+        assert!(
+            odd.starts_with("otpauth://totp/My%20Server:a%3Ab?"),
+            "{odd}"
+        );
     }
 
     #[test]
@@ -302,12 +302,21 @@ mod tests {
             assert_eq!(code.as_bytes()[5], b'-');
             let canonical = normalize_recovery(code).expect("a code reads back");
             assert_eq!(canonical.len(), 10);
-            assert_eq!(normalize_recovery(&code.to_uppercase()), Some(canonical.clone()));
+            assert_eq!(
+                normalize_recovery(&code.to_uppercase()),
+                Some(canonical.clone())
+            );
             assert_eq!(normalize_recovery(&code.replace('-', " ")), Some(canonical));
         }
         let distinct: std::collections::HashSet<&String> = codes.iter().collect();
         assert_eq!(distinct.len(), codes.len());
-        for bad in ["", "abcde-fghi", "abcde-fghij1", "abcde-fghi1", "abcde-fghi8"] {
+        for bad in [
+            "",
+            "abcde-fghi",
+            "abcde-fghij1",
+            "abcde-fghi1",
+            "abcde-fghi8",
+        ] {
             assert_eq!(normalize_recovery(bad), None, "{bad:?}");
         }
     }

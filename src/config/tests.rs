@@ -3215,7 +3215,10 @@ fn a_policy_that_is_not_off_without_a_key_stops_the_start_and_says_why() {
                 && message.contains("authentication.mfa"),
             "{policy:?}: {message}"
         );
-        assert!(message.contains(r#"authentication.mfa = "off""#), "{message}");
+        assert!(
+            message.contains(r#"authentication.mfa = "off""#),
+            "{message}"
+        );
     }
     // With `off`, the key is not needed, and it must not be written: the two keys contradict.
     let off = no_key.replace("authentication {", r#"authentication { mfa = "off""#);
@@ -3229,8 +3232,9 @@ fn a_policy_that_is_not_off_without_a_key_stops_the_start_and_says_why() {
     let both = MINIMAL.replace("authentication {", r#"authentication { mfa = "off""#);
     let message = err(&both);
     assert!(
-        message.contains("authentication.totp_key_env and authentication.totp_key_file must not be set")
-            && message.contains(r#"authentication.mfa is "off""#),
+        message.contains(
+            "authentication.totp_key_env and authentication.totp_key_file must not be set"
+        ) && message.contains(r#"authentication.mfa is "off""#),
         "{message}"
     );
 }
@@ -3238,9 +3242,16 @@ fn a_policy_that_is_not_off_without_a_key_stops_the_start_and_says_why() {
 #[test]
 fn the_key_of_the_second_factor_is_checked_at_start_and_never_shown() {
     let bad = |value: &str| {
-        let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", "admin"), ("PORTAL_PASSWORD", "a password for the tests"), ("PORTAL_TOTP_KEY", value)])
-            .err()
-            .unwrap_or_else(|| panic!("{value:?} must be refused"));
+        let message = parse_with(
+            MINIMAL,
+            &[
+                ("PORTAL_LOGIN", "admin"),
+                ("PORTAL_PASSWORD", "a password for the tests"),
+                ("PORTAL_TOTP_KEY", value),
+            ],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{value:?} must be refused"));
         assert!(message.contains("authentication.totp_key"), "{message}");
         assert!(message.contains("env:PORTAL_TOTP_KEY"), "{message}");
         assert!(
@@ -3274,7 +3285,8 @@ fn the_key_of_the_second_factor_is_checked_at_start_and_never_shown() {
     let wrong = MINIMAL.replace("authentication {", r#"authentication { mfa = "always""#);
     let message = err(&wrong);
     assert!(
-        message.contains("authentication.mfa") && message.contains("\"off\", \"optional\", \"required\""),
+        message.contains("authentication.mfa")
+            && message.contains("\"off\", \"optional\", \"required\""),
         "{message}"
     );
 }

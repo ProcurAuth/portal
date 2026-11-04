@@ -220,6 +220,7 @@ impl Mfa {
         Self { sealbox }
     }
 
+    #[cfg(test)]
     pub fn check_value(&self) -> [u8; 32] {
         self.sealbox.check_value()
     }
@@ -459,10 +460,22 @@ mod tests {
             Err(PendingError::Expired)
         );
         // Another client, another page, another server key.
-        assert_eq!(open(SECRET, &token, &[8; 32], CSRF, 1_000_100), Err(PendingError::Invalid));
-        assert_eq!(open(SECRET, &token, &BINDING, "another", 1_000_100), Err(PendingError::Invalid));
         assert_eq!(
-            open(b"another-key-another-key-another!", &token, &BINDING, CSRF, 1_000_100),
+            open(SECRET, &token, &[8; 32], CSRF, 1_000_100),
+            Err(PendingError::Invalid)
+        );
+        assert_eq!(
+            open(SECRET, &token, &BINDING, "another", 1_000_100),
+            Err(PendingError::Invalid)
+        );
+        assert_eq!(
+            open(
+                b"another-key-another-key-another!",
+                &token,
+                &BINDING,
+                CSRF,
+                1_000_100
+            ),
             Err(PendingError::Invalid)
         );
         // A person cannot change the account, the choice or the count of tries.
@@ -474,7 +487,10 @@ mod tests {
             plain.replace("\n0\n1000000", "\n9\n1000000"),
             plain.replace("code", "enrol"),
         ] {
-            let forged = format!("{}.{mac}", Base64UrlUnpadded::encode_string(forged.as_bytes()));
+            let forged = format!(
+                "{}.{mac}",
+                Base64UrlUnpadded::encode_string(forged.as_bytes())
+            );
             assert_eq!(
                 open(SECRET, &forged, &BINDING, CSRF, 1_000_100),
                 Err(PendingError::Invalid),
@@ -482,7 +498,10 @@ mod tests {
             );
         }
         for bad in ["", ".", "a.b", "!!.!!", &token[..token.len() - 2]] {
-            assert_eq!(open(SECRET, bad, &BINDING, CSRF, 1_000_100), Err(PendingError::Invalid));
+            assert_eq!(
+                open(SECRET, bad, &BINDING, CSRF, 1_000_100),
+                Err(PendingError::Invalid)
+            );
         }
     }
 
@@ -494,31 +513,75 @@ mod tests {
             let store = backend.fresh();
             let page = mfa.begin("alice", "Portal", now).unwrap();
             assert!(page.uri.starts_with("otpauth://totp/Portal:alice?secret="));
-            assert_eq!(page.grouped.replace(' ', ""), page.uri.split("secret=").nth(1).unwrap().split('&').next().unwrap());
-            assert!(page.qr.as_deref().is_some_and(|svg| svg.starts_with("<svg") && !svg.contains("<?xml")));
+            assert_eq!(
+                page.grouped.replace(' ', ""),
+                page.uri
+                    .split("secret=")
+                    .nth(1)
+                    .unwrap()
+                    .split('&')
+                    .next()
+                    .unwrap()
+            );
+            assert!(page
+                .qr
+                .as_deref()
+                .is_some_and(|svg| svg.starts_with("<svg") && !svg.contains("<?xml")));
             let secret = totp::base32_decode(&page.grouped.replace(' ', "")).unwrap();
             let good = totp::code_at(&secret, now);
             // A wrong code, a page for another account, an old page.
-            assert_eq!(mfa.confirm(&store, "alice", &page.token, "000000", now).unwrap(), Enrolled::WrongCode);
-            assert_eq!(mfa.confirm(&store, "bob", &page.token, &good, now).unwrap(), Enrolled::BadPage);
             assert_eq!(
-                mfa.confirm(&store, "alice", &page.token, &good, now + ENROL_TTL_SECS + 1).unwrap(),
+                mfa.confirm(&store, "alice", &page.token, "000000", now)
+                    .unwrap(),
+                Enrolled::WrongCode
+            );
+            assert_eq!(
+                mfa.confirm(&store, "bob", &page.token, &good, now).unwrap(),
                 Enrolled::BadPage
             );
-            assert!(store.totp_get("alice").unwrap().is_none(), "nothing stored yet");
-            let Enrolled::Done(codes) = mfa.confirm(&store, "alice", &page.token, &good, now).unwrap() else {
+            assert_eq!(
+                mfa.confirm(
+                    &store,
+                    "alice",
+                    &page.token,
+                    &good,
+                    now + ENROL_TTL_SECS + 1
+                )
+                .unwrap(),
+                Enrolled::BadPage
+            );
+            assert!(
+                store.totp_get("alice").unwrap().is_none(),
+                "nothing stored yet"
+            );
+            let Enrolled::Done(codes) = mfa
+                .confirm(&store, "alice", &page.token, &good, now)
+                .unwrap()
+            else {
                 panic!("a good code turns the second factor on");
             };
             assert_eq!(codes.len(), totp::RECOVERY_CODES);
             let row = store.totp_get("alice").unwrap().unwrap();
             assert_eq!(row.recovery_left as usize, totp::RECOVERY_CODES);
             assert_eq!(row.last_step, totp::step_of(now));
-            assert!(!row.sealed.windows(secret.len()).any(|w| w == secret.as_slice()), "sealed");
+            assert!(
+                !row.sealed
+                    .windows(secret.len())
+                    .any(|w| w == secret.as_slice()),
+                "sealed"
+            );
             // A second enrolment of the same account is refused, and the code of the first one cannot sign in.
             let again = mfa.begin("alice", "Portal", now).unwrap();
             let other = totp::base32_decode(&again.grouped.replace(' ', "")).unwrap();
             assert_eq!(
-                mfa.confirm(&store, "alice", &again.token, &totp::code_at(&other, now), now).unwrap(),
+                mfa.confirm(
+                    &store,
+                    "alice",
+                    &again.token,
+                    &totp::code_at(&other, now),
+                    now
+                )
+                .unwrap(),
                 Enrolled::Already
             );
             assert_eq!(
@@ -550,24 +613,46 @@ mod tests {
             let (secret, codes) = enrolled(&store, &mfa, "alice", now);
             let next = now + 30;
             let code = totp::code_at(&secret, next);
-            assert_eq!(mfa.verify(&store, "alice", &code, next).unwrap(), Verdict::Totp);
+            assert_eq!(
+                mfa.verify(&store, "alice", &code, next).unwrap(),
+                Verdict::Totp
+            );
             // Replay: the same code, and the code of the step before, are refused.
-            assert!(matches!(mfa.verify(&store, "alice", &code, next).unwrap(), Verdict::Wrong { .. }));
             assert!(matches!(
-                mfa.verify(&store, "alice", &totp::code_at(&secret, now), next).unwrap(),
+                mfa.verify(&store, "alice", &code, next).unwrap(),
+                Verdict::Wrong { .. }
+            ));
+            assert!(matches!(
+                mfa.verify(&store, "alice", &totp::code_at(&secret, now), next)
+                    .unwrap(),
                 Verdict::Wrong { .. }
             ));
             // A code with a space in it, one step later, works.
             let later = totp::code_at(&secret, next + 30);
             let spaced = format!("{} {}", &later[..3], &later[3..]);
-            assert_eq!(mfa.verify(&store, "alice", &spaced, next + 30).unwrap(), Verdict::Totp);
+            assert_eq!(
+                mfa.verify(&store, "alice", &spaced, next + 30).unwrap(),
+                Verdict::Totp
+            );
             // A recovery code works once, in any typed form.
             let recovery = codes[0].to_uppercase().replace('-', " ");
-            assert_eq!(mfa.verify(&store, "alice", &recovery, next).unwrap(), Verdict::Recovery);
-            assert!(matches!(mfa.verify(&store, "alice", &codes[0], next).unwrap(), Verdict::Wrong { .. }));
-            assert_eq!(store.totp_get("alice").unwrap().unwrap().recovery_left as usize, totp::RECOVERY_CODES - 1);
+            assert_eq!(
+                mfa.verify(&store, "alice", &recovery, next).unwrap(),
+                Verdict::Recovery
+            );
+            assert!(matches!(
+                mfa.verify(&store, "alice", &codes[0], next).unwrap(),
+                Verdict::Wrong { .. }
+            ));
+            assert_eq!(
+                store.totp_get("alice").unwrap().unwrap().recovery_left as usize,
+                totp::RECOVERY_CODES - 1
+            );
             // A login without a second factor.
-            assert_eq!(mfa.verify(&store, "bob", "123456", next).unwrap(), Verdict::NotEnrolled);
+            assert_eq!(
+                mfa.verify(&store, "bob", "123456", next).unwrap(),
+                Verdict::NotEnrolled
+            );
         });
     }
 
@@ -588,16 +673,24 @@ mod tests {
             }
             assert_eq!(
                 mfa.verify(&store, "alice", "000000", t).unwrap(),
-                Verdict::Wrong { locked_until: Some(t + LIMITS.lockout) }
+                Verdict::Wrong {
+                    locked_until: Some(t + LIMITS.lockout)
+                }
             );
             // The lock holds against a good code too, until it ends. No lock is permanent.
             let good = totp::code_at(&secret, t);
             assert_eq!(
                 mfa.verify(&store, "alice", &good, t + 1).unwrap(),
-                Verdict::Locked { until: t + LIMITS.lockout }
+                Verdict::Locked {
+                    until: t + LIMITS.lockout
+                }
             );
             let after = totp::code_at(&secret, t + LIMITS.lockout);
-            assert_eq!(mfa.verify(&store, "alice", &after, t + LIMITS.lockout).unwrap(), Verdict::Totp);
+            assert_eq!(
+                mfa.verify(&store, "alice", &after, t + LIMITS.lockout)
+                    .unwrap(),
+                Verdict::Totp
+            );
             // The failures of an old window do not add up.
             for n in 0..LIMITS.max_failures - 1 {
                 let at = t + 1_000 + n * 700;
@@ -625,7 +718,9 @@ mod tests {
             // The row did not change, and the right key still works.
             assert_eq!(store.totp_get("alice").unwrap().unwrap(), before);
             assert_eq!(
-                first.verify(&store, "alice", &totp::code_at(&secret, now + 30), now + 30).unwrap(),
+                first
+                    .verify(&store, "alice", &totp::code_at(&secret, now + 30), now + 30)
+                    .unwrap(),
                 Verdict::Totp
             );
             // The check value tells the keys apart at start, and the first call records it.
@@ -645,16 +740,26 @@ mod tests {
         each_backend(|backend| {
             let store = backend.fresh();
             let (_, old) = enrolled(&store, &mfa, "alice", now);
-            assert!(mfa.regenerate(&store, "bob").unwrap().is_none(), "no second factor");
+            assert!(
+                mfa.regenerate(&store, "bob").unwrap().is_none(),
+                "no second factor"
+            );
             let new = mfa.regenerate(&store, "alice").unwrap().unwrap();
             assert_eq!(new.len(), totp::RECOVERY_CODES);
-            assert!(matches!(mfa.verify(&store, "alice", &old[0], now).unwrap(), Verdict::Wrong { .. }));
-            assert_eq!(mfa.verify(&store, "alice", &new[0], now).unwrap(), Verdict::Recovery);
+            assert!(matches!(
+                mfa.verify(&store, "alice", &old[0], now).unwrap(),
+                Verdict::Wrong { .. }
+            ));
+            assert_eq!(
+                mfa.verify(&store, "alice", &new[0], now).unwrap(),
+                Verdict::Recovery
+            );
         });
     }
 
     #[test]
-    fn deleting_an_account_deletes_its_second_factor_and_a_new_account_of_the_name_starts_without() {
+    fn deleting_an_account_deletes_its_second_factor_and_a_new_account_of_the_name_starts_without()
+    {
         let mfa = mfa(1);
         let now = 1_700_000_000;
         each_backend(|backend| {
@@ -670,7 +775,11 @@ mod tests {
             enrolled(&store, &mfa, "carol", now);
             assert_eq!(store.totp_logins().unwrap(), ["alice", "carol"]);
             assert!(store.remove_user("alice").unwrap());
-            assert_eq!(store.totp_logins().unwrap(), ["carol"], "alice lost hers, carol keeps hers");
+            assert_eq!(
+                store.totp_logins().unwrap(),
+                ["carol"],
+                "alice lost hers, carol keeps hers"
+            );
             assert_eq!(store.count("totp_recovery") as usize, totp::RECOVERY_CODES);
             // A row that an older account left behind does not pass to a new account of the same login.
             enrolled(&store, &mfa, "alice", now);
@@ -691,18 +800,39 @@ mod tests {
         let (secret, codes) = enrolled(&a, &mfa, "alice", now);
         // Instance B reads what A wrote, and the two share the steps: a code is good once on the pair.
         let code = totp::code_at(&secret, now + 30);
-        assert_eq!(mfa.verify(&b, "alice", &code, now + 30).unwrap(), Verdict::Totp);
-        assert!(matches!(mfa.verify(&a, "alice", &code, now + 30).unwrap(), Verdict::Wrong { .. }));
+        assert_eq!(
+            mfa.verify(&b, "alice", &code, now + 30).unwrap(),
+            Verdict::Totp
+        );
+        assert!(matches!(
+            mfa.verify(&a, "alice", &code, now + 30).unwrap(),
+            Verdict::Wrong { .. }
+        ));
         // A recovery code that B used is gone on A.
-        assert_eq!(mfa.verify(&b, "alice", &codes[1], now + 30).unwrap(), Verdict::Recovery);
-        assert!(matches!(mfa.verify(&a, "alice", &codes[1], now + 30).unwrap(), Verdict::Wrong { .. }));
+        assert_eq!(
+            mfa.verify(&b, "alice", &codes[1], now + 30).unwrap(),
+            Verdict::Recovery
+        );
+        assert!(matches!(
+            mfa.verify(&a, "alice", &codes[1], now + 30).unwrap(),
+            Verdict::Wrong { .. }
+        ));
         // The failures of the two instances add up. The wrong recovery code on A counted one: four more lock it.
         let t = now + 100;
         mfa.verify(&a, "alice", "000000", t).unwrap();
         mfa.verify(&b, "alice", "000000", t).unwrap();
         mfa.verify(&a, "alice", "000000", t).unwrap();
         let last = mfa.verify(&b, "alice", "000000", t).unwrap();
-        assert_eq!(last, Verdict::Wrong { locked_until: Some(t + LIMITS.lockout) }, "5 failures over both");
-        assert!(matches!(mfa.verify(&b, "alice", "000000", t + 1).unwrap(), Verdict::Locked { .. }));
+        assert_eq!(
+            last,
+            Verdict::Wrong {
+                locked_until: Some(t + LIMITS.lockout)
+            },
+            "5 failures over both"
+        );
+        assert!(matches!(
+            mfa.verify(&b, "alice", "000000", t + 1).unwrap(),
+            Verdict::Locked { .. }
+        ));
     }
 }

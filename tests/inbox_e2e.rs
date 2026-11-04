@@ -304,6 +304,8 @@ server {{
 authentication {{
   superadmin_login_file = "{login}"
   superadmin_password_file = "{password}"
+  // The tests of the inbox do not use the second factor.
+  mfa = "off"
 }}
 session {{
   secret_mode = "provided"

@@ -55,7 +55,12 @@ pub(super) async fn after_password(
     let row = match tokio::task::spawn_blocking(move || store.totp_get(&login)).await {
         Ok(Ok(row)) => row,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_read_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_read_failed",
+                &[("error", error)],
+            );
             state.metrics.login_internal_error();
             return Some(text_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -156,7 +161,13 @@ fn step_page(
 }
 
 /// The answer to a second step that cannot go on: the person starts again at the password step.
-fn start_again(state: &AppState, client: &Client, rd: &str, sig: &str, message: &str) -> HttpResponse {
+fn start_again(
+    state: &AppState,
+    client: &Client,
+    rd: &str,
+    sig: &str,
+    message: &str,
+) -> HttpResponse {
     let Ok(fresh) = new_csrf_token() else {
         return internal_error();
     };
@@ -247,12 +258,7 @@ async fn read_step(
 }
 
 /// The refusal of a second step that a limiter blocks: the same page, status 429, `Retry-After`.
-fn limited_step(
-    state: &AppState,
-    client: &Client,
-    step: &Step,
-    wait_secs: u64,
-) -> HttpResponse {
+fn limited_step(state: &AppState, client: &Client, step: &Step, wait_secs: u64) -> HttpResponse {
     state.metrics.login_mfa_failure();
     let mut response = step_page(
         state,
@@ -337,12 +343,7 @@ fn record_wrong_code(state: &AppState, client: &Client, step: &Step, login: &str
 
 /// The person gave a wrong code: the same card again with a new token that counts the try, or the password step when the
 /// token has no try left.
-fn wrong_code(
-    state: &AppState,
-    client: &Client,
-    step: &Step,
-    message: &str,
-) -> HttpResponse {
+fn wrong_code(state: &AppState, client: &Client, step: &Step, message: &str) -> HttpResponse {
     let tries = step.pending.tries.saturating_add(1);
     if tries >= mfa::MAX_TRIES {
         let Ok(fresh) = new_csrf_token() else {
@@ -420,7 +421,12 @@ pub(super) async fn handle_code_post(
     let verdict = match verdict {
         Ok(Ok(verdict)) => verdict,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_check_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_check_failed",
+                &[("error", error)],
+            );
             state.metrics.login_internal_error();
             return internal_error();
         }
@@ -547,7 +553,12 @@ pub(super) async fn handle_enrol_post(
     let outcome = match outcome {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_enrol_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_enrol_failed",
+                &[("error", error)],
+            );
             state.metrics.login_internal_error();
             return internal_error();
         }
@@ -598,7 +609,10 @@ pub(super) fn tab_visible(state: &AppState, viewer: &Viewer) -> bool {
     state.mfa.is_some() && !viewer.session.impersonated
 }
 
-async fn read_row(state: &Arc<AppState>, login: &str) -> Result<Option<crate::store::TotpRow>, String> {
+async fn read_row(
+    state: &Arc<AppState>,
+    login: &str,
+) -> Result<Option<crate::store::TotpRow>, String> {
     let store = Arc::clone(&state.store);
     let login = login.to_string();
     tokio::task::spawn_blocking(move || store.totp_get(&login))
@@ -608,13 +622,20 @@ async fn read_row(state: &Arc<AppState>, login: &str) -> Result<Option<crate::st
 
 /// The logins that have a second factor, for the pages of the accounts. `None`: the second factor is off, or the
 /// database cannot be read.
-pub(super) async fn enabled_logins(state: &Arc<AppState>) -> Option<std::collections::HashSet<String>> {
+pub(super) async fn enabled_logins(
+    state: &Arc<AppState>,
+) -> Option<std::collections::HashSet<String>> {
     state.mfa.as_ref()?;
     let store = Arc::clone(&state.store);
     match tokio::task::spawn_blocking(move || store.totp_logins()).await {
         Ok(Ok(logins)) => Some(logins.into_iter().collect()),
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_read_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_read_failed",
+                &[("error", error)],
+            );
             None
         }
         Err(_) => None,
@@ -692,8 +713,16 @@ pub(super) async fn handle_security_get(
     let row = match read_row(state, &viewer.login).await {
         Ok(row) => row,
         Err(error) => {
-            log(state, LogLevel::Error, "mfa_read_failed", &[("error", error)]);
-            return text_response(StatusCode::SERVICE_UNAVAILABLE, "session store unavailable\n");
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_read_failed",
+                &[("error", error)],
+            );
+            return text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session store unavailable\n",
+            );
         }
     };
     let notice = query_value(uri, "s").and_then(|code| ui::notice_for(&code));
@@ -760,7 +789,10 @@ async fn password_is_right(
         Who::User(_, record) => record.password_hash.clone(),
         Who::Unknown => state.dummy_hash.clone(),
     };
-    let permit = Arc::clone(&state.password_gate).acquire_owned().await.ok()?;
+    let permit = Arc::clone(&state.password_gate)
+        .acquire_owned()
+        .await
+        .ok()?;
     let ok = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         verify_password(password.as_bytes(), &hash)
@@ -820,7 +852,12 @@ async fn prove(
         }
         Ok(Ok(Verdict::NotEnrolled)) => Proof::Refused,
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_check_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_check_failed",
+                &[("error", error)],
+            );
             Proof::Error
         }
         Err(_) => Proof::Error,
@@ -843,12 +880,8 @@ pub(super) async fn handle_security_enable(
     if address_blocked(state, client).is_some() || code.len() > 64 {
         return security_redirect("mfa-locked");
     }
-    let (worker, name, token, typed) = (
-        Arc::clone(state),
-        viewer.login.clone(),
-        enrol.clone(),
-        code,
-    );
+    let (worker, name, token, typed) =
+        (Arc::clone(state), viewer.login.clone(), enrol.clone(), code);
     let outcome = tokio::task::spawn_blocking(move || {
         let mfa = worker.mfa.as_ref().ok_or("the second factor is off")?;
         mfa.confirm(&worker.store, &name, &token, &typed, unix_now())
@@ -865,7 +898,15 @@ pub(super) async fn handle_security_enable(
                 &headers,
             );
             state.metrics.user_admin("mfa_enable", "ok");
-            render(state, &viewer, None, |_| Pick::Codes(codes), None, StatusCode::OK).await
+            render(
+                state,
+                &viewer,
+                None,
+                |_| Pick::Codes(codes),
+                None,
+                StatusCode::OK,
+            )
+            .await
         }
         Ok(Ok(Enrolled::WrongCode)) => {
             count_address_failure(state, client);
@@ -890,7 +931,12 @@ pub(super) async fn handle_security_enable(
         }
         Ok(Ok(Enrolled::BadPage | Enrolled::Already)) => security_redirect("mfa-stale"),
         Ok(Err(error)) => {
-            log(state, LogLevel::Error, "mfa_enrol_failed", &[("error", error)]);
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_enrol_failed",
+                &[("error", error)],
+            );
             security_redirect("error")
         }
         Err(_) => security_redirect("error"),
@@ -969,7 +1015,15 @@ pub(super) async fn handle_security_recovery(
                 &headers,
             );
             state.metrics.user_admin("mfa_recovery", "ok");
-            render(state, &viewer, None, |_| Pick::Codes(codes), None, StatusCode::OK).await
+            render(
+                state,
+                &viewer,
+                None,
+                |_| Pick::Codes(codes),
+                None,
+                StatusCode::OK,
+            )
+            .await
         }
         Ok(Ok(None)) => security_redirect("mfa-none"),
         _ => security_redirect("error"),

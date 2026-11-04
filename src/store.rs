@@ -2854,7 +2854,7 @@ mod tests {
         store
             .totp_enable("a-file-account", b"sealed-file", &[[3; 32]], 6, NOW)
             .unwrap();
-                                           // A key with a budget, a key of the superadmin and a revoked key (schema 6).
+        // A key with a budget, a key of the superadmin and a revoked key (schema 6).
         let big = KeyCaps {
             max_per_user: 100,
             ..caps()
@@ -2923,7 +2923,10 @@ mod tests {
             }
         );
         // The second factor comes with its recovery codes and the check of its key.
-        assert_eq!(target.totp_get("alice").unwrap(), source.totp_get("alice").unwrap());
+        assert_eq!(
+            target.totp_get("alice").unwrap(),
+            source.totp_get("alice").unwrap()
+        );
         assert_eq!(target.totp_get("alice").unwrap().unwrap().recovery_left, 2);
         assert_eq!(target.totp_logins().unwrap(), ["a-file-account", "alice"]);
         assert!(target.totp_bind_key(&[9; 32]).unwrap());

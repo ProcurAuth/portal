@@ -274,12 +274,19 @@ mod tests {
     fn the_card_of_the_code_has_the_two_forms_the_hidden_fields_and_an_error_line() {
         let page = code_card(&fields(), Some("Invalid code"));
         assert_eq!(page.matches(r#"action="/auth/login/code""#).count(), 2);
-        assert_eq!(page.matches(r#"name="pending" value="pending.token""#).count(), 2);
+        assert_eq!(
+            page.matches(r#"name="pending" value="pending.token""#)
+                .count(),
+            2
+        );
         assert!(page.contains(r#"autocomplete="one-time-code""#));
         assert!(page.contains(r#"inputmode="numeric""#));
         assert!(page.contains(r#"maxlength="11""#));
         assert!(page.contains(r#"role="alert" aria-live="assertive">Invalid code<"#));
-        assert!(page.contains("value=\"/x?a=1&amp;b=2\""), "the target is escaped");
+        assert!(
+            page.contains("value=\"/x?a=1&amp;b=2\""),
+            "the target is escaped"
+        );
         assert!(!page.contains("<script>"), "no inline script");
         assert!(!code_card(&fields(), None).contains("role=\"alert\""));
     }
@@ -292,7 +299,10 @@ mod tests {
         assert!(page.contains(&html_escape(&e.grouped)));
         assert!(page.contains(&html_escape(&e.uri)));
         assert!(page.contains(&format!(r#"name="enrol" value="{}""#, e.token)));
-        assert!(!page.contains("<img") && !page.contains("data:"), "no image request");
+        assert!(
+            !page.contains("<img") && !page.contains("data:"),
+            "no image request"
+        );
         assert!(!page.contains("style="), "the CSP forbids inline style");
     }
 

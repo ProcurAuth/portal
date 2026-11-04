@@ -223,6 +223,50 @@ fn real_main() -> Result<(), String> {
             println!("revoked {revoked} keys");
             Ok(())
         }
+        // Removes the second factor of one account, or of every account and the check value of the key. This is the
+        // way back for the superadmin, who has no account above it, and for a new `authentication.totp_key`. With a
+        // SQLite file, the command writes only when the portal does not run. With PostgreSQL, it ends the sessions of
+        // the account too. The command writes one audit event, with the actor `cli`.
+        "reset-two-factor" => {
+            let (config_path, who) = parse_revoke_args(args.collect())?;
+            let (config, secrets) = Config::load(&config_path)?;
+            if let StorageBackend::Sqlite(path) = &config.storage.backend {
+                if store::sqlite_instance_running(path) {
+                    return Err(format!(
+                        "the portal runs and holds the SQLite file {}: stop it first, or use PostgreSQL",
+                        path.display()
+                    ));
+                }
+            }
+            let store = open_store(&config, &secrets)?;
+            let removed = match &who {
+                Some(login) => {
+                    let removed = usize::from(store.totp_remove(login)?);
+                    if removed > 0 && store.is_shared() {
+                        // The sessions of an account of the file, and of the superadmin, are not in the list of a user.
+                        let _ = store.sessions_delete_user(login);
+                    }
+                    removed
+                }
+                None => store.totp_remove_all()?,
+            };
+            if removed > 0 {
+                let mut batch = tracking::Batch::default();
+                batch
+                    .events
+                    .push(tracking::Event::Audit(tracking::AuditEvent {
+                        kind: tracking::AuditKind::TotpReset,
+                        login: who.clone(),
+                        actor: Some("cli".into()),
+                        ip: None,
+                        user_agent: "portal reset-two-factor".into(),
+                        at: tracking::unix_now(),
+                    }));
+                store.apply(&batch)?;
+            }
+            println!("removed the second factor of {removed} accounts");
+            Ok(())
+        }
         // Check the file, the variables and the files that it names.
         // Then print the value that applies to each key, with its source.
         // The secrets are hidden.
@@ -467,7 +511,7 @@ fn healthcheck(path: &Path) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|access|access-panel-only|activity|activity-panel-only|user|new-user|services|services-panel-only|services-empty] > page.html\n  portal version",
+        "portal {}\n\nUSAGE:\n  portal run --config FILE\n  portal check-config --config FILE\n  portal config-reference\n  portal revoke-keys --config FILE (--user LOGIN | --all)\n  portal reset-two-factor --config FILE (--user LOGIN | --all)\n  portal identity-public-key --config FILE\n  portal healthcheck --config FILE\n  portal import-sqlite --config FILE --from SQLITE_FILE\n  portal end-sessions --config FILE\n  portal hash-password < password.txt\n  portal inbox keygen --out FILE\n  portal inbox token --out FILE\n  portal inbox import-sqlite --config FILE --from SQLITE_FILE\n  portal inbox healthcheck --config FILE\n  portal render-demo [ICONS_DIR|-] [launcher|access|access-panel-only|activity|activity-panel-only|user|new-user|services|services-panel-only|services-empty] > page.html\n  portal version",
         release_version()
     );
 }

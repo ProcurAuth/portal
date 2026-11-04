@@ -169,9 +169,7 @@ impl Sqlite {
         let mut conn = self.conn();
         let tx = begin_write(&mut conn).map_err(db)?;
         tx.execute("DELETE FROM totp_recovery", []).map_err(db)?;
-        let removed = tx
-            .execute("DELETE FROM totp_credentials", [])
-            .map_err(db)?;
+        let removed = tx.execute("DELETE FROM totp_credentials", []).map_err(db)?;
         tx.execute("DELETE FROM totp_key_check", []).map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(removed)
