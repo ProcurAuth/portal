@@ -8634,7 +8634,7 @@ mod mfa_tests {
         let page = mfa.begin(login, "Portal", now).unwrap();
         let secret = totp::base32_decode(&page.grouped.replace(' ', "")).unwrap();
         // The code of the confirmation is the code of the step before: the codes of the next steps stay free.
-        let code = totp::code_for_step(&secret, base_step() - 1, totp::DIGITS);
+        let code = totp::code_for_step(&secret, base_step(&secret) - 1, totp::DIGITS);
         match mfa
             .confirm(&node.state.store, login, &page.token, &code, now)
             .unwrap()
@@ -8646,23 +8646,26 @@ mod mfa_tests {
 
     /// The code of the app at the current step plus `offset` steps. The window of the server holds -1, 0 and +1.
     fn code(secret: &[u8], offset: i64) -> String {
-        totp::code_for_step(secret, base_step() + offset, totp::DIGITS)
+        totp::code_for_step(secret, base_step(secret) + offset, totp::DIGITS)
     }
 
     thread_local! {
-        static BASE_STEP: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+        static BASE_STEPS: std::cell::RefCell<Vec<(Vec<u8>, i64)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    /// The step of the clock at the first use in the test. The codes of a test stay at fixed offsets from it, so a
-    /// step of 30 seconds that ends in the middle of the test does not turn a good code into a replay.
-    fn base_step() -> i64 {
-        BASE_STEP.with(|cell| match cell.get() {
-            Some(step) => step,
-            None => {
-                let step = totp::step_of(unix_now());
-                cell.set(Some(step));
-                step
+    /// The step of the clock at the first use of `secret` in the test. The codes of an account stay at fixed offsets
+    /// from it, so a step of 30 seconds that ends in the middle of the test does not turn a good code into a replay.
+    /// Each secret has its own base. A test that runs on two backends enrols a new account on each of them, and the
+    /// clock of the second run is later than the clock of the first.
+    fn base_step(secret: &[u8]) -> i64 {
+        BASE_STEPS.with(|bases| {
+            let mut bases = bases.borrow_mut();
+            if let Some((_, step)) = bases.iter().find(|(known, _)| known == secret) {
+                return *step;
             }
+            let step = totp::step_of(unix_now());
+            bases.push((secret.to_vec(), step));
+            step
         })
     }
 
