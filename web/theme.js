@@ -1,6 +1,7 @@
 /* Theme selector: system (default), dark or light, remembered in this browser only.
    Loaded synchronously in <head> so the theme is applied before the first paint. It is the only script
-   of the launcher and the login page; the settings pages add settings.js. */
+   of the launcher and the login page. It also shows the button that reveals the password and the Copy button.
+   The settings pages add settings.js. */
 (function () {
   "use strict";
   var KEY = "ui-color-mode";
@@ -38,6 +39,24 @@
         }, 2000);
       }, function () {});
     } catch (e) {}
+  });
+
+  // The button that shows the password (the attribute data-reveal, with no value). The page has it hidden, so a browser
+  // without script shows no button. The button names its field with aria-controls. The pressed state is the state of
+  // the button: the stylesheet reads it to draw the right icon, and a screen reader says it.
+  document.addEventListener("DOMContentLoaded", function () {
+    var buttons = document.querySelectorAll("[data-reveal]");
+    for (var i = 0; i < buttons.length; i += 1) buttons[i].removeAttribute("hidden");
+  });
+
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-reveal]");
+    if (!button) return;
+    var field = document.getElementById(button.getAttribute("aria-controls"));
+    if (!field) return;
+    var show = field.type === "password";
+    field.type = show ? "text" : "password";
+    button.setAttribute("aria-pressed", String(show));
   });
 
   document.addEventListener("DOMContentLoaded", function () {

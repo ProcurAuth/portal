@@ -23,11 +23,12 @@ use super::{asset_path, assets, Assets};
 use crate::crypto;
 
 /// The data attributes of the shared stylesheet and script. The longest name is first.
-const DATA_ATTRS: [&str; 4] = [
+const DATA_ATTRS: [&str; 5] = [
     "data-theme-switch",
     "data-theme-value",
     "data-theme-mode",
     "data-theme",
+    "data-reveal",
 ];
 
 /// The plain names of the classes of the inert wrappers (`display: contents`) and of the empty
