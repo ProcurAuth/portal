@@ -533,7 +533,8 @@ a {
   display: grid;
   place-items: center;
   min-height: 100dvh;
-  padding: 24px;
+  /* The extra space under the card lifts it a little above the middle. */
+  padding: 24px 24px calc(24px + 16dvh);
 }
 
 .card {
