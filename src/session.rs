@@ -265,6 +265,23 @@ impl SessionStore {
         }
     }
 
+    /// The same as [`Self::validate`], and the idle timer stays as it is. A page that asks in the
+    /// background uses this: an open page must not keep a session alive, and its requests must
+    /// not write to the shared database.
+    pub fn peek(&self, token: &str, binding: &Binding) -> Option<Session> {
+        let digest = digest_encoded_token(token)?;
+        if let Some(store) = &self.shared {
+            return self.peek_shared(store, digest, binding);
+        }
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().expect("session store mutex poisoned");
+        self.prune(&mut sessions, now);
+        match sessions.get(&digest) {
+            Some(entry) if entry.binding == *binding => Some(entry.session.clone()),
+            _ => None,
+        }
+    }
+
     /// Ends the session that `token` stands for. Returns the session.
     pub fn revoke(&self, token: &str, reason: EndReason) -> Option<Session> {
         let digest = digest_encoded_token(token)?;
@@ -476,6 +493,42 @@ impl SessionStore {
                 self.tracker.touch(session.sid, at);
                 Some(session)
             }
+            Ok(None) => {
+                self.sessions
+                    .lock()
+                    .expect("session store mutex poisoned")
+                    .remove(&digest);
+                None
+            }
+            Err(error) => {
+                self.failed("session_check_failed", &error);
+                copy.filter(|(_, checked, _)| now.duration_since(*checked) < STALE_GRACE)
+                    .map(|(_, _, session)| session)
+            }
+        }
+    }
+
+    fn peek_shared(&self, store: &Store, digest: [u8; 32], binding: &Binding) -> Option<Session> {
+        let now = Instant::now();
+        let copy = {
+            let mut cache = self.sessions.lock().expect("session store mutex poisoned");
+            self.prune_copies(&mut cache, now);
+            cache
+                .get(&digest)
+                .map(|entry| (entry.binding, entry.checked, entry.session.clone()))
+        };
+        if let Some((copy_binding, checked, session)) = &copy {
+            if copy_binding != binding {
+                return None;
+            }
+            if now.duration_since(*checked) < self.cache_ttl {
+                return Some(session.clone());
+            }
+        }
+        match blocking(|| {
+            store.session_peek(&digest, binding, unix_now(), self.idle, &self.generation)
+        }) {
+            Ok(Some(stored)) => Some(session_of(stored)),
             Ok(None) => {
                 self.sessions
                     .lock()
@@ -756,6 +809,28 @@ mod tests {
             "idle for longer than the timeout"
         );
         assert_eq!(store.active_count(), 0);
+    }
+
+    #[test]
+    fn a_peek_does_not_renew_the_idle_timer() {
+        let store = store(HOUR, Duration::from_millis(120), 4);
+        let token = store.issue(HERE, user("alice")).unwrap();
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(60));
+            // The first peeks fall inside the idle window of the issue.
+            let _ = store.peek(&token, &HERE);
+        }
+        assert!(
+            store.peek(&token, &HERE).is_none(),
+            "a peek never kept the session alive"
+        );
+        assert!(store.peek(&token, &ELSEWHERE).is_none());
+        let other = store.issue(HERE, user("bob")).unwrap();
+        assert!(store.peek(&other, &HERE).is_some());
+        assert!(
+            store.peek(&other, &ELSEWHERE).is_none(),
+            "the binding holds for a peek"
+        );
     }
 
     #[test]
@@ -1090,6 +1165,25 @@ mod shared_tests {
         assert!(a.sessions.validate(&dropped, &HERE).is_none());
         assert!(a.sessions.validate(&kept, &HERE).is_some());
         assert_eq!(a.sessions.active_count(), 1);
+    }
+
+    #[test]
+    fn a_peek_on_the_shared_database_reads_and_does_not_keep_the_session_alive() {
+        let Some((a, b)) = instances(HOUR, Duration::from_secs(2), 8, Duration::ZERO) else {
+            return;
+        };
+        let token = a.sessions.issue(HERE, user("alice")).unwrap();
+        for _ in 0..3 {
+            sleep(Duration::from_millis(900));
+            let _ = b.sessions.peek(&token, &HERE);
+        }
+        assert!(
+            b.sessions.peek(&token, &HERE).is_none(),
+            "idle for longer than the timeout, whatever the peeks"
+        );
+        let fresh = a.sessions.issue(HERE, user("bob")).unwrap();
+        assert!(b.sessions.peek(&fresh, &HERE).is_some());
+        assert!(b.sessions.peek(&fresh, &ELSEWHERE).is_none());
     }
 
     #[test]

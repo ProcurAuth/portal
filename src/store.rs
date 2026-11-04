@@ -726,6 +726,20 @@ impl Store {
             .session_touch(digest, binding, now, idle.as_secs() as i64, generation)
     }
 
+    /// The same as [`Self::session_touch`], and the idle timer stays as it is. The call writes
+    /// nothing.
+    pub fn session_peek(
+        &self,
+        digest: &[u8; 32],
+        binding: &[u8; 32],
+        now: i64,
+        idle: Duration,
+        generation: &[u8; 32],
+    ) -> Result<Option<SharedSession>, String> {
+        self.shared()?
+            .session_peek(digest, binding, now, idle.as_secs() as i64, generation)
+    }
+
     /// Ends the superadmin and impersonated sessions of every other credential generation.
     /// Returns the identifiers that this call ended.
     pub fn sessions_end_other_generations(
