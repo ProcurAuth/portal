@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Inbox mark "((•))" (assets/brand/mark.svg), scaled into the 66 dp safe zone. -->
+<!--
+  Launcher foreground: the mark P1 "Doorway" of the portal logo (assets/brand/logo-mark.svg), a white arch with the cyan
+  dot in the doorway. The group scales the 100 by 100 mark to 60 % and centres it, so the mark stays inside the 66 dp safe zone.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <group android:scaleX="1.35" android:scaleY="1.35" android:translateX="10.8" android:translateY="10.8">
-        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:pathData="M39.8,24.2A11,11 0,0 1,39.8 39.8" />
-        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:pathData="M24.2,24.2A11,11 0,0 0,24.2 39.8" />
-        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:strokeAlpha="0.85" android:pathData="M45.4,18.6A19,19 0,0 1,45.4 45.4" />
-        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:strokeAlpha="0.85" android:pathData="M18.6,18.6A19,19 0,0 0,18.6 45.4" />
-        <path android:fillColor="#FFFFFFFF" android:pathData="M26.5,32a5.5,5.5 0,1 0,11 0a5.5,5.5 0,1 0,-11 0z" />
+    <group android:scaleX="0.6" android:scaleY="0.6" android:translateX="24" android:translateY="24">
+        <path android:strokeColor="#FFFFFFFF" android:strokeWidth="20" android:pathData="M23,88V49a27,27 0 0 1 54,0V88" />
+        <path android:fillColor="#FF7FF0FF" android:pathData="M40,68a10,10 0 1,0 20,0a10,10 0 1,0 -20,0z" />
     </group>
 </vector>

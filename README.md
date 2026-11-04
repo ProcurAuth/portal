@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-lockup-onblue.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/brand/logo-lockup.svg">
+    <img alt="portal" src="assets/brand/logo-lockup.svg" width="280">
+  </picture>
+</p>
+
 # portal
 
 portal is one Rust program. It has one binary, one configuration file and one database. It does these functions:
@@ -1018,6 +1026,31 @@ The metrics `portal_watch_sent_total{kind}` and `portal_watch_failed_total{kind}
 ### Stop
 
 On SIGTERM, the Inbox tells each phone to reconnect with the close code 1012. It still serves for 5 seconds. Then it closes its listeners and waits for the sessions at most 10 seconds. It writes what the memory holds to the database. With the block `inbox.replica`, it takes a last copy and gives the lease back, so a standby instance takes over at once.
+
+## Brand tokens and logo
+
+The logo is the direction P1, the Doorway. The files are in `assets/brand/`. Its README gives the colours, the typeface and the rules of use.
+
+The stylesheet `web/portal.css` names the brand colours one time, in its first token block. Every other colour token refers to them.
+
+| Token | Value | Use |
+|---|---|---|
+| `--brand` | `#1238F0` (Signal Blue) | The fill of primary controls, the mark on a light page. White text on it has a ratio of 7.4:1. |
+| `--brand-cyan` | `#7FF0FF` | The dot of the logo and the focus ring on a dark surface. |
+| `--brand-cyan-deep` | `#38B6FF` | The dot of the logo on a light surface. |
+| `--brand-300` | `#7D98FF` | Accent text and thin marks on a dark surface. |
+| `--brand-ink` | `#0B1220` | Text on a light surface. |
+
+The tokens that a rule uses are `--accent-fill`, `--accent-fill-hover`, `--accent-tint`, `--accent-text`, `--accent-line`, `--focus-ring`, `--logo-ink` and `--logo-dot`.
+`--accent-fill` is for a surface that holds white text. `--accent-text` is for text. `--accent-line` is for a mark of 2 pixels or more, such as the underline of a tab. `--focus-ring` is for the focus outline.
+The dark and light values of each token pass these ratios: 4.5:1 for text, 3:1 for a focus ring and for the border of a field.
+A rule never holds a colour literal. Only the token blocks hold literals.
+
+The logo shows on the launcher and on the settings pages. It does not show on the sign-in pages, on the code step, or on the error and status pages.
+Those pages are anonymous on purpose, and the server sends no icon link with them.
+The sprite `web/sprite.svg` has the symbols `logo` (the mark) and `logo-lockup` (the mark and the word). The mark takes the colour of the text. The dot takes `--logo-dot`.
+The icon of the tab is `web/favicon.svg`, a copy of `assets/brand/logo-icon.svg`. The server sends it at a hashed path under `/auth/a/` to a signed-in browser only.
+A browser that does not support an SVG icon shows its default icon. This is the case for old versions of Safari on macOS and for some other old browsers.
 
 ## Local test
 

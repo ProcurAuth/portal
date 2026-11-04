@@ -44,6 +44,8 @@ pub const SETTINGS_CSS: &str = include_str!("../../web/settings.css");
 pub const THEME_JS: &str = include_str!("../../web/theme.js");
 pub const SETTINGS_JS: &str = include_str!("../../web/settings.js");
 pub const NOTIFY_JS: &str = include_str!("../../web/notify.js");
+/// The icon of the tab: the logo on a rounded tile of Signal Blue. Only the pages after sign-in link to it.
+pub const FAVICON_SVG: &str = include_str!("../../web/favicon.svg");
 const SPRITE: &str = include_str!("../../web/sprite.svg");
 
 const MAX_LISTED_PROBLEMS: usize = 3;
@@ -82,6 +84,22 @@ pub fn assets() -> &'static Assets {
             notify,
         }
     })
+}
+
+/// The path of the tab icon: `/auth/a/<hash>.svg`. The hash follows the content, as for the other assets.
+/// The server sends the file to a signed-in browser only: a visitor who is not signed in cannot use it to
+/// know the product.
+pub fn favicon_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| asset_path(FAVICON_SVG, "svg"))
+}
+
+/// The `link` element of the tab icon. A page after sign-in puts it in its head. A sign-in page never does.
+fn favicon_link() -> String {
+    format!(
+        r#"<link rel="icon" type="image/svg+xml" href="{}">"#,
+        favicon_path()
+    )
 }
 
 /// `/auth/a/<16 hexadecimal digits of the SHA-256 of the content>.<extension>`.
@@ -158,7 +176,14 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         }
         body.push_str("</main>");
     }
-    let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
+    let mut icons = vec![
+        "i-logo-lockup",
+        "i-logo",
+        "i-device-desktop",
+        "i-moon",
+        "i-sun",
+        "i-logout",
+    ];
     if ctx.settings.is_some() {
         icons.push("i-settings");
     }
@@ -178,7 +203,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
             "i-bell-ringing",
         ]);
     }
-    document("Portal", "", &icons, &body)
+    document("Portal", &favicon_link(), &icons, &body)
 }
 
 /// Wraps an authentication card (`<h1>`, text, form) in the shared shell.
@@ -311,7 +336,11 @@ fn sign_out_form(token: &str) -> String {
 
 fn header(ctx: &HomeContext) -> String {
     let mut out = String::new();
-    out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
+    // The logo is a picture and not a control: this page is the target of "Back to panel", so a link would
+    // only repeat it. On a narrow screen the mark alone takes the place of the lockup.
+    out.push_str(
+        r##"<header class="appHeader"><div class="appHeader__left"><svg class="appMark__lockup" aria-hidden="true" focusable="false"><use href="#i-logo-lockup"/></svg><svg class="appMark__glyph appMark__glyph--narrow" aria-hidden="true" focusable="false"><use href="#i-logo"/></svg></div><div class="appHeader__right">"##,
+    );
     if let Some(bell) = ctx.bell {
         out.push_str(&notify::bell(bell));
     }
@@ -1280,6 +1309,80 @@ mod tests {
         }
     }
 
+    /// What a page shows when it draws the logo. The list names each part: the mark, the lockup, the class of
+    /// the dot, the classes of the header and the link of the tab icon.
+    const LOGO_PARTS: [&str; 7] = [
+        "i-logo",
+        "logoDot",
+        "appMark",
+        "appSep",
+        "rel=\"icon\"",
+        "image/svg+xml",
+        ".svg\"",
+    ];
+
+    #[test]
+    fn the_launcher_shows_the_logo_as_a_picture_and_links_the_tab_icon() {
+        let page = home_page(&demo_catalog(), &Icons::empty(), &ctx());
+        // The lockup for a wide screen and the mark for a narrow one, both from the sprite.
+        assert!(page.contains(r##"<use href="#i-logo-lockup"/>"##));
+        assert!(page.contains(r##"<use href="#i-logo"/>"##));
+        assert!(page.contains(r#"<symbol id="i-logo-lockup""#));
+        assert!(page.contains(r#"<symbol id="i-logo" viewBox="0 0 100 100">"#));
+        // The logo is a picture: it has no name, no link and no title.
+        let header = &page[page.find("<header").unwrap()..page.find("</header>").unwrap()];
+        let first = header.find("appHeader__left").unwrap();
+        let logo = &header[first..header.find("appHeader__right").unwrap()];
+        assert!(logo.contains(r#"aria-hidden="true""#));
+        assert!(!logo.contains("<a ") && !logo.contains("<title") && !logo.contains("aria-label"));
+        // The wordmark is a path, not text: the page has no text "portal" for the logo.
+        assert!(!page.contains(">portal<"));
+        // The tab icon: a link to the same-origin hashed file.
+        let link = format!(
+            r#"<link rel="icon" type="image/svg+xml" href="{}">"#,
+            favicon_path()
+        );
+        assert!(page.contains(&link), "{page}");
+        assert!(favicon_path().starts_with("/auth/a/") && favicon_path().ends_with(".svg"));
+        assert_eq!(page.matches("rel=\"icon\"").count(), 1);
+    }
+
+    #[test]
+    fn the_symbol_of_the_mark_takes_its_colours_from_the_tokens_and_has_no_literal() {
+        let mark = SPRITE
+            .lines()
+            .find(|line| line.starts_with(r#"<symbol id="i-logo" "#))
+            .unwrap();
+        assert!(mark.contains(r#"stroke="currentColor""#));
+        assert!(mark.contains(r#"<circle class="logoDot""#));
+        assert!(!mark.contains('#') && !mark.contains("var("), "{mark}");
+        assert!(CSS.contains(".logoDot {\n  fill: var(--logo-dot);"));
+        // The tab icon is a file of its own: the tile of Signal Blue with the mark in white and the dot in cyan.
+        assert!(FAVICON_SVG.contains(r##"fill="#1238F0""##));
+        assert!(FAVICON_SVG.contains(r##"fill="#7FF0FF""##));
+        assert!(!FAVICON_SVG.contains("<script") && !FAVICON_SVG.contains("<style"));
+        assert!(!FAVICON_SVG.to_ascii_lowercase().contains("portal"));
+    }
+
+    #[test]
+    fn no_sign_in_page_and_no_status_page_shows_the_logo_or_links_an_icon() {
+        let pages = [
+            auth_document("Authentication", "<p>x</p>"),
+            message_page("Not found", "No such page.", "Back to panel"),
+            denied_page(DENIED_TEXT, "alice", "tok"),
+            sign_in_document("<p>x</p>", &["i-lock"], false),
+            sign_in_document("<p>x</p>", &["i-lock", "i-alert-triangle"], true),
+        ];
+        for page in &pages {
+            for part in LOGO_PARTS {
+                assert!(!page.contains(part), "{part}: {page}");
+            }
+            assert!(!page.contains("<link rel=\"icon\"") && !page.contains("shortcut"));
+            // The only link of the head is the stylesheet.
+            assert_eq!(page.matches("<link ").count(), 1, "{page}");
+        }
+    }
+
     #[test]
     fn only_the_superadmin_gets_the_gear_and_it_opens_a_page_not_a_popup() {
         let plain = home_page(&demo_catalog(), &Icons::empty(), &ctx());
@@ -1415,8 +1518,8 @@ mod tests {
         let launcher = home_page(&demo_catalog(), &Icons::empty(), &ctx());
         assert_eq!(
             launcher.matches("<symbol ").count(),
-            4,
-            "no gear for a user"
+            6,
+            "the lockup, the mark, the three themes and sign out: no gear for a user"
         );
         assert!(!launcher.contains("i-alert-triangle") && !launcher.contains("i-chevron-left"));
         for page in [

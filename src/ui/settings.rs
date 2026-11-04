@@ -307,7 +307,7 @@ fn shell_class(
     let mut body = String::new();
     let _ = write!(
         body,
-        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
+        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><svg class="appMark__glyph" aria-hidden="true" focusable="false"><use href="#i-logo"/></svg><span class="appSep"></span><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
         tab_strip(tabs, tab, frame.notify.as_ref()),
         theme_switch(),
         sign_out_form(frame.logout_token),
@@ -322,8 +322,9 @@ fn shell_class(
     document_class(
         &format!("Settings: {title}"),
         &format!(
-            r#"<link rel="stylesheet" href="/auth/settings.css?v={}">"#,
-            asset_version()
+            r#"<link rel="stylesheet" href="/auth/settings.css?v={}">{}"#,
+            asset_version(),
+            super::favicon_link()
         ),
         &icons,
         "shell",
@@ -1670,6 +1671,52 @@ mod tests {
     use super::*;
     use crate::ui::fixtures::*;
     use crate::ui::{access_page, activity_page, ActivityView};
+
+    #[test]
+    fn every_settings_page_has_the_mark_at_the_left_of_the_header_and_links_the_tab_icon() {
+        let cat = catalog();
+        let d = data();
+        let activity = ActivityView {
+            notice: None,
+            logins: &d.logins,
+            changes: false,
+            only_refused: false,
+            days: &d.days,
+            first_day: FIRST_DAY,
+            recent_events: &d.events,
+        };
+        let pages = [
+            access_page(&full_frame(), &view(&cat)),
+            activity_page(&full_frame(), &activity),
+            services_page(
+                &full_frame(),
+                &services_view(&cat, &services(), &[holder("alice", access(&["grafana"]))]),
+            ),
+        ];
+        for html in &pages {
+            let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
+            // The mark comes first, then the rule, then the way back, which stays the first action.
+            let mark = header.find(r##"<use href="#i-logo"/>"##).unwrap();
+            let rule = header.find(r#"<span class="appSep">"#).unwrap();
+            let back = header.find(r#"<a class="backLink" href="/">"#).unwrap();
+            assert!(mark < rule && rule < back, "{header}");
+            assert_eq!(
+                header.matches("<a ").count() - header.matches("contentTabs__tab").count(),
+                1
+            );
+            // A picture: hidden from the screen reader, with no name, and no second link to the launcher.
+            let before_back = &header[..back];
+            assert!(before_back.contains(r#"aria-hidden="true""#));
+            assert!(!before_back.contains("<title") && !before_back.contains("aria-label"));
+            assert!(html.contains(r#"<symbol id="i-logo" viewBox="0 0 100 100">"#));
+            assert!(
+                !html.contains("i-logo-lockup"),
+                "the lockup is for the launcher"
+            );
+            // The tab icon.
+            assert!(html.contains(&super::super::favicon_link()));
+        }
+    }
 
     #[test]
     fn every_page_is_a_whole_document_with_the_same_header_skip_link_and_tabs() {

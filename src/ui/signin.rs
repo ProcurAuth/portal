@@ -499,6 +499,42 @@ mod tests {
     }
 
     #[test]
+    fn the_sign_in_pages_are_anonymous_with_no_mark_no_icon_link_and_no_product_word() {
+        let code = |rd: &str, error: Option<&str>| {
+            code_page(&Code {
+                hidden: "",
+                rd,
+                host: Some("app.example.com"),
+                error,
+                invalid: "Invalid code",
+                action: "/auth/login/code",
+            })
+        };
+        let pages = [
+            login("/", Some("app.example.com"), None),
+            login("/chdash/x", Some("app.example.com"), None),
+            login("/", None, Some("Invalid login or password")),
+            code("/", None),
+            code("/chdash/", Some("Invalid code")),
+        ];
+        for page in &pages {
+            for part in [
+                "i-logo",
+                "logoDot",
+                "appMark",
+                "appSep",
+                "rel=\"icon\"",
+                "image/svg+xml",
+                "<svg class=\"appMark",
+            ] {
+                assert!(!page.contains(part), "{part}: {page}");
+            }
+            assert!(!page.to_ascii_lowercase().contains("portal"), "{page}");
+            assert_eq!(page.matches("<link ").count(), 1, "the stylesheet only");
+        }
+    }
+
+    #[test]
     fn the_card_of_the_code_has_a_band_only_with_a_destination() {
         let code = |rd: &str, error: Option<&str>| {
             code_page(&Code {
