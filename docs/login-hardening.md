@@ -34,6 +34,8 @@ Each of these requests runs exactly one Argon2 check. For an unknown login, the 
 
 The portal reads the accounts of the shared database before each sign-in, for every login. The read has a limit of one for each second. In the past, only an unknown login started the read. The time then told the observer that the login was unknown. The read now starts for every login.
 
+The limit of one read for each second does not apply to a request with a valid session. When the directory of an instance does not know the account of such a session, the instance reads the accounts at once. Requests that arrive together wait for one read. The session ends only when the database confirms that the account does not exist. When the database does not answer, the request fails and the session stays. A new account on another instance therefore never loses its session.
+
 The tests `an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusal` and `a_failed_form_check_uses_the_budget_of_the_failed_sign_ins` check this. They compare the status, the canonical form of the body (the body without the inert elements, with the attributes and the head in a fixed order) and the headers. They do not measure time. They count the Argon2 checks, because the count is a measure that does not depend on the load of the machine.
 
 ### What stays different (unavoidable)

@@ -652,6 +652,52 @@ fn a_session_opened_for_an_account_the_instance_has_not_heard_of_yet_is_not_ende
 }
 
 #[test]
+fn a_read_of_the_accounts_that_just_ran_does_not_end_the_session_of_a_new_account() {
+    each_backend(|backend| {
+        let (a, b) = cluster(backend, Some(Duration::ZERO));
+        // The hash is made before the test starts its clock. The steps below take a few milliseconds.
+        let hash = password_hash("a-long-password-1");
+        // The instance `b` reads the accounts now: the next read for an unknown login is less than a second away.
+        b.state.users.refresh(&b.state.store).unwrap();
+        a.state
+            .store
+            .insert_user(&crate::store::UserRow {
+                login: "gina".into(),
+                password_hash: hash,
+                grants: Vec::new(),
+                created_at: 1,
+            })
+            .unwrap();
+        a.state.users.refresh(&a.state.store).unwrap();
+        let gina = a
+            .state
+            .sessions
+            .issue(
+                client_binding(&a, "127.0.0.1"),
+                crate::session::NewSession {
+                    principal: Principal::User("gina".into()),
+                    login: "gina".into(),
+                    impersonated: false,
+                    remember: false,
+                    mfa: false,
+                    ip: None,
+                    user_agent: AGENT.into(),
+                    not_after: None,
+                },
+            )
+            .unwrap();
+        // The account is new for `b`, and the last read of `b` is too old to show it. The session is good all the same.
+        assert_eq!(verify(&b, &gina, AGENT), 204, "{}", backend.name());
+        assert_eq!(
+            verify(&a, &gina, AGENT),
+            204,
+            "{}: the check on the other instance ended nothing",
+            backend.name()
+        );
+    });
+}
+
+#[test]
 fn deleting_an_account_ends_its_sessions_on_every_instance() {
     each_backend(|backend| {
         let (a, b) = cluster(backend, Some(Duration::ZERO));
@@ -930,6 +976,21 @@ fn grants_open_services_give_an_identity_token_and_the_pages_hide_the_other_serv
             "other-grafana"
         );
     });
+}
+
+/// Replaces the grants of an account as the portal does: the database first, then the directory of the instance.
+/// A change of the directory alone is lost at the next read of the shared accounts, which a login starts when the last
+/// read is older than one second.
+fn change_grants(node: &Node, login: &str, mut grants: Vec<Grant>) {
+    grants.sort();
+    assert!(
+        node.state
+            .store
+            .update_user(login, None, Some(&grants))
+            .unwrap(),
+        "the account {login} exists"
+    );
+    assert!(node.state.users.update(login, None, Some(grants)));
 }
 
 /// An account of the database that exists before the mode is `static`: the create route does not
@@ -6445,13 +6506,10 @@ mod inbox_rights_tests {
             assert_eq!(authorizer.subscribable("nobody"), Subscribable::Unknown);
             // The stamp changes with the directory.
             let before = authorizer.directory_stamp().unwrap();
-            node.state.users.update(
+            change_grants(
+                &node,
                 "alice",
-                None,
-                Some(vec![Grant::parse(
-                    "inbox.receive on service:portal/inbox_group:oncall",
-                )
-                .unwrap()]),
+                vec![Grant::parse("inbox.receive on service:portal/inbox_group:oncall").unwrap()],
             );
             assert_ne!(authorizer.directory_stamp().unwrap(), before);
             assert_eq!(authorizer.subscribable("alice"), groups(&["oncall"]));
@@ -6891,11 +6949,11 @@ mod kinds_tests {
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Allowed
             );
-            let grants = |texts: &[&str]| -> Option<Vec<Grant>> {
-                Some(texts.iter().map(|t| Grant::parse(t).unwrap()).collect())
+            let grants = |texts: &[&str]| -> Vec<Grant> {
+                texts.iter().map(|t| Grant::parse(t).unwrap()).collect()
             };
             // The owner loses the permission on the group: the key loses it with no wait.
-            node.state.users.update("alice", None, grants(&[usage]));
+            change_grants(&node, "alice", grants(&[usage]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Refused {
@@ -6903,15 +6961,13 @@ mod kinds_tests {
                 }
             );
             // The owner gets it again: the key has it again.
-            node.state
-                .users
-                .update("alice", None, grants(&[usage, send]));
+            change_grants(&node, "alice", grants(&[usage, send]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Allowed
             );
             // The owner loses the right to use the keys of the kind: the key is not valid.
-            node.state.users.update("alice", None, grants(&[send]));
+            change_grants(&node, "alice", grants(&[send]));
             assert_eq!(
                 authorizer.decide(&id, "alert.send", "infra", false),
                 Decision::Refused {
@@ -6919,9 +6975,9 @@ mod kinds_tests {
                 }
             );
             // The right to use the keys of the other kind does not count.
-            node.state.users.update(
+            change_grants(
+                &node,
                 "alice",
-                None,
                 grants(&[send, "keys.own.use on service:portal/key_kind:mcp"]),
             );
             assert_eq!(
@@ -7395,13 +7451,13 @@ mod kinds_tests {
             assert_eq!(seen.inbox_page, 404);
             // The new-key form has no selector: one kind is possible.
             let alice = {
-                node.state.users.update(
+                change_grants(
+                    &node,
                     "alice",
-                    None,
-                    Some(vec![
+                    vec![
                         Grant::parse("keys.own.read on service:portal").unwrap(),
                         Grant::parse("keys.own.create on service:portal/key_kind:mcp").unwrap(),
-                    ]),
+                    ],
                 );
                 sign_in(&node, "alice", PASSWORD)
             };
@@ -8634,7 +8690,7 @@ mod mfa_tests {
         let page = mfa.begin(login, "Portal", now).unwrap();
         let secret = totp::base32_decode(&page.grouped.replace(' ', "")).unwrap();
         // The code of the confirmation is the code of the step before: the codes of the next steps stay free.
-        let code = totp::code_for_step(&secret, base_step() - 1, totp::DIGITS);
+        let code = totp::code_for_step(&secret, base_step(&secret) - 1, totp::DIGITS);
         match mfa
             .confirm(&node.state.store, login, &page.token, &code, now)
             .unwrap()
@@ -8646,23 +8702,26 @@ mod mfa_tests {
 
     /// The code of the app at the current step plus `offset` steps. The window of the server holds -1, 0 and +1.
     fn code(secret: &[u8], offset: i64) -> String {
-        totp::code_for_step(secret, base_step() + offset, totp::DIGITS)
+        totp::code_for_step(secret, base_step(secret) + offset, totp::DIGITS)
     }
 
     thread_local! {
-        static BASE_STEP: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+        static BASE_STEPS: std::cell::RefCell<Vec<(Vec<u8>, i64)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    /// The step of the clock at the first use in the test. The codes of a test stay at fixed offsets from it, so a
-    /// step of 30 seconds that ends in the middle of the test does not turn a good code into a replay.
-    fn base_step() -> i64 {
-        BASE_STEP.with(|cell| match cell.get() {
-            Some(step) => step,
-            None => {
-                let step = totp::step_of(unix_now());
-                cell.set(Some(step));
-                step
+    /// The step of the clock at the first use of `secret` in the test. The codes of an account stay at fixed offsets
+    /// from it, so a step of 30 seconds that ends in the middle of the test does not turn a good code into a replay.
+    /// Each secret has its own base. A test that runs on two backends enrols a new account on each of them, and the
+    /// clock of the second run is later than the clock of the first.
+    fn base_step(secret: &[u8]) -> i64 {
+        BASE_STEPS.with(|bases| {
+            let mut bases = bases.borrow_mut();
+            if let Some((_, step)) = bases.iter().find(|(known, _)| known == secret) {
+                return *step;
             }
+            let step = totp::step_of(unix_now());
+            bases.push((secret.to_vec(), step));
+            step
         })
     }
 
