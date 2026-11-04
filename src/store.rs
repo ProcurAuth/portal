@@ -254,6 +254,8 @@ pub struct SessionRow {
     pub impersonated: bool,
     /// The session had the remembered rule ("Keep me signed in").
     pub remembered: bool,
+    /// The sign-in used the second factor.
+    pub mfa: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,8 +375,53 @@ pub struct SharedSession {
     pub impersonated: bool,
     /// The session has the remembered rule: its life and its idle time are the longer ones.
     pub remembered: bool,
+    /// The sign-in used the second factor.
+    pub mfa: bool,
     /// Unix time.
     pub expires_at: i64,
+}
+
+/// The second factor of one account, as the store keeps it. The secret is sealed: only the key of the
+/// configuration opens it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TotpRow {
+    pub sealed: Vec<u8>,
+    pub created_at: i64,
+    /// The last time step that a code was accepted for. A code of this step or of an older step is refused.
+    pub last_step: i64,
+    /// The failed codes since `failed_since`, while the account is not locked.
+    pub failed: u32,
+    /// The account takes no code before this Unix time. The value is 0 when the account was never locked.
+    pub locked_until: i64,
+    /// The recovery codes that nobody used.
+    pub recovery_left: u32,
+}
+
+/// How many failed second-factor attempts lock the account, and for how long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TotpLimits {
+    pub max_failures: i64,
+    /// The failures count while they stay inside this window, in seconds.
+    pub window: i64,
+    /// The lock lasts this long, in seconds.
+    pub lockout: i64,
+}
+
+impl TotpLimits {
+    /// The counters after one more failure at `now`: the failures, the start of the window, and the end of the lock
+    /// when this failure locks the account. A lock resets the counters, so no lock is permanent.
+    pub fn after_failure(self, failed: i64, since: i64, now: i64) -> (i64, i64, Option<i64>) {
+        let (failed, since) = if failed <= 0 || now - since > self.window {
+            (1, now)
+        } else {
+            (failed + 1, since)
+        };
+        if failed >= self.max_failures {
+            (0, 0, Some(now + self.lockout))
+        } else {
+            (failed, since, None)
+        }
+    }
 }
 
 /// A line of `sessions_log`, as the import reads and writes it.
@@ -385,6 +432,7 @@ pub struct LoggedSession {
     pub superadmin: bool,
     pub impersonated: bool,
     pub remembered: bool,
+    pub mfa: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     pub started_at: i64,
@@ -436,6 +484,19 @@ pub struct Dump {
     /// The keys with their grants, and the summary rows of the revoked keys (schema 6).
     pub keys: Vec<KeyRow>,
     pub key_history: Vec<KeyHistoryRow>,
+    /// The second factor of the accounts, with its recovery codes, and the check value of its key.
+    pub totp: Vec<TotpDump>,
+    pub totp_check: Option<Vec<u8>>,
+}
+
+/// One account with a second factor, as the import reads and writes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TotpDump {
+    pub login: String,
+    pub sealed: Vec<u8>,
+    pub created_at: i64,
+    pub last_step: i64,
+    pub recovery: Vec<Vec<u8>>,
 }
 
 /// What an import copied.
@@ -448,6 +509,7 @@ pub struct ImportReport {
     pub logins: usize,
     pub keys: usize,
     pub key_history: usize,
+    pub totp: usize,
 }
 
 /// The file that tells that a portal runs on a SQLite file: the file of the database and `.pid`.
@@ -562,6 +624,7 @@ impl Store {
         backend!(self.update_user(login, password_hash, grants))
     }
 
+    /// Removes an account with its grants, its keys and its second factor.
     pub fn remove_user(&self, login: &str) -> Result<bool, String> {
         backend!(self.remove_user(login))
     }
@@ -715,6 +778,78 @@ impl Store {
     /// Everything the Users page shows. `accounts` is `(login, is_superadmin)`.
     pub fn snapshot(&self, accounts: &[(String, bool)], now: i64) -> Result<Snapshot, String> {
         backend!(self.snapshot(accounts, now))
+    }
+
+    // The second factor ---------------------------------------------------------------------------
+
+    /// Tells whether `check` is the check value of the key that sealed the secrets of this database. The first call
+    /// on a database without a check value records `check` and answers `true`.
+    pub fn totp_bind_key(&self, check: &[u8; 32]) -> Result<bool, String> {
+        backend!(self.totp_bind_key(check))
+    }
+
+    pub fn totp_get(&self, login: &str) -> Result<Option<TotpRow>, String> {
+        backend!(self.totp_get(login))
+    }
+
+    /// The logins that have a second factor, in order.
+    pub fn totp_logins(&self) -> Result<Vec<String>, String> {
+        backend!(self.totp_logins())
+    }
+
+    /// Turns the second factor on. `step` is the time step of the code that confirmed the enrolment: it cannot be used
+    /// again. The answer is `false`, and nothing changes, when the account has one already.
+    pub fn totp_enable(
+        &self,
+        login: &str,
+        sealed: &[u8],
+        recovery: &[[u8; 32]],
+        step: i64,
+        now: i64,
+    ) -> Result<bool, String> {
+        backend!(self.totp_enable(login, sealed, recovery, step, now))
+    }
+
+    /// Records `step` as the last accepted step, and clears the failures. The answer is `true` for one caller only: a
+    /// code is good once, also when two instances check it at the same time.
+    pub fn totp_accept_step(&self, login: &str, step: i64) -> Result<bool, String> {
+        backend!(self.totp_accept_step(login, step))
+    }
+
+    /// Consumes one recovery code. The answer is `true` for one caller only.
+    pub fn totp_use_recovery(&self, login: &str, hash: &[u8; 32]) -> Result<bool, String> {
+        backend!(self.totp_use_recovery(login, hash))
+    }
+
+    /// Replaces the recovery codes of an account that has a second factor. `false`: it has none.
+    pub fn totp_replace_recovery(
+        &self,
+        login: &str,
+        recovery: &[[u8; 32]],
+    ) -> Result<bool, String> {
+        backend!(self.totp_replace_recovery(login, recovery))
+    }
+
+    /// Turns the second factor off. `false`: the account had none.
+    pub fn totp_remove(&self, login: &str) -> Result<bool, String> {
+        backend!(self.totp_remove(login))
+    }
+
+    /// Removes the second factor of every account and the check value of the key, so that a new key can serve.
+    /// Returns the number of accounts.
+    pub fn totp_remove_all(&self) -> Result<usize, String> {
+        backend!(self.totp_remove_all())
+    }
+
+    /// Counts one failed attempt against an account that has a second factor. The answer is the end of the lock when
+    /// this failure locks the account. The count is in the database, so every instance adds to it.
+    pub fn totp_fail(
+        &self,
+        login: &str,
+        now: i64,
+        limits: TotpLimits,
+    ) -> Result<Option<i64>, String> {
+        backend!(self.totp_fail(login, now, limits))
     }
 
     // Shared sessions (PostgreSQL only) -------------------------------------------------------
@@ -945,6 +1080,7 @@ mod tests {
             superadmin,
             impersonated,
             remembered: false,
+            mfa: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             at,
@@ -2224,6 +2360,7 @@ mod tests {
             login: login.map(str::to_string),
             impersonated: false,
             remembered: false,
+            mfa: false,
             expires_at,
         }
     }
@@ -2235,6 +2372,7 @@ mod tests {
             superadmin: false,
             impersonated: false,
             remembered: false,
+            mfa: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             at,
@@ -2708,6 +2846,14 @@ mod tests {
         store.insert_user(&user("bob", &[])).unwrap();
         store.insert_user(&user("carol", &["viewer"])).unwrap();
         store.remove_user("bob").unwrap(); // a gap in the identifiers
+                                           // The second factor of a database account and of an account of the file, and the check of the key.
+        store.totp_bind_key(&[9; 32]).unwrap();
+        store
+            .totp_enable("alice", b"sealed-alice", &[[1; 32], [2; 32]], 5, NOW)
+            .unwrap();
+        store
+            .totp_enable("a-file-account", b"sealed-file", &[[3; 32]], 6, NOW)
+            .unwrap();
                                            // A key with a budget, a key of the superadmin and a revoked key (schema 6).
         let big = KeyCaps {
             max_per_user: 100,
@@ -2773,8 +2919,15 @@ mod tests {
                 logins: 2,
                 keys: 2,
                 key_history: 1,
+                totp: 2,
             }
         );
+        // The second factor comes with its recovery codes and the check of its key.
+        assert_eq!(target.totp_get("alice").unwrap(), source.totp_get("alice").unwrap());
+        assert_eq!(target.totp_get("alice").unwrap().unwrap().recovery_left, 2);
+        assert_eq!(target.totp_logins().unwrap(), ["a-file-account", "alice"]);
+        assert!(target.totp_bind_key(&[9; 32]).unwrap());
+        assert!(!target.totp_bind_key(&[8; 32]).unwrap());
         assert_eq!(target.load_users().unwrap(), source.load_users().unwrap());
         // The keys keep their digests, their grants and their owners. The import adds 1 to the
         // version of the directory, so the instances read it again.

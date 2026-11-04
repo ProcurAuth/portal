@@ -252,6 +252,12 @@ fn audit_label(kind: &str) -> &'static str {
         "impersonation_started" => "Signed in as the account",
         "impersonation_ended" => "Back to superadmin",
         "sessions_ended" => "All sessions ended",
+        "totp_enabled" => "Two-factor turned on",
+        "totp_disabled" => "Two-factor turned off",
+        "totp_reset" => "Two-factor reset",
+        "recovery_regenerated" => "Recovery codes renewed",
+        "recovery_used" => "Recovery code used",
+        "mfa_failed" => "Refused second factor",
         _ => "Event",
     }
 }

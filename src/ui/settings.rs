@@ -893,6 +893,9 @@ fn session_row(out: &mut String, session: &SessionRow) {
     if session.remembered {
         badges.push_str(r#" <span class="badge" title="Kept signed in">kept</span>"#);
     }
+    if session.mfa {
+        badges.push_str(r#" <span class="badge" title="Signed in with the second factor">2fa</span>"#);
+    }
     let _ = write!(
         out,
         r#"<tr><td>{}{}</td><td>{}</td><td title="{}">{}</td><td>{}</td><td>{}</td></tr>"#,
@@ -1918,6 +1921,7 @@ mod tests {
                 .into(),
             impersonated: false,
             remembered: false,
+            mfa: false,
         });
         alice.activity.services.push(crate::store::ServiceUse {
             service_id: "infra-grafana".into(),
@@ -2311,6 +2315,7 @@ mod tests {
                 user_agent: "x".into(),
                 impersonated: false,
                 remembered,
+                mfa: false,
             });
         }
         let html = user_page(&frame(), &user_view(&cat, alice));
@@ -2330,6 +2335,7 @@ mod tests {
             user_agent: "\"><img src=x onerror=1>".into(),
             impersonated: true,
             remembered: false,
+            mfa: false,
         });
         let html = user_page(&frame(), &user_view(&cat, user));
         assert!(!html.contains("<b>x</b>"));

@@ -14,6 +14,7 @@ use crate::grants::Grant;
 use crate::tracking::{AuditEvent, Batch, Event, LoginAttempt};
 
 mod keys;
+mod totp;
 
 const SCHEMA_VERSION: i64 = 8;
 
@@ -202,8 +203,36 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 
 /// Schema version 8: the history keeps whether a session had the remembered rule ("Keep me signed
 /// in"). A session of an older file is not remembered. With SQLite the live sessions are in memory.
+///
+/// The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
+/// users, so the base schema changed in place. A file that the version 8 made before the second factor lacks these
+/// objects: [`Sqlite::init`] refuses it. The column `mfa` tells that the sign-in used the second factor.
+/// `totp_credentials` holds one row for each account that has it, keyed by login: the accounts of the file have no
+/// row in `users`. The secret is sealed with the key of the configuration. `last_step` is the last accepted time step:
+/// a code of this step or an older step is refused. `failed`, `failed_since` and `locked_until` count the failed
+/// attempts. `totp_recovery` holds the keyed hashes of the recovery codes that nobody used. `totp_key_check` holds the
+/// check value of the key.
 const SESSION_REMEMBERED_SCHEMA: &str = "
 ALTER TABLE sessions_log ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions_log ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE totp_credentials (
+  login TEXT PRIMARY KEY,
+  secret BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_step INTEGER NOT NULL,
+  failed INTEGER NOT NULL DEFAULT 0,
+  failed_since INTEGER NOT NULL DEFAULT 0,
+  locked_until INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE totp_recovery (
+  login TEXT NOT NULL REFERENCES totp_credentials(login) ON DELETE CASCADE,
+  hash BLOB NOT NULL,
+  PRIMARY KEY (login, hash)
+);
+CREATE TABLE totp_key_check (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  value BLOB NOT NULL
+);
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -417,7 +446,17 @@ impl Sqlite {
                     .map_err(db)?;
                 tx.commit().map_err(db)?;
             }
-            SCHEMA_VERSION => {}
+            SCHEMA_VERSION => {
+                let sql = "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'
+                                      AND name IN ('totp_credentials', 'totp_recovery', 'totp_key_check'))
+                                + (SELECT COUNT(*) FROM pragma_table_info('sessions_log') WHERE name = 'mfa')";
+                let found: i64 = conn.query_row(sql, [], |row| row.get(0)).map_err(db)?;
+                if found != 4 {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column sessions_log.mfa by hand (see docs/login-hardening.md)"
+                    ));
+                }
+            }
             newer => {
                 return Err(format!(
                 "the database schema is version {newer}, this portal understands {SCHEMA_VERSION}"
@@ -492,6 +531,8 @@ impl Sqlite {
             Err(e) => return Err(InsertError::Db(db(e))),
         }
         let id = tx.last_insert_rowid();
+        // A row of the second factor that an older account of this login left behind must not pass to the new account.
+        totp::remove_rows(&tx, &user.login).map_err(|e| InsertError::Db(db(e)))?;
         insert_grants(&tx, id, &user.grants).map_err(|e| InsertError::Db(db(e)))?;
         keys::insert_counter_rows(&tx, keys::Subject::User(id), &user.grants)
             .map_err(|e| InsertError::Db(db(e)))?;
@@ -542,6 +583,7 @@ impl Sqlite {
         let changed = tx
             .execute("DELETE FROM users WHERE login = ?1", [login])
             .map_err(db)?;
+        totp::remove_rows(&tx, login).map_err(db)?;
         if changed > 0 {
             keys::bump(&tx).map_err(db)?;
         }
@@ -564,8 +606,8 @@ impl Sqlite {
                 Event::SessionStarted(start) => {
                     tx.execute(
                         "INSERT OR IGNORE INTO sessions_log
-                           (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+                           (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered, mfa)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
                         params![
                             start.sid as i64,
                             start.login,
@@ -574,7 +616,8 @@ impl Sqlite {
                             start.ip,
                             start.user_agent,
                             start.at,
-                            start.remembered
+                            start.remembered,
+                            start.mfa
                         ],
                     )
                     .map_err(db)?;
@@ -715,7 +758,7 @@ impl Sqlite {
             let days = day_stats(&conn, first_day, Some((login, *superadmin)))?;
             let recent = conn
                 .prepare(
-                    "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered
+                    "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered, mfa
                        FROM sessions_log WHERE login = ?1 AND superadmin = ?2
                       ORDER BY started_at DESC, sid DESC LIMIT ?3",
                 )
@@ -730,6 +773,7 @@ impl Sqlite {
                         user_agent: row.get(5)?,
                         impersonated: row.get(6)?,
                         remembered: row.get(7)?,
+                        mfa: row.get(8)?,
                     })
                 })
                 .map_err(db)?
@@ -875,6 +919,28 @@ fn day_stats(
     Ok(days)
 }
 
+/// Tells whether a table has a column. A file of an older version of the schema may lack it.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+        [table, column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(db)
+}
+
+/// Tells whether a file has a table.
+fn has_table(conn: &Connection, table: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(db)
+}
+
 impl Sqlite {
     /// Opens an existing file without changing it. The import uses this to read all data in the file.
     pub fn open_read_only(path: &Path) -> Result<Self, String> {
@@ -933,9 +999,11 @@ impl Sqlite {
         let sessions = conn
             .prepare(&format!(
                 "SELECT sid, login, superadmin, impersonated, ip, user_agent, started_at,
-                            last_seen_at, ended_at, end_reason, {}
+                            last_seen_at, ended_at, end_reason, {}, {}
                        FROM sessions_log ORDER BY started_at, sid",
-                if version >= 8 { "remembered" } else { "0" }
+                if version >= 8 { "remembered" } else { "0" },
+                // A file of version 8 can be older than the second factor: it has no column.
+                if has_column(conn, "sessions_log", "mfa")? { "mfa" } else { "0" }
             ))
             .map_err(db)?
             .query_map([], |row| {
@@ -951,6 +1019,7 @@ impl Sqlite {
                     ended_at: row.get(8)?,
                     end_reason: row.get(9)?,
                     remembered: row.get(10)?,
+                    mfa: row.get(11)?,
                 })
             })
             .map_err(db)?
@@ -1022,6 +1091,41 @@ impl Sqlite {
         } else {
             (Vec::new(), Vec::new())
         };
+        let (totp, totp_check) = if has_table(conn, "totp_credentials")? {
+            let mut rows = conn
+                .prepare("SELECT login, secret, created_at, last_step FROM totp_credentials ORDER BY login")
+                .map_err(db)?
+                .query_map([], |row| {
+                    Ok(TotpDump {
+                        login: row.get(0)?,
+                        sealed: row.get(1)?,
+                        created_at: row.get(2)?,
+                        last_step: row.get(3)?,
+                        recovery: Vec::new(),
+                    })
+                })
+                .map_err(db)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db)?;
+            for row in &mut rows {
+                row.recovery = conn
+                    .prepare("SELECT hash FROM totp_recovery WHERE login = ?1 ORDER BY hash")
+                    .map_err(db)?
+                    .query_map([&row.login], |r| r.get(0))
+                    .map_err(db)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(db)?;
+            }
+            let check = conn
+                .query_row("SELECT value FROM totp_key_check WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(db)?;
+            (rows, check)
+        } else {
+            (Vec::new(), None)
+        };
         Ok(Dump {
             users: with_grants,
             sessions,
@@ -1030,6 +1134,8 @@ impl Sqlite {
             logins,
             keys,
             key_history,
+            totp,
+            totp_check,
         })
     }
 }
@@ -1178,7 +1284,7 @@ mod tests {
         // This is the file of the portal before version 7: the column `kind` did not exist.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered;
+            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
              PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -1205,6 +1311,27 @@ mod tests {
     }
 
     #[test]
+    fn a_database_made_before_the_second_factor_is_refused_with_a_message_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("portal-v8-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        // The file of version 8 as it was before the second factor: no table and no column.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;",
+        )
+        .unwrap();
+        drop(conn);
+        let error = Sqlite::open(&path).err().expect("the file is refused");
+        assert!(
+            error.contains("before the second factor") && error.contains("totp_credentials"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_database_at_version_seven_gains_the_remembered_flag_of_the_history() {
         let dir = std::env::temp_dir().join(format!("portal-v7-remembered-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1214,7 +1341,7 @@ mod tests {
         // This is the file of the portal before version 8: the column did not exist. The file has one open session.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE sessions_log DROP COLUMN remembered;
+            "ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
              INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                VALUES (1, 'alice', 0, 0, 'ua', 10, 10);
              PRAGMA user_version = 7;",
@@ -1247,7 +1374,7 @@ mod tests {
             "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
              DROP TABLE keys; DROP TABLE directory_version;
              ALTER TABLE user_grants DROP COLUMN limits;
-             ALTER TABLE sessions_log DROP COLUMN remembered;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
              PRAGMA user_version = 5;",
         )
         .unwrap();

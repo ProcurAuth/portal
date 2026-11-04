@@ -72,6 +72,18 @@ pub enum AuditKind {
     ImpersonationEnded,
     /// The superadmin, or the command `portal end-sessions`, ended every session.
     SessionsEnded,
+    /// An account turned its second factor on.
+    TotpEnabled,
+    /// An account turned its second factor off.
+    TotpDisabled,
+    /// The superadmin, or the command `portal reset-two-factor`, removed the second factor of an account.
+    TotpReset,
+    /// An account made its recovery codes again.
+    RecoveryRegenerated,
+    /// An account signed in with a recovery code.
+    RecoveryUsed,
+    /// A second-factor code was wrong for an account that has a second factor.
+    MfaFailed,
 }
 
 impl AuditKind {
@@ -85,6 +97,12 @@ impl AuditKind {
             Self::ImpersonationStarted => "impersonation_started",
             Self::ImpersonationEnded => "impersonation_ended",
             Self::SessionsEnded => "sessions_ended",
+            Self::TotpEnabled => "totp_enabled",
+            Self::TotpDisabled => "totp_disabled",
+            Self::TotpReset => "totp_reset",
+            Self::RecoveryRegenerated => "recovery_regenerated",
+            Self::RecoveryUsed => "recovery_used",
+            Self::MfaFailed => "mfa_failed",
         }
     }
 }
@@ -97,6 +115,8 @@ pub struct SessionStart {
     pub impersonated: bool,
     /// The person asked "Keep me signed in" and the session got the remembered rule.
     pub remembered: bool,
+    /// The sign-in used the second factor.
+    pub mfa: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     pub at: i64,

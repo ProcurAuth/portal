@@ -23,6 +23,7 @@ use crate::grants::Grant;
 use crate::tracking::{unix_now, AuditEvent, Batch, EndReason, Event, LoginAttempt, SessionStart};
 
 mod keys;
+mod totp;
 
 /// How long the first connection is retried. A pod can start before its network is ready.
 /// The database can also be failing over.
@@ -248,8 +249,36 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 -- Version 8: the remembered sessions (\"Keep me signed in\"). A remembered session has a longer life
 -- and a longer idle time. The history row keeps the flag for the list of the sessions. A session
 -- that exists before this version is not remembered.
+-- The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
+-- users, so the base schema changed in place. A database that was made by the version 8 before the second factor
+-- lacks these objects: the check at the end of the migration refuses it. The column mfa of a session tells that
+-- the sign-in used the second factor. totp_credentials holds one row for each account that has it, keyed by
+-- login: the accounts of the file have no row in users. The secret is sealed with the key of the configuration.
+-- The last accepted time step, in the same row, refuses a code that was used. The counters of failures and the
+-- end of the lock are in the row too, so every instance sees them. totp_recovery holds the keyed hashes of the
+-- recovery codes that are not used. totp_key_check holds the check value of the key.
 ALTER TABLE sessions ADD COLUMN remembered BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE sessions_log ADD COLUMN remembered BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN mfa BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sessions_log ADD COLUMN mfa BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE totp_credentials (
+  login TEXT PRIMARY KEY,
+  secret BYTEA NOT NULL,
+  created_at BIGINT NOT NULL,
+  last_step BIGINT NOT NULL,
+  failed INTEGER NOT NULL DEFAULT 0,
+  failed_since BIGINT NOT NULL DEFAULT 0,
+  locked_until BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE totp_recovery (
+  login TEXT NOT NULL REFERENCES totp_credentials(login) ON DELETE CASCADE,
+  hash BYTEA NOT NULL,
+  PRIMARY KEY (login, hash)
+);
+CREATE TABLE totp_key_check (
+  id SMALLINT PRIMARY KEY CHECK (id = 1),
+  value BYTEA NOT NULL
+);
 ",
 ];
 
@@ -592,6 +621,28 @@ impl Pg {
                     &[&((index + 1) as i64), &unix_now()],
                 )?;
             }
+            // The second factor changed the version 8 in place (see the comment of that version). A database that
+            // the version 8 made before it lacks the objects: refuse it, so that the portal never runs on half a schema.
+            let complete: bool = tx
+                .query_one(
+                    "SELECT to_regclass('totp_credentials') IS NOT NULL
+                        AND to_regclass('totp_recovery') IS NOT NULL
+                        AND to_regclass('totp_key_check') IS NOT NULL
+                        AND EXISTS (SELECT 1 FROM information_schema.columns
+                                     WHERE table_schema = current_schema()
+                                       AND table_name = 'sessions_log' AND column_name = 'mfa')
+                        AND EXISTS (SELECT 1 FROM information_schema.columns
+                                     WHERE table_schema = current_schema()
+                                       AND table_name = 'sessions' AND column_name = 'mfa')",
+                    &[],
+                )?
+                .get(0);
+            if !complete {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column mfa of sessions and sessions_log by hand (see docs/login-hardening.md)",
+                    SCHEMA.len()
+                )));
+            }
             tx.commit()?;
             Ok(Ok(()))
         })?
@@ -676,6 +727,8 @@ impl Pg {
                 };
                 let id: i64 = row.get(0);
                 insert_grants(&mut tx, id, &user.grants)?;
+                // A row of the second factor that an older account of this login left behind must not pass to the new account.
+                totp::remove_rows(&mut tx, &user.login)?;
                 keys::insert_counter_rows(&mut tx, keys::Subject::User(id), &user.grants)?;
                 keys::bump(&mut tx)?;
                 tx.commit()?;
@@ -727,6 +780,7 @@ impl Pg {
             let mut tx = c.transaction()?;
             keys::bump(&mut tx)?;
             let removed = tx.execute("DELETE FROM users WHERE login = $1", &[&login])? > 0;
+            totp::remove_rows(&mut tx, login)?;
             if removed {
                 tx.commit()?;
             }
@@ -754,8 +808,8 @@ impl Pg {
                     Event::SessionStarted(start) => {
                         tx.execute(
                             "INSERT INTO sessions_log
-                               (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+                               (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered, mfa)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
                              ON CONFLICT (sid) DO NOTHING",
                             &[
                                 &(start.sid as i64),
@@ -766,6 +820,7 @@ impl Pg {
                                 &start.user_agent,
                                 &start.at,
                                 &start.remembered,
+                                &start.mfa,
                             ],
                         )?;
                     }
@@ -896,7 +951,7 @@ impl Pg {
                 let days = day_stats(c, first_day, Some((login, *superadmin)))?;
                 let recent = c
                     .query(
-                        "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered
+                        "SELECT started_at, last_seen_at, ended_at, end_reason, ip, user_agent, impersonated, remembered, mfa
                            FROM sessions_log WHERE login = $1 AND superadmin = $2
                           ORDER BY started_at DESC, sid DESC LIMIT $3",
                         &[login, superadmin, &RECENT_SESSIONS],
@@ -911,6 +966,7 @@ impl Pg {
                         user_agent: row.get(5),
                         impersonated: row.get(6),
                         remembered: row.get(7),
+                        mfa: row.get(8),
                     })
                     .collect();
                 let services = c
@@ -989,9 +1045,9 @@ impl Pg {
             let inserted = tx.execute(
                 "INSERT INTO sessions
                    (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at,
-                    admin_generation, remembered)
+                    admin_generation, remembered, mfa)
                  SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint,
-                        $9::bytea, $10::boolean
+                        $9::bytea, $10::boolean, $11::boolean
                   WHERE (SELECT COUNT(*) FROM sessions WHERE expires_at > $6) < $8",
                 &[
                     &digest.as_slice(),
@@ -1004,6 +1060,7 @@ impl Pg {
                     &(max_active as i64),
                     &generation.as_slice(),
                     &session.remembered,
+                    &session.mfa,
                 ],
             )?;
             if inserted == 0 {
@@ -1011,8 +1068,8 @@ impl Pg {
             }
             tx.execute(
                 "INSERT INTO sessions_log
-                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, remembered, mfa)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
                  ON CONFLICT (sid) DO NOTHING",
                 &[
                     &(start.sid as i64),
@@ -1023,6 +1080,7 @@ impl Pg {
                     &start.user_agent,
                     &start.at,
                     &start.remembered,
+                    &start.mfa,
                 ],
             )?;
             tx.commit()?;
@@ -1048,7 +1106,7 @@ impl Pg {
                   WHERE digest = $1 AND binding = $2 AND expires_at > $3
                     AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
                     AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)
-              RETURNING sid, login, impersonated, expires_at, remembered",
+              RETURNING sid, login, impersonated, expires_at, remembered, mfa",
                 &[
                     &digest.as_slice(),
                     &binding.as_slice(),
@@ -1073,7 +1131,7 @@ impl Pg {
     ) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
-                "SELECT sid, login, impersonated, expires_at, remembered FROM sessions
+                "SELECT sid, login, impersonated, expires_at, remembered, mfa FROM sessions
                   WHERE digest = $1 AND binding = $2 AND expires_at > $3
                     AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
                     AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)",
@@ -1115,7 +1173,7 @@ impl Pg {
         self.run(|c| {
             Ok(c.query_opt(
                 "DELETE FROM sessions WHERE digest = $1
-                 RETURNING sid, login, impersonated, expires_at, remembered",
+                 RETURNING sid, login, impersonated, expires_at, remembered, mfa",
                 &[&digest.as_slice()],
             )?
             .map(shared_session))
@@ -1180,7 +1238,8 @@ impl Pg {
             let mut tx = c.transaction()?;
             tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
             tx.batch_execute(
-                "LOCK TABLE users, user_grants, sessions_log, service_access, audit_events, login_attempts
+                "LOCK TABLE users, user_grants, sessions_log, service_access, audit_events, login_attempts,
+                            totp_credentials, totp_recovery, totp_key_check
                    IN ACCESS EXCLUSIVE MODE",
             )?;
             for table in IMPORTED_TABLES {
@@ -1256,8 +1315,8 @@ impl Pg {
             keys::bump(&mut tx)?;
             let session = tx.prepare(
                 "INSERT INTO sessions_log
-                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason, remembered)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                   (sid, login, superadmin, impersonated, ip, user_agent, started_at, last_seen_at, ended_at, end_reason, remembered, mfa)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )?;
             for row in &dump.sessions {
                 let open = row.ended_at.is_none();
@@ -1280,6 +1339,7 @@ impl Pg {
                         &ended_at,
                         &end_reason,
                         &row.remembered,
+                        &row.mfa,
                     ],
                 )?;
             }
@@ -1301,6 +1361,25 @@ impl Pg {
                 tx.execute(
                     &audit,
                     &[&row.id, &row.ts, &row.kind, &row.login, &row.actor, &row.ip, &row.user_agent],
+                )?;
+            }
+            for row in &dump.totp {
+                tx.execute(
+                    "INSERT INTO totp_credentials (login, secret, created_at, last_step)
+                     VALUES ($1, $2, $3, $4)",
+                    &[&row.login, &row.sealed, &row.created_at, &row.last_step],
+                )?;
+                for hash in &row.recovery {
+                    tx.execute(
+                        "INSERT INTO totp_recovery (login, hash) VALUES ($1, $2)",
+                        &[&row.login, hash],
+                    )?;
+                }
+            }
+            if let Some(check) = &dump.totp_check {
+                tx.execute(
+                    "INSERT INTO totp_key_check (id, value) VALUES (1, $1)",
+                    &[check],
                 )?;
             }
             let login = tx.prepare(
@@ -1337,6 +1416,7 @@ impl Pg {
                 logins: dump.logins.len(),
                 keys: dump.keys.len(),
                 key_history: dump.key_history.len(),
+                totp: dump.totp.len(),
             }))
         })?
     }
@@ -1406,7 +1486,8 @@ impl Pg {
 }
 
 /// The tables that the import fills. All of them must be empty.
-const IMPORTED_TABLES: [&str; 7] = [
+const IMPORTED_TABLES: [&str; 8] = [
+    "totp_credentials",
     "keys",
     "key_history",
     "users",
@@ -1423,6 +1504,7 @@ fn shared_session(row: postgres::Row) -> SharedSession {
         impersonated: row.get(2),
         expires_at: row.get(3),
         remembered: row.get(4),
+        mfa: row.get(5),
     }
 }
 
@@ -1588,7 +1670,7 @@ mod tests {
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
                  DROP TABLE keys; DROP TABLE directory_version;
                  ALTER TABLE user_grants DROP COLUMN limits;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
             )
@@ -1666,6 +1748,34 @@ mod tests {
     }
 
     #[test]
+    fn a_database_made_before_the_second_factor_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // The database of version 8 as it was before the second factor: no table and no column, and version 8 is recorded.
+        admin
+            .batch_execute(
+                "ALTER TABLE sessions DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN mfa;
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;",
+            )
+            .unwrap();
+        drop(fresh);
+        let error = Pg::start(config, 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(
+            error.contains("before the second factor") && error.contains("totp_credentials"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn the_migration_to_version_eight_adds_the_remembered_flag_and_the_old_sessions_are_not_remembered(
     ) {
         use crate::store::testing::{postgres, Backend};
@@ -1680,8 +1790,9 @@ mod tests {
         // This database was made by the portal before version 8: the columns did not exist. A session is open.
         admin
             .batch_execute(&format!(
-                "ALTER TABLE sessions DROP COLUMN remembered;
-                 ALTER TABLE sessions_log DROP COLUMN remembered;
+                "ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa;
+                 ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 7;
                  INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
                    VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10);
@@ -1727,7 +1838,7 @@ mod tests {
                  INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )
             .unwrap();
@@ -1761,7 +1872,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1816,7 +1927,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1872,7 +1983,7 @@ mod tests {
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -1915,7 +2026,7 @@ mod tests {
         admin
             .batch_execute(&format!(
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN remembered;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (

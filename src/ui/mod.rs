@@ -752,6 +752,7 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> Accounts<'a> {
                     user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0".into(),
                     impersonated: false,
                     remembered: false,
+                    mfa: false,
                 },
                 SessionRow {
                     started_at: now - 90_000,
@@ -762,6 +763,7 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> Accounts<'a> {
                     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1".into(),
                     impersonated: false,
                     remembered: false,
+                    mfa: false,
                 },
             ],
             services: vec![

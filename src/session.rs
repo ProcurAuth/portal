@@ -61,6 +61,9 @@ pub struct Session {
     /// The person asked "Keep me signed in" at the sign-in. The session has the longer life and the longer
     /// idle time of `session.remember_ttl` and `session.remember_idle_timeout`.
     pub remembered: bool,
+    /// The sign-in used the second factor. A session that "Log in as" opens never has it: the session of the
+    /// superadmin is the one that counts.
+    pub mfa: bool,
     /// The absolute end of the session, in Unix time.
     pub expires_at: i64,
 }
@@ -75,6 +78,8 @@ pub struct NewSession {
     /// The person asked "Keep me signed in". The store ignores the request when `session.remember` is
     /// `false`, and for an impersonated session: such a session always has the short rule.
     pub remember: bool,
+    /// The sign-in used the second factor. The store ignores the flag for an impersonated session.
+    pub mfa: bool,
     pub ip: Option<String>,
     pub user_agent: String,
     /// The latest end of the new session, in Unix time. A switch of session ("Log in as",
@@ -139,6 +144,11 @@ impl SessionStore {
     /// Whether a new session gets the remembered rule.
     fn is_remembered(&self, new: &NewSession) -> bool {
         new.remember && !new.impersonated && self.remember.is_some()
+    }
+
+    /// Whether a new session records the second factor. An impersonated session records none.
+    fn has_mfa(new: &NewSession) -> bool {
+        new.mfa && !new.impersonated
     }
 
     /// The life of a session of the rule that `remembered` selects.
@@ -227,6 +237,7 @@ impl SessionStore {
         }
         let now_unix = unix_now();
         let remembered = self.is_remembered(&new);
+        let mfa = Self::has_mfa(&new);
         let expires_unix = self.expiry(now_unix, new.not_after, remembered);
         let lifetime = self.lifetime(now_unix, new.not_after, remembered);
         let now = Instant::now();
@@ -260,6 +271,7 @@ impl SessionStore {
                 principal: new.principal.clone(),
                 impersonated: new.impersonated,
                 remembered,
+                mfa,
                 expires_at: expires_unix,
             };
             self.tracker.emit(Event::SessionStarted(SessionStart {
@@ -268,6 +280,7 @@ impl SessionStore {
                 superadmin: new.principal == Principal::Superadmin,
                 impersonated: new.impersonated,
                 remembered,
+                mfa,
                 ip: new.ip,
                 user_agent: new.user_agent,
                 at: unix_now(),
@@ -433,12 +446,14 @@ impl SessionStore {
 
         let now = unix_now();
         let remembered = self.is_remembered(&new);
+        let mfa = Self::has_mfa(&new);
         let expires_at = self.expiry(now, new.not_after, remembered);
         let session = Session {
             sid: u64::from_be_bytes(sid),
             principal: new.principal.clone(),
             impersonated: new.impersonated,
             remembered,
+            mfa,
             expires_at,
         };
         let stored = SharedSession {
@@ -449,6 +464,7 @@ impl SessionStore {
             },
             impersonated: new.impersonated,
             remembered,
+            mfa,
             expires_at,
         };
         // The history row is written with the session. Therefore, no instance meets a session without a history row.
@@ -458,6 +474,7 @@ impl SessionStore {
             superadmin: new.principal == Principal::Superadmin,
             impersonated: new.impersonated,
             remembered,
+            mfa,
             ip: new.ip,
             user_agent: new.user_agent,
             at: now,
@@ -718,6 +735,7 @@ fn session_of(stored: SharedSession) -> Session {
         },
         impersonated: stored.impersonated,
         remembered: stored.remembered,
+        mfa: stored.mfa,
         expires_at: stored.expires_at,
     }
 }
@@ -762,6 +780,7 @@ mod tests {
             login: login.into(),
             impersonated: false,
             remember: false,
+            mfa: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             not_after: None,
@@ -796,6 +815,7 @@ mod tests {
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
+                mfa: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -918,6 +938,7 @@ mod tests {
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
+                mfa: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -1190,6 +1211,7 @@ mod shared_tests {
             login: login.into(),
             impersonated: false,
             remember: false,
+            mfa: false,
             ip: Some("10.0.0.2".into()),
             user_agent: "Browser/1.0".into(),
             not_after: None,
@@ -1237,6 +1259,7 @@ mod shared_tests {
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
+                mfa: false,
                     ip: None,
                     user_agent: String::new(),
                     not_after: None,
@@ -1419,6 +1442,7 @@ mod shared_tests {
                 login: "root".into(),
                 impersonated: false,
                 remember: false,
+                mfa: false,
                 ip: None,
                 user_agent: String::new(),
                 not_after: None,
@@ -1426,6 +1450,7 @@ mod shared_tests {
             Some(login) => NewSession {
                 impersonated: true,
                 remember: false,
+                mfa: false,
                 ..user(login)
             },
         }
