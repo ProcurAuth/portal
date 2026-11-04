@@ -174,22 +174,9 @@ fn start(store: Arc<Store>, cache_ttl: Option<Duration>) -> Node {
     start_with(store, cache_ttl, "")
 }
 
-/// A free local port. A port that this function gave once is never given again, so two servers of
-/// a test never get the same port when the first one has not bound it yet.
+/// A free local port. The ports of all the tests of the process come from one list: see `util::test_ports`.
 fn free_port() -> u16 {
-    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
-    loop {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let mut given = GIVEN.lock().unwrap();
-        if !given.contains(&port) {
-            given.push(port);
-            return port;
-        }
-    }
+    crate::util::test_ports::free()
 }
 
 /// A node with more configuration. The `extra` text is added to the file.
@@ -2656,7 +2643,7 @@ fn publish_tree(node: &Node) {
 /// A service that lists options. It answers `GET /.well-known/procurauth/resources`: the databases
 /// of the host `prod` and a 404 for the rest. It records each request line and its headers.
 fn options_service() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::util::test_ports::listener();
     let port = listener.local_addr().unwrap().port();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);

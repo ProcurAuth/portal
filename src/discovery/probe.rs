@@ -32,11 +32,10 @@ pub async fn http(client: &reqwest::Client, url: &str) -> Health {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
 
     /// Serves one canned response per connection on a loopback port.
     fn serve(status_line: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = crate::util::test_ports::listener();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for stream in listener.incoming().take(4) {
@@ -73,13 +72,7 @@ mod tests {
             assert_eq!(runtime.block_on(http(&client, &url)), expected, "{status}");
         }
         // A port that no process listens on.
-        let closed = {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            format!(
-                "http://127.0.0.1:{}/",
-                listener.local_addr().unwrap().port()
-            )
-        };
+        let closed = { format!("http://127.0.0.1:{}/", crate::util::test_ports::free()) };
         assert_eq!(runtime.block_on(http(&client, &closed)), Health::Down);
     }
 }

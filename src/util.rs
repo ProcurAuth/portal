@@ -455,6 +455,53 @@ pub fn blocking<T>(work: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Local ports for the tests. All the tests of a process get their ports here. The ports that were given stay
+/// registered, also after the listener is gone. Two tests therefore never meet on one port: a test that binds a
+/// listener on port 0 can no longer take the port that another test freed and has not bound yet.
+#[cfg(test)]
+pub mod test_ports {
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+
+    static GIVEN: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+    /// The sockets that hold the ports of `free` for the whole life of the process.
+    static HOLDERS: Mutex<Vec<tokio::net::TcpSocket>> = Mutex::new(Vec::new());
+
+    /// A listener on a new local port. The caller keeps it as long as it needs the port.
+    pub fn listener() -> TcpListener {
+        loop {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let mut given = GIVEN.lock().unwrap_or_else(|p| p.into_inner());
+            if !given.contains(&port) {
+                given.push(port);
+                return listener;
+            }
+        }
+    }
+
+    /// A free local port for a server that binds it later. A socket that does not listen holds the port, with
+    /// `SO_REUSEADDR` as the server has. The server binds the port without error. A client socket, which has no
+    /// `SO_REUSEADDR`, never takes the port in the meantime, neither with an explicit bind nor with a connect.
+    pub fn free() -> u16 {
+        loop {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_reuseaddr(true).unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let port = socket.local_addr().unwrap().port();
+            let mut given = GIVEN.lock().unwrap_or_else(|p| p.into_inner());
+            if !given.contains(&port) {
+                given.push(port);
+                HOLDERS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(socket);
+                return port;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -700,5 +747,27 @@ mod tests {
         assert_eq!(short_agent("curl/8.5.0"), "curl 8");
         assert_eq!(short_agent(""), "unknown");
         assert_eq!(short_agent(&"x".repeat(100)).len(), 40);
+    }
+
+    #[test]
+    fn a_free_test_port_stays_ours_until_the_server_binds_it() {
+        let port = test_ports::free();
+        // A client socket cannot take the port, and a connect finds nobody.
+        let client = tokio::net::TcpSocket::new_v4().unwrap();
+        assert!(client.bind(([127, 0, 0, 1], port).into()).is_err());
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        // A listener with the options of the server binds it.
+        let server = tokio::net::TcpSocket::new_v4().unwrap();
+        server.set_reuseaddr(true).unwrap();
+        server.bind(([127, 0, 0, 1], port).into()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let _listener = server.listen(8).unwrap();
+        // The next port is another one, also for a listener on port 0.
+        assert_ne!(test_ports::free(), port);
+        assert_ne!(test_ports::listener().local_addr().unwrap().port(), port);
     }
 }
