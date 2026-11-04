@@ -8127,7 +8127,13 @@ fn a_refusal_shows_the_message_as_a_strip_after_the_button_and_the_normal_page_h
     let form_end = page.find("</form>").unwrap();
     assert!(page[..form_end].contains("type=\"submit\""), "{page}");
     assert!(form_end < strip, "{page}");
-    assert!(page[strip..].contains("Invalid login or password</span></p>"));
+    // The variation of the page can wrap the span in an inert element: the canonical form has none.
+    let canonical = node.state.mask.canonical(&page);
+    let canonical_strip = canonical.find("role=\"alert\"").unwrap();
+    assert!(
+        canonical[canonical_strip..].contains("Invalid login or password</span></p>"),
+        "{canonical}"
+    );
     // Both fields point to the strip with the mapped identifier, and the identifier exists.
     let id = node.state.mask.name("signin-msg");
     assert!(Mask::names_in_page(&page, true).contains(&id), "{page}");
