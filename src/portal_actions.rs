@@ -506,7 +506,7 @@ mod tests {
     fn inbox_config() -> InboxConfig {
         let raw = r#"
             server { listen_address = "0.0.0.0:4181" trusted_proxies = [] }
-            authentication { superadmin_login_env = "L" superadmin_password_env = "P" }
+            authentication { superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }
             inbox {
               server_key_env = "K"
               devices {

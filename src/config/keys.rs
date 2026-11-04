@@ -74,6 +74,8 @@ pub enum When {
     SecretProvided,
     /// `session.remember` is `true`.
     RememberOn,
+    /// `authentication.mfa` is `optional` or `required`.
+    MfaOn,
     /// The block `identity` is present.
     IdentityBlock,
     /// The block `pdp` is present.
@@ -103,6 +105,7 @@ impl When {
             When::MetricsOn => "metrics.enabled is false",
             When::SecretProvided => "session.secret_mode is ephemeral",
             When::RememberOn => "session.remember is false",
+            When::MfaOn => "authentication.mfa is \"off\"",
         }
     }
 
@@ -128,6 +131,7 @@ impl When {
             When::MetricsOn => "Applies only when `metrics.enabled` is `true`.",
             When::SecretProvided => "Applies only when `session.secret_mode` is `provided`.",
             When::RememberOn => "Applies only when `session.remember` is `true`.",
+            When::MfaOn => "Applies only when `authentication.mfa` is `optional` or `required`.",
         }
     }
 }
@@ -202,7 +206,7 @@ const DAY: u64 = 86_400;
 /// The blocks of the file, in the order of the reference. Each block holds the keys of the table.
 pub const BLOCKS: &[(&str, &str)] = &[
     ("server", "The HTTP server."),
-    ("authentication", "The superadmin: the one account that is not in the database."),
+    ("authentication", "The superadmin: the one account that is not in the database. The second factor of the sign-in."),
     ("users", "The accounts in the database."),
     (
         "access",
@@ -377,6 +381,22 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Required,
         when: When::Always,
         doc: "The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions.",
+    },
+    Key {
+        block: "authentication",
+        name: "mfa",
+        kind: Kind::Enum(&["off", "optional", "required"]),
+        presence: Presence::Default("optional"),
+        when: When::Always,
+        doc: "The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal shows no second-factor page and never asks for a code. `optional`: each account chooses to turn it on. `required`: each account, the superadmin included, must enrol after the password step, and the session starts only after the second factor. No separate switch exists for the superadmin. Under `optional`, the superadmin signs in with the password only, so scripts that sign in keep working. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`.",
+    },
+    Key {
+        block: "authentication",
+        name: "totp_key",
+        kind: Kind::Secret { max_bytes: 128 },
+        presence: Presence::Required,
+        when: When::MfaOn,
+        doc: "The key that encrypts the TOTP secrets in the database (AES-256-GCM). It has 64 hexadecimal characters, which are 32 random bytes. Make it with `openssl rand -hex 32`. All instances use the same key. At start, the server compares the key with a check value in the database. A key that does not match stops the server, and no secret changes. The server never replaces a secret under another key. To use a new key, run `portal reset-two-factor --all` first.",
     },
     Key {
         block: "users",

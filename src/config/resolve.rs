@@ -265,6 +265,9 @@ impl Resolved {
                 .text("session", "secret_mode")
                 .is_ok_and(|mode| mode == "provided"),
             When::RememberOn => self.bool("session", "remember").unwrap_or(false),
+            When::MfaOn => self
+                .text("authentication", "mfa")
+                .is_ok_and(|policy| policy != "off"),
             When::IdentityBlock => self.has_block("identity"),
             When::PdpBlock => self.has_block("pdp"),
             When::KeysBlock => self.has_block("keys"),
@@ -698,8 +701,14 @@ fn read_secret(
     }
     let (bytes, source) = match (from_env, from_file) {
         (None, None) => {
+            // The key of the second factor is required by a policy, not by the table alone: say which one.
+            let why = if key.when == When::MfaOn {
+                "; authentication.mfa is not \"off\" (\"optional\" is its default), so the TOTP secrets need this key (expected 64 hexadecimal characters); or set authentication.mfa = \"off\""
+            } else {
+                ""
+            };
             return Err(format!(
-                "missing required configuration key: give exactly one of {path}_env (the name of an environment variable) or {path}_file (an absolute path)"
+                "missing required configuration key: give exactly one of {path}_env (the name of an environment variable) or {path}_file (an absolute path){why}"
             ));
         }
         (Some(_), Some(_)) => {

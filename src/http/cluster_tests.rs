@@ -5908,7 +5908,7 @@ fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database
     let identity = crate::identity::testing::new_key_pem();
     let text = format!(
         r#"server {{ listen_address = "127.0.0.1:{}" trusted_proxies = [] }}
-        authentication {{ superadmin_login_env = "PORTAL_TEST_LOGIN" superadmin_password_env = "PORTAL_TEST_PASSWORD" }}
+        authentication {{ superadmin_login_env = "PORTAL_TEST_LOGIN" superadmin_password_env = "PORTAL_TEST_PASSWORD" mfa = "off" }}
         session {{ secret_mode = "provided" secret_env = "PORTAL_TEST_SESSION" }}
         access {{ grants_mode = "hybrid" }}
         identity {{ issuer = "i" signing_key_env = "IDENTITY" }}

@@ -260,7 +260,7 @@ mod tests {
         let tokens = tokens.map(str::to_string);
         let raw = r#"
             server { listen_address = "0.0.0.0:4181" trusted_proxies = [] }
-            authentication { superadmin_login_env = "L" superadmin_password_env = "P" }
+            authentication { superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }
             access { grants_mode = "static" }
             users { allow_creation = false }
             keys { mcp = false api = true }

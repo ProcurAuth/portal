@@ -11,6 +11,7 @@ const VARS: &[(&str, &str)] = &[
     ("PDP_DB", "a token of the server db, at least 32 bytes"),
     ("PDP_CHAT", "a token of the server chat, at least 32 bytes"),
     ("SHORT", "too short"),
+    ("PORTAL_TOTP_KEY", TOTP_KEY),
     (
         "IDENTITY_KEY",
         "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g",
@@ -23,14 +24,21 @@ const MINIMAL: &str = r#"
     authentication {
       superadmin_login_env    = "PORTAL_LOGIN"
       superadmin_password_env = "PORTAL_PASSWORD"
+      totp_key_env            = "PORTAL_TOTP_KEY"
     }
 "#;
 
+/// The key of the second factor that the tests give to every set of variables. A test of this key sets its own.
+const TOTP_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
 fn parse_with(raw: &str, vars: &[(&str, &str)]) -> Result<(Config, Secrets), String> {
-    let vars: Vec<(String, String)> = vars
+    let mut vars: Vec<(String, String)> = vars
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
+    if !vars.iter().any(|(k, _)| k == "PORTAL_TOTP_KEY") {
+        vars.push(("PORTAL_TOTP_KEY".into(), TOTP_KEY.into()));
+    }
     Config::parse(raw, &move |name| {
         vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
     })
@@ -230,7 +238,7 @@ fn a_secret_comes_from_a_variable_or_from_a_file_and_the_file_loses_one_line_end
     let password = temp_file(b"pass word\r\n");
     let raw = format!(
         r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
-        authentication {{ superadmin_login_file = "{}" superadmin_password_file = "{}" }}"#,
+        authentication {{ superadmin_login_file = "{}" superadmin_password_file = "{}" totp_key_env = "PORTAL_TOTP_KEY" }}"#,
         login.display(),
         password.display()
     );
@@ -268,12 +276,12 @@ fn all_four_secrets_accept_both_forms() {
     for form in &forms {
         let (_, secrets) = ok(&format!(
             r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
-            authentication {{ superadmin_login_{form} superadmin_password_env = "PORTAL_PASSWORD" }}"#
+            authentication {{ superadmin_login_{form} superadmin_password_env = "PORTAL_PASSWORD" totp_key_env = "PORTAL_TOTP_KEY" }}"#
         ));
         assert_eq!(secrets.superadmin_login, "0123456789abcdef0123456789abcdef");
         let (_, secrets) = ok(&format!(
             r#"server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
-            authentication {{ superadmin_login_env = "PORTAL_LOGIN" superadmin_password_{form} }}"#
+            authentication {{ superadmin_login_env = "PORTAL_LOGIN" superadmin_password_{form} totp_key_env = "PORTAL_TOTP_KEY" }}"#
         ));
         assert_eq!(secrets.superadmin_password.len(), 32);
         let (_, secrets) = ok(&with(&format!(
@@ -3162,4 +3170,111 @@ fn a_block_key_of_an_account_of_the_file_holds_an_mcp_key_only() {
     );
     let message = parse_keys(&raw, &vars).err().unwrap();
     assert!(message.contains("keys.mcp = true"), "{message}");
+}
+
+// The second factor: `authentication.mfa` and `authentication.totp_key`.
+
+#[test]
+fn the_second_factor_is_optional_by_default_and_needs_its_key() {
+    let (cfg, secrets) = ok(MINIMAL);
+    assert_eq!(cfg.authentication.mfa, MfaPolicy::Optional);
+    assert_eq!(line(&cfg, "authentication.mfa").source, "default");
+    assert_eq!(line(&cfg, "authentication.mfa").value, "\"optional\"");
+    assert_eq!(secrets.totp_key.as_ref().unwrap().len(), 64);
+    // The key is in the effective configuration with its source, and its value is hidden.
+    let key = line(&cfg, "authentication.totp_key");
+    assert_eq!(key.source, "env:PORTAL_TOTP_KEY");
+    assert_eq!(key.value, "<hidden>");
+    assert!(!cfg.render_effective().contains(TOTP_KEY));
+    for (value, policy) in [
+        ("off", MfaPolicy::Off),
+        ("optional", MfaPolicy::Optional),
+        ("required", MfaPolicy::Required),
+    ] {
+        let mut raw = MINIMAL.replace(
+            "authentication {",
+            &format!(r#"authentication {{ mfa = "{value}""#),
+        );
+        if value == "off" {
+            // The key does not apply with `off`.
+            raw = raw.replace(r#"totp_key_env            = "PORTAL_TOTP_KEY""#, "");
+        }
+        assert_eq!(ok(&raw).0.authentication.mfa, policy, "{value}");
+    }
+}
+
+#[test]
+fn a_policy_that_is_not_off_without_a_key_stops_the_start_and_says_why() {
+    let no_key = MINIMAL.replace(r#"totp_key_env            = "PORTAL_TOTP_KEY""#, "");
+    for policy in ["", r#"mfa = "optional""#, r#"mfa = "required""#] {
+        let raw = no_key.replace("authentication {", &format!("authentication {{ {policy}"));
+        let message = err(&raw);
+        assert!(
+            message.contains("authentication.totp_key_env")
+                && message.contains("authentication.totp_key_file")
+                && message.contains("authentication.mfa"),
+            "{policy:?}: {message}"
+        );
+        assert!(message.contains(r#"authentication.mfa = "off""#), "{message}");
+    }
+    // With `off`, the key is not needed, and it must not be written: the two keys contradict.
+    let off = no_key.replace("authentication {", r#"authentication { mfa = "off""#);
+    let (cfg, secrets) = ok(&off);
+    assert_eq!(cfg.authentication.mfa, MfaPolicy::Off);
+    assert!(secrets.totp_key.is_none());
+    assert!(cfg
+        .effective
+        .iter()
+        .all(|l| l.key != "authentication.totp_key"));
+    let both = MINIMAL.replace("authentication {", r#"authentication { mfa = "off""#);
+    let message = err(&both);
+    assert!(
+        message.contains("authentication.totp_key_env and authentication.totp_key_file must not be set")
+            && message.contains(r#"authentication.mfa is "off""#),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_key_of_the_second_factor_is_checked_at_start_and_never_shown() {
+    let bad = |value: &str| {
+        let message = parse_with(MINIMAL, &[("PORTAL_LOGIN", "admin"), ("PORTAL_PASSWORD", "a password for the tests"), ("PORTAL_TOTP_KEY", value)])
+            .err()
+            .unwrap_or_else(|| panic!("{value:?} must be refused"));
+        assert!(message.contains("authentication.totp_key"), "{message}");
+        assert!(message.contains("env:PORTAL_TOTP_KEY"), "{message}");
+        assert!(
+            !message.contains(value) || value.is_empty(),
+            "the value stays out of the error: {message}"
+        );
+        message
+    };
+    assert!(bad("0011").contains("expected 64 hexadecimal characters"));
+    assert!(bad(&"zz".repeat(32)).contains("not hexadecimal"));
+    assert!(bad(&"ab".repeat(32)).contains("all bytes"));
+    assert!(bad(&format!("{TOTP_KEY}00")).contains("66 characters"));
+    // A key from a file loses its last line end, as every secret.
+    let file = temp_file(format!("{TOTP_KEY}\n").as_bytes());
+    let raw = MINIMAL.replace(
+        r#"totp_key_env            = "PORTAL_TOTP_KEY""#,
+        &format!(r#"totp_key_file = "{}""#, file.display()),
+    );
+    let (cfg, _) = ok(&raw);
+    assert_eq!(
+        line(&cfg, "authentication.totp_key").source,
+        format!("file:{}", file.display())
+    );
+    fs::remove_file(file).ok();
+    // The key is never in clear in the file, and the other values are closed.
+    let clear = MINIMAL.replace(
+        r#"totp_key_env            = "PORTAL_TOTP_KEY""#,
+        &format!(r#"totp_key = "{TOTP_KEY}""#),
+    );
+    assert!(err(&clear).contains("must not be written in the file"));
+    let wrong = MINIMAL.replace("authentication {", r#"authentication { mfa = "always""#);
+    let message = err(&wrong);
+    assert!(
+        message.contains("authentication.mfa") && message.contains("\"off\", \"optional\", \"required\""),
+        "{message}"
+    );
 }

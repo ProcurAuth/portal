@@ -31,6 +31,7 @@ use resolve::{Env, Resolved};
 
 pub struct Config {
     pub server: ServerConfig,
+    pub authentication: AuthenticationConfig,
     pub session: SessionConfig,
     pub security: SecurityConfig,
     pub metrics: MetricsConfig,
@@ -61,6 +62,8 @@ pub struct Secrets {
     /// The login of the superadmin, exactly as the file or the variable gives it.
     pub superadmin_login: String,
     pub superadmin_password: Secret,
+    /// The key of the TOTP secrets. `None` when `authentication.mfa` is `off`.
+    pub totp_key: Option<Secret>,
     /// The signing key. `None` when `session.secret_mode` is `ephemeral`.
     pub session_secret: Option<Secret>,
     /// `None` when the file has no `postgres` block. The password is valid UTF-8.
@@ -265,6 +268,30 @@ pub struct Remember {
     pub ttl: Duration,
     /// A remembered session unused for this long ends, even before `ttl`.
     pub idle_timeout: Duration,
+}
+
+/// The policy of the second factor (`authentication.mfa`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MfaPolicy {
+    /// The portal never asks for a code and shows no page of the second factor.
+    Off,
+    /// Each account chooses to turn the second factor on.
+    Optional,
+    /// Each account must have the second factor. The sign-in of an account without it ends in the page of the
+    /// enrolment.
+    Required,
+}
+
+impl MfaPolicy {
+    pub fn is_on(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// The block `authentication`, without the secrets.
+#[derive(Clone, Debug)]
+pub struct AuthenticationConfig {
+    pub mfa: MfaPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -555,6 +582,13 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
                 .collect::<Result<_, _>>()
                 .map_err(|e| format!("internal error: server.trusted_proxies: {e}"))?,
         },
+        authentication: AuthenticationConfig {
+            mfa: match r.text("authentication", "mfa")?.as_str() {
+                "off" => MfaPolicy::Off,
+                "optional" => MfaPolicy::Optional,
+                _ => MfaPolicy::Required,
+            },
+        },
         session: SessionConfig {
             cookie_name: r.text("session", "cookie_name")?,
             ttl,
@@ -729,6 +763,16 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
         ));
     }
 
+    let totp_key = r.take_secret("authentication", "totp_key");
+    if let Some(key) = &totp_key {
+        crate::secretbox::SecretBox::parse_key(key.as_bytes()).map_err(|reason| {
+            format!(
+                "authentication.totp_key: {reason} ({}; the value is hidden)",
+                source_of(r, "authentication.totp_key")
+            )
+        })?;
+    }
+
     let session_secret = r.take_secret("session", "secret");
     if let Some(secret) = &session_secret {
         if secret.len() < 32 {
@@ -761,6 +805,7 @@ fn build_secrets(r: &mut Resolved) -> Result<Secrets, String> {
     Ok(Secrets {
         superadmin_login,
         superadmin_password,
+        totp_key,
         session_secret,
         postgres_password,
         identity_key,

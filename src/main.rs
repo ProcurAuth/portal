@@ -482,6 +482,7 @@ mod tests {
                 authentication {{
                   superadmin_login_env    = "T_LOGIN"
                   superadmin_password_env = "T_PASSWORD"
+                  mfa                     = "off"
                 }}
                 session {{ secret_mode = "provided" secret_env = "T_SESSION" }}
                 {storage}

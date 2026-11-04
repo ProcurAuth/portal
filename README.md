@@ -1162,12 +1162,14 @@ The HTTP server.
 
 #### Block `authentication`
 
-The superadmin: the one account that is not in the database.
+The superadmin: the one account that is not in the database. The second factor of the sign-in.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `superadmin_login` | secret: give `superadmin_login_env` (a variable name) or `superadmin_login_file` (an absolute path), not both | required | The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of keys. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. |
 | `superadmin_password` | secret: give `superadmin_password_env` (a variable name) or `superadmin_password_file` (an absolute path), not both | required | The password of the superadmin. At start, the server hashes it with Argon2id and erases it from memory. It has at most `security.max_password_bytes` bytes. The server refuses the example values of `.env.example` and of the README. A new password ends the sessions of the superadmin and the impersonated sessions. |
+| `mfa` | `off`, `optional`, `required` | `"optional"` | The second factor of the sign-in: a TOTP code from an authenticator app (RFC 6238). `off`: the portal shows no second-factor page and never asks for a code. `optional`: each account chooses to turn it on. `required`: each account, the superadmin included, must enrol after the password step, and the session starts only after the second factor. No separate switch exists for the superadmin. Under `optional`, the superadmin signs in with the password only, so scripts that sign in keep working. A value other than `off` needs `authentication.totp_key_env` or `authentication.totp_key_file`. |
+| `totp_key` | secret: give `totp_key_env` (a variable name) or `totp_key_file` (an absolute path), not both | required | The key that encrypts the TOTP secrets in the database (AES-256-GCM). It has 64 hexadecimal characters, which are 32 random bytes. Make it with `openssl rand -hex 32`. All instances use the same key. At start, the server compares the key with a check value in the database. A key that does not match stops the server, and no secret changes. The server never replaces a secret under another key. To use a new key, run `portal reset-two-factor --all` first. Applies only when `authentication.mfa` is `optional` or `required`. |
 
 #### Block `users`
 
