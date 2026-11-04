@@ -1128,7 +1128,11 @@ fn handle_denied(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
 }
 
 /// The login URL. After authentication, it returns the browser to `original_uri`.
+/// The home page is the return address of a login without a destination: the URL has no parameter then.
 fn login_location(state: &AppState, original_uri: &str) -> Result<String, ()> {
+    if original_uri == HOME_PATH {
+        return Ok(LOGIN_PATH.to_string());
+    }
     let signature = sign_return_uri(&state.signing_secret, original_uri).map_err(|_| ())?;
     Ok(format!(
         "{LOGIN_PATH}?rd={}&sig={}",

@@ -3619,6 +3619,33 @@ fn a_key_that_is_unknown_revoked_expired_too_old_or_without_an_owner_right_is_an
 }
 
 #[test]
+fn the_home_page_without_a_session_goes_to_the_login_with_no_parameter() {
+    each_backend(|backend| {
+        let (node, _) = cluster(backend, None);
+        let home = send(node.port, "GET", "/", &[], "");
+        assert_eq!(home.status, 302, "{}", home.body);
+        assert_eq!(home.location(), Some(LOGIN_PATH));
+        // Any other address keeps its signed destination.
+        let behind = send(
+            node.port,
+            "GET",
+            VERIFY_PATH,
+            &[("X-Forwarded-Uri", "/app/"), ("X-Forwarded-Method", "GET")],
+            "",
+        );
+        let location = behind.location().expect("a redirect").to_string();
+        assert!(
+            location.starts_with(&format!("{LOGIN_PATH}?rd=%2Fapp%2F&sig=")),
+            "{location}"
+        );
+        // The login page without a parameter returns to the home page, with its own signature.
+        let page = send(node.port, "GET", LOGIN_PATH, &[], "");
+        assert_eq!(page.status, 200, "{}", page.body);
+        assert!(page.body.contains(r#"name="rd""#));
+    });
+}
+
+#[test]
 fn a_key_of_the_superadmin_has_only_its_own_grants_and_its_own_counters() {
     each_backend(|backend| {
         let (node, port) = key_node(backend);
