@@ -7867,6 +7867,166 @@ fn an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusa
     assert_eq!(metric(&node, "portal_login_form_check_failures_total"), 6);
 }
 
+/// The body of a sign-in post that goes to `rd` (already signed, as the server signs it).
+fn login_body_to(node: &Node, csrf: &str, rd: &str, login: &str, password: &str) -> String {
+    let token = form_token_issued(node, csrf, 5_000);
+    let signature = sign_return_uri(&node.state.signing_secret, rd).unwrap();
+    format!(
+        "login={login}&password={password}&csrf={csrf}&rd={}&sig={signature}&{FORM_TOKEN_FIELD}={token}&{TRAP_FIELD}=",
+        percent_encode_query_component(rd)
+    )
+}
+
+/// The page of `GET /auth/login` for the return target `rd` with the signature of the server. `headers` are
+/// the headers that a proxy adds.
+fn login_page_for(node: &Node, rd: &str, headers: &[(&str, &str)]) -> Reply {
+    let signature = sign_return_uri(&node.state.signing_secret, rd).unwrap();
+    let path = format!(
+        "{LOGIN_PATH}?rd={}&sig={}",
+        percent_encode_query_component(rd),
+        percent_encode_query_component(&signature)
+    );
+    send(node.port, "GET", &path, headers, "")
+}
+
+#[test]
+fn the_band_of_the_sign_in_page_shows_the_destination_only_when_there_is_one() {
+    let node = sign_in_node("");
+    // No destination: the page has no band, no "Launcher" and no placeholder.
+    let plain = send(node.port, "GET", LOGIN_PATH, &[], "").body;
+    assert!(Mask::has_element(&plain, "h1", &[]), "{plain}");
+    assert!(!plain.contains("Launcher"), "{plain}");
+    assert!(!plain.contains("To </span>"), "no band: {plain}");
+    let direct = login_page_for(&node, "/", &[]).body;
+    assert!(!direct.contains("To </span>"), "{direct}");
+    // A destination with a good signature: the band shows the host and the path, without the query.
+    let page = login_page_for(
+        &node,
+        "/chdash/x?a=1",
+        &[("X-Forwarded-Host", "app.example.com")],
+    )
+    .body;
+    assert!(page.contains("To </span>"), "{page}");
+    assert!(page.contains(">app.example.com</span>"), "{page}");
+    assert!(page.contains(">/chdash/x</b>"), "{page}");
+    assert!(!page.contains(">/chdash/x?a=1</b>"), "{page}");
+    // Without a forwarded host, the Host header gives the host.
+    let page = login_page_for(&node, "/chdash/", &[]).body;
+    assert!(
+        page.contains(&format!(">127.0.0.1:{}</span>", node.port)),
+        "{page}"
+    );
+    // A destination with a bad signature is the default: no band.
+    let path = format!("{LOGIN_PATH}?rd=%2Fchdash%2F&sig=AAAA");
+    let forged = send(node.port, "GET", &path, &[], "").body;
+    assert!(!forged.contains("To </span>"), "{forged}");
+    assert!(!forged.contains("chdash"), "{forged}");
+    // A host that is not a host is not in the page.
+    let page = login_page_for(&node, "/chdash/", &[("X-Forwarded-Host", "a\"><script>x")]).body;
+    assert!(!page.contains("<script>x"), "{page}");
+    assert!(page.contains(">/chdash/</b>"), "{page}");
+}
+
+#[test]
+fn an_address_with_markup_stays_text_in_the_band() {
+    let node = sign_in_node("");
+    for rd in [
+        "/\"><script>alert(1)</script>",
+        "/javascript:alert(1)",
+        "/a<img src=x onerror=alert(1)>",
+    ] {
+        let page = login_page_for(&node, rd, &[("X-Forwarded-Host", "app.example.com")]).body;
+        assert!(page.contains("To </span>"), "{rd}");
+        assert!(!page.contains("<script>alert"), "{rd}: {page}");
+        assert!(!page.contains("<img src=x"), "{rd}: {page}");
+        assert!(!page.contains("<a "), "{rd}: {page}");
+    }
+    let page = login_page_for(&node, "/javascript:alert(1)", &[]).body;
+    assert!(page.contains(">/javascript:alert(1)</b>"), "{page}");
+}
+
+#[test]
+fn a_refusal_with_a_destination_has_the_same_band_for_each_cause() {
+    let node = sign_in_node("");
+    let csrf = "G".repeat(32);
+    let rd = "/chdash/";
+    let cases = [
+        ("unknown login", "nobody", "x-wrong-password"),
+        (
+            "wrong password of the superadmin",
+            "root",
+            "x-wrong-password",
+        ),
+        ("wrong password of an account", "alice", "x-wrong-password"),
+    ];
+    let mut replies = Vec::new();
+    for (index, (name, login, password)) in cases.iter().enumerate() {
+        let body = login_body_to(&node, &csrf, rd, login, password);
+        let reply = post_login(&node, &format!("127.0.5.{}", index + 1), &csrf, &body);
+        assert_eq!(reply.status, 401, "{name}: {}", reply.body);
+        assert!(reply.body.contains("To </span>"), "{name}: the band stays");
+        assert!(reply.body.contains(">/chdash/</b>"), "{name}");
+        replies.push((name, reply));
+    }
+    // The wrong code of a login that is not in the list changes nothing: the band depends on `rd`.
+    let first = &replies[0].1;
+    for (name, reply) in &replies {
+        assert_eq!(
+            without_random(&node, &reply.body),
+            without_random(&node, &first.body),
+            "{name}"
+        );
+        assert_eq!(shape_of(reply), shape_of(first), "{name}");
+    }
+}
+
+#[test]
+fn the_sign_in_page_has_the_hidden_heading_the_hidden_button_and_no_plain_class() {
+    let node = sign_in_node("");
+    for rd in ["/", "/chdash/"] {
+        let page = login_page_for(&node, rd, &[]).body;
+        assert!(page.contains("<title>Authentication</title>"), "{page}");
+        assert_eq!(page.matches("<h1").count(), 1, "{page}");
+        assert!(page.contains(">Authentication</h1>"), "{page}");
+        // The button that shows the password is in the page with the attribute `hidden`.
+        let hook = format!("data-{}", node.state.mask.name("data-reveal"));
+        let at = page.find(&hook).expect("the button has the mapped hook");
+        let tag = &page[page[..at].rfind('<').unwrap()..at + page[at..].find('>').unwrap()];
+        assert!(tag.starts_with("<button"), "{tag}");
+        assert!(tag.split_whitespace().any(|part| part == "hidden"), "{tag}");
+        assert!(!page.contains("data-reveal"), "{page}");
+        for plain in [
+            "signin",
+            "authShell",
+            "card",
+            "visually-hidden",
+            "reveal",
+            "keep",
+        ] {
+            assert!(
+                !Mask::names_in_page(&page, false).iter().any(|n| n == plain),
+                "{plain} is a class of the page"
+            );
+        }
+        assert!(
+            !page.contains("style=") && !page.contains("<script>"),
+            "{page}"
+        );
+        for name in [
+            "login",
+            "password",
+            "csrf",
+            "rd",
+            "sig",
+            FORM_TOKEN_FIELD,
+            TRAP_FIELD,
+            KEEP_FIELD,
+        ] {
+            assert!(page.contains(&format!("name=\"{name}\"")), "{name}");
+        }
+    }
+}
+
 #[test]
 fn a_good_sign_in_still_works_with_the_form_token() {
     let node = sign_in_node("");
