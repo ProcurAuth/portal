@@ -1,6 +1,6 @@
 // Checks the sign-in page and the card of the second step in a real browser: the band with the destination (only with a
-// redirect), the floating labels, the button that shows the password, the message line, the targets, the contrast, the
-// position of the card, and a real sign-in, a refused one, one with the box "Keep me signed in", and the second step.
+// redirect), the floating labels, the button that shows the password, the strip of the message, the targets, the contrast, the
+// position of the card, and a real sign-in, a refused one, one with the box "Remember me", and the second step.
 // It runs at 1280 and 390 px (and the widths 320 and 1920 for the layout), in the dark and the light scheme, with and
 // without script. Run it with tools/dev/ui-check.sh and UI_CHECK_SCRIPT=ui-check-login.js.
 //
@@ -158,7 +158,9 @@ function inspect(page) {
     const keep = form.querySelector("input[name=keep]");
     if (keep) {
       const l = keep.labels[0];
-      out.keep = { text: l.textContent.trim(), box: box(keep), labelBox: box(l), border: getComputedStyle(keep).borderTopColor, checked: keep.checked };
+      const lb = l.getBoundingClientRect();
+      const cb = card.getBoundingClientRect();
+      out.keep = { text: l.textContent.trim(), title: l.title, described: (document.getElementById(keep.getAttribute("aria-describedby")) || {}).textContent || "", centre: Math.round(((lb.left + lb.right) / 2 - (cb.left + cb.right) / 2) * 10) / 10, box: box(keep), labelBox: box(l), border: getComputedStyle(keep).borderTopColor, checked: keep.checked };
       out.contrasts.push(["keep text", ratio(getComputedStyle(l).color, panel), 4.5]);
       out.contrasts.push(["keep box", ratio(getComputedStyle(keep).borderTopColor, panel), 3]);
     }
@@ -166,7 +168,28 @@ function inspect(page) {
     const live = document.querySelector("[aria-live]");
     const msg = alert || live;
     out.msg = msg ? { text: msg.textContent.trim(), role: msg.getAttribute("role"), live: msg.getAttribute("aria-live"), box: box(msg), color: getComputedStyle(msg).color } : null;
-    if (alert) out.contrasts.push(["error text", ratio(getComputedStyle(alert).color, panel), 4.5]);
+    out.alerts = document.querySelectorAll("[role=alert]").length;
+    out.lives = document.querySelectorAll("[aria-live]").length;
+    if (alert) {
+      // The strip: its box in the card, the order after the button, and the text on its tinted background.
+      const cs = getComputedStyle(alert);
+      const bg = parse(cs.backgroundColor);
+      const p = parse(panel);
+      const a = bg.length > 3 ? bg[3] : 1;
+      const flat = [0, 1, 2].map((n) => Math.round(bg[n] * a + p[n] * (1 - a)));
+      const lastButton = Array.from(document.querySelectorAll("main button[type=submit]")).filter((b) => b.checkVisibility())[0];
+      out.strip = {
+        height: Math.round(alert.getBoundingClientRect().height * 10) / 10,
+        fullWidth: Math.abs(alert.getBoundingClientRect().width - (card.getBoundingClientRect().width - 2)) <= 1,
+        bottomFlush: Math.abs(card.getBoundingClientRect().bottom - 1 - alert.getBoundingClientRect().bottom) <= 1,
+        afterButton: !!(lastButton.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING),
+        fontSize: cs.fontSize,
+        fontFamily: cs.fontFamily,
+        icon: !!alert.querySelector("svg"),
+      };
+      out.contrasts.push(["error text on the strip", ratio(cs.color, "rgb(" + flat.join(",") + ")"), 4.5]);
+    }
+    out.fieldTop = out.fields.length ? out.fields[0].box.y : null;
     out.buttons = Array.from(document.querySelectorAll("main button[type=submit]"))
       .filter((b) => b.checkVisibility())
       .map((b) => {
@@ -241,8 +264,9 @@ async function main() {
           check("password: current-password and its label (" + name + ")", pw.autocomplete === "current-password" && pw.label === "Password", JSON.stringify(pw));
           check("fields are at least 24 px high and the underline is 1 px (" + name + ")", i.fields.every((f) => f.box.h >= 24 && f.underlineWidth === "1px"), JSON.stringify(i.fields.map((f) => f.box)));
           check("the button is full width and at least " + (width < 600 ? 44 : 24) + " px high (" + name + ")", i.buttons[0].width === i.buttons[0].formWidth && i.buttons[0].box.h >= (width < 600 ? 44 : 24), JSON.stringify(i.buttons));
-          check("the box has its label and 24 px (" + name + ")", i.keep.text === "Keep me signed in for 30 days" && i.keep.labelBox.h >= (width < 600 ? 44 : 24) && !i.keep.checked, JSON.stringify(i.keep));
-          check("the message line has its place and is quiet (" + name + ")", i.msg && i.msg.text === "" && i.msg.live === "polite" && i.msg.box.h >= 16, JSON.stringify(i.msg));
+          check("the box has its label and 24 px (" + name + ")", i.keep.text === "Remember me" && i.keep.title === i.keep.described && /30 days/.test(i.keep.title) && i.keep.labelBox.h >= (width < 600 ? 44 : 24) && !i.keep.checked, JSON.stringify(i.keep));
+          check("the row of the box is in the middle of the card (" + name + ")", Math.abs(i.keep.centre) <= 1, String(i.keep.centre));
+          check("a normal page has no strip, no alert and no empty live line (" + name + ")", i.msg === null && i.alerts === 0 && i.lives === 0, JSON.stringify([i.msg, i.alerts, i.lives]));
           // The eye: only with script.
           if (script) {
             check("the eye shows with script and is 24 px at least (" + name + ")", i.eye && !i.eye.hidden && i.eye.display !== "none" && i.eye.box.w >= (width < 600 ? 44 : 24) && i.eye.box.h >= (width < 600 ? 44 : 24), JSON.stringify(i.eye));
@@ -309,7 +333,9 @@ async function main() {
           await Promise.all([page.waitForNavigation(), page.click("button[type=submit]")]);
           const after = await inspect(page);
           check("a refusal: the message, role alert, both fields marked (" + name + ")", after.msg && after.msg.text === "Invalid login or password" && after.msg.role === "alert" && after.fields.every((f) => f.invalid === "true"), JSON.stringify([after.msg, after.fields.map((f) => f.invalid)]));
-          check("a refusal: the card keeps its size and its place (" + name + ")", JSON.stringify(before.card) === JSON.stringify(after.card), JSON.stringify([before.card, after.card]));
+          check("a refusal: the strip is 32 px, full width, at the bottom edge, after the button, with an icon, in the type of the band (" + name + ")", after.alerts === 1 && after.strip.height === 32 && after.strip.fullWidth && after.strip.bottomFlush && after.strip.afterButton && after.strip.icon && after.strip.fontSize === "12px" && /mono|Mono|Courier/.test(after.strip.fontFamily), JSON.stringify(after.strip));
+          check("a refusal: the card grows by the strip and the fields do not move more than 16 px (" + name + ")", after.card.h === before.card.h + 32 && Math.abs(after.fieldTop - before.fieldTop) <= 16, JSON.stringify([before.card, after.card, before.fieldTop, after.fieldTop]));
+          console.log("      field shift on a refusal (" + name + "): " + (after.fieldTop - before.fieldTop) + " px");
           check("a refusal: the band is the same (" + name + ")", JSON.stringify(before.band && before.band.text) === JSON.stringify(after.band && after.band.text), JSON.stringify([before.band, after.band]));
           check("a refusal: the field marked invalid has a red line, the text reads 4.5:1 (" + name + ")", after.contrasts.every(([, got, want]) => got >= want), JSON.stringify(after.contrasts));
           check("a refusal: the sign-in stays at the login page, the target is kept", page.url().includes("/auth/login"), page.url());
@@ -320,7 +346,7 @@ async function main() {
     }
   }
 
-  // 4. A real sign-in, with a redirect and without, and with the box "Keep me signed in".
+  // 4. A real sign-in, with a redirect and without, and with the box "Remember me".
   for (const [redirect, keep] of [[true, false], [false, false], [false, true]]) {
     const { context, page } = await open(browser, "dark", 1280, true);
     await page.goto(redirect ? await signedLogin(context, DEST) : BASE + "/auth/login");
@@ -389,7 +415,8 @@ async function main() {
             await Promise.all([second.page.waitForNavigation(), second.page.click("button[type=submit]")]);
             const after = await inspect(second.page);
             check("code step: a wrong code shows the message and marks the field (" + name + ")", after.msg && after.msg.text === "Invalid code" && after.msg.role === "alert" && after.fields[0].invalid === "true", JSON.stringify(after.msg));
-            check("code step: the card keeps its size (" + name + ")", before.card.h === after.card.h, JSON.stringify([before.card, after.card]));
+            check("code step: the strip is the last part of the card and the fields do not move more than 16 px (" + name + ")", after.strip && after.strip.height === 32 && after.strip.afterButton && after.strip.bottomFlush && after.card.h === before.card.h + 32 && Math.abs(after.fieldTop - before.fieldTop) <= 16, JSON.stringify([before.card, after.card, before.fieldTop, after.fieldTop, after.strip]));
+            console.log("      field shift on a wrong code (" + name + "): " + (after.fieldTop - before.fieldTop) + " px");
             await shot(second.page, "code-error-" + name);
             await second.page.click("summary");
             await shot(second.page, "code-recovery-" + name);

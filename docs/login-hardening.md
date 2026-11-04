@@ -14,7 +14,7 @@ Five measures protect or hide the page. Two of them are real protections. Three 
 
 Obscurity does not stop an attacker who reads the page. It only removes the easy marks. Do not count on items 2, 4 and 5 for security. The limiters and Argon2 stay the protection against password guessing.
 
-None of the five measures adds a configuration key. No new key means no new default to document. The box "Keep me signed in" is not a measure of this page, and it has its own keys: see "The box Keep me signed in" at the end of this file. The second factor is not a measure of this page either: see "The second step".
+None of the five measures adds a configuration key. No new key means no new default to document. The box "Remember me" is not a measure of this page, and it has its own keys: see "The box Remember me" at the end of this file. The second factor is not a measure of this page either: see "The second step".
 
 ## 1. Anti-enumeration
 
@@ -188,14 +188,16 @@ Not done:
 - No per-render change of the class names. A name that changes at each render cannot go into a file that the browser keeps. The structure changes at each render. The names do not.
 - No change to the pages of the settings.
 
-## The box "Keep me signed in"
+## The box "Remember me"
 
 The form has a box with the field name `keep`. The value of a ticked box is `1`. The box is a part of the form for the anti-enumeration and the anti-bot checks. These rules apply:
 
 - The server reads the field with the other fields, before it checks for an unknown field. The box never makes the form invalid. Only the value `1` counts as ticked. Any other value is the same as no field.
 - A failed check of the form and a wrong password give the same answer, with the box ticked or not. The box changes only the session that a good sign-in opens. It does not change a refusal.
 - The page after a refusal never shows the box ticked. The answer to a refusal therefore does not depend on what the client sent. The login and the password are not shown again either.
-- The box has no identifier and no script. The label holds the box, and its class goes through the mask like all other classes of the page. The mask never wraps a label that holds a field.
+- The box has no script. The label holds the box, and its class goes through the mask like all other classes of the page. The mask never wraps a label that holds a field.
+- The words of the label are "Remember me". The life of the session is not in the label. It is in the `title` of the label and in a hidden text, for example "Stay signed in for 30 days". The box points to the hidden text with `aria-describedby`. The identifier goes through the mask like all other identifiers.
+- The row of the box is one group, in the middle of the card. It is as wide as the group, so a click beside the group does not tick the box.
 - With `session.remember = false`, the page has no box. The server still reads the field and ignores its value.
 - The name `keep` is a common word. It does not name the product.
 
@@ -205,7 +207,7 @@ With `authentication.mfa` other than `off`, an account can have a second factor 
 
 - **Step 1 does not change.** A wrong password, an unknown login and a failed check of the form give the same answer. An account with a second factor and an account without give the same refusal. The test `a_wrong_password_looks_the_same_for_an_account_with_and_without_a_second_factor` compares the canonical form and the headers.
 - **Step 2 is for a person who knows the password.** When the password is right and the account has a second factor, the answer is a card with a field for the code. A person who sees this card learns that the account has a second factor. This is accepted: the person has the password. A person without the password never reaches the card.
-- **The state is a token.** The hidden field `pending` holds a token that the server signs. It holds the account, the box "Keep me signed in", the count of wrong codes and the time. It is bound to the client binding and to the anti-CSRF token. It lives 5 minutes. Any instance with the session secret can check it. A damaged, old or foreign token gives the page "The page was open too long", with status 403.
+- **The state is a token.** The hidden field `pending` holds a token that the server signs. It holds the account, the box "Remember me", the count of wrong codes and the time. It is bound to the client binding and to the anti-CSRF token. It lives 5 minutes. Any instance with the session secret can check it. A damaged, old or foreign token gives the page "The page was open too long", with status 403.
 - **The routes.** `POST /auth/login/code` and `POST /auth/login/enrol`. The `Origin` check, the content type, the limit of the bodies read at the same time and the size of the body are the checks of the first step. ForwardAuth lets both paths pass without a session, as it does for `/auth/login`.
 - **The cards go through the pass of the names.** Their classes and identifiers are mapped like the classes of the sign-in card. They have no inline script and no inline style. A test checks that no plain class name is in the page. The copy button of the recovery codes finds its field from its place in the box, not from an identifier, so that the mapping does not break it.
 - **Counters.** A wrong code counts in the database row of the account (5 in 10 minutes lock the second step for 5 minutes), and in the limiter of the address with the key `mfa:<address>`. The limits of the address are the keys `security.login_attempts_per_ip`, `security.login_window` and `security.login_lockout`. The metric `portal_login_attempts_total{result="mfa_failure"}` counts the wrong codes. They add to the refused sign-ins that the alerts of the portal read. The log line `login_failed` has `reason=mfa`.
@@ -219,11 +221,12 @@ The sign-in page and the card of the second step have one look: a flat card, 320
 - **The band.** A solid band at the top of the card shows the host and the path that the visitor asked for. The portal derives them from the signed `rd` of the page and from the host of the request (`X-Forwarded-Host`, or `Host`). The band does not show the query. It shows a path of 96 characters at most, and the stylesheet cuts what does not fit. The band is plain text. It never has a link, whatever `rd` holds. The code drops the control characters and the characters that change the order of text. The code escapes the rest.
 - **No destination, no band.** When `rd` is the default `/`, the card has no band and starts with the fields. A page that has a band and a page that has none look the same in all other parts.
 - **The band does not leak.** The band depends on `rd` and on the host of the request. It does not depend on the login, on the password or on the cause of a refusal. The test `a_refusal_with_a_destination_has_the_same_band_for_each_cause` compares the refused pages. The host of the request is not secret: it is the host that the visitor typed.
-- **The message line.** The card always has the line of the message, empty or not. A refusal fills it and does not move the card. A refused sign-in marks the two fields as invalid. A limit or an expired form does not mark them.
+- **The strip of the message.** A message is a strip at the bottom edge of the card, under the button. The strip has the height (32 px), the width, the layout and the type of the band, in the colour of danger. The card clips it with its radius. The page has the strip only when it has a message: there is no empty place for it. A long message wraps, and the strip grows by whole lines. The strip is the last part of the card, after the button, and has `role="alert"`. A refused sign-in marks the two fields as invalid. A limit or an expired form does not mark them. Every cause of a refusal gives the same strip.
+- **The place of the fields.** A card with a strip is higher than a card without one. The card has a top margin of 32 px for that case, so the fields stay at the same place in the window when a refusal gives the page again. A message of two lines moves the fields up by 8 px.
 - **The floating label.** The label is a real `<label for>`. It floats with `:focus`, `:placeholder-shown` and the autofill states. No script is needed. A browser that does not know `:has()` keeps the label floated, so the label never covers the text.
 - **The button that shows the password.** The page has the button with the attribute `hidden`. The shared script shows it, and it changes the type of the field. Without script, there is no button. The script finds the button by a data attribute that the pass maps.
 - **The title and the heading.** The title is always `Authentication`. A heading that is hidden from the eye names the page: `Authentication` for the password step and `Verification` for the second step.
-- **The check in a browser.** `tools/dev/ui-check-login.js` checks the band, the labels, the button, the message line, the targets, the contrast and the position of the card. It also signs in, with and without a destination, and it checks the second step. See the header of the file.
+- **The check in a browser.** `tools/dev/ui-check-login.js` checks the band, the labels, the button, the strip of the message, the targets, the contrast and the position of the card. It also signs in, with and without a destination, and it checks the second step. See the header of the file.
 - **Other cards do not change.** The 404, the denied page, the success page and the forced enrolment keep the card `card`. None of the new rules applies to them.
 
 ## Operation notes

@@ -58,7 +58,7 @@ pub struct Session {
     pub principal: Principal,
     /// The superadmin browses as this user. This is not a connection of the user.
     pub impersonated: bool,
-    /// The person asked "Keep me signed in" at the sign-in. The session has the longer life and the longer
+    /// The person asked "Remember me" at the sign-in. The session has the longer life and the longer
     /// idle time of `session.remember_ttl` and `session.remember_idle_timeout`.
     pub remembered: bool,
     /// The sign-in used the second factor. A session that "Log in as" opens never has it: the session of the
@@ -75,7 +75,7 @@ pub struct NewSession {
     /// The login shown in the history. For the superadmin, this is the superadmin's own login.
     pub login: String,
     pub impersonated: bool,
-    /// The person asked "Keep me signed in". The store ignores the request when `session.remember` is
+    /// The person asked "Remember me". The store ignores the request when `session.remember` is
     /// `false`, and for an impersonated session: such a session always has the short rule.
     pub remember: bool,
     /// The sign-in used the second factor. The store ignores the flag for an impersonated session.

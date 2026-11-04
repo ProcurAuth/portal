@@ -10,6 +10,10 @@
 //! `:placeholder-shown`, `:focus` and the autofill states. No script is needed. The button that shows the
 //! password is in the page with the attribute `hidden`: the shared script shows it.
 //!
+//! A message (a refusal, a limit, a wrong code) is a strip at the bottom edge of the card, under the button. It has the
+//! height and the look of the band, in the colour of danger. The strip exists in the page only when there is a
+//! message: a card without a message has no empty place for it.
+//!
 //! The pages go through the pass of [`super::mask`]. The classes below are in the shared stylesheet.
 
 use super::sign_in_document;
@@ -20,8 +24,10 @@ pub const INVALID_CREDENTIALS: &str = "Invalid login or password";
 
 /// The id of the hidden heading. The form takes its name from it.
 const TITLE_ID: &str = "signin-title";
-/// The id of the line of the message. A field that the message concerns points to it.
+/// The id of the strip of the message. A field that the message concerns points to it.
 const MESSAGE_ID: &str = "signin-msg";
+/// The id of the hidden text that gives the life of a remembered session to the box.
+const KEEP_ID: &str = "signin-keep";
 
 /// The longest path (in characters) that the band shows. The stylesheet cuts what does not fit.
 const MAX_PATH_CHARS: usize = 96;
@@ -103,16 +109,15 @@ fn invalid_attributes(invalid: bool) -> &'static str {
     }
 }
 
-/// The line of the message. It always takes its place in the card, so the card does not move when a message
-/// appears.
+/// The strip of the message. It is empty when there is no message: the card then has no strip and no empty
+/// place. The page has the strip after the button, at the bottom edge of the card.
 fn message(text: Option<&str>) -> String {
-    match text {
-        Some(text) => format!(
+    text.map_or_else(String::new, |text| {
+        format!(
             r##"<p class="signin__msg" id="{MESSAGE_ID}" role="alert"><svg class="signin__mi" aria-hidden="true" focusable="false"><use href="#i-alert-triangle"/></svg><span>{}</span></p>"##,
             html_escape(text),
-        ),
-        None => format!(r#"<p class="signin__msg" id="{MESSAGE_ID}" aria-live="polite"></p>"#),
-    }
+        )
+    })
 }
 
 /// The button that shows and hides the password. The page has it hidden: the script shows it.
@@ -122,10 +127,11 @@ fn reveal(target: &str) -> String {
     )
 }
 
-/// The card, with its hidden heading and its band. `form` is the markup that follows.
-fn card(title: &str, host: Option<&str>, rd: &str, form: &str) -> String {
+/// The card, with its hidden heading and its band. `form` is the markup that follows. `strip` is the strip of the
+/// message: it is the last part of the card.
+fn card(title: &str, host: Option<&str>, rd: &str, form: &str, strip: &str) -> String {
     format!(
-        r#"<h1 class="visually-hidden" id="{TITLE_ID}">{title}</h1>{}{form}"#,
+        r#"<h1 class="visually-hidden" id="{TITLE_ID}">{title}</h1>{}{form}{strip}"#,
         band(host, rd)
     )
 }
@@ -148,7 +154,7 @@ pub struct Login<'a> {
     pub form_token: &'a str,
     /// The host that the visitor asked for. `None` when the request gave no usable host.
     pub host: Option<&'a str>,
-    /// A sentence for the message line, for example [`INVALID_CREDENTIALS`].
+    /// A sentence for the strip of the message, for example [`INVALID_CREDENTIALS`].
     pub error: Option<&'a str>,
     pub max_password_bytes: usize,
     /// The words of the life of a remembered session. `None`: the form has no box.
@@ -169,16 +175,17 @@ pub struct LoginNames {
 pub fn login_page(l: &Login) -> String {
     let invalid = l.error == Some(INVALID_CREDENTIALS);
     let marks = invalid_attributes(invalid);
+    // The words "Remember me" are the label. The life of the session is in the title of the row and in a hidden text
+    // that describes the box. The hidden text is not a part of the label, so it is not a part of the name of the box.
     let keep = l.keep_for.map_or_else(String::new, |words| {
+        let life = format!("Stay signed in for {}", html_escape(words));
         format!(
-            r#"<label class="signin__check"><input type="checkbox" name="{}" value="{}">Keep me signed in for {}</label>"#,
-            l.names.keep,
-            l.names.keep_value,
-            html_escape(words)
+            r#"<label class="signin__check" title="{life}"><input type="checkbox" name="{}" value="{}" aria-describedby="{KEEP_ID}">Remember me</label><span class="visually-hidden" id="{KEEP_ID}">{life}</span>"#,
+            l.names.keep, l.names.keep_value,
         )
     });
     let form = format!(
-        r#"<form class="{}" method="post" action="/auth/login" autocomplete="on" aria-labelledby="{TITLE_ID}"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{}" value="{}">{}{}{}{keep}<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="signin__btn" type="submit">Continue</button></form>"#,
+        r#"<form class="{}" method="post" action="/auth/login" autocomplete="on" aria-labelledby="{TITLE_ID}"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{}" value="{}">{}{}{keep}<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="signin__btn" type="submit">Continue</button></form>"#,
         form_class(l.rd),
         html_escape(l.csrf),
         html_escape(l.rd),
@@ -204,10 +211,14 @@ pub fn login_page(l: &Login) -> String {
             " signin__field--pw",
             &reveal("password"),
         ),
-        message(l.error),
         l.names.trap,
     );
-    sign_in_document(&card("Authentication", l.host, l.rd, &form), &ICONS)
+    let strip = message(l.error);
+    sign_in_document(
+        &card("Authentication", l.host, l.rd, &form, &strip),
+        &ICONS,
+        l.error.is_some(),
+    )
 }
 
 /// What the card of the second step needs. The fields are those of [`super::mfa::Fields`].
@@ -228,7 +239,7 @@ pub struct Code<'a> {
 pub fn code_page(c: &Code) -> String {
     let marks = invalid_attributes(c.error == Some(c.invalid));
     let form = format!(
-        r#"<form class="{} signin__form--head" method="post" action="{}" autocomplete="off" aria-labelledby="{TITLE_ID}">{}{}{}<button class="signin__btn" type="submit">Continue</button></form><details class="signin__alt"><summary class="signin__sum">Use a recovery code</summary><form class="signin__recovery" method="post" action="{}" autocomplete="off">{}{}<button class="signin__btn signin__btn--sec" type="submit">Continue</button></form></details>"#,
+        r#"<form class="{} signin__form--head" method="post" action="{}" autocomplete="off" aria-labelledby="{TITLE_ID}">{}{}<button class="signin__btn" type="submit">Continue</button></form><details class="signin__alt"><summary class="signin__sum">Use a recovery code</summary><form class="signin__recovery" method="post" action="{}" autocomplete="off">{}{}<button class="signin__btn signin__btn--sec" type="submit">Continue</button></form></details>"#,
         form_class(c.rd),
         c.action,
         c.hidden,
@@ -241,7 +252,6 @@ pub fn code_page(c: &Code) -> String {
             " signin__field--code",
             "",
         ),
-        message(c.error),
         c.action,
         c.hidden,
         field(
@@ -252,7 +262,12 @@ pub fn code_page(c: &Code) -> String {
             "",
         ),
     );
-    sign_in_document(&card("Verification", c.host, c.rd, &form), &ICONS[..2])
+    let strip = message(c.error);
+    sign_in_document(
+        &card("Verification", c.host, c.rd, &form, &strip),
+        &ICONS[..2],
+        c.error.is_some(),
+    )
 }
 
 #[cfg(test)]
@@ -384,7 +399,9 @@ mod tests {
         assert!(page.contains(r#"autocomplete="current-password""#));
         assert!(page.contains(r#"autocomplete="username""#));
         assert!(page.contains("autofocus"));
-        assert!(page.contains(r#"name="keep" value="1">Keep me signed in for 30 days</label>"#));
+        assert!(page.contains(
+            r#"name="keep" value="1" aria-describedby="signin-keep">Remember me</label>"#
+        ));
         assert!(!page.contains("style=") && !page.contains("<script>"));
     }
 
@@ -394,6 +411,7 @@ mod tests {
         assert_eq!(refused.matches(r#"aria-invalid="true""#).count(), 2);
         assert!(refused.contains(r#"id="signin-msg" role="alert">"#));
         assert!(refused.contains("Invalid login or password"));
+        assert!(refused.contains(r#"class="signin signin--strip""#));
         let limited = login(
             "/",
             None,
@@ -402,7 +420,82 @@ mod tests {
         assert_eq!(limited.matches("aria-invalid").count(), 0);
         assert!(limited.contains(r#"role="alert""#));
         let quiet = login("/", None, None);
-        assert!(!quiet.contains("role=\"alert\"") && quiet.contains("aria-live=\"polite\""));
+        assert!(!quiet.contains("role=\"alert\"") && !quiet.contains("aria-live"));
+    }
+
+    #[test]
+    fn the_strip_exists_only_with_a_message_and_comes_after_the_button() {
+        let quiet = login("/", None, None);
+        // No message: no strip, no empty place, no reference to a strip, no room made for it.
+        for word in ["signin__msg", "signin-msg", "signin__mi", "signin--strip"] {
+            assert!(!quiet.contains(word), "{word} in {quiet}");
+        }
+        assert!(quiet.contains(r#"<div class="signin">"#));
+        let page = login("/chdash/", Some("a.example"), Some(INVALID_CREDENTIALS));
+        assert_eq!(page.matches("signin__msg").count(), 1, "{page}");
+        assert_eq!(page.matches(r#"role="alert""#).count(), 1);
+        let button = page.find(r#"<button class="signin__btn""#).unwrap();
+        let form_end = page.find("</form>").unwrap();
+        let strip = page.find(r#"<p class="signin__msg""#).unwrap();
+        // The strip is after the button and after the form: the last part of the card.
+        assert!(button < form_end && form_end < strip, "{page}");
+        assert!(page[strip..].contains("</p></div></main>"), "{page}");
+        assert!(page.contains(
+            r##"<svg class="signin__mi" aria-hidden="true" focusable="false"><use href="#i-alert-triangle"/></svg><span>Invalid login or password</span></p>"##
+        ));
+        // Each notice of the page uses the same strip.
+        for text in [
+            "Too many sign-in attempts from this address. Try again later.",
+            "The page was open too long. Enter your login and password again.",
+        ] {
+            let page = login("/", None, Some(text));
+            let strip = page.find(r#"<p class="signin__msg""#).unwrap();
+            assert!(page.find("</form>").unwrap() < strip);
+            assert!(page.contains(&format!("<span>{text}</span></p>")), "{page}");
+            assert_eq!(page.matches("aria-invalid").count(), 0);
+        }
+    }
+
+    #[test]
+    fn the_box_says_remember_me_and_keeps_the_life_in_a_title_and_a_description() {
+        let page = login("/", None, None);
+        assert!(
+            page.contains(r#"<label class="signin__check" title="Stay signed in for 30 days">"#)
+        );
+        assert!(page.contains("Remember me</label>"));
+        assert!(page.contains(
+            r#"<span class="visually-hidden" id="signin-keep">Stay signed in for 30 days</span>"#
+        ));
+        assert!(page.contains(r#"aria-describedby="signin-keep""#));
+        // The description is not a part of the label, so it is not a part of the name of the box.
+        let label = &page[page.find("<label class=\"signin__check\"").unwrap()..];
+        let label = &label[..label.find("</label>").unwrap()];
+        assert!(!label.contains("visually-hidden") && !label.contains("<span"));
+        // The old words are gone.
+        assert!(!page.contains("Keep me") && !page.contains("signed in for 30 days</label>"));
+        // The box comes after the eye button and before the button of the form.
+        let eye = page.find("data-reveal").unwrap();
+        let keep = page.find("name=\"keep\"").unwrap();
+        let button = page.find("<button class=\"signin__btn\"").unwrap();
+        assert!(eye < keep && keep < button);
+        // Without a life, the form has no box and no description.
+        let none = login_page(&Login {
+            csrf: "c",
+            rd: "/",
+            sig: "s",
+            form_token: "t",
+            host: None,
+            error: None,
+            max_password_bytes: 1024,
+            keep_for: None,
+            names: LoginNames {
+                form_token: "token",
+                trap: "website",
+                keep: "keep",
+                keep_value: "1",
+            },
+        });
+        assert!(!none.contains("Remember me") && !none.contains("signin-keep"));
     }
 
     #[test]
@@ -426,5 +519,15 @@ mod tests {
         assert!(without.contains(r#"autocomplete="one-time-code""#));
         let error = code("/", Some("Invalid code"));
         assert!(error.contains(r#"aria-invalid="true""#));
+        // The strip of the error is after both forms and after the link of the recovery code. A card without an
+        // error has no strip.
+        let strip = error.find(r#"<p class="signin__msg""#).unwrap();
+        assert!(error.rfind("</details>").unwrap() < strip, "{error}");
+        assert!(
+            error.contains(r#"role="alert"><svg"#)
+                && error.contains("<span>Invalid code</span></p>")
+        );
+        assert!(error.contains(r#"class="signin signin--strip""#));
+        assert!(!without.contains("signin__msg") && !without.contains("aria-live"));
     }
 }

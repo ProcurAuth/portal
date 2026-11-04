@@ -8086,6 +8086,41 @@ fn the_sign_in_page_has_the_hidden_heading_the_hidden_button_and_no_plain_class(
 }
 
 #[test]
+fn a_refusal_shows_the_message_as_a_strip_after_the_button_and_the_normal_page_has_none() {
+    let node = sign_in_node("");
+    let alert = [("role", Some("alert"))];
+    let normal = login_page_for(&node, "/chdash/", &[]).body;
+    assert!(!Mask::has_element(&normal, "p", &alert), "{normal}");
+    assert!(!normal.contains("aria-live"), "no empty place: {normal}");
+    assert!(!normal.contains("Invalid login or password"), "{normal}");
+    let csrf = "F".repeat(32);
+    let body = login_body(&node, &csrf, "alice", "x-wrong-password");
+    let refused = post_login(&node, "127.0.6.1", &csrf, &body);
+    assert_eq!(refused.status, 401, "{}", refused.body);
+    let page = refused.body;
+    assert!(Mask::has_element(&page, "p", &alert), "{page}");
+    assert_eq!(page.matches("role=\"alert\"").count(), 1, "{page}");
+    // The strip is the last part of the card: after the button and after the form.
+    let strip = page.find("role=\"alert\"").unwrap();
+    let form_end = page.find("</form>").unwrap();
+    assert!(page[..form_end].contains("type=\"submit\""), "{page}");
+    assert!(form_end < strip, "{page}");
+    assert!(page[strip..].contains("Invalid login or password</span></p>"));
+    // Both fields point to the strip with the mapped identifier, and the identifier exists.
+    let id = node.state.mask.name("signin-msg");
+    assert!(Mask::names_in_page(&page, true).contains(&id), "{page}");
+    assert_eq!(
+        page.matches(&format!("aria-describedby=\"{id}\"")).count(),
+        2
+    );
+    // The card of a page with a strip has its own mapped class, and no plain class.
+    let room = node.state.mask.name("signin--strip");
+    assert!(Mask::names_in_page(&page, false).contains(&room), "{page}");
+    assert!(!Mask::names_in_page(&normal, false).contains(&room));
+    assert!(!page.contains("signin"), "{page}");
+}
+
+#[test]
 fn a_good_sign_in_still_works_with_the_form_token() {
     let node = sign_in_node("");
     let csrf = "D".repeat(32);
@@ -8342,7 +8377,7 @@ fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
     assert!(!settings.body.contains(&css_path));
 }
 
-// "Keep me signed in": the box of the sign-in form, the cookie and the session.
+// "Remember me": the box of the sign-in form, the cookie and the session.
 
 /// The binding of a session that a test client opens from the address `source`, with the test User-Agent.
 fn client_binding(node: &Node, source: &str) -> Binding {
@@ -8504,10 +8539,13 @@ fn the_sign_in_page_shows_the_box_with_the_number_of_days_of_the_file() {
         ),
         "{page}"
     );
+    assert!(page.contains("Remember me</label>"), "{page}");
     assert!(
-        page.contains("Keep me signed in for 30 days</label>"),
+        page.contains(r#"title="Stay signed in for 30 days""#)
+            && page.contains("Stay signed in for 30 days</span>"),
         "{page}"
     );
+    assert!(!page.contains("Keep me"), "{page}");
     assert!(!page.contains("checked"), "the box is not ticked: {page}");
     // The box is a plain control in a label: no inline style, no identifier, no script of its own.
     assert!(!page.contains("style="), "{page}");
@@ -8518,11 +8556,12 @@ fn the_sign_in_page_shows_the_box_with_the_number_of_days_of_the_file() {
     // Another life, another number.
     let node = sign_in_node_with_session(r#"remember_ttl = "90d" remember_idle_timeout = "7d""#);
     let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
-    assert!(page.contains("Keep me signed in for 90 days"), "{page}");
+    assert!(page.contains("Stay signed in for 90 days</span>"), "{page}");
+    assert!(page.contains("Remember me</label>"), "{page}");
     let node =
         sign_in_node_with_session(r#"ttl = "1h" remember_ttl = "1d" remember_idle_timeout = "1d""#);
     let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
-    assert!(page.contains("Keep me signed in for 1 day<"), "{page}");
+    assert!(page.contains("Stay signed in for 1 day</span>"), "{page}");
 }
 
 #[test]
@@ -8532,7 +8571,8 @@ fn without_the_option_the_page_has_no_box_and_the_server_ignores_the_field() {
     let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
     assert!(!page.contains("keep"), "{page}");
     assert!(!page.contains("checkbox"), "{page}");
-    assert!(!page.contains("Keep me signed in"), "{page}");
+    assert!(!page.contains("Remember me"), "{page}");
+    assert!(!page.contains("Stay signed in"), "{page}");
     // A post with the field is not refused, and its session is a normal one.
     let reply = sign_in_with_box(&node, "127.0.4.1", "root", PASSWORD, Some("1"));
     assert_eq!(reply.status, 303);
@@ -8859,7 +8899,7 @@ mod mfa_tests {
             let cookie = reply.header("set-cookie").unwrap();
             assert!(
                 cookie.contains("Max-Age"),
-                "the box Keep me signed in survives the second step"
+                "the box Remember me survives the second step"
             );
             assert_eq!(verify(&b, &session, AGENT), 204);
             assert_eq!(verify(&a, &session, AGENT), 204);

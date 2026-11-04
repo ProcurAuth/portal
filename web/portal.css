@@ -569,7 +569,7 @@ a {
   margin-top: 0;
 }
 
-/* The box "Keep me signed in". The label holds the box, so a click on the words ticks it. The box has a
+/* The box "Remember me". The label holds the box, so a click on the words ticks it. The box has a
    fixed size, so the form does not move. */
 .card .keep {
   display: flex;
@@ -904,31 +904,46 @@ a {
   display: none;
 }
 
-/* The message line keeps its place, so the card does not move when a message appears. */
+/* The strip of the message: the band of the card, turned over. It has the height, the width, the layout and the
+   type of the band, at the bottom edge of the card, under the button. The card clips it with its radius. The page has
+   the strip only when it has a message. A long message wraps and the strip grows by whole lines. */
 .signin__msg {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 16px;
-  margin: 6px 0 0;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 32px;
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--danger-bg);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--danger) 35%, transparent);
   color: var(--danger);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 16px;
+  font: 12px/16px var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
 .signin__mi {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   flex: none;
 }
 
+/* A card with a strip is higher than a card without one. The margin has the height of a one-line strip: the card
+   is in the middle of the window, so the fields stay at the same place when a refusal gives the page again. */
+.signin--strip {
+  margin-top: 32px;
+}
+
+/* The box and its words are one group, in the middle of the card. The row is as wide as the group, so a click beside
+   the group does not tick the box. */
 .signin__check {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  width: fit-content;
+  max-width: 100%;
   min-height: 28px;
-  margin: 6px 0 0;
+  margin: 8px auto 0;
   color: var(--text);
   cursor: pointer;
 }

@@ -261,7 +261,7 @@ pub struct SessionConfig {
     pub max_active_sessions: usize,
 }
 
-/// The rule of a remembered session, the one that a person asks with "Keep me signed in".
+/// The rule of a remembered session, the one that a person asks with "Remember me".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Remember {
     /// The lifetime from the sign-in. The persistent cookie has the same life.

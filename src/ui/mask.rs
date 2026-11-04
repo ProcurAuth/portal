@@ -799,7 +799,7 @@ fn insert_inert(tokens: Vec<Tok>, rng: &mut Rng) -> Option<Vec<Tok>> {
             continue;
         }
         let parent = open_name(&tokens[tree.parent[index]?]);
-        // A label that holds a field (the box "Keep me signed in", the trap field) stays as it is.
+        // A label that holds a field (the box "Remember me", the trap field) stays as it is.
         let holds_field = name == "label"
             && tokens[index..=tree.end[index]]
                 .iter()

@@ -201,8 +201,8 @@ const KEY_KIND_SCHEMA: &str = "
 ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mcp', 'api'));
 ";
 
-/// Schema version 8: the history keeps whether a session had the remembered rule ("Keep me signed
-/// in"). A session of an older file is not remembered. With SQLite the live sessions are in memory.
+/// Schema version 8: the history keeps whether a session had the remembered rule ("Remember
+/// me"). A session of an older file is not remembered. With SQLite the live sessions are in memory.
 ///
 /// The second factor (TOTP) is part of this version, with no step of its own: the portal has no deployment with
 /// users, so the base schema changed in place. A file that the version 8 made before the second factor lacks these
