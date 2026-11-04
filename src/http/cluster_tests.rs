@@ -334,25 +334,60 @@ fn start_custom(
     }
     let state = Arc::new(state);
     let serving = Arc::clone(&state);
+    // The thread of the server tells how it ended. A start that fails (an address in use, a panic) is a failure of
+    // the test at once, with the reason, and not a wait of 60 seconds.
+    let ended: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let report = Arc::clone(&ended);
     std::thread::spawn(move || {
-        let _ = match stop {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match stop {
             Some(stop) => super::serve_with(serving, async move {
                 let _ = stop.await;
             }),
             None => super::serve_with(serving, std::future::pending()),
+        }));
+        let text = match run {
+            Ok(Ok(())) => "the server ended without an error".to_string(),
+            Ok(Err(error)) => format!("the server stopped with an error: {error}"),
+            Err(_) => "the server thread panicked".to_string(),
         };
+        *report.lock().unwrap_or_else(|p| p.into_inner()) = Some(text);
     });
     let node = Node { port, state };
     if !wait_complete {
         return node;
     }
     // A start has time to be late: the whole suite starts hundreds of servers at once on a busy machine.
-    wait_until(START_LIMIT, || {
-        TcpStream::connect(("127.0.0.1", port)).is_ok()
-            && send(port, "GET", "/healthz", &[], "").status == 200
-    });
+    let begun = Instant::now();
+    loop {
+        if let Some(text) = ended.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            panic!("the server on port {port} is gone before it answered /healthz: {text}");
+        }
+        let seen = match TcpStream::connect(("127.0.0.1", port)) {
+            Err(error) => format!("connect: {error}"),
+            Ok(stream) => {
+                drop(stream);
+                let status = send(port, "GET", "/healthz", &[], "").status;
+                if status == 200 {
+                    break;
+                }
+                format!("/healthz answered {status}")
+            }
+        };
+        assert!(
+            begun.elapsed() < START_LIMIT,
+            "the server on port {port} did not answer /healthz 200 in {START_LIMIT:?}; last try: {seen}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     // The first discovery round publishes an empty catalogue. The next round starts an hour later.
-    wait_until(START_LIMIT, || node.state.discovery.refreshes() >= 1);
+    let waited = Instant::now();
+    while node.state.discovery.refreshes() < 1 {
+        assert!(
+            waited.elapsed() < START_LIMIT,
+            "the server on port {port} answers /healthz but its first discovery round did not end in {START_LIMIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
         current_catalog(&node.state).is_complete(),
         "the first round of a harness without a source is complete"
