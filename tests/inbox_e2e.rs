@@ -1760,7 +1760,7 @@ async fn one_port_serves_the_pages_the_producers_and_the_phones() {
         "",
     );
     assert_eq!(st, 200);
-    assert!(!home.contains("/auth/settings/inbox\""), "no tile: {home}");
+    assert!(!home.contains(">Inbox<"), "no tile: {home}");
     s.stop();
 }
 
@@ -5108,14 +5108,16 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let bob = enroll_as(&s, "phone-bob", "bob").await.unwrap();
     let (_, page) = inbox_page_as(&s, &rita.cookie, "/auth/settings/inbox");
     assert!(has(&page, "phone-bob") && !has(&page, "bulk__box") && !has(&page, "revoke-phones"));
-    // The page has no form, so the account has no token: the request fails on the token.
-    let (st, _, _) = inbox_form(
+    // The page has the form of the level of the notifications, so the account has a token. The
+    // request passes the token, and the missing right refuses it.
+    let (st, head, _) = inbox_form(
         &s,
         &rita.cookie,
         "/auth/settings/inbox/revoke",
         &format!("id.{}=1", bob.device_id),
     );
-    assert_eq!(st, 403);
+    assert_eq!(st, 303);
+    assert!(location(&head).ends_with("s=unknown_device"), "{head}");
     assert!(
         Conn::open(port, &bob).await.is_ok(),
         "the phone is not revoked"
@@ -5182,11 +5184,14 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     assert_eq!(st, 403);
     let (_, home) = inbox_page_as(&s, &pia.cookie, "/");
     // The launcher changes the order of the attributes at each render: read the tag of the gear.
+    // The inbox icon has a link to the same page: the gear is the tag that is named "Settings".
     let gear_of = |home: &str, href: &str| {
-        let at = home
-            .find(&format!(r#"href="{href}""#))
-            .unwrap_or_else(|| panic!("{home}"));
-        home[home[..at].rfind('<').unwrap()..at + home[at..].find('>').unwrap()].to_string()
+        home.match_indices(&format!(r#"href="{href}""#))
+            .map(|(at, _)| {
+                home[home[..at].rfind('<').unwrap()..at + home[at..].find('>').unwrap()].to_string()
+            })
+            .find(|tag| tag.contains(r#"aria-label="Settings""#))
+            .unwrap_or_else(|| panic!("no gear for {href}: {home}"))
     };
     let gear = gear_of(&home, "/auth/settings/inbox");
     assert!(gear.contains(r#"aria-label="Settings""#), "{gear}");
@@ -5196,15 +5201,17 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     );
     let (_, home) = inbox_page_as(&s, &s.session().cookie, "/");
     assert!(gear_of(&home, "/auth/settings").contains(r#"aria-label="Settings""#));
-    assert!(
-        !has(&home, r#"href="/auth/settings/inbox""#),
-        "no tile of the inbox"
-    );
+    assert!(!has(&home, ">Inbox<"), "no tile of the inbox");
     // The superadmin sees four tabs at most and the permission editor shows the groups by name.
     // The tab Keys does not exist: the list of the keys is in the tab Access.
     let (_, page) = inbox_page(&s, "/auth/settings/inbox");
     for tab in ["Access", "Services", "Activity", "Inbox"] {
-        assert!(has(&page, &format!(">{tab}</a>")), "{tab}");
+        // The tab Inbox has its badge after the name.
+        let name = if tab == "Inbox" { ">Inbox<span " } else { tab };
+        assert!(
+            has(&page, &format!(">{tab}</a>")) || has(&page, name),
+            "{tab}"
+        );
     }
     assert!(!has(&page, ">Keys</a>"), "the tab Keys is gone");
     assert_eq!(
