@@ -1469,12 +1469,13 @@ Only failed password checks use the failure budgets. A successful authentication
 
 ## Hardening of the sign-in page
 
-The sign-in page has four measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key.
+The sign-in page has five measures. The full description is in `docs/login-hardening.md`. No measure adds a configuration key.
 
 - **Anti-enumeration (real protection).** An unknown login, a wrong password and a failed check of the form give the same answer: status 401, the same page, the same headers. Each of them runs one Argon2 check and counts as one failure. A refusal of a limiter (status 429) is the only visible difference. It does not depend on the login, with one documented exception: the budget of the superadmin login.
 - **Hide the product (obscurity, not security).** The page has a neutral title, no comment and no version. The stylesheet and the script have neutral paths, `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The cookie of the form is `lc`. The default name of the session cookie is not changed: set `session.cookie_name` for a neutral name.
 - **Anti-bot checks (real protection, limited).** The form has a signed token with a minimum age of 1 second and a maximum age of 12 hours. It has a trap field that a person cannot reach. A failed check looks exactly like a wrong password, and it counts as a failed sign-in. The metric `portal_login_form_check_failures_total` counts the failed checks. The names of the login and password fields stay stable, so that password managers work.
 - **Script minification (obscurity, not security).** The script and the stylesheet that every page loads are minified at the first request, with no tool at build time. A test runs `node --check` on the script when `node` exists.
+- **Random names and structure (obscurity, not security).** The sign-in page, the status pages and the launcher load only the shared stylesheet and the theme script. Their classes, identifiers and data attributes have short names that look random. The names are an HMAC of the plain names, under a key that comes from the session secret. All instances with the same secret use the same names, and a restart does not change them. The server also changes the structure of the HTML at each render: it inserts 0 to 3 inert elements, and it changes the order of the attributes and of the elements of the head. The look of the page does not change. The settings pages keep the plain names. The documentation lists what still identifies the product.
 
 A script that signs in with `curl` must read the field `token` of the page, wait one second, and post the field.
 

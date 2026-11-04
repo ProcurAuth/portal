@@ -11,6 +11,7 @@ use std::time::Duration;
 use super::*;
 use crate::grants::Grant;
 use crate::store::testing::{each_backend, Backend};
+use crate::ui::mask::Mask;
 
 const PASSWORD: &str = "correct-horse-battery-staple";
 const SECRET: [u8; 32] = [b'k'; 32];
@@ -7678,10 +7679,13 @@ fn metric(node: &Node, start: &str) -> u64 {
 
 /// The text of a refusal with the values that change at each render (the anti-CSRF token and the
 /// token of the form) replaced. Two refusals must be the same text.
-fn without_random(body: &str) -> String {
-    let mut out = body.to_string();
+fn without_random(node: &Node, body: &str) -> String {
+    // Two renders differ in the inert elements, in the order of the attributes and in the order
+    // of the head. The canonical form has none of these differences.
+    let mut out = node.state.mask.canonical(body);
     for name in ["csrf", FORM_TOKEN_FIELD] {
-        let marker = format!(r#"name="{name}" value=""#);
+        // The canonical form sorts the attributes: `name`, `type`, `value`.
+        let marker = format!(r#"name="{name}" type="hidden" value=""#);
         if let Some(start) = out.find(&marker) {
             let value_start = start + marker.len();
             let end = value_start + out[value_start..].find('"').unwrap();
@@ -7692,12 +7696,13 @@ fn without_random(body: &str) -> String {
 }
 
 /// The headers of a reply as a sorted list. The values of `set-cookie` lose the token. The length
-/// of the body is part of the list: the pages must have the same size.
+/// of the body is not in the list: the inert elements of the page change its size at each render,
+/// and the change does not depend on the cause of the refusal.
 fn shape_of(reply: &Reply) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = reply
         .headers
         .iter()
-        .filter(|(name, _)| name != "date")
+        .filter(|(name, _)| name != "date" && name != "content-length")
         .map(|(name, value)| {
             let value = if name == "set-cookie" {
                 value.split('=').next().unwrap().to_string()
@@ -7805,11 +7810,10 @@ fn an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusa
     let first = &replies[0].1;
     for (name, reply) in &replies {
         assert_eq!(
-            without_random(&reply.body),
-            without_random(&first.body),
+            without_random(&node, &reply.body),
+            without_random(&node, &first.body),
             "{name}: the page"
         );
-        assert_eq!(reply.body.len(), first.body.len(), "{name}: the size");
         assert_eq!(shape_of(reply), shape_of(first), "{name}: the headers");
     }
     // Each refusal went through one Argon2 check and counted as a failed sign-in: the time and
@@ -7875,7 +7879,10 @@ fn a_failed_form_check_uses_the_budget_of_the_failed_sign_ins() {
     let unknown = login_body(&node, &csrf, "nobody", "x-wrong-password");
     let other = post_login(&node, "127.0.1.1", &csrf, &unknown);
     assert_eq!(other.status, 429);
-    assert_eq!(without_random(&other.body), without_random(&reply.body));
+    assert_eq!(
+        without_random(&node, &other.body),
+        without_random(&node, &reply.body)
+    );
     assert_eq!(shape_of(&other), shape_of(&reply));
     // Another address is free.
     assert_eq!(post_login(&node, "127.0.1.2", &csrf, &good).status, 303);
@@ -7909,27 +7916,65 @@ fn the_sign_in_page_names_no_product_and_has_a_trap_that_a_person_cannot_reach()
         .unwrap();
     assert!(cookie.1.starts_with("lc="), "{}", cookie.1);
     // The trap: hidden by a class, out of the tab order, hidden from a screen reader, and not
-    // filled by a password manager.
-    assert!(page.body.contains(&format!(
-        r#"<div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off""#
-    )));
+    // filled by a password manager. The class has a mapped name.
+    let mask = &node.state.mask;
+    assert!(Mask::has_element(
+        &page.body,
+        "div",
+        &[
+            ("class", Some(&mask.name("hp"))),
+            ("aria-hidden", Some("true")),
+            ("inert", None)
+        ]
+    ));
+    assert!(Mask::has_element(
+        &page.body,
+        "input",
+        &[
+            ("type", Some("text")),
+            ("name", Some(TRAP_FIELD)),
+            ("tabindex", Some("-1")),
+            ("autocomplete", Some("off")),
+            ("data-lpignore", Some("true")),
+            ("data-1p-ignore", Some("true")),
+            ("data-bwignore", Some("true")),
+            ("value", Some("")),
+        ]
+    ));
     // The fields of a person keep their names and their autocomplete tokens, for a password manager.
-    assert!(page
-        .body
-        .contains(r#"id="login" name="login" type="text" autocomplete="username""#));
-    assert!(page.body.contains(
-        r#"id="password" name="password" type="password" autocomplete="current-password""#
+    assert!(Mask::has_element(
+        &page.body,
+        "input",
+        &[
+            ("id", Some(&mask.name("login"))),
+            ("name", Some("login")),
+            ("type", Some("text")),
+            ("autocomplete", Some("username")),
+        ]
+    ));
+    assert!(Mask::has_element(
+        &page.body,
+        "input",
+        &[
+            ("id", Some(&mask.name("password"))),
+            ("name", Some("password")),
+            ("type", Some("password")),
+            ("autocomplete", Some("current-password")),
+        ]
     ));
     // The page loads one stylesheet and one script, with neutral paths. No script is inline.
-    let assets = ui::assets();
+    let assets = mask.assets();
     assert!(page
         .body
         .contains(&format!(r#"href="{}""#, assets.css_path)));
     assert!(page.body.contains(&format!(r#"src="{}""#, assets.js_path)));
     assert_eq!(page.body.matches("<script").count(), 1);
+    let plain = ui::assets();
     for path in [
         &assets.css_path,
         &assets.js_path,
+        &plain.css_path,
+        &plain.js_path,
         &STYLE_PATH.to_string(),
         &THEME_JS_PATH.to_string(),
     ] {
@@ -7943,7 +7988,12 @@ fn the_sign_in_page_names_no_product_and_has_a_trap_that_a_person_cannot_reach()
         assert!(asset.header("server").is_none());
     }
     // ForwardAuth lets the neutral paths pass without a session.
-    for path in [&assets.css_path, &assets.js_path] {
+    for path in [
+        &assets.css_path,
+        &assets.js_path,
+        &plain.css_path,
+        &plain.js_path,
+    ] {
         let reply = send(
             node.port,
             "GET",
@@ -7953,4 +8003,87 @@ fn the_sign_in_page_names_no_product_and_has_a_trap_that_a_person_cannot_reach()
         );
         assert_eq!(reply.status, 204, "{path}");
     }
+}
+
+/// The value of the attribute `attribute` of the first element `tag` of the page.
+fn attribute_of(page: &str, tag: &str, attribute: &str) -> String {
+    let start = page.find(&format!("<{tag} ")).unwrap();
+    let element = &page[start..start + page[start..].find('>').unwrap()];
+    let marker = format!(r#" {attribute}=""#);
+    let value = element.find(&marker).unwrap() + marker.len();
+    element[value..value + element[value..].find('"').unwrap()].to_string()
+}
+
+#[test]
+fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
+    let node = sign_in_node("");
+    let other = sign_in_node("");
+    let login = send(node.port, "GET", LOGIN_PATH, &[], "");
+    let again = send(node.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(login.status, 200);
+    // The page has none of the plain classes of the stylesheet, and no plain identifier.
+    let plain = crate::ui::mask::names_in_stylesheet(&ui::assets().css);
+    assert!(plain.len() > 30, "{}", plain.len());
+    let classes = Mask::names_in_page(&login.body, false);
+    let names: Vec<String> = [classes.clone(), Mask::names_in_page(&login.body, true)].concat();
+    assert!(classes.len() >= 6, "{classes:?}");
+    for name in &names {
+        assert!(!plain.contains(name), "{name}");
+        assert!(!["login", "password"].contains(&name.as_str()), "{name}");
+    }
+    // The mapped stylesheet that the page links has a rule for each of these names.
+    let css_path = attribute_of(&login.body, "link", "href");
+    let css = send(node.port, "GET", &css_path, &[], "");
+    assert_eq!(css.status, 200);
+    assert_eq!(
+        css.header("cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    let ruled = crate::ui::mask::names_in_stylesheet(&css.body);
+    for name in &classes {
+        assert!(ruled.contains(name), "{name} has no rule");
+    }
+    // The script uses the mapped data attributes: none of the plain ones remains.
+    let js_path = attribute_of(&login.body, "script", "src");
+    let js = send(node.port, "GET", &js_path, &[], "");
+    assert_eq!(js.status, 200);
+    assert!(!js.body.contains("data-theme"), "{}", js.body);
+    // Two renders differ, and two instances with the same secret use the same files and names.
+    assert_ne!(login.body, again.body);
+    assert_eq!(attribute_of(&again.body, "link", "href"), css_path);
+    let twin = send(other.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(attribute_of(&twin.body, "link", "href"), css_path);
+    assert_eq!(attribute_of(&twin.body, "script", "src"), js_path);
+    assert_eq!(send(other.port, "GET", &css_path, &[], "").body, css.body);
+    // The 404 page and the 403 page too.
+    let missing = send(
+        node.port,
+        "GET",
+        "/nothing-here",
+        &[("Accept", "text/html")],
+        "",
+    );
+    assert_eq!(missing.status, 302);
+    assert!(missing.location().unwrap().starts_with(LOGIN_PATH));
+    let root = sign_in(&node, "root", PASSWORD);
+    let missing = page(&node, &root, "/auth/nothing-here");
+    assert_eq!(missing.status, 404);
+    let home = page(&node, &root, "/");
+    for reply in [&missing, &home] {
+        for name in Mask::names_in_page(&reply.body, true) {
+            assert!(!plain.contains(&name), "{name}");
+        }
+        for name in Mask::names_in_page(&reply.body, false) {
+            assert!(!plain.contains(&name), "{name}");
+            assert!(ruled.contains(&name), "{name} has no rule");
+        }
+        assert_eq!(attribute_of(&reply.body, "link", "href"), css_path);
+    }
+    // The settings pages keep the plain names and the plain files.
+    let settings = page(&node, &root, "/auth/settings/services");
+    assert_eq!(settings.status, 200);
+    assert!(settings
+        .body
+        .contains(&format!(r#"href="{}""#, ui::assets().css_path)));
+    assert!(!settings.body.contains(&css_path));
 }

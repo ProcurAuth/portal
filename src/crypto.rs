@@ -120,6 +120,24 @@ fn form_token_input(issued: &[u8], csrf: &str) -> Vec<u8> {
     input
 }
 
+/// The key of the names that the pages of the sign-in and of the launcher use for their classes,
+/// their identifiers and their data attributes. It is derived from the session secret, so every
+/// instance that has the secret makes the same names, and no instance has to remember them.
+pub fn ui_names_key(secret: &[u8]) -> Result<[u8; 32], String> {
+    sign(secret, b"ui-names\n1")
+}
+
+/// The digest from which one name of a page is made. `key` is the result of [`ui_names_key`].
+pub fn ui_name_digest(key: &[u8; 32], name: &str) -> [u8; 32] {
+    // A key of 32 bytes is always valid for the HMAC.
+    sign(key, name.as_bytes()).unwrap_or([0u8; 32])
+}
+
+/// Fills `buf` with bytes of the operating system generator.
+pub fn random_bytes(buf: &mut [u8]) -> Result<(), String> {
+    fill_random(buf)
+}
+
 /// The anti-CSRF token of a button on a page that stays open (sign out, account administration):
 /// bound to the session it acts for and to what it is for (`purpose`), so it stays valid as long
 /// as the page does (a cookie-based token would expire under an idle tab) and cannot be replayed

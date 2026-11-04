@@ -2,7 +2,7 @@
 
 The sign-in page is `/auth/login`. This path is a contract with Traefik ForwardAuth and with the applications. It never changes.
 
-Four measures protect or hide the page. Two of them are real protections. Two of them are obscurity.
+Five measures protect or hide the page. Two of them are real protections. Three of them are obscurity.
 
 | Measure | Kind | What it does |
 |---|---|---|
@@ -10,10 +10,11 @@ Four measures protect or hide the page. Two of them are real protections. Two of
 | 2. Hide the product | Obscurity, not security | The page does not name the product or its version. |
 | 3. Anti-bot checks | Real protection, limited | A simple script that posts at once, or that fills every field, fails. |
 | 4. Script minification | Obscurity, not security | The served script has no comment and no long name. |
+| 5. Random names and structure | Obscurity, not security | The classes, the identifiers and the structure of the page are not fixed. |
 
-Obscurity does not stop an attacker who reads the page. It only removes the easy marks. Do not count on items 2 and 4 for security. The limiters and Argon2 stay the protection against password guessing.
+Obscurity does not stop an attacker who reads the page. It only removes the easy marks. Do not count on items 2, 4 and 5 for security. The limiters and Argon2 stay the protection against password guessing.
 
-None of the four measures adds a configuration key. No new key means no new default to document.
+None of the five measures adds a configuration key. No new key means no new default to document.
 
 ## 1. Anti-enumeration
 
@@ -21,7 +22,7 @@ An attacker can try to learn which logins exist. The portal gives the same answe
 
 ### What the observer sees
 
-These cases give the same answer. Each case gets status 401, the text "Invalid login or password", and the same headers. The page has the same size and the same structure. Only the anti-CSRF token and the form token change.
+These cases give the same answer. Each case gets status 401, the text "Invalid login or password", and the same headers. The page has the same structure. Only the anti-CSRF token, the form token and the inert elements of item 5 change. The size changes with the inert elements, and the change does not depend on the cause.
 
 - The login does not exist.
 - The login is the superadmin, and the password is wrong.
@@ -33,7 +34,7 @@ Each of these requests runs exactly one Argon2 check. For an unknown login, the 
 
 The portal reads the accounts of the shared database before each sign-in, for every login. The read has a limit of one for each second. In the past, only an unknown login started the read. The time then told the observer that the login was unknown. The read now starts for every login.
 
-The tests `an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusal` and `a_failed_form_check_uses_the_budget_of_the_failed_sign_ins` check this. They compare the status, the body, the size and the headers. They do not measure time. They count the Argon2 checks, because the count is a measure that does not depend on the load of the machine.
+The tests `an_unknown_login_a_wrong_password_and_a_failed_form_check_get_the_same_refusal` and `a_failed_form_check_uses_the_budget_of_the_failed_sign_ins` check this. They compare the status, the canonical form of the body (the body without the inert elements, with the attributes and the head in a fixed order) and the headers. They do not measure time. They count the Argon2 checks, because the count is a measure that does not depend on the load of the machine.
 
 ### What stays different (unavoidable)
 
@@ -73,9 +74,9 @@ What still identifies the product:
 - The query `?rd=...&sig=...` of the redirect to the page.
 - The names of the form fields: `login`, `password`, `csrf`, `rd`, `sig`, `token`.
 - The headers of the security policy, for example the text of the Content-Security-Policy.
-- The visual design of the card, and the behavior of the page.
+- The visual design of the card, and the behavior of the page. Item 5 lists what it hides and what it keeps.
 - The session cookie, until the site sets `session.cookie_name`.
-- The settings pages (`/auth/settings/...`), the script `/auth/assets/settings.js?v=<version>` and the metrics path. They need a session, or they are on a path that the operator controls. The Inbox paths `/readyz` and `/api/version` are public when the block `inbox` exists. `/api/version` shows the version.
+- The settings pages (`/auth/settings/...`) keep the plain class names and the plain files. They need a session. Also the script `/auth/assets/settings.js?v=<version>`, and the metrics path. The metrics path is on a path that the operator controls. The Inbox paths `/readyz` and `/api/version` are public when the block `inbox` exists. `/api/version` shows the version.
 
 ## 3. Anti-bot checks
 
@@ -125,9 +126,70 @@ Not done:
 
 The tests check that the served script has no comment and no name of the product. They also run `node --check` on it. The test skips the check when the image has no `node`.
 
+## 5. Random names and structure
+
+The sign-in page, the status pages and the launcher load only two files. The files are the shared stylesheet `web/portal.css` and the theme script `web/theme.js`. The status pages are "Page not found", "Access denied" and "Authenticated". This measure applies to these pages. The settings pages need a session and load other files. They keep the plain names.
+
+The code is in `src/ui/mask.rs`. The renderers still write plain names. A last step, the mask, changes the page before the server sends it. This way the renderers and their tests do not change.
+
+### The names
+
+- Each class, each identifier (`id`, `for`, `aria-labelledby`, `href="#..."`) and each data attribute of the shared files gets a mapped name. A mapped name has 6 to 10 characters from `a-z0-9`. It starts with a letter.
+- The mapped name is the HMAC-SHA-256 of the plain name. The key of the HMAC derives from the session secret, with a fixed label. The secret is the one that signs the form token.
+- Each instance that has the same secret makes the same names. No instance keeps a state, so a rolling upgrade works. A restart does not change the names. A new session secret changes them.
+- The same map rewrites the stylesheet and the script. In the stylesheet, only the selectors change. In the script, only the strings that name the class `js` and the data attributes change. The values do not change.
+- The mapped files have their own paths `/auth/a/<hash>.css` and `/auth/a/<hash>.js`. The hash follows the mapped content. The files are the same for all visitors, so the browser keeps them for one year (`immutable`).
+- The settings pages, and the old paths `/auth/style.css` and `/auth/assets/theme.js`, keep the plain files. A browser that visits both kinds of page loads both pairs of files. A page that loads the plain files and a page that loads the mapped files never mix their names.
+- ForwardAuth lets the mapped paths pass without a session, as it does for the plain paths.
+
+### The structure
+
+At each render, the mask makes these changes. A change has no effect on the look or on the behavior.
+
+- It inserts 0 to 3 inert elements, at random places in the body. An inert element is a wrapper (`div` or `span`) around an element of the page, with the rule `display: contents`. It can also be an empty `div` with `display: none` and `aria-hidden="true"`. An inert element has a mapped class and no other attribute. It has no content of its own, no tab stop and no role.
+- A wrapper never encloses a field, a button or an element of the sprite. A `span` never encloses a block. The mask puts a `div` only where the content of the parent can be a block.
+- It changes the order of the attributes of each tag.
+- It changes the order of the elements of the head. `<meta charset>` stays first. Order has no effect for the stylesheet and the script: the browser loads both before the first paint.
+
+The stylesheet of these pages has no rule that depends on the structure. It has no child combinator (`>`), no sibling combinator (`+`, `~`) and no `:first-child` or `:first-of-type`. A test reads the stylesheet and fails if such a rule comes back. A rule for a case that needs the structure uses a class.
+
+The order of the login field and the password field does not change. The trap field stays after them. The form fields and their attributes stay in the form. Password managers find them as before.
+
+### What still identifies the product
+
+This is an honest list. The measure is obscurity.
+
+- The names of the form fields: `login`, `password`, `csrf`, `rd`, `sig`, `token` and the trap `website`. The attributes `autocomplete`, `data-lpignore`, `data-1p-ignore` and `data-bwignore`. Password managers and scripts need them.
+- The text, the number and the kind of the elements, and their order. The form has two fields, a trap and a button.
+- The names of the CSS custom properties (`--bg`, `--accent-fill`, and others), the name of the keyframes `pulse-up`, the values of the rules and the media queries. The mask maps classes, identifiers and data attributes only.
+- The values of the theme (`dark`, `light`, `system`), the `aria-*` attributes, `role`, `type` and the key `ui-color-mode` of the browser storage.
+- The mapped names are fixed for one deployment. A reader that learns them once finds them on every request. They differ from one deployment to another. They change when the session secret changes.
+- The mapped files are served from `/auth/a/`, and both have a hash in the name.
+- The cost of the page: size, number of requests, and the two files.
+- The behavior: the theme switch, the form flow, the cookie `lc`, and the headers.
+
+### Tests
+
+- Two instances with the same secret make the same names and the same files. Two secrets make other names and other files.
+- A name has 6 to 10 characters, it starts with a letter, and no two plain names give the same mapped name.
+- The login page, the denied page, the error page and the launcher have none of the plain class names of `portal.css`. Each class of these pages has a rule in the mapped stylesheet. Each `for` and `href="#..."` points to an identifier of the page.
+- The mapped stylesheet and the mapped script have none of the plain names. `node --check` accepts the mapped script, when the image has `node`.
+- Over 200 seeds, each page has the same canonical form. The mask inserts at most 3 elements, and the counts 0, 1, 2 and 3 all occur.
+- The tests of the sign-in page read the mapped names from the mask. The tests of the anti-enumeration compare the canonical form.
+
+The look is checked in a browser, not in a unit test. `tools/dev/ui-check.sh` runs a Playwright check against a portal that is yours. A check of this measure compares screenshots of a portal with the mask and of a portal without it. The viewports are 1280 and 390 pixels, in the dark and the light scheme, with and without script. A difference of one pixel is a failure.
+
+Not done:
+
+- No random names for the fields of the form. Item 3 gives the reason.
+- No per-render change of the class names. A name that changes at each render cannot go into a file that the browser keeps. The structure changes at each render. The names do not.
+- No change to the pages of the settings.
+
 ## Operation notes
 
+- A new session secret changes the mapped names and the mapped paths. It also ends the sessions, so the effect is the same as the effect of an upgrade.
 - An upgrade changes the hash in the asset paths. A page that an old instance served can ask for a file that a new instance does not have. During a rolling upgrade, this gives a page without style for a short time. A reload fixes it.
 - The cookie of the form has a new name. A form that was open at the upgrade gives the page "The page was open too long" once.
 - The scripts that sign in with `curl` must read the field `token` of the page, wait one second, and post it. `demo/lib.sh` does this.
+- The page changes the order of the attributes at each render. A script must read the attributes of a tag in any order, and it must not use the plain class names or the identifiers of the page. Use the field names. `demo/lib.sh` and `tools/dev/ui-check.js` do this.
 - `tools/dev/ui-check.js` waits 1.2 seconds before it submits the form.

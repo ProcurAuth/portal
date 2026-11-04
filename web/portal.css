@@ -476,9 +476,14 @@ a {
 
 /* Empty and degraded states ---------------------------------------------- */
 
+/* No rule of this file uses a combinator of the structure (child, sibling, first-of-type): the
+   server wraps elements of these pages in inert elements, so a rule that depends on the structure
+   would break. The spacing below the notice comes from the notice, and a row of lines uses a gap. */
 .notice {
+  display: grid;
+  gap: 4px;
   width: min(calc(100% - 48px), calc(var(--page-width) - 48px));
-  margin: 0 auto;
+  margin: 0 auto 16px;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius-tile);
@@ -491,15 +496,6 @@ a {
   margin: 0;
 }
 
-.notice p + p {
-  margin-top: 4px;
-}
-
-.notice + .rows,
-.notice + .empty {
-  margin-top: 16px;
-}
-
 .empty {
   display: grid;
   gap: 6px;
@@ -507,6 +503,11 @@ a {
   margin: 12vh auto 0;
   padding: 0 24px;
   text-align: center;
+}
+
+/* The empty page under a notice: the notice has the space. */
+.empty--after {
+  margin-top: 0;
 }
 
 .empty h1 {
@@ -563,7 +564,7 @@ a {
   font-weight: 600;
 }
 
-.card form > label:first-of-type {
+.card .field--first {
   margin-top: 0;
 }
 

@@ -578,10 +578,14 @@ fn sign_in_request(port: u16, login: &str, password: &str) -> (u16, String, Stri
                 .map(|(_, v)| v.trim().split(';').next().unwrap().to_string())
         })
         .expect("the sign-in page sets the cookie of its token");
+    // The page changes the order of the attributes at each render: read the tag, not a fixed text.
     let field = |name: &str| {
-        let marker = format!("name=\"{name}\" value=\"");
-        let start = page.find(&marker).expect("a field of the form") + marker.len();
-        page[start..].split('"').next().unwrap().to_string()
+        let at = page
+            .find(&format!("name=\"{name}\""))
+            .expect("a field of the form");
+        let tag = &page[page[..at].rfind('<').unwrap()..at + page[at..].find('>').unwrap()];
+        let start = tag.find("value=\"").expect("a value") + "value=\"".len();
+        tag[start..].split('"').next().unwrap().to_string()
     };
     // The form has a minimum time between its display and its submit.
     std::thread::sleep(std::time::Duration::from_millis(1_200));
@@ -5177,19 +5181,21 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let (st, _) = inbox_page_as(&s, &none.cookie, "/auth/settings/inbox");
     assert_eq!(st, 403);
     let (_, home) = inbox_page_as(&s, &pia.cookie, "/");
-    assert!(
-        has(
-            &home,
-            r#"href="/auth/settings/inbox" aria-label="Settings""#
-        ),
-        "{home}"
-    );
+    // The launcher changes the order of the attributes at each render: read the tag of the gear.
+    let gear_of = |home: &str, href: &str| {
+        let at = home
+            .find(&format!(r#"href="{href}""#))
+            .unwrap_or_else(|| panic!("{home}"));
+        home[home[..at].rfind('<').unwrap()..at + home[at..].find('>').unwrap()].to_string()
+    };
+    let gear = gear_of(&home, "/auth/settings/inbox");
+    assert!(gear.contains(r#"aria-label="Settings""#), "{gear}");
     assert!(
         !has(&home, "inbox-tile") && !has(&home, "<h2"),
         "no tile of the inbox: {home}"
     );
     let (_, home) = inbox_page_as(&s, &s.session().cookie, "/");
-    assert!(has(&home, r#"href="/auth/settings" aria-label="Settings""#));
+    assert!(gear_of(&home, "/auth/settings").contains(r#"aria-label="Settings""#));
     assert!(
         !has(&home, r#"href="/auth/settings/inbox""#),
         "no tile of the inbox"

@@ -124,6 +124,9 @@ pub struct AppState {
     /// The hash that the portal checks when the login does not exist. An unknown login then takes the same time as a known login.
     pub dummy_hash: String,
     pub signing_secret: Vec<u8>,
+    /// The names, the stylesheet and the script of the pages that load only the shared stylesheet.
+    /// Every instance with the same secret makes the same ones.
+    pub mask: ui::mask::Mask,
     pub sessions: SessionStore,
     pub users: Directory,
     pub store: Arc<Store>,
@@ -244,7 +247,9 @@ impl AppState {
             );
         let ensured = crate::bootstrap::prepare_counters(&config, &store, &users, unix_now())?;
         let dummy_hash = hash_password(b"a password nobody has chosen")?;
+        let mask = ui::mask::Mask::new(&signing_secret)?;
         Ok(Self {
+            mask,
             ip_limiter: RateLimiter::new(
                 config.security.login_window,
                 config.security.login_lockout,
@@ -754,6 +759,10 @@ async fn handle_request(
         keys_page::handle_keys_revoke(&state, request, &client).await
     } else if method == Method::GET && path == HOME_PATH {
         handle_home(&state, request.headers(), &client).await
+    } else if method == Method::GET && path == state.mask.assets().css_path {
+        hashed_response("text/css; charset=utf-8", &state.mask.assets().css)
+    } else if method == Method::GET && path == state.mask.assets().js_path {
+        hashed_response("text/javascript; charset=utf-8", &state.mask.assets().js)
     } else if method == Method::GET && path == ui::assets().css_path {
         hashed_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path == ui::assets().js_path {
@@ -912,7 +921,7 @@ fn handle_verify(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     if matches!(
         original_path,
         LOGIN_PATH | LOGOUT_PATH | STYLE_PATH | THEME_JS_PATH
-    ) || is_neutral_asset(original_path)
+    ) || is_neutral_asset(state, original_path)
     {
         state.metrics.verify_allowed();
         return empty_response(StatusCode::NO_CONTENT);
@@ -1027,7 +1036,8 @@ fn handle_not_found(
         }
     }
     if *method == Method::GET {
-        html_response(
+        masked_response(
+            state,
             StatusCode::NOT_FOUND,
             ui::message_page(
                 "Page not found",
@@ -1050,7 +1060,8 @@ fn handle_denied(state: &AppState, headers: &HeaderMap, client: &Client) -> Http
     else {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     };
-    html_response(
+    masked_response(
+        state,
         StatusCode::FORBIDDEN,
         ui::denied_page(ui::DENIED_TEXT, &viewer.login, &logout_token),
     )
@@ -1138,7 +1149,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
             settings: gear,
         },
     );
-    html_response(StatusCode::OK, page)
+    masked_response(state, StatusCode::OK, page)
 }
 
 /// The superadmin in its own right. This does not apply while the superadmin browses as a user.
@@ -1997,7 +2008,8 @@ fn handle_success(state: &AppState, headers: &HeaderMap, client: &Client) -> Htt
     if !has_valid_session(state, headers, client) {
         return redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH);
     }
-    html_response(
+    masked_response(
+        state,
         StatusCode::OK,
         ui::auth_document(
             "Authenticated",
@@ -3542,7 +3554,7 @@ fn login_page(
     let body = ui::auth_document(
         "Authentication",
         &format!(
-            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
+            r#"{}<form method="post" action="/auth/login" autocomplete="on"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="rd" value="{}"><input type="hidden" name="sig" value="{}"><input type="hidden" name="{FORM_TOKEN_FIELD}" value="{form_token}"><label class="field--first" for="login">Login</label><input id="login" name="login" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="128" required autofocus><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="{}" required><div class="hp" aria-hidden="true" inert><label>Leave this field empty<input type="text" name="{TRAP_FIELD}" tabindex="-1" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" value=""></label></div><button class="button button--primary" type="submit">Continue</button></form>{}"#,
             error_html,
             html_escape(csrf),
             html_escape(rd),
@@ -3551,7 +3563,7 @@ fn login_page(
             redirect_html,
         ),
     );
-    let mut response = html_response(status, body);
+    let mut response = masked_response(state, status, body);
     if append_dynamic_header(&mut response, SET_COOKIE, &csrf_cookie(state, csrf, https)).is_err() {
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
     }
@@ -3791,6 +3803,12 @@ fn json_response(status: StatusCode, body: String) -> HttpResponse {
     response
 }
 
+/// A page that loads only the shared stylesheet and the theme script. The names and the structure
+/// of the page change before the server sends it: see `ui::mask`.
+fn masked_response(state: &AppState, status: StatusCode, body: String) -> HttpResponse {
+    html_response(status, state.mask.page(&body))
+}
+
 fn html_response(status: StatusCode, body: String) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::from(body));
     response.headers_mut().insert(
@@ -3816,8 +3834,18 @@ fn static_response(content_type: &'static str, body: &str) -> HttpResponse {
 }
 
 /// Whether `path` is the neutral path of the stylesheet or of the script that every page loads.
-fn is_neutral_asset(path: &str) -> bool {
-    path == ui::assets().css_path || path == ui::assets().js_path
+/// The pages of the sign-in and of the launcher load the files with the mapped names. The
+/// settings pages load the plain files.
+fn is_neutral_asset(state: &AppState, path: &str) -> bool {
+    let mapped = state.mask.assets();
+    [
+        &ui::assets().css_path,
+        &ui::assets().js_path,
+        &mapped.css_path,
+        &mapped.js_path,
+    ]
+    .iter()
+    .any(|known| path == known.as_str())
 }
 
 /// An asset with a hashed path. The path changes when the content changes. Therefore, the browser
@@ -3980,7 +4008,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         READY_PATH => "ready",
         _ if crate::inbox::owns(path) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH => "assets",
-        _ if is_neutral_asset(path) => "assets",
+        _ if is_neutral_asset(state, path) => "assets",
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",
