@@ -1338,12 +1338,14 @@ mod shared_tests {
 
     #[test]
     fn a_session_that_ran_out_is_refused_at_once_and_recorded_by_one_instance_only() {
-        let Some((a, b)) = instances(Duration::from_secs(1), HOUR, 8, Duration::ZERO) else {
+        // The end of a session is a Unix second. A life of 1 second can end less than 1 second after the issue, when
+        // the issue falls at the end of a second. A life of 3 seconds leaves 2 seconds for the first check.
+        let Some((a, b)) = instances(Duration::from_secs(3), HOUR, 8, Duration::ZERO) else {
             return;
         };
         let token = a.sessions.issue(HERE, user("alice")).unwrap();
         assert!(b.sessions.validate(&token, &HERE).is_some());
-        sleep(Duration::from_millis(2_200));
+        sleep(Duration::from_millis(3_200));
         assert!(
             b.sessions.validate(&token, &HERE).is_none(),
             "refused before any sweep"

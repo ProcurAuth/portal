@@ -623,6 +623,20 @@ fn sign_in_request(port: u16, login: &str, password: &str) -> (u16, String, Stri
     )
 }
 
+/// The key of an alert of the portal holds the hour of the Unix clock (the bucket of `repeat_after`). Two instances
+/// that detect one event on both sides of the end of the hour make two alerts. A test that counts the alerts of two
+/// instances waits for the next hour when fewer than `margin` seconds are left in this one.
+fn stay_in_an_hour(margin: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let left = 3600 - now % 3600;
+    if left < margin {
+        std::thread::sleep(Duration::from_secs(left + 1));
+    }
+}
+
 /// `count` sign-ins with a wrong password. The portal refuses each of them, or blocks it with a
 /// limiter. Make the sessions that the test needs before: the limiter locks the address out.
 fn refuse_sign_ins(port: u16, login: &str, count: usize) {
@@ -4587,6 +4601,7 @@ async fn two_instances_send_one_alert_for_one_event() {
         eprintln!("INBOX_TEST_PG is not set: skipped");
         return;
     };
+    stay_in_an_hour(90);
     let mut a = Server::setup_with(Some(admin_pg));
     quiet_phones(&a);
     a.add_to_inbox(&watch_block(""));
