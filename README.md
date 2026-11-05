@@ -1045,8 +1045,12 @@ The tokens that a rule uses are `--accent-fill`, `--accent-fill-hover`, `--accen
 The dark and light values of each token pass these ratios: 4.5:1 for text, 3:1 for a focus ring and for the border of a field.
 A rule never holds a colour literal. Only the token blocks hold literals.
 
-No page shows the logo in its body. The logo is the icon of the browser tab only.
-The icon of the tab is `web/favicon.svg`, a copy of `assets/brand/logo-icon.svg`. The server sends it at a hashed path under `/auth/a/` to a signed-in browser only.
+No page shows the logo or the name of the product in its body. The logo is the icon of the browser tab only. The name is in the title of the tab only.
+The icon of the tab is `web/favicon.svg`, a copy of `assets/brand/logo-icon.svg`. The key `ui.favicon` controls it. The default value is `"default"`.
+With `"default"`, the pages after sign-in link the icon. The server sends it at a hashed path under `/auth/a/` to a signed-in browser only.
+With `"none"`, no page links an icon. The icon path then answers as an unknown path does.
+The sign-in pages, the code step and the error and status pages never link an icon. They are anonymous on purpose.
+The title of the launcher is the value of `server.name`. The title of a settings page is `Settings: <page> · <server.name>`. The sign-in pages keep the title `Authentication`.
 A browser that does not support an SVG icon shows its default icon. This is the case for old versions of Safari on macOS and for some other old browsers.
 
 ## Local test

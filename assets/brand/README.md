@@ -59,4 +59,8 @@ The SVG files carry only the outlines of the glyphs, not the font. The OFL lets 
 4. Do not stretch, rotate, outline or add an effect to the logo.
 5. Do not draw the dot out of the doorway and do not remove it.
 6. Use the white form on a dark or blue background. Use the full-colour form on a white background.
-7. Show the logo only on the pages after the sign-in. The sign-in pages and the error pages stay anonymous.
+7. Do not show the logo in the body of a page of the product. The logo is the icon of the browser tab only.
+8. The key `ui.favicon` controls the icon of the tab. The value `"default"` shows the icon on the pages after sign-in. The value `"none"` removes it. The sign-in pages and the error pages never show it.
+9. Do not show the name `portal` in the body of a page. The name is in the title of the tab only, as the value of `server.name`.
+
+These rules are for the pages that the server sends. The README of the repository and the files of this folder may show the lockup.
