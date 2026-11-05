@@ -316,6 +316,47 @@ mod tests {
     }
 
     #[test]
+    fn no_page_of_the_second_factor_names_the_product_except_in_the_link_of_the_app() {
+        use crate::ui::body_words::{assert_clean, product_words};
+        let e = enrolment();
+        let codes = ["abcde-fghij".to_string()];
+        assert_clean("code card", &code_card(&fields(), Some("Invalid code")));
+        assert_clean("codes card", &codes_card(&codes, "/"));
+        // The link of the app holds the name of the instance as its issuer: this is the only place.
+        let card = enrol_card(&fields(), &e, None);
+        assert_clean("enrol card", &card);
+        assert!(card.contains("issuer=Portal"));
+        let frame = crate::ui::fixtures::full_frame();
+        let states = [
+            State::Off,
+            State::Enrol { enrolment: &e },
+            State::On {
+                since: 1_700_000_000,
+                recovery_left: 3,
+                locked_on: false,
+            },
+            State::Codes { codes: &codes },
+        ];
+        for state in states {
+            let page = security_page(
+                &frame,
+                &SecurityView {
+                    notice: None,
+                    token: "t",
+                    state,
+                },
+            );
+            assert_clean("security", &page);
+        }
+        // Another name of the instance: the body has nothing of it, with or without the link.
+        let mfa = Mfa::new(SecretBox::new(&[3; 32]).unwrap());
+        let other = mfa.begin("alice", "Prod", 1_700_000_000).unwrap();
+        let page = enrol_card(&fields(), &other, None);
+        assert!(product_words(&page).is_empty());
+        assert!(page.contains("issuer=Prod"));
+    }
+
+    #[test]
     fn the_recovery_codes_are_in_a_field_that_a_person_can_select() {
         let codes = ["abcde-fghij".to_string(), "klmno-pqrst".to_string()];
         let page = codes_card(&codes, "/next?x=1&y=2");

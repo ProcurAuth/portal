@@ -597,8 +597,8 @@ fn origin_cell(origin: &Origin) -> String {
     let (name, text, label) = match origin {
         Origin::Watch => (
             "activity",
-            "portal watch".to_string(),
-            "Sent by the portal watch".to_string(),
+            "server watch".to_string(),
+            "Sent by the server watch".to_string(),
         ),
         Origin::Account => (
             "user",
@@ -674,7 +674,7 @@ fn docs_popover(view: &InboxView, docs: &DocsData) -> String {
         );
     }
     let body = format!(
-        r#"<div class="twoCols"><div><h2 class="sectionLabel">Endpoints</h2><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div><p class="muted">Body: <code>title</code> and one of <code>group</code> (a group id) and <code>user</code> (a login). The login is any account of the portal: an account of the database or of the file.</p></div><div><h2 class="sectionLabel">Groups</h2>{}</div></div>"#,
+        r#"<div class="twoCols"><div><h2 class="sectionLabel">Endpoints</h2><div class="monoLine">POST /api/v1/alerts<br>GET /api/v1/alerts/{{id}}<br>POST /api/v1/notify/{{group}}<br>POST /api/v1/webhooks/alertmanager/{{group}}</div><div class="monoLine">Authorization: Bearer &lt;key&gt;</div><div class="monoLine">{}</div><p class="muted">Body: <code>title</code> and one of <code>group</code> (a group id) and <code>user</code> (a login). The login is any account of this server: an account of the database or of the file.</p></div><div><h2 class="sectionLabel">Groups</h2>{}</div></div>"#,
         html_escape(&docs.base),
         if groups.is_empty() {
             r#"<span class="muted">No group</span>"#.to_string()

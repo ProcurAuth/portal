@@ -342,7 +342,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
         path: String::new(),
         kind: SERVICE_TYPE.to_string(),
         label: if portal {
-            "Portal features".to_string()
+            "Server features".to_string()
         } else {
             "Whole service".to_string()
         },
@@ -470,7 +470,7 @@ impl EditorData {
     pub fn keep(&mut self, grant: &Grant) {
         let service = if grant.service == crate::portal_actions::SERVICE {
             self.features
-                .get_or_insert_with(|| bare_service(&grant.service, "Portal features"))
+                .get_or_insert_with(|| bare_service(&grant.service, "Server features"))
         } else {
             let at = match self.services.iter().position(|s| s.id == grant.service) {
                 Some(at) => at,
@@ -642,7 +642,7 @@ mod tests {
         let document = crate::actions::parse("portal", text.as_bytes()).unwrap();
         ServiceActions {
             id: "portal".into(),
-            name: "Portal features".into(),
+            name: "Server features".into(),
             actions: document
                 .actions
                 .iter()
@@ -735,7 +735,7 @@ mod tests {
         let document = crate::portal_actions::document(&features);
         ServiceActions {
             id: crate::portal_actions::SERVICE.into(),
-            name: "Portal features".into(),
+            name: "Server features".into(),
             actions: document
                 .actions
                 .iter()

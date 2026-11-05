@@ -14,6 +14,8 @@
 
 pub mod access;
 pub mod activity;
+#[cfg(test)]
+pub(crate) mod body_words;
 pub mod components;
 #[cfg(test)]
 mod fixtures;
@@ -758,7 +760,7 @@ fn demo_features() -> ServiceActions {
     let document = document(&features);
     ServiceActions {
         id: crate::portal_actions::SERVICE.into(),
-        name: "Portal features".into(),
+        name: "Server features".into(),
         actions: document
             .actions
             .iter()
@@ -1383,6 +1385,114 @@ mod tests {
             assert!(!page.contains("<link rel=\"icon\"") && !page.contains("shortcut"));
             // The only link of the head is the stylesheet.
             assert_eq!(page.matches("<link ").count(), 1, "{page}");
+        }
+    }
+
+    #[test]
+    fn no_body_of_the_launcher_or_of_a_status_page_names_the_product() {
+        use crate::inbox::notify::{Importance, Level};
+        use body_words::assert_clean;
+        let rows = [notify::Row {
+            id: "aa".into(),
+            title: "Disk full".into(),
+            group: "Infra".into(),
+            importance: Importance::Alert,
+            created_at_ms: 0,
+            href: None,
+            unread: true,
+        }];
+        let bell = notify::Bell {
+            header: notify::Header {
+                level: Level::All,
+                unread: 1,
+                cursor_ms: 0,
+            },
+            rows: &rows,
+            now_ms: 0,
+            csrf: "tok",
+            forms: true,
+        };
+        let full = HomeContext {
+            settings: Some("/auth/settings"),
+            bell: Some(&bell),
+            impersonating: true,
+            ..ctx()
+        };
+        let empty = Catalog::build(Vec::new(), Vec::new());
+        // The launcher: with services, with the gear, the bell and the banner, and the two empty states.
+        assert_clean(
+            "launcher",
+            &home_page(&demo_catalog(), &Icons::empty(), &ctx()),
+        );
+        assert_clean(
+            "launcher, all controls",
+            &home_page(&demo_catalog(), &Icons::empty(), &full),
+        );
+        assert_clean(
+            "launcher, no service",
+            &home_page(&empty, &Icons::empty(), &ctx()),
+        );
+        assert_clean(
+            "launcher, no service is open",
+            &home_page(
+                &empty,
+                &Icons::empty(),
+                &HomeContext {
+                    hidden_services: 2,
+                    ..ctx()
+                },
+            ),
+        );
+        // A name that the operator sets is not in the body.
+        let named = HomeContext {
+            tab: TabLook {
+                name: "Prod <Zeta>",
+                icon: true,
+            },
+            ..ctx()
+        };
+        let page = home_page(&demo_catalog(), &Icons::empty(), &named);
+        assert!(page.contains("<title>Prod &lt;Zeta&gt;</title>"));
+        assert!(!page[page.find("<body").unwrap()..].contains("Zeta"));
+        // The status pages and the sign-in pages.
+        assert_clean(
+            "not found",
+            &message_page(
+                "Page not found",
+                "There is nothing at this address.",
+                "Back to panel",
+            ),
+        );
+        assert_clean("denied", &denied_page(DENIED_TEXT, "alice", "tok"));
+        assert_clean(
+            "card",
+            &auth_document("Authentication", "<h1>Authenticated</h1>"),
+        );
+    }
+
+    #[test]
+    fn no_text_that_a_script_draws_names_the_product() {
+        // A string of a script ends in the body of a page. A comment and a name of a variable do not.
+        for (name, script) in [
+            ("settings.js", SETTINGS_JS),
+            ("notify.js", NOTIFY_JS),
+            ("theme.js", THEME_JS),
+        ] {
+            for (number, line) in script.lines().enumerate() {
+                let line = line.trim_start();
+                if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+                    continue;
+                }
+                for quote in ['"', '\''] {
+                    for (at, text) in line.split(quote).enumerate() {
+                        assert!(
+                            at % 2 == 0 || !text.to_ascii_lowercase().contains("portal"),
+                            "{name}:{}: {line}",
+                            number + 1
+                        );
+                    }
+                }
+            }
         }
     }
 

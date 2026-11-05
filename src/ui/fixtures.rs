@@ -143,7 +143,7 @@ pub(super) fn features() -> ServiceActions {
     });
     ServiceActions {
         id: PORTAL.into(),
-        name: "Portal features".into(),
+        name: "Server features".into(),
         actions: document
             .actions
             .iter()

@@ -48,7 +48,7 @@ The superadmin can add users and change grants in the settings page. The superad
 `up.sh` runs `seed.sh` after the portal is ready. It is safe to run again. It does these steps through the pages of the portal:
 
 1. It signs in as `admin` and adds the accounts `alice`, `bob` and `carol`.
-2. It saves the grants of `alice` and `bob` on the page of each account. It saves the rights on keys of `alice` in the group **Portal features** of her page.
+2. It saves the grants of `alice` and `bob` on the page of each account. It saves the rights on keys of `alice` in the group **Server features** of her page.
 3. It signs in as `alice` and makes the API key `demo-sender` on `/auth/keys/new?kind=api`. The key has `alert.send` on `infra`. The portal shows the key one time, and the script keeps it in `demo/.secrets/alice_key`.
 
 The inbox has these groups and API keys:

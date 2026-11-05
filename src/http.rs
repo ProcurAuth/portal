@@ -1912,7 +1912,7 @@ fn feature_actions(
         .unwrap_or_default();
     ui::ServiceActions {
         id: crate::portal_actions::SERVICE.to_string(),
-        name: "Portal features".to_string(),
+        name: "Server features".to_string(),
         actions: document
             .actions
             .iter()

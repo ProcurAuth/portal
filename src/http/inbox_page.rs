@@ -325,7 +325,7 @@ fn portal_base(headers: &HeaderMap) -> String {
                 format!("{}://{}:{}", origin.scheme, origin.host, origin.port)
             }
         }
-        None => "http://<address of the portal>".to_string(),
+        None => "http://<address of this server>".to_string(),
     }
 }
 

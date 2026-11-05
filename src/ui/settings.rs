@@ -9,7 +9,7 @@
 //! - The Access page has the accounts and the keys side by side (see [`super::access`]).
 //! - The Activity page has the sign-ins and the changes (see [`super::activity`]).
 //! - The page of an account has one row of tools (log in as, the password, the activity, delete,
-//!   Save). Under it, the groups "Services" and "Portal features" stand side by side. The editor of
+//!   Save). Under it, the groups "Services" and "Server features" stand side by side. The editor of
 //!   grants draws them.
 //! - "New user" opens a page with the login, the password, the groups and the same editor.
 //! - The Services page has the services on the left. A click on a row selects it, with a link.
@@ -238,7 +238,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "mfa-none" => ("This account has no second factor.", false),
         "mfa-stale" => ("The page was open too long. Start again.", false),
-        "error" => ("The action failed. See the portal logs.", false),
+        "error" => ("The action failed. See the server logs.", false),
         _ => return None,
     };
     Some(Notice { text, ok })
@@ -1711,6 +1711,7 @@ mod tests {
     #[test]
     fn every_page_is_a_whole_document_with_the_same_header_skip_link_and_tabs() {
         let cat = catalog();
+        let empty = crate::catalog::Catalog::build(Vec::new(), Vec::new());
         let d = data();
         let actions = services();
         let holders = vec![holder("alice", access(&["grafana"]))];
@@ -1749,9 +1750,34 @@ mod tests {
                 Tab::Services,
                 services_page(&full_frame(), &services_view(&cat, &actions, &holders)),
             ),
+            // The pages of a server that has no service yet: the hints of the empty states.
+            (
+                Tab::Services,
+                services_page(&full_frame(), &services_view(&empty, &[], &[])),
+            ),
+            (
+                Tab::Access,
+                user_page(&full_frame(), &user_view(&empty, card("alice", &[]))),
+            ),
+            (
+                Tab::Access,
+                new_user_page(
+                    &full_frame(),
+                    &NewUserView {
+                        notice: None,
+                        field: None,
+                        groups: Vec::new(),
+                        services: Vec::new(),
+                        features: Some(features()),
+                        token: "tok",
+                        refused: None,
+                    },
+                ),
+            ),
         ];
         for (tab, html) in &pages {
             assert!(html.starts_with("<!doctype html>"), "{tab:?}");
+            crate::ui::body_words::assert_clean(tab.label(), html);
             assert!(html.contains(&format!(
                 r#"<link rel="stylesheet" href="/auth/settings.css?v={}">"#,
                 asset_version()

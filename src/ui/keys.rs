@@ -205,12 +205,12 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "capacity" => (
-            "The portal holds the largest number of counter rows or of permissions. Revoke a key first.",
+            "The server holds the largest number of counter rows or of permissions. Revoke a key first.",
             false,
         ),
         "unknown_key" => ("That key does not exist, or you cannot change it.", false),
         "file_key" => (
-            "This key comes from the configuration file. Remove it from the file, and restart the portal.",
+            "This key comes from the configuration file. Remove it from the file, and restart the server.",
             false,
         ),
         _ => return None,
@@ -720,7 +720,7 @@ fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, St
 /// The aside of the form of an API key: the calls that the ticked rights allow. The script fills it
 /// from the editor, so without script it is absent. The boxes of the editor already show the rights:
 /// the aside does not list them again.
-const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title" title="The portal knows these calls from its own documentation. The key holds at most the rights of its owner.">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><div class="mono-line">Authorization: Bearer &lt;key&gt;</div></aside>"#;
+const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title" title="The server knows these calls from its own documentation. The key holds at most the rights of its owner.">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><div class="mono-line">Authorization: Bearer &lt;key&gt;</div></aside>"#;
 
 /// The page "New key" or "Edit key": the fields across the width, then the editor of the
 /// permissions. An MCP key shows the services on the whole width. An API key shows the inbox on the
@@ -866,7 +866,7 @@ fn made_page(key: &NewKey<'_>) -> String {
         ),
     });
     format!(
-        r##"{head}<p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">The key <strong>{}</strong> is made. Copy its text now. The portal shows it one time and keeps only a digest.</span></p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</span></p>"##,
+        r##"{head}<p class="uiBanner uiBanner--inset uiBanner--ok" role="status"><span class="uiBanner__text">The key <strong>{}</strong> is made. Copy its text now. The server shows it one time and keeps only a digest.</span></p><div class="field"><label class="field__label" for="key-text">Key</label><div class="keyRow"><input class="uiInput uiInput--mono keyText" id="key-text" type="text" readonly value="{}" spellcheck="false" autocomplete="off"><button class="button copyButton" type="button" data-copy="key-text"><svg class="icon icon--sm copyButton__idle" aria-hidden="true"><use href="#i-copy"/></svg><svg class="icon icon--sm copyButton__done" aria-hidden="true"><use href="#i-check"/></svg>Copy</button></div></div><p class="uiBanner uiBanner--inset uiBanner--warn"><span class="uiBanner__text">Each request with this key acts as you. Do not put it in a connector that other persons use.{}</span></p>"##,
         html_escape(key.name),
         html_escape(key.text),
         if key.superadmin {
