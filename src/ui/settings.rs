@@ -145,6 +145,8 @@ pub struct Frame<'a> {
     /// The viewer sees the tab "Security": `authentication.mfa` is not `off`, and the session is not a session of
     /// "Log in as".
     pub security: bool,
+    /// What the tab of the browser shows.
+    pub tab: super::TabLook<'a>,
 }
 
 impl Frame<'_> {
@@ -320,11 +322,11 @@ fn shell_class(
     body.push_str(&script_tag());
     let icons = icon_ids(&body);
     document_class(
-        &format!("Settings: {title}"),
+        &format!("Settings: {title} · {}", frame.tab.name),
         &format!(
             r#"<link rel="stylesheet" href="/auth/settings.css?v={}">{}"#,
             asset_version(),
-            super::favicon_link()
+            frame.tab.icon_link()
         ),
         &icons,
         "shell",
@@ -1457,7 +1459,7 @@ fn source_line(source: crate::actions::Source, problem: Option<&str>) -> String 
             "ok",
             "circle-check",
             format!(
-                "Published by the service at <code>{SOURCE_PATH}</code> \u{b7} read {} ago",
+                "Published by the service at <code>{SOURCE_PATH}</code> · read {} ago",
                 minutes(age)
             ),
         ),
@@ -1798,6 +1800,7 @@ mod tests {
                 superadmin,
                 notify: None,
                 security: false,
+                tab: crate::ui::TabLook::DEFAULT,
             }
             .tabs()
         };

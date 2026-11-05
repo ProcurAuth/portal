@@ -233,7 +233,7 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
-    fn frame(&self, state: &AppState) -> ui::Frame<'_> {
+    fn frame<'a>(&'a self, state: &'a AppState) -> ui::Frame<'a> {
         ui::Frame {
             logout_token: &self.logout_token,
             keys: super::keys_page::list_visible(state, &self.viewer),
@@ -241,6 +241,7 @@ impl Context<'_> {
             superadmin: is_superadmin(&self.viewer),
             notify: None,
             security: super::mfa_page::tab_visible(state, &self.viewer),
+            tab: state.tab_look(),
         }
     }
 }

@@ -149,6 +149,7 @@ fn parses_the_minimal_configuration_with_the_documented_defaults() {
     assert!(cfg.discovery.docker_socket.is_none());
     assert_eq!(cfg.discovery.interval, Duration::from_secs(15));
     assert_eq!(cfg.ui.icons_dir, PathBuf::from("/icons"));
+    assert_eq!(cfg.ui.favicon, Favicon::Default);
     assert_eq!(cfg.logging.level, LogLevel::Info);
 }
 
@@ -647,9 +648,20 @@ fn letter_case_is_exact_for_booleans_and_enums() {
         r#"logging { level = "INFO" }"#,
         r#"logging { level = "Debug" }"#,
         r#"logging { level = "warning" }"#,
+        r#"ui { favicon = "None" }"#,
+        r#"ui { favicon = "off" }"#,
+        "ui { favicon = none }",
+        "ui { favicon = false }",
     ] {
         err(&with(bad));
     }
+    let (cfg, _) = ok(&with(r#"ui { favicon = "none" }"#));
+    assert_eq!(cfg.ui.favicon, Favicon::None);
+    let message = err(&with(r#"ui { favicon = "off" }"#));
+    assert!(
+        message.contains("ui.favicon") && message.contains("default") && message.contains("off"),
+        "{message}"
+    );
     let (cfg, _) = ok(&with(
         r#"session { same_site = "Lax" bind = "none" } logging { level = "warn" }"#,
     ));

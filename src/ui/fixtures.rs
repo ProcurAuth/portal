@@ -72,6 +72,7 @@ pub(super) fn frame() -> Frame<'static> {
         superadmin: true,
         notify: None,
         security: false,
+        tab: crate::ui::TabLook::DEFAULT,
     }
 }
 

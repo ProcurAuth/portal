@@ -8484,6 +8484,96 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     assert_ne!(verify.status, 204);
 }
 
+/// The text of the `title` element of a page.
+fn title_of(page: &str) -> &str {
+    let start = page.find("<title>").expect("no title") + "<title>".len();
+    &page[start..start + page[start..].find("</title>").unwrap()]
+}
+
+#[test]
+fn with_favicon_none_no_page_links_an_icon_and_the_icon_route_is_an_unknown_path() {
+    let node = sign_in_node(r#"ui { favicon = "none" }"#);
+    let icon = ui::favicon_path();
+    let root = sign_in(&node, "root", PASSWORD);
+    let login = send(node.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(login.status, 200);
+    let mut pages = vec![login];
+    for path in ["/", "/auth/settings/services", "/auth/settings"] {
+        let reply = page(&node, &root, path);
+        assert_eq!(reply.status, 200, "{path}");
+        pages.push(reply);
+    }
+    for reply in &pages {
+        assert!(
+            !reply.body.contains("rel=\"icon\"") && !reply.body.contains(icon),
+            "{}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body.matches("<link ").count(),
+            if reply.body.contains("settings.css") {
+                2
+            } else {
+                1
+            }
+        );
+    }
+    // The route: a signed-in browser gets the 404 page of an unknown path, not the file.
+    let signed = page(&node, &root, icon);
+    let unknown = page(&node, &root, "/auth/a/0000000000000000.svg");
+    assert_eq!(signed.status, 404);
+    assert_eq!(signed.status, unknown.status);
+    assert_eq!(title_of(&signed.body), title_of(&unknown.body));
+    assert!(!signed.body.contains("1238F0"));
+    // A browser that is not signed in gets what an unknown path gets.
+    let anonymous = send(node.port, "GET", icon, &[], "");
+    let anonymous_unknown = send(node.port, "GET", "/auth/a/0000000000000000.svg", &[], "");
+    assert_eq!(anonymous.status, anonymous_unknown.status);
+    assert_ne!(anonymous.status, 200);
+}
+
+#[test]
+fn the_name_of_the_instance_ends_the_title_of_the_pages_after_sign_in_and_nowhere_else() {
+    let node = sign_in_node("");
+    let root = sign_in(&node, "root", PASSWORD);
+    assert_eq!(title_of(&page(&node, &root, "/").body), "Portal");
+    assert_eq!(
+        title_of(&page(&node, &root, "/auth/settings/services").body),
+        "Settings: Services \u{b7} Portal"
+    );
+    // The sign-in page keeps its neutral title.
+    assert_eq!(
+        title_of(&send(node.port, "GET", LOGIN_PATH, &[], "").body),
+        "Authentication"
+    );
+    // Another name: the title shows it, escaped, and the body does not.
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            server: r#"name = "Prod <&> Zeta" trusted_proxies = ["127.0.0.1/32"]"#,
+            ..Custom::default()
+        },
+        "",
+    );
+    let root = sign_in(&node, "root", PASSWORD);
+    let home = page(&node, &root, "/");
+    assert_eq!(title_of(&home.body), "Prod &lt;&amp;&gt; Zeta");
+    let settings = page(&node, &root, "/auth/settings");
+    assert_eq!(
+        title_of(&settings.body),
+        "Settings: Access \u{b7} Prod &lt;&amp;&gt; Zeta"
+    );
+    for reply in [&home, &settings] {
+        let body = &reply.body[reply.body.find("<body").unwrap()..];
+        assert!(!body.contains("Zeta") && !body.contains("Prod"), "{body}");
+    }
+    assert_eq!(
+        title_of(&send(node.port, "GET", LOGIN_PATH, &[], "").body),
+        "Authentication"
+    );
+}
+
 #[test]
 fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
     let node = sign_in_node("");

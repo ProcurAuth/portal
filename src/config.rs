@@ -207,6 +207,28 @@ pub struct UiConfig {
     /// Directory of the offline icon library (`di/`, `si/`, `tb/`).
     /// When the directory is missing, icons fall back to initials.
     pub icons_dir: PathBuf,
+    /// The icon of the browser tab (`ui.favicon`).
+    pub favicon: Favicon,
+}
+
+/// The values of `ui.favicon`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Favicon {
+    /// The pages after sign-in link the built-in icon.
+    Default,
+    /// No page links an icon.
+    None,
+}
+
+impl Favicon {
+    /// The exact names of the table: `default` and `none`.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "default" => Ok(Self::Default),
+            "none" => Ok(Self::None),
+            _ => Err(format!("invalid ui.favicon: {value:?}")),
+        }
+    }
 }
 
 /// The API of the cluster, as the environment variables that the file names give it.
@@ -652,6 +674,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         },
         ui: UiConfig {
             icons_dir: PathBuf::from(r.text("ui", "icons_dir")?),
+            favicon: Favicon::parse(&r.text("ui", "favicon")?)?,
         },
         logging: LoggingConfig {
             level: LogLevel::parse(&r.text("logging", "level")?)?,

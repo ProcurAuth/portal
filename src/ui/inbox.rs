@@ -1809,6 +1809,7 @@ mod tests {
             superadmin: false,
             notify: None,
             security: false,
+            tab: crate::ui::TabLook::DEFAULT,
         }
     }
 

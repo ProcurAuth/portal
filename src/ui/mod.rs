@@ -136,6 +136,35 @@ pub struct HomeContext<'a> {
     /// The inbox icon next to the gear, with its popover. `None`: the viewer receives no
     /// notification, and the page has no icon.
     pub bell: Option<&'a notify::Bell<'a>>,
+    /// What the tab of the browser shows.
+    pub tab: TabLook<'a>,
+}
+
+/// What the tab of the browser shows on a page after sign-in. The name and the icon are in the head of the page. No
+/// page body shows them.
+#[derive(Clone, Copy, Debug)]
+pub struct TabLook<'a> {
+    /// The name of the instance (`server.name`). It ends the title of the page.
+    pub name: &'a str,
+    /// The page links the icon of the tab (`ui.favicon` is `default`).
+    pub icon: bool,
+}
+
+impl TabLook<'_> {
+    /// The defaults of the configuration: the name "Portal" and the icon.
+    pub const DEFAULT: TabLook<'static> = TabLook {
+        name: "Portal",
+        icon: true,
+    };
+
+    /// The `link` element of the icon, or nothing when the icon is off.
+    fn icon_link(&self) -> String {
+        if self.icon {
+            favicon_link()
+        } else {
+            String::new()
+        }
+    }
 }
 
 /// The launcher. It has one full-width row for each group and one tile for each service.
@@ -196,7 +225,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
             "i-bell-ringing",
         ]);
     }
-    document("Portal", &favicon_link(), &icons, &body)
+    document(ctx.tab.name, &ctx.tab.icon_link(), &icons, &body)
 }
 
 /// Wraps an authentication card (`<h1>`, text, form) in the shared shell.
@@ -1004,6 +1033,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         superadmin: true,
         notify: None,
         security: false,
+        tab: TabLook::DEFAULT,
     };
     let holders = |users: &Accounts| -> Vec<Holder> {
         users
@@ -1028,6 +1058,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 hidden_services: 0,
                 settings: Some("/auth/settings"),
                 bell: None,
+                tab: TabLook::DEFAULT,
             },
         ),
         "access" | "access-panel-only" => access_page(
@@ -1252,6 +1283,7 @@ mod tests {
             hidden_services: 0,
             settings: None,
             bell: None,
+            tab: TabLook::DEFAULT,
         }
     }
 

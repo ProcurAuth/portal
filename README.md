@@ -1211,7 +1211,7 @@ The HTTP server.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `listen_address` | text: an IP address and a port, such as 0.0.0.0:4181 | required | The address and the port that the server listens on. |
-| `name` | text: 1 to 64 bytes, not blank, no control character | `"Portal"` | The name of this instance. The phones show it as the name of the server, and the welcome message uses it. |
+| `name` | text: 1 to 64 bytes, not blank, no control character | `"Portal"` | The name of this instance. The phones show it as the name of the server, and the welcome message uses it. The browser tab shows it at the end of the title of the pages after sign-in. No page body shows it. |
 | `workers` | number, 1 to 64 | `4` | The number of worker threads. |
 | `max_body_bytes` | size, 1KiB to 1MiB | `"32KiB"` | The largest request body that the server reads. The form of a user holds one field for each grant that it shows. |
 | `max_connections` | number, 1 to 100000 | `1024` | The largest number of open TCP connections of the pages and the API. A connection that upgrades to a phone session gives its permit back and takes a permit of the session budget: `server.max_connections` plus two times `inbox.devices.max_devices`. This budget exists only with the block `inbox`. |
@@ -1387,6 +1387,7 @@ The pages.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `icons_dir` | text: an absolute path without '..' | `"/icons"` | The directory of the offline icon library. If the directory is missing, the pages show initials. |
+| `favicon` | `default`, `none` | `"default"` | The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page links an icon, and the icon route answers 404. |
 
 #### Block `logging`
 

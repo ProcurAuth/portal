@@ -288,7 +288,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Default("Portal"),
         when: When::Always,
-        doc: "The name of this instance. The phones show it as the name of the server, and the welcome message uses it.",
+        doc: "The name of this instance. The phones show it as the name of the server, and the welcome message uses it. The browser tab shows it at the end of the title of the pages after sign-in. No page body shows it.",
     },
     Key {
         block: "server",
@@ -1007,6 +1007,14 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("/icons"),
         when: When::Always,
         doc: "The directory of the offline icon library. If the directory is missing, the pages show initials.",
+    },
+    Key {
+        block: "ui",
+        name: "favicon",
+        kind: Kind::Enum(&["default", "none"]),
+        presence: Presence::Default("default"),
+        when: When::Always,
+        doc: "The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page links an icon, and the icon route answers 404.",
     },
     Key {
         block: "logging",
