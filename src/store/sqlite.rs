@@ -1789,6 +1789,11 @@ CREATE TABLE user_roles (
                 other
                     .busy_timeout(std::time::Duration::from_secs(5))
                     .unwrap();
+                // The inbox puts the shared file in the WAL mode. In the rollback mode two writers can
+                // deadlock on the lock upgrade, and SQLite then ends one of them at once.
+                other
+                    .query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
+                    .unwrap();
                 let mut writes = 0_u64;
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     other
