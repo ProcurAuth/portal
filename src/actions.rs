@@ -769,7 +769,7 @@ pub fn parse_within(service: &str, body: &[u8], bounds: &Bounds) -> Result<Docum
         serde_json::from_slice(body).map_err(|e| format!("the document is not valid: {e}"))?;
     if document.server != service {
         return Err(format!(
-            "the document names the server {:?}, the id of the service is {service:?}: set portal.id to the name of the server",
+            "the document names the server {:?}, the id of the service is {service:?}: set the id label of the catalogue to the name of the server",
             document.server
         ));
     }

@@ -9,7 +9,7 @@
 //! - The Access page has the accounts and the keys side by side (see [`super::access`]).
 //! - The Activity page has the sign-ins and the changes (see [`super::activity`]).
 //! - The page of an account has one row of tools (log in as, the password, the activity, delete,
-//!   Save). Under it, the groups "Services" and "Portal features" stand side by side. The editor of
+//!   Save). Under it, the groups "Services" and "Server features" stand side by side. The editor of
 //!   grants draws them.
 //! - "New user" opens a page with the login, the password, the groups and the same editor.
 //! - The Services page has the services on the left. A click on a row selects it, with a link.
@@ -145,6 +145,8 @@ pub struct Frame<'a> {
     /// The viewer sees the tab "Security": `authentication.mfa` is not `off`, and the session is not a session of
     /// "Log in as".
     pub security: bool,
+    /// What the tab of the browser shows.
+    pub tab: super::TabLook<'a>,
 }
 
 impl Frame<'_> {
@@ -236,7 +238,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "mfa-none" => ("This account has no second factor.", false),
         "mfa-stale" => ("The page was open too long. Start again.", false),
-        "error" => ("The action failed. See the portal logs.", false),
+        "error" => ("The action failed. See the server logs.", false),
         _ => return None,
     };
     Some(Notice { text, ok })
@@ -307,7 +309,7 @@ fn shell_class(
     let mut body = String::new();
     let _ = write!(
         body,
-        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><svg class="appMark__glyph" aria-hidden="true" focusable="false"><use href="#i-logo"/></svg><span class="appSep"></span><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
+        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
         tab_strip(tabs, tab, frame.notify.as_ref()),
         theme_switch(),
         sign_out_form(frame.logout_token),
@@ -320,11 +322,11 @@ fn shell_class(
     body.push_str(&script_tag());
     let icons = icon_ids(&body);
     document_class(
-        &format!("Settings: {title}"),
+        &format!("Settings: {title} · {}", frame.tab.name),
         &format!(
             r#"<link rel="stylesheet" href="/auth/settings.css?v={}">{}"#,
             asset_version(),
-            super::favicon_link()
+            frame.tab.icon_link()
         ),
         &icons,
         "shell",
@@ -624,7 +626,7 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
         );
     }
     if view.services.is_empty() && view.features.is_none() {
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
     } else {
         // The editor shows every grant that the account holds, also a grant that the document of
         // the service does not name now. The grants of the configuration file are locked.
@@ -1094,7 +1096,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
         groups_field(&view.groups, &[], true),
     );
     if view.services.is_empty() && view.features.is_none() {
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
     } else {
         let data = grant_editor::build(
             &view.services,
@@ -1199,7 +1201,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let count = view.catalog.service_count();
     if count == 0 {
         out.push_str(&toolbar("Services", "", ""));
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
         return fill_page(Tab::Services, frame, "Services", &out);
     }
     let selected = view.selected_id();
@@ -1457,7 +1459,7 @@ fn source_line(source: crate::actions::Source, problem: Option<&str>) -> String 
             "ok",
             "circle-check",
             format!(
-                "Published by the service at <code>{SOURCE_PATH}</code> \u{b7} read {} ago",
+                "Published by the service at <code>{SOURCE_PATH}</code> · read {} ago",
                 minutes(age)
             ),
         ),
@@ -1673,7 +1675,7 @@ mod tests {
     use crate::ui::{access_page, activity_page, ActivityView};
 
     #[test]
-    fn every_settings_page_has_the_mark_at_the_left_of_the_header_and_links_the_tab_icon() {
+    fn no_settings_page_has_a_logo_in_its_header_and_each_links_the_tab_icon() {
         let cat = catalog();
         let d = data();
         let activity = ActivityView {
@@ -1694,25 +1696,13 @@ mod tests {
             ),
         ];
         for html in &pages {
-            let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
-            // The mark comes first, then the rule, then the way back, which stays the first action.
-            let mark = header.find(r##"<use href="#i-logo"/>"##).unwrap();
-            let rule = header.find(r#"<span class="appSep">"#).unwrap();
-            let back = header.find(r#"<a class="backLink" href="/">"#).unwrap();
-            assert!(mark < rule && rule < back, "{header}");
-            assert_eq!(
-                header.matches("<a ").count() - header.matches("contentTabs__tab").count(),
-                1
-            );
-            // A picture: hidden from the screen reader, with no name, and no second link to the launcher.
-            let before_back = &header[..back];
-            assert!(before_back.contains(r#"aria-hidden="true""#));
-            assert!(!before_back.contains("<title") && !before_back.contains("aria-label"));
-            assert!(html.contains(r#"<symbol id="i-logo" viewBox="0 0 100 100">"#));
-            assert!(
-                !html.contains("i-logo-lockup"),
-                "the lockup is for the launcher"
-            );
+            for part in ["i-logo", "logoDot", "appMark", "appSep"] {
+                assert!(!html.replace("i-logout", "").contains(part), "{part}");
+            }
+            // The header starts with the way back, which is the first action.
+            assert!(html.contains(
+                r##"<header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/">"##
+            ));
             // The tab icon.
             assert!(html.contains(&super::super::favicon_link()));
         }
@@ -1721,6 +1711,7 @@ mod tests {
     #[test]
     fn every_page_is_a_whole_document_with_the_same_header_skip_link_and_tabs() {
         let cat = catalog();
+        let empty = crate::catalog::Catalog::build(Vec::new(), Vec::new());
         let d = data();
         let actions = services();
         let holders = vec![holder("alice", access(&["grafana"]))];
@@ -1759,9 +1750,34 @@ mod tests {
                 Tab::Services,
                 services_page(&full_frame(), &services_view(&cat, &actions, &holders)),
             ),
+            // The pages of a server that has no service yet: the hints of the empty states.
+            (
+                Tab::Services,
+                services_page(&full_frame(), &services_view(&empty, &[], &[])),
+            ),
+            (
+                Tab::Access,
+                user_page(&full_frame(), &user_view(&empty, card("alice", &[]))),
+            ),
+            (
+                Tab::Access,
+                new_user_page(
+                    &full_frame(),
+                    &NewUserView {
+                        notice: None,
+                        field: None,
+                        groups: Vec::new(),
+                        services: Vec::new(),
+                        features: Some(features()),
+                        token: "tok",
+                        refused: None,
+                    },
+                ),
+            ),
         ];
         for (tab, html) in &pages {
             assert!(html.starts_with("<!doctype html>"), "{tab:?}");
+            crate::ui::body_words::assert_clean(tab.label(), html);
             assert!(html.contains(&format!(
                 r#"<link rel="stylesheet" href="/auth/settings.css?v={}">"#,
                 asset_version()
@@ -1810,6 +1826,7 @@ mod tests {
                 superadmin,
                 notify: None,
                 security: false,
+                tab: crate::ui::TabLook::DEFAULT,
             }
             .tabs()
         };

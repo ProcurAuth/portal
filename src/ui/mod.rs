@@ -14,6 +14,8 @@
 
 pub mod access;
 pub mod activity;
+#[cfg(test)]
+pub(crate) mod body_words;
 pub mod components;
 #[cfg(test)]
 mod fixtures;
@@ -136,6 +138,35 @@ pub struct HomeContext<'a> {
     /// The inbox icon next to the gear, with its popover. `None`: the viewer receives no
     /// notification, and the page has no icon.
     pub bell: Option<&'a notify::Bell<'a>>,
+    /// What the tab of the browser shows.
+    pub tab: TabLook<'a>,
+}
+
+/// What the tab of the browser shows on a page after sign-in. The name and the icon are in the head of the page. No
+/// page body shows them.
+#[derive(Clone, Copy, Debug)]
+pub struct TabLook<'a> {
+    /// The name of the instance (`server.name`). It ends the title of the page.
+    pub name: &'a str,
+    /// The page links the icon of the tab (`ui.favicon` is `default`).
+    pub icon: bool,
+}
+
+impl TabLook<'_> {
+    /// The defaults of the configuration: the name "Portal" and the icon.
+    pub const DEFAULT: TabLook<'static> = TabLook {
+        name: "Portal",
+        icon: true,
+    };
+
+    /// The `link` element of the icon, or nothing when the icon is off.
+    fn icon_link(&self) -> String {
+        if self.icon {
+            favicon_link()
+        } else {
+            String::new()
+        }
+    }
 }
 
 /// The launcher. It has one full-width row for each group and one tile for each service.
@@ -166,7 +197,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
     } else if catalog.groups().is_empty() {
         let _ = write!(
             body,
-            r#"<main class="{empty}"><h1>No services yet</h1><p>Add <code>portal.name</code> and <code>portal.href</code> labels to a container or an IngressRoute and it appears here.</p></main>"#,
+            r#"<main class="{empty}"><h1>No services yet</h1><p>Add the catalogue labels to a container or an IngressRoute and it appears here.</p></main>"#,
         );
     } else {
         body.push_str(r#"<main class="rows"><h1 class="visually-hidden">Services</h1>"#);
@@ -176,14 +207,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         }
         body.push_str("</main>");
     }
-    let mut icons = vec![
-        "i-logo-lockup",
-        "i-logo",
-        "i-device-desktop",
-        "i-moon",
-        "i-sun",
-        "i-logout",
-    ];
+    let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
     if ctx.settings.is_some() {
         icons.push("i-settings");
     }
@@ -203,7 +227,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
             "i-bell-ringing",
         ]);
     }
-    document("Portal", &favicon_link(), &icons, &body)
+    document(ctx.tab.name, &ctx.tab.icon_link(), &icons, &body)
 }
 
 /// Wraps an authentication card (`<h1>`, text, form) in the shared shell.
@@ -336,11 +360,7 @@ fn sign_out_form(token: &str) -> String {
 
 fn header(ctx: &HomeContext) -> String {
     let mut out = String::new();
-    // The logo is a picture and not a control: this page is the target of "Back to panel", so a link would
-    // only repeat it. On a narrow screen the mark alone takes the place of the lockup.
-    out.push_str(
-        r##"<header class="appHeader"><div class="appHeader__left"><svg class="appMark__lockup" aria-hidden="true" focusable="false"><use href="#i-logo-lockup"/></svg><svg class="appMark__glyph appMark__glyph--narrow" aria-hidden="true" focusable="false"><use href="#i-logo"/></svg></div><div class="appHeader__right">"##,
-    );
+    out.push_str(r#"<header class="appHeader"><div class="appHeader__right">"#);
     if let Some(bell) = ctx.bell {
         out.push_str(&notify::bell(bell));
     }
@@ -740,7 +760,7 @@ fn demo_features() -> ServiceActions {
     let document = document(&features);
     ServiceActions {
         id: crate::portal_actions::SERVICE.into(),
-        name: "Portal features".into(),
+        name: "Server features".into(),
         actions: document
             .actions
             .iter()
@@ -1015,6 +1035,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
         superadmin: true,
         notify: None,
         security: false,
+        tab: TabLook::DEFAULT,
     };
     let holders = |users: &Accounts| -> Vec<Holder> {
         users
@@ -1039,6 +1060,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 hidden_services: 0,
                 settings: Some("/auth/settings"),
                 bell: None,
+                tab: TabLook::DEFAULT,
             },
         ),
         "access" | "access-panel-only" => access_page(
@@ -1263,6 +1285,7 @@ mod tests {
             hidden_services: 0,
             settings: None,
             bell: None,
+            tab: TabLook::DEFAULT,
         }
     }
 
@@ -1309,34 +1332,18 @@ mod tests {
         }
     }
 
-    /// What a page shows when it draws the logo. The list names each part: the mark, the lockup, the class of
-    /// the dot, the classes of the header and the link of the tab icon.
-    const LOGO_PARTS: [&str; 7] = [
-        "i-logo",
-        "logoDot",
-        "appMark",
-        "appSep",
-        "rel=\"icon\"",
-        "image/svg+xml",
-        ".svg\"",
-    ];
+    /// What a page shows when it draws the logo in its body. The list names each part: the symbols, the class of
+    /// the dot and the classes of the header.
+    const LOGO_PARTS: [&str; 4] = ["i-logo", "logoDot", "appMark", "appSep"];
 
     #[test]
-    fn the_launcher_shows_the_logo_as_a_picture_and_links_the_tab_icon() {
+    fn the_launcher_has_no_logo_in_its_body_and_links_the_tab_icon() {
         let page = home_page(&demo_catalog(), &Icons::empty(), &ctx());
-        // The lockup for a wide screen and the mark for a narrow one, both from the sprite.
-        assert!(page.contains(r##"<use href="#i-logo-lockup"/>"##));
-        assert!(page.contains(r##"<use href="#i-logo"/>"##));
-        assert!(page.contains(r#"<symbol id="i-logo-lockup""#));
-        assert!(page.contains(r#"<symbol id="i-logo" viewBox="0 0 100 100">"#));
-        // The logo is a picture: it has no name, no link and no title.
-        let header = &page[page.find("<header").unwrap()..page.find("</header>").unwrap()];
-        let first = header.find("appHeader__left").unwrap();
-        let logo = &header[first..header.find("appHeader__right").unwrap()];
-        assert!(logo.contains(r#"aria-hidden="true""#));
-        assert!(!logo.contains("<a ") && !logo.contains("<title") && !logo.contains("aria-label"));
-        // The wordmark is a path, not text: the page has no text "portal" for the logo.
-        assert!(!page.contains(">portal<"));
+        for part in LOGO_PARTS {
+            assert!(!page.replace("i-logout", "").contains(part), "{part}");
+        }
+        // The header holds the controls only.
+        assert!(page.contains(r#"<header class="appHeader"><div class="appHeader__right">"#));
         // The tab icon: a link to the same-origin hashed file.
         let link = format!(
             r#"<link rel="icon" type="image/svg+xml" href="{}">"#,
@@ -1348,20 +1355,14 @@ mod tests {
     }
 
     #[test]
-    fn the_symbol_of_the_mark_takes_its_colours_from_the_tokens_and_has_no_literal() {
-        let mark = SPRITE
-            .lines()
-            .find(|line| line.starts_with(r#"<symbol id="i-logo" "#))
-            .unwrap();
-        assert!(mark.contains(r#"stroke="currentColor""#));
-        assert!(mark.contains(r#"<circle class="logoDot""#));
-        assert!(!mark.contains('#') && !mark.contains("var("), "{mark}");
-        assert!(CSS.contains(".logoDot {\n  fill: var(--logo-dot);"));
-        // The tab icon is a file of its own: the tile of Signal Blue with the mark in white and the dot in cyan.
+    fn the_tab_icon_is_a_file_of_its_own_with_the_colours_of_the_brand() {
+        // The tile of Signal Blue with the mark in white and the dot in cyan.
         assert!(FAVICON_SVG.contains(r##"fill="#1238F0""##));
         assert!(FAVICON_SVG.contains(r##"fill="#7FF0FF""##));
         assert!(!FAVICON_SVG.contains("<script") && !FAVICON_SVG.contains("<style"));
         assert!(!FAVICON_SVG.to_ascii_lowercase().contains("portal"));
+        // The sprite of the pages has no symbol of the logo.
+        assert!(!SPRITE.replace("i-logout", "").contains("i-logo"));
     }
 
     #[test]
@@ -1375,11 +1376,123 @@ mod tests {
         ];
         for page in &pages {
             for part in LOGO_PARTS {
-                assert!(!page.contains(part), "{part}: {page}");
+                assert!(
+                    !page.replace("i-logout", "").contains(part),
+                    "{part}: {page}"
+                );
             }
+            assert!(!page.contains("rel=\"icon\"") && !page.contains("image/svg+xml"));
             assert!(!page.contains("<link rel=\"icon\"") && !page.contains("shortcut"));
             // The only link of the head is the stylesheet.
             assert_eq!(page.matches("<link ").count(), 1, "{page}");
+        }
+    }
+
+    #[test]
+    fn no_body_of_the_launcher_or_of_a_status_page_names_the_product() {
+        use crate::inbox::notify::{Importance, Level};
+        use body_words::assert_clean;
+        let rows = [notify::Row {
+            id: "aa".into(),
+            title: "Disk full".into(),
+            group: "Infra".into(),
+            importance: Importance::Alert,
+            created_at_ms: 0,
+            href: None,
+            unread: true,
+        }];
+        let bell = notify::Bell {
+            header: notify::Header {
+                level: Level::All,
+                unread: 1,
+                cursor_ms: 0,
+            },
+            rows: &rows,
+            now_ms: 0,
+            csrf: "tok",
+            forms: true,
+        };
+        let full = HomeContext {
+            settings: Some("/auth/settings"),
+            bell: Some(&bell),
+            impersonating: true,
+            ..ctx()
+        };
+        let empty = Catalog::build(Vec::new(), Vec::new());
+        // The launcher: with services, with the gear, the bell and the banner, and the two empty states.
+        assert_clean(
+            "launcher",
+            &home_page(&demo_catalog(), &Icons::empty(), &ctx()),
+        );
+        assert_clean(
+            "launcher, all controls",
+            &home_page(&demo_catalog(), &Icons::empty(), &full),
+        );
+        assert_clean(
+            "launcher, no service",
+            &home_page(&empty, &Icons::empty(), &ctx()),
+        );
+        assert_clean(
+            "launcher, no service is open",
+            &home_page(
+                &empty,
+                &Icons::empty(),
+                &HomeContext {
+                    hidden_services: 2,
+                    ..ctx()
+                },
+            ),
+        );
+        // A name that the operator sets is not in the body.
+        let named = HomeContext {
+            tab: TabLook {
+                name: "Prod <Zeta>",
+                icon: true,
+            },
+            ..ctx()
+        };
+        let page = home_page(&demo_catalog(), &Icons::empty(), &named);
+        assert!(page.contains("<title>Prod &lt;Zeta&gt;</title>"));
+        assert!(!page[page.find("<body").unwrap()..].contains("Zeta"));
+        // The status pages and the sign-in pages.
+        assert_clean(
+            "not found",
+            &message_page(
+                "Page not found",
+                "There is nothing at this address.",
+                "Back to panel",
+            ),
+        );
+        assert_clean("denied", &denied_page(DENIED_TEXT, "alice", "tok"));
+        assert_clean(
+            "card",
+            &auth_document("Authentication", "<h1>Authenticated</h1>"),
+        );
+    }
+
+    #[test]
+    fn no_text_that_a_script_draws_names_the_product() {
+        // A string of a script ends in the body of a page. A comment and a name of a variable do not.
+        for (name, script) in [
+            ("settings.js", SETTINGS_JS),
+            ("notify.js", NOTIFY_JS),
+            ("theme.js", THEME_JS),
+        ] {
+            for (number, line) in script.lines().enumerate() {
+                let line = line.trim_start();
+                if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+                    continue;
+                }
+                for quote in ['"', '\''] {
+                    for (at, text) in line.split(quote).enumerate() {
+                        assert!(
+                            at % 2 == 0 || !text.to_ascii_lowercase().contains("portal"),
+                            "{name}:{}: {line}",
+                            number + 1
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1518,8 +1631,8 @@ mod tests {
         let launcher = home_page(&demo_catalog(), &Icons::empty(), &ctx());
         assert_eq!(
             launcher.matches("<symbol ").count(),
-            6,
-            "the lockup, the mark, the three themes and sign out: no gear for a user"
+            4,
+            "no gear for a user"
         );
         assert!(!launcher.contains("i-alert-triangle") && !launcher.contains("i-chevron-left"));
         for page in [
@@ -1811,7 +1924,9 @@ mod tests {
     fn empty_catalog_explains_how_to_populate_it() {
         let page = home_page(&Catalog::default(), &Icons::empty(), &ctx());
         assert!(page.contains("No services yet"));
-        assert!(page.contains("portal.name"));
+        assert!(page.contains("Add the catalogue labels to a container or an IngressRoute"));
+        // The hint names no label key and no product word: the README documents the label names.
+        body_words::assert_clean("empty launcher", &page);
         assert!(!page.contains(r#"class="rows""#));
     }
 

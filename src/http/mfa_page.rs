@@ -667,6 +667,7 @@ async fn render(
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
         security: true,
+        tab: state.tab_look(),
     };
     let picked = pick(row.as_ref());
     let required = state.config.authentication.mfa == crate::config::MfaPolicy::Required;

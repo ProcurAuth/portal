@@ -112,15 +112,6 @@ body.shell {
   flex: none;
 }
 
-/* The mark, then a thin rule, then the way back. The rule and the way back keep the gap of the header. */
-.shell .appHeader__left {
-  gap: 10px;
-}
-
-.shell .backLink {
-  margin-left: 0;
-}
-
 .shell .appHeader__right {
   margin-left: auto;
 }
@@ -713,12 +704,6 @@ input.keyText {
 }
 
 @media (max-width: 640px) {
-  /* The header has no room for the mark: the way back, the tabs and the controls keep the line. */
-  .shell .appMark__glyph,
-  .shell .appSep {
-    display: none;
-  }
-
   /* A table of the inbox keeps its main columns and its action on a narrow screen. */
 
   .ge__svcHead {

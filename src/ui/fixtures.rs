@@ -72,6 +72,7 @@ pub(super) fn frame() -> Frame<'static> {
         superadmin: true,
         notify: None,
         security: false,
+        tab: crate::ui::TabLook::DEFAULT,
     }
 }
 
@@ -142,7 +143,7 @@ pub(super) fn features() -> ServiceActions {
     });
     ServiceActions {
         id: PORTAL.into(),
-        name: "Portal features".into(),
+        name: "Server features".into(),
         actions: document
             .actions
             .iter()

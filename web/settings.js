@@ -434,7 +434,7 @@
 
    A pane is the tree of one service and its actions. The page of an account (data-layout="groups")
    has two groups side by side. The group "Services" has one row for each service, and the pane
-   opens under the chosen row. The group "Portal features" has one pane, always open. The forms of
+   opens under the chosen row. The group "Server features" has one pane, always open. The forms of
    the keys have one list: the features are one more row.
 
    A person who gives a grant does not know the resources of a service. When a node can have
@@ -1879,13 +1879,13 @@
       if (featureSvc) {
         var featGroup = node("section", "ge__grp");
         var featHead = node("div", "ge__grpHead");
-        featHead.appendChild(node("h2", "title", "Portal features"));
+        featHead.appendChild(node("h2", "title", "Server features"));
         featHead.appendChild(featuresCount);
         featGroup.appendChild(featHead);
         var portalLine = node("div", "srcLine srcLine--ok");
-        portalLine.title = "The portal builds this document in its own code. It does not serve it over HTTP.";
+        portalLine.title = "This server builds this document in its own code. It does not serve it over HTTP.";
         portalLine.appendChild(icon("circle-check"));
-        portalLine.appendChild(node("span", "", "Published by the portal. Built in, always current."));
+        portalLine.appendChild(node("span", "", "Published by this server. Built in, always current."));
         featGroup.appendChild(portalLine);
         var featBody = node("div", "ge__featBody");
         featBody.appendChild(features.ui);
@@ -1901,7 +1901,7 @@
       var openCount = 0;
       rowList.forEach(function (svc, at) {
         if (!groups) {
-          var group = svc.feature ? "Portal features" : "Services";
+          var group = svc.feature ? "Server features" : "Services";
           if (group !== lastGroup) {
             rowsEl.appendChild(node("h3", "ge__groupTitle", group));
             lastGroup = group;

@@ -1056,6 +1056,7 @@ mod tests {
                 hidden_services: 0,
                 settings: Some("/auth/settings/access"),
                 bell: Some(&bell),
+                tab: crate::ui::TabLook::DEFAULT,
             },
         )
     }

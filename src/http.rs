@@ -204,6 +204,15 @@ pub struct AccessSecrets {
 }
 
 impl AppState {
+    /// What the tab of the browser shows on the pages after sign-in: `server.name` in the title, and the icon when
+    /// `ui.favicon` is `default`.
+    pub fn tab_look(&self) -> ui::TabLook<'_> {
+        ui::TabLook {
+            name: &self.config.server.name,
+            icon: self.config.ui.favicon == crate::config::Favicon::Default,
+        }
+    }
+
     pub fn new(
         config: Config,
         superadmin: SuperAdmin,
@@ -808,7 +817,7 @@ async fn handle_request(
             "text/javascript; charset=utf-8",
             &state.mask.assets().notify,
         )
-    } else if method == Method::GET && path == ui::favicon_path() {
+    } else if method == Method::GET && path == ui::favicon_path() && state.tab_look().icon {
         handle_favicon(&state, request.headers(), &client)
     } else if method == Method::GET && path == STYLE_PATH {
         static_response("text/css; charset=utf-8", &ui::assets().css)
@@ -1239,6 +1248,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
             users_token: &users_token,
             hidden_services: catalog.service_count() - shown.service_count(),
             settings: gear,
+            tab: state.tab_look(),
         },
     );
     masked_response(state, StatusCode::OK, page)
@@ -1306,6 +1316,7 @@ async fn handle_settings(
         superadmin,
         notify: inbox_page::notify_header(state, &viewer).await,
         security: mfa_page::tab_visible(state, &viewer),
+        tab: state.tab_look(),
     };
     // The portal features are not in the catalogue: the pages of the services list the workloads
     // only.
@@ -1901,7 +1912,7 @@ fn feature_actions(
         .unwrap_or_default();
     ui::ServiceActions {
         id: crate::portal_actions::SERVICE.to_string(),
-        name: "Portal features".to_string(),
+        name: "Server features".to_string(),
         actions: document
             .actions
             .iter()
@@ -3073,6 +3084,7 @@ async fn new_user_refused(
         superadmin: is_superadmin(viewer),
         notify: inbox_page::notify_header(state, viewer).await,
         security: mfa_page::tab_visible(state, viewer),
+        tab: state.tab_look(),
     };
     let workloads = current_catalog(state);
     let html = ui::new_user_page(
@@ -4313,7 +4325,11 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH | NOTIFY_JS_PATH => {
             "assets"
         }
-        _ if is_neutral_asset(state, path) || path == ui::favicon_path() => "assets",
+        _ if is_neutral_asset(state, path)
+            || (path == ui::favicon_path() && state.tab_look().icon) =>
+        {
+            "assets"
+        }
         _ if is_settings_path(path) => "settings",
         _ if path.starts_with(ICONS_PREFIX) => "icons",
         SUCCESS_PATH => "success",

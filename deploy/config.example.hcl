@@ -11,7 +11,8 @@ server {
   # the webhooks (/api/v1/*) and the routes of the phones (/v1/enroll, /v1/session). The routes of the inbox have no
   # ForwardAuth. The account pages make the enrollment codes.
   listen_address  = "0.0.0.0:4181"
-  # The name of this instance. The app shows it as the name of the server.
+  # The name of this instance. The app shows it as the name of the server. The browser tab shows it at the end of the
+  # title of the pages after sign-in. No page body shows it.
   name            = "Portal"
   # Peers whose X-Forwarded-For header the portal trusts, for the pages, the senders and the phones. Empty: none.
   trusted_proxies = ["127.0.0.1/32"]
@@ -70,6 +71,12 @@ user "grafana" {
 # SQLite. Instead of this block, the block `postgres` below lets several active instances share one database.
 storage {
   database = "/var/lib/portal/portal.db"
+}
+
+ui {
+  # The icon of the browser tab. "default" (default): the built-in logo, on the pages after sign-in only.
+  # "none": no page links an icon, and the icon route answers 404.
+  # favicon = "default"
 }
 
 logging {

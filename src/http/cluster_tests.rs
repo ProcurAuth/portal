@@ -6894,6 +6894,75 @@ mod kinds_tests {
     }
 
     #[test]
+    fn no_page_body_of_a_server_with_the_inbox_and_the_keys_names_the_product() {
+        use crate::ui::body_words::{assert_clean, product_words};
+        each_backend(|backend| {
+            let (node, _) = inbox_node(backend);
+            publish_catalog(&node, &[]);
+            add_account(
+                &node,
+                "alice",
+                &[
+                    "access on service:db",
+                    "keys.own.read on service:portal",
+                    "keys.own.edit on service:portal",
+                    "keys.own.create on service:portal/key_kind:api",
+                    "keys.own.use on service:portal/key_kind:api",
+                    "inbox.receive on service:portal/inbox_group:infra",
+                    "alert.send on service:portal/inbox_group:infra",
+                ],
+            );
+            let (_, key_id) = add_real_key(
+                &node,
+                KeyKind::Api,
+                Some("alice"),
+                &["alert.send on service:portal/inbox_group:infra"],
+            );
+            let root = sign_in(&node, "root", PASSWORD);
+            let alice = sign_in(&node, "alice", PASSWORD);
+            let edit = format!("/auth/keys/edit?id={key_id}");
+            // Every main page, for the superadmin and for an account with rights.
+            let paths = [
+                "/",
+                "/auth/settings",
+                "/auth/settings/services",
+                "/auth/settings/activity",
+                "/auth/settings/inbox",
+                "/auth/settings/new-user",
+                "/auth/settings/users/alice",
+                "/auth/keys/new?kind=api",
+                edit.as_str(),
+                "/auth/success",
+                "/auth/denied",
+                "/auth/nothing-here",
+            ];
+            let mut shown = 0;
+            for (who, session) in [("root", &root), ("alice", &alice)] {
+                for path in paths {
+                    let reply = page(&node, session, path);
+                    assert_ne!(reply.status, 500, "{who} {path}");
+                    if reply.status == 200 || reply.status == 404 || reply.status == 403 {
+                        assert_clean(&format!("{who} {path}"), &reply.body);
+                    }
+                    shown += usize::from(reply.status == 200);
+                }
+            }
+            // The superadmin gets ten pages and the account gets at least three.
+            assert!(shown >= 13, "only {shown} pages were shown");
+            // The refusals and the notices that a page shows after an action.
+            for code in ["error", "user-added", "exists"] {
+                let path = format!("/auth/settings?s={code}");
+                assert_clean(&path, &page(&node, &root, &path).body);
+            }
+            // The page of the sign-in.
+            assert_clean("sign-in", &send(node.port, "GET", LOGIN_PATH, &[], "").body);
+            // A server that has another name: its pages show no trace of it in the body.
+            let launcher = page(&node, &root, "/");
+            assert!(product_words(&launcher.body).is_empty());
+        });
+    }
+
+    #[test]
     fn an_api_key_at_the_key_edge_is_refused_and_an_mcp_key_works_there() {
         each_backend(|backend| {
             let (node, authorizer) = inbox_node(backend);
@@ -8397,7 +8466,7 @@ fn stylesheet_of(page: &str) -> String {
 }
 
 #[test]
-fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
+fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     let node = sign_in_node("");
     let icon = ui::favicon_path();
     // The sign-in page, masked: no mark, no icon link, no product word, and one link in its head.
@@ -8431,7 +8500,7 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
         assert!(!reply.body.contains("<symbol"), "{path}");
         assert_eq!(reply.body.matches("<link ").count(), 1, "{path}");
     }
-    // The launcher: the mark, the lockup and the icon link. The mask keeps the path of the icon, which has no class.
+    // The launcher: the icon link and no logo. The mask keeps the path of the icon, which has no class.
     let home = page(&node, &root, "/");
     assert_eq!(home.status, 200);
     assert!(
@@ -8440,6 +8509,7 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
         home.body
     );
     assert!(home.body.contains("rel=\"icon\"") && home.body.contains("<symbol"));
+    assert!(!home.body.contains("<symbol id=\"i-logo\"") && !home.body.contains("i-logo-"));
     assert_eq!(
         stylesheet_of(&home.body),
         attribute_of(&login.body, "link", "href")
@@ -8461,13 +8531,16 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
     }
     assert!(
         !home.body.contains("appMark")
-            && !home.body.contains("i-logo")
+            && !home.body.replace("i-logout", "").contains("i-logo")
             && !home.body.contains("logoDot")
     );
-    // A settings page: the mark, and the icon link too.
+    // A settings page: the icon link too, and no logo.
     let settings = page(&node, &root, "/auth/settings/services");
     assert!(settings.body.contains(&format!(r#"href="{icon}""#)));
-    assert!(settings.body.contains(r##"<use href="#i-logo"/>"##));
+    assert!(
+        !settings.body.replace("i-logout", "").contains("i-logo")
+            && !settings.body.contains("appMark")
+    );
     // The file: a signed-in browser gets it with a private cache and the image type. Nobody else does.
     let cookie = format!("{}={root}", session_cookie_name(&node));
     let file = send(node.port, "GET", icon, &[("Cookie", &cookie)], "");
@@ -8500,6 +8573,96 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
         "",
     );
     assert_ne!(verify.status, 204);
+}
+
+/// The text of the `title` element of a page.
+fn title_of(page: &str) -> &str {
+    let start = page.find("<title>").expect("no title") + "<title>".len();
+    &page[start..start + page[start..].find("</title>").unwrap()]
+}
+
+#[test]
+fn with_favicon_none_no_page_links_an_icon_and_the_icon_route_is_an_unknown_path() {
+    let node = sign_in_node(r#"ui { favicon = "none" }"#);
+    let icon = ui::favicon_path();
+    let root = sign_in(&node, "root", PASSWORD);
+    let login = send(node.port, "GET", LOGIN_PATH, &[], "");
+    assert_eq!(login.status, 200);
+    let mut pages = vec![login];
+    for path in ["/", "/auth/settings/services", "/auth/settings"] {
+        let reply = page(&node, &root, path);
+        assert_eq!(reply.status, 200, "{path}");
+        pages.push(reply);
+    }
+    for reply in &pages {
+        assert!(
+            !reply.body.contains("rel=\"icon\"") && !reply.body.contains(icon),
+            "{}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body.matches("<link ").count(),
+            if reply.body.contains("settings.css") {
+                2
+            } else {
+                1
+            }
+        );
+    }
+    // The route: a signed-in browser gets the 404 page of an unknown path, not the file.
+    let signed = page(&node, &root, icon);
+    let unknown = page(&node, &root, "/auth/a/0000000000000000.svg");
+    assert_eq!(signed.status, 404);
+    assert_eq!(signed.status, unknown.status);
+    assert_eq!(title_of(&signed.body), title_of(&unknown.body));
+    assert!(!signed.body.contains("1238F0"));
+    // A browser that is not signed in gets what an unknown path gets.
+    let anonymous = send(node.port, "GET", icon, &[], "");
+    let anonymous_unknown = send(node.port, "GET", "/auth/a/0000000000000000.svg", &[], "");
+    assert_eq!(anonymous.status, anonymous_unknown.status);
+    assert_ne!(anonymous.status, 200);
+}
+
+#[test]
+fn the_name_of_the_instance_ends_the_title_of_the_pages_after_sign_in_and_nowhere_else() {
+    let node = sign_in_node("");
+    let root = sign_in(&node, "root", PASSWORD);
+    assert_eq!(title_of(&page(&node, &root, "/").body), "Portal");
+    assert_eq!(
+        title_of(&page(&node, &root, "/auth/settings/services").body),
+        "Settings: Services \u{b7} Portal"
+    );
+    // The sign-in page keeps its neutral title.
+    assert_eq!(
+        title_of(&send(node.port, "GET", LOGIN_PATH, &[], "").body),
+        "Authentication"
+    );
+    // Another name: the title shows it, escaped, and the body does not.
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            server: r#"name = "Prod <&> Zeta" trusted_proxies = ["127.0.0.1/32"]"#,
+            ..Custom::default()
+        },
+        "",
+    );
+    let root = sign_in(&node, "root", PASSWORD);
+    let home = page(&node, &root, "/");
+    assert_eq!(title_of(&home.body), "Prod &lt;&amp;&gt; Zeta");
+    let settings = page(&node, &root, "/auth/settings");
+    assert_eq!(
+        title_of(&settings.body),
+        "Settings: Access \u{b7} Prod &lt;&amp;&gt; Zeta"
+    );
+    for reply in [&home, &settings] {
+        let body = &reply.body[reply.body.find("<body").unwrap()..];
+        assert!(!body.contains("Zeta") && !body.contains("Prod"), "{body}");
+    }
+    assert_eq!(
+        title_of(&send(node.port, "GET", LOGIN_PATH, &[], "").body),
+        "Authentication"
+    );
 }
 
 #[test]
@@ -9389,7 +9552,6 @@ mod mfa_tests {
             "mfaScan",
             "qr",
             "mfaSecret",
-            "mfaUri",
             "mfaBox",
             "mfaCopy",
             "copyBtn",
@@ -9421,7 +9583,53 @@ mod mfa_tests {
             );
             assert!(!body.contains("<img"), "{name}: the QR code is markup");
         }
-        assert!(enrol_page.body.contains("<svg") && enrol_page.body.contains("otpauth://totp/"));
+        assert!(enrol_page.body.contains("<svg") && !enrol_page.body.contains("otpauth"));
+        assert_eq!(secret_of(&enrol_page.body).len(), 20);
+    }
+
+    /// The secret of an enrolment page, as the app takes it: the text of its only `code` element, without spaces.
+    fn secret_of(body: &str) -> Vec<u8> {
+        let start = body.find("<code").expect("no secret in the page");
+        let start = start + body[start..].find('>').unwrap() + 1;
+        let text = body[start..start + body[start..].find("</code>").unwrap()].replace(' ', "");
+        totp::base32_decode(&text).unwrap()
+    }
+
+    #[test]
+    fn the_pages_of_the_second_factor_never_name_the_product_and_never_print_the_link_of_the_app() {
+        use crate::ui::body_words::{assert_clean, product_words};
+        // The forced enrolment: a card before the session starts.
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        let (card, _) = step_one(&node, "alice", ALICE, false);
+        assert_eq!(card.status, 200);
+        assert_clean("forced enrolment", &card.body);
+        assert!(!card.body.contains("otpauth") && !card.body.contains("issuer="));
+        // The same page under another name: the body has no trace of the product or of the name.
+        let named = start_custom(
+            Arc::new(Backend::Sqlite.fresh()),
+            None,
+            Custom {
+                mfa: "required",
+                server: r#"name = "Prod" trusted_proxies = ["127.0.0.1/32"]"#,
+                ..Custom::default()
+            },
+            "",
+        );
+        insert_account(&named, "alice", ALICE);
+        let (card, _) = step_one(&named, "alice", ALICE, false);
+        assert!(product_words(&card.body).is_empty(), "{}", card.body);
+        assert!(!card.body.contains("Prod"), "{}", card.body);
+        // The pages of the settings, with the policy optional.
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let session = sign_in(&node, "alice", ALICE);
+        for path in [
+            "/auth/settings/security",
+            "/auth/settings/security?enable=1",
+        ] {
+            let reply = page(&node, &session, path);
+            assert_eq!(reply.status, 200, "{path}");
+            assert_clean(path, &reply.body);
+        }
     }
 
     #[test]
@@ -9436,21 +9644,8 @@ mod mfa_tests {
             "no session before the enrolment"
         );
         let enrol_token = hidden_value(&page.body, "enrol");
-        // The secret is in the link, as text.
-        let uri_start = page.body.find("otpauth://").unwrap();
-        let uri = page.body[uri_start..]
-            .split('<')
-            .next()
-            .unwrap()
-            .replace("&amp;", "&");
-        let secret_text = uri
-            .split("secret=")
-            .nth(1)
-            .unwrap()
-            .split('&')
-            .next()
-            .unwrap();
-        let secret = totp::base32_decode(secret_text).unwrap();
+        // The secret is in the page as text, in groups of four characters.
+        let secret = secret_of(&page.body);
         let body = |code: &str| {
             format!(
                 "csrf={csrf}&rd={}&sig={}&pending={}&enrol={enrol_token}&code={code}",
@@ -9543,24 +9738,10 @@ mod mfa_tests {
             &format!("{}?enable=1", ui::mfa::SECURITY_PATH),
         );
         assert!(
-            enrolment.body.contains("<svg class=\"qr\"")
-                && enrolment.body.contains("otpauth://totp/")
+            enrolment.body.contains("<svg class=\"qr\"") && !enrolment.body.contains("otpauth")
         );
         let token = hidden_value(&enrolment.body, "enrol");
-        let uri = enrolment.body[enrolment.body.find("otpauth://").unwrap()..]
-            .split('<')
-            .next()
-            .unwrap()
-            .replace("&amp;", "&");
-        let secret = totp::base32_decode(
-            uri.split("secret=")
-                .nth(1)
-                .unwrap()
-                .split('&')
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
+        let secret = secret_of(&enrolment.body);
         // A wrong code shows the same secret again.
         let wrong = post(
             &node,

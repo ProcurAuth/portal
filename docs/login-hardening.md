@@ -65,6 +65,9 @@ Done:
 - The assets have no comment and no name of the product. The key of the browser storage for the theme is `ui-color-mode`.
 - The cookie of the sign-in form is `lc` (`__Host-lc` over HTTPS). The old name carried the name of the product.
 - ForwardAuth lets the neutral asset paths pass without a session, as it does for the old paths.
+- The sign-in pages, the code step and the status pages have no logo, no icon link and no name of the product.
+- No page body has the logo or the name of the product, also after sign-in. A test makes sure of it for the main pages. It has a list of the technical identifiers that stay, such as `service:portal` in a grant.
+- After sign-in, the tab shows the name of the instance (`server.name`) in its title and the built-in logo as its icon. The key `ui.favicon` set to `"none"` removes the icon. The server sends the icon to a signed-in browser only, so a visitor cannot use it to find the product.
 
 Not done, on purpose:
 
