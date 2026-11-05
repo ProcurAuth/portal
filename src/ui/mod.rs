@@ -197,7 +197,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
     } else if catalog.groups().is_empty() {
         let _ = write!(
             body,
-            r#"<main class="{empty}"><h1>No services yet</h1><p>Add <code>portal.name</code> and <code>portal.href</code> labels to a container or an IngressRoute and it appears here.</p></main>"#,
+            r#"<main class="{empty}"><h1>No services yet</h1><p>Add the catalogue labels to a container or an IngressRoute and it appears here.</p></main>"#,
         );
     } else {
         body.push_str(r#"<main class="rows"><h1 class="visually-hidden">Services</h1>"#);
@@ -1924,7 +1924,9 @@ mod tests {
     fn empty_catalog_explains_how_to_populate_it() {
         let page = home_page(&Catalog::default(), &Icons::empty(), &ctx());
         assert!(page.contains("No services yet"));
-        assert!(page.contains("portal.name"));
+        assert!(page.contains("Add the catalogue labels to a container or an IngressRoute"));
+        // The hint names no label key and no product word: the README documents the label names.
+        body_words::assert_clean("empty launcher", &page);
         assert!(!page.contains(r#"class="rows""#));
     }
 

@@ -626,7 +626,7 @@ pub fn user_page(frame: &Frame, view: &UserView) -> String {
         );
     }
     if view.services.is_empty() && view.features.is_none() {
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
     } else {
         // The editor shows every grant that the account holds, also a grant that the document of
         // the service does not name now. The grants of the configuration file are locked.
@@ -1096,7 +1096,7 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
         groups_field(&view.groups, &[], true),
     );
     if view.services.is_empty() && view.features.is_none() {
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
     } else {
         let data = grant_editor::build(
             &view.services,
@@ -1201,7 +1201,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let count = view.catalog.service_count();
     if count == 0 {
         out.push_str(&toolbar("Services", "", ""));
-        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has <code>portal.*</code> labels.</p>"#);
+        out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
         return fill_page(Tab::Services, frame, "Services", &out);
     }
     let selected = view.selected_id();

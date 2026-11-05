@@ -19,30 +19,6 @@ pub(crate) const ALLOWED: &[(&str, &str)] = &[
         "the id of the internal service in an error of a key form",
     ),
     (
-        "portal.name",
-        "a label key of the catalogue, in the hint of an empty page",
-    ),
-    (
-        "portal.href",
-        "a label key of the catalogue, in the hint of an empty page",
-    ),
-    (
-        "portal.*",
-        "the family of the label keys, in the hint of an empty page",
-    ),
-    (
-        "portal.id",
-        "a label key of the catalogue, in the error of a document of actions",
-    ),
-    (
-        "totp/Portal:",
-        "the label of the link otpauth, which holds the name of the instance",
-    ),
-    (
-        "issuer=Portal",
-        "the issuer of the link otpauth, which holds the name of the instance",
-    ),
-    (
         r#""portal""#,
         "the id of the internal service, a quoted string in the data of the editor of grants",
     ),
@@ -167,12 +143,12 @@ mod tests {
     fn a_hit_that_the_list_does_not_cover_is_found_in_any_case() {
         let html = r#"<body><p>The Portal shows it. Add <code>portal.name</code> and a grant on service:portal.</p><p title="PORTAL">x</p></body>"#;
         let hits = product_words(html);
-        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits.len(), 3, "{hits:?}");
         assert!(hits[0].contains("The Portal shows it"));
-        assert_eq!(hits[1], "PORTAL");
-        assert!(
-            product_words(r#"<body><code>portal.name</code> service:portal</body>"#).is_empty()
-        );
+        // A label key is a hit too: no hint of a page names it.
+        assert_eq!(hits[1], "portal.name");
+        assert_eq!(hits[2], "PORTAL");
+        assert!(product_words(r#"<body><p>On service:portal</p></body>"#).is_empty());
     }
 
     #[test]
