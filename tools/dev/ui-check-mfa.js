@@ -88,9 +88,9 @@ async function layout(page) {
 }
 
 async function secretOf(page) {
-  const text = await page.content();
-  const found = text.match(/otpauth:\/\/totp\/[^<"]*?secret=([A-Z2-7]+)/);
-  return found ? found[1] : null;
+  // The page prints the secret in groups of four characters, in its only code element. It prints no link.
+  const text = (await page.locator("code").first().textContent()).replace(/\s/g, "");
+  return /^[A-Z2-7]+$/.test(text) ? text : null;
 }
 
 async function main() {
@@ -205,7 +205,7 @@ async function main() {
     const { context, page } = await open(browser, BASE_REQUIRED, scheme, width, script);
     await passwordStep(page, BASE_REQUIRED, login, password);
     const name = login + " " + tag(scheme, width, script);
-    check("required, " + name + ": the password step ends in the enrolment card", (await page.content()).includes("otpauth://"), page.url());
+    check("required, " + name + ": the password step ends in the enrolment card", (await page.locator("code").count()) > 0 && (await page.content()).includes("<svg"), page.url());
     const l = await layout(page);
     check("the enrolment card, " + name + ": QR inside, no scroll", l.qr && l.qr[3] <= l.width && !l.overflow && l.inlineStyle === 0, JSON.stringify(l));
     await shot(page, "forced-" + tag(scheme, width, script));

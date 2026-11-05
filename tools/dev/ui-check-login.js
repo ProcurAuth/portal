@@ -377,7 +377,7 @@ async function main() {
     const text = await page.textContent("main");
     if (text.includes("Off")) {
       await Promise.all([page.waitForNavigation(), page.click("text=Turn on")]);
-      const secret = (await page.content()).match(/otpauth:\/\/totp\/[^<"]*?secret=([A-Z2-7]+)/)[1];
+      const secret = (await page.locator("code").first().textContent()).replace(/\s/g, "");
       await page.fill("input[name=code]", code(secret, -1));
       await Promise.all([page.waitForNavigation(), page.click("main button[type=submit]")]);
       global.SECRET = secret;

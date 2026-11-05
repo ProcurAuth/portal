@@ -9530,7 +9530,6 @@ mod mfa_tests {
             "mfaScan",
             "qr",
             "mfaSecret",
-            "mfaUri",
             "mfaBox",
             "mfaCopy",
             "copyBtn",
@@ -9562,18 +9561,27 @@ mod mfa_tests {
             );
             assert!(!body.contains("<img"), "{name}: the QR code is markup");
         }
-        assert!(enrol_page.body.contains("<svg") && enrol_page.body.contains("otpauth://totp/"));
+        assert!(enrol_page.body.contains("<svg") && !enrol_page.body.contains("otpauth"));
+        assert_eq!(secret_of(&enrol_page.body).len(), 20);
+    }
+
+    /// The secret of an enrolment page, as the app takes it: the text of its only `code` element, without spaces.
+    fn secret_of(body: &str) -> Vec<u8> {
+        let start = body.find("<code").expect("no secret in the page");
+        let start = start + body[start..].find('>').unwrap() + 1;
+        let text = body[start..start + body[start..].find("</code>").unwrap()].replace(' ', "");
+        totp::base32_decode(&text).unwrap()
     }
 
     #[test]
-    fn the_pages_of_the_second_factor_name_the_product_only_in_the_link_of_the_app() {
+    fn the_pages_of_the_second_factor_never_name_the_product_and_never_print_the_link_of_the_app() {
         use crate::ui::body_words::{assert_clean, product_words};
         // The forced enrolment: a card before the session starts.
         let node = mfa_node(&Backend::Sqlite, "required", "");
         let (card, _) = step_one(&node, "alice", ALICE, false);
         assert_eq!(card.status, 200);
         assert_clean("forced enrolment", &card.body);
-        assert!(card.body.contains("issuer=Portal"));
+        assert!(!card.body.contains("otpauth") && !card.body.contains("issuer="));
         // The same page under another name: the body has no trace of the product or of the name.
         let named = start_custom(
             Arc::new(Backend::Sqlite.fresh()),
@@ -9588,6 +9596,7 @@ mod mfa_tests {
         insert_account(&named, "alice", ALICE);
         let (card, _) = step_one(&named, "alice", ALICE, false);
         assert!(product_words(&card.body).is_empty(), "{}", card.body);
+        assert!(!card.body.contains("Prod"), "{}", card.body);
         // The pages of the settings, with the policy optional.
         let node = mfa_node(&Backend::Sqlite, "optional", "");
         let session = sign_in(&node, "alice", ALICE);
@@ -9613,21 +9622,8 @@ mod mfa_tests {
             "no session before the enrolment"
         );
         let enrol_token = hidden_value(&page.body, "enrol");
-        // The secret is in the link, as text.
-        let uri_start = page.body.find("otpauth://").unwrap();
-        let uri = page.body[uri_start..]
-            .split('<')
-            .next()
-            .unwrap()
-            .replace("&amp;", "&");
-        let secret_text = uri
-            .split("secret=")
-            .nth(1)
-            .unwrap()
-            .split('&')
-            .next()
-            .unwrap();
-        let secret = totp::base32_decode(secret_text).unwrap();
+        // The secret is in the page as text, in groups of four characters.
+        let secret = secret_of(&page.body);
         let body = |code: &str| {
             format!(
                 "csrf={csrf}&rd={}&sig={}&pending={}&enrol={enrol_token}&code={code}",
@@ -9720,24 +9716,10 @@ mod mfa_tests {
             &format!("{}?enable=1", ui::mfa::SECURITY_PATH),
         );
         assert!(
-            enrolment.body.contains("<svg class=\"qr\"")
-                && enrolment.body.contains("otpauth://totp/")
+            enrolment.body.contains("<svg class=\"qr\"") && !enrolment.body.contains("otpauth")
         );
         let token = hidden_value(&enrolment.body, "enrol");
-        let uri = enrolment.body[enrolment.body.find("otpauth://").unwrap()..]
-            .split('<')
-            .next()
-            .unwrap()
-            .replace("&amp;", "&");
-        let secret = totp::base32_decode(
-            uri.split("secret=")
-                .nth(1)
-                .unwrap()
-                .split('&')
-                .next()
-                .unwrap(),
-        )
-        .unwrap();
+        let secret = secret_of(&enrolment.body);
         // A wrong code shows the same secret again.
         let wrong = post(
             &node,

@@ -1215,7 +1215,7 @@ a {
   color: var(--danger);
 }
 
-/* The second factor: the QR code, the secret, the link and the recovery codes. The same blocks are in the cards of the
+/* The second factor: the QR code, the secret and the recovery codes. The same blocks are in the cards of the
    sign-in and in the settings. The QR code keeps a white ground in both color schemes, because a scanner needs it. */
 .mfaScan {
   display: grid;
@@ -1245,8 +1245,7 @@ a {
   margin: 6px 0 0;
 }
 
-.mfaSecret,
-.mfaUri {
+.mfaSecret {
   display: block;
   padding: 7px 10px;
   border-radius: var(--radius-control);

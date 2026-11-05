@@ -74,14 +74,14 @@ pub fn code_card(f: &Fields, error: Option<&str>) -> String {
     })
 }
 
-/// The secret of an enrolment: the QR code, the secret in groups of four characters and the link, both as text.
+/// The secret of an enrolment: the QR code and the secret in groups of four characters. The QR code holds the link of
+/// the app: the page does not print the link, because it holds the name of the instance.
 /// The block is the same in the card and in the settings.
 pub fn secret_block(e: &Enrolment) -> String {
     let qr = e.qr.as_deref().unwrap_or_default();
     format!(
-        r#"<div class="mfaScan">{qr}<p class="mfaLabel">Secret</p><code class="mfaSecret">{}</code><p class="mfaLabel">Link</p><code class="mfaUri">{}</code></div>"#,
+        r#"<div class="mfaScan">{qr}<p class="mfaLabel">Secret</p><code class="mfaSecret">{}</code></div>"#,
         html_escape(&e.grouped),
-        html_escape(&e.uri),
     )
 }
 
@@ -301,12 +301,14 @@ mod tests {
     }
 
     #[test]
-    fn the_card_of_the_enrolment_shows_the_qr_the_secret_and_the_link_as_text() {
+    fn the_card_of_the_enrolment_shows_the_qr_and_the_secret_and_not_the_link() {
         let e = enrolment();
         let page = enrol_card(&fields(), &e, None);
         assert!(page.contains("<svg class=\"qr\""));
         assert!(page.contains(&html_escape(&e.grouped)));
-        assert!(page.contains(&html_escape(&e.uri)));
+        // The link holds the name of the instance: the page does not print it, and the QR code carries it.
+        assert!(!page.contains("otpauth"));
+        assert!(!page.contains("mfaUri") && !page.contains(">Link<"));
         assert!(page.contains(&format!(r#"name="enrol" value="{}""#, e.token)));
         assert!(
             !page.contains("<img") && !page.contains("data:"),
@@ -316,16 +318,16 @@ mod tests {
     }
 
     #[test]
-    fn no_page_of_the_second_factor_names_the_product_except_in_the_link_of_the_app() {
+    fn no_page_of_the_second_factor_names_the_product_or_prints_the_link_of_the_app() {
         use crate::ui::body_words::{assert_clean, product_words};
         let e = enrolment();
         let codes = ["abcde-fghij".to_string()];
         assert_clean("code card", &code_card(&fields(), Some("Invalid code")));
         assert_clean("codes card", &codes_card(&codes, "/"));
-        // The link of the app holds the name of the instance as its issuer: this is the only place.
+        // The link of the app holds the name of the instance as its issuer: no page prints it.
         let card = enrol_card(&fields(), &e, None);
         assert_clean("enrol card", &card);
-        assert!(card.contains("issuer=Portal"));
+        assert!(!card.contains("issuer=") && !card.contains("otpauth"));
         let frame = crate::ui::fixtures::full_frame();
         let states = [
             State::Off,
@@ -348,12 +350,11 @@ mod tests {
             );
             assert_clean("security", &page);
         }
-        // Another name of the instance: the body has nothing of it, with or without the link.
+        // Another name of the instance: the body has nothing of it.
         let mfa = Mfa::new(SecretBox::new(&[3; 32]).unwrap());
         let other = mfa.begin("alice", "Prod", 1_700_000_000).unwrap();
         let page = enrol_card(&fields(), &other, None);
-        assert!(product_words(&page).is_empty());
-        assert!(page.contains("issuer=Prod"));
+        assert!(product_words(&page).is_empty() && !page.contains("Prod"));
     }
 
     #[test]

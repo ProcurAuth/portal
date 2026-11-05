@@ -204,8 +204,6 @@ pub struct Enrolment {
     pub token: String,
     /// The secret in base32, in groups of four.
     pub grouped: String,
-    /// The `otpauth://` link as text.
-    pub uri: String,
     /// The QR code of the link, as inline SVG markup. `None` when the link is too long for a code.
     pub qr: Option<String>,
 }
@@ -246,7 +244,6 @@ impl Mfa {
             token: format!("{expires}.{}", Base64UrlUnpadded::encode_string(&sealed)),
             grouped: totp::grouped(&*secret),
             qr: qr_svg(&uri),
-            uri,
         })
     }
 
@@ -259,7 +256,6 @@ impl Mfa {
             token: token.to_string(),
             grouped: totp::grouped(&secret),
             qr: qr_svg(&uri),
-            uri,
         })
     }
 
@@ -512,17 +508,14 @@ mod tests {
         each_backend(|backend| {
             let store = backend.fresh();
             let page = mfa.begin("alice", "Portal", now).unwrap();
-            assert!(page.uri.starts_with("otpauth://totp/Portal:alice?secret="));
+            // The page has the secret in groups of four, and the QR code of the link.
             assert_eq!(
-                page.grouped.replace(' ', ""),
-                page.uri
-                    .split("secret=")
-                    .nth(1)
+                totp::base32_decode(&page.grouped.replace(' ', ""))
                     .unwrap()
-                    .split('&')
-                    .next()
-                    .unwrap()
+                    .len(),
+                20
             );
+            assert!(page.qr.is_some());
             assert!(page
                 .qr
                 .as_deref()
