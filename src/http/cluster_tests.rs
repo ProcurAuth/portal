@@ -8375,7 +8375,7 @@ fn stylesheet_of(page: &str) -> String {
 }
 
 #[test]
-fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
+fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     let node = sign_in_node("");
     let icon = ui::favicon_path();
     // The sign-in page, masked: no mark, no icon link, no product word, and one link in its head.
@@ -8409,7 +8409,7 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
         assert!(!reply.body.contains("<symbol"), "{path}");
         assert_eq!(reply.body.matches("<link ").count(), 1, "{path}");
     }
-    // The launcher: the mark, the lockup and the icon link. The mask keeps the path of the icon, which has no class.
+    // The launcher: the icon link and no logo. The mask keeps the path of the icon, which has no class.
     let home = page(&node, &root, "/");
     assert_eq!(home.status, 200);
     assert!(
@@ -8418,6 +8418,7 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
         home.body
     );
     assert!(home.body.contains("rel=\"icon\"") && home.body.contains("<symbol"));
+    assert!(!home.body.contains("<symbol id=\"i-logo\"") && !home.body.contains("i-logo-"));
     assert_eq!(
         stylesheet_of(&home.body),
         attribute_of(&login.body, "link", "href")
@@ -8439,13 +8440,16 @@ fn the_logo_and_the_tab_icon_are_for_the_signed_in_pages_only() {
     }
     assert!(
         !home.body.contains("appMark")
-            && !home.body.contains("i-logo")
+            && !home.body.replace("i-logout", "").contains("i-logo")
             && !home.body.contains("logoDot")
     );
-    // A settings page: the mark, and the icon link too.
+    // A settings page: the icon link too, and no logo.
     let settings = page(&node, &root, "/auth/settings/services");
     assert!(settings.body.contains(&format!(r#"href="{icon}""#)));
-    assert!(settings.body.contains(r##"<use href="#i-logo"/>"##));
+    assert!(
+        !settings.body.replace("i-logout", "").contains("i-logo")
+            && !settings.body.contains("appMark")
+    );
     // The file: a signed-in browser gets it with a private cache and the image type. Nobody else does.
     let cookie = format!("{}={root}", session_cookie_name(&node));
     let file = send(node.port, "GET", icon, &[("Cookie", &cookie)], "");

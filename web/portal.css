@@ -8,7 +8,6 @@
   /* The colours of the logo that the interface uses. The whole spec is in assets/brand/README.md. */
   --brand: #1238f0;
   --brand-cyan: #7ff0ff;
-  --brand-cyan-deep: #38b6ff;
   --brand-300: #7d98ff;
   --brand-ink: #0b1220;
   color-scheme: dark;
@@ -35,8 +34,6 @@
   --accent-line: var(--brand-300);
   --focus-ring: var(--brand-cyan);
   --on-fill: #ffffff;
-  --logo-ink: var(--on-fill);
-  --logo-dot: var(--brand-cyan);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.28);
   --input-border: #6e7789;
   /* Monochrome icon sets draw in black inside an <img>; dark surfaces flip them to light. */
@@ -63,8 +60,6 @@
     --accent-text: var(--brand);
     --accent-line: var(--brand);
     --focus-ring: var(--brand);
-    --logo-ink: var(--brand);
-    --logo-dot: var(--brand-cyan-deep);
     --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(11, 18, 32, 0.08);
     --input-border: #727c91;
     --mono-filter: none;
@@ -95,8 +90,6 @@
   --accent-text: var(--brand);
   --accent-line: var(--brand);
   --focus-ring: var(--brand);
-  --logo-ink: var(--brand);
-  --logo-dot: var(--brand-cyan-deep);
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 8px 24px rgba(11, 18, 32, 0.08);
   --input-border: #727c91;
   --mono-filter: none;
@@ -217,43 +210,6 @@ a {
 
 .backLink:hover {
   color: var(--text);
-}
-
-/* The logo, on the pages after sign-in only. It is a picture and not a control. The mark takes the text
-   colour of the logo and the dot takes its own colour, both from the tokens. */
-.appMark__glyph,
-.appMark__lockup {
-  display: block;
-  flex: none;
-  color: var(--logo-ink);
-}
-
-.appMark__glyph {
-  width: 22px;
-  height: 22px;
-}
-
-.appMark__glyph--narrow {
-  display: none;
-  width: 24px;
-  height: 24px;
-}
-
-.appMark__lockup {
-  width: 106px;
-  height: 24px;
-}
-
-.logoDot {
-  fill: var(--logo-dot);
-}
-
-.appSep {
-  flex: none;
-  width: 1px;
-  height: 20px;
-  margin: 0 2px;
-  background: var(--border-strong);
 }
 
 .button {
@@ -1173,15 +1129,6 @@ a {
     padding-right: 14px;
   }
 
-  /* Not enough room for the word: the mark stands alone. */
-  .appMark__lockup {
-    display: none;
-  }
-
-  .appMark__glyph--narrow {
-    display: block;
-  }
-
   .notice {
     width: calc(100% - 28px);
   }
@@ -1192,13 +1139,6 @@ a {
 
   .tiles {
     grid-template-columns: 1fr;
-  }
-}
-
-/* A phone: the controls of the header fill the line, so the mark has no room. */
-@media (max-width: 440px) {
-  .appMark__glyph--narrow {
-    display: none;
   }
 }
 

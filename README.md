@@ -1036,19 +1036,16 @@ The stylesheet `web/portal.css` names the brand colours one time, in its first t
 | Token | Value | Use |
 |---|---|---|
 | `--brand` | `#1238F0` (Signal Blue) | The fill of primary controls, the mark on a light page. White text on it has a ratio of 7.4:1. |
-| `--brand-cyan` | `#7FF0FF` | The dot of the logo and the focus ring on a dark surface. |
-| `--brand-cyan-deep` | `#38B6FF` | The dot of the logo on a light surface. |
+| `--brand-cyan` | `#7FF0FF` | The focus ring on a dark surface. |
 | `--brand-300` | `#7D98FF` | Accent text and thin marks on a dark surface. |
 | `--brand-ink` | `#0B1220` | Text on a light surface. |
 
-The tokens that a rule uses are `--accent-fill`, `--accent-fill-hover`, `--accent-tint`, `--accent-text`, `--accent-line`, `--focus-ring`, `--logo-ink` and `--logo-dot`.
+The tokens that a rule uses are `--accent-fill`, `--accent-fill-hover`, `--accent-tint`, `--accent-text`, `--accent-line` and `--focus-ring`.
 `--accent-fill` is for a surface that holds white text. `--accent-text` is for text. `--accent-line` is for a mark of 2 pixels or more, such as the underline of a tab. `--focus-ring` is for the focus outline.
 The dark and light values of each token pass these ratios: 4.5:1 for text, 3:1 for a focus ring and for the border of a field.
 A rule never holds a colour literal. Only the token blocks hold literals.
 
-The logo shows on the launcher and on the settings pages. It does not show on the sign-in pages, on the code step, or on the error and status pages.
-Those pages are anonymous on purpose, and the server sends no icon link with them.
-The sprite `web/sprite.svg` has the symbols `logo` (the mark) and `logo-lockup` (the mark and the word). The mark takes the colour of the text. The dot takes `--logo-dot`.
+No page shows the logo in its body. The logo is the icon of the browser tab only.
 The icon of the tab is `web/favicon.svg`, a copy of `assets/brand/logo-icon.svg`. The server sends it at a hashed path under `/auth/a/` to a signed-in browser only.
 A browser that does not support an SVG icon shows its default icon. This is the case for old versions of Safari on macOS and for some other old browsers.
 
