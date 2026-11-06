@@ -101,7 +101,7 @@ A sender sends a request to the portal, on the same host and port as the pages. 
 | `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. The field `target` has the `kind` (`group` or `user`) and the `id`. An alert to a group needs `alert.read` on the group. An alert to an account can be read by the key that sent it. For an alert of the portal about a service, the owner of the key must also have the right to open the service. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. No key. |
 
-Send the key in the header `Authorization: Bearer <key>`. A tool that cannot set a header can use the query `?token=<key>`. A proxy can write an address with a query in its log, so use the header when you can.
+Send the key in the header `Authorization: Bearer <key>`. The Inbox reads the key only in this header. A request with the key in the query of the URL and no header gets `401`. Do not put a key in a URL: a proxy can write the URL in its log.
 
 Example. The portal is at `https://portal.example.org`.
 

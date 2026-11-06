@@ -1,0 +1,43 @@
+{
+  "pep": {
+    "service": "notes",
+    "token": {
+      "header": "X-Identity-Token",
+      "iss": "https://edge.example",
+      "max_age_seconds": 300,
+      "skew_seconds": 30,
+      "keys": [
+        {
+          "alg": "Ed25519",
+          "kid": "zcYrqS8nm_rTQdKyTm81Y6JcRAB7YNgJYlyR_4XIf98",
+          "file": "../procurauth/crates/access-conformance/examples/test-edge-ed25519.pem"
+        }
+      ]
+    },
+    "pdp": {
+      "listen": "127.0.0.1:8181",
+      "credential_file": "../procurauth/crates/access-conformance/examples/pdp-credential.txt"
+    },
+    "answer_cache": false,
+    "operations": {
+      "use_plain": {
+        "method": "GET",
+        "path": "/notes/api/notebooks/work/notes",
+        "action": "notes.read",
+        "resource_type": "notebook",
+        "resource_id": "work",
+        "ancestors": [
+          {
+            "type": "service",
+            "id": "notes"
+          }
+        ]
+      }
+    }
+  },
+  "timeouts": {
+    "request_seconds": 10,
+    "case_seconds": 60,
+    "settle_ms": 50
+  }
+}

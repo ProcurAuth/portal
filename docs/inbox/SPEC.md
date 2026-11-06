@@ -59,7 +59,7 @@ A requirement has one of two states. A requirement without a mark is in force in
 
 ### 3.3 Senders and keys
 
-3.3.1 A sender MUST send an alert with an API key (the prefix `api_`) as a bearer token. Two sources of API key work at the same time: a key of the file (a block `api_key`), and a key of the database. A bad form, a bad checksum, an unknown prefix and a key of another kind MUST get `401` with no detail, before any lookup.
+3.3.1 A sender MUST send an alert with an API key (the prefix `api_`) as a bearer token in the header `Authorization`. The server MUST NOT read a key in the query of the URL, and MUST NOT log the query. Two sources of API key work at the same time: a key of the file (a block `api_key`), and a key of the database. A bad form, a bad checksum, an unknown prefix and a key of another kind MUST get `401` with no detail, before any lookup.
 
 3.3.2 A key of the file MUST NOT depend on the state of the portal at run time. It works when the portal is not ready and when PostgreSQL is away. Its owner MUST be an account of the file. The start decides its groups.
 

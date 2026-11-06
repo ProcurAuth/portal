@@ -11,11 +11,11 @@
 //! limit of both sides applies (see [`crate::decision`]).
 //!
 //! The resource is a node of the resource tree of the service (protocol 5.2). The service itself
-//! is `{"type": "service", "id": "<name>"}`. A node below it has `properties.ancestors`: the chain
-//! from the service to the parent of the node. The first ancestor must be the service that asks,
-//! and the chain must follow the parents of the last known document of this service. Otherwise,
-//! the answer is `false` with the reason `invalid_resource`. A node without `ancestors` is read as
-//! `[service, node]`: this is correct only when its type has the parent `service`.
+//! is `{"type": "service", "id": "<name>"}`. A node below it must have `properties.ancestors`: the
+//! chain from the service to the parent of the node, `[service]` for a node of depth 1. The first
+//! ancestor must be the service that asks, and the chain must follow the parents of the last known
+//! document of this service. Otherwise, the answer is `false` with the reason `invalid_resource`.
+//! A node without `ancestors`, or with an empty array, also gets it (protocol 4.1, 11.1).
 //!
 //! A grant covers the node that it names and each node below it (prefix match, segment by
 //! segment). With `context.match = "subtree"`, a grant on a node below the resource also gives
@@ -560,8 +560,9 @@ struct Resource {
     invalid: bool,
 }
 
-/// Read the resource of a request. `properties.ancestors` is optional. When it is present, it
-/// must be an array of objects with `type` and `id`. Otherwise the resource has the mark `invalid`:
+/// Read the resource of a request. The reader accepts a resource without `properties.ancestors`:
+/// `chain_of` refuses it below the service. When the member is present, it must be an array of
+/// objects with `type` and `id`. Otherwise the resource has the mark `invalid`:
 /// the caller refuses a request with one evaluation (status `400`), and a batch item gets the
 /// reason `invalid_request`. The chain itself is checked later, against the document of the
 /// service.
@@ -656,23 +657,22 @@ fn chain_of(
         }
         return Ok(Vec::new());
     }
-    let below: &[Entity] = match &resource.ancestors {
-        // Compatibility: a node without ancestors is a node of depth 1.
-        None => &[],
-        Some(ancestors) => {
-            let Some((first, rest)) = ancestors.split_first() else {
-                return Err(Unresolved::Invalid(
-                    "the ancestors do not start with the service",
-                ));
-            };
-            if first.kind != SERVICE_TYPE || first.id != client.name {
-                return Err(Unresolved::Invalid(
-                    "the first ancestor is not the service of the server that asks",
-                ));
-            }
-            rest
-        }
+    // A node below the service without `ancestors`, or with an empty array, has no first object of
+    // the chain (protocol 4.1, 11.1).
+    let Some((first, below)) = resource
+        .ancestors
+        .as_deref()
+        .and_then(<[Entity]>::split_first)
+    else {
+        return Err(Unresolved::Invalid(
+            "a node below the service has no ancestors",
+        ));
     };
+    if first.kind != SERVICE_TYPE || first.id != client.name {
+        return Err(Unresolved::Invalid(
+            "the first ancestor is not the service of the server that asks",
+        ));
+    }
     if below.len() + 1 > MAX_DEPTH {
         return Err(Unresolved::Invalid("the chain is too deep"));
     }

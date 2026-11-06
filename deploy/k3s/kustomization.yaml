@@ -18,4 +18,4 @@ configMapGenerator:
 images:
 - name: portal
   newName: portal
-  newTag: 5.0.1
+  newTag: 5.0.2

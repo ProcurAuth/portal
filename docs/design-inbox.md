@@ -8,7 +8,7 @@ The plan of the rework is `demo/design-proposals/rework/REWORK-PLAN.md`. The spe
 
 ## 1. Goal
 
-The portal and the earlier standalone alert server became one binary, `portal` (version 5.0.1). One account gives one identity and one set of permissions for the launcher, the keys and the Inbox. The feature has the name **Inbox**. It sends alerts to Android phones now. It will carry questions and approvals later (section 17).
+The portal and the earlier standalone alert server became one binary, `portal` (version 5.0.2). One account gives one identity and one set of permissions for the launcher, the keys and the Inbox. The feature has the name **Inbox**. It sends alerts to Android phones now. It will carry questions and approvals later (section 17).
 
 ## 2. Decisions of the owner
 
@@ -394,7 +394,7 @@ The app has the name **Portal Inbox**. The launcher label, the notification text
 
 The commands are in the section "Build and release" of the README. The files are in `deploy/README.md`. Step 7 made these choices where the owner left them open.
 
-- **One version.** The root package and the workspace packages have the version 5.0.1. `tools/version.sh` reads the root package and stops when the workspace version differs. `tools/build.sh`, `tools/android/build-apk.sh`, `tools/release/local-release.sh` and the release workflow call it. The Gradle `versionName` is this version. The `versionCode` is `major * 10000 + minor * 100 + patch`, so 5.0.1 gives 50001. It is larger than every code that the old app used.
+- **One version.** The root package and the workspace packages have the version 5.0.2. `tools/version.sh` reads the root package and stops when the workspace version differs. `tools/build.sh`, `tools/android/build-apk.sh`, `tools/release/local-release.sh` and the release workflow call it. The Gradle `versionName` is this version. The `versionCode` is `major * 10000 + minor * 100 + patch`, so 5.0.2 gives 50002. It is larger than every code that the old app used.
 - **One image.** `docker/Dockerfile` builds on `rust:1.98-alpine3.24`. Alpine is musl, so the build needs no target and no cross compiler. The packages `musl-dev gcc make perl binutils` are enough for SQLite and for `aws-lc-sys`. CMake is not needed. There is no `rust-toolchain.toml`. The Dockerfile builds natively for each architecture. A `buildx` build for another architecture runs the compiler under QEMU or on a native builder.
 - **Layers.** A layer holds the dependencies only. It uses the manifests and stub sources. A change of the sources rebuilds the crates of the repository, not the dependencies. `RUSTFLAGS` has only `--remap-path-prefix`. An explicit `crt-static` would break the proc macros on a musl host.
 - **Runtime.** The image has `/tmp` (mode 1777) and `/var/lib/portal` (owner 10001). The process writes nowhere else. The image has no icon library. The pages show initials when `ui.icons_dir` is absent. A deployment that wants the icons mounts the library at `/icons`.

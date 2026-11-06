@@ -1,11 +1,9 @@
 //! The API of the producers (`/api/v1/*`) and the path that accepts an alert. The admin calls
 //! use the same path.
 
-use std::collections::HashMap;
-
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderMap, AUTHORIZATION};
-use hyper::{Request, StatusCode};
+use hyper::{Request, StatusCode, Uri};
 use inbox_core::noise::MAX_PLAINTEXT;
 use inbox_core::proto::{AlertMsg, Kind, ServerMsg, MAX_TITLE_CHARS};
 use serde::{Deserialize, Serialize};
@@ -20,7 +18,7 @@ use super::spool::{self, Accepted as Spooled};
 use super::state::{App, FileKey};
 use super::target::Target;
 use super::util::{hex, is_hex_id, now_ms, truncate_chars};
-use crate::util::parse_form;
+use crate::util::percent_decode_form;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -366,32 +364,32 @@ fn one_line(text: &str) -> String {
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Query parameters accepted by producer endpoints, for tools that cannot set
-/// headers. A token in a URL may end up in proxy logs: prefer the header.
-#[derive(Debug, Default)]
-pub struct ProducerQuery {
-    token: Option<String>,
-    title: Option<String>,
-}
-
-impl ProducerQuery {
-    /// Reads the query string of a request. An unknown parameter is ignored.
-    fn read(request: &Request<Incoming>) -> Result<ProducerQuery, ApiError> {
-        let Some(raw) = request.uri().query() else {
-            return Ok(ProducerQuery::default());
+/// The parameter `title` of the query of `POST /api/v1/notify/{group}`. It is the only parameter
+/// that the API reads. The key of a sender is never in the query: a URL can go into the log of a
+/// proxy. The API ignores each other parameter and never decodes its value, so no error and no log
+/// can show it. A parameter `title` that occurs two times, or that has a bad encoding, gives `400`.
+fn query_title(uri: &Uri) -> Result<Option<String>, ApiError> {
+    let bad = |reason: &str| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            format!("bad query: {reason}"),
+        )
+    };
+    let mut title = None;
+    for pair in uri.query().unwrap_or_default().split('&') {
+        let Some(value) = pair
+            .strip_prefix("title=")
+            .or((pair == "title").then_some(""))
+        else {
+            continue;
         };
-        let mut fields: HashMap<String, String> = parse_form(raw.as_bytes()).map_err(|e| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_query",
-                format!("bad query: {e}"),
-            )
-        })?;
-        Ok(ProducerQuery {
-            token: fields.remove("token"),
-            title: fields.remove("title"),
-        })
+        if title.is_some() {
+            return Err(bad("the parameter title occurs two times"));
+        }
+        title = Some(percent_decode_form(value).map_err(|e| bad(&e))?);
     }
+    Ok(title)
 }
 
 /// Who sends an alert: a key of the file, or a key of the database.
@@ -423,17 +421,13 @@ impl Sender<'_> {
 /// The text gets its form checked first: the prefix, the length, the characters and the checksum,
 /// before any lookup. A key of another kind gets the same answer as a text with a bad form: 401
 /// with no detail. A key of the file comes next: it never depends on the portal. A key that is not
-/// one of them can be a key of the database.
-fn sender<'a>(
-    app: &'a App,
-    headers: &HeaderMap,
-    query: &ProducerQuery,
-) -> Result<Sender<'a>, ApiError> {
+/// one of them can be a key of the database. The key is only in the header `Authorization: Bearer`.
+/// A request without this header gets `401`, also when its query holds a key.
+fn sender<'a>(app: &'a App, headers: &HeaderMap) -> Result<Sender<'a>, ApiError> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .or(query.token.as_deref())
         .map(str::trim);
     let unauthorized = || {
         ApiError::new(
@@ -694,35 +688,26 @@ pub fn idempotency_key(headers: &HeaderMap, content: &[&str]) -> Result<String, 
     Ok(key.to_string())
 }
 
-/// What a producer endpoint has read from a request: the query, the headers, the sender and the
-/// body.
+/// What a producer endpoint has read from a request: the headers, the sender and the body.
 struct Call<'a> {
-    query: ProducerQuery,
     headers: HeaderMap,
     who: Sender<'a>,
     body: Bytes,
 }
 
-/// Reads the query, finds the sender, then reads the body. The key comes before the body: the
-/// inbox reads no body for a request without a valid key. Thus an anonymous client cannot hold a
-/// connection of `server.max_connections` for `server.body_read_timeout`, and ForwardAuth keeps
-/// its connections.
+/// Finds the sender, then reads the body. The key comes before the body: the inbox reads no body
+/// for a request without a valid key. Thus an anonymous client cannot hold a connection of
+/// `server.max_connections` for `server.body_read_timeout`, and ForwardAuth keeps its connections.
 async fn read_call<'a>(app: &'a App, request: Request<Incoming>) -> Result<Call<'a>, ApiError> {
-    let query = ProducerQuery::read(&request)?;
     let headers = request.headers().clone();
-    let who = sender(app, &headers, &query)?;
+    let who = sender(app, &headers)?;
     let body = read_body(
         request,
         app.config.devices.max_request_bytes,
         app.http.body_read_timeout,
     )
     .await?;
-    Ok(Call {
-        query,
-        headers,
-        who,
-        body,
-    })
+    Ok(Call { headers, who, body })
 }
 
 fn created_or_ok(accepted: &Accepted) -> Resp {
@@ -793,8 +778,7 @@ async fn get_alert_inner(
     request: Request<Incoming>,
     id: &str,
 ) -> Result<Resp, ApiError> {
-    let query = ProducerQuery::read(&request)?;
-    let who = sender(app, request.headers(), &query)?;
+    let who = sender(app, request.headers())?;
     let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such alert");
     if !is_hex_id(id) {
         return Err(not_found());
@@ -969,13 +953,10 @@ async fn notify_inner(
     request: Request<Incoming>,
     group: &str,
 ) -> Result<Resp, ApiError> {
-    let Call {
-        query,
-        headers,
-        who,
-        body,
-    } = read_call(app, request).await?;
+    let uri = request.uri().clone();
+    let Call { headers, who, body } = read_call(app, request).await?;
     authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?;
+    let query_title = query_title(&uri)?;
     let header_title = headers
         .get("x-title")
         .and_then(|v| v.to_str().ok())
@@ -990,9 +971,7 @@ async fn notify_inner(
         Ok(other) => Some(other.to_string()),
         Err(_) => Some(text.to_string()),
     };
-    let title = query
-        .title
-        .clone()
+    let title = query_title
         .or(header_title)
         .or(body_title)
         .map(|t| one_line(&truncate_chars(&one_line(&t), MAX_TITLE_CHARS)))
@@ -1089,6 +1068,38 @@ mod tests {
             webhook_key("infra", "a", "bc", "")
         );
         assert_ne!(key, webhook_key("infra", "fp\u{0}nul", "resolved", "t"));
+    }
+
+    #[test]
+    fn the_query_gives_only_the_title_and_never_reads_a_key() {
+        let title = |text: &str| query_title(&text.parse::<Uri>().unwrap());
+        assert_eq!(title("/api/v1/notify/infra").unwrap(), None);
+        assert_eq!(
+            title("/api/v1/notify/infra?title=Backup%20done+now").unwrap(),
+            Some("Backup done now".to_string())
+        );
+        // The parameter `token` is not a parameter of the API: its value is never decoded, so a
+        // bad encoding in it is no error, and nothing of it comes back.
+        let key = "api_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(
+            title(&format!("/api/v1/notify/infra?token={key}&title=t")).unwrap(),
+            Some("t".to_string())
+        );
+        assert_eq!(
+            title(&format!("/api/v1/notify/infra?token={key}%zz")).unwrap(),
+            None
+        );
+        // A repeated title and a title with a bad encoding are refused. The message holds no value
+        // of the query.
+        for text in [
+            format!("/api/v1/notify/infra?token={key}&title=a&title=b"),
+            format!("/api/v1/notify/infra?token={key}&title=%zz"),
+        ] {
+            let error = title(&text).unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{text}");
+            assert_eq!(error.code(), "invalid_query", "{text}");
+            assert!(!error.summary().contains("api_"), "{}", error.summary());
+        }
     }
 
     #[test]

@@ -1103,14 +1103,26 @@ fn pdp(port: u16, path: &str, token: Option<&str>, body: &str, request_id: Optio
     send(port, "POST", path, &headers, body)
 }
 
+/// A question about a service, or about a node of depth 1 of the service `db` with its chain
+/// `[service:db]` (protocol 4.1).
 fn evaluation(subject: &str, action: &str, kind: &str, id: &str) -> String {
     serde_json::json!({
         "subject": {"type": "user", "id": subject},
         "action": {"name": action},
-        "resource": {"type": kind, "id": id},
+        "resource": depth_one(kind, id),
         "context": {}
     })
     .to_string()
+}
+
+/// The service `{"type": "service", "id": id}`, or a node below the service `db` with the chain
+/// `[service:db]`.
+fn depth_one(kind: &str, id: &str) -> serde_json::Value {
+    if kind == "service" {
+        serde_json::json!({"type": kind, "id": id})
+    } else {
+        node_of(kind, id, &[("service", "db")])
+    }
 }
 
 #[test]
@@ -1472,20 +1484,22 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
         "the superadmin"
     );
     // The service of a sub-resource is the server that asks: chat has no grant of alice.
-    assert!(!decide(
-        PDP_CHAT_TOKEN,
-        &evaluation("alice", "query.run.write", "database", "analytics")
-    ));
+    let chat = serde_json::json!({
+        "subject": {"type": "user", "id": "alice"},
+        "action": {"name": "query.run.write"},
+        "resource": node_of("database", "analytics", &[("service", "chat")])
+    });
+    assert!(!decide(PDP_CHAT_TOKEN, &chat.to_string()));
 
     // The batch: one subject, a resource for each evaluation.
     let body = serde_json::json!({
         "subject": {"type": "user", "id": "alice"},
         "action": {"name": "query.run.write"},
         "evaluations": [
-            {"resource": {"type": "database", "id": "analytics"}},
-            {"resource": {"type": "database", "id": "logs"}},
-            {"resource": {"type": "service", "id": "db"}},
-            {"action": {"name": "query.run.read"}, "resource": {"type": "database", "id": "logs"}}
+            {"resource": depth_one("database", "analytics")},
+            {"resource": depth_one("database", "logs")},
+            {"resource": depth_one("service", "db")},
+            {"action": {"name": "query.run.read"}, "resource": depth_one("database", "logs")}
         ]
     });
     let reply = pdp(
@@ -1508,7 +1522,7 @@ fn the_pdp_decides_on_sub_resources_with_the_service_of_the_server_that_asks() {
     let search = |subject: &str, kind: &str, id: &str| {
         let body = serde_json::json!({
             "subject": {"type": "user", "id": subject},
-            "resource": {"type": kind, "id": id}
+            "resource": depth_one(kind, id)
         });
         let reply = pdp(
             pdp_port,
@@ -1579,7 +1593,7 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
             serde_json::json!({
                 "subject": {"type": subject_kind, "id": subject},
                 "action": {"name": action},
-                "resource": {"type": kind, "id": id}
+                "resource": depth_one(kind, id)
             })
             .to_string(),
         )
@@ -1595,7 +1609,7 @@ fn the_pdp_gives_a_reason_only_for_an_unknown_subject_or_an_invalid_resource() {
         unknown,
         "also on a sub-resource"
     );
-    // An id with a colon names a key. Nothing makes one yet: it is an unknown subject.
+    // An id with a colon names a key. Without the block `keys`, a key is an unknown subject.
     for id in ["key:acc1", "key:", "other:k1", "carol:x"] {
         assert_eq!(
             single("user", id, "access", "service", "db"),
@@ -1921,7 +1935,19 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         ),
         (
             serde_json::json!({"type": "database", "id": "x"}),
-            "no ancestors: depth 1, but database is at depth 2",
+            "no ancestors",
+        ),
+        (
+            serde_json::json!({"type": "host", "id": "local"}),
+            "no ancestors, also for a type of depth 1",
+        ),
+        (
+            serde_json::json!({"type": "host", "id": "local", "properties": {}}),
+            "properties without ancestors",
+        ),
+        (
+            node_of("host", "local", &[]),
+            "empty ancestors of a type of depth 1",
         ),
         (
             node_of("database", "x", &[("service", "chat"), ("host", "local")]),
@@ -2016,8 +2042,8 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         assert_eq!(reply.status, 400, "{}", reply.body);
     }
 
-    // The grant of the document of one level does not follow the tree: it does not apply, also
-    // with the old form of the request.
+    // The grant of the document of one level does not follow the tree: it does not apply. The
+    // chain of the old tree and a request without ancestors are not valid.
     assert_eq!(
         single(
             "carol",
@@ -2025,6 +2051,14 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
             node_of("database", "old", &local)
         ),
         no
+    );
+    assert_eq!(
+        single(
+            "carol",
+            "query.run.write",
+            node_of("database", "old", &service)
+        ),
+        invalid
     );
     assert_eq!(
         single(
@@ -2268,7 +2302,8 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         ["carol query.run.write on service:db/database:old"]
     );
 
-    // Compatibility: a document of one level reads a node without ancestors as depth 1.
+    // A document of one level: each node has the chain `[service]`. A node without ancestors is not
+    // valid, also when its type has the parent `service` (protocol 4.1, 11.1).
     publish_catalog(&node, &["query.run.read", "query.run.write"]);
     assert_eq!(
         single(
@@ -2276,7 +2311,11 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
             "query.run.write",
             serde_json::json!({"type": "database", "id": "old"})
         ),
-        yes
+        invalid
+    );
+    assert_eq!(
+        single("carol", "query.run.write", node_of("database", "old", &[])),
+        invalid
     );
     assert_eq!(
         single(
@@ -2290,6 +2329,151 @@ fn the_pdp_checks_the_ancestors_and_applies_a_grant_to_the_nodes_below_it() {
         single("carol", "query.run.read", node_of("database", "x", &local)),
         invalid,
         "no host in this document"
+    );
+}
+
+/// A node of depth 1 needs its chain `[service]` (protocol 4.1, 11.1). Without `ancestors`, or with
+/// an empty array, it gets `invalid_resource` in the three endpoints and in a batch item.
+#[test]
+fn a_node_of_depth_1_without_ancestors_is_an_invalid_resource_in_each_endpoint() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"access {{ grants_mode = "hybrid" }}
+            user "carol" {{ grants = ["query.run.read on service:db/host:local"] }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 8 }}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}
+            pdp_client "chat" {{ token_env = "TEST_PDP_CHAT" }}"#
+        ),
+    );
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    let row = crate::store::UserRow {
+        login: "carol".into(),
+        password_hash: password_hash(PASSWORD),
+        grants: Vec::new(),
+        created_at: 1,
+    };
+    node.state.store.insert_user(&row).unwrap();
+    crate::sync::run_round(&node.state, 1);
+    // The catalogue holds db: an early read of its document keeps it in the registry.
+    publish_catalog(&node, &[]);
+    publish_tree(&node);
+    let ask = |token: &str, path: &str, body: serde_json::Value| -> serde_json::Value {
+        let reply = pdp(pdp_port, path, Some(token), &body.to_string(), None);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()
+    };
+    let question = |subject: &str, resource: &serde_json::Value| {
+        serde_json::json!({
+            "subject": {"type": "user", "id": subject},
+            "action": {"name": "query.run.read"},
+            "resource": resource
+        })
+    };
+    let yes = serde_json::json!({"decision": true});
+    let no = serde_json::json!({"decision": false});
+    let invalid = serde_json::json!({"decision": false, "context": {"reason": "invalid_resource"}});
+    // The host is at depth 1 in the tree of db.
+    let chained = node_of("host", "local", &[("service", "db")]);
+    let without = [
+        (
+            serde_json::json!({"type": "host", "id": "local"}),
+            "no properties",
+        ),
+        (
+            serde_json::json!({"type": "host", "id": "local", "properties": {}}),
+            "properties without ancestors",
+        ),
+        (node_of("host", "local", &[]), "an empty array"),
+    ];
+
+    // One evaluation, for a person with a grant on the node and for the superadmin.
+    for subject in ["carol", "root"] {
+        assert_eq!(
+            ask(
+                PDP_DB_TOKEN,
+                "/access/v1/evaluation",
+                question(subject, &chained)
+            ),
+            yes,
+            "{subject}: the chain [service]"
+        );
+        for (resource, why) in &without {
+            assert_eq!(
+                ask(
+                    PDP_DB_TOKEN,
+                    "/access/v1/evaluation",
+                    question(subject, resource)
+                ),
+                invalid,
+                "{subject}: {why}"
+            );
+        }
+    }
+
+    // A batch: the default resource of the request and each item without ancestors.
+    let mut body = question("carol", &without[0].0);
+    body["evaluations"] = serde_json::json!([
+        {},
+        {"resource": chained},
+        {"resource": without[0].0},
+        {"resource": without[1].0},
+        {"resource": without[2].0}
+    ]);
+    assert_eq!(
+        ask(PDP_DB_TOKEN, "/access/v1/evaluations", body)["evaluations"],
+        serde_json::json!([invalid, yes, invalid, invalid, invalid])
+    );
+    let mut body = question("carol", &chained);
+    body["evaluations"] = serde_json::json!([{}, {"resource": without[0].0}]);
+    assert_eq!(
+        ask(PDP_DB_TOKEN, "/access/v1/evaluations", body)["evaluations"],
+        serde_json::json!([yes, invalid])
+    );
+
+    // The action search: no action on a node without ancestors, also for the superadmin.
+    let search = |subject: &str, resource: &serde_json::Value| -> Vec<String> {
+        ask(
+            PDP_DB_TOKEN,
+            "/access/v1/search/action",
+            serde_json::json!({"subject": {"type": "user", "id": subject}, "resource": resource}),
+        )["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(search("carol", &chained), ["query.run.read"]);
+    assert_eq!(
+        search("root", &chained),
+        ["access", "query.run.read", "query.run.write", "system.read"]
+    );
+    for (resource, why) in &without {
+        assert!(search("carol", resource).is_empty(), "carol: {why}");
+        assert!(search("root", resource).is_empty(), "root: {why}");
+    }
+
+    // Without a known document of the service, the start of the chain is still checked.
+    assert_eq!(
+        ask(
+            PDP_CHAT_TOKEN,
+            "/access/v1/evaluation",
+            question("root", &serde_json::json!({"type": "room", "id": "r"}))
+        ),
+        invalid
+    );
+    assert_eq!(
+        ask(
+            PDP_CHAT_TOKEN,
+            "/access/v1/evaluation",
+            question("root", &node_of("room", "r", &[("service", "chat")]))
+        ),
+        no
     );
 }
 

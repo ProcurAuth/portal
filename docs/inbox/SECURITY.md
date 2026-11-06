@@ -32,7 +32,7 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 ## Operator checklist
 
 - Keep a copy of the key file of the server and of the database. Protect both. Both are secrets.
-- Send alerts with the header `Authorization: Bearer`. Query strings are often in logs.
+- Send alerts with the header `Authorization: Bearer`. The server reads the key only in this header. A request with a key in the query and no header gets `401`. Do not put a key in a URL: query strings are often in logs.
 - Use an HTTPS `inbox.devices.public_address`.
 - List only the real proxies in `server.trusted_proxies`. Do not list the Docker gateway or a whole bridge range. The same list gives the client address for the limiter of the enrollment attempts.
 - Send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. A phone and a webhook have no session. Add a retry middleware that retries only when the server does not answer.

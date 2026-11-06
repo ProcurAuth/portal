@@ -2812,13 +2812,15 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let (mut c, _) = Conn::open(port, &dev).await.unwrap();
     c.subscribe("infra").await;
 
-    // Generic notify: plain text body, token in the query string, no Idempotency-Key.
-    let url = format!("/api/v1/notify/infra?token={}&title=Sauvegarde", s.token);
+    // Generic notify: plain text body, title in the query string, key in the header, no
+    // Idempotency-Key.
+    let auth = ("Authorization", format!("Bearer {}", s.token));
+    let url = "/api/v1/notify/infra?title=Sauvegarde";
     let (st, body) = http(
         s.port,
         "POST",
-        &url,
-        &[("Content-Type", "text/plain".into())],
+        url,
+        &[auth.clone(), ("Content-Type", "text/plain".into())],
         "backup KO\n",
     );
     assert_eq!(st, 201, "{body}");
@@ -2829,15 +2831,14 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let (st, body) = http(
         s.port,
         "POST",
-        &url,
-        &[("Content-Type", "text/plain".into())],
+        url,
+        &[auth.clone(), ("Content-Type", "text/plain".into())],
         "backup KO\n",
     );
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("\"duplicate\":true"));
 
     // Without a title anywhere, the plain text body is the title, on one line.
-    let auth = ("Authorization", format!("Bearer {}", s.token));
     let (st, _) = http(
         s.port,
         "POST",
@@ -2894,14 +2895,20 @@ async fn integrations_and_reverse_proxy_prefixes() {
     let got = c.alert().await;
     assert_eq!(got.title, r#"{"monitor":{"name":"web"},"status":0}"#);
     c.ack(&got.alert_id, AckStage::Received).await;
-    // Wrong token in the query string is refused; forbidden group too.
-    let (st, _) = http(s.port, "POST", "/api/v1/notify/infra?token=nope", &[], "x");
+    // A wrong key is refused; forbidden group too.
+    let (st, _) = http(
+        s.port,
+        "POST",
+        "/api/v1/notify/infra",
+        &[("Authorization", "Bearer nope".into())],
+        "x",
+    );
     assert_eq!(st, 401);
     let (st, _) = http(
         s.port,
         "POST",
-        &format!("/api/v1/notify/other?token={}", s.token),
-        &[],
+        "/api/v1/notify/other",
+        std::slice::from_ref(&auth),
         "x",
     );
     assert_eq!(st, 403);
@@ -4871,7 +4878,7 @@ async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner
     assert!(take(&mut conn).await.title.starts_with("[FIRING] Disk"));
 
     // The key of the file works as before. It is an API key too: its owner is an account of the
-    // file, and the start decided its groups. The key in the query works too.
+    // file, and the start decided its groups. A title in the query works with the key in the header.
     let (st, v) = post_alert(
         &s,
         "file1",
@@ -4884,8 +4891,8 @@ async fn an_api_key_sends_alerts_with_the_permissions_and_the_limit_of_its_owner
     let (st, _) = http(
         s.port,
         "POST",
-        &format!("/api/v1/notify/crit?token={ci}&title=query"),
-        &[],
+        "/api/v1/notify/crit?title=query",
+        &[("Authorization", format!("Bearer {ci}"))],
         "",
     );
     assert_eq!(st, 201);
@@ -7196,6 +7203,7 @@ fn a_key_of_the_file_reads_the_status_of_an_alert_only_with_alert_read_of_its_ow
             "",
         )
     };
+    // The key in the query is no key: 401, as a request without the header.
     let by_query = |s: &Server| {
         http(
             s.port,
@@ -7209,14 +7217,114 @@ fn a_key_of_the_file_reads_the_status_of_an_alert_only_with_alert_read_of_its_ow
     let (st, body) = by_header(&s);
     assert_eq!(st, 404, "{body}");
     assert!(!body.contains("deliveries"), "{body}");
-    assert_eq!(by_query(&s).0, 404);
+    assert_eq!(by_query(&s).0, 401);
     // The owner gets alert.read on infra: the key reads the status.
     s.stop();
     std::fs::write(s.config(), &with_read).unwrap();
     s.start();
     let (st, body) = by_header(&s);
     assert_eq!(st, 200, "{body}");
-    assert_eq!(by_query(&s).0, 200);
+    assert_eq!(by_query(&s).0, 401);
+}
+
+/// The API of the inbox reads the key only in the header `Authorization: Bearer` (ProcurAuth 1.4).
+/// A valid key in the query `token` gets `401` on each route, as a request without the header.
+/// The log of the server, the metrics and the answers hold nothing of the key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_in_the_query_gets_401_and_no_log_holds_it() {
+    let mut s = Server::setup();
+    s.start();
+    let key = s.token.clone();
+    let auth = ("Authorization", format!("Bearer {key}"));
+    let dev = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    let (mut c, _) = Conn::open(s.port, &dev).await.unwrap();
+    c.subscribe("infra").await;
+    // The key is valid: with the header, it sends to infra and reads the status of the alert.
+    let (st, v) = post_alert(&s, "q1", json!({"group": "infra", "title": "by header"}));
+    assert_eq!(st, 201, "{v}");
+    let id = v["alert_id"].as_str().unwrap().to_string();
+    assert_eq!(take(&mut c).await.title, "by header");
+    let (st, body) = http(
+        s.port,
+        "GET",
+        &format!("/api/v1/alerts/{id}"),
+        std::slice::from_ref(&auth),
+        "",
+    );
+    assert_eq!(st, 200, "{body}");
+
+    // The same key in the query only: 401 on the alerts, the notify route, the webhook and the
+    // read of an alert. Also with a title, and with the key in the form of a header value.
+    let webhook =
+        r#"{"alerts":[{"status":"firing","labels":{"alertname":"Query"},"fingerprint":"q"}]}"#;
+    let routes = [
+        (
+            "POST",
+            "/api/v1/alerts".to_string(),
+            r#"{"group":"infra","title":"by query"}"#,
+        ),
+        ("POST", "/api/v1/notify/infra".to_string(), "by query"),
+        (
+            "POST",
+            "/api/v1/webhooks/alertmanager/infra".to_string(),
+            webhook,
+        ),
+        ("GET", format!("/api/v1/alerts/{id}"), ""),
+    ];
+    let host = format!("localhost:{}", s.port);
+    for (method, path, body) in &routes {
+        for query in [
+            format!("token={key}"),
+            format!("title=by%20query&token={key}"),
+            format!("token=Bearer%20{key}"),
+        ] {
+            let url = format!("{path}?{query}");
+            let (st, head, answer) = http_full(s.port, &host, method, &url, &[], body);
+            assert_eq!(st, 401, "{method} {url}: {answer}");
+            assert!(answer.contains("\"unauthorized\""), "{answer}");
+            assert!(
+                !answer.contains(&key) && !head.contains(&key),
+                "{head}{answer}"
+            );
+        }
+    }
+    // No request of the query made an alert.
+    c.no_alert(Duration::from_millis(1500)).await;
+
+    // The query `token` is no parameter of the API: with the header, a wrong key in the query
+    // changes nothing.
+    let (st, body) = http(
+        s.port,
+        "POST",
+        "/api/v1/notify/infra?token=api_wrong&title=header%20wins",
+        std::slice::from_ref(&auth),
+        "",
+    );
+    assert_eq!(st, 201, "{body}");
+    assert_eq!(take(&mut c).await.title, "header wins");
+
+    // The log has a line for each request of the query, with the path and no query. No piece of
+    // ten characters of the key is in the log or in the metrics.
+    let metrics = metrics_of(&s);
+    let log = s.log();
+    for (method, path, _) in &routes {
+        let line = format!("\"method\":\"{method}\",\"path\":\"{path}\",\"status\":\"401\"");
+        assert_eq!(log.matches(&line).count(), 3, "{line}: {log}");
+    }
+    assert!(!log.contains("token="), "{log}");
+    let random = &key["api_".len()..];
+    for start in 0..=random.len() - 10 {
+        let piece = &random[start..start + 10];
+        assert!(
+            !log.contains(piece),
+            "the log holds {piece:?} of the key: {log}"
+        );
+        assert!(
+            !metrics.contains(piece),
+            "the metrics hold {piece:?} of the key"
+        );
+    }
+    s.stop();
 }
 
 /// The total of the graph and the title of each bar, as the zone Sent draws them.
