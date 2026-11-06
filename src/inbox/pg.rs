@@ -24,6 +24,7 @@ use deadpool_postgres::{
 use futures_util::StreamExt;
 use inbox_core::proto::Kind;
 use tokio::sync::mpsc;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, NoTls};
 
 use super::db::{
@@ -33,7 +34,7 @@ use super::db::{
 };
 use super::hub::LiveInfo;
 use super::log;
-use super::notify::{Ask, Item, Level, Prefs, Scope, View, UNREAD_CAP};
+use super::notify::{Ask, Item, Level, Prefs, Scope, Services, View, UNREAD_CAP};
 use super::spool::{DbAck, Entry, Spool};
 use super::store::Stats;
 use super::target::Target;
@@ -94,6 +95,9 @@ CREATE TABLE alerts (
     source          TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     created_at      BIGINT NOT NULL,
+    -- The service that an alert of the portal names (`inbox.watch`). A reader sees the alert only
+    -- when the reader may open the service. NULL for every other alert.
+    service         TEXT,
     UNIQUE (source, idempotency_key)
 );
 CREATE INDEX alerts_created ON alerts(created_at);
@@ -170,6 +174,27 @@ CREATE TABLE web_notify (
 CREATE INDEX alerts_target ON alerts(target_id, created_at);
 "#,
 ];
+
+/// One value of a parameter of the condition of a scope (see `PgStore::scope_sql`).
+type ScopeArg = Box<dyn ToSql + Sync + Send>;
+
+/// The value of a parameter of a scope, as the driver takes it.
+fn arg(value: &ScopeArg) -> &(dyn ToSql + Sync) {
+    value.as_ref()
+}
+
+/// The parameters of a query on a scope: `head` as `$1`, then the parameters of the scope, then
+/// `tail`.
+fn around<'a>(
+    head: &'a (dyn ToSql + Sync),
+    args: &'a [ScopeArg],
+    tail: Option<&'a (dyn ToSql + Sync)>,
+) -> Vec<&'a (dyn ToSql + Sync)> {
+    let mut out: Vec<&(dyn ToSql + Sync)> = vec![head];
+    out.extend(args.iter().map(arg));
+    out.extend(tail);
+    out
+}
 
 /// The kind that a stored text names. An unknown text is a storage error.
 fn kind_of(text: String) -> Result<Kind, DbError> {
@@ -616,14 +641,17 @@ impl PgStore {
     }
 
     /// The devices that the target names, as last seen in the database: the devices subscribed to
-    /// the group, or the phones of the account. A revoked device is never in the list.
-    pub fn cached_targets(&self, target: &Target) -> Vec<String> {
+    /// the group, or the phones of the account. A revoked device is never in the list. With
+    /// `audience`, a device is in the list only when its account is in the audience (see
+    /// `db::insert_alert`).
+    pub fn cached_targets(&self, target: &Target, audience: Option<&[String]>) -> Vec<String> {
         let cache = self.cache.read().expect("cache lock");
         let mut ids: Vec<String> = cache
             .devices
             .iter()
             .filter(|(_, d)| {
                 !d.key.revoked
+                    && audience.is_none_or(|logins| logins.contains(&d.key.user_name))
                     && match target {
                         Target::Group(group) => d.subscriptions.iter().any(|g| g == group),
                         Target::User(login) => d.key.user_name == *login,
@@ -750,8 +778,8 @@ impl PgStore {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         tx.execute(
-            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (source, idempotency_key) DO NOTHING",
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind, service)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (source, idempotency_key) DO NOTHING",
             &[
                 &e.id,
                 &e.target.kind(),
@@ -761,6 +789,7 @@ impl PgStore {
                 &e.key,
                 &e.created_at,
                 &e.kind.as_str(),
+                &e.service,
             ],
         )
         .await
@@ -1473,14 +1502,22 @@ impl PgStore {
 
     // ------------------------------------------------------------ alerts and deliveries
 
-    pub async fn insert_alert(&self, alert: &NewAlert) -> Result<InsertOutcome, DbError> {
+    /// Stores the alert and its deliveries in one transaction (see `db::insert_alert`). With
+    /// `audience`, a device is a target only when its account is in the list.
+    pub async fn insert_alert(
+        &self,
+        alert: &NewAlert,
+        audience: Option<&[String]>,
+    ) -> Result<InsertOutcome, DbError> {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         let id = random_id();
+        let audience: Option<Vec<&str>> =
+            audience.map(|logins| logins.iter().map(String::as_str).collect());
         let created = tx
             .query_opt(
-                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind, service)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING id",
                 &[
                     &id,
@@ -1491,6 +1528,7 @@ impl PgStore {
                     &alert.idempotency_key,
                     &now_ms(),
                     &alert.kind.as_str(),
+                    &alert.service,
                 ],
             )
             .await
@@ -1540,8 +1578,9 @@ impl PgStore {
                      SELECT $1, s.device_id FROM subscriptions s
                      JOIN devices d ON d.id = s.device_id
                      WHERE s.group_id = $2 AND d.revoked_at IS NULL
+                       AND ($3::text[] IS NULL OR d.user_name = ANY($3::text[]))
                      ORDER BY s.device_id",
-                    &[&id, group],
+                    &[&id, group, &audience],
                 )
                 .await
                 .map_err(db_error)?,
@@ -1550,8 +1589,9 @@ impl PgStore {
                     "INSERT INTO deliveries (alert_id, device_id)
                      SELECT $1, d.id FROM devices d
                      WHERE d.user_name = $2 AND d.revoked_at IS NULL
+                       AND ($3::text[] IS NULL OR d.user_name = ANY($3::text[]))
                      ORDER BY d.id",
-                    &[&id, login],
+                    &[&id, login, &audience],
                 )
                 .await
                 .map_err(db_error)?,
@@ -1593,7 +1633,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind
+                "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind, a.service
                  FROM deliveries d JOIN alerts a ON a.id = d.alert_id
                  WHERE d.device_id = $1 AND d.received_at IS NULL AND a.created_at >= $3
                  ORDER BY d.seq LIMIT $2",
@@ -1610,9 +1650,23 @@ impl PgStore {
                     title: r.get(4),
                     created_at: r.get(5),
                     kind: kind_of(r.get(6))?,
+                    service: r.get(7),
                 })
             })
             .collect()
+    }
+
+    /// Removes deliveries that the device has not received (see `db::withdraw_deliveries`).
+    pub async fn withdraw_deliveries(&self, seqs: &[i64]) -> Result<usize, DbError> {
+        let c = self.client().await?;
+        let removed = c
+            .execute(
+                "DELETE FROM deliveries WHERE seq = ANY($1::bigint[]) AND received_at IS NULL",
+                &[&seqs],
+            )
+            .await
+            .map_err(db_error)?;
+        Ok(removed as usize)
     }
 
     /// The number of phones that are not revoked, for each login that has one at least.
@@ -1754,6 +1808,7 @@ impl PgStore {
             received: r.get(7),
             expired: 0,
             missing: Vec::new(),
+            service: r.get(9),
         })
     }
 
@@ -1766,7 +1821,7 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
+                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id
                  WHERE a.created_at >= $2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
                 &[&i64::from(limit), &since_ms],
@@ -1831,25 +1886,39 @@ impl PgStore {
         })
     }
 
-    /// The condition of the alerts that `scope` receives, with the parameters from `$first` on.
-    /// The second value is the list of groups for the first parameter, or `None` when the scope
-    /// has all the groups. The third is the number of the parameter of the login.
-    fn scope_sql(scope: &Scope, first: usize) -> (String, Option<Vec<String>>, usize) {
-        match &scope.groups {
-            None => (
-                format!("(target_kind = 'group' OR (target_kind = 'user' AND target_id = ${first}))"),
-                None,
-                first,
-            ),
-            Some(ids) => (
+    /// The condition of the alerts that `scope` receives, with the parameters from `$first` on,
+    /// and the values of these parameters in order (see `db::scope_sql`). An alert about a service
+    /// needs the service in the scope: the rule of `Services::sees`.
+    fn scope_sql(scope: &Scope, first: usize) -> (String, Vec<ScopeArg>) {
+        let mut args: Vec<ScopeArg> = Vec::new();
+        let groups = match &scope.groups {
+            None => "target_kind = 'group'".to_string(),
+            Some(ids) => {
+                args.push(Box::new(ids.clone()));
                 format!(
-                    "((target_kind = 'group' AND target_id = ANY(${first}::text[])) OR (target_kind = 'user' AND target_id = ${}))",
-                    first + 1
-                ),
-                Some(ids.clone()),
-                first + 1,
+                    "target_kind = 'group' AND target_id = ANY(${}::text[])",
+                    first + args.len() - 1
+                )
+            }
+        };
+        args.push(Box::new(scope.login.clone()));
+        let login = first + args.len() - 1;
+        let services = match &scope.services {
+            Services::All => "TRUE".to_string(),
+            Services::Only(open) => {
+                args.push(Box::new(open.iter().cloned().collect::<Vec<String>>()));
+                format!(
+                    "service IS NULL OR service = ANY(${}::text[])",
+                    first + args.len() - 1
+                )
+            }
+        };
+        (
+            format!(
+                "(({groups}) OR (target_kind = 'user' AND target_id = ${login})) AND ({services})"
             ),
-        }
+            args,
+        )
     }
 
     /// The alerts that `scope` receives: the preferences, the count of unread ones and the newest
@@ -1866,40 +1935,28 @@ impl PgStore {
         }
         let cap = i64::from(UNREAD_CAP);
         let limit = i64::from(ask.limit);
-        // The groups, when the scope has a list, then the login, as the last parameter.
-        let (condition, groups, login_at) = Self::scope_sql(scope, 2);
+        // The time first, then the parameters of the scope, then the limit as the last one.
+        let (condition, args) = Self::scope_sql(scope, 2);
+        let last = 2 + args.len();
         let unread_sql = format!(
-            "SELECT COUNT(*)::bigint FROM (SELECT 1 FROM alerts WHERE created_at > $1 AND {condition} LIMIT ${})",
-            login_at + 1
+            "SELECT COUNT(*)::bigint FROM (SELECT 1 FROM alerts WHERE created_at > $1 AND {condition} LIMIT ${last})"
         );
-        let unread: i64 = match &groups {
-            Some(ids) => {
-                c.query_one(&unread_sql, &[&prefs.read_up_to, ids, &scope.login, &cap])
-                    .await
-            }
-            None => {
-                c.query_one(&unread_sql, &[&prefs.read_up_to, &scope.login, &cap])
-                    .await
-            }
-        }
-        .map_err(db_error)?
-        .get(0);
+        let unread: i64 = c
+            .query_one(&unread_sql, &around(&prefs.read_up_to, &args, Some(&cap)))
+            .await
+            .map_err(db_error)?
+            .get(0);
         let items = if ask.limit == 0 {
             Vec::new()
         } else {
             let sql = format!(
                 "SELECT id, target_kind, target_id, title, created_at FROM alerts
-                 WHERE created_at > $1 AND {condition} ORDER BY created_at DESC, id DESC LIMIT ${}",
-                login_at + 1
+                 WHERE created_at > $1 AND {condition} ORDER BY created_at DESC, id DESC LIMIT ${last}"
             );
-            let rows = match &groups {
-                Some(ids) => {
-                    c.query(&sql, &[&ask.since_ms, ids, &scope.login, &limit])
-                        .await
-                }
-                None => c.query(&sql, &[&ask.since_ms, &scope.login, &limit]).await,
-            }
-            .map_err(db_error)?;
+            let rows = c
+                .query(&sql, &around(&ask.since_ms, &args, Some(&limit)))
+                .await
+                .map_err(db_error)?;
             rows.iter()
                 .map(|r| {
                     Ok(Item {
@@ -1923,14 +1980,10 @@ impl PgStore {
     pub async fn notify_mark_read(&self, scope: &Scope) -> Result<i64, DbError> {
         let c = self.client().await?;
         Self::notify_prefs(&c, &scope.login, now_ms()).await?;
-        let (condition, groups, _) = Self::scope_sql(scope, 1);
+        let (condition, args) = Self::scope_sql(scope, 1);
         let sql = format!("SELECT MAX(created_at)::bigint FROM alerts WHERE {condition}");
-        let newest: Option<i64> = match &groups {
-            Some(ids) => c.query_one(&sql, &[ids, &scope.login]).await,
-            None => c.query_one(&sql, &[&scope.login]).await,
-        }
-        .map_err(db_error)?
-        .get(0);
+        let params: Vec<&(dyn ToSql + Sync)> = args.iter().map(arg).collect();
+        let newest: Option<i64> = c.query_one(&sql, &params).await.map_err(db_error)?.get(0);
         let r = c
             .query_one(
                 "UPDATE web_notify SET read_up_to = GREATEST(read_up_to, $2) WHERE login = $1 RETURNING read_up_to",
@@ -1963,9 +2016,9 @@ impl PgStore {
         let c = self.client().await?;
         let rows = c
             .query(
-                "SELECT (created_at - $1) / $2, target_id, COUNT(*) FROM alerts
+                "SELECT (created_at - $1) / $2, target_id, service, COUNT(*) FROM alerts
                  WHERE created_at >= $1 AND target_kind = 'group'
-                 GROUP BY 1, 2 ORDER BY 1, 2",
+                 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3",
                 &[&since_ms, &bucket_ms.max(1)],
             )
             .await
@@ -1975,7 +2028,8 @@ impl PgStore {
             .map(|r| super::db::AlertCount {
                 bucket: r.get(0),
                 group: r.get(1),
-                count: r.get(2),
+                service: r.get(2),
+                count: r.get(3),
             })
             .collect())
     }
@@ -1988,7 +2042,7 @@ impl PgStore {
         let c = self.client().await?;
         let Some(row) = c
             .query_opt(
-                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind
+                "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id WHERE a.id = $1 GROUP BY a.id",
                 &[&id],
             )
@@ -2269,11 +2323,12 @@ impl PgStore {
 
         let mut stmt = lite
             .prepare(
-                "SELECT id, target_kind, target_id, title, source, idempotency_key, created_at, kind FROM alerts",
+                "SELECT id, target_kind, target_id, title, source, idempotency_key, created_at, kind, service FROM alerts",
             )
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+            let service: Option<String> = r.get(8).map_err(|e| e.to_string())?;
             let (id, target_kind, target_id, title, source, key, at): (
                 String,
                 String,
@@ -2295,8 +2350,8 @@ impl PgStore {
             let kind = Kind::parse(&kind)
                 .ok_or_else(|| format!("alert {id} has the unknown message kind {kind:?}"))?;
             tx.execute(
-                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[&id, &target_kind, &target_id, &title, &source, &key, &at, &kind.as_str()],
+                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at, kind, service) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[&id, &target_kind, &target_id, &title, &source, &key, &at, &kind.as_str(), &service],
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -2860,12 +2915,12 @@ mod tests {
             .await
             .unwrap();
         store
-            .insert_alert(&alert_for(Target::User("erin".into()), "to-erin"))
+            .insert_alert(&alert_for(Target::User("erin".into()), "to-erin"), None)
             .await
             .unwrap();
         let mut sent = alert_for(Target::User("erin".into()), "k1");
         sent.source = super::super::db::admin_source("erin");
-        store.insert_alert(&sent).await.unwrap();
+        store.insert_alert(&sent, None).await.unwrap();
         store.notify_set_level("erin", Level::Off).await.unwrap();
 
         // The portal deletes the row, then ends the inbox state of the account.
@@ -2890,6 +2945,7 @@ mod tests {
         let scope = Scope {
             groups: Some(Vec::new()),
             login: "erin".into(),
+            services: Services::Only(Default::default()),
         };
         let ask = Ask {
             since_ms: 0,
@@ -2903,7 +2959,7 @@ mod tests {
         let mut again = alert_for(Target::User("bob".into()), "k1");
         again.source = super::super::db::admin_source("erin");
         assert!(matches!(
-            store.insert_alert(&again).await.unwrap(),
+            store.insert_alert(&again, None).await.unwrap(),
             InsertOutcome::NoPhone
         ));
     }
@@ -2923,13 +2979,17 @@ mod tests {
             ("e", "infra", 10),
         ] {
             store
-                .insert_alert(&NewAlert {
-                    kind: Kind::Alert,
-                    target: Target::Group(group.into()),
-                    title: "t".into(),
-                    source: "producer:test".into(),
-                    idempotency_key: key.into(),
-                })
+                .insert_alert(
+                    &NewAlert {
+                        kind: Kind::Alert,
+                        target: Target::Group(group.into()),
+                        title: "t".into(),
+                        source: "producer:test".into(),
+                        idempotency_key: key.into(),
+                        service: None,
+                    },
+                    None,
+                )
                 .await
                 .unwrap();
             db.sql(&format!(
@@ -2956,6 +3016,7 @@ mod tests {
             title: "t".into(),
             source: "producer:test".into(),
             idempotency_key: key.into(),
+            service: None,
         }
     }
 
@@ -2981,7 +3042,7 @@ mod tests {
         }
         assert!(store.revoke_device(&ids[2]).await.unwrap());
         let InsertOutcome::Created { devices, .. } = store
-            .insert_alert(&alert_for(Target::User("alice".into()), "k"))
+            .insert_alert(&alert_for(Target::User("alice".into()), "k"), None)
             .await
             .unwrap()
         else {
@@ -2993,11 +3054,11 @@ mod tests {
         // The cache of the degraded mode knows the same phones.
         store.refresh_cache().await.unwrap();
         assert_eq!(
-            store.cached_targets(&Target::User("alice".into())),
+            store.cached_targets(&Target::User("alice".into()), None),
             expected
         );
         assert_eq!(
-            store.cached_targets(&Target::User("bob".into())),
+            store.cached_targets(&Target::User("bob".into()), None),
             vec![ids[3].clone()]
         );
         let pending = store.pending_deliveries(&ids[0], 10, 0).await.unwrap();
@@ -3026,6 +3087,110 @@ mod tests {
             .is_empty());
     }
 
+    /// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers, on
+    /// PostgreSQL: an alert about a service goes only to the phones of its audience, in the
+    /// database and in the copy of the degraded mode. The notifications, their count and the
+    /// marker show it only to an account that may open the service.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_an_alert_about_a_service_reaches_only_who_may_open_it() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let mut phones = Vec::new();
+        for (n, login) in [(1u8, "carol"), (2, "dave")] {
+            store
+                .create_code(&[n; 32], login, 10 * MINUTE_MS, 5, false)
+                .await
+                .unwrap();
+            let Redeem::Enrolled { device_id, .. } = redeem(&store, [n; 32], n).await else {
+                panic!("enrolled")
+            };
+            store.subscribe(&device_id, "infra").await.unwrap();
+            phones.push(device_id);
+        }
+        let (carol, dave) = (&phones[0], &phones[1]);
+        let watch = NewAlert {
+            source: "portal".into(),
+            service: Some("notes".into()),
+            ..alert_for(Target::Group("infra".into()), "portal:unhealthy:notes:1")
+        };
+        let audience = ["carol".to_string()];
+        let InsertOutcome::Created { devices, .. } =
+            store.insert_alert(&watch, Some(&audience)).await.unwrap()
+        else {
+            panic!("created")
+        };
+        assert_eq!(devices, vec![carol.clone()]);
+        assert!(store
+            .pending_deliveries(dave, 10, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        let pending = store.pending_deliveries(carol, 10, 0).await.unwrap();
+        assert_eq!(pending[0].service.as_deref(), Some("notes"));
+        let target = Target::Group("infra".into());
+        store.refresh_cache().await.unwrap();
+        assert_eq!(
+            store.cached_targets(&target, Some(&audience)),
+            vec![carol.clone()]
+        );
+        assert_eq!(store.cached_targets(&target, None).len(), 2);
+        let counts = store.alert_counts(0, 1_000_000_000_000_000).await.unwrap();
+        assert_eq!(counts[0].service.as_deref(), Some("notes"));
+        // A delivery that the phone did not receive can be withdrawn.
+        assert_eq!(
+            store.withdraw_deliveries(&[pending[0].seq]).await.unwrap(),
+            1
+        );
+        // The notifications. The first sight of an account sets its marker at the time of the call.
+        let who = |login: &str, open: &[&str]| Scope {
+            services: Services::Only(open.iter().map(|s| s.to_string()).collect()),
+            ..scope(Some(&["infra"]), login)
+        };
+        for s in [who("carol", &["notes"]), who("dave", &[])] {
+            store.notify_view(&s, &ASK).await.unwrap();
+        }
+        let far = now_ms() + 3_600_000;
+        put(&db, "plain", "group", "infra", far).await;
+        put(&db, "about-notes", "group", "infra", far + 10).await;
+        db.sql("UPDATE alerts SET service = 'notes' WHERE id = 'about-notes'")
+            .await;
+        let carol_view = store
+            .notify_view(&who("carol", &["notes"]), &ASK)
+            .await
+            .unwrap();
+        assert_eq!(ids(&carol_view)[..2], ["about-notes", "plain"]);
+        assert_eq!(carol_view.unread, 2);
+        let dave_view = store.notify_view(&who("dave", &[]), &ASK).await.unwrap();
+        assert_eq!(ids(&dave_view), ["plain"]);
+        assert_eq!(
+            dave_view.unread, 1,
+            "the count has no alert about a hidden service"
+        );
+        let all = store.notify_view(&scope(None, "root"), &ASK).await.unwrap();
+        assert!(ids(&all).contains(&"about-notes"));
+        assert_eq!(
+            store.notify_mark_read(&who("dave", &[])).await.unwrap(),
+            far
+        );
+        for s in [
+            who("carol", &["notes"]),
+            who("dave", &[]),
+            scope(None, "root"),
+        ] {
+            let got = store.notify_view(&s, &ASK).await.unwrap();
+            for (id, service) in [("plain", None), ("about-notes", Some("notes"))] {
+                assert_eq!(
+                    ids(&got).contains(&id),
+                    s.receives(&target, service),
+                    "{s:?} {id}"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn postgres_an_account_with_no_active_phone_gets_no_alert_and_nothing_is_stored() {
         let Some(db) = TestDatabase::create().await else {
@@ -3044,7 +3209,7 @@ mod tests {
         for login in ["alice", "nobody"] {
             assert!(matches!(
                 store
-                    .insert_alert(&alert_for(Target::User(login.into()), "k"))
+                    .insert_alert(&alert_for(Target::User(login.into()), "k"), None)
                     .await
                     .unwrap(),
                 InsertOutcome::NoPhone
@@ -3059,14 +3224,14 @@ mod tests {
         redeem(&store, [2; 32], 2).await;
         assert!(matches!(
             store
-                .insert_alert(&alert_for(Target::User("infra".into()), "k2"))
+                .insert_alert(&alert_for(Target::User("infra".into()), "k2"), None)
                 .await
                 .unwrap(),
             InsertOutcome::Created { .. }
         ));
         assert!(matches!(
             store
-                .insert_alert(&alert_for(Target::Group("infra".into()), "k2"))
+                .insert_alert(&alert_for(Target::Group("infra".into()), "k2"), None)
                 .await
                 .unwrap(),
             InsertOutcome::Conflict
@@ -3099,9 +3264,11 @@ mod tests {
                         kind: Kind::Alert,
                         target: Target::Group("infra".into()),
                         title: "disk full".into(),
-                        source: "admin:root".into(),
+                        source: "portal".into(),
                         idempotency_key: "k".into(),
+                        service: Some("notes".into()),
                     },
+                    None,
                 )?;
                 super::super::db::notify_set_level(c, "alice", Level::Important, 55)?;
                 Ok(())
@@ -3122,10 +3289,11 @@ mod tests {
             .unwrap()
             .prefs;
         assert_eq!((prefs.level, prefs.read_up_to), (Level::Important, 55));
-        // The kind of the message comes with the alert.
+        // The kind of the message and the service that it names come with the alert.
         let alerts = store.recent_alerts(10, 0, 0).await.unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].kind, Kind::Alert);
+        assert_eq!(alerts[0].service.as_deref(), Some("notes"));
         // The used code stays used. The other code still works.
         assert_eq!(
             redeem(&store, [1; 32], 1).await,
@@ -3142,6 +3310,11 @@ mod tests {
         Scope {
             groups: groups.map(|g| g.iter().map(|s| s.to_string()).collect()),
             login: login.into(),
+            services: if groups.is_none() {
+                Services::All
+            } else {
+                Services::Only(Default::default())
+            },
         }
     }
 
@@ -3200,7 +3373,11 @@ mod tests {
                 ("d-bob", "user", "bob"),
             ] {
                 let target = Target::from_columns(kind, target.into()).unwrap();
-                assert_eq!(ids(&got).contains(&id), s.receives(&target), "{s:?} {id}");
+                assert_eq!(
+                    ids(&got).contains(&id),
+                    s.receives(&target, None),
+                    "{s:?} {id}"
+                );
             }
         }
     }
@@ -3275,7 +3452,7 @@ mod tests {
         let (a, b) = (db.store().await, db.store().await);
         let s = scope(Some(&["infra"]), "alice");
         assert!(b.notify_view(&s, &ASK).await.unwrap().items.is_empty());
-        a.insert_alert(&alert_for(Target::Group("infra".into()), "k1"))
+        a.insert_alert(&alert_for(Target::Group("infra".into()), "k1"), None)
             .await
             .unwrap();
         let seen = b.notify_view(&s, &ASK).await.unwrap();
@@ -3307,6 +3484,7 @@ mod tests {
                 title.into(),
                 "webhook:mallory".into(),
                 key.into(),
+                None,
                 now_ms(),
                 Vec::new(),
             );
@@ -3348,9 +3526,10 @@ mod tests {
             title: title.into(),
             source: source.into(),
             idempotency_key: "k".into(),
+            service: None,
         };
         let InsertOutcome::Created { alert_id, .. } = store
-            .insert_alert(&alert("webhook:ci", "load 0.91"))
+            .insert_alert(&alert("webhook:ci", "load 0.91"), None)
             .await
             .unwrap()
         else {
@@ -3359,7 +3538,7 @@ mod tests {
         let InsertOutcome::Duplicate {
             alert_id: again, ..
         } = store
-            .insert_alert(&alert("webhook:ci", "load 0.97"))
+            .insert_alert(&alert("webhook:ci", "load 0.97"), None)
             .await
             .unwrap()
         else {
@@ -3367,12 +3546,12 @@ mod tests {
         };
         assert_eq!(again, alert_id);
         store
-            .insert_alert(&alert("producer:ci", "first"))
+            .insert_alert(&alert("producer:ci", "first"), None)
             .await
             .unwrap();
         assert!(matches!(
             store
-                .insert_alert(&alert("producer:ci", "second"))
+                .insert_alert(&alert("producer:ci", "second"), None)
                 .await
                 .unwrap(),
             InsertOutcome::Conflict
@@ -3385,6 +3564,7 @@ mod tests {
             "load 0.99".into(),
             "webhook:ci".into(),
             "k".into(),
+            None,
             now_ms(),
             Vec::new(),
         );

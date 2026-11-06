@@ -2608,6 +2608,24 @@ fn a_key_of_the_file_reads_only_the_groups_of_its_block_where_its_owner_holds_al
     assert_eq!(key.read_groups, ["oncall"]);
 }
 
+/// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: a key of the
+/// file reads an alert about a service only when its owner may open the service.
+#[test]
+fn a_key_of_the_file_reads_the_alerts_about_the_services_that_its_owner_may_open() {
+    use crate::inbox::rights::Services;
+    let (config, _) = inbox_ok(&with_inbox(INBOX));
+    let key = &config.inbox.as_ref().unwrap().api_keys["grafana"];
+    assert_eq!(key.services, Services::Only(Default::default()));
+    let opener = with_inbox(INBOX).replace(
+        "    \"alert.send on service:portal/inbox_group:oncall\",\n",
+        "    \"alert.send on service:portal/inbox_group:oncall\",\n    \"access on service:notes\",\n",
+    );
+    let (config, _) = inbox_ok(&opener);
+    let key = &config.inbox.as_ref().unwrap().api_keys["grafana"];
+    assert!(key.services.sees(Some("notes")));
+    assert!(!key.services.sees(Some("vault")));
+}
+
 #[test]
 fn the_replica_block_is_for_sqlite_and_the_cluster_block_is_for_postgres() {
     let replica = INBOX.replace(

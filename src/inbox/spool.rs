@@ -57,6 +57,8 @@ pub struct WireAlert {
     pub source: String,
     pub key: String,
     pub created_at: i64,
+    /// The service that the alert names (see `db::NewAlert::service`).
+    pub service: Option<String>,
     pub deliveries: Vec<WireDelivery>,
 }
 
@@ -80,6 +82,9 @@ pub struct Entry {
     pub source: String,
     pub key: String,
     pub created_at: i64,
+    /// The service that the alert names (see `db::NewAlert::service`). The deliveries go only to
+    /// the phones of the accounts that may see it.
+    pub service: Option<String>,
     pub deliveries: Vec<Delivery>,
     /// Changes whenever the entry does: the replay drops an entry only if nothing changed since it copied it.
     pub rev: u64,
@@ -95,6 +100,7 @@ impl Entry {
             source: self.source.clone(),
             key: self.key.clone(),
             created_at: self.created_at,
+            service: self.service.clone(),
             deliveries: self
                 .deliveries
                 .iter()
@@ -209,7 +215,8 @@ fn fresh(deliveries: impl IntoIterator<Item = (String, Option<i64>)>) -> Vec<Del
 }
 
 impl Spool {
-    /// Keeps a new alert for `devices`, or finds the one with the same source and key.
+    /// Keeps a new alert for `devices`, or finds the one with the same source and key. The caller
+    /// chose `devices`: for an alert about `service`, only the phones of its audience.
     #[allow(clippy::too_many_arguments)]
     pub fn accept(
         &self,
@@ -219,6 +226,7 @@ impl Spool {
         title: String,
         source: String,
         key: String,
+        service: Option<String>,
         created_at: i64,
         devices: Vec<String>,
     ) -> Accepted {
@@ -242,6 +250,7 @@ impl Spool {
             source,
             key,
             created_at,
+            service,
             deliveries: fresh(devices.into_iter().map(|d| (d, None))),
             rev: 0,
         };
@@ -300,6 +309,7 @@ impl Spool {
             source: wire.source,
             key: wire.key,
             created_at: wire.created_at,
+            service: wire.service,
             deliveries: fresh(
                 wire.deliveries
                     .into_iter()
@@ -334,6 +344,7 @@ impl Spool {
                     target: e.target.clone(),
                     title: e.title.clone(),
                     created_at: e.created_at,
+                    service: e.service.clone(),
                 });
             }
         }
@@ -358,6 +369,38 @@ impl Spool {
             }
             inner.touch(&id);
         }
+    }
+
+    /// Removes deliveries (negative sequence numbers) that their device has not received: the
+    /// account may no longer see the service of the alert. A received delivery stays. The result is
+    /// the number of deliveries removed.
+    pub fn withdraw(&self, seqs: &[i64]) -> usize {
+        let mut guard = self.inner.lock().expect("spool lock");
+        let inner = &mut *guard;
+        let mut removed = 0;
+        for seq in seqs {
+            let Some((id, _)) = inner.by_seq.get(seq).cloned() else {
+                continue;
+            };
+            let Some(entry) = inner.alerts.get_mut(&id) else {
+                continue;
+            };
+            let before = entry.deliveries.len();
+            entry
+                .deliveries
+                .retain(|d| d.seq != *seq || d.received_at.is_some());
+            if entry.deliveries.len() == before {
+                continue;
+            }
+            removed += 1;
+            inner.by_seq.remove(seq);
+            // The places of the deliveries after the removed one moved.
+            for (i, d) in entry.deliveries.iter().enumerate() {
+                inner.by_seq.insert(d.seq, (id.clone(), i));
+            }
+            inner.touch(&id);
+        }
+        removed
     }
 
     /// A receipt from a device of this instance. `None` when the alert is not in the spool.
@@ -484,6 +527,7 @@ mod tests {
             title.into(),
             "producer:ci".into(),
             key.into(),
+            None,
             1_000,
             devices.iter().map(|d| d.to_string()).collect(),
         )
@@ -536,6 +580,7 @@ mod tests {
                 title.into(),
                 "webhook:ci".into(),
                 "k".into(),
+                None,
                 1_000,
                 vec!["d1".into()],
             )
@@ -612,6 +657,7 @@ mod tests {
             source: "producer:ci".into(),
             key: "k".into(),
             created_at: 5,
+            service: None,
             deliveries: vec![
                 WireDelivery {
                     device: "d1".into(),
@@ -662,6 +708,7 @@ mod tests {
             "t".into(),
             "producer:ci".into(),
             "k".into(),
+            None,
             1,
             vec!["d1".into()],
         ) else {
@@ -675,6 +722,47 @@ mod tests {
             s.pending_for("d1", 10, 0)[0].target,
             Target::User("alice".into())
         );
+    }
+
+    /// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: a spooled
+    /// alert keeps its service in the copy for the other instances and in the pending list. A
+    /// delivery that its phone did not receive can be withdrawn, and the others stay.
+    #[test]
+    fn a_spooled_alert_keeps_its_service_and_a_delivery_can_be_withdrawn() {
+        let s = Spool::default();
+        let Accepted::Created(e) = s.accept(
+            alert_id("portal", "portal:unhealthy:notes:1"),
+            Kind::Alert,
+            Target::Group("infra".into()),
+            "Service Notes is unhealthy for 2 minutes".into(),
+            "portal".into(),
+            "portal:unhealthy:notes:1".into(),
+            Some("notes".into()),
+            1,
+            vec!["d1".into(), "d2".into(), "d3".into()],
+        ) else {
+            panic!("created")
+        };
+        assert_eq!(e.wire().service.as_deref(), Some("notes"));
+        let text = serde_json::to_string(&e.wire()).unwrap();
+        let back: WireAlert = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, e.wire());
+        let pending = s.pending_for("d1", 10, 0);
+        assert_eq!(pending[0].service.as_deref(), Some("notes"));
+        // d3 received the alert: its delivery stays. d1 goes.
+        s.ack("d3", &e.id, 2).unwrap();
+        let d3 = e.deliveries[2].seq;
+        assert_eq!(s.withdraw(&[pending[0].seq, d3]), 1);
+        assert!(s.pending_for("d1", 10, 0).is_empty());
+        // The index of the other deliveries still works after the removal.
+        let d2 = s.pending_for("d2", 10, 0);
+        assert_eq!(d2.len(), 1);
+        s.mark_sent(&[d2[0].seq], 3);
+        assert_eq!(s.ack("d2", &e.id, 4).unwrap().seq, d2[0].seq);
+        let kept = s.snapshot().remove(0);
+        assert_eq!(kept.deliveries.len(), 2);
+        assert_eq!(kept.deliveries[0].attempts, 1);
+        assert_eq!(s.withdraw(&[pending[0].seq]), 0, "already gone");
     }
 
     #[test]

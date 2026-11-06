@@ -121,6 +121,10 @@ pub struct ApiKeyConfig {
     /// The groups of the block where the owner holds `alert.read`: the key reads the alerts of
     /// these groups only. [`check_api_keys`] fills the list from the grants of the owner.
     pub read_groups: Vec<String>,
+    /// The services whose alerts the key reads: the services that the owner may open. An alert
+    /// about another service stays hidden from the key. [`check_api_keys`] fills it from the
+    /// grants of the owner.
+    pub services: crate::inbox::rights::Services,
     /// The key can send an alert to an account. The owner holds `alert.send_user`.
     pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
@@ -308,6 +312,7 @@ pub fn build(
                 owner: block.text("owner")?,
                 groups: listed,
                 read_groups: Vec::new(),
+                services: crate::inbox::rights::Services::Only(Default::default()),
                 direct_alerts,
                 webhook_send_resolved: block.bool("webhook_send_resolved")?,
             },
@@ -437,8 +442,8 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
 /// account of the file. The owner must hold `keys.own.use` on the kind `api`, `alert.send` on each
 /// group of the key, and `alert.send_user` on the service when the key has `direct_alerts`. The
 /// error names the key, the expected value and the value found. The function also keeps, for each
-/// key, the groups of the block where the owner holds `alert.read`: a key never has more rights
-/// than its owner.
+/// key, the groups of the block where the owner holds `alert.read`, and the services that the owner
+/// may open: a key never has more rights than its owner.
 pub fn check_api_keys(
     config: &Config,
     inbox: &mut InboxConfig,
@@ -505,6 +510,7 @@ pub fn check_api_keys(
             })
             .cloned()
             .collect();
+        key.services = crate::inbox::rights::Services::of_grants(Some(&account.grants));
     }
     Ok(())
 }

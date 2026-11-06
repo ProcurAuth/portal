@@ -1,7 +1,7 @@
 //! The rights of the inbox: what the inbox asks the portal, and what it does with the answers.
 //!
 //! The inbox does not read the state of the portal. The portal gives it one object at start, an
-//! [`Authorizer`]. The inbox uses it in three places:
+//! [`Authorizer`]. The inbox uses it in these places:
 //! - A sender that gives a key of the kind `api` as its token. The inbox checks the key, then asks for
 //!   the decision on the action `alert.send` on the group, or on the action `alert.send_user` on the
 //!   service (see `api.rs`).
@@ -10,6 +10,9 @@
 //! - A change of the directory of the portal. The task [`run`] then removes the subscriptions that an
 //!   account lost.
 //! - A phone that opens a session or enrolls. Its account must exist (see [`Standing`]).
+//! - An alert about a service (an alert of `inbox.watch`). Each reader of the alert must see the
+//!   service (see [`Services`]): the phones at the fan-out and at the delivery, the notifications,
+//!   the page of the Inbox and the keys.
 //!
 //! SAFETY RULE. A subscription is the way to a person that an alert can protect. The inbox
 //! removes a subscription only when a loaded directory positively says that the account has no
@@ -24,6 +27,11 @@
 //! a restart. Its verdict is [`Subscribable::Absent`], and the inbox ends the state of the login
 //! (see `enrollment::end_account`). With a shared database, the file of another instance can still
 //! hold the login: the phone gets no session, and the inbox writes nothing.
+//!
+//! RULE OF THE SERVICES. An alert about a service must not reach a person who may not open the
+//! service. Thus the rule goes the other way: when the portal cannot tell, the inbox shows no such
+//! alert and makes no delivery of it. A delivery that exists waits, and a loaded directory that
+//! says no removes it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -95,6 +103,59 @@ pub enum Standing {
     Unknown,
 }
 
+/// The services whose alerts a reader may see. An alert of the portal about a service (an alert
+/// of `inbox.watch`) names the service. The rule is the rule of the launcher: a reader sees such
+/// an alert only when the reader may open the service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Services {
+    /// Every service: the superadmin.
+    All,
+    /// The services where the account holds `access`.
+    Only(BTreeSet<String>),
+}
+
+impl Services {
+    /// The services of a person with `grants`: the services that the launcher shows to the person
+    /// (`access::may_open`). `None` is the superadmin. This is the one place that turns grants into
+    /// services: the portal and the keys of the file use it.
+    pub fn of_grants(grants: Option<&[crate::grants::Grant]>) -> Services {
+        match grants {
+            None => Services::All,
+            Some(held) => Services::Only(
+                held.iter()
+                    .map(|grant| grant.service.as_str())
+                    .filter(|service| crate::access::may_open(grants, service))
+                    .map(str::to_string)
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Whether the reader may see an alert about `service`. An alert about no service has no
+    /// such limit. Every reader of an alert uses this rule. The stores apply the same rule in
+    /// their queries, and a test keeps the two in agreement.
+    pub fn sees(&self, service: Option<&str>) -> bool {
+        match (self, service) {
+            (_, None) | (Services::All, Some(_)) => true,
+            (Services::Only(open), Some(service)) => open.contains(service),
+        }
+    }
+}
+
+/// The services whose alerts the account `login` may see. `None`: the inbox cannot tell, and the
+/// reader then sees no alert about a service.
+pub fn services_of(app: &App, login: &str) -> Option<Services> {
+    app.authorizer()?.services(login)
+}
+
+/// The logins that may see the alerts about `service`. Without an authorizer the set is empty:
+/// an alert about a service then reaches no phone.
+pub fn audience(app: &App, service: &str) -> BTreeSet<String> {
+    app.authorizer()
+        .map(|authorizer| authorizer.audience(service))
+        .unwrap_or_default()
+}
+
 /// What the portal gives to the inbox. The calls read memory and, for a use that counts, one row
 /// of the database. They block for a short time: the inbox calls them from async code.
 pub trait Authorizer: Send + Sync {
@@ -123,6 +184,19 @@ pub trait Authorizer: Send + Sync {
 
     /// A number that changes when the directory changes. `None`: the directory is not ready.
     fn directory_stamp(&self) -> Option<u64>;
+
+    /// The services whose alerts the account may see (see [`Services`]). `None`: the portal cannot
+    /// tell, because the directory is not ready, is old, or does not know the account. It reads
+    /// memory only.
+    fn services(&self, login: &str) -> Option<Services>;
+
+    /// The same for the owner of a key of the database. `None`: the portal cannot tell, or the key
+    /// does not exist.
+    fn key_services(&self, key_id: &str) -> Option<Services>;
+
+    /// The logins that may see the alerts about `service`: each person whose [`Authorizer::services`]
+    /// sees it. A person that the portal cannot judge is not in the set. It reads memory only.
+    fn audience(&self, service: &str) -> BTreeSet<String>;
 }
 
 /// The groups that a phone of `login` may subscribe to. `None`: the inbox cannot tell, so it
@@ -291,6 +365,8 @@ pub mod testing {
     /// A fixed answer for each login, with a stamp that a test can change.
     pub struct Fixed {
         pub answers: Mutex<HashMap<String, Subscribable>>,
+        /// The services that each login sees. A login that is not in the map is unknown.
+        pub services: Mutex<HashMap<String, Services>>,
         pub stamp: Mutex<Option<u64>>,
     }
 
@@ -298,6 +374,7 @@ pub mod testing {
         pub fn new() -> Arc<Fixed> {
             Arc::new(Fixed {
                 answers: Mutex::new(HashMap::new()),
+                services: Mutex::new(HashMap::new()),
                 stamp: Mutex::new(Some(1)),
             })
         }
@@ -342,6 +419,21 @@ pub mod testing {
         }
         fn directory_stamp(&self) -> Option<u64> {
             *self.stamp.lock().unwrap()
+        }
+        fn services(&self, login: &str) -> Option<Services> {
+            self.services.lock().unwrap().get(login).cloned()
+        }
+        fn key_services(&self, _key_id: &str) -> Option<Services> {
+            None
+        }
+        fn audience(&self, service: &str) -> BTreeSet<String> {
+            self.services
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, seen)| seen.sees(Some(service)))
+                .map(|(login, _)| login.clone())
+                .collect()
         }
     }
 }
@@ -431,6 +523,37 @@ mod tests {
         let planned = plan(&devices, authorizer.as_ref());
         assert_eq!(planned.absent, BTreeSet::from(["dave".to_string()]));
         assert!(planned.lost.is_empty());
+    }
+
+    /// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: the
+    /// services of a reader are the services that the launcher shows to the reader.
+    #[test]
+    fn a_reader_sees_an_alert_about_a_service_only_when_the_launcher_shows_the_service() {
+        let grant = |text: &str| crate::grants::Grant::parse(text).unwrap();
+        let carol = [
+            grant("inbox.receive on service:portal/inbox_group:infra"),
+            grant("access on service:notes"),
+            // A grant below a service does not open the service.
+            grant("files.read on service:s3/bucket:b"),
+        ];
+        let dave = [grant("inbox.receive on service:portal/inbox_group:infra")];
+        let seen = Services::of_grants(Some(&carol));
+        assert_eq!(seen, Services::Only(BTreeSet::from(["notes".to_string()])));
+        for service in ["notes", "s3", "portal", "other"] {
+            assert_eq!(
+                seen.sees(Some(service)),
+                crate::access::may_open(Some(&carol), service),
+                "{service}"
+            );
+            assert!(!Services::of_grants(Some(&dave)).sees(Some(service)));
+            assert!(
+                Services::of_grants(None).sees(Some(service)),
+                "the superadmin"
+            );
+        }
+        // An alert about no service has no such limit.
+        assert!(Services::of_grants(Some(&dave)).sees(None));
+        assert!(Services::of_grants(Some(&[])).sees(None));
     }
 
     #[test]

@@ -326,6 +326,17 @@ pub struct Outgoing {
     pub key: String,
 }
 
+impl Outgoing {
+    /// The id of the service that the alert names. The inbox shows the alert only to the readers
+    /// that may open this service. A burst of refused sign-ins names no service.
+    pub fn service(&self) -> Option<String> {
+        match self.due.kind {
+            Kind::ServiceUnhealthy | Kind::ServiceRecovered => Some(self.due.subject.clone()),
+            Kind::SignInBurst => None,
+        }
+    }
+}
+
 /// The two detectors, the configuration and the memory of the counter.
 pub struct Engine {
     config: WatchConfig,
@@ -534,9 +545,12 @@ pub async fn run(state: Arc<AppState>) {
             let kind = outgoing.due.kind;
             let sent = tokio::time::timeout(
                 SEND_LIMIT,
-                state
-                    .inbox
-                    .send_watch_alert(&group, outgoing.title.clone(), outgoing.key.clone()),
+                state.inbox.send_watch_alert(
+                    &group,
+                    outgoing.title.clone(),
+                    outgoing.key.clone(),
+                    outgoing.service(),
+                ),
             )
             .await
             .unwrap_or_else(|_| Err("the inbox did not answer in time".into()));

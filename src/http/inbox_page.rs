@@ -16,7 +16,7 @@
 use super::pdp::{decide_person_for, UseVerdict};
 use super::*;
 use crate::inbox::admin::{self, DeviceRow, Target};
-use crate::inbox::notify::{self, Ask, Importance, Level, Scope};
+use crate::inbox::notify::{self, Ask, Importance, Level, Scope, Services};
 use crate::inbox::App as InboxApp;
 use crate::portal_actions as actions;
 use crate::ui::inbox as ui_inbox;
@@ -54,6 +54,8 @@ pub(super) struct Held {
     receive_groups: Option<Vec<String>>,
     /// The groups that the page names: the groups that the account may read or send to.
     named: Option<Vec<String>>,
+    /// The services whose alerts the account may see: the services of its launcher.
+    services: Services,
 }
 
 /// The rights of the viewer. `None`: the file has no block `inbox`.
@@ -101,6 +103,7 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
             read_groups: None,
             receive_groups: None,
             named: None,
+            services: Services::of_grants(None),
         });
     };
     let document = state.actions.declared(actions::SERVICE)?;
@@ -130,16 +133,18 @@ fn held_with(state: &AppState, viewer: &Viewer, count_members: bool) -> Option<H
         read_groups: Some(read_ids),
         receive_groups: Some(receive_ids),
         named: Some(named),
+        services: Services::of_grants(Some(grants)),
     })
 }
 
 impl Held {
     /// The alerts that the account receives: the groups with `inbox.receive`, and the alerts for
-    /// the account (see `inbox::notify`).
+    /// the account (see `inbox::notify`). An alert about a service also needs the service.
     fn scope(&self, login: &str) -> Scope {
         Scope {
             groups: self.receive_groups.clone(),
             login: login.to_string(),
+            services: self.services.clone(),
         }
     }
 
@@ -159,8 +164,12 @@ impl Held {
 /// Whether the viewer may read the alert. An alert for a group needs `alert.read` on the group. An
 /// alert for an account can be read by its sender, by the target account and by the superadmin: a
 /// right on a group does not fit a target that is not a group. The sender is the account that used
-/// the form, or the owner of the key that sent the alert.
+/// the form, or the owner of the key that sent the alert. An alert about a service also needs the
+/// service in the launcher of the viewer.
 fn may_read_alert(state: &AppState, ctx: &Context<'_>, summary: &admin::AlertSummary) -> bool {
+    if !ctx.held.services.sees(summary.service.as_deref()) {
+        return false;
+    }
     match &summary.target {
         Target::Group(group) => ctx.held.may_read(group),
         Target::User(login) => {
@@ -501,12 +510,15 @@ async fn page(
             Err(_) => return unavailable(),
         };
         // The graph counts the groups that the account may read, as the rows do. A group with
-        // `alert.send` only adds nothing.
+        // `alert.send` only adds nothing, and an alert about a hidden service adds nothing.
         let counts =
             match admin::alert_counts(&ctx.app, since_ms, query.period.bucket_millis()).await {
                 Ok(v) => v
                     .into_iter()
-                    .filter(|count| ctx.held.may_read(&count.group))
+                    .filter(|count| {
+                        ctx.held.may_read(&count.group)
+                            && ctx.held.services.sees(count.service.as_deref())
+                    })
                     .collect(),
                 Err(_) => return unavailable(),
             };

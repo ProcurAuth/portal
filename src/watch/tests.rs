@@ -418,6 +418,27 @@ fn two_engines_build_the_same_alert_for_the_same_event() {
     assert_eq!((&x.title, &x.key), (&y.title, &y.key));
 }
 
+/// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: the alert of a
+/// service and its recovery carry the id of the service, so the inbox shows them only to who may
+/// open it. A burst names no service.
+#[test]
+fn an_alert_about_a_service_carries_the_id_of_the_service() {
+    let mut engine = Engine::new(config());
+    let down = [svc("notes", Seen::Unhealthy)];
+    assert!(engine.tick(S(0), 0, 0, &down).is_empty());
+    let alert = engine.tick(S(120), 120, 0, &down).remove(0);
+    assert_eq!(alert.service().as_deref(), Some("notes"));
+    engine.confirm(&alert, S(120));
+    let back = engine
+        .tick(S(130), 130, 0, &[svc("notes", Seen::Healthy)])
+        .remove(0);
+    assert_eq!(back.due.kind, Kind::ServiceRecovered);
+    assert_eq!(back.service().as_deref(), Some("notes"));
+    let burst = engine.tick(S(140), 140, 50, &[]).remove(0);
+    assert_eq!(burst.due.kind, Kind::SignInBurst);
+    assert_eq!(burst.service(), None);
+}
+
 #[test]
 fn the_engine_follows_the_switches_of_the_configuration() {
     let down = [svc("notes", Seen::Unhealthy)];

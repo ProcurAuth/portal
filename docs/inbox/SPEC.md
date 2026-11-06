@@ -97,13 +97,15 @@ A requirement has one of two states. A requirement without a mark is in force in
 
 3.5.2 These alerts MUST use the path of an alert of the API. This gives one transaction, the idempotency key and the copy to the replica. The source of the alert is `portal`.
 
+3.5.3 An alert about a service, and its recovery, MUST reach a reader only when the reader may open the service: the superadmin, or an account with `access` on the service. This applies to the phones, the notifications, the page of the Inbox and the keys. A key reads such an alert only when its owner may open the service. When the portal cannot tell the rights of a reader, the reader MUST NOT see the alert.
+
 ## 4. Delivery guarantee
 
 The transport is at least once. The phone ignores a repeat. The result is that the user sees each alert exactly once.
 
 4.1 The Inbox MUST answer `201` only after two things are on disk. They are the alert and one delivery for each phone that is subscribed at that moment. This is one transaction.
 
-4.2 The phones that an alert targets are the phones that are subscribed when the Inbox accepts it. They can be online or offline.
+4.2 The phones that an alert targets are the phones that are subscribed when the Inbox accepts it. They can be online or offline. An alert about a service targets only the phones of the readers of 3.5.3. The Inbox MUST NOT send it to a phone whose account lost the access after the acceptance.
 
 4.3 The Inbox MUST send again each delivery that the phone did not confirm. It does this during the session and at each reconnection.
 

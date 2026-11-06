@@ -667,7 +667,9 @@ async fn deliver(
         }
         if flush {
             flush = false;
-            if let Err(e) = flush_deliveries(app, socket, session, device_id, &mut inflight).await {
+            if let Err(e) =
+                flush_deliveries(app, socket, session, device_id, &user_name, &mut inflight).await
+            {
                 return e;
             }
         }
@@ -837,11 +839,16 @@ async fn unavailable(socket: &mut Socket, session: &mut Session) -> Result<bool,
     Ok(false)
 }
 
+/// Sends the deliveries that wait for the phone. An alert about a service goes to the phone only
+/// while its account `login` may see the service: the rights can change after the fan-out. A
+/// loaded directory that says no withdraws the delivery, so the phone never gets the alert. When
+/// the portal cannot tell, the delivery waits. An alert that the phone received stays on it.
 async fn flush_deliveries(
     app: &App,
     socket: &mut Socket,
     session: &mut Session,
     device_id: &str,
+    login: &str,
     inflight: &mut HashMap<i64, Instant>,
 ) -> Result<(), End> {
     let limit = app.config.devices.max_inflight;
@@ -856,7 +863,20 @@ async fn flush_deliveries(
     let now = Instant::now();
     let resend_after = app.config.devices.resend_after;
     let mut sent = Vec::new();
+    // The services of the account, read once, and only for an alert about a service.
+    let mut services: Option<Option<rights::Services>> = None;
+    let mut withdrawn = Vec::new();
     for p in pending {
+        if let Some(service) = p.service.as_deref() {
+            match services.get_or_insert_with(|| rights::services_of(app, login)) {
+                Some(seen) if seen.sees(Some(service)) => {}
+                Some(_) => {
+                    withdrawn.push(p.seq);
+                    continue;
+                }
+                None => continue,
+            }
+        }
         if inflight
             .get(&p.seq)
             .is_some_and(|at| now.duration_since(*at) < resend_after)
@@ -879,6 +899,16 @@ async fn flush_deliveries(
     if !sent.is_empty() {
         app.metrics.deliveries_sent(sent.len() as u64);
         app.db.mark_sent(sent).await.map_err(End::Storage)?;
+    }
+    if !withdrawn.is_empty() {
+        let count = withdrawn.len();
+        app.db.withdraw(withdrawn).await.map_err(End::Storage)?;
+        log::info!(
+            event = "deliveries_withdrawn_by_rights",
+            device.id = %device_id,
+            user.name = %login,
+            count
+        );
     }
     Ok(())
 }

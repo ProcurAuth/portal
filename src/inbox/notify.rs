@@ -6,7 +6,8 @@
 //!
 //! A person is notified of the alerts that the person receives. These are the alerts for the
 //! groups where the account holds `inbox.receive`, and the alerts for the account itself. The
-//! page of the portal gives the groups as a [`Scope`] (see `src/http/inbox_page.rs`). The store
+//! page of the portal gives the groups as a [`Scope`] (see `src/http/inbox_page.rs`). An alert
+//! about a service also needs the service in the scope: the rule of the launcher. The store
 //! applies the scope in the query, so a row of another account never leaves the database.
 //!
 //! The store keeps two values for each account: the marker "read up to" and the level of the
@@ -14,6 +15,7 @@
 //! marker is unread. The Android app has its own state: this marker is the one of the web only.
 
 use super::api::ApiError;
+pub use super::rights::Services;
 use super::state::App;
 use super::target::Target;
 pub use super::target::DIRECT_NAME;
@@ -101,26 +103,29 @@ impl Importance {
 }
 
 /// The alerts that an account receives: the groups where it holds `inbox.receive`, and the
-/// alerts that are for it.
+/// alerts that are for it. An alert about a service also needs the service in `services`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
     /// The ids of the groups. `None`: all the groups (the superadmin).
     pub groups: Option<Vec<String>>,
     pub login: String,
+    /// The services whose alerts the account may see (see `rights::Services`).
+    pub services: Services,
 }
 
 impl Scope {
-    /// Whether the account receives an alert for `target`. The store applies the same rule in its
-    /// queries. A test keeps the two in agreement.
+    /// Whether the account receives an alert for `target` about `service`. The store applies the
+    /// same rule in its queries. A test keeps the two in agreement.
     #[cfg(test)]
-    pub fn receives(&self, target: &Target) -> bool {
-        match target {
+    pub fn receives(&self, target: &Target, service: Option<&str>) -> bool {
+        let to_it = match target {
             Target::Group(group) => self
                 .groups
                 .as_ref()
                 .is_none_or(|groups| groups.iter().any(|g| g == group)),
             Target::User(login) => *login == self.login,
-        }
+        };
+        to_it && self.services.sees(service)
     }
 }
 
@@ -231,16 +236,22 @@ mod tests {
         let scope = Scope {
             groups: Some(vec!["infra".into()]),
             login: "alice".into(),
+            services: Services::Only(["notes".to_string()].into()),
         };
-        assert!(scope.receives(&Target::Group("infra".into())));
-        assert!(!scope.receives(&Target::Group("other".into())));
-        assert!(scope.receives(&Target::User("alice".into())));
-        assert!(!scope.receives(&Target::User("bob".into())));
+        let infra = Target::Group("infra".into());
+        assert!(scope.receives(&infra, None));
+        assert!(!scope.receives(&Target::Group("other".into()), None));
+        assert!(scope.receives(&Target::User("alice".into()), None));
+        assert!(!scope.receives(&Target::User("bob".into()), None));
+        // An alert about a service needs the service too.
+        assert!(scope.receives(&infra, Some("notes")));
+        assert!(!scope.receives(&infra, Some("vault")));
         let all = Scope {
             groups: None,
             login: "root".into(),
+            services: Services::All,
         };
-        assert!(all.receives(&Target::Group("any".into())));
-        assert!(!all.receives(&Target::User("bob".into())));
+        assert!(all.receives(&Target::Group("any".into()), Some("vault")));
+        assert!(!all.receives(&Target::User("bob".into()), None));
     }
 }

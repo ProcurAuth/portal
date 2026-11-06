@@ -32,6 +32,8 @@ pub struct FileKey {
     pub groups: Vec<String>,
     /// The groups of the key where the owner holds `alert.read`.
     pub read_groups: Vec<String>,
+    /// The services whose alerts the key reads: the services that the owner may open.
+    pub services: super::rights::Services,
     /// The key sends alerts to accounts (`direct_alerts = true`). The start checked that its
     /// owner holds `alert.send_user`.
     pub direct_alerts: bool,
@@ -80,6 +82,7 @@ impl Secrets {
                 digest,
                 groups: block.groups.clone(),
                 read_groups: block.read_groups.clone(),
+                services: block.services.clone(),
                 direct_alerts: block.direct_alerts,
                 webhook_send_resolved: block.webhook_send_resolved,
             });

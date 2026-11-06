@@ -9,7 +9,7 @@ use std::sync::Weak;
 
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
-use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Standing, Subscribable};
+use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Services, Standing, Subscribable};
 use crate::keyauth::{self, Cause};
 use crate::portal_actions as actions;
 
@@ -210,6 +210,56 @@ impl Authorizer for PortalAuthorizer {
         let state = self.state.upgrade()?;
         directory_fresh(&state).then(|| state.users.generation())
     }
+
+    fn services(&self, login: &str) -> Option<Services> {
+        let state = self.state.upgrade()?;
+        services_of(&state, login)
+    }
+
+    fn key_services(&self, key_id: &str) -> Option<Services> {
+        use crate::users::KeyOwner;
+        let state = self.state.upgrade()?;
+        if !directory_fresh(&state) {
+            return None;
+        }
+        match &state.users.key_by_id(key_id)?.owner {
+            KeyOwner::Superadmin => Some(Services::All),
+            KeyOwner::User(login) | KeyOwner::File(login) => services_of(&state, login),
+        }
+    }
+
+    fn audience(&self, service: &str) -> BTreeSet<String> {
+        let Some(state) = self.state.upgrade() else {
+            return BTreeSet::new();
+        };
+        let mut logins: BTreeSet<String> = state
+            .users
+            .list()
+            .into_iter()
+            .map(|(login, _)| login)
+            .collect();
+        logins.extend(state.config.access.accounts.keys().cloned());
+        logins.insert(state.superadmin_login.clone());
+        logins
+            .into_iter()
+            .filter(|login| services_of(&state, login).is_some_and(|seen| seen.sees(Some(service))))
+            .collect()
+    }
+}
+
+/// The services whose alerts the person `login` may see: the services that the launcher shows to
+/// the person (see `Services::of_grants`). The superadmin sees every service. `None`: the
+/// directory is not ready or is old, or it does not know the person. The inbox then shows no alert
+/// about a service to this person.
+fn services_of(state: &AppState, login: &str) -> Option<Services> {
+    if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
+        return Some(Services::All);
+    }
+    if !directory_fresh(state) {
+        return None;
+    }
+    let (grants, _) = keyauth::person_grants(state, login)?;
+    Some(Services::of_grants(Some(&grants)))
 }
 
 /// Whether an account has `login`: the superadmin, an account of the file or an account of the

@@ -156,11 +156,14 @@ A phone subscribes only to a group for which its account has the permission `inb
 - When the account loses the permission, the server removes the subscription and sends `subscriptions`. This check runs when the directory of the portal changes, and at each `welcome`. It does not run for each alert. The next alerts of the group are not made for the phone.
 - The server never removes a subscription when it does not know. A directory that is not ready, a directory that is old, an empty directory and an account that the directory does not know remove nothing.
 - An alert that exists is always delivered. A phone that loses the permission still gets the alerts that the server made before. They stay in its backlog until the phone confirms them or they expire.
+- An alert of the portal about a service (`inbox.watch`) is an exception. The server sends it only while the account of the phone may open the service. When the account lost the access, the server removes the delivery from the backlog. When the portal cannot tell, the delivery waits.
 
 ### Delivery rules
 
 - **Fan-out at acceptance.** When an alert is accepted, one delivery row is created
-  for every device subscribed to the group at that instant.
+  for every device subscribed to the group at that instant. An alert of the portal
+  about a service has a row only for the devices of the accounts that may open the
+  service.
 - **Retransmission.** The server sends rows whose receipt has not arrived yet,
   oldest first, with at most `max_inflight` rows in flight. A row that stays
   without receipt for `resend_after` is sent again, and the whole backlog is resent

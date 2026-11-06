@@ -184,6 +184,7 @@ pub async fn send_alert(
             title,
             source: admin_source(sender),
             idempotency_key,
+            service: None,
         },
         "admin",
     )

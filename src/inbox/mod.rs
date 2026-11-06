@@ -318,18 +318,27 @@ impl Slot {
         }
     }
 
-    /// Sends an alert that the portal makes about itself (source `portal`). The result is `true`
-    /// when the inbox already had the key. `Err` tells why the inbox did not accept the alert.
+    /// Sends an alert that the portal makes about itself (source `portal`). `service` is the id of
+    /// the service that the alert names: a member of the group sees the alert only when it may
+    /// open the service. The result is `true` when the inbox already had the key. `Err` tells why
+    /// the inbox did not accept the alert.
     pub async fn send_watch_alert(
         &self,
         group: &str,
         title: String,
         key: String,
+        service: Option<String>,
     ) -> Result<bool, String> {
         let app = self.app().ok_or("the inbox is not running")?;
-        internal::send_alert(&app, target::Target::Group(group.to_string()), title, key)
-            .await
-            .map_err(|e| e.summary())
+        internal::send_alert(
+            &app,
+            target::Target::Group(group.to_string()),
+            title,
+            key,
+            service,
+        )
+        .await
+        .map_err(|e| e.summary())
     }
 
     /// The text of the metrics of the inbox. Empty without the block `inbox`.

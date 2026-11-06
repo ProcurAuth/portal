@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use super::db::{same_title, InsertOutcome, NewAlert, WEBHOOK_SOURCE};
 use super::http::{json, read_body, Resp};
 use super::log;
-use super::rights::{Decision, KeyCheck};
+use super::rights::{Decision, KeyCheck, Services};
 use super::spool::{self, Accepted as Spooled};
 use super::state::{App, FileKey};
 use super::target::Target;
@@ -179,11 +179,17 @@ pub async fn accept_alert(
         ));
     }
 
-    let outcome = match app.db.insert_alert(alert.clone()).await {
+    // An alert about a service goes only to the phones of the accounts that may see the service:
+    // the rule of the launcher (see `rights::Services`).
+    let audience: Option<Vec<String>> = alert
+        .service
+        .as_deref()
+        .map(|service| super::rights::audience(app, service).into_iter().collect());
+    let outcome = match app.db.insert_alert(alert.clone(), audience.clone()).await {
         Ok(outcome) => outcome,
         // PostgreSQL has no usable primary: the alert is kept in memory and copied to the other instances (`spool.rs`).
         Err(e) if e.is_unavailable() && app.db.spool().is_some() => {
-            return accept_without_database(app, alert, source_kind).await;
+            return accept_without_database(app, alert, audience, source_kind).await;
         }
         Err(e) => return Err(ApiError::storage(e)),
     };
@@ -243,10 +249,12 @@ fn no_phone() -> ApiError {
 }
 
 /// The alert is accepted although the database cannot take it: kept in the spool, copied to the other instances before the
-/// answer, and delivered at once to the phones connected here. The database gets it when it has a primary again.
+/// answer, and delivered at once to the phones connected here. The database gets it when it has a primary again. With
+/// `audience`, only the phones of these accounts get a delivery.
 async fn accept_without_database(
     app: &App,
     alert: NewAlert,
+    audience: Option<Vec<String>>,
     source_kind: &'static str,
 ) -> Result<Accepted, ApiError> {
     let pg = app.db.pg().expect("only PostgreSQL has a spool");
@@ -264,14 +272,14 @@ async fn accept_without_database(
         }
         app.metrics
             .alert_duplicate(source_kind, alert.kind, alert.target.kind());
-        let targets = pg.cached_targets(&alert.target).len();
+        let targets = pg.cached_targets(&alert.target, audience.as_deref()).len();
         return Ok(Accepted {
             alert_id: known.id,
             duplicate: true,
             targets,
         });
     }
-    let devices = pg.cached_targets(&alert.target);
+    let devices = pg.cached_targets(&alert.target, audience.as_deref());
     if devices.is_empty() && matches!(alert.target, Target::User(_)) {
         return Err(no_phone());
     }
@@ -283,6 +291,7 @@ async fn accept_without_database(
         alert.title,
         alert.source,
         alert.idempotency_key,
+        alert.service,
         now_ms(),
         devices,
     ) {
@@ -584,6 +593,15 @@ fn authorize_at(
     }
 }
 
+/// The services whose alerts the sender reads: the services that its owner may open. A key of the
+/// file has them from the start. `None`: the portal cannot tell.
+fn sender_services(app: &App, sender: &Sender<'_>) -> Option<Services> {
+    match sender {
+        Sender::FileKey(p) => Some(p.services.clone()),
+        Sender::Key { id } => app.authorizer()?.key_services(id),
+    }
+}
+
 /// Checks that the account exists. The portal knows its accounts: the inbox asks it. `404
 /// unknown_user` for an account that the directory does not hold, `503` when the directory is not
 /// ready.
@@ -757,6 +775,7 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
             title: req.title,
             source: format!("producer:{}", who.name()),
             idempotency_key: key,
+            service: None,
         },
         "producer",
     )
@@ -803,6 +822,21 @@ async fn get_alert_inner(
         Target::User(_) => {
             if detail.summary.source != format!("producer:{}", who.name()) {
                 return Err(not_found());
+            }
+        }
+    }
+    // An alert about a service needs the service in the services of the owner of the key: the
+    // rule of the launcher. When the portal cannot tell, the key reads nothing.
+    if let Some(service) = detail.summary.service.as_deref() {
+        match sender_services(app, &who) {
+            Some(seen) if seen.sees(Some(service)) => {}
+            Some(_) => return Err(not_found()),
+            None => {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "directory_not_ready",
+                    "the portal cannot check keys yet, retry in a moment",
+                ))
             }
         }
     }
@@ -895,6 +929,7 @@ async fn alertmanager_inner(
                 title: truncate_chars(&title, MAX_TITLE_CHARS),
                 source: format!("{WEBHOOK_SOURCE}{}", who.name()),
                 idempotency_key: webhook_key(group, &fingerprint, status, &starts_at),
+                service: None,
             },
             "webhook",
         )
@@ -971,6 +1006,7 @@ async fn notify_inner(
             title,
             source: format!("notify:{}", who.name()),
             idempotency_key: key,
+            service: None,
         },
         "notify",
     )

@@ -323,11 +323,22 @@ impl Store {
 
     // ------------------------------------------------------------ alerts and deliveries
 
-    pub async fn insert_alert(&self, alert: NewAlert) -> Result<InsertOutcome, DbError> {
+    /// Stores the alert and its deliveries. With `audience`, only the phones of these accounts get
+    /// a delivery (see `db::insert_alert`).
+    pub async fn insert_alert(
+        &self,
+        alert: NewAlert,
+        audience: Option<Vec<String>>,
+    ) -> Result<InsertOutcome, DbError> {
         match self {
-            Store::Sqlite(db) => db.call(move |c| Ok(db::insert_alert(c, &alert)?)).await,
+            Store::Sqlite(db) => {
+                db.call(move |c| Ok(db::insert_alert(c, &alert, audience.as_deref())?))
+                    .await
+            }
             Store::Pg(pg) => {
-                let outcome = pg.guard(pg.insert_alert(&alert)).await?;
+                let outcome = pg
+                    .guard(pg.insert_alert(&alert, audience.as_deref()))
+                    .await?;
                 if let InsertOutcome::Created { alert_id, .. }
                 | InsertOutcome::Duplicate { alert_id, .. } = &outcome
                 {
@@ -397,6 +408,32 @@ impl Store {
                     Err(e) if e.is_unavailable() => Ok(()),
                     other => other,
                 }
+            }
+        }
+    }
+
+    /// Removes the deliveries that their phone has not received: the account may no longer see the
+    /// service of the alert (see `db::withdraw_deliveries`). Without the database, a delivery of
+    /// the database stays, and the next try removes it.
+    pub async fn withdraw(&self, seqs: Vec<i64>) -> Result<usize, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                db.call(move |c| Ok(db::withdraw_deliveries(c, &seqs)?))
+                    .await
+            }
+            Store::Pg(pg) => {
+                // Negative numbers are deliveries of the spool.
+                let (spooled, stored): (Vec<i64>, Vec<i64>) =
+                    seqs.into_iter().partition(|s| *s < 0);
+                let mut removed = pg.spool().withdraw(&spooled);
+                if !stored.is_empty() {
+                    match pg.guard(pg.withdraw_deliveries(&stored)).await {
+                        Ok(n) => removed += n,
+                        Err(e) if e.is_unavailable() => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(removed)
             }
         }
     }

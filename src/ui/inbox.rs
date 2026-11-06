@@ -1869,6 +1869,7 @@ mod tests {
             received,
             expired,
             missing: Vec::new(),
+            service: None,
         }
     }
 
@@ -1912,11 +1913,13 @@ mod tests {
                 AlertCount {
                     bucket: 23,
                     group: "infra".into(),
+                    service: None,
                     count: 4,
                 },
                 AlertCount {
                     bucket: 23,
                     group: "crit".into(),
+                    service: None,
                     count: 1,
                 },
             ],

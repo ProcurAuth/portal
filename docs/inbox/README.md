@@ -15,7 +15,7 @@ This chapter is for operators and for people who send alerts. The root [`README.
 | Phone | An Android phone that runs the app Portal Inbox and enrolled with an account of the portal. |
 | Account | An account of the portal. It owns its phones. Its login is the user name of each phone. |
 | Subscription | The link between one phone and one group. The phone chooses it. The account must have the permission `inbox.receive` on the group. |
-| Delivery | The record that one alert must reach one phone. The Inbox makes one delivery for each phone that is subscribed when it accepts the alert. |
+| Delivery | The record that one alert must reach one phone. The Inbox makes one delivery for each phone that is subscribed when it accepts the alert. An alert of the portal about a service is an exception: see "Alerts of the portal". |
 | Enrollment code | A text that the account makes in the Inbox page. It lets one phone enroll one time. |
 
 The phone decides how it reacts to an alert. The server never knows this choice. The choices are `alarm`, `ring` and `notify` (see "The Android app").
@@ -98,7 +98,7 @@ A sender sends a request to the portal, on the same host and port as the pages. 
 | `POST /api/v1/alerts` | Body: `{"group": "<id>", "title": "<text>"}` or `{"user": "<login>", "title": "<text>"}`. Give exactly one of `group` and `user`. The answer is `201` with `alert_id`, `duplicate` and `targets` (the number of phones). |
 | `POST /api/v1/notify/{group}` | A webhook for any tool. The title comes from `?title=`, from the header `X-Title`, from the field `title` of a JSON body, or from the body. The Inbox cuts a long title. |
 | `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each alert with the status `firing` makes one alert. The answer has the counts `created`, `duplicates`, `skipped` and `refused`. An alert that the Inbox refuses counts in `refused` and does not stop the other alerts. |
-| `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. The field `target` has the `kind` (`group` or `user`) and the `id`. An alert to a group needs `alert.read` on the group. An alert to an account can be read by the key that sent it. |
+| `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. The field `target` has the `kind` (`group` or `user`) and the `id`. An alert to a group needs `alert.read` on the group. An alert to an account can be read by the key that sent it. For an alert of the portal about a service, the owner of the key must also have the right to open the service. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. No key. |
 
 Send the key in the header `Authorization: Bearer <key>`. A tool that cannot set a header can use the query `?token=<key>`. A proxy can write an address with a query in its log, so use the header when you can.
@@ -149,6 +149,15 @@ The Inbox ignores the notifications `resolved`. A block `api_key` can set `webho
 ### Alerts of the portal
 
 The portal can send alerts about itself, in process, with the source `portal`. It needs the block `inbox.watch`. The alerts are: a service is unhealthy, a service is healthy again, and a burst of refused sign-ins. The root `README.md` describes them.
+
+An alert about a service, and its recovery, follow the rule of the launcher. The alert carries the id of the service. A reader sees the alert only when the reader may open the service: the superadmin, or an account with `access` on the service. This rule applies to each reader:
+
+- **Phones.** The Inbox makes a delivery only for the phones of these accounts. It checks the rights again before it sends a delivery. When the account lost the access, the Inbox removes the delivery, and the phone never gets the alert. An alert that the phone received stays on the phone.
+- **Notifications.** The poll, the list of the bell and the unread count do not show the alert to an account that may not open the service.
+- **Page.** The rows of the zone **Sent**, the opened alert and the graph do not show it to such an account.
+- **Keys.** `GET /api/v1/alerts/{id}` answers `404` when the owner of the key may not open the service.
+
+When the portal cannot tell the rights of an account, the account sees no alert about a service. An alert about a burst of refused sign-ins names no service: each member of the group sees it.
 
 ## Enroll a phone
 

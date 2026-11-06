@@ -5059,6 +5059,150 @@ async fn an_unhealthy_service_makes_one_alert_and_its_recovery_one_more() {
     s.stop();
 }
 
+/// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers (the test of the
+/// audit, inverted). The members carol, dave and erin hold `inbox.receive` and `alert.read` on the
+/// group of the watch. carol and erin may open the service `notes`, dave may not. The alert about
+/// `notes` and its recovery reach the superadmin and the members that may open the service.
+/// Nothing reaches dave: no phone alert, no notification, no unread count, no row of the page, no
+/// answer to his key. When carol loses the access, the recovery that waits for her phone never
+/// reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_alert_reaches_only_the_members_that_may_open_the_service() {
+    let mut s = Server::setup();
+    quiet_phones(&s);
+    s.add_to_inbox(&watch_block("    sign_in_burst = false"));
+    let docker = with_notes(&s, "healthy");
+    s.start();
+    let member = [
+        "inbox.receive on service:portal/inbox_group:infra",
+        "alert.read on service:portal/inbox_group:infra",
+        "keys.own.read on service:portal",
+        "keys.own.create on service:portal/key_kind:api",
+        "keys.own.use on service:portal/key_kind:api",
+    ];
+    let opener: Vec<&str> = member
+        .iter()
+        .copied()
+        .chain(["access on service:notes"])
+        .collect();
+    let carol = s.account_with("carol", &opener);
+    let dave = s.account_with("dave", &member);
+    let _ = s.account_with("erin", &opener);
+    let (_, home) = inbox_page_as(&s, &dave.cookie, "/");
+    assert!(
+        !home.contains("Notes"),
+        "the launcher of dave hides the service"
+    );
+    let (_, home) = inbox_page_as(&s, &carol.cookie, "/");
+    assert!(
+        home.contains("Notes"),
+        "the launcher of carol shows the service"
+    );
+    let now_of = |cookie: &str| notifications(&s, cookie, "").1["now"].as_i64().unwrap();
+    let (since_c, since_d) = (now_of(&carol.cookie), now_of(&dave.cookie));
+    let key_c = make_key(&s, &carol.cookie, "api", "carol-key", &[member[1]]);
+    let key_d = make_key(&s, &dave.cookie, "api", "dave-key", &[member[1]]);
+
+    // The phones of carol, dave, the superadmin and erin, in this order.
+    let mut conns = Vec::new();
+    for (name, login) in [
+        ("c", "carol"),
+        ("d", "dave"),
+        ("r", SUPERADMIN),
+        ("e", "erin"),
+    ] {
+        let phone = enroll_as(&s, &format!("phone-{name}"), login)
+            .await
+            .unwrap();
+        let (mut conn, _) = Conn::open(s.port, &phone).await.unwrap();
+        conn.subscribe("infra").await;
+        conns.push((phone, conn));
+    }
+    docker.set("unhealthy");
+    let title = "Service Notes is unhealthy for 10 seconds";
+    let alert = conns[0].1.alert_within(Duration::from_secs(30)).await;
+    assert_eq!(alert.title, title);
+    conns[0].1.ack(&alert.alert_id, AckStage::Received).await;
+    for at in [2, 3] {
+        let got = conns[at].1.alert_within(Duration::from_secs(10)).await;
+        assert_eq!(got.alert_id, alert.alert_id);
+        conns[at].1.ack(&got.alert_id, AckStage::Received).await;
+    }
+    conns[1].1.no_alert(Duration::from_secs(3)).await;
+    // The fan-out made no delivery for the phone of dave.
+    let stored = watch_list(&s);
+    assert_eq!(stored[0]["targets"], 3, "{stored:?}");
+
+    // The notifications and their count.
+    let (st, seen) = notifications(&s, &dave.cookie, &format!("?after={since_d}"));
+    assert_eq!(st, 200);
+    assert!(titles(&seen).is_empty(), "{seen}");
+    assert_eq!(seen["unread"], 0, "{seen}");
+    let (_, seen) = notifications(&s, &carol.cookie, &format!("?after={since_c}"));
+    assert_eq!(titles(&seen), [title]);
+    assert_eq!(seen["unread"], 1);
+    let (_, home) = inbox_page_as(&s, &dave.cookie, "/");
+    assert!(!home.contains("Service Notes"), "the bell of the launcher");
+
+    // The page of the Inbox: the rows, the opened alert and the graph.
+    let open = format!("/auth/settings/inbox?open={}", alert.alert_id);
+    for path in ["/auth/settings/inbox", open.as_str()] {
+        let (st, page) = inbox_page_as(&s, &dave.cookie, path);
+        assert_eq!(st, 200);
+        assert!(!page.contains("Service Notes"), "{path}");
+        let (_, page) = inbox_page_as(&s, &carol.cookie, path);
+        assert!(page.contains(title), "{path}");
+        let (_, page) = inbox_page(&s, path);
+        assert!(page.contains(title), "{path}");
+    }
+
+    // The status of the alert for a key: the owner of the key must see the service. The key of the
+    // file belongs to the account `ci`, which may not open the service.
+    let status = format!("/api/v1/alerts/{}", alert.alert_id);
+    let (st, _, v) = producer_call(&s, "GET", &status, &key_c, "", "");
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["title"], title);
+    for token in [&key_d, &s.token] {
+        let (st, _, v) = producer_call(&s, "GET", &status, token, "", "");
+        assert_eq!(st, 404, "{v}");
+    }
+
+    // The phone of carol is away when the service is healthy again. The recovery follows the same
+    // rule: erin and the superadmin get it, dave does not, and one delivery waits for carol.
+    let (phone_c, conn_c) = conns.remove(0);
+    drop(conn_c);
+    docker.set("healthy");
+    let back = conns[2].1.alert_within(Duration::from_secs(20)).await;
+    assert_eq!(back.title, "Service Notes is healthy again");
+    conns[2].1.ack(&back.alert_id, AckStage::Received).await;
+    let got = conns[1].1.alert_within(Duration::from_secs(10)).await;
+    assert_eq!(got.alert_id, back.alert_id);
+    conns[1].1.ack(&got.alert_id, AckStage::Received).await;
+    conns[0].1.no_alert(Duration::from_secs(3)).await;
+    let (_, seen) = notifications(&s, &dave.cookie, &format!("?after={since_d}"));
+    assert!(titles(&seen).is_empty(), "{seen}");
+    let stored = watch_list(&s);
+    assert_eq!(stored[0]["title"], back.title);
+    assert_eq!(
+        stored[0]["targets"], 3,
+        "carol could open the service: {stored:?}"
+    );
+
+    // carol loses the access: the recovery that waits for her phone never reaches it, and her
+    // notifications no longer show the alerts about the service.
+    set_grants(&s, "carol", &member);
+    let (mut conn_c, _) = Conn::open(s.port, &phone_c).await.unwrap();
+    conn_c.no_alert(Duration::from_secs(4)).await;
+    wait_for("the withdrawn delivery", Duration::from_secs(10), || {
+        watch_list(&s)[0]["targets"] == 2
+    });
+    let (st, seen) = notifications(&s, &carol.cookie, &format!("?after={since_c}"));
+    assert_eq!(st, 200, "{seen}");
+    assert!(titles(&seen).is_empty(), "{seen}");
+    assert_eq!(seen["unread"], 0, "{seen}");
+    s.stop();
+}
+
 /// Two active instances detect the same events. The shared key makes the inbox accept one alert for each event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_instances_send_one_alert_for_one_event() {

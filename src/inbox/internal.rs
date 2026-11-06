@@ -18,12 +18,14 @@ const SOURCE: &str = "portal";
 /// Accepts one alert for the target. The result is `true` when the key was already in use: another
 /// instance, or an earlier try, sent it. A key that another title already uses (two instances
 /// with two configurations, during an update) counts the same way: the phones have an alert for
-/// this event, and a new try would fail again.
+/// this event, and a new try would fail again. `service` is the id of the service that the alert
+/// names: only the readers that may open the service see the alert (see `rights::Services`).
 pub async fn send_alert(
     app: &App,
     target: Target,
     title: String,
     key: String,
+    service: Option<String>,
 ) -> Result<bool, ApiError> {
     let result = accept_alert(
         app,
@@ -33,6 +35,7 @@ pub async fn send_alert(
             title,
             source: SOURCE.into(),
             idempotency_key: key,
+            service,
         },
         SOURCE,
     )

@@ -1025,13 +1025,15 @@ The portal sends two kinds of alert.
 - **A service is unhealthy.** The portal reads the state of each service from the launcher. A service is unhealthy when its tile shows `down` or `unhealthy`. The portal sends the alert when the service stays unhealthy for `unhealthy_after`. The title is `Service Notes is unhealthy for 2 minutes`. A service that is healthy or starting in this time does not raise the alert. A service with no health check is never unhealthy. The portal alerts only for the services that the launcher already probes.
 - **Sign-ins fail in a burst.** The portal counts the refused sign-ins: a wrong password, an unknown login and a sign-in that a limiter blocks. It sends the alert when `sign_in_failures` sign-ins are refused in `sign_in_window`. The window slides. The title is `10 refused sign-ins in 5 minutes`. The title has no login, no address and no password. The log of sign-ins has these details.
 
-Each account with `inbox.receive` or `alert.read` on the group reads these alerts, also the alerts about a service that the account may not open. Give this group only to persons who may know the names of all the services (see `SECURITY.md`).
+An alert about a service, and its recovery, follow the rule of the launcher. A member of the group reads the alert only when the member may open the service: the superadmin, or an account with `access` on the service. The rule applies to the phones, the notifications and their count, the page of the Inbox and the keys. A key reads the alert only when its owner may open the service. An alert about a burst names no service, so each member of the group reads it.
+
+The Inbox makes a delivery of an alert about a service only for the phones of these accounts. It checks the rights again before it sends a delivery. When the account lost the access, the Inbox removes the delivery, and the phone never gets the alert. An alert that a phone received stays on the phone. When the portal cannot tell the rights of an account, the account sees no alert about a service. Give `access` on a service to each member that must get the alerts about it (see `SECURITY.md`).
 
 The title shows the values of the configuration, not the measured time. The reason is that each instance must build the same title for the same event.
 
 `repeat_after` is the shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. A burst that stops raises no new alert. With `recovered = true`, the portal sends `Service Notes is healthy again` when a service is healthy again after an unhealthy alert. A service that only starts again does not count as healthy.
 
-The portal gives the alert to the Inbox inside the process. There is no HTTP request and no token. The Inbox gives it the same guarantees as an alert of the API. The alert and one delivery for each subscribed phone are in one transaction. The idempotency key holds, and the replica copies the alert. The source of the alert is `portal`. If the database has no writable primary, the spool of the degraded mode takes the alert.
+The portal gives the alert to the Inbox inside the process. There is no HTTP request and no token. The Inbox gives it the same guarantees as an alert of the API. The alert and its deliveries are in one transaction. The idempotency key holds, and the replica copies the alert. The source of the alert is `portal`. If the database has no writable primary, the spool of the degraded mode takes the alert.
 
 With several instances, each instance detects the same event. The idempotency key has only shared facts: `portal:unhealthy:<service id>:<bucket>`, `portal:recovered:<service id>:<bucket>` and `portal:burst:<bucket>`. The bucket is the Unix time divided by `repeat_after`. The Inbox accepts one alert for one key, so the phones get one alert. Two instances can read one event on two sides of a bucket limit. The phones then get a second alert. Each instance counts only the refused sign-ins that it sees.
 
@@ -1779,6 +1781,17 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 - An old name is an unknown name. The configuration has no alias for a block, a key or a command of an earlier name. `portal check-config` names the key that it refuses.
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
+
+Version 5.0.1 closes the findings of a security audit. Read these points before you upgrade from 5.0.0:
+
+- The base schema changed in place. A PostgreSQL database needs the column `sessions.credential`, and each database needs the column `alerts.service`. A database without them is refused at start: make a new database. The homelab has no migration step.
+- A cluster of instances must run one version. The copies of alerts between instances now carry the service of a watch alert.
+- Three keys are new: `session.max_sessions_per_account` (16), `inbox.devices.max_handshakes_per_address` (16) and `inbox.devices.max_per_account` (10). A file that sets `session.max_active_sessions` below 16 must also set the first key.
+- A watch alert about a service reaches only the people who may open that service. Give `access` on the service to the members of `inbox.watch.group` that must get its alerts.
+- A file key reads the status of an alert only when its owner holds `alert.read` on the group.
+- A workload that is not listed but has a path stays closed to everyone except the superadmin.
+- The webhook keys of Alertmanager and Grafana have a new form: an alert that is firing during the upgrade is created once more.
+- The enrollment fingerprint shows 80 bits. The app and the page show the same value.
 
 ## Limitations
 

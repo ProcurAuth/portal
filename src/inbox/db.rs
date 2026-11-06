@@ -16,7 +16,7 @@ use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
 use super::log;
-use super::notify::{Ask, Item, Level, Prefs, Scope, View, UNREAD_CAP};
+use super::notify::{Ask, Item, Level, Prefs, Scope, Services, View, UNREAD_CAP};
 use super::target::Target;
 use super::util::{now_ms, random_id};
 
@@ -103,6 +103,9 @@ CREATE TABLE alerts (
     source          TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     created_at      INTEGER NOT NULL,
+    -- The service that an alert of the portal names (`inbox.watch`). A reader sees the alert only
+    -- when the reader may open the service. NULL for every other alert.
+    service         TEXT,
     UNIQUE (source, idempotency_key)
 ) STRICT;
 CREATE INDEX alerts_created ON alerts(created_at);
@@ -714,6 +717,10 @@ pub struct NewAlert {
     pub title: String,
     pub source: String,
     pub idempotency_key: String,
+    /// The id of the service that the alert names. Only the alerts of the portal about a service
+    /// (`internal.rs`) set it. A reader sees such an alert only when the reader may open the
+    /// service (see `rights::Services`).
+    pub service: Option<String>,
 }
 
 /// The start of the source of an alert of the webhook of Alertmanager and Grafana.
@@ -743,8 +750,14 @@ pub enum InsertOutcome {
 
 /// Stores the alert and one delivery row per subscribed, non-revoked device, in a
 /// single transaction. Devices subscribed at this instant are the targets, whether
-/// they are online or not.
-pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result<InsertOutcome> {
+/// they are online or not. With `audience`, a device is a target only when its account is in the
+/// list: an alert about a service goes only to the accounts that may see the service.
+pub fn insert_alert(
+    conn: &mut Connection,
+    alert: &NewAlert,
+    audience: Option<&[String]>,
+) -> rusqlite::Result<InsertOutcome> {
+    let audience = audience.map(|logins| serde_json::to_string(logins).expect("strings serialize"));
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let existing = tx
         .query_row(
@@ -787,8 +800,8 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
     let id = random_id();
     let now = now_ms();
     tx.execute(
-        "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
-         VALUES (?1, ?7, ?8, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at, service)
+         VALUES (?1, ?7, ?8, ?2, ?3, ?4, ?5, ?6, ?9)",
         params![
             id,
             alert.target.id(),
@@ -797,7 +810,8 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
             alert.idempotency_key,
             now,
             alert.kind.as_str(),
-            alert.target.kind()
+            alert.target.kind(),
+            alert.service
         ],
     )?;
     match &alert.target {
@@ -806,15 +820,17 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
              SELECT ?1, s.device_id FROM subscriptions s
              JOIN devices d ON d.id = s.device_id
              WHERE s.group_id = ?2 AND d.revoked_at IS NULL
+               AND (?3 IS NULL OR d.user_name IN (SELECT value FROM json_each(?3)))
              ORDER BY s.device_id",
-            params![id, group],
+            params![id, group, audience],
         )?,
         Target::User(login) => tx.execute(
             "INSERT INTO deliveries (alert_id, device_id)
              SELECT ?1, d.id FROM devices d
              WHERE d.user_name = ?2 AND d.revoked_at IS NULL
+               AND (?3 IS NULL OR d.user_name IN (SELECT value FROM json_each(?3)))
              ORDER BY d.id",
-            params![id, login],
+            params![id, login, audience],
         )?,
     };
     let devices = delivery_devices(&tx, &id)?;
@@ -841,6 +857,8 @@ pub struct PendingDelivery {
     pub target: Target,
     pub title: String,
     pub created_at: i64,
+    /// The service that the alert names (see [`NewAlert::service`]).
+    pub service: Option<String>,
 }
 
 /// Oldest deliveries of `device_id` whose receipt the device has not sent yet,
@@ -852,7 +870,7 @@ pub fn pending_deliveries(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<PendingDelivery>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind
+        "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind, a.service
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
          WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
          ORDER BY d.seq LIMIT ?2",
@@ -865,9 +883,27 @@ pub fn pending_deliveries(
             title: r.get(4)?,
             created_at: r.get(5)?,
             kind: kind_column(r, 6)?,
+            service: r.get(7)?,
         })
     })?;
     rows.collect()
+}
+
+/// Removes deliveries that the device has not received: their account may no longer see the
+/// service of the alert. A delivery that the device received stays. The result is the number of
+/// deliveries removed.
+pub fn withdraw_deliveries(conn: &mut Connection, seqs: &[i64]) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let mut removed = 0;
+    {
+        let mut stmt =
+            tx.prepare_cached("DELETE FROM deliveries WHERE seq = ?1 AND received_at IS NULL")?;
+        for seq in seqs {
+            removed += stmt.execute(params![seq])?;
+        }
+    }
+    tx.commit()?;
+    Ok(removed)
 }
 
 /// Reads the two columns of a target: the kind at `index`, the id at `index + 1`. An unknown
@@ -1015,11 +1051,15 @@ pub struct AlertSummary {
     pub expired: i64,
     /// Pseudonyms of non-revoked targets that have not received the alert yet.
     pub missing: Vec<String>,
+    /// The service that the alert names (see [`NewAlert::service`]). The readers use it to decide
+    /// who sees the alert. The JSON answers do not show it.
+    #[serde(skip)]
+    pub service: Option<String>,
 }
 
 const ALERT_SUMMARY: &str =
     "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at,
-        COUNT(d.seq), COUNT(d.received_at), a.kind
+        COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
      FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id";
 
 fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
@@ -1034,6 +1074,7 @@ fn alert_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<AlertSummary> {
         kind: kind_column(r, 8)?,
         expired: 0,
         missing: Vec::new(),
+        service: r.get(9)?,
     })
 }
 
@@ -1058,34 +1099,37 @@ pub fn recent_alerts(
     Ok(alerts)
 }
 
-/// The number of alerts of one group in one bucket of time: the data of the graph of the page.
-/// The alerts for an account are not in the graph.
+/// The number of alerts of one group about one service in one bucket of time: the data of the
+/// graph of the page. The alerts for an account are not in the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlertCount {
     /// The number of the bucket. Bucket 0 starts at `since_ms`.
     pub bucket: i64,
     pub group: String,
+    /// The service that the alerts name (see [`NewAlert::service`]). `None` for the other alerts.
+    pub service: Option<String>,
     pub count: i64,
 }
 
-/// The alerts created at or after `since_ms`, counted for each bucket of `bucket_ms` and each
-/// group. The result has at most one row for each bucket and group, so it is small. The index of
-/// `created_at` serves the range.
+/// The alerts created at or after `since_ms`, counted for each bucket of `bucket_ms`, each group
+/// and each service. The result has at most one row for each bucket, group and service, so it is
+/// small. The index of `created_at` serves the range.
 pub fn alert_counts(
     conn: &Connection,
     since_ms: i64,
     bucket_ms: i64,
 ) -> rusqlite::Result<Vec<AlertCount>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT (created_at - ?1) / ?2, target_id, COUNT(*) FROM alerts
+        "SELECT (created_at - ?1) / ?2, target_id, service, COUNT(*) FROM alerts
          WHERE created_at >= ?1 AND target_kind = 'group'
-         GROUP BY 1, 2 ORDER BY 1, 2",
+         GROUP BY 1, 2, 3 ORDER BY 1, 2, 3",
     )?;
     let rows = stmt.query_map(params![since_ms, bucket_ms.max(1)], |r| {
         Ok(AlertCount {
             bucket: r.get(0)?,
             group: r.get(1)?,
-            count: r.get(2)?,
+            service: r.get(2)?,
+            count: r.get(3)?,
         })
     })?;
     rows.collect()
@@ -1239,8 +1283,10 @@ pub fn subscribed_devices(conn: &Connection) -> rusqlite::Result<Vec<(String, Op
 
 // ---------------------------------------------------------------- notifications of the web
 
-/// The condition on `target_kind` and `target_id` for the alerts that `scope` receives, with `?`
-/// placeholders, and the values of the placeholders in order. The index `alerts_target` serves it.
+/// The condition on `target_kind`, `target_id` and `service` for the alerts that `scope`
+/// receives, with `?` placeholders, and the values of the placeholders in order. The index
+/// `alerts_target` serves it. An alert about a service needs the service in the scope: the rule of
+/// `Services::sees`.
 fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
     let mut values: Vec<String> = Vec::new();
     let groups = match &scope.groups {
@@ -1253,8 +1299,17 @@ fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
         }
     };
     values.push(scope.login.clone());
+    let services = match &scope.services {
+        Services::All => "1".to_string(),
+        Services::Only(open) if open.is_empty() => "service IS NULL".to_string(),
+        Services::Only(open) => {
+            values.extend(open.iter().cloned());
+            let marks = vec!["?"; open.len()].join(", ");
+            format!("service IS NULL OR service IN ({marks})")
+        }
+    };
     (
-        format!("(({groups}) OR (target_kind = 'user' AND target_id = ?))"),
+        format!("(({groups}) OR (target_kind = 'user' AND target_id = ?)) AND ({services})"),
         values,
     )
 }
@@ -1444,7 +1499,67 @@ mod tests {
             title: "t".into(),
             source: "producer:test".into(),
             idempotency_key: key.into(),
+            service: None,
         }
+    }
+
+    /// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: an alert
+    /// about a service goes only to the phones of the accounts of the audience. The service stays
+    /// with the alert, in the rows of the phones, of the page and of the graph.
+    #[test]
+    fn an_alert_about_a_service_goes_only_to_the_phones_of_its_audience() {
+        let mut c = mem();
+        let carol = insert_device(&c, "c", "carol", &[1; 32], "ip").unwrap();
+        let dave = insert_device(&c, "d", "dave", &[2; 32], "ip").unwrap();
+        set_subscription(&c, &carol, "infra").unwrap();
+        set_subscription(&c, &dave, "infra").unwrap();
+        let watch = NewAlert {
+            source: "portal".into(),
+            service: Some("notes".into()),
+            ..alert("portal:unhealthy:notes:1")
+        };
+        let audience = ["carol".to_string(), "root".to_string()];
+        let InsertOutcome::Created { devices, .. } =
+            insert_alert(&mut c, &watch, Some(&audience)).unwrap()
+        else {
+            panic!("created")
+        };
+        assert_eq!(devices, vec![carol.clone()]);
+        assert!(pending_deliveries(&c, &dave, 10, 0).unwrap().is_empty());
+        let pending = pending_deliveries(&c, &carol, 10, 0).unwrap();
+        assert_eq!(pending[0].service.as_deref(), Some("notes"));
+        assert_eq!(
+            recent_alerts(&c, 10, 0, 0).unwrap()[0].service.as_deref(),
+            Some("notes")
+        );
+        let counts = alert_counts(&c, 0, 1_000_000_000_000_000).unwrap();
+        assert_eq!(counts[0].service.as_deref(), Some("notes"));
+        // An empty audience reaches no phone, and an alert with no audience reaches all of them.
+        let none = NewAlert {
+            service: Some("notes".into()),
+            ..alert("k-empty")
+        };
+        let InsertOutcome::Created { devices, .. } =
+            insert_alert(&mut c, &none, Some(&[])).unwrap()
+        else {
+            panic!("created")
+        };
+        assert!(devices.is_empty());
+        let InsertOutcome::Created { devices, .. } =
+            insert_alert(&mut c, &alert("k-all"), None).unwrap()
+        else {
+            panic!("created")
+        };
+        assert_eq!(devices.len(), 2);
+        // A delivery that the phone did not receive can be withdrawn. A received one stays.
+        let seq = pending_deliveries(&c, &dave, 10, 0).unwrap()[0].seq;
+        let received = pending_deliveries(&c, &carol, 10, 0).unwrap()[0].clone();
+        ack(&c, &carol, &received.alert_id).unwrap();
+        assert_eq!(
+            withdraw_deliveries(&mut c, &[seq, received.seq]).unwrap(),
+            1
+        );
+        assert!(pending_deliveries(&c, &dave, 10, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -1457,7 +1572,8 @@ mod tests {
         set_subscription(&c, &b, "other").unwrap();
         set_subscription(&c, &r, "infra").unwrap();
         revoke_device(&mut c, &r).unwrap();
-        let InsertOutcome::Created { devices, .. } = insert_alert(&mut c, &alert("k1")).unwrap()
+        let InsertOutcome::Created { devices, .. } =
+            insert_alert(&mut c, &alert("k1"), None).unwrap()
         else {
             panic!()
         };
@@ -1472,7 +1588,7 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        insert_alert(&mut c, &alert("k")).unwrap();
+        insert_alert(&mut c, &alert("k"), None).unwrap();
         let stored: String = c
             .query_row("SELECT kind FROM alerts", [], |r| r.get(0))
             .unwrap();
@@ -1507,7 +1623,7 @@ mod tests {
         ] {
             let mut alert = alert(key);
             alert.target = Target::Group(group.into());
-            insert_alert(&mut c, &alert).unwrap();
+            insert_alert(&mut c, &alert, None).unwrap();
             c.execute(
                 "UPDATE alerts SET created_at = ?1 WHERE idempotency_key = ?2",
                 params![at, key],
@@ -1516,6 +1632,7 @@ mod tests {
         }
         // Buckets of 1,000 ms from 1,000: the alert at 10 is before the range.
         let counts = alert_counts(&c, 1_000, 1_000).unwrap();
+        assert!(counts.iter().all(|n| n.service.is_none()));
         let text: Vec<(i64, &str, i64)> = counts
             .iter()
             .map(|n| (n.bucket, n.group.as_str(), n.count))
@@ -1532,7 +1649,7 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        insert_alert(&mut c, &alert("k")).unwrap();
+        insert_alert(&mut c, &alert("k"), None).unwrap();
         c.execute("UPDATE alerts SET kind = 'question'", [])
             .unwrap();
         assert!(pending_deliveries(&c, &a, 10, 0).is_err());
@@ -1544,13 +1661,14 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        let InsertOutcome::Created { alert_id, .. } =
+            insert_alert(&mut c, &alert("k"), None).unwrap()
         else {
             panic!()
         };
         let InsertOutcome::Duplicate {
             alert_id: again, ..
-        } = insert_alert(&mut c, &alert("k")).unwrap()
+        } = insert_alert(&mut c, &alert("k"), None).unwrap()
         else {
             panic!()
         };
@@ -1558,7 +1676,7 @@ mod tests {
         let mut other = alert("k");
         other.title = "different".into();
         assert!(matches!(
-            insert_alert(&mut c, &other).unwrap(),
+            insert_alert(&mut c, &other, None).unwrap(),
             InsertOutcome::Conflict
         ));
         assert_eq!(pending_deliveries(&c, &a, 10, 0).unwrap().len(), 1);
@@ -1570,14 +1688,15 @@ mod tests {
         let mut first = alert("k");
         first.source = format!("{WEBHOOK_SOURCE}ci");
         first.title = "[FIRING] Load: load 0.91".into();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &first).unwrap() else {
+        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &first, None).unwrap()
+        else {
             panic!()
         };
         let mut later = first.clone();
         later.title = "[FIRING] Load: load 0.97".into();
         let InsertOutcome::Duplicate {
             alert_id: again, ..
-        } = insert_alert(&mut c, &later).unwrap()
+        } = insert_alert(&mut c, &later, None).unwrap()
         else {
             panic!("a new summary of the same alert is a repeat")
         };
@@ -1590,7 +1709,7 @@ mod tests {
         let mut elsewhere = later;
         elsewhere.target = Target::Group("other".into());
         assert!(matches!(
-            insert_alert(&mut c, &elsewhere).unwrap(),
+            insert_alert(&mut c, &elsewhere, None).unwrap(),
             InsertOutcome::Conflict
         ));
     }
@@ -1600,7 +1719,8 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        let InsertOutcome::Created { alert_id, .. } =
+            insert_alert(&mut c, &alert("k"), None).unwrap()
         else {
             panic!()
         };
@@ -1619,7 +1739,8 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &alert("k")).unwrap()
+        let InsertOutcome::Created { alert_id, .. } =
+            insert_alert(&mut c, &alert("k"), None).unwrap()
         else {
             panic!()
         };
@@ -1648,7 +1769,7 @@ mod tests {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
-        insert_alert(&mut c, &alert("k")).unwrap();
+        insert_alert(&mut c, &alert("k"), None).unwrap();
         let past = now_ms() - 1_000_000;
         assert_eq!(purge(&mut c, past, past).unwrap().0, 0);
         let future = now_ms() + 1_000_000;
@@ -2110,7 +2231,7 @@ mod tests {
         // The account has no subscription: a direct alert does not need one.
         revoke_device(&mut c, &a3).unwrap();
         let InsertOutcome::Created { devices, .. } =
-            insert_alert(&mut c, &user_alert("k", "alice")).unwrap()
+            insert_alert(&mut c, &user_alert("k", "alice"), None).unwrap()
         else {
             panic!("created")
         };
@@ -2139,7 +2260,7 @@ mod tests {
         revoke_device(&mut c, &phone).unwrap();
         for login in ["alice", "nobody"] {
             assert!(matches!(
-                insert_alert(&mut c, &user_alert("k", login)).unwrap(),
+                insert_alert(&mut c, &user_alert("k", login), None).unwrap(),
                 InsertOutcome::NoPhone
             ));
         }
@@ -2154,16 +2275,16 @@ mod tests {
         let mut c = mem();
         insert_device(&c, "p", "infra", &[1; 32], "ip").unwrap();
         assert!(matches!(
-            insert_alert(&mut c, &user_alert("k", "infra")).unwrap(),
+            insert_alert(&mut c, &user_alert("k", "infra"), None).unwrap(),
             InsertOutcome::Created { .. }
         ));
         assert!(matches!(
-            insert_alert(&mut c, &user_alert("k", "infra")).unwrap(),
+            insert_alert(&mut c, &user_alert("k", "infra"), None).unwrap(),
             InsertOutcome::Duplicate { .. }
         ));
         // A group and an account can have the same id: they are two targets.
         assert!(matches!(
-            insert_alert(&mut c, &alert("k")).unwrap(),
+            insert_alert(&mut c, &alert("k"), None).unwrap(),
             InsertOutcome::Conflict
         ));
     }
@@ -2172,8 +2293,8 @@ mod tests {
     fn the_graph_counts_the_alerts_of_groups_only() {
         let mut c = mem();
         insert_device(&c, "p", "infra", &[1; 32], "ip").unwrap();
-        insert_alert(&mut c, &user_alert("u", "infra")).unwrap();
-        insert_alert(&mut c, &alert("g")).unwrap();
+        insert_alert(&mut c, &user_alert("u", "infra"), None).unwrap();
+        insert_alert(&mut c, &alert("g"), None).unwrap();
         let counts = alert_counts(&c, 0, 1_000_000_000_000_000).unwrap();
         assert_eq!(counts.len(), 1);
         assert_eq!((counts[0].group.as_str(), counts[0].count), ("infra", 1));
@@ -2253,6 +2374,68 @@ mod tests {
         Scope {
             groups: groups.map(|g| g.iter().map(|s| s.to_string()).collect()),
             login: login.into(),
+            services: if groups.is_none() {
+                Services::All
+            } else {
+                Services::Only(Default::default())
+            },
+        }
+    }
+
+    /// The audit finding portal/watch/group-alert-names-services-hidden-from-receivers: the
+    /// notifications and their count show an alert about a service only to an account that may
+    /// open the service. The store and `Scope::receives` agree.
+    #[test]
+    fn the_notifications_show_an_alert_about_a_service_only_to_who_may_open_it() {
+        let c = mem();
+        put(&c, "plain", "group", "infra", 100);
+        put(&c, "notes", "group", "infra", 110);
+        put(&c, "vault", "group", "infra", 120);
+        for (id, service) in [("notes", "notes"), ("vault", "vault")] {
+            c.execute(
+                "UPDATE alerts SET service = ?2 WHERE id = ?1",
+                params![id, service],
+            )
+            .unwrap();
+        }
+        let who = |login: &str, list: &[&str]| Scope {
+            services: Services::Only(list.iter().map(|s| s.to_string()).collect()),
+            ..scope(Some(&["infra"]), login)
+        };
+        let carol = who("carol", &["notes"]);
+        let dave = who("dave", &[]);
+        let view = notify_view(&c, &carol, &ASK, 0).unwrap();
+        assert_eq!(ids(&view), ["notes", "plain"]);
+        assert_eq!(view.unread, 2);
+        let view = notify_view(&c, &dave, &ASK, 0).unwrap();
+        assert_eq!(ids(&view), ["plain"]);
+        assert_eq!(
+            view.unread, 1,
+            "the count has no alert about a hidden service"
+        );
+        let all = notify_view(&c, &scope(None, "root"), &ASK, 0).unwrap();
+        assert_eq!((all.items.len(), all.unread), (3, 3));
+        // The marker moves to the newest alert that the account sees.
+        put(&c, "later", "group", "infra", 200);
+        c.execute("UPDATE alerts SET service = 'vault' WHERE id = 'later'", [])
+            .unwrap();
+        assert_eq!(notify_mark_read(&c, &dave, 300).unwrap(), 100);
+        assert_eq!(notify_view(&c, &dave, &ASK, 300).unwrap().unread, 0);
+        for s in [carol, dave, who("erin", &["vault"]), scope(None, "root")] {
+            let got = notify_view(&c, &s, &ASK, 0).unwrap();
+            for (id, service) in [
+                ("plain", None),
+                ("notes", Some("notes")),
+                ("vault", Some("vault")),
+                ("later", Some("vault")),
+            ] {
+                let target = Target::Group("infra".into());
+                assert_eq!(
+                    ids(&got).contains(&id),
+                    s.receives(&target, service),
+                    "{s:?} {id}"
+                );
+            }
         }
     }
 
@@ -2295,7 +2478,11 @@ mod tests {
                 ("d-bob", "user", "bob"),
             ] {
                 let target = Target::from_columns(kind, target.into()).unwrap();
-                assert_eq!(ids(&got).contains(&id), s.receives(&target), "{s:?} {id}");
+                assert_eq!(
+                    ids(&got).contains(&id),
+                    s.receives(&target, None),
+                    "{s:?} {id}"
+                );
             }
         }
     }
