@@ -8,7 +8,7 @@
 #   an API key of the file is accepted at POST /api/v1/alerts of the portal, on the port of the pages (201), a wrong key is not (401)
 #   the routes of the phones are on the same port: a plain GET of /v1/session is 400, and an upgrade gives 101
 #   the metrics of the portal show portal_inbox_* series
-#   an account that is not signed in cannot read the admin calls of the inbox (401)
+#   a visitor that is not signed in cannot read the inbox page: the answer is a redirect to the sign-in page (303)
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
@@ -58,7 +58,12 @@ check "same alert again (idempotent)" 200 "$(code -X POST "$pages/api/v1/alerts"
   -H "Authorization: Bearer $token" -H "Idempotency-Key: $key" -H 'Content-Type: application/json' -d "$body")"
 check "alert with a wrong token" 401 "$(code -X POST "$pages/api/v1/alerts" \
   -H "Authorization: Bearer wrong" -H "Idempotency-Key: $key-2" -H 'Content-Type: application/json' -d "$body")"
-check "admin call without a session" 401 "$(code "$pages/auth/inbox/api/overview")"
+# The pages of the inbox need a session: a visitor with no session goes to the sign-in page, and reads nothing.
+check "inbox page without a session" 303 "$(code "$pages/auth/settings/inbox")"
+case "$(curl -s -o /dev/null -D - "$pages/auth/settings/inbox" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')" in
+  /auth/login*) echo "ok   inbox page without a session goes to the sign-in page" ;;
+  *) echo "FAIL: the inbox page without a session does not go to the sign-in page" >&2; exit 1 ;;
+esac
 
 metrics=$(curl -s "$pages/metrics")
 printf '%s\n' "$metrics" | grep -q '^portal_inbox_' || { echo "FAIL: /metrics has no portal_inbox_ series" >&2; exit 1; }
