@@ -40,6 +40,13 @@ pub enum SessionIssueError {
 /// What a session cookie is tied to (see `transport::binding`).
 pub type Binding = [u8; 32];
 
+/// The stamp of the credential that a sign-in checked: a digest of the password hash of the account, or the
+/// credential generation of the superadmin. A session carries the stamp of the proof that opened it. The session is
+/// valid only while the principal has the same stamp. A new password, a removed password or a new account of the
+/// login gives another stamp. The program makes the stamp and compares it (see `http::credential_stamp`). The store
+/// keeps it.
+pub type Credential = [u8; 32];
+
 /// Who a session belongs to.
 /// The superadmin is the account defined by the environment.
 /// The database stores the other accounts. The system looks them up by login.
@@ -66,12 +73,17 @@ pub struct Session {
     pub mfa: bool,
     /// The absolute end of the session, in Unix time.
     pub expires_at: i64,
+    /// The stamp of the credential that opened the session.
+    pub credential: Credential,
 }
 
 /// What `issue` needs to open a session and to describe it in the history.
 #[derive(Clone, Debug)]
 pub struct NewSession {
     pub principal: Principal,
+    /// The stamp of the credential that the proof of the sign-in checked. For a switch of session, the stamp of the
+    /// principal of the new session.
+    pub credential: Credential,
     /// The login shown in the history. For the superadmin, this is the superadmin's own login.
     pub login: String,
     pub impersonated: bool,
@@ -107,6 +119,8 @@ pub struct SessionStore {
     /// The rule of the remembered sessions. `None`: the store opens no remembered session.
     remember: Option<Remember>,
     max_active: usize,
+    /// The largest number of live sessions of one principal. An impersonated session does not count.
+    max_per_account: usize,
     tracker: Arc<Tracker>,
     shared: Option<Arc<Store>>,
     /// The credential generation of the superadmin (see [`crate::crypto::superadmin_generation`]).
@@ -126,6 +140,7 @@ impl SessionStore {
             idle,
             remember: None,
             max_active,
+            max_per_account: usize::MAX,
             tracker,
             shared: None,
             generation: [0; 32],
@@ -139,6 +154,23 @@ impl SessionStore {
     pub fn remember(mut self, remember: Remember) -> Self {
         self.remember = Some(remember);
         self
+    }
+
+    /// Limits the live sessions of one principal to `max` (`session.max_sessions_per_account`). A new session of a
+    /// principal that has `max` sessions ends the session of that principal that was used least recently. Thus one
+    /// account never takes the places of the other accounts. An impersonated session does not count and ends no
+    /// session.
+    pub fn per_account(mut self, max: usize) -> Self {
+        self.max_per_account = max;
+        self
+    }
+
+    /// The limits of the shared database for a new session.
+    fn limits(&self) -> crate::store::SessionLimits {
+        crate::store::SessionLimits {
+            max_active: self.max_active,
+            max_per_account: self.max_per_account,
+        }
     }
 
     /// Whether a new session gets the remembered rule.
@@ -243,6 +275,9 @@ impl SessionStore {
         let now = Instant::now();
         let mut sessions = self.sessions.lock().expect("session store mutex poisoned");
         self.prune(&mut sessions, now);
+        if !new.impersonated {
+            self.make_room_for(&mut sessions, &new.principal);
+        }
         if sessions.len() >= self.max_active {
             return Err(SessionIssueError::Capacity);
         }
@@ -273,6 +308,7 @@ impl SessionStore {
                 remembered,
                 mfa,
                 expires_at: expires_unix,
+                credential: new.credential,
             };
             self.tracker.emit(Event::SessionStarted(SessionStart {
                 sid: session.sid,
@@ -455,6 +491,7 @@ impl SessionStore {
             remembered,
             mfa,
             expires_at,
+            credential: new.credential,
         };
         let stored = SharedSession {
             sid: session.sid,
@@ -466,6 +503,7 @@ impl SessionStore {
             remembered,
             mfa,
             expires_at,
+            credential: new.credential,
         };
         // The history row is written with the session. Therefore, no instance meets a session without a history row.
         let start = SessionStart {
@@ -485,22 +523,28 @@ impl SessionStore {
                 &binding,
                 &stored,
                 &start,
-                self.max_active,
+                self.limits(),
                 &self.generation,
             )
         });
-        match inserted {
-            Ok(true) => {}
-            Ok(false) => return Err(SessionIssueError::Capacity),
+        let ended = match inserted {
+            Ok(Some(ended)) => ended,
+            Ok(None) => return Err(SessionIssueError::Capacity),
             Err(error) => {
                 self.failed("session_insert_failed", &error);
                 return Err(SessionIssueError::Storage);
             }
+        };
+        for sid in &ended {
+            self.ended_sid(*sid, EndReason::Revoked);
         }
         let at = Instant::now();
         let lifetime = self.lifetime(now, new.not_after, remembered);
         let mut cache = self.sessions.lock().expect("session store mutex poisoned");
         self.prune_copies(&mut cache, at);
+        // The sessions that the new one replaced end here at once. Another instance refuses its copy at the end of the
+        // life of a copy.
+        cache.retain(|_, entry| !ended.contains(&entry.session.sid));
         cache.insert(
             digest,
             Entry {
@@ -708,6 +752,28 @@ impl SessionStore {
         });
     }
 
+    /// Ends the sessions of `principal` that were used least recently, until a new session of the principal makes at
+    /// most `max_per_account`. An impersonated session does not count.
+    fn make_room_for(&self, sessions: &mut HashMap<[u8; 32], Entry>, principal: &Principal) {
+        let mut mine: Vec<([u8; 32], Instant)> = sessions
+            .iter()
+            .filter(|(_, entry)| {
+                entry.session.principal == *principal && !entry.session.impersonated
+            })
+            .map(|(digest, entry)| (*digest, entry.last_seen))
+            .collect();
+        if mine.len() < self.max_per_account {
+            return;
+        }
+        mine.sort_by_key(|(_, seen)| *seen);
+        let surplus = mine.len() + 1 - self.max_per_account;
+        for (digest, _) in mine.into_iter().take(surplus) {
+            if let Some(entry) = sessions.remove(&digest) {
+                self.ended(&entry.session, EndReason::Revoked);
+            }
+        }
+    }
+
     fn prune(&self, sessions: &mut HashMap<[u8; 32], Entry>, now: Instant) {
         sessions.retain(|_, entry| {
             let live = entry.expires_at > now;
@@ -737,6 +803,7 @@ fn session_of(stored: SharedSession) -> Session {
         remembered: stored.remembered,
         mfa: stored.mfa,
         expires_at: stored.expires_at,
+        credential: stored.credential,
     }
 }
 
@@ -777,6 +844,7 @@ mod tests {
     fn user(login: &str) -> NewSession {
         NewSession {
             principal: Principal::User(login.into()),
+            credential: [0; 32],
             login: login.into(),
             impersonated: false,
             remember: false,
@@ -812,6 +880,7 @@ mod tests {
                 HERE,
                 NewSession {
                     principal: Principal::Superadmin,
+                    credential: [0; 32],
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
@@ -860,6 +929,41 @@ mod tests {
             store.issue(HERE, user("alice")),
             Err(SessionIssueError::Capacity)
         );
+    }
+
+    /// One principal keeps at most its number of sessions: its new session ends its session that was used least
+    /// recently. Another principal and an impersonated session take no place of it.
+    #[test]
+    fn one_principal_keeps_its_number_of_sessions_and_its_least_used_one_ends() {
+        let (tracker, events) = Tracker::recording();
+        let store = SessionStore::new(HOUR, HOUR, 8, tracker).per_account(2);
+        let first = store.issue(HERE, user("mallory")).unwrap();
+        let second = store.issue(HERE, user("mallory")).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(store.validate(&first, &HERE).is_some());
+        let third = store.issue(HERE, user("mallory")).unwrap();
+        assert!(
+            store.validate(&second, &HERE).is_none(),
+            "the session used least recently ended"
+        );
+        assert!(store.validate(&first, &HERE).is_some());
+        assert!(store.validate(&third, &HERE).is_some());
+        let bob = store.issue(HERE, user("bob")).unwrap();
+        let mut as_mallory = user("mallory");
+        as_mallory.impersonated = true;
+        store.issue(HERE, as_mallory).unwrap();
+        assert_eq!(store.active_count(), 4);
+        for token in [&first, &third, &bob] {
+            assert!(store.validate(token, &HERE).is_some());
+        }
+        let ended: Vec<EndReason> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::SessionEnded { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, [EndReason::Revoked]);
     }
 
     #[test]
@@ -935,6 +1039,7 @@ mod tests {
                 HERE,
                 NewSession {
                     principal: Principal::Superadmin,
+                    credential: [0; 32],
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
@@ -1208,6 +1313,7 @@ mod shared_tests {
     fn user(login: &str) -> NewSession {
         NewSession {
             principal: Principal::User(login.into()),
+            credential: [0; 32],
             login: login.into(),
             impersonated: false,
             remember: false,
@@ -1256,6 +1362,7 @@ mod shared_tests {
                 HERE,
                 NewSession {
                     principal: Principal::Superadmin,
+                    credential: [0; 32],
                     login: "root".into(),
                     impersonated: false,
                     remember: false,
@@ -1441,6 +1548,7 @@ mod shared_tests {
         match impersonating {
             None => NewSession {
                 principal: Principal::Superadmin,
+                credential: [0; 32],
                 login: "root".into(),
                 impersonated: false,
                 remember: false,

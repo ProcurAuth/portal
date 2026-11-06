@@ -39,11 +39,14 @@ fn internal_error() -> HttpResponse {
 // The sign-in -----------------------------------------------------------------------------------
 
 /// What follows a good password. `None`: the account opens its session now. `Some`: the page of the second step, or
-/// an error. A policy `off` never gives a page.
+/// an error. A policy `off` never gives a page. `credential` is the stamp of the credential that the password step
+/// checked. The pending token holds it with the second factor of the account (see [`mfa::proof_of`]).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn after_password(
     state: &Arc<AppState>,
     client: &Client,
     principal: &Principal,
+    credential: &Credential,
     keep: bool,
     csrf: &str,
     rd: &str,
@@ -76,12 +79,16 @@ pub(super) async fn after_password(
     } else {
         return None;
     };
+    let Ok(proof) = mfa::proof_of(&state.signing_secret, credential, row.as_ref()) else {
+        return Some(internal_error());
+    };
     let pending = Pending {
         stage,
         principal: principal.clone(),
         keep,
         tries: 0,
         issued: unix_now(),
+        proof,
     };
     Some(step_page(
         state,
@@ -128,7 +135,6 @@ fn step_page(
         csrf: posted.csrf,
         rd: posted.rd,
         sig: posted.sig,
-        host: client.host.as_deref(),
         pending: &token,
     };
     let body = match pending.stage {
@@ -187,6 +193,8 @@ fn start_again(
 struct Step {
     headers: HeaderMap,
     pending: Pending,
+    /// The stamp of the credential that the password step checked. It is the stamp of now.
+    credential: Credential,
     csrf: String,
     rd: String,
     sig: String,
@@ -197,7 +205,9 @@ struct Step {
 
 /// The checks that both second steps share: the form, the return target, the anti-CSRF token and the pending token.
 /// A pending token that is damaged, old, or made for another browser or page gives the page "open too long": the person
-/// cannot tell these causes apart.
+/// cannot tell these causes apart. The same page answers a token whose account changed its credential or its second
+/// factor after the password step. Thus a new password refuses every pending token made before it. A reset of the
+/// second factor, a new enrolment and a new superadmin credential do the same.
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
 async fn read_step(
     state: &Arc<AppState>,
@@ -209,7 +219,11 @@ async fn read_step(
         headers,
         csrf_cookie,
         mut form,
+        body_permit,
+        ..
     } = login_form(state, request, client).await?;
+    // The second step runs no Argon2 check: the body permit goes back now.
+    drop(body_permit);
     let csrf = form.remove("csrf").unwrap_or_default();
     let rd = form.remove("rd").unwrap_or_else(|| "/".to_string());
     let sig = form.remove("sig").unwrap_or_default();
@@ -247,9 +261,48 @@ async fn read_step(
         Ok(pending) if pending.stage == stage => pending,
         Ok(_) | Err(PendingError::Invalid | PendingError::Expired) => return Err(stale(state)),
     };
+    // The password step proved a credential and saw a second factor. Both must be the ones of now. The accounts of
+    // the shared database are read as the password step reads them.
+    refresh_directory_if_due(state);
+    let row = match read_row(state, &totp_login(state, &pending.principal)).await {
+        Ok(row) => row,
+        Err(error) => {
+            log(
+                state,
+                LogLevel::Error,
+                "mfa_read_failed",
+                &[("error", error)],
+            );
+            state.metrics.login_internal_error();
+            return Err(text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session store unavailable\n",
+            ));
+        }
+    };
+    let mut credential = None;
+    let fresh = fresh_against_directory(state, |state| {
+        credential = credential_stamp(state, &pending.principal).filter(|now| {
+            mfa::proof_of(&state.signing_secret, now, row.as_ref())
+                .is_ok_and(|proof| constant_time_eq(&proof, &pending.proof))
+        });
+        credential.is_some()
+    });
+    let credential = match (fresh, credential) {
+        (Fresh::Current, Some(credential)) => credential,
+        (Fresh::Unknown, _) => {
+            state.metrics.login_internal_error();
+            return Err(text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session store unavailable\n",
+            ));
+        }
+        _ => return Err(stale(state)),
+    };
     Ok(Step {
         headers,
         pending,
+        credential,
         csrf,
         rd,
         sig,
@@ -280,28 +333,28 @@ fn limited_step(state: &AppState, client: &Client, step: &Step, wait_secs: u64) 
     response
 }
 
-/// Counts a failed attempt against the address.
-fn count_address_failure(state: &AppState, client: &Client) {
-    if state.config.security.login_rate_limit_enabled {
-        state.ip_limiter.failure(
-            address_key(client),
-            state.config.security.login_attempts_per_ip,
-        );
-    }
-}
-
-/// The address is blocked: the time to wait.
-fn address_blocked(state: &AppState, client: &Client) -> Option<Duration> {
+/// Counts an attempt of the second factor against the address, and checks the limit in the same step. The answer is
+/// the time to wait when the address is blocked: the attempt then does not go on. Attempts that arrive at the same
+/// time therefore never pass the limit. A good code or a good proof clears the count (see [`address_success`]).
+fn address_acquire(state: &AppState, client: &Client) -> Option<Duration> {
     if !state.config.security.login_rate_limit_enabled {
         return None;
     }
     state
         .ip_limiter
-        .check(
+        .acquire(
             &address_key(client),
             state.config.security.login_attempts_per_ip,
         )
         .err()
+}
+
+/// A good code or a good proof: the attempts of the second factor of the address end. The failures of the password
+/// step of the address stay: they can name other logins, and they expire with `security.login_window`.
+fn address_success(state: &AppState, client: &Client) {
+    if state.config.security.login_rate_limit_enabled {
+        state.ip_limiter.success(&address_key(client));
+    }
 }
 
 /// The log, the metric, the audit event and the sign-in list for a wrong code.
@@ -382,6 +435,7 @@ fn wrong_code(state: &AppState, client: &Client, step: &Step, message: &str) -> 
 fn signed_in(step: &Step, login: &str) -> SignedIn {
     SignedIn {
         principal: step.pending.principal.clone(),
+        credential: step.credential,
         session_login: login.to_string(),
         typed: typed_login(login),
         known: true,
@@ -404,7 +458,7 @@ pub(super) async fn handle_code_post(
         Err(response) => return response,
     };
     let login = totp_login(state, &step.pending.principal);
-    if let Some(wait) = address_blocked(state, client) {
+    if let Some(wait) = address_acquire(state, client) {
         log(
             state,
             LogLevel::Warn,
@@ -435,16 +489,7 @@ pub(super) async fn handle_code_post(
     };
     match verdict {
         Verdict::Totp | Verdict::Recovery => {
-            if state.config.security.login_rate_limit_enabled {
-                state.ip_limiter.success(&address_key(client));
-                state.ip_limiter.success(&format!(
-                    "ip:{}",
-                    client
-                        .ip
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "unknown".into())
-                ));
-            }
+            address_success(state, client);
             if verdict == Verdict::Recovery {
                 audit(
                     state,
@@ -465,7 +510,6 @@ pub(super) async fn handle_code_post(
             )
         }
         Verdict::Wrong { locked_until } => {
-            count_address_failure(state, client);
             record_wrong_code(state, client, &step, &login);
             match locked_until {
                 Some(until) => limited_step(
@@ -478,7 +522,6 @@ pub(super) async fn handle_code_post(
             }
         }
         Verdict::Locked { until } => {
-            count_address_failure(state, client);
             record_wrong_code(state, client, &step, &login);
             limited_step(
                 state,
@@ -487,39 +530,15 @@ pub(super) async fn handle_code_post(
                 u64::try_from(until - unix_now()).unwrap_or(1),
             )
         }
-        // An administrator reset the second factor between the two steps. The password was right: the policy decides.
-        Verdict::NotEnrolled => {
-            if state.config.authentication.mfa == crate::config::MfaPolicy::Required {
-                let pending = Pending {
-                    stage: Stage::Enrol,
-                    tries: 0,
-                    ..step.pending.clone()
-                };
-                return step_page(
-                    state,
-                    client,
-                    &pending,
-                    &Posted {
-                        csrf: &step.csrf,
-                        rd: &step.rd,
-                        sig: &step.sig,
-                        enrol: None,
-                    },
-                    None,
-                    StatusCode::OK,
-                );
-            }
-            let mut signed = signed_in(&step, &login);
-            signed.mfa = false;
-            finish_sign_in(
-                state,
-                client,
-                &step.headers,
-                &step.rd,
-                signed,
-                Landing::Redirect,
-            )
-        }
+        // The second factor of the account went away after the check of the pending token: an administrator reset it.
+        // The proof of the password step is stale, as for a page that was open too long.
+        Verdict::NotEnrolled => start_again(
+            state,
+            client,
+            &step.rd,
+            &step.sig,
+            "The page was open too long. Enter your login and password again.",
+        ),
     }
 }
 
@@ -541,7 +560,7 @@ pub(super) async fn handle_enrol_post(
         Err(response) => return response,
     };
     let login = totp_login(state, &step.pending.principal);
-    if let Some(wait) = address_blocked(state, client) {
+    if let Some(wait) = address_acquire(state, client) {
         return limited_step(state, client, &step, wait.as_secs());
     }
     let enrol = step.enrol.clone().unwrap_or_default();
@@ -567,9 +586,7 @@ pub(super) async fn handle_enrol_post(
     };
     match outcome {
         Enrolled::Done(codes) => {
-            if state.config.security.login_rate_limit_enabled {
-                state.ip_limiter.success(&address_key(client));
-            }
+            address_success(state, client);
             audit(
                 state,
                 AuditKind::TotpEnabled,
@@ -588,7 +605,6 @@ pub(super) async fn handle_enrol_post(
             )
         }
         Enrolled::WrongCode => {
-            count_address_failure(state, client);
             record_wrong_code(state, client, &step, &login);
             wrong_code(state, client, &step, ui_mfa::INVALID_CODE)
         }
@@ -788,7 +804,7 @@ async fn password_is_right(
     let known = identify(state, &viewer.login);
     let hash = match &known {
         Who::Superadmin => state.superadmin_hash.clone(),
-        Who::User(_, record) => record.password_hash.clone(),
+        Who::User(_, record, _) => record.password_hash.clone(),
         Who::Unknown => state.dummy_hash.clone(),
     };
     let permit = Arc::clone(&state.password_gate)
@@ -822,13 +838,12 @@ async fn prove(
 ) -> Proof {
     let password = Zeroizing::new(form.remove("password").unwrap_or_default());
     let code = form.remove("code").unwrap_or_default();
-    if address_blocked(state, client).is_some() || code.len() > 64 {
+    if code.len() > 64 || address_acquire(state, client).is_some() {
         return Proof::Locked;
     }
     match password_is_right(state, viewer, password).await {
         Some(true) => {}
         Some(false) => {
-            count_address_failure(state, client);
             state.metrics.login_mfa_failure();
             return Proof::Refused;
         }
@@ -841,10 +856,12 @@ async fn prove(
     })
     .await;
     match verdict {
-        Ok(Ok(Verdict::Totp | Verdict::Recovery)) => Proof::Good,
+        Ok(Ok(Verdict::Totp | Verdict::Recovery)) => {
+            address_success(state, client);
+            Proof::Good
+        }
         Ok(Ok(Verdict::Locked { .. })) => Proof::Locked,
         Ok(Ok(Verdict::Wrong { locked_until })) => {
-            count_address_failure(state, client);
             state.metrics.login_mfa_failure();
             if locked_until.is_some() {
                 Proof::Locked
@@ -879,7 +896,7 @@ pub(super) async fn handle_security_enable(
         };
     let enrol = form.remove("enrol").unwrap_or_default();
     let code = form.remove("code").unwrap_or_default();
-    if address_blocked(state, client).is_some() || code.len() > 64 {
+    if code.len() > 64 || address_acquire(state, client).is_some() {
         return security_redirect("mfa-locked");
     }
     let (worker, name, token, typed) =
@@ -891,6 +908,7 @@ pub(super) async fn handle_security_enable(
     .await;
     match outcome {
         Ok(Ok(Enrolled::Done(codes))) => {
+            address_success(state, client);
             audit(
                 state,
                 AuditKind::TotpEnabled,
@@ -911,7 +929,6 @@ pub(super) async fn handle_security_enable(
             .await
         }
         Ok(Ok(Enrolled::WrongCode)) => {
-            count_address_failure(state, client);
             state.metrics.login_mfa_failure();
             let Some(mfa) = state.mfa.as_ref() else {
                 return internal_error();

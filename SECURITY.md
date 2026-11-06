@@ -18,7 +18,8 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 - A failed login returns the same message.
 - A new user has no grant and opens no service. Access comes from a grant only. The superadmin has all grants.
 - A path that no service owns is open to each signed-in user only when the catalogue is complete. The catalogue is complete when each configured discovery source answered at least once. Until then, only the superadmin passes the gate.
-- A workload with unusable labels keeps the path of its `href` closed. A workload whose id another workload uses with another `href` also keeps its path closed. Only the superadmin passes a closed path.
+- A workload with unusable labels keeps the path of its `href` closed. A workload that does not ask for a listing (for example `portal.enabled=false`) also keeps it closed. A workload whose id another workload uses with another `href` also keeps its path closed. Only the superadmin passes a closed path.
+- The gate reads an `href` with the same percent-decode as a request path. A segment that starts with the last segment of a prefix belongs to that service, as Traefik `PathPrefix` routes it. Such a path gets no identity token.
 - The gate reads the forwarded path in every way that a proxy or a backend can read it.
 - The gate allows the request only if every reading is allowed.
 - The gate refuses a URI that cannot be read.
@@ -30,11 +31,15 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 - Account administration uses a purpose-bound CSRF token and a same-origin check.
 - A new password is hashed under the same Argon2 permit as a login.
 - A new password ends the sessions of that account.
+- Each sign-in proof and each session carries a stamp of the credential that the proof checked. A proof opens a session, and a session acts, only while the account has the same stamp. Thus a password step or a second step that started before a new password opens no session.
+- A form checks the session again after its body. A session that ended while the body arrived does not act. **Log in as** and **Back to superadmin** give no session in place of a session that ended.
+- The superadmin login has one owner. An account of the database or a block `user` with this login stops the start.
 - A new superadmin login, password or session secret ends the sessions of the superadmin and the impersonated sessions. This also applies with PostgreSQL, where the other sessions survive a restart.
 - **Log in as** and **Back to superadmin** keep the end of the session that the password opened. A switch never gives a fresh `session.ttl`.
 - The server refuses at start the example superadmin passwords and the example session secret that the repository publishes. The error names the key and the source. It never shows the value.
 - The server writes every change to the audit history.
 - The 403 page names no service. A user does not learn the name of a service that is not open to that user.
+- One exception: the alerts of the portal about itself (`inbox.watch`) name each probed service to the members of `inbox.watch.group`. See "Inbox".
 - In the mode `static`, the settings pages refuse a change of grants. The server does not use the grants of the database.
 - In the mode `hybrid`, the settings pages cannot change a grant of the configuration.
 - The settings pages give a grant below a service only for a level that the service declares and an action that lists its type. The form gives one id for each type of the chain. While the service has not answered, the pages refuse the grant. Each resource id is exact. The server does not trim it or change its case. An id with a control character, or of more than 256 bytes, is refused.
@@ -49,7 +54,7 @@ A grant is an action on a service, or on a node of the resource tree of a servic
 - The server limits the Argon2 concurrency.
 - The server limits the rate of login failures per IP address and globally.
 - The global limiter has a separate budget for the superadmin login. Failures against other logins never refuse the sign-in of the superadmin.
-- The server reads a bounded number of sign-in bodies at the same time (`server.max_login_body_reads`). Slow sign-in bodies cannot hold every connection that ForwardAuth needs.
+- The server reads a bounded number of sign-in bodies at the same time (`server.max_login_body_reads`). A sign-in keeps its place in this number until it gets the Argon2 permit. Slow sign-in bodies and a queue of sign-ins cannot hold every connection that ForwardAuth needs.
 - A successful authentication creates a random, opaque session identifier of 256 bits.
 - Active sessions are held in limited process RAM. With PostgreSQL, they are held in the shared database as SHA-256 digests. The database never stores the cookie.
 - Each instance keeps a copy of each active session for a few seconds.
@@ -97,7 +102,7 @@ With the `pdp` block, the server answers AuthZEN requests on a second listener (
 - A node without ancestors is a node of depth 1. This keeps the requests of a document of one level. With a tree, such a request on a deeper type is not valid.
 - A grant covers its node and each node below it. The PDP compares the chains segment by segment, with exact types and decoded ids. A grant does not cover its parent or a node of another branch.
 - With `context.match = "subtree"`, a grant on a node below the resource also gives `true`. This answer only tells that something below the resource is open: a service uses it to show a navigation element, never to permit an operation. An operation asks with the default `"node"`. A bad value gives `false` with the reason `invalid_request`.
-- A grant below the service applies only when the last known document of the service follows it. The action must list the type, and the path must follow the parents. The PDP keeps the last document that it read for each service. A failed read does not remove this document. If the document does not follow the grant, the PDP does not apply it (fail closed). If portal never read the document of the service, the PDP returns `false` for each node below this service. A grant on the whole service is not affected. The check is at run time. The start checks only the form of the grants.
+- A grant below the service applies only when the last known document of the service follows it. The action must list the type, and the path must follow the parents. The PDP keeps the last document that it read for each service. A failed read does not remove this document. If the document does not follow the grant, the PDP does not apply it (fail closed). If portal has no good document of the service, the PDP returns `false` for each node of this service and for the whole service. Only `access` on the whole service is not affected: without the document, the PDP cannot apply the ceilings and the budgets of a grant. The check is at run time. The start checks only the form of the grants.
 - The PDP fails closed. It returns `false` for an unknown user, an unknown subject type, or a bad action name. It returns `400` and no decision for a request that it cannot read. The PDP limits the body size (`pdp.max_body_bytes`). It limits the batch size (`pdp.max_evaluations`).
 - The log records each decision (`pdp_decision`). Each entry has the server, the subject, the action, the resource, the decision, and the reason. The resource is the chain with the ids percent-encoded, so that an id cannot add a line or a field to the log. The counters `portal_pdp_decisions_total` and `portal_pdp_refused_total` are in `/metrics`.
 - The PDP has no TLS. The deployment must limit the network of the listener to the services and the portal. This differs from AuthZEN, which requires TLS. In K3s, the NetworkPolicy `allow-portal-pdp` admits to the port 4182 only the pods with the label `portal-pdp-client: "true"` in the namespaces `apps`, `observability` and `edge`.
@@ -166,11 +171,13 @@ The server stores only these values:
 
 Logout therefore revokes the session on the server. It does not only delete the browser cookie. A cookie with another binding is refused. The refusal does not change the session. A thief cannot end the owner's session this way.
 
-The store is limited by `session.max_active_sessions`. The server removes expired entries during session operations. When capacity is reached, new sessions fail closed with `503`.
+The store is limited by `session.max_active_sessions`. The server removes expired entries during session operations. When capacity is reached, new sessions fail closed with `503`. One account has at most `session.max_sessions_per_account` sessions. Its new session ends its session that was used least recently, so one account cannot take the places of the others.
 
 With PostgreSQL, the digest, the binding hash, the identity, the expiry, and the last use are rows of the shared database. The instance that served the login writes these rows. The same statement enforces the binding and the idle timeout, and finds the session. A refused binding renews nothing. Each instance trusts its own copy of a session for 5 seconds at most. A revocation made on another instance takes up to 5 seconds to reach the copy. While the database is unreachable, a copy checked less than 2 minutes ago is still honoured. This copy is bounded by the session's own expiry. This rule prevents the sign-out of every user. Logins fail closed. The failed-login limiters stay per instance. With N instances, an attacker has N times the budget.
 
 A row also holds the credential generation of the superadmin: HMAC-SHA-256 under the session secret of the superadmin login and password. The database never holds a plain hash of the superadmin password. Thus a reader of the database cannot test password guesses without the secret. A superadmin or impersonated row is valid only with the generation of the instance that reads it. At start, each instance deletes the superadmin and impersonated rows of the other generations. After a suspected theft of a superadmin cookie, rotate the superadmin password or the session secret: the rotation ends the stolen session on every instance.
+
+A row also holds the stamp of the credential that opened the session. The stamp is a SHA-256 digest of the source of the account, its login and its password hash. An instance accepts the row only while the account has the same stamp. Thus a new or removed `password_hash` of an account of the file ends its sessions. A new account of the login never gets the sessions of an old account.
 
 ### Remembered sessions
 
@@ -204,7 +211,11 @@ A person who can create a container or an IngressRoute chooses what the launcher
 
 The gate opens a path that no service owns to each signed-in user. This rule is safe only when the catalogue holds every service. The first snapshot after a start is empty. A source that has not answered yet gives a snapshot without its services. Thus, until each configured source answered once, the gate lets only the superadmin through. A source that failed at setup keeps this state for the life of the process. The metric `portal_catalog_complete` shows the state.
 
+A source that answers can still miss a workload that Traefik routes. Examples are a container that restarts and a container that Compose recreates. The path of such a workload keeps its last owner, or stays closed, for 20 refreshes after the last list that names it. A new workload has no owner until the first refresh that lists it. In this time, each signed-in user passes the gate for its path, without an identity token. A service that checks the identity token refuses such a request.
+
 Health probes are plain GET requests to URLs taken from labels. They do not follow redirects. They do not read the body. They have a timeout and limited concurrency. They send nothing secret. The probe client does not verify certificates. It asks only whether something answers.
+
+Only the health probes use this client. The reads of the actions documents and of the options use a client that verifies the certificate and the host name of an https URL, with the embedded Mozilla roots. A read that fails this check gives no document and no option.
 
 Icons are SVG files. They are included in the image and indexed once at startup. A request can name only an indexed icon. A request cannot build a path. The server serves each icon with `Content-Security-Policy: default-src 'none'; sandbox`.
 
@@ -237,7 +248,9 @@ server {
 
 Hyper's HTTP/1 connection parser receives the header limits and timeouts. The application collects the body in parts. It checks the size before each extension. A total read timeout wraps the collection.
 
-`POST /auth/login` is the only route that reads a body before it knows the client. One connection can hold a slot for `header_read_timeout` plus `body_read_timeout`. The server therefore reads at most `server.max_login_body_reads` sign-in bodies at the same time. It refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `max_connections`, so ForwardAuth always has connections left.
+`POST /auth/login` is the only route that reads a body before it knows the client. The API of the Inbox checks the key of the sender before it reads the body. One connection can hold a slot for `header_read_timeout` plus `body_read_timeout`.
+
+The server therefore reads at most `server.max_login_body_reads` sign-in bodies at the same time. A sign-in keeps its place until it gets the Argon2 permit, and it waits for this permit only until `body_read_timeout` ends. It refuses the other sign-ins at once with `503` and `Retry-After: 1`. This value must be less than `max_connections`, so ForwardAuth always has connections left.
 
 The client address comes from `X-Forwarded-For` only when the TCP peer is in `server.trusted_proxies`. The server reads the header from the right. It skips the trusted addresses and takes the first address that is not trusted. A peer that is not trusted, a missing header, two headers, or an entry that is not an address give the address of the peer. Keep the networks of this list small. In K3s, the NetworkPolicy `allow-portal-http` admits only the Traefik and Prometheus pods to the port 4181.
 
@@ -261,9 +274,9 @@ The key `authentication.mfa` (`off`, `optional` or `required`) sets the policy. 
 
 ### Design
 
-- **State between the two steps.** The password step gives no session. It gives a token that the server signs (HMAC-SHA-256 under the session secret). The token holds the account, the choice "Remember me", the count of wrong codes and the time of issue. It is bound to the client binding and to the anti-CSRF token of the page. It lives 5 minutes. A token that is changed, old, or used by another client gives the page "The page was open too long". A person cannot tell these causes apart.
+- **State between the two steps.** The password step gives no session. It gives a token that the server signs (HMAC-SHA-256 under the session secret). The token holds the account, the choice "Remember me", the count of wrong codes and the time of issue. It also holds a keyed digest of the credential that the password step checked and of the second factor of the account at that time. The second step goes on only while both are the same. Thus a new password, a reset of the second factor, an enrolment or a new superadmin credential refuses the token. It is bound to the client binding and to the anti-CSRF token of the page. It lives 5 minutes. A token that is changed, old, or used by another client gives the page "The page was open too long". A person cannot tell these causes apart.
 - **Anti-enumeration.** The first step does not change: a wrong password gives the same answer for an unknown login, for an account with a second factor and for an account without. Only a person who knows the password reaches the second step, and learns that the account has one. This is accepted.
-- **Brute force.** The counters of an account are in its database row: failures, start of the window, end of the lock. One statement or one transaction with a row lock changes them, so two instances never lose a failure. Five failures in 10 minutes lock the second step for 5 minutes. No account stays locked for ever. A lock needs the password first: an anonymous attacker cannot lock an account. An attacker who has the password can lock the second step for the person. The address limiter of the sign-in counts the wrong codes too. A TOTP code has 10^6 values and three are valid at a time: the lock keeps the chance of a guess below 1 in 10^5 for each 5 minutes.
+- **Brute force.** The counters of an account are in its database row: failures, start of the window, end of the lock. Each attempt counts in one write transaction before the comparison of the code. Thus attempts at the same time, on one instance or on several, compare at most five codes before the lock. A good code clears the count. Five failures in 10 minutes lock the second step for 5 minutes. No account stays locked for ever. A lock needs the password first: an anonymous attacker cannot lock an account. An attacker who has the password can lock the second step for the person. The address limiter of the second step counts each attempt in the same way before the comparison. A TOTP code has 10^6 values and three are valid at a time: the lock keeps the chance of a guess below 1 in 10^5 for each 5 minutes.
 - **Replay.** The row keeps the last accepted time step. A statement accepts a step only if it is more than the stored step, so two instances never accept the same code. A code of the same step, or of an older step, is refused. The code that confirms an enrolment is used up.
 - **Recovery codes.** Ten codes of 50 bits, shown one time, stored as keyed hashes. The delete of the hash is the use: it succeeds for one caller only.
 - **Wrong key.** At start, the server compares a check value of the key with the value in the database. A key that does not match stops the server. A secret that a key does not open gives an error of the server, never a wrong code, and no secret changes. The server never replaces a secret under another key.
@@ -341,6 +354,16 @@ Measures:
 - Do not route on the portal origin a service that lets its users publish HTML or JavaScript.
 - Open the settings pages only in a browser profile that does not open the services.
 
+### Forwarded headers of ForwardAuth
+
+`/auth/verify` and `/auth/verify-key` know the request only from `X-Forwarded-Uri` and `X-Forwarded-Method`. With `trustForwardHeader: false`, Traefik writes these headers from the request that it routes. With `true`, Traefik copies the values that come from a trusted hop (`forwardedHeaders.trustedIPs`). A hop that passes the headers of the client lets the client send `X-Forwarded-Uri: /auth/login`. The request then reaches a service without a session.
+
+Measures:
+
+- Keep `trustForwardHeader: false` on each ForwardAuth middleware of the portal.
+- Set `true` only when each hop in front of Traefik overwrites or removes the `X-Forwarded-Uri`, `X-Forwarded-Method`, `X-Forwarded-Host` and `X-Forwarded-Proto` headers of the client. `forwardedHeaders.trustedIPs` alone does not remove them.
+- Behind a TCP load balancer, give the client address with `proxyProtocol.trustedIPs` of the entry point. Behind an HTTP proxy, keep `false` and set `session.bind = "user_agent"`.
+
 ### Traefik path normalisation
 
 The gate reads the path of `X-Forwarded-Uri` in each way that a proxy or a backend can read it, after it removes dot segments. Traefik must route on the same clean path. If Traefik routes on a path that still holds `..` or an encoded `/` (`%2F`), a request can match the route of a service while the gate reads it as a path without an owner.
@@ -349,6 +372,7 @@ Measures:
 
 - On each entry point of Traefik, set `http.sanitizePath: true`. Set each key of `http.encodedCharacters` to `false`: `allowEncodedSlash`, `allowEncodedBackSlash`, `allowEncodedNullCharacter`, `allowEncodedSemicolon`, `allowEncodedPercent`, `allowEncodedQuestionMark` and `allowEncodedHash`. The Compose configuration of Traefik (`traefik/docker/compose.yaml`) sets these values. Set them also on the K3s entry point `websecure` (`traefik/k3s/controller.yaml`).
 - Check the effective configuration of the entry point after each upgrade of Traefik.
+- The gate gives a segment that starts with the last segment of a prefix to that service, as ``PathPrefix(`/files`)`` routes it. A router rule must not match a path outside the text prefix of the `href` of its service. For example, a deep link `/pgadmin/browser/` with the rule ``PathPrefix(`/pgadmin`)`` leaves `/pgadmin/misc/` without an owner.
 
 
 ## Inbox
@@ -357,10 +381,13 @@ The Inbox is a feature of the portal. The page `docs/inbox/SECURITY.md` gives it
 
 - A phone enrolls with a one-time code of an account of the portal. The code holds the address of the server, the public key of the server and a secret of 128 bits. The secret works one time and expires. The server keeps only its SHA-256 digest.
 - The phone pins the public key of the code. The session is Noise IK between the key of the phone and this key. A network capture gives no secret and no material for an offline attack.
-- The server limits the enrollment attempts for each client address.
+- The server limits the failed attempts for each client address: enrollments, and session handshakes that prove no phone. A phone that proves its key always gets its session.
+- A handshake has a fixed time limit, and one client address holds at most `inbox.devices.max_handshakes_per_address` handshakes. One account has at most `inbox.devices.max_per_account` phones.
+- A revocation also ends a session that was in its handshake at the time of the revocation.
 - The routes of the phones (`/v1/enroll`, `/v1/session`) and the API of the senders share the listener of the portal. They have no session, set no cookie and need no ForwardAuth. The portal matches them before every other route and applies no session, CSRF or origin check to them. A phone session uses a budget of connections that is separate from the pages: a flood of phone sessions cannot starve the pages, and a flood of page requests cannot starve the phones.
 - A phone subscribes only to a group for which its account has `inbox.receive`. A loaded directory that positively refuses a subscription removes it. A directory that is not ready, old or empty never removes one.
 - A sender sends an alert with an API key (`api_`) as a bearer token. The server checks the form of the text (prefix, length, characters, checksum) before any lookup. A key of another kind gets `401` with no detail. The server compares the keys of the file in constant time. A key needs `alert.send` on the group for the key and for its owner. To alert an account, the key and its owner need `alert.send_user` on the service `portal`: this right is flat, so a sender can alert any account. An alert to an account has no group, so only the key that sent it can read its status. A key of the file decides its groups, and `direct_alerts`, at start and reads no directory.
+- The alerts of the portal about itself (`inbox.watch`) go to the group `inbox.watch.group`. Each account with `inbox.receive` or `alert.read` on this group reads them. Such an account learns the name and the outages of each service that the portal probes. This includes a service that the account may not open. The portal does not filter these alerts for each reader: the owner chooses the members of the group. Give this group only to persons who may know the names of all the services.
 - The page of the Inbox needs a session of the portal. A form carries an anti-CSRF token and a same-origin check. A session that the superadmin opens as another account cannot send an alert and cannot revoke a phone. Such a session can make an enrollment code for that account. The owner has not reviewed this point.
 - The key file of the Inbox server and the secrets of the `api_key` blocks use only `_env` or `_file`. A secret in clear text stops the start. The log never holds a key text, a code or a secret.
 - The portal listener has no TLS. An API key travels in clear text on plain HTTP. Use a TLS proxy for the senders.

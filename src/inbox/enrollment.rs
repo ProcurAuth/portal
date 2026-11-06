@@ -28,10 +28,13 @@ pub struct NewCode {
     pub fingerprint: String,
 }
 
-/// Makes a code for `login`. The account must exist: the caller checks it. The inbox refuses the
-/// code when the account has `inbox.enrollment.max_active_per_account` codes that are not used and
-/// not expired. With a replica, the call returns after the copy holds the digest of the code.
-pub async fn create_code(app: &App, login: &str) -> Result<NewCode, ApiError> {
+/// Makes a code for `login`. The account must exist: the caller checks it. `stored` tells that the
+/// account is an account of the database: the store then refuses the code when the row of the
+/// account is gone, in the transaction of the code. An account that a delete ends at the same time
+/// therefore keeps no code. The inbox refuses the code when the account has
+/// `inbox.enrollment.max_active_per_account` codes that are not used and not expired. With a
+/// replica, the call returns after the copy holds the digest of the code.
+pub async fn create_code(app: &App, login: &str, stored: bool) -> Result<NewCode, ApiError> {
     let mut secret: [u8; 16] = Rng::os().bytes();
     let digest: [u8; 32] = Sha256::digest(secret).into();
     let settings = &app.config.enrollment;
@@ -42,10 +45,19 @@ pub async fn create_code(app: &App, login: &str) -> Result<NewCode, ApiError> {
             login.to_string(),
             settings.code_ttl.as_millis() as i64,
             settings.max_active_per_account,
+            stored,
         )
         .await;
     let expires_at_ms = match outcome {
         Ok(CodeInsert::Created { expires_at_ms }) => expires_at_ms,
+        Ok(CodeInsert::NoAccount) => {
+            secret.zeroize();
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_account",
+                "the account does not exist",
+            ));
+        }
         Ok(CodeInsert::TooMany) => {
             secret.zeroize();
             return Err(ApiError::new(
@@ -105,13 +117,16 @@ pub async fn create_code(app: &App, login: &str) -> Result<NewCode, ApiError> {
     })
 }
 
-/// Deletes the unused codes of `login` and revokes its devices. The sessions of these devices end
-/// with the close code 4403. The portal calls it before it deletes the account. The result is the
-/// number of devices that the call revoked.
-pub async fn revoke_devices_of(app: &App, login: &str) -> Result<usize, String> {
+/// Ends the inbox state of the account `login`. This is the one operation for every end of an
+/// account: the delete of an account of the database, an account of the file that left the file,
+/// and an old login of the superadmin. It deletes the unused codes, revokes the devices and
+/// detaches the rows that name the login (see `db::end_account`). The sessions of the devices end
+/// with the close code 4403. A new account with the same login starts with nothing. The result is
+/// the number of devices that the call revoked.
+pub async fn end_account(app: &App, login: &str) -> Result<usize, String> {
     let ids = app
         .db
-        .revoke_account(login)
+        .end_account(login)
         .await
         .map_err(|e| format!("inbox storage: {e}"))?;
     for id in &ids {
@@ -121,6 +136,6 @@ pub async fn revoke_devices_of(app: &App, login: &str) -> Result<usize, String> 
         app.metrics.replica_sync_failure();
         log::warn!(event = "replica_sync_failed", error = %e);
     }
-    log::info!(event = "account_devices_revoked", user.name = %login, count = ids.len());
+    log::info!(event = "account_inbox_ended", user.name = %login, devices = ids.len());
     Ok(ids.len())
 }

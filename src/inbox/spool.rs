@@ -20,7 +20,7 @@ use inbox_core::proto::Kind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::db::{AckOutcome, PendingDelivery};
+use super::db::{same_title, AckOutcome, PendingDelivery};
 use super::target::Target;
 use super::util::hex;
 
@@ -225,7 +225,7 @@ impl Spool {
         let mut inner = self.inner.lock().expect("spool lock");
         if let Some(existing) = inner.by_key.get(&(source.clone(), key.clone())) {
             let e = &inner.alerts[existing];
-            return if e.target == target && e.title == title {
+            return if e.target == target && same_title(&source, &e.title, &title) {
                 Accepted::Duplicate(e.clone())
             } else {
                 Accepted::Conflict
@@ -259,7 +259,7 @@ impl Spool {
             .cloned()
         {
             let known = inner.alerts.get_mut(&existing).expect("indexed");
-            if known.target != wire.target || known.title != wire.title {
+            if known.target != wire.target || !same_title(&wire.source, &known.title, &wire.title) {
                 return Accepted::Conflict;
             }
             let mut changed = false;
@@ -522,6 +522,39 @@ mod tests {
             accept(&s, "k", "another title", &[]),
             Accepted::Conflict
         ));
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn a_new_title_of_the_same_webhook_alert_is_a_repeat_in_the_spool_and_from_a_peer() {
+        let s = Spool::default();
+        let webhook = |title: &str| {
+            s.accept(
+                alert_id("webhook:ci", "k"),
+                Kind::Alert,
+                Target::Group("infra".into()),
+                title.into(),
+                "webhook:ci".into(),
+                "k".into(),
+                1_000,
+                vec!["d1".into()],
+            )
+        };
+        let Accepted::Created(first) = webhook("load 0.91") else {
+            panic!("created")
+        };
+        let Accepted::Duplicate(again) = webhook("load 0.97") else {
+            panic!("a new summary of the same alert is a repeat")
+        };
+        assert_eq!(
+            (again.id.as_str(), again.title.as_str()),
+            (first.id.as_str(), "load 0.91")
+        );
+        let mut wire = first.wire();
+        wire.title = "load 0.99".into();
+        assert!(matches!(s.merge(wire.clone()), Accepted::Duplicate(_)));
+        wire.target = Target::Group("other".into());
+        assert!(matches!(s.merge(wire), Accepted::Conflict));
         assert_eq!(s.len(), 1);
     }
 

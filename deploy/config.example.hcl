@@ -75,7 +75,8 @@ storage {
 
 ui {
   # The icon of the browser tab. "default" (default): the built-in logo, on the pages after sign-in only.
-  # "none": no page links an icon, and the icon route answers 404.
+  # "none": no page after sign-in links an icon, and the icon route gives the answer of an unknown path. A page
+  # before sign-in never has an icon: it has the empty icon.
   # favicon = "default"
 }
 
@@ -99,7 +100,8 @@ inbox {
     max_inflight          = 32
     unreachable_after     = "2m"
     offline_warning_after = "3m"
-    # Defaults: max_devices = 1000, max_auth_failures = 5, auth_failure_window = "10m", max_request_bytes = "64KiB".
+    # Defaults: max_devices = 1000, max_per_account = 10 (at most max_devices), max_auth_failures = 5,
+    # auth_failure_window = "10m", max_handshakes_per_address = 16, max_request_bytes = "64KiB".
     max_devices = 1000
   }
 

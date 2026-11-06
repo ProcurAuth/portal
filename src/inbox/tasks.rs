@@ -62,7 +62,12 @@ fn spawn_cluster(app: Arc<App>) {
         while let Some(event) = rx.recv().await {
             match event {
                 Event::Wake(devices) => app.hub.wake(&devices),
-                Event::Revoked(device) => app.hub.kick(&device, close::REVOKED),
+                Event::Revoked(device) => {
+                    // The copy of the degraded mode refuses the device too, also before its next
+                    // refresh: the database can go away before that refresh.
+                    pg.cache_revoked(&device);
+                    app.hub.kick(&device, close::REVOKED);
+                }
                 Event::Replaced {
                     device,
                     instance,
@@ -72,7 +77,18 @@ fn spawn_cluster(app: Arc<App>) {
                         app.hub.kick_older(&device, connected_at, close::REPLACED);
                     }
                 }
-                Event::Resync => app.hub.wake_all(),
+                Event::Resync => {
+                    // A notification of a revocation can be lost with the connection: the copy is
+                    // read again, and a session of a device that it shows revoked ends.
+                    if pg.guard(pg.refresh_cache()).await.is_ok() {
+                        for (id, _) in app.hub.snapshot() {
+                            if pg.cached_device(&id).is_some_and(|d| d.revoked) {
+                                app.hub.kick(&id, close::REVOKED);
+                            }
+                        }
+                    }
+                    app.hub.wake_all();
+                }
             }
         }
     });
@@ -126,11 +142,14 @@ fn spawn_resilience(app: Arc<App>) {
             pg.spool().expire(app.delivery_cutoff());
             if pg.spool().has_work() {
                 match pg.guard(pg.replay()).await {
-                    Ok((alerts, devices)) => {
-                        if alerts > 0 {
-                            log::info!(event = "spool_replayed", alerts);
+                    Ok(done) => {
+                        if done.written > 0 {
+                            log::info!(event = "spool_replayed", alerts = done.written);
                         }
-                        app.hub.wake(&devices);
+                        for _ in 0..done.refused {
+                            app.metrics.alert_refused("replay");
+                        }
+                        app.hub.wake(&done.wake);
                     }
                     Err(e) => log::warn!(event = "spool_replay_failed", error = %e),
                 }

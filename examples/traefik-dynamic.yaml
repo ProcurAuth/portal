@@ -21,9 +21,16 @@ http:
     portal:
       forwardAuth:
         address: "http://portal:4181/auth/verify"
-        # Safe default when Traefik is directly exposed to clients.
-        # If Traefik itself is behind a trusted reverse proxy/LB, configure
-        # entryPoints.websecure.forwardedHeaders.trustedIPs and switch this to true.
+        # Keep false. Traefik then writes X-Forwarded-Uri and X-Forwarded-Method from the
+        # real request, and /auth/verify checks the request that Traefik routes.
+        # With true, Traefik copies these headers from a trusted hop (forwardedHeaders.trustedIPs).
+        # If the hop passes the headers of the client, a client can send
+        # X-Forwarded-Uri: /auth/login and pass the gate without a session.
+        # Set true only when each hop in front of Traefik overwrites or removes the
+        # X-Forwarded-Uri, X-Forwarded-Method, X-Forwarded-Host and X-Forwarded-Proto
+        # headers of the client. Most proxies keep them: check the configuration of the hop.
+        # Behind a TCP load balancer, keep false and use entryPoints.<name>.proxyProtocol.
+        # Behind an HTTP proxy with false, set session.bind = "user_agent" in the portal.
         trustForwardHeader: false
         preserveLocationHeader: true
         forwardBody: false
@@ -45,6 +52,7 @@ http:
     portal-key:
       forwardAuth:
         address: "http://portal:4181/auth/verify-key"
+        # Keep false, for the same reason as the middleware portal.
         trustForwardHeader: false
         authRequestHeaders:
           - Authorization

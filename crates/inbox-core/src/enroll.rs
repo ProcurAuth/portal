@@ -106,15 +106,25 @@ impl EnrollCode {
         Ok(EnrollCode { address, server_public_key, secret })
     }
 
-    /// Short fingerprint of the pinned key, to let the person compare it.
+    /// The fingerprint of the pinned key (80 bits, see [`key_fingerprint`]), for a person to compare.
     pub fn fingerprint(&self) -> String {
         key_fingerprint(&self.server_public_key)
     }
 }
 
-/// The first 8 hexadecimal characters of the SHA-256 digest of a public key.
+/// The bytes of the SHA-256 digest that the fingerprint shows: 80 bits. A different key with the
+/// same fingerprint costs about 2^80 digests.
+const FINGERPRINT_BYTES: usize = 10;
+
+/// The first 20 hexadecimal characters (80 bits, lower case) of the SHA-256 digest of a public
+/// key, in five groups of 4 characters with one space between them.
 pub fn key_fingerprint(public_key: &[u8]) -> String {
-    Sha256::digest(public_key).iter().take(4).map(|b| format!("{b:02x}")).collect()
+    let digest = Sha256::digest(public_key);
+    let groups: Vec<String> = digest[..FINGERPRINT_BYTES]
+        .chunks(2)
+        .map(|pair| pair.iter().map(|b| format!("{b:02x}")).collect())
+        .collect();
+    groups.join(" ")
 }
 
 fn decode_fixed<const N: usize>(text: &str) -> Option<[u8; N]> {
@@ -366,11 +376,23 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_eight_hex_of_sha256() {
+    fn fingerprint_is_eighty_bits_of_sha256_in_groups_of_four() {
         let code = code_for(&[0u8; 32]);
         // SHA-256 of 32 zero bytes: 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
-        assert_eq!(code.fingerprint(), "66687aad");
-        assert_eq!(key_fingerprint(&[0u8; 32]), "66687aad");
+        assert_eq!(code.fingerprint(), "6668 7aad f862 bd77 6c8f");
+        assert_eq!(key_fingerprint(&[0u8; 32]), "6668 7aad f862 bd77 6c8f");
+        let hex: String = code.fingerprint().split(' ').collect();
+        assert_eq!(hex.len() * 4, 80, "the fingerprint shows 80 bits");
+        // The digests of these two keys share their first 32 bits (93613343), the old fingerprint
+        // of 8 hexadecimal characters. A search of about 2^16 keys found them. The fingerprint of
+        // 80 bits tells them apart.
+        let key = |n: u16| {
+            let mut key = [0u8; 32];
+            key[30..].copy_from_slice(&n.to_be_bytes());
+            key
+        };
+        assert_eq!(key_fingerprint(&key(50323)), "9361 3343 0b8c 6a2b c988");
+        assert_eq!(key_fingerprint(&key(54260)), "9361 3343 acd6 e90c 30a9");
     }
 
     #[test]

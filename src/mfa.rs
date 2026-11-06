@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::crypto;
 use crate::secretbox::SecretBox;
 use crate::session::Principal;
-use crate::store::{Store, TotpLimits, TotpRow};
+use crate::store::{Attempt, Store, TotpLimits, TotpRow};
 use crate::totp;
 
 /// How long a person has to give the code after the password step, in seconds.
@@ -61,6 +61,32 @@ pub struct Pending {
     /// Unix time of the issue of the first token of the sequence. A new token after a wrong code keeps it, so
     /// a sequence never lasts longer than [`PENDING_TTL_SECS`].
     pub issued: i64,
+    /// The keyed digest of what the password step proved (see [`proof_of`]). It covers the stamp of the checked
+    /// credential and the second factor that the account had then. The second step goes on only while the account has
+    /// the same credential and the same second factor.
+    pub proof: [u8; 32],
+}
+
+const PROOF_DOMAIN: &str = "mfa-pending-proof";
+
+/// The value of [`Pending::proof`] for the stamp `credential` of the credential of the account and for its second
+/// factor `row`. A new password, a reset of the second factor, a new enrolment or a new superadmin credential gives
+/// another value.
+pub fn proof_of(
+    secret: &[u8],
+    credential: &[u8; 32],
+    row: Option<&TotpRow>,
+) -> Result<[u8; 32], String> {
+    let mut data = credential.to_vec();
+    match row {
+        // The sealed secret is new at each enrolment. It does not change when a code is used.
+        Some(row) => {
+            data.extend_from_slice(format!("\ntotp\n{}\n", row.created_at).as_bytes());
+            data.extend_from_slice(&row.sealed);
+        }
+        None => data.extend_from_slice(b"\nnone"),
+    }
+    crypto::mac(secret, PROOF_DOMAIN, &data)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -85,17 +111,19 @@ fn payload(pending: &Pending) -> String {
         Principal::User(login) => format!("u:{login}"),
     };
     format!(
-        "{}\n{who}\n{}\n{}\n{}",
+        "{}\n{who}\n{}\n{}\n{}\n{}",
         pending.stage.as_str(),
         u8::from(pending.keep),
         pending.tries,
-        pending.issued
+        pending.issued,
+        Base64UrlUnpadded::encode_string(&pending.proof)
     )
 }
 
 /// The token of a pending sign-in. It is bound to the browser (the `binding` of the session rule, which holds the
 /// client address under the default rule) and to the anti-CSRF token of the page. It holds the account, the
-/// choice "Remember me", the count of wrong codes and the time of the issue.
+/// choice "Remember me", the count of wrong codes and the time of the issue. It also holds the digest of what the
+/// password step proved.
 pub fn sign_pending(
     secret: &[u8],
     pending: &Pending,
@@ -134,7 +162,8 @@ pub fn open_pending(
     }
     let text = String::from_utf8(text).map_err(|_| PendingError::Invalid)?;
     let mut fields = text.split('\n');
-    let (Some(stage), Some(who), Some(keep), Some(tries), Some(issued), None) = (
+    let (Some(stage), Some(who), Some(keep), Some(tries), Some(issued), Some(proof), None) = (
+        fields.next(),
         fields.next(),
         fields.next(),
         fields.next(),
@@ -163,6 +192,10 @@ pub fn open_pending(
         keep: keep == "1",
         tries: tries.parse().map_err(|_| PendingError::Invalid)?,
         issued: issued.parse().map_err(|_| PendingError::Invalid)?,
+        proof: Base64UrlUnpadded::decode_vec(proof)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(PendingError::Invalid)?,
     };
     if now - pending.issued > PENDING_TTL_SECS || now < pending.issued - 5 {
         return Err(PendingError::Expired);
@@ -313,8 +346,10 @@ impl Mfa {
     }
 
     /// Checks a typed code of the second step. A code of the app is good once: the database keeps the last accepted
-    /// step. A recovery code is good once: the database deletes it. A wrong code counts against the account, in the
-    /// database, so every instance adds to the count.
+    /// step. A recovery code is good once: the database deletes it. Each attempt counts against the account in the
+    /// database before the comparison, so every instance adds to the count. The count and the lock are one step:
+    /// attempts that arrive at the same time compare at most [`LIMITS`]`.max_failures` codes before the lock. A good
+    /// code clears the count.
     ///
     /// The error is a failure of the database, or a secret that the key does not open. A wrong key never gives
     /// a wrong code: the caller shows an error of the server and no secret changes.
@@ -328,13 +363,15 @@ impl Mfa {
         let Some(row) = store.totp_get(login)? else {
             return Ok(Verdict::NotEnrolled);
         };
-        if row.locked_until > now {
-            return Ok(Verdict::Locked {
-                until: row.locked_until,
-            });
-        }
+        // A secret that the key does not open is an error of the server before the attempt counts: a wrong key
+        // changes no row.
+        let secret = self.open_secret(login, &row)?;
+        let locked_until = match store.totp_begin_attempt(login, now, LIMITS)? {
+            Attempt::NotEnrolled => return Ok(Verdict::NotEnrolled),
+            Attempt::Locked { until } => return Ok(Verdict::Locked { until }),
+            Attempt::Counted { locked_until } => locked_until,
+        };
         if let Some(code) = totp::normalize_code(typed) {
-            let secret = self.open_secret(login, &row)?;
             if let Some(step) = totp::verify(&secret, &code, now, row.last_step) {
                 if store.totp_accept_step(login, step)? {
                     return Ok(Verdict::Totp);
@@ -345,7 +382,7 @@ impl Mfa {
                 return Ok(Verdict::Recovery);
             }
         }
-        let locked_until = store.totp_fail(login, now, LIMITS)?;
+        // The attempt counted already.
         Ok(Verdict::Wrong { locked_until })
     }
 
@@ -416,6 +453,7 @@ mod tests {
             keep: true,
             tries,
             issued: 1_000_000,
+            proof: [3; 32],
         }
     }
 
@@ -429,6 +467,7 @@ mod tests {
                     keep: true,
                     tries: 3,
                     issued: 1_000_000,
+                    proof: [3; 32],
                 };
                 let token = sign_pending(SECRET, &want, &BINDING, CSRF).unwrap();
                 assert_eq!(
@@ -482,6 +521,11 @@ mod tests {
             plain.replace("\n1\n0\n", "\n0\n0\n"),
             plain.replace("\n0\n1000000", "\n9\n1000000"),
             plain.replace("code", "enrol"),
+            // The proof of the password step.
+            plain.replace(
+                &Base64UrlUnpadded::encode_string(&[3; 32]),
+                &Base64UrlUnpadded::encode_string(&[4; 32]),
+            ),
         ] {
             let forged = format!(
                 "{}.{mac}",
@@ -691,6 +735,109 @@ mod tests {
                     mfa.verify(&store, "alice", "000000", at).unwrap(),
                     Verdict::Wrong { locked_until: None },
                     "spread failure {n}"
+                );
+            }
+        });
+    }
+
+    /// The proof of a pending token changes with the credential that the password step checked. It also changes with
+    /// the second factor of the account: a reset or a new enrolment.
+    #[test]
+    fn the_proof_of_a_pending_token_follows_the_credential_and_the_second_factor() {
+        let row = |sealed: &[u8], created_at: i64| TotpRow {
+            sealed: sealed.to_vec(),
+            created_at,
+            last_step: 1,
+            failed: 0,
+            locked_until: 0,
+            recovery_left: 10,
+        };
+        let proof = |credential: [u8; 32], row: Option<&TotpRow>| {
+            proof_of(SECRET, &credential, row).unwrap()
+        };
+        let base = proof([1; 32], Some(&row(b"sealed-1", 5)));
+        assert_eq!(base, proof([1; 32], Some(&row(b"sealed-1", 5))));
+        // A used code or a failure changes the row, and not the proof.
+        let mut used = row(b"sealed-1", 5);
+        used.last_step = 9;
+        used.failed = 3;
+        used.recovery_left = 2;
+        assert_eq!(base, proof([1; 32], Some(&used)));
+        for other in [
+            proof([2; 32], Some(&row(b"sealed-1", 5))),
+            proof([1; 32], Some(&row(b"sealed-2", 5))),
+            proof([1; 32], Some(&row(b"sealed-1", 6))),
+            proof([1; 32], None),
+        ] {
+            assert_ne!(base, other);
+        }
+        assert_ne!(
+            base,
+            proof_of(
+                b"another-key-another-key-another!",
+                &[1; 32],
+                Some(&row(b"sealed-1", 5))
+            )
+            .unwrap()
+        );
+    }
+
+    /// Attempts at the same time compare at most `LIMITS.max_failures` codes before the lock. The attempt counts, and
+    /// the lock is decided, in one step before the comparison (portal/mfa/lock-check-outside-failure-write).
+    #[test]
+    fn attempts_at_the_same_time_never_compare_more_codes_than_the_lock_allows() {
+        let mfa = mfa(1);
+        let now = 1_700_000_000;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let (secret, _) = enrolled(&store, &mfa, "alice", now);
+            for window in 0..3 {
+                let t = now + 60 + window * (LIMITS.lockout + 1);
+                let good: Vec<String> = [-30, 0, 30]
+                    .iter()
+                    .map(|offset| totp::code_at(&secret, t + offset))
+                    .collect();
+                let codes: Vec<String> = (0..40)
+                    .map(|n| format!("{n:06}"))
+                    .filter(|code| !good.contains(code))
+                    .take(16)
+                    .collect();
+                let barrier = std::sync::Barrier::new(codes.len());
+                let verdicts: Vec<Verdict> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = codes
+                        .iter()
+                        .map(|code| {
+                            let (mfa, store, barrier) = (&mfa, &store, &barrier);
+                            scope.spawn(move || {
+                                barrier.wait();
+                                mfa.verify(store, "alice", code, t).unwrap()
+                            })
+                        })
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                let compared = verdicts
+                    .iter()
+                    .filter(|v| matches!(v, Verdict::Wrong { .. }))
+                    .count();
+                assert_eq!(
+                    compared,
+                    LIMITS.max_failures as usize,
+                    "{}: window {window}: {verdicts:?}",
+                    backend.name()
+                );
+                assert_eq!(
+                    verdicts
+                        .iter()
+                        .filter(|v| matches!(
+                            v,
+                            Verdict::Wrong {
+                                locked_until: Some(_)
+                            }
+                        ))
+                        .count(),
+                    1,
+                    "the fifth attempt locks"
                 );
             }
         });

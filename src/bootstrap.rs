@@ -38,6 +38,24 @@ pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
     out
 }
 
+/// Refuses a database that holds an account with the login of the superadmin (portal 3.4a). The program
+/// recognises the superadmin by its login: the rights of the Inbox, the direct alerts, the PDP, the second
+/// factor and the identity token. The login therefore has one owner. The error does not show the login, because
+/// the configuration hides it.
+pub fn check_superadmin_against_database(
+    superadmin_login: &str,
+    snapshot: &DirectorySnapshot,
+) -> Result<(), String> {
+    if snapshot
+        .users
+        .iter()
+        .any(|user| user.login == superadmin_login)
+    {
+        return Err("authentication.superadmin_login is also the login of an account of the database: an account comes from one source, so delete that account or give the superadmin another login (the value is hidden)".into());
+    }
+    Ok(())
+}
+
 /// Refuses a file that holds a login, a key id or a key digest that the database holds too
 /// (portal 3.4a, 3.4c). Each error names the login and, for a key, its name.
 pub fn check_file_against_database(

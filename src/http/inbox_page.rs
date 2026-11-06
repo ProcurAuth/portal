@@ -500,9 +500,14 @@ async fn page(
             Ok(v) => v,
             Err(_) => return unavailable(),
         };
+        // The graph counts the groups that the account may read, as the rows do. A group with
+        // `alert.send` only adds nothing.
         let counts =
             match admin::alert_counts(&ctx.app, since_ms, query.period.bucket_millis()).await {
-                Ok(v) => v,
+                Ok(v) => v
+                    .into_iter()
+                    .filter(|count| ctx.held.may_read(&count.group))
+                    .collect(),
                 Err(_) => return unavailable(),
             };
         let opened = match &query.open {
@@ -630,8 +635,9 @@ async fn form<'a>(
         ));
     }
     // The session first: the portal reads no body for a request that has no session.
-    let ctx = open(state, "", request.headers(), client)?;
-    if !ctx.held.ui.any() {
+    let headers = request.headers().clone();
+    let first = open(state, "", &headers, client)?;
+    if !first.held.ui.any() {
         return Err(forbidden());
     }
     let body = match read_limited_body(
@@ -656,6 +662,15 @@ async fn form<'a>(
         }
         Err(BodyReadError::Io) => return Err(bad_request()),
     };
+    // The session can end while the body arrives: a deleted account must not make a code or send an alert. The
+    // action needs the session and the rights of now.
+    let ctx = open(state, "", &headers, client)?;
+    if ctx.viewer.session.sid != first.viewer.session.sid {
+        return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
+    }
+    if !ctx.held.ui.any() {
+        return Err(forbidden());
+    }
     let Ok(mut fields) = parse_form(&body) else {
         return Err(bad_request());
     };
@@ -945,7 +960,12 @@ async fn code(
         "inbox_enrollment_code",
         &[("actor", ctx.viewer.login.clone())],
     );
-    let made = state.inbox.create_enrollment_code(&ctx.viewer.login).await;
+    // An account of the database gets a code only while its row exists: a delete of the account
+    // at the same time leaves no code (see `inbox::Slot::create_enrollment_code`).
+    let login = &ctx.viewer.login;
+    let stored =
+        *login != state.superadmin_login && !state.config.access.accounts.contains_key(login);
+    let made = state.inbox.create_enrollment_code(login, stored).await;
     match made {
         Some(Ok(code)) => {
             page(

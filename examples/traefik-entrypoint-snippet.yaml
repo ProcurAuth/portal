@@ -18,8 +18,15 @@ entryPoints:
       tls:
         options: default
 
-    # If another trusted proxy/load-balancer sits in front of Traefik, list only
-    # its addresses here and set forwardAuth.trustForwardHeader=true.
+    # A proxy or a load balancer in front of Traefik: list only its addresses here.
+    # Keep forwardAuth.trustForwardHeader false in the middlewares of the portal
+    # (see traefik-dynamic.yaml). trustedIPs does not remove the X-Forwarded-Uri and
+    # X-Forwarded-Method headers that a client sends through the hop. With
+    # trustForwardHeader true, the client then chooses the request that /auth/verify checks.
     # forwardedHeaders:
+    #   trustedIPs:
+    #     - "10.0.0.0/8"
+    # A TCP load balancer can give the client address with the PROXY protocol instead:
+    # proxyProtocol:
     #   trustedIPs:
     #     - "10.0.0.0/8"

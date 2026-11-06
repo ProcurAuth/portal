@@ -10,8 +10,8 @@
 //
 // Environment:
 //   UI_CHECK_BASE      base URL of the portal (default http://127.0.0.1:18814)
-//   UI_CHECK_HOST      a host name that the browser maps to the address of UI_CHECK_BASE, so the band shows it
-//                      (for example app.example.com). Without it, the band shows the host of UI_CHECK_BASE.
+//   UI_CHECK_HOST      a host name that the browser maps to the address of UI_CHECK_BASE
+//                      (for example app.example.com). The check makes sure that the band shows no host.
 //   UI_CHECK_LOGIN     login of the superadmin (default admin)
 //   UI_CHECK_PASSWORD  its password
 //   UI_CHECK_SHOTS     a directory for the screenshots (optional)
@@ -65,6 +65,12 @@ async function open(browser, scheme, width, script, height) {
     hasTouch: mobile,
   });
   const page = await context.newPage();
+  // The requests for an icon: a sign-in page must cause none. The headless browser never asks for an icon by itself, so
+  // this is a smoke check. The proof is the link: the empty icon only.
+  page.iconRequests = [];
+  page.on("request", (r) => {
+    if (/favicon|apple-touch|\.ico(\?|$)|\.svg(\?|$)|manifest/i.test(r.url())) page.iconRequests.push(r.url());
+  });
   return { context, page };
 }
 
@@ -98,7 +104,7 @@ function inspect(page) {
     while (card && getComputedStyle(card).borderTopWidth === "0px") card = card.parentElement;
     const panel = getComputedStyle(card).backgroundColor;
     const divs = Array.from(document.querySelectorAll("main div")).filter(
-      (d) => /^\s*To\s/.test(d.textContent) && d.querySelector("svg")
+      (d) => /^\s*Redirect\s/.test(d.textContent) && d.querySelector("svg")
     );
     const band = divs.filter((d) => !divs.some((o) => o !== d && d.contains(o)))[0] || null;
     const out = { width: window.innerWidth, height: window.innerHeight };
@@ -238,12 +244,15 @@ async function main() {
           await page.waitForTimeout(400);
           const i = await inspect(page);
           check("no horizontal scroll, no inline style (" + name + ")", !i.overflow && i.inlineStyle === 0, JSON.stringify([i.overflow, i.inlineStyle]));
+          const icons = await page.$$eval("link[rel~=icon], link[rel~=apple-touch-icon], link[rel=manifest]", (links) => links.map((l) => l.getAttribute("rel") + " " + l.getAttribute("href")));
+          check("the page has no icon but the empty one, and asks for none (" + name + ")", icons.length === 1 && icons[0] === "icon data:," && page.iconRequests.length === 0, JSON.stringify([icons, page.iconRequests]));
           check("one hidden heading and the title Authentication (" + name + ")", i.h1.length === 1 && i.h1[0].text === "Authentication" && i.h1[0].box.w <= 1 && i.title === "Authentication", JSON.stringify([i.h1, i.title]));
           check("the card is flat with a hairline border (" + name + ")", i.cardBorder === "1px" && i.cardShadow === "none" && i.card.w <= 320 && (i.width < 400 || i.card.w === 320), JSON.stringify([i.cardBorder, i.cardShadow, i.card]));
           check(redirect ? "a band with the destination (" + name + ")" : "no band (" + name + ")", redirect ? !!i.band : !i.band, JSON.stringify(i.band));
           if (redirect) {
-            const want = (SHOWN ? SHOWN + ":" + new URL(BASE).port : new URL(BASE).host) + "/chdash/reports/2026";
-            check("the band says host and path, not the query (" + name + ")", i.band.text === "To " + want || i.band.text.replace(/^To\s*/, "") === want, i.band.text);
+            const want = "/chdash/reports/2026";
+            const hostName = SHOWN || new URL(BASE).hostname;
+            check("the band says the path, not the query, and no host (" + name + ")", i.band.text.replace(/^Redirect\s*/, "") === want && !i.band.text.includes(hostName), i.band.text);
             check("the band is 32 px high, inside the card, with no link (" + name + ")", i.band.height === "32px" && i.band.inside && i.links === 0, JSON.stringify(i.band));
             check("the band text is 12 px (" + name + ")", i.band.fontSize === "12px", i.band.fontSize);
             check("the address is not cut at this width, or it carries its tooltip (" + name + ")", !i.band.clipped || i.band.tooltip.includes("/chdash/reports/2026"), JSON.stringify(i.band));

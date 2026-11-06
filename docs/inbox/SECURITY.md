@@ -8,7 +8,7 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 
 - **Enrollment.** An account of the portal makes a one-time code. The code holds the address of the server, the public key of the server and a secret of 128 bits. The phone pins the key. It sends the secret inside a Noise IK message to this key. A network capture gives neither the secret nor material for an offline attack.
 - **Code.** The secret works one time and expires (`inbox.enrollment.code_ttl`). The server keeps only its SHA-256 digest. The answer that shows the code has the header `Cache-Control: no-store`.
-- **Limits.** The server limits the enrollment attempts for each client address (`inbox.devices.max_auth_failures` in `inbox.devices.auth_failure_window`). It closes a connection that sends no message in 10 seconds.
+- **Limits.** The server limits the failed attempts for each client address (`inbox.devices.max_auth_failures` in `inbox.devices.auth_failure_window`). An enrollment attempt and a session handshake that proves no phone count. A phone that proves its key always gets its session. The server closes an enrollment that sends no message in 10 seconds, and a session handshake after 15 seconds. One client address holds at most `inbox.devices.max_handshakes_per_address` handshakes. One account has at most `inbox.devices.max_per_account` phones.
 - **Sessions.** A session is Noise IK between the key of the phone and the pinned key of the server. Each phone can be revoked. A revoked phone gets the close code 4403.
 - **Rights.** The permissions of the portal features (the service `portal`) decide who sends, who reads and who revokes. A phone subscribes only to the groups for which its account has `inbox.receive`.
 - **Keys.** A sender uses an `api_` key. A verifier checks the form of the text (prefix, length, characters, checksum) and the kind before any lookup. An `mcp_` key and a bad text get `401` with no detail. A key follows its owner and never has more rights than its owner. A key of the file is compared in constant time. A key of the database needs `alert.send` on the group, for the key and for its owner. For an alert to an account, it needs `alert.send_user` on the service `portal`, for the key and for its owner.
@@ -25,6 +25,8 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 - A session that the superadmin opens as another account can read the phones and make a code for that account. The phone then belongs to that account. The owner has not reviewed this point.
 - The Android app allows clear text for each address. It has no network security configuration.
 - Each instance has its own rate limits and its own counter of refused sign-ins.
+- The alerts of the portal about itself (`inbox.watch`) name each service that the portal probes. Each account with `inbox.receive` or `alert.read` on `inbox.watch.group` reads them. This includes the alerts about a service that the account may not open. The portal does not filter these alerts for each reader. The owner chooses the members of the group.
+- With PostgreSQL, a phone of a login that this instance does not know gets the close code 1013 and no session. Examples are an account of the file that left the file and an old login of the superadmin. The Inbox does not end the state of this login, because the file of another instance can still have it. The phone tries again until a person revokes it in the zone **Phones**. Revoke it when every instance has the new file.
 
 ## Operator checklist
 
@@ -36,4 +38,5 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 - Keep `inbox.cluster.listen` on the private network of the pods.
 - Do not publish the port of the portal to the internet without a proxy that you control. Let the proxy send only `/v1/`, `/api/v1/` and `/api/version` to the internet, and keep the pages behind ForwardAuth. A phone session uses a budget of connections that is separate from the pages.
 - Give each sender its own `api_` key with the smallest set of groups. Revoke a key that leaks.
+- Give `inbox.receive` and `alert.read` on `inbox.watch.group` only to persons who may know the names of all the services.
 - Alert on `portal_inbox_devices_unreachable`, `portal_inbox_oldest_pending_delivery_seconds`, `portal_inbox_storage_degraded` and `portal_inbox_replica_last_snapshot_age_seconds`.

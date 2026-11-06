@@ -35,7 +35,9 @@ use crate::key_forms;
 use crate::keyauth;
 use crate::metrics::Metrics;
 use crate::rate_limit::RateLimiter;
-use crate::session::{Binding, NewSession, Principal, Session, SessionIssueError, SessionStore};
+use crate::session::{
+    Binding, Credential, NewSession, Principal, Session, SessionIssueError, SessionStore,
+};
 use crate::store::{AccountActivity, InsertError, LoginPage, Snapshot, Store, UserRow};
 use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
@@ -96,8 +98,6 @@ type HttpResponse = Response<ResponseBody>;
 struct Client {
     /// True when the browser uses HTTPS. This value sets the cookie names and the `Secure` attribute.
     https: bool,
-    /// The host that the browser asked for. The sign-in pages show it. See [`transport::display_host`].
-    host: Option<String>,
     ip: Option<IpAddr>,
     /// The value that a session issued to this client is bound to.
     binding: Binding,
@@ -107,7 +107,6 @@ impl Client {
     fn new(state: &AppState, headers: &HeaderMap, ip: Option<IpAddr>) -> Self {
         Self {
             https: transport::is_https(headers),
-            host: transport::display_host(headers),
             ip,
             binding: transport::binding(state.config.session.bind, headers, ip),
         }
@@ -128,6 +127,9 @@ pub struct AppState {
     pub config: Config,
     pub superadmin_login: String,
     pub superadmin_hash: String,
+    /// The credential generation of the superadmin. It is the stamp of the credential of a superadmin session (see
+    /// [`credential_stamp`]).
+    pub superadmin_generation: Credential,
     /// The hash that the portal checks when the login does not exist. An unknown login then takes the same time as a known login.
     pub dummy_hash: String,
     pub signing_secret: Vec<u8>,
@@ -267,7 +269,8 @@ impl AppState {
             config.session.idle_timeout,
             config.session.max_active_sessions,
             Arc::clone(&tracker),
-        );
+        )
+        .per_account(config.session.max_sessions_per_account);
         if let Some(remember) = config.session.remember {
             sessions = sessions.remember(remember);
         }
@@ -278,6 +281,7 @@ impl AppState {
             sessions.end_other_generations();
         }
         let snapshot = store.load_directory()?;
+        crate::bootstrap::check_superadmin_against_database(&superadmin.login, &snapshot)?;
         crate::bootstrap::check_file_against_database(&config, &snapshot)?;
         crate::bootstrap::check_user_grants(&config, &snapshot)?;
         let users = Directory::from_snapshot(snapshot, config.users.max_users)
@@ -341,6 +345,7 @@ impl AppState {
             config,
             superadmin_login: superadmin.login,
             superadmin_hash: superadmin.password_hash,
+            superadmin_generation: superadmin.generation,
             dummy_hash,
             signing_secret,
             mfa,
@@ -818,7 +823,7 @@ async fn handle_request(
             &state.mask.assets().notify,
         )
     } else if method == Method::GET && path == ui::favicon_path() && state.tab_look().icon {
-        handle_favicon(&state, request.headers(), &client)
+        handle_favicon(&state, &uri, request.headers(), &client)
     } else if method == Method::GET && path == STYLE_PATH {
         static_response("text/css; charset=utf-8", &ui::assets().css)
     } else if method == Method::GET && path.starts_with(ICONS_PREFIX) {
@@ -873,6 +878,17 @@ async fn handle_request(
     } else {
         handle_not_found(&state, &method, &uri, request.headers(), &client)
     };
+    // A form of the portal that changed the database waits for the copy of the replica, as a
+    // write of the inbox does: a takeover must not bring back a deleted account, a revoked key or a
+    // used recovery code. The sign-in and the sign-out do not wait. Nothing to copy: no wait.
+    if method == Method::POST
+        && !starting
+        && !crate::inbox::owns(&path)
+        && path != LOGIN_PATH
+        && path != LOGOUT_PATH
+    {
+        state.inbox.sync_replica().await;
+    }
 
     let status = response.status().as_u16();
     state
@@ -1098,9 +1114,22 @@ fn handle_not_found(
     headers: &HeaderMap,
     client: &Client,
 ) -> HttpResponse {
+    not_found_response(state, method, uri, || {
+        has_valid_session(state, headers, client)
+    })
+}
+
+/// The answer for a path that does not exist. `signed_in` tells whether the visitor has a session. It runs only when
+/// the answer depends on it, so a caller that already knows the visitor has none gives a function with no check.
+fn not_found_response(
+    state: &AppState,
+    method: &Method,
+    uri: &str,
+    signed_in: impl FnOnce() -> bool,
+) -> HttpResponse {
     if *method == Method::GET
         && validate_return_uri(uri, state.config.security.max_forwarded_uri_bytes)
-        && !has_valid_session(state, headers, client)
+        && !signed_in()
     {
         if let Ok(location) = login_location(state, uri) {
             return redirect_response(StatusCode::FOUND, &location);
@@ -1180,10 +1209,18 @@ fn handle_icon(state: &AppState, path: &str) -> HttpResponse {
 }
 
 /// The icon of the tab. Only a signed-in browser gets it: the file shows the logo, and a visitor who is not signed in
-/// must not find the product with it. Its use does not renew the idle timer, as the poll of the notifications.
-fn handle_favicon(state: &AppState, headers: &HeaderMap, client: &Client) -> HttpResponse {
+/// must not find the product with it. A visitor gets the answer of any unknown path, so the path of the icon, which
+/// follows from the content of the file, does not look different from a path that never existed. The use of the
+/// icon does not renew the idle timer, as the poll of the notifications.
+fn handle_favicon(
+    state: &AppState,
+    uri: &str,
+    headers: &HeaderMap,
+    client: &Client,
+) -> HttpResponse {
     if current_viewer_passive(state, headers, client).is_none() {
-        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
+        // The check above found no session: the answer needs no second check, which would renew the idle timer.
+        return not_found_response(state, &Method::GET, uri, || false);
     }
     let mut response = hashed_response("image/svg+xml", ui::FAVICON_SVG);
     // The cache is private: a shared cache must not keep a file that needs a session.
@@ -1346,12 +1383,14 @@ async fn handle_settings(
             };
             let accounts = if superadmin {
                 let (users, snapshot) = load_admin_data(state).await;
+                let two_factor = mfa_page::enabled_logins(state).await;
                 Some(accounts_data(
                     state,
                     &workloads,
                     &users_token,
                     users,
                     &snapshot,
+                    two_factor,
                 ))
             } else {
                 None
@@ -1642,6 +1681,7 @@ fn accounts_data<'a>(
     users_token: &'a str,
     users: Vec<(String, UserRecord)>,
     snapshot: &Snapshot,
+    two_factor: Option<std::collections::HashSet<String>>,
 ) -> ui::Accounts<'a> {
     let mut activities = activities_of(snapshot);
     let counts = key_counts(state);
@@ -1674,6 +1714,7 @@ fn accounts_data<'a>(
         features: features_service(state),
         max_users: state.config.users.max_users,
         token: users_token,
+        two_factor,
     }
 }
 
@@ -2009,6 +2050,19 @@ fn viewer_of(
         state.metrics.session_invalid();
         return None;
     };
+    // The session ends when its credential is not the credential of now. Examples are a new password, a removed
+    // password and another account of the login. A session that a sign-in issued after the revocation of the account
+    // ends here too.
+    match credential_current(state, &session.principal, &session.credential) {
+        Fresh::Current => {}
+        Fresh::Stale => {
+            state.metrics.session_invalid();
+            state.sessions.revoke(token, EndReason::Revoked);
+            return None;
+        }
+        // The database did not answer. The session stays: the next request asks again.
+        Fresh::Unknown => return None,
+    }
     state.metrics.session_valid();
     let (grants, login) = match &session.principal {
         Principal::Superadmin => (None, state.superadmin_login.clone()),
@@ -2068,6 +2122,98 @@ fn refresh_directory_if_due(state: &AppState) -> bool {
                 .users
                 .refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP)
         })
+}
+
+// The binding of the sign-in proofs and of the sessions to the credential ----------------------------------------
+
+/// Where the password of an account comes from. The stamp names it: an account of the file and an account of the
+/// database never have the same stamp.
+#[derive(Clone, Copy)]
+enum Source {
+    Database,
+    File,
+}
+
+/// The stamp of the password `hash` of the account `login` (see [`Credential`]). The stamp is a SHA-256 digest, not a
+/// MAC: a new session secret does not end the sessions of the accounts. The digest tells nothing that helps a guess
+/// of the password: the hash holds a random salt, and the digest does not give the salt.
+fn account_stamp(source: Source, login: &str, hash: &str) -> Credential {
+    use sha2::Digest;
+    let source = match source {
+        Source::Database => "db",
+        Source::File => "file",
+    };
+    // A login has no line end: the line ends separate the fields.
+    sha2::Sha256::digest(format!("credential-stamp\n{source}\n{login}\n{hash}").as_bytes()).into()
+}
+
+/// The stamp of the credential of `principal` now. For the superadmin, it is the credential generation. For an account
+/// of the database or of the file, it is the stamp of the password hash. `None`: the principal has no password now.
+/// The login of the superadmin names no account, so `Principal::User` with that login has no stamp either.
+///
+/// Each sign-in proof and each session carries the stamp of the credential that the proof checked. The proofs are the
+/// password step and the pending token of the second step. A proof opens a session, and a session acts, only while
+/// the stamp is the stamp of now (see [`credential_current`]). Thus a new password refuses every proof and every
+/// session made before it. A removed password, a new superadmin credential and a new account of the login do the
+/// same. The order of the revocation and of the sign-in does not change this result.
+fn credential_stamp(state: &AppState, principal: &Principal) -> Option<Credential> {
+    match principal {
+        Principal::Superadmin => Some(state.superadmin_generation),
+        Principal::User(login) if *login == state.superadmin_login => None,
+        Principal::User(login) => match state.users.password_hash(login) {
+            Some(hash) => Some(account_stamp(Source::Database, login, &hash)),
+            None => {
+                let hash = state
+                    .config
+                    .access
+                    .accounts
+                    .get(login)?
+                    .password_hash
+                    .as_deref()?;
+                Some(account_stamp(Source::File, login, hash))
+            }
+        },
+    }
+}
+
+/// What a check of a stamp found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fresh {
+    /// The stamp is the stamp of now.
+    Current,
+    /// The credential changed, or the principal has no password now.
+    Stale,
+    /// The shared database did not answer: the portal cannot tell.
+    Unknown,
+}
+
+/// Whether `credential` is the stamp of the credential of `principal` now. This is the one check of the binding of
+/// a proof or of a session to the credential. With a shared database, the directory of this instance can lack a
+/// change of another instance. The directory is then read again before the answer `Stale`.
+fn credential_current(state: &AppState, principal: &Principal, credential: &Credential) -> Fresh {
+    fresh_against_directory(state, |state| {
+        credential_stamp(state, principal).is_some_and(|now| constant_time_eq(&now, credential))
+    })
+}
+
+/// `Current` when `holds` is true for the directory of this instance. Otherwise, with a shared database, the
+/// directory is read again and `holds` decides.
+fn fresh_against_directory(state: &AppState, mut holds: impl FnMut(&AppState) -> bool) -> Fresh {
+    if holds(state) {
+        return Fresh::Current;
+    }
+    if !state.store.is_shared() {
+        return Fresh::Stale;
+    }
+    let since = crate::users::Directory::clock_millis();
+    if !blocking(|| state.users.refresh_since(&state.store, since)) {
+        return Fresh::Unknown;
+    }
+    if holds(state) {
+        Fresh::Current
+    } else {
+        Fresh::Stale
+    }
 }
 
 /// The time in milliseconds since the Unix epoch.
@@ -2186,6 +2332,22 @@ struct LoginForm {
     /// The anti-CSRF cookie of the browser.
     csrf_cookie: Option<String>,
     form: std::collections::HashMap<String, String>,
+    /// The permit of `server.max_login_body_reads`. The sign-in keeps it until it has the Argon2
+    /// permit. Thus the sign-ins that read a body or wait for a check hold at most this number of
+    /// connections, and ForwardAuth keeps the others.
+    body_permit: tokio::sync::OwnedSemaphorePermit,
+    /// `server.body_read_timeout` after the start of the body read. The wait for the Argon2 permit
+    /// ends at this time too, so a sign-in holds its connection for a bounded time.
+    deadline: tokio::time::Instant,
+}
+
+/// `503` with `Retry-After: 1`: the server has no room for this sign-in now.
+fn sign_in_busy() -> HttpResponse {
+    let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n");
+    if set_dynamic_header(&mut response, RETRY_AFTER, "1").is_err() {
+        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+    }
+    response
 }
 
 #[allow(clippy::result_large_err)] // the error is the response, sent as is
@@ -2254,22 +2416,15 @@ async fn login_form(
                 ),
             ],
         );
-        let mut response = text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n");
-        if set_dynamic_header(&mut response, RETRY_AFTER, "1").is_err() {
-            return Err(text_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "authentication error\n",
-            ));
-        }
-        return Err(response);
+        return Err(sign_in_busy());
     };
+    let deadline = tokio::time::Instant::now() + state.config.server.body_read_timeout;
     let body = read_limited_body(
         request.into_body(),
         state.config.server.max_body_bytes,
         state.config.server.body_read_timeout,
     )
     .await;
-    drop(body_permit);
     let body = match body {
         Ok(v) => Zeroizing::new(v),
         Err(BodyReadError::TooLarge) => {
@@ -2303,6 +2458,8 @@ async fn login_form(
         headers,
         csrf_cookie,
         form,
+        body_permit,
+        deadline,
     })
 }
 
@@ -2316,6 +2473,8 @@ async fn handle_login_post(
         headers,
         csrf_cookie,
         mut form,
+        body_permit,
+        deadline,
     } = match login_form(state, request, client).await {
         Ok(v) => v,
         Err(response) => return response,
@@ -2397,13 +2556,27 @@ async fn handle_login_post(
         return response;
     }
 
-    let permit = match Arc::clone(&state.password_gate).acquire_owned().await {
-        Ok(v) => v,
-        Err(_) => {
+    // The wait for the Argon2 permit keeps the body permit and ends at the deadline of the body.
+    // Thus waiting sign-ins hold at most `server.max_login_body_reads` connections, each for a
+    // bounded time. The answer at the deadline tells nothing about the login: no check ran.
+    let gate = Arc::clone(&state.password_gate).acquire_owned();
+    let permit = match tokio::time::timeout_at(deadline, gate).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(_)) => {
             state.metrics.login_internal_error();
             return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
         }
+        Err(_) => {
+            log(
+                state,
+                LogLevel::Warn,
+                "login_password_check_wait_timeout",
+                &[("client_ip", client_ip_text.clone())],
+            );
+            return sign_in_busy();
+        }
     };
+    drop(body_permit);
 
     // Requests can wait in a queue behind the Argon2 semaphore. Check again after the request gets the permit.
     // This check stops a burst that the portal admitted before the first failures were recorded. Such a burst cannot drain the expensive password-check budget afterwards.
@@ -2431,7 +2604,7 @@ async fn handle_login_post(
     let known = !matches!(who, Who::Unknown);
     let target_hash = match &who {
         Who::Superadmin => state.superadmin_hash.clone(),
-        Who::User(_, record) => record.password_hash.clone(),
+        Who::User(_, record, _) => record.password_hash.clone(),
         Who::Unknown => state.dummy_hash.clone(),
     };
     let authenticated = {
@@ -2523,19 +2696,30 @@ async fn handle_login_post(
 
     let (principal, session_login) = match &who {
         Who::Superadmin => (Principal::Superadmin, state.superadmin_login.clone()),
-        Who::User(login, _) => (Principal::User(login.clone()), login.clone()),
+        Who::User(login, _, _) => (Principal::User(login.clone()), login.clone()),
         Who::Unknown => unreachable!("an unknown login never authenticates"),
     };
-    // With the second factor on, the password opens no session: the person goes on to the second step. The failures
-    // of the address stay on record until a person finishes the second step, so a script that knows a password
-    // cannot clear them.
-    if let Some(response) =
-        mfa_page::after_password(state, client, &principal, keep, &csrf, &rd, &sig).await
+    // The proof of the password holds for the copy of the credential that the check used. A new password that
+    // arrived during the check makes the proof stale (see `finish_sign_in`).
+    let Some(credential) = who.credential(state) else {
+        unreachable!("an unknown login never authenticates")
+    };
+    // A good password clears no failure of the address: the failures of the address can name other logins. They
+    // expire with `security.login_window`. With the second factor on, the password opens no session: the person
+    // goes on to the second step.
+    if let Some(response) = mfa_page::after_password(
+        state,
+        client,
+        &principal,
+        &credential,
+        keep,
+        &csrf,
+        &rd,
+        &sig,
+    )
+    .await
     {
         return response;
-    }
-    if state.config.security.login_rate_limit_enabled {
-        state.ip_limiter.success(&ip_key);
     }
     finish_sign_in(
         state,
@@ -2544,6 +2728,7 @@ async fn handle_login_post(
         &rd,
         SignedIn {
             principal,
+            credential,
             session_login,
             typed,
             known,
@@ -2557,6 +2742,8 @@ async fn handle_login_post(
 /// The account that has given all the proofs that the configuration asks, and what the session records about it.
 struct SignedIn {
     principal: Principal,
+    /// The stamp of the credential that the proofs checked.
+    credential: Credential,
     /// The login that the history of the sessions shows.
     session_login: String,
     /// The login as typed, made safe, for the log and the sign-in list.
@@ -2587,6 +2774,7 @@ fn finish_sign_in(
 ) -> HttpResponse {
     let SignedIn {
         principal,
+        credential,
         session_login,
         typed,
         known,
@@ -2597,11 +2785,53 @@ fn finish_sign_in(
         .ip
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unknown".into());
+    // The proofs must hold for the credential of now. A new password, a removed password, a new superadmin
+    // credential or a new account of the login that arrived after the proof refuses it. A change after this check
+    // gives a session that ends at its first use (see `viewer_of`).
+    match credential_current(state, &principal, &credential) {
+        Fresh::Current => {}
+        Fresh::Stale => {
+            state.metrics.login_failure();
+            log(
+                state,
+                LogLevel::Warn,
+                "login_failed",
+                &[
+                    ("client_ip", client_ip_text),
+                    ("login", typed),
+                    ("known", known.to_string()),
+                    ("reason", "stale_credential".to_string()),
+                ],
+            );
+            let (Ok(fresh), Ok(sig)) =
+                (new_csrf_token(), sign_return_uri(&state.signing_secret, rd))
+            else {
+                return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+            };
+            return login_page(
+                state,
+                client,
+                rd,
+                &sig,
+                &fresh,
+                Some("The page was open too long. Enter your login and password again."),
+                StatusCode::FORBIDDEN,
+            );
+        }
+        Fresh::Unknown => {
+            state.metrics.login_internal_error();
+            return text_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session store unavailable\n",
+            );
+        }
+    }
     let token = Zeroizing::new(
         match state.sessions.issue(
             client.binding,
             NewSession {
                 principal,
+                credential,
                 login: session_login,
                 impersonated: false,
                 remember: keep,
@@ -2694,7 +2924,9 @@ fn finish_sign_in(
 /// The account that a login names.
 enum Who {
     Superadmin,
-    User(String, UserRecord),
+    /// An account of the database or of the file. The record is a copy, and the stamp is the stamp of the password
+    /// of this copy (see [`credential_stamp`]).
+    User(String, UserRecord, Credential),
     Unknown,
 }
 
@@ -2703,7 +2935,16 @@ impl Who {
     fn login(&self, state: &AppState) -> Option<String> {
         match self {
             Self::Superadmin => Some(state.superadmin_login.clone()),
-            Self::User(login, _) => Some(login.clone()),
+            Self::User(login, _, _) => Some(login.clone()),
+            Self::Unknown => None,
+        }
+    }
+
+    /// The stamp of the credential that a check of the password of this copy proves.
+    fn credential(&self, state: &AppState) -> Option<Credential> {
+        match self {
+            Self::Superadmin => Some(state.superadmin_generation),
+            Self::User(_, _, credential) => Some(*credential),
             Self::Unknown => None,
         }
     }
@@ -2725,25 +2966,31 @@ fn identify(state: &AppState, typed: &str) -> Who {
         return Who::Superadmin;
     }
     // The caller reads the accounts of the shared database before, for every login: see `handle_login_post`.
-    state
-        .users
-        .get(&login)
+    let found = match state.users.get(&login) {
+        Some(record) => Some((record, Source::Database)),
         // An account of the file has a password only when its block gives the digest (portal 3.4b).
-        .or_else(|| {
-            let digest = state
-                .config
-                .access
-                .accounts
-                .get(&login)?
-                .password_hash
-                .clone()?;
-            Some(UserRecord {
-                password_hash: digest,
-                grants: Vec::new(),
-                created_at: 0,
-            })
-        })
-        .map_or(Who::Unknown, |record| Who::User(login, record))
+        None => state
+            .config
+            .access
+            .accounts
+            .get(&login)
+            .and_then(|account| account.password_hash.clone())
+            .map(|digest| {
+                (
+                    UserRecord {
+                        password_hash: digest,
+                        grants: Vec::new(),
+                        created_at: 0,
+                    },
+                    Source::File,
+                )
+            }),
+    };
+    let Some((record, source)) = found else {
+        return Who::Unknown;
+    };
+    let credential = account_stamp(source, &login, &record.password_hash);
+    Who::User(login, record, credential)
 }
 
 /// The `Set-Cookie` value of a session. `max_age_secs` is the time left before the session ends.
@@ -2991,7 +3238,9 @@ async fn form_request(
             "Unsupported Media Type\n",
         ));
     }
-    let Some(viewer) = current_viewer(state, request.headers(), client) else {
+    // The session first: the portal reads no body for a request that has no session.
+    let headers = request.headers().clone();
+    let Some(first) = current_viewer(state, &headers, client) else {
         return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
     };
     let body = match read_limited_body(
@@ -3018,6 +3267,9 @@ async fn form_request(
             return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n"))
         }
     };
+    let Some(viewer) = still_current(state, &headers, client, &first) else {
+        return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
+    };
     let mut form = match parse_form(&body) {
         Ok(v) => v,
         Err(_) => return Err(text_response(StatusCode::BAD_REQUEST, "Bad Request\n")),
@@ -3031,6 +3283,18 @@ async fn form_request(
         ));
     }
     Ok((viewer, form))
+}
+
+/// The viewer of now, when the session of `first` is still live. A form checks the session before its body and
+/// acts after it. The session can end while the body arrives: a logout, End all sessions, a new password or a
+/// deleted account. The action then needs this second check. The grants and the rights are the ones of now.
+fn still_current(
+    state: &AppState,
+    headers: &HeaderMap,
+    client: &Client,
+    first: &Viewer,
+) -> Option<Viewer> {
+    current_viewer(state, headers, client).filter(|now| now.session.sid == first.session.sid)
 }
 
 /// Only the superadmin in its own right manages accounts. This does not apply while the superadmin browses as a user.
@@ -3137,17 +3401,21 @@ fn audit(
 /// Removes the grants that another grant of the list covers: the same action and service, on a
 /// node above. The boxes of a page show a grant on a host ticked when the whole service is ticked,
 /// so a form sends both. The account keeps the broad grant only.
+///
+/// A narrower grant with limit values stays: the PDP takes the lowest ceiling of the grants that
+/// cover a node (`decision::ceilings_of`), so this grant restricts its node.
 fn drop_covered(mut grants: Vec<Grant>) -> Vec<Grant> {
     grants.sort();
     grants.dedup();
     let all = grants.clone();
     grants.retain(|grant| {
-        !all.iter().any(|other| {
-            other != grant
-                && other.action == grant.action
-                && other.service == grant.service
-                && grant.path.starts_with(&other.path)
-        })
+        !grant.limits.is_empty()
+            || !all.iter().any(|other| {
+                other != grant
+                    && other.action == grant.action
+                    && other.service == grant.service
+                    && grant.path.starts_with(&other.path)
+            })
     });
     grants
 }
@@ -3348,6 +3616,31 @@ async fn handle_users_add(
         }
         Err(_) => return rejected("error"),
     }
+    // The new account starts with no inbox state: a phone, a code, an alert or a notification
+    // state that an earlier holder of the login left goes. An account of the file that left the
+    // file, or an old login of the superadmin, is such a holder. The row exists and nobody can use
+    // the account yet. If the inbox fails, the account goes again.
+    if let Err(error) = state.inbox.end_account(&login).await {
+        log(
+            state,
+            LogLevel::Error,
+            "user_add_inbox_failed",
+            &[("error", error)],
+        );
+        let store = Arc::clone(&state.store);
+        let target = login.clone();
+        if let Ok(Err(error)) =
+            tokio::task::spawn_blocking(move || store.remove_user(&target)).await
+        {
+            log(
+                state,
+                LogLevel::Error,
+                "user_insert_undo_failed",
+                &[("error", error)],
+            );
+        }
+        return rejected("error");
+    }
     let login_for_page = login.clone();
     state.users.insert(
         login.clone(),
@@ -3394,10 +3687,11 @@ async fn handle_users_delete(
         }
     };
 
-    // The inbox revokes the phones of the account and deletes its unused enrollment codes first. If
-    // the inbox fails, the account stays: a phone must not outlive its account. Without the block
-    // `inbox`, this call does nothing.
-    if let Err(error) = state.inbox.revoke_devices_of(&login).await {
+    // The inbox ends the state of the account first: it revokes the phones, deletes the unused
+    // enrollment codes and detaches the rows that name the login. If the inbox fails, the account
+    // stays: a phone must not outlive its account. Without the block `inbox`, this call does
+    // nothing.
+    if let Err(error) = state.inbox.end_account(&login).await {
         log(
             state,
             LogLevel::Error,
@@ -3425,6 +3719,17 @@ async fn handle_users_delete(
     }
     state.users.remove(&login);
     state.sessions.revoke_user(&login, EndReason::UserDeleted);
+    // A request of the account that passed its checks before the end of its sessions can have
+    // made a code or sent an alert after the first call. The code needed the row of the account
+    // (see `inbox::Slot::create_enrollment_code`), so this second call finds every such code.
+    if let Err(error) = state.inbox.end_account(&login).await {
+        log(
+            state,
+            LogLevel::Error,
+            "user_delete_inbox_failed",
+            &[("error", error)],
+        );
+    }
     audit(
         state,
         AuditKind::UserDeleted,
@@ -3624,27 +3929,37 @@ async fn handle_impersonate(
             return settings_redirect("no-user");
         }
     };
+    let principal = Principal::User(login.clone());
+    let Some(credential) = credential_stamp(state, &principal) else {
+        state.metrics.user_admin("impersonate", "rejected");
+        return settings_redirect("no-user");
+    };
     let response = switch_session(
         state,
         client,
         &headers,
         &viewer,
-        Principal::User(login.clone()),
-        login.clone(),
-        true,
+        Switch {
+            principal,
+            credential,
+            login: login.clone(),
+            impersonated: true,
+        },
         redirect_response(StatusCode::SEE_OTHER, HOME_PATH),
     );
-    if response.status() == StatusCode::SEE_OTHER {
-        audit(
-            state,
-            AuditKind::ImpersonationStarted,
-            Some(login),
-            Some(state.superadmin_login.clone()),
-            client,
-            &headers,
-        );
-        state.metrics.user_admin("impersonate", "ok");
-    }
+    let response = match response {
+        Ok(response) => response,
+        Err(response) => return response,
+    };
+    audit(
+        state,
+        AuditKind::ImpersonationStarted,
+        Some(login),
+        Some(state.superadmin_login.clone()),
+        client,
+        &headers,
+    );
+    state.metrics.user_admin("impersonate", "ok");
     response
 }
 
@@ -3673,22 +3988,27 @@ async fn handle_impersonate_end(
         client,
         &headers,
         &viewer,
-        Principal::Superadmin,
-        state.superadmin_login.clone(),
-        false,
+        Switch {
+            principal: Principal::Superadmin,
+            credential: state.superadmin_generation,
+            login: state.superadmin_login.clone(),
+            impersonated: false,
+        },
         redirect_response(StatusCode::SEE_OTHER, ui::settings::ACCESS_PATH),
     );
-    if response.status() == StatusCode::SEE_OTHER {
-        audit(
-            state,
-            AuditKind::ImpersonationEnded,
-            Some(impersonated),
-            Some(state.superadmin_login.clone()),
-            client,
-            &headers,
-        );
-        state.metrics.user_admin("impersonate_end", "ok");
-    }
+    let response = match response {
+        Ok(response) => response,
+        Err(response) => return response,
+    };
+    audit(
+        state,
+        AuditKind::ImpersonationEnded,
+        Some(impersonated),
+        Some(state.superadmin_login.clone()),
+        client,
+        &headers,
+    );
+    state.metrics.user_admin("impersonate_end", "ok");
     response
 }
 
@@ -3769,26 +4089,43 @@ fn signed_out_response(state: &AppState, client: &Client, location: &str) -> Htt
     response
 }
 
-/// Opens a session for `principal` and sets its cookie on `response`. Only after that, the function ends the current
-/// session. If a failure occurs, the browser keeps the session that it had.
+/// The session that a switch opens.
+struct Switch {
+    principal: Principal,
+    /// The stamp of the credential of `principal` now.
+    credential: Credential,
+    /// The login that the history shows.
+    login: String,
+    impersonated: bool,
+}
+
+/// Opens a session for `next.principal` and sets its cookie on `response`. Only after that, the function ends the
+/// current session. If a failure occurs, the browser keeps the session that it had, and the error is the answer.
+/// Another action can end the current session while the request runs, for example a logout or End all sessions.
+/// The new session then ends too: a switch never gives a session in place of a session that is already over.
 ///
 /// The new session ends when the current session would have ended. A switch never gives a fresh
 /// `session.ttl`: only a sign-in with the password does.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)] // the error is the response, sent as is
 fn switch_session(
     state: &AppState,
     client: &Client,
     headers: &HeaderMap,
     current: &Viewer,
-    principal: Principal,
-    login: String,
-    impersonated: bool,
+    next: Switch,
     mut response: HttpResponse,
-) -> HttpResponse {
+) -> Result<HttpResponse, HttpResponse> {
+    let Switch {
+        principal,
+        credential,
+        login,
+        impersonated,
+    } = next;
     let token = match state.sessions.issue(
         client.binding,
         NewSession {
             principal,
+            credential,
             login,
             impersonated,
             // A switch of session never gives the remembered rule.
@@ -3802,19 +4139,22 @@ fn switch_session(
         Ok(token) => Zeroizing::new(token),
         Err(SessionIssueError::Capacity) => {
             state.metrics.session_capacity_rejected();
-            return text_response(
+            return Err(text_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "session capacity reached\n",
-            );
+            ));
         }
         Err(SessionIssueError::Random) => {
-            return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+            return Err(text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "authentication error\n",
+            ));
         }
         Err(SessionIssueError::Storage) => {
-            return text_response(
+            return Err(text_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "session store unavailable\n",
-            );
+            ));
         }
     };
     let left = current.session.expires_at.saturating_sub(unix_now()).max(0) as u64;
@@ -3826,13 +4166,21 @@ fn switch_session(
     );
     if append_dynamic_header(&mut response, SET_COOKIE, cookie.as_str()).is_err() {
         state.sessions.revoke(token.as_str(), EndReason::Revoked);
-        return text_response(StatusCode::INTERNAL_SERVER_ERROR, "authentication error\n");
+        return Err(text_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "authentication error\n",
+        ));
     }
-    state
+    if state
         .sessions
-        .revoke(current.token.as_str(), EndReason::Impersonation);
+        .revoke(current.token.as_str(), EndReason::Impersonation)
+        .is_none()
+    {
+        state.sessions.revoke(token.as_str(), EndReason::Revoked);
+        return Err(signed_out_response(state, client, LOGIN_PATH));
+    }
     state.metrics.session_issued();
-    response
+    Ok(response)
 }
 
 fn login_page(
@@ -3859,7 +4207,6 @@ fn login_page(
         rd,
         sig,
         form_token: &form_token,
-        host: client.host.as_deref(),
         error,
         max_password_bytes: state.config.security.max_password_bytes,
         keep_for: keep_for.as_deref(),
@@ -4250,7 +4597,7 @@ fn apply_secure_headers(response: &mut HttpResponse, no_store: bool) {
     response.headers_mut().insert(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+            "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
         ),
     );
 }

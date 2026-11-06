@@ -24,7 +24,7 @@ import app.portalinbox.service.InboxService
 /**
  * Enrolls this phone with a one-time enrollment code made by an account of the portal.
  * The code is typed or pasted here. A tapped `portal-inbox://enroll?...` link opens this
- * screen with the code filled in. The screen shows the server address and a short
+ * screen with the code filled in. The screen shows the server address and the 80-bit
  * fingerprint of the server key that the code pins, so the person can check them.
  */
 class AddServerActivity : BaseActivity() {
@@ -124,7 +124,8 @@ class AddServerActivity : BaseActivity() {
         check.addView(label(getString(R.string.add_check_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 2))
         val rows = listOf(
             kv(getString(R.string.meta_address), info.address.http.removePrefix("http://").removePrefix("https://"), color(R.color.text), 2, true),
-            kv(getString(R.string.add_check_fingerprint), info.fingerprint, color(R.color.text), 1, true),
+            // Five groups of 4 characters: two lines let a narrow screen wrap between groups, never cut one.
+            kv(getString(R.string.add_check_fingerprint), info.fingerprint, color(R.color.text), 2, true),
         )
         for (row in rows) {
             row.setPadding(0, dp(5), 0, dp(5))

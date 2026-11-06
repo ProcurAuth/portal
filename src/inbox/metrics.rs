@@ -82,6 +82,7 @@ pub struct InboxMetrics {
     alerts_accepted: Kinded,
     alerts_duplicate: Kinded,
     alerts_spooled: Kinded,
+    alerts_refused: Labeled,
     auth_failures: Labeled,
     session_closes: Labeled,
     deliveries_created: AtomicU64,
@@ -115,6 +116,12 @@ impl InboxMetrics {
 
     pub fn alert_spooled(&self, source: &'static str, kind: Kind, target: &'static str) {
         self.alerts_spooled.add(source, kind, target);
+    }
+
+    /// One alert that the inbox refused alone: `webhook` for an alert of a webhook payload,
+    /// `replay` for a spooled alert that the database refused.
+    pub fn alert_refused(&self, stage: &'static str) {
+        self.alerts_refused.add(stage, 1);
     }
 
     pub fn auth_failure(&self, kind: &'static str) {
@@ -240,6 +247,12 @@ impl InboxMetrics {
             "portal_inbox_spool_rejected_total",
             "Alerts refused because the spool was full",
             self.spool_rejected.load(Relaxed),
+        );
+        self.alerts_refused.render(
+            &mut out,
+            "portal_inbox_alerts_refused_total",
+            "Alerts refused one by one without a stop of the others, by stage",
+            "stage",
         );
         gauge(
             &mut out,

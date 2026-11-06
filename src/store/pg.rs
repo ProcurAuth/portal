@@ -95,7 +95,10 @@ CREATE TABLE login_attempts (
 );
 CREATE INDEX login_attempts_ts ON login_attempts (ts);
 -- The live sessions, shared by every instance. The cookie is never stored, only its SHA-256.
--- `login` is NULL for the superadmin.
+-- `login` is NULL for the superadmin. `credential` is the stamp of the credential that opened the session. It is a
+-- digest of the password hash of the account, or the generation of the superadmin. An instance accepts the session only
+-- while the account has the same stamp. This column changed the base schema in place: the check at the end of the
+-- migration refuses a database without it.
 CREATE TABLE sessions (
   digest BYTEA PRIMARY KEY,
   binding BYTEA NOT NULL,
@@ -104,7 +107,8 @@ CREATE TABLE sessions (
   impersonated BOOLEAN NOT NULL,
   created_at BIGINT NOT NULL,
   expires_at BIGINT NOT NULL,
-  last_seen_at BIGINT NOT NULL
+  last_seen_at BIGINT NOT NULL,
+  credential BYTEA NOT NULL
 );
 CREATE INDEX sessions_login ON sessions (login);
 ",
@@ -633,13 +637,16 @@ impl Pg {
                                        AND table_name = 'sessions_log' AND column_name = 'mfa')
                         AND EXISTS (SELECT 1 FROM information_schema.columns
                                      WHERE table_schema = current_schema()
-                                       AND table_name = 'sessions' AND column_name = 'mfa')",
+                                       AND table_name = 'sessions' AND column_name = 'mfa')
+                        AND EXISTS (SELECT 1 FROM information_schema.columns
+                                     WHERE table_schema = current_schema()
+                                       AND table_name = 'sessions' AND column_name = 'credential')",
                     &[],
                 )?
                 .get(0);
             if !complete {
                 return Ok(Err(format!(
-                    "the database was made by schema version {} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column mfa of sessions and sessions_log by hand (see docs/login-hardening.md)",
+                    "the database was made by schema version {} before the second factor or before the column credential of sessions, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check, the column mfa of sessions and sessions_log and the column credential (BYTEA NOT NULL) of sessions by hand (see docs/login-hardening.md)",
                     SCHEMA.len()
                 )));
             }
@@ -1029,25 +1036,49 @@ impl Pg {
 
     /// Records a new session and its line of the history in the same transaction.
     /// Therefore, no other instance can see a session whose history row does not exist yet.
-    /// Returns `false` when `max_active` sessions are already live.
-    /// The count is read without a lock. Two instances that race at the limit can overshoot it by one each.
+    /// A session that is not impersonated first ends the live sessions of its principal that were used least
+    /// recently. Thus the principal has at most `limits.max_per_account` sessions. The answer holds their
+    /// identifiers. The answer is `None`, and the transaction changes nothing, when `limits.max_active` sessions are
+    /// already live. The counts are read without a lock. Two instances that race at a limit can overshoot it by one
+    /// each.
     pub fn session_insert(
         &self,
         digest: &[u8; 32],
         binding: &[u8; 32],
         session: &SharedSession,
         start: &SessionStart,
-        max_active: usize,
+        limits: SessionLimits,
         generation: &[u8; 32],
-    ) -> Result<bool, String> {
+    ) -> Result<Option<Vec<u64>>, String> {
         self.run(|c| {
             let mut tx = c.transaction()?;
+            let ended: Vec<u64> = if session.impersonated {
+                Vec::new()
+            } else {
+                // The principal keeps its newest `max_per_account - 1` sessions: the new one is the last place.
+                tx.query(
+                    "DELETE FROM sessions WHERE digest IN (
+                       SELECT digest FROM sessions
+                        WHERE login IS NOT DISTINCT FROM $1::text AND NOT impersonated AND expires_at > $2
+                        ORDER BY last_seen_at DESC, created_at DESC
+                       OFFSET $3::bigint)
+                     RETURNING sid",
+                    &[
+                        &session.login,
+                        &start.at,
+                        &i64::try_from(limits.max_per_account.saturating_sub(1)).unwrap_or(i64::MAX),
+                    ],
+                )?
+                .into_iter()
+                .map(|row| row.get::<_, i64>(0) as u64)
+                .collect()
+            };
             let inserted = tx.execute(
                 "INSERT INTO sessions
                    (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at,
-                    admin_generation, remembered, mfa)
+                    admin_generation, remembered, mfa, credential)
                  SELECT $1::bytea, $2::bytea, $3::bigint, $4::text, $5::boolean, $6::bigint, $7::bigint, $6::bigint,
-                        $9::bytea, $10::boolean, $11::boolean
+                        $9::bytea, $10::boolean, $11::boolean, $12::bytea
                   WHERE (SELECT COUNT(*) FROM sessions WHERE expires_at > $6) < $8",
                 &[
                     &digest.as_slice(),
@@ -1057,14 +1088,16 @@ impl Pg {
                     &session.impersonated,
                     &start.at,
                     &session.expires_at,
-                    &(max_active as i64),
+                    &i64::try_from(limits.max_active).unwrap_or(i64::MAX),
                     &generation.as_slice(),
                     &session.remembered,
                     &session.mfa,
+                    &session.credential.as_slice(),
                 ],
             )?;
             if inserted == 0 {
-                return Ok(false);
+                // The transaction ends without a commit: the sessions above stay.
+                return Ok(None);
             }
             tx.execute(
                 "INSERT INTO sessions_log
@@ -1084,14 +1117,15 @@ impl Pg {
                 ],
             )?;
             tx.commit()?;
-            Ok(true)
+            Ok(Some(ended))
         })
     }
 
     /// Returns the live session of `digest` that was issued for `binding`. Its idle timer is renewed to `now`.
     /// Returns `None` when there is no such session, when it ended, or when the binding differs. In the last case, the session is not changed.
     /// A session of the superadmin, or an impersonated session, must also carry `generation`.
-    /// A session of a database user does not depend on the superadmin credentials.
+    /// A session of a database user does not depend on the superadmin credentials. The caller compares the stamp of
+    /// the credential of the answer with the stamp of the account of now.
     pub fn session_touch(
         &self,
         digest: &[u8; 32],
@@ -1106,7 +1140,7 @@ impl Pg {
                   WHERE digest = $1 AND binding = $2 AND expires_at > $3
                     AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
                     AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)
-              RETURNING sid, login, impersonated, expires_at, remembered, mfa",
+              RETURNING sid, login, impersonated, expires_at, remembered, mfa, credential",
                 &[
                     &digest.as_slice(),
                     &binding.as_slice(),
@@ -1131,7 +1165,7 @@ impl Pg {
     ) -> Result<Option<SharedSession>, String> {
         self.run(|c| {
             Ok(c.query_opt(
-                "SELECT sid, login, impersonated, expires_at, remembered, mfa FROM sessions
+                "SELECT sid, login, impersonated, expires_at, remembered, mfa, credential FROM sessions
                   WHERE digest = $1 AND binding = $2 AND expires_at > $3
                     AND last_seen_at > $3 - (CASE WHEN remembered THEN $5::bigint ELSE $4::bigint END)
                     AND ((login IS NOT NULL AND NOT impersonated) OR admin_generation = $6)",
@@ -1173,7 +1207,7 @@ impl Pg {
         self.run(|c| {
             Ok(c.query_opt(
                 "DELETE FROM sessions WHERE digest = $1
-                 RETURNING sid, login, impersonated, expires_at, remembered, mfa",
+                 RETURNING sid, login, impersonated, expires_at, remembered, mfa, credential",
                 &[&digest.as_slice()],
             )?
             .map(shared_session))
@@ -1505,6 +1539,8 @@ fn shared_session(row: postgres::Row) -> SharedSession {
         expires_at: row.get(3),
         remembered: row.get(4),
         mfa: row.get(5),
+        // A stamp of another length matches no account: the session is refused.
+        credential: row.get::<_, Vec<u8>>(6).try_into().unwrap_or([0; 32]),
     }
 }
 
@@ -1775,6 +1811,28 @@ mod tests {
         );
     }
 
+    /// The column `credential` of `sessions` changed the base schema in place: a database without it is refused.
+    #[test]
+    fn a_database_made_before_the_stamp_of_the_sessions_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute("ALTER TABLE sessions DROP COLUMN credential;")
+            .unwrap();
+        drop(fresh);
+        let error = Pg::start(config, 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(error.contains("column credential"), "{error}");
+    }
+
     #[test]
     fn the_migration_to_version_eight_adds_the_remembered_flag_and_the_old_sessions_are_not_remembered(
     ) {
@@ -1794,8 +1852,9 @@ mod tests {
                  ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
                  DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
                  DELETE FROM schema_migrations WHERE version > 7;
-                 INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
-                   VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10);
+                 INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
+                   VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10,
+                           decode(repeat('04', 32), 'hex'));
                  INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                    VALUES (1, 'alice', false, false, 'ua', 10, 10);",
                 i64::MAX / 2
@@ -1995,10 +2054,10 @@ mod tests {
                    sub_resource_id TEXT NOT NULL DEFAULT '',
                    PRIMARY KEY (user_id, action, resource_type, resource_id, sub_resource_type, sub_resource_id));
                  INSERT INTO sessions
-                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at)
-                 VALUES ('\\x01', '\\x07', 1, NULL, false, 1, 9999999999, 1),
-                        ('\\x02', '\\x07', 2, 'alice', true, 1, 9999999999, 1),
-                        ('\\x03', '\\x07', 3, 'bob', false, 1, 9999999999, 1);",
+                   (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
+                 VALUES ('\\x01', '\\x07', 1, NULL, false, 1, 9999999999, 1, '\\x04'),
+                        ('\\x02', '\\x07', 2, 'alice', true, 1, 9999999999, 1, '\\x04'),
+                        ('\\x03', '\\x07', 3, 'bob', false, 1, 9999999999, 1, '\\x04');",
             )
             .unwrap();
         drop(fresh);

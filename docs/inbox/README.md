@@ -84,13 +84,8 @@ The routes of the Inbox accept `api_` keys only. They answer `401` with no detai
 
 Two sources of `api_` key work at the same time.
 
-<<<<<<< ours
-- **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. The list of keys does not list it. Make its text with `portal inbox token --out FILE`.
-- **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it in the tab **Access**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api` and `alert.send` on the group.
-=======
 - **A key of the file.** It is a block `api_key` in the block `inbox`. The block names its owner, which is an account of the file (a block `user`), and the groups of the key. At start, the portal keeps the groups that the owner may send to. This key does not depend on the portal at run time. It works when the portal is not ready and when PostgreSQL is away. It has no budget. With `direct_alerts = true`, the key can send an alert to an account too: the owner must hold `alert.send_user` on `service:portal`, and `groups` can be empty. The list of keys does not list it. Make its text with `portal inbox token --out FILE`.
 - **A key of the database.** An account that holds `keys.own.create` on the kind `api` makes it in the tab **Access**. The page shows the text one time. The Inbox checks the key and asks the portal for the decision on each request. The owner needs `keys.own.use` on the kind `api`, and `alert.send` on the group or `alert.send_user` on the service.
->>>>>>> theirs
 
 The switch `keys.api` turns the kind on. The default is `false`. The kind needs the block `inbox`. The root `README.md` has the example of a file key and of the account that owns it.
 
@@ -102,7 +97,7 @@ A sender sends a request to the portal, on the same host and port as the pages. 
 |---|---|
 | `POST /api/v1/alerts` | Body: `{"group": "<id>", "title": "<text>"}` or `{"user": "<login>", "title": "<text>"}`. Give exactly one of `group` and `user`. The answer is `201` with `alert_id`, `duplicate` and `targets` (the number of phones). |
 | `POST /api/v1/notify/{group}` | A webhook for any tool. The title comes from `?title=`, from the header `X-Title`, from the field `title` of a JSON body, or from the body. The Inbox cuts a long title. |
-| `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each alert with the status `firing` makes one alert. The answer has the counts `created`, `duplicates` and `skipped`. |
+| `POST /api/v1/webhooks/alertmanager/{group}` | The payload of Alertmanager and of Grafana. Each alert with the status `firing` makes one alert. The answer has the counts `created`, `duplicates`, `skipped` and `refused`. An alert that the Inbox refuses counts in `refused` and does not stop the other alerts. |
 | `GET /api/v1/alerts/{id}` | The delivery status of an alert: sent and received, with the number of attempts. The field `target` has the `kind` (`group` or `user`) and the `id`. An alert to a group needs `alert.read` on the group. An alert to an account can be read by the key that sent it. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. No key. |
 
@@ -149,7 +144,7 @@ Grafana has a fixed list of contact point types. A plugin cannot add one. The In
 - **Alertmanager.** Use a `webhook_configs` receiver with a bearer token. The example is [`alertmanager.yml`](alertmanager.yml).
 - **Grafana.** Make a contact point of the type Webhook with the authorization scheme Bearer. The example is [`grafana/contact-point.yaml`](grafana/contact-point.yaml).
 
-The Inbox ignores the notifications `resolved`. A block `api_key` can set `webhook_send_resolved = true` to turn them into alerts. A key of the database never sends them. The Inbox merges a repeat of the same alert. It compares the fingerprint, the status and `startsAt`.
+The Inbox ignores the notifications `resolved`. A block `api_key` can set `webhook_send_resolved = true` to turn them into alerts. A key of the database never sends them. The Inbox merges a repeat of the same alert. It compares the group, the fingerprint, the status and `startsAt`. A repeat with a new summary keeps the first title. The same alert to two groups makes one alert in each group.
 
 ### Alerts of the portal
 
@@ -176,7 +171,7 @@ If the enrollment fails, the app shows one of these texts:
 
 | Text in the app | Cause |
 |---|---|
-| The code is not valid. Ask for a new one. | The code is unknown, used or expired. The account was deleted. The limit `inbox.devices.max_devices` is reached. |
+| The code is not valid. Ask for a new one. | The code is unknown, used or expired. The account was deleted. The limit `inbox.devices.max_devices` or `inbox.devices.max_per_account` is reached. |
 | Update the app. | The app does not speak protocol 4. |
 | Too many attempts. | The client address sent too many attempts. Wait. |
 
@@ -265,11 +260,13 @@ SQLite needs a local file system. Two instances must never open the same file. T
 
 The block names a directory that every instance shares. It must be a volume of plain files. The directory holds:
 
-- `snapshot-<epoch>.db`, a consistent copy of the whole database. The Inbox writes it when the database changed, at most every `snapshot_interval`. It writes it also before it confirms an alert, an enrollment or a revocation.
+- `snapshot-<epoch>.db`, a consistent copy of the whole database. The Inbox writes it when the database changed, at most every `snapshot_interval`. It writes it also before it confirms an alert, an enrollment or a revocation, and before the portal answers a form that changed the database.
 - `lease.json`, the name of the active instance. The owner renews it every `lease_ttl / 3`.
 - `claim-<epoch>`, a file that the Inbox creates with exclusive access. Two standby instances cannot take the same epoch.
 
 An instance that starts waits until the lease is released or has not changed for `lease_ttl`. It takes the next epoch. It restores the newest snapshot that passes `PRAGMA quick_check`. Then it serves. An instance that loses its lease stops the whole process. The orchestrator starts it again as a standby.
+
+Each owner writes its epoch into the table `inbox_replica_epoch` before its first snapshot. An instance that starts keeps its own local file when the file names the epoch of the newest snapshot and passes the check. That file is the live database of the owner that wrote the snapshot, so it is newer. Thus a restart on the same disk after a crash keeps the changes after the last snapshot.
 
 With `sync_alerts = true`, the Inbox confirms an alert only after the snapshot that holds it exists. A sender that gets no answer sends the alert again, and the idempotency key makes one alert. If the shared directory fails, the sender gets `503 replication_unavailable`. With `sync_alerts = false`, the Inbox confirms after the local commit, and a failed copy is only logged (`portal_inbox_replica_sync_failures_total`).
 
@@ -296,9 +293,9 @@ A PostgreSQL failover takes seconds to minutes. In this time, the instances stil
 - Each call to the database has a limit of 2 seconds. When a call fails, the instance switches to memory. A probe checks each second for a writable primary. The log has `storage_degraded` and `storage_recovered`. The gauges `portal_inbox_storage_degraded` and `portal_inbox_spool_alerts` show the state.
 - The Inbox validates an alert as usual and keeps it in a spool. The spool holds 10 000 alerts at most. When it is full, the sender gets `503 spool_full` and sends the alert again. The spool holds one delivery for each phone that is subscribed. The id of the alert comes from the source and the idempotency key. Two instances that accept the same alert make the same id.
 - With the block `inbox.cluster`, the Inbox copies the alert to the other instances before it answers the sender. The alert then survives the loss of the instance that accepted it. The log has `spool_unreplicated` when no other instance had the copy.
-- When the primary is back, each instance writes its spool, oldest first. The write ignores an alert that exists (`ON CONFLICT DO NOTHING`). A crash in the middle gives one alert row and one delivery row for each phone.
+- When the primary is back, each instance writes its spool, oldest first. The write ignores an alert that exists (`ON CONFLICT DO NOTHING`). A crash in the middle gives one alert row and one delivery row for each phone. If the database refuses one alert, the instance writes the other alerts and the receipts. The refused alert stays in the spool until it expires. The log has `spool_alert_refused`.
 
-Some actions still need the database: enrollment, a change of subscription, the revocation of a phone and the history in the page. A phone that is revoked in the outage can connect until the database is back.
+Some actions still need the database: enrollment, a change of subscription, the revocation of a phone and the history in the page. A phone that is revoked in the outage can connect until the database is back. A revocation before the outage holds on every instance: the notification of the revocation marks the copy of each instance at once.
 
 An alert that the Inbox accepts while the database is away exists only in memory. If every instance that holds it stops before the database is back, the Inbox loses the alert. The sender already got `201`. A request to the database that timed out can still commit. If the sender retries it in the outage and no instance remembers it, a phone can get it twice with two ids. A pod that starts while the database is away waits 60 seconds for it, then exits.
 
@@ -319,7 +316,7 @@ At step 2, an agent first sends alerts through the same REST route with an `api_
 | Symptom | Check |
 |---|---|
 | The app says the server is unreachable. | Open the address of `inbox.devices.public_address` from the phone. Check the port, the firewall and the proxy. The proxy must send `/v1/` to the portal without ForwardAuth. The answer `503` means that the budget of sessions is full. Run `portal inbox healthcheck --config FILE` on the server. |
-| The app says "The code is not valid". | The code is used or expired. Make a new code. Check `inbox.devices.max_devices`. The log has the event `enroll_refused` with a reason. |
+| The app says "The code is not valid". | The code is used or expired. Make a new code. Check `inbox.devices.max_devices` and `inbox.devices.max_per_account`. The log has the event `enroll_refused` with a reason. |
 | The app says "Update the app". | The app is older than protocol 4. Install the current APK. |
 | A phone is `unreachable`. | The app is stopped, the phone is off, or the battery saver blocks the app. Check the permissions of the app. |
 | An alert does not come. | Open the alert in the zone **Sent**. Check that the phone subscribed to the group and that the account has `inbox.receive`. |

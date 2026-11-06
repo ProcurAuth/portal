@@ -92,7 +92,7 @@ impl Pg {
     pub fn totp_accept_step(&self, login: &str, step: i64) -> Result<bool, String> {
         self.run(|c| {
             Ok(c.execute(
-                "UPDATE totp_credentials SET last_step = $2, failed = 0, failed_since = 0
+                "UPDATE totp_credentials SET last_step = $2, failed = 0, failed_since = 0, locked_until = 0
                   WHERE login = $1 AND last_step < $2",
                 &[&login, &step],
             )? == 1)
@@ -108,7 +108,7 @@ impl Pg {
             )?;
             if used == 1 {
                 tx.execute(
-                    "UPDATE totp_credentials SET failed = 0, failed_since = 0 WHERE login = $1",
+                    "UPDATE totp_credentials SET failed = 0, failed_since = 0, locked_until = 0 WHERE login = $1",
                     &[&login],
                 )?;
             }
@@ -164,30 +164,40 @@ impl Pg {
         })
     }
 
-    pub fn totp_fail(
+    pub fn totp_begin_attempt(
         &self,
         login: &str,
         now: i64,
         limits: TotpLimits,
-    ) -> Result<Option<i64>, String> {
+    ) -> Result<Attempt, String> {
         self.run(|c| {
             let mut tx = c.transaction()?;
+            // The row lock serializes the attempts of every instance.
             let Some(row) = tx.query_opt(
-                "SELECT failed, failed_since FROM totp_credentials WHERE login = $1 FOR UPDATE",
+                "SELECT failed, failed_since, locked_until FROM totp_credentials WHERE login = $1 FOR UPDATE",
                 &[&login],
             )?
             else {
-                return Ok(None);
+                return Ok(Attempt::NotEnrolled);
             };
-            let (failed, since) = (i64::from(row.get::<_, i32>(0)), row.get::<_, i64>(1));
-            let (failed, since, locked_until) = limits.after_failure(failed, since, now);
+            let (failed, since, locked_until) = (
+                i64::from(row.get::<_, i32>(0)),
+                row.get::<_, i64>(1),
+                row.get::<_, i64>(2),
+            );
+            if locked_until > now {
+                return Ok(Attempt::Locked {
+                    until: locked_until,
+                });
+            }
+            let (failed, since, lock) = limits.after_failure(failed, since, now);
             tx.execute(
                 "UPDATE totp_credentials SET failed = $2, failed_since = $3,
                         locked_until = GREATEST(locked_until, $4) WHERE login = $1",
-                &[&login, &(failed as i32), &since, &locked_until.unwrap_or(0)],
+                &[&login, &(failed as i32), &since, &lock.unwrap_or(0)],
             )?;
             tx.commit()?;
-            Ok(locked_until)
+            Ok(Attempt::Counted { locked_until: lock })
         })
     }
 }

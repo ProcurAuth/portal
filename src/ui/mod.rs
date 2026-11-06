@@ -96,13 +96,20 @@ pub fn favicon_path() -> &'static str {
     PATH.get_or_init(|| asset_path(FAVICON_SVG, "svg"))
 }
 
-/// The `link` element of the tab icon. A page after sign-in puts it in its head. A sign-in page never does.
+/// The `link` element of the tab icon. A page after sign-in puts it in its head. A page before sign-in has the empty
+/// icon, [`BLANK_ICON_LINK`], and never this one.
 fn favicon_link() -> String {
     format!(
         r#"<link rel="icon" type="image/svg+xml" href="{}">"#,
         favicon_path()
     )
 }
+
+/// The `link` element of an empty tab icon. Every page that a visitor can reach before sign-in has it: the sign-in
+/// pages, the cards of the second step and the status pages. The empty icon stops two things. The browser does not
+/// ask for `/favicon.ico`, and it does not show an icon that it keeps from a signed-in page. The page of a visitor
+/// never shows an icon, so the icon cannot tell that the product runs on this server.
+const BLANK_ICON_LINK: &str = r#"<link rel="icon" href="data:,">"#;
 
 /// `/auth/a/<16 hexadecimal digits of the SHA-256 of the content>.<extension>`.
 fn asset_path(content: &str, extension: &str) -> String {
@@ -233,7 +240,7 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
 /// Wraps an authentication card (`<h1>`, text, form) in the shared shell.
 pub fn auth_document(title: &str, card_html: &str) -> String {
     let body = format!(r#"<main class="authShell"><div class="card">{card_html}</div></main>"#);
-    document(title, "", &[], &body)
+    document(title, BLANK_ICON_LINK, &[], &body)
 }
 
 /// The shell of the sign-in page and of the card of the second step. The card has its own class, so none of the
@@ -248,7 +255,7 @@ fn sign_in_document(card_html: &str, icons: &[&str], with_strip: bool) -> String
         "signin"
     };
     let body = format!(r#"<main class="authShell"><div class="{class}">{card_html}</div></main>"#);
-    document("Authentication", "", icons, &body)
+    document("Authentication", BLANK_ICON_LINK, icons, &body)
 }
 
 /// A card with a title, a sentence and one button back to the launcher. The 404 and the 403 pages
@@ -331,21 +338,34 @@ pub fn status_icon(tone: &str, icon: &str, word: &str) -> String {
     )
 }
 
+/// The theme selector of ClickHouse Dash: one icon button that shows the current mode, and a list of
+/// the modes under it. The script hides the current mode in the list. The page has no script state in
+/// the markup: the script sets the mode, `aria-selected` and the open list. Without script, the stylesheet hides the whole selector.
 fn theme_switch() -> String {
-    let mut out = String::from(
-        r#"<div class="themeSwitch" data-theme-switch role="group" aria-label="Theme">"#,
-    );
-    for (value, label, icon) in [
+    let modes = [
         ("system", "System theme", "i-device-desktop"),
         ("dark", "Dark theme", "i-moon"),
         ("light", "Light theme", "i-sun"),
-    ] {
+    ];
+    let mut out = String::from(
+        r#"<div class="themeSelect" data-theme-switch><button class="themeSelect__button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Theme" title="Theme">"#,
+    );
+    for (value, _, icon) in modes {
         let _ = write!(
             out,
-            r##"<button type="button" data-theme-value="{value}" aria-pressed="false" aria-label="{label}" title="{label}"><svg class="icon" aria-hidden="true"><use href="#{icon}"/></svg></button>"##
+            r##"<svg class="icon themeNow themeNow--{value}" aria-hidden="true"><use href="#{icon}"/></svg>"##
         );
     }
-    out.push_str("</div>");
+    out.push_str(
+        r#"</button><div class="themeSelect__menu" role="listbox" aria-label="Theme" hidden>"#,
+    );
+    for (value, label, icon) in modes {
+        let _ = write!(
+            out,
+            r##"<button type="button" tabindex="-1" class="themeSelect__option" role="option" data-theme-value="{value}" aria-selected="false" aria-label="{label}" title="{label}"><svg class="icon" aria-hidden="true"><use href="#{icon}"/></svg></button>"##
+        );
+    }
+    out.push_str("</div></div>");
     out
 }
 
@@ -886,6 +906,7 @@ fn demo_users<'a>(catalog: &'a Catalog, panel_only: bool) -> Accounts<'a> {
         features: (!panel_only).then(demo_features),
         max_users: 64,
         token: "demo",
+        two_factor: Some(["alice".to_string()].into_iter().collect()),
     }
 }
 
@@ -1189,6 +1210,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_theme_selector_is_a_list_of_three_modes_that_starts_closed() {
+        let html = theme_switch();
+        assert_eq!(html.matches(r#"aria-haspopup="listbox""#).count(), 1);
+        assert_eq!(html.matches("data-theme-value=").count(), 3);
+        assert_eq!(html.matches("themeNow--").count(), 3);
+        assert!(
+            html.contains(r#"aria-expanded="false""#) && !html.contains(r#"aria-expanded="true""#)
+        );
+        assert!(html.contains(r#"role="listbox" aria-label="Theme" hidden>"#));
+        assert_eq!(html.matches(r#"role="option""#).count(), 3);
+        assert_eq!(html.matches(r#"aria-selected="false""#).count(), 3);
+        assert!(!html.contains("aria-pressed"));
+    }
+
+    #[test]
     fn the_assets_have_neutral_paths_no_comment_and_no_name_of_the_product() {
         let assets = assets();
         for (path, content) in [
@@ -1366,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn no_sign_in_page_and_no_status_page_shows_the_logo_or_links_an_icon() {
+    fn no_sign_in_page_and_no_status_page_shows_the_logo_or_links_the_icon_file() {
         let pages = [
             auth_document("Authentication", "<p>x</p>"),
             message_page("Not found", "No such page.", "Back to panel"),
@@ -1381,10 +1417,13 @@ mod tests {
                     "{part}: {page}"
                 );
             }
-            assert!(!page.contains("rel=\"icon\"") && !page.contains("image/svg+xml"));
-            assert!(!page.contains("<link rel=\"icon\"") && !page.contains("shortcut"));
-            // The only link of the head is the stylesheet.
-            assert_eq!(page.matches("<link ").count(), 1, "{page}");
+            // The only icon is the empty one: no file, no SVG, no path of the icon.
+            assert_eq!(page.matches("rel=\"icon\"").count(), 1, "{page}");
+            assert!(page.contains(BLANK_ICON_LINK), "{page}");
+            assert!(!page.contains("image/svg+xml") && !page.contains("shortcut"));
+            assert!(!page.contains(favicon_path()) && !page.contains("apple-touch"));
+            // The head links the stylesheet and the empty icon.
+            assert_eq!(page.matches("<link ").count(), 2, "{page}");
         }
     }
 

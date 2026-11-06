@@ -374,6 +374,15 @@ impl Directory {
         self.read().users.get(login).cloned()
     }
 
+    /// The password hash of an account of the database. `None` means that the account does not exist. The grants are
+    /// not copied: each request of a session reads the hash (see `http::credential_stamp`).
+    pub fn password_hash(&self, login: &str) -> Option<String> {
+        self.read()
+            .users
+            .get(login)
+            .map(|user| user.password_hash.clone())
+    }
+
     /// The stored grants of an account. `None` means that the account does not exist.
     pub fn grants_of(&self, login: &str) -> Option<Vec<Grant>> {
         self.read().users.get(login).map(|user| user.grants.clone())

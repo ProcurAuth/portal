@@ -1,9 +1,9 @@
 //! The sign-in page and the card of the second step. They share one look: a flat card, a band with the
 //! destination, and fields with a floating label.
 //!
-//! The band shows the host and the path that the visitor asked for. It exists only when the sign-in has a
+//! The band shows the page that the visitor asked for. It exists only when the sign-in has a
 //! destination: the signed `rd` of the page is not the default `/`. Without a destination, the card has no
-//! band and starts with the fields. The band depends on `rd` and on the host of the request only. It never
+//! band and starts with the fields. The band depends on `rd` only. It never
 //! depends on what a visitor typed, so a refused sign-in keeps the same answer for each cause.
 //!
 //! A floating label is a real `<label for>` and the field has the placeholder `" "`. The stylesheet reads
@@ -36,7 +36,7 @@ const MAX_PATH_CHARS: usize = 96;
 pub const ICONS: [&str; 4] = ["i-lock", "i-alert-triangle", "i-eye", "i-eye-off"];
 
 /// Tells whether a character can change the order or the look of the text that is around it. The band does
-/// not show such a character: an address cannot reorder or hide the host that stands before it.
+/// not show such a character: an address cannot reorder or hide the text that stands before it.
 fn is_unsafe_char(c: char) -> bool {
     c.is_control()
         || matches!(
@@ -58,9 +58,14 @@ fn is_unsafe_char(c: char) -> bool {
         )
 }
 
-/// The path of the destination, as text: the part of `rd` before the query, without the characters that
-/// [`is_unsafe_char`] names, and cut at [`MAX_PATH_CHARS`] with an ellipsis. `None` when `rd` is the default.
-fn destination_path(rd: &str) -> Option<String> {
+/// What the band says about the destination: its path. The path is the part of `rd` before the query, without the
+/// characters that [`is_unsafe_char`] names, and cut at [`MAX_PATH_CHARS`] with an ellipsis. `None` when `rd` is the
+/// default. A page of the portal has no name of its own in the band: a visitor can ask for any path, and the server
+/// signs it, so a name would tell the pages of the product from the other paths.
+///
+/// The destination is always on the host of the page: `rd` is a path that the server signed, and the browser goes to
+/// it with no host. So the band shows no host.
+fn destination(rd: &str) -> Option<String> {
     if rd == "/" {
         return None;
     }
@@ -75,20 +80,14 @@ fn destination_path(rd: &str) -> Option<String> {
 
 /// The band at the top of the card. It is empty when `rd` is the default: the card then has no band.
 /// The text is plain text: the band has no link, whatever `rd` holds.
-fn band(host: Option<&str>, rd: &str) -> String {
-    let Some(path) = destination_path(rd) else {
+fn band(rd: &str) -> String {
+    let Some(text) = destination(rd) else {
         return String::new();
     };
-    let host = host.unwrap_or_default();
-    let host_html = if host.is_empty() {
-        String::new()
-    } else {
-        format!(r#"<span class="signin__host">{}</span>"#, html_escape(host))
-    };
     format!(
-        r##"<div class="signin__band"><svg class="signin__lock" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><span class="signin__to" title="{}"><span class="visually-hidden">To </span>{host_html}<b class="signin__path">{}</b></span></div>"##,
-        html_escape(&format!("{host}{path}")),
-        html_escape(&path),
+        r##"<div class="signin__band"><svg class="signin__lock" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><span class="signin__to" title="{}"><span class="signin__tag">Redirect</span> <b class="signin__path">{}</b></span></div>"##,
+        html_escape(&text),
+        html_escape(&text),
     )
 }
 
@@ -129,10 +128,10 @@ fn reveal(target: &str) -> String {
 
 /// The card, with its hidden heading and its band. `form` is the markup that follows. `strip` is the strip of the
 /// message: it is the last part of the card.
-fn card(title: &str, host: Option<&str>, rd: &str, form: &str, strip: &str) -> String {
+fn card(title: &str, rd: &str, form: &str, strip: &str) -> String {
     format!(
         r#"<h1 class="visually-hidden" id="{TITLE_ID}">{title}</h1>{}{form}{strip}"#,
-        band(host, rd)
+        band(rd)
     )
 }
 
@@ -152,8 +151,6 @@ pub struct Login<'a> {
     pub rd: &'a str,
     pub sig: &'a str,
     pub form_token: &'a str,
-    /// The host that the visitor asked for. `None` when the request gave no usable host.
-    pub host: Option<&'a str>,
     /// A sentence for the strip of the message, for example [`INVALID_CREDENTIALS`].
     pub error: Option<&'a str>,
     pub max_password_bytes: usize,
@@ -215,7 +212,7 @@ pub fn login_page(l: &Login) -> String {
     );
     let strip = message(l.error);
     sign_in_document(
-        &card("Authentication", l.host, l.rd, &form, &strip),
+        &card("Authentication", l.rd, &form, &strip),
         &ICONS,
         l.error.is_some(),
     )
@@ -226,7 +223,6 @@ pub struct Code<'a> {
     /// The hidden fields of both forms, already written.
     pub hidden: &'a str,
     pub rd: &'a str,
-    pub host: Option<&'a str>,
     pub error: Option<&'a str>,
     /// The message that marks the code field as invalid.
     pub invalid: &'a str,
@@ -264,7 +260,7 @@ pub fn code_page(c: &Code) -> String {
     );
     let strip = message(c.error);
     sign_in_document(
-        &card("Verification", c.host, c.rd, &form, &strip),
+        &card("Verification", c.rd, &form, &strip),
         &ICONS[..2],
         c.error.is_some(),
     )
@@ -274,13 +270,12 @@ pub fn code_page(c: &Code) -> String {
 mod tests {
     use super::*;
 
-    fn login(rd: &str, host: Option<&str>, error: Option<&str>) -> String {
+    fn login(rd: &str, error: Option<&str>) -> String {
         login_page(&Login {
             csrf: "c",
             rd,
             sig: "s",
             form_token: "t",
-            host,
             error,
             max_password_bytes: 1024,
             keep_for: Some("30 days"),
@@ -295,23 +290,60 @@ mod tests {
 
     #[test]
     fn the_default_return_target_gives_no_band() {
-        let page = login("/", Some("app.example.com"), None);
+        let page = login("/", None);
         assert!(!page.contains("signin__band"), "{page}");
         assert!(page.contains("signin__form--bare"));
         assert!(!page.contains("Launcher"));
     }
 
     #[test]
-    fn a_destination_gives_a_band_with_the_host_and_the_path() {
-        let page = login("/chdash/x?a=1&b=2", Some("app.example.com"), None);
-        assert!(page.contains(r#"<span class="signin__host">app.example.com</span><b class="signin__path">/chdash/x</b>"#), "{page}");
+    fn a_destination_gives_a_band_with_the_path_and_no_host() {
+        let page = login("/chdash/x?a=1&b=2", None);
+        assert!(
+            page.contains(r#"<b class="signin__path">/chdash/x</b>"#),
+            "{page}"
+        );
+        assert!(!page.contains("example.com"));
         assert!(!page.contains("signin__form--bare"));
         // The query is not in the band. It stays in the hidden field.
         assert!(!page.contains("a=1&amp;b=2</b>"));
         assert!(page.contains(r#"name="rd" value="/chdash/x?a=1&amp;b=2""#));
-        let page = login("/chdash/", None, None);
+        let page = login("/chdash/", None);
         assert!(page.contains(r#"<b class="signin__path">/chdash/</b>"#));
-        assert!(!page.contains("signin__host"));
+    }
+
+    #[test]
+    fn a_page_of_the_portal_shows_its_path_like_any_other_page() {
+        for rd in [
+            "/auth/settings/services",
+            "/auth/settings",
+            "/auth/settings/activity",
+            "/auth/settings/inbox",
+            "/auth/settings/security",
+            "/auth/settings/new-user",
+            "/auth/keys/new",
+            "/auth/settings/users/alice",
+            "/auth/settingsX",
+            "/chdash/reports",
+        ] {
+            let page = login(rd, None);
+            // The whole band: the tag, the path in the title and in the text, and nothing else.
+            let start = page.find(r#"<div class="signin__band">"#).unwrap();
+            let band = &page[start..start + page[start..].find("</div>").unwrap()];
+            assert!(
+                band.contains(&format!(
+                    r#"title="{rd}"><span class="signin__tag">Redirect</span> <b class="signin__path">{rd}</b></span>"#
+                )),
+                "{rd}: {band}"
+            );
+            assert!(
+                !band.contains("Settings") && !band.contains("Services"),
+                "{rd}"
+            );
+        }
+        // The query stays out of the band.
+        let page = login("/auth/settings/services?svc=a&f=check", None);
+        assert!(page.contains(r#"<b class="signin__path">/auth/settings/services</b>"#));
     }
 
     #[test]
@@ -322,7 +354,7 @@ mod tests {
             "/javascript:alert(1)",
             "/x'onmouseover='alert(1)",
         ] {
-            let page = login(rd, Some("app.example.com"), None);
+            let page = login(rd, None);
             for markup in [
                 "<script>alert",
                 "<img",
@@ -337,9 +369,9 @@ mod tests {
                 "no link to the address"
             );
         }
-        let page = login("/javascript:alert(1)", Some("app.example.com"), None);
+        let page = login("/javascript:alert(1)", None);
         assert!(page.contains("/javascript:alert(1)</b>"));
-        let page = login("/a<b>&\"", Some("app.example.com"), None);
+        let page = login("/a<b>&\"", None);
         assert!(
             page.contains(r#"<b class="signin__path">/a&lt;b&gt;&amp;&quot;</b>"#),
             "{page}"
@@ -349,7 +381,7 @@ mod tests {
     #[test]
     fn the_band_cuts_a_long_path_and_drops_the_characters_that_reorder_text() {
         let long = format!("/{}", "a".repeat(500));
-        let page = login(&long, Some("h.example"), None);
+        let page = login(&long, None);
         let shown = page
             .split(r#"<b class="signin__path">"#)
             .nth(1)
@@ -359,7 +391,7 @@ mod tests {
             .unwrap();
         assert_eq!(shown.chars().count(), MAX_PATH_CHARS + 1);
         assert!(shown.ends_with('\u{2026}'));
-        let page = login("/a\u{202E}b\u{200B}c\u{0007}d", Some("h.example"), None);
+        let page = login("/a\u{202E}b\u{200B}c\u{0007}d", None);
         assert!(
             page.contains(r#"<b class="signin__path">/abcd</b>"#),
             "{page}"
@@ -372,24 +404,16 @@ mod tests {
             let start = page.find("<div class=\"signin__band\">").unwrap();
             page[start..start + page[start..].find("</div>").unwrap()].to_string()
         };
-        let plain = band_of(&login("/chdash/", Some("a.example"), None));
-        let refused = band_of(&login(
-            "/chdash/",
-            Some("a.example"),
-            Some(INVALID_CREDENTIALS),
-        ));
-        let limited = band_of(&login(
-            "/chdash/",
-            Some("a.example"),
-            Some("Too many sign-in attempts."),
-        ));
+        let plain = band_of(&login("/chdash/", None));
+        let refused = band_of(&login("/chdash/", Some(INVALID_CREDENTIALS)));
+        let limited = band_of(&login("/chdash/", Some("Too many sign-in attempts.")));
         assert_eq!(plain, refused);
         assert_eq!(plain, limited);
     }
 
     #[test]
     fn the_password_button_is_hidden_and_the_heading_is_for_a_screen_reader() {
-        let page = login("/", Some("a.example"), None);
+        let page = login("/", None);
         assert!(page.contains(r#"<button class="signin__reveal" type="button" data-reveal hidden aria-controls="password" aria-pressed="false" aria-label="Show password">"#));
         assert!(
             page.contains(r#"<h1 class="visually-hidden" id="signin-title">Authentication</h1>"#)
@@ -407,31 +431,30 @@ mod tests {
 
     #[test]
     fn a_refusal_marks_both_fields_and_a_limit_does_not() {
-        let refused = login("/", None, Some(INVALID_CREDENTIALS));
+        let refused = login("/", Some(INVALID_CREDENTIALS));
         assert_eq!(refused.matches(r#"aria-invalid="true""#).count(), 2);
         assert!(refused.contains(r#"id="signin-msg" role="alert">"#));
         assert!(refused.contains("Invalid login or password"));
         assert!(refused.contains(r#"class="signin signin--strip""#));
         let limited = login(
             "/",
-            None,
             Some("Too many sign-in attempts from this address. Try again later."),
         );
         assert_eq!(limited.matches("aria-invalid").count(), 0);
         assert!(limited.contains(r#"role="alert""#));
-        let quiet = login("/", None, None);
+        let quiet = login("/", None);
         assert!(!quiet.contains("role=\"alert\"") && !quiet.contains("aria-live"));
     }
 
     #[test]
     fn the_strip_exists_only_with_a_message_and_comes_after_the_button() {
-        let quiet = login("/", None, None);
+        let quiet = login("/", None);
         // No message: no strip, no empty place, no reference to a strip, no room made for it.
         for word in ["signin__msg", "signin-msg", "signin__mi", "signin--strip"] {
             assert!(!quiet.contains(word), "{word} in {quiet}");
         }
         assert!(quiet.contains(r#"<div class="signin">"#));
-        let page = login("/chdash/", Some("a.example"), Some(INVALID_CREDENTIALS));
+        let page = login("/chdash/", Some(INVALID_CREDENTIALS));
         assert_eq!(page.matches("signin__msg").count(), 1, "{page}");
         assert_eq!(page.matches(r#"role="alert""#).count(), 1);
         let button = page.find(r#"<button class="signin__btn""#).unwrap();
@@ -448,7 +471,7 @@ mod tests {
             "Too many sign-in attempts from this address. Try again later.",
             "The page was open too long. Enter your login and password again.",
         ] {
-            let page = login("/", None, Some(text));
+            let page = login("/", Some(text));
             let strip = page.find(r#"<p class="signin__msg""#).unwrap();
             assert!(page.find("</form>").unwrap() < strip);
             assert!(page.contains(&format!("<span>{text}</span></p>")), "{page}");
@@ -458,7 +481,7 @@ mod tests {
 
     #[test]
     fn the_box_says_remember_me_and_keeps_the_life_in_a_title_and_a_description() {
-        let page = login("/", None, None);
+        let page = login("/", None);
         assert!(
             page.contains(r#"<label class="signin__check" title="Stay signed in for 30 days">"#)
         );
@@ -484,7 +507,6 @@ mod tests {
             rd: "/",
             sig: "s",
             form_token: "t",
-            host: None,
             error: None,
             max_password_bytes: 1024,
             keep_for: None,
@@ -499,21 +521,20 @@ mod tests {
     }
 
     #[test]
-    fn the_sign_in_pages_are_anonymous_with_no_mark_no_icon_link_and_no_product_word() {
+    fn the_sign_in_pages_are_anonymous_with_no_mark_an_empty_icon_and_no_product_word() {
         let code = |rd: &str, error: Option<&str>| {
             code_page(&Code {
                 hidden: "",
                 rd,
-                host: Some("app.example.com"),
                 error,
                 invalid: "Invalid code",
                 action: "/auth/login/code",
             })
         };
         let pages = [
-            login("/", Some("app.example.com"), None),
-            login("/chdash/x", Some("app.example.com"), None),
-            login("/", None, Some("Invalid login or password")),
+            login("/", None),
+            login("/chdash/x", None),
+            login("/", Some("Invalid login or password")),
             code("/", None),
             code("/chdash/", Some("Invalid code")),
         ];
@@ -523,14 +544,17 @@ mod tests {
                 "logoDot",
                 "appMark",
                 "appSep",
-                "rel=\"icon\"",
                 "image/svg+xml",
+                "apple-touch",
                 "<svg class=\"appMark",
             ] {
                 assert!(!page.contains(part), "{part}: {page}");
             }
             assert!(!page.to_ascii_lowercase().contains("portal"), "{page}");
-            assert_eq!(page.matches("<link ").count(), 1, "the stylesheet only");
+            // The stylesheet, and the empty icon that no file backs.
+            assert_eq!(page.matches("<link ").count(), 2, "{page}");
+            assert_eq!(page.matches("rel=\"icon\"").count(), 1, "{page}");
+            assert!(page.contains("href=\"data:,\""), "{page}");
         }
     }
 
@@ -540,7 +564,6 @@ mod tests {
             code_page(&Code {
                 hidden: r#"<input type="hidden" name="pending" value="p">"#,
                 rd,
-                host: Some("app.example.com"),
                 error,
                 invalid: "Invalid code",
                 action: "/auth/login/code",

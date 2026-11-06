@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use crate::catalog::Health;
 
-/// Client for probes. It does not follow any redirect. It does not verify certificates. A probe
-/// asks "does something answer?" It sends nothing secret. An in-cluster service often has a
-/// private CA.
+/// Client for the health probes only. It does not follow any redirect. It does not verify
+/// certificates. A probe asks "does something answer?" It sends nothing secret and reads no body.
+/// An in-cluster service often has a private CA.
 pub fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .tls_certs_only(super::embedded_roots())
@@ -17,6 +17,20 @@ pub fn build_client(timeout: Duration) -> Result<reqwest::Client, String> {
         .user_agent(concat!("portal-probe/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("cannot build the probe client: {e}"))
+}
+
+/// Client for the reads that carry an identity token or give a document that decides grants: the
+/// actions documents and the options. It verifies the certificate and the host name of an https
+/// URL against the embedded roots. It does not follow any redirect.
+pub fn build_verified_client(timeout: Duration) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .tls_certs_only(super::embedded_roots())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .user_agent(concat!("portal/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("cannot build the client of the service documents: {e}"))
 }
 
 /// Up when the service answers with any status code below 500. A 401 or a redirect means that the

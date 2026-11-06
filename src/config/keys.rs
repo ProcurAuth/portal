@@ -344,7 +344,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
         presence: Presence::Default("10s"),
         when: When::Always,
-        doc: "The time that a client has to send the request body.",
+        doc: "The time that a client has to send the request body. A sign-in also gets its Argon2 check in this time, or the server answers `503`.",
     },
     Key {
         block: "server",
@@ -352,7 +352,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 100_000 },
         presence: Presence::Default("64"),
         when: When::Always,
-        doc: "The largest number of sign-in requests whose body the server reads at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`.",
+        doc: "The largest number of sign-in requests that the server reads, or that wait for their Argon2 check, at the same time. The server answers `503` at once to a sign-in request above this number. Slow sign-in bodies and a queue of sign-ins thus cannot hold all the connections that ForwardAuth needs. It must be less than `server.max_connections`.",
     },
     Key {
         block: "server",
@@ -372,7 +372,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Secret { max_bytes: 256 },
         presence: Presence::Required,
         when: When::Always,
-        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of keys. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions.",
+        doc: "The login of the superadmin. It has 1 to 64 characters, and no upper-case letter, no space, no control character and no colon. The portal keeps the colon for the ids of keys. The server does not change it. A new login ends the sessions of the superadmin and the impersonated sessions. An account of the database or a block `user` with this login stops the start.",
     },
     Key {
         block: "authentication",
@@ -818,6 +818,14 @@ pub static KEYS: &[Key] = &[
         doc: "The largest number of open sessions. A login above this number gets the status 503.",
     },
     Key {
+        block: "session",
+        name: "max_sessions_per_account",
+        kind: Kind::Int { min: 1, max: 1_000_000 },
+        presence: Presence::Default("16"),
+        when: When::Always,
+        doc: "The largest number of open sessions of one account, the superadmin included. A new sign-in of an account at this number ends the session of that account that was used least recently. Thus one account cannot fill `session.max_active_sessions`. An impersonated session does not count. The value is at most `session.max_active_sessions`.",
+    },
+    Key {
         block: "security",
         name: "max_password_bytes",
         kind: Kind::Int { min: 8, max: 16 * 1024 },
@@ -1014,7 +1022,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Enum(&["default", "none"]),
         presence: Presence::Default("default"),
         when: When::Always,
-        doc: "The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page links an icon, and the icon route answers 404.",
+        doc: "The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page after sign-in links an icon, and the icon route gives the answer of an unknown path. A page before sign-in never has an icon: it has the empty icon.",
     },
     Key {
         block: "logging",
@@ -1050,6 +1058,14 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("1000"),
         when: When::Always,
         doc: "The largest number of enrolled phones that are not revoked.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_per_account",
+        kind: Kind::Int { min: 1, max: 100_000 },
+        presence: Presence::Default("10"),
+        when: When::Always,
+        doc: "The largest number of enrolled phones of one account that are not revoked. The inbox refuses the enrollment of one more phone of the account, and the code stays unused. Thus one account cannot use all the places of `inbox.devices.max_devices`. The value is at most `inbox.devices.max_devices`.",
     },
     Key {
         block: "inbox.devices",
@@ -1105,7 +1121,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Int { min: 1, max: 1000 },
         presence: Presence::Default("5"),
         when: When::Always,
-        doc: "The number of enrollment attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started enrollment counts until it succeeds.",
+        doc: "The number of failed attempts of one client address in the window `inbox.devices.auth_failure_window`. Each started enrollment counts until it succeeds. A session handshake that proves no enrolled phone counts too, also when it ends at its time limit. At this number, the address cannot start an enrollment, and such a handshake gets the close code 4429. A phone that proves its key always gets its session.",
     },
     Key {
         block: "inbox.devices",
@@ -1114,6 +1130,14 @@ pub static KEYS: &[Key] = &[
         presence: Presence::Default("10m"),
         when: When::Always,
         doc: "The window of `inbox.devices.max_auth_failures`.",
+    },
+    Key {
+        block: "inbox.devices",
+        name: "max_handshakes_per_address",
+        kind: Kind::Int { min: 1, max: 100_000 },
+        presence: Presence::Default("16"),
+        when: When::Always,
+        doc: "The largest number of phone WebSockets of one client address that did not finish the handshake. The routes `/v1/enroll` and `/v1/session` count together. A new WebSocket of an address at this number ends the oldest handshake of the address with the close code 1013. Thus one client holds at most this part of the session budget. The phones behind one NAT address share this number.",
     },
     Key {
         block: "inbox.devices",
@@ -1188,7 +1212,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(DAY) },
         presence: Presence::Default("10s"),
         when: When::Always,
-        doc: "The inbox copies a changed database at most this often. An accepted alert, an enrollment and a revocation do not wait for this time.",
+        doc: "The inbox copies a changed database at most this often. An accepted alert, an enrollment, a revocation and a form of the portal that changes the database do not wait for this time.",
     },
     Key {
         block: "inbox.replica",
@@ -1204,7 +1228,7 @@ pub static KEYS: &[Key] = &[
         kind: Kind::Duration { min: secs(1), max: secs(MINUTE) },
         presence: Presence::Default("5s"),
         when: When::Always,
-        doc: "The time that an accepted alert waits for the copy that holds it.",
+        doc: "The time that an accepted alert, or the answer to a form of the portal, waits for the copy that holds the change.",
     },
     Key {
         block: "inbox.replica",
@@ -1326,7 +1350,7 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
     (
         "api_key",
         "<name>",
-        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the list of keys.",
+        "One API key of the file: the key of a monitoring tool, a script or a webhook that sends alerts. The block is inside the block `inbox`. The label is the name of the key: 1 to 64 characters of a-z, 0-9, '-' and '_'. The key follows its owner, as each key does: it can do only what the key and its owner both have the right to do. The owner is an account of the file (a block `user`), so the key and its account have one source. The rights of a file account do not change while the server runs, so the server decides at start which groups the key can send to. It also keeps the groups of the key where the owner holds `alert.read`: only these give the status of an alert (`GET /api/v1/alerts/{id}`). This decision does not wait for the database. The block needs `keys.api = true`. The key is not in the list of keys.",
     ),
     (
         "pdp_client",

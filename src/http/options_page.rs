@@ -61,6 +61,11 @@ pub(super) async fn handle_options(
     let Ok(parent_path) = grants::parse_path(&parent) else {
         return bad_request();
     };
+    // A service that the viewer cannot open gets the answer of a service that does not exist. The
+    // viewer learns nothing of it: not its id, and not its types.
+    if !may_open(viewer.grants.as_deref(), service_id) {
+        return nothing(false);
+    }
     let catalog = current_catalog(state);
     let service = catalog
         .groups()
@@ -80,9 +85,6 @@ pub(super) async fn handle_options(
         .any(|t| t.name == *kind && t.parent == parent_kind);
     if !right_type {
         return bad_request();
-    }
-    if !may_open(viewer.grants.as_deref(), service_id) {
-        return nothing(false);
     }
     let (Some(signer), Some(identity), Some(origin)) = (
         &state.signer,

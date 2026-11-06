@@ -37,6 +37,8 @@ pub struct DevicesConfig {
     /// The public base URL of the portal as the phones reach it. It is the `s` of an enrollment code.
     pub public_address: String,
     pub max_devices: u32,
+    /// The most phones of one account that are not revoked. At most `max_devices`.
+    pub max_per_account: u32,
     pub heartbeat_interval: Duration,
     pub session_timeout: Duration,
     pub resend_after: Duration,
@@ -45,6 +47,8 @@ pub struct DevicesConfig {
     pub offline_warning_after: Duration,
     pub max_auth_failures: u32,
     pub auth_failure_window: Duration,
+    /// The most phone WebSockets of one client address that did not finish the handshake.
+    pub max_handshakes_per_address: u32,
     pub max_request_bytes: usize,
 }
 
@@ -114,6 +118,9 @@ pub struct ApiKeyConfig {
     pub owner: String,
     /// The groups that the block lists. The server keeps only those that the owner may send to.
     pub groups: Vec<String>,
+    /// The groups of the block where the owner holds `alert.read`: the key reads the alerts of
+    /// these groups only. [`check_api_keys`] fills the list from the grants of the owner.
+    pub read_groups: Vec<String>,
     /// The key can send an alert to an account. The owner holds `alert.send_user`.
     pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
@@ -150,6 +157,7 @@ pub fn build(
     let devices = DevicesConfig {
         public_address: r.text("inbox.devices", "public_address")?,
         max_devices: small(r, "inbox.devices", "max_devices")?,
+        max_per_account: small(r, "inbox.devices", "max_per_account")?,
         heartbeat_interval: r.duration("inbox.devices", "heartbeat_interval")?,
         session_timeout: r.duration("inbox.devices", "session_timeout")?,
         resend_after: r.duration("inbox.devices", "resend_after")?,
@@ -158,6 +166,7 @@ pub fn build(
         offline_warning_after: r.duration("inbox.devices", "offline_warning_after")?,
         max_auth_failures: small(r, "inbox.devices", "max_auth_failures")?,
         auth_failure_window: r.duration("inbox.devices", "auth_failure_window")?,
+        max_handshakes_per_address: small(r, "inbox.devices", "max_handshakes_per_address")?,
         max_request_bytes: r.size("inbox.devices", "max_request_bytes")?,
     };
     let enrollment = EnrollmentConfig {
@@ -298,6 +307,7 @@ pub fn build(
             ApiKeyConfig {
                 owner: block.text("owner")?,
                 groups: listed,
+                read_groups: Vec::new(),
                 direct_alerts,
                 webhook_send_resolved: block.bool("webhook_send_resolved")?,
             },
@@ -328,6 +338,12 @@ pub fn build(
 /// The keys of the inbox that contradict each other.
 fn check_values(c: &InboxConfig) -> Result<(), String> {
     let d = &c.devices;
+    if d.max_per_account > d.max_devices {
+        return Err(format!(
+            "inbox.devices.max_per_account must be at most inbox.devices.max_devices: max_per_account is {}, max_devices is {}",
+            d.max_per_account, d.max_devices
+        ));
+    }
     if d.session_timeout < d.heartbeat_interval * 2 {
         return Err(format!(
             "inbox.devices.session_timeout must be at least two times inbox.devices.heartbeat_interval: session_timeout is {}, heartbeat_interval is {}",
@@ -420,15 +436,17 @@ pub fn check_against(config: &Config, inbox: &InboxConfig, postgres: bool) -> Re
 /// Checks each block `api_key` against the accounts of the file (portal 3.4a, 4.1). The owner is an
 /// account of the file. The owner must hold `keys.own.use` on the kind `api`, `alert.send` on each
 /// group of the key, and `alert.send_user` on the service when the key has `direct_alerts`. The
-/// error names the key, the expected value and the value found.
+/// error names the key, the expected value and the value found. The function also keeps, for each
+/// key, the groups of the block where the owner holds `alert.read`: a key never has more rights
+/// than its owner.
 pub fn check_api_keys(
     config: &Config,
-    inbox: &InboxConfig,
+    inbox: &mut InboxConfig,
     features: &crate::portal_actions::Features,
 ) -> Result<(), String> {
     use crate::portal_actions as portal;
     let document = portal::document(features);
-    for (name, key) in &inbox.api_keys {
+    for (name, key) in &mut inbox.api_keys {
         let Some(account) = config.access.accounts.get(&key.owner) else {
             return Err(format!(
                 "invalid inbox.api_key.{name}.owner: expected the login of an account of the file (a block user), got {:?}",
@@ -473,6 +491,20 @@ pub fn check_api_keys(
                 ));
             }
         }
+        key.read_groups = key
+            .groups
+            .iter()
+            .filter(|group| {
+                portal::allows(
+                    &document,
+                    &key.owner,
+                    &account.grants,
+                    portal::ALERT_READ,
+                    Some(group),
+                )
+            })
+            .cloned()
+            .collect();
     }
     Ok(())
 }

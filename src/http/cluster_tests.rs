@@ -698,6 +698,8 @@ fn a_read_of_the_accounts_that_just_ran_does_not_end_the_session_of_a_new_accoun
                 client_binding(&a, "127.0.0.1"),
                 crate::session::NewSession {
                     principal: Principal::User("gina".into()),
+                    credential: credential_stamp(&a.state, &Principal::User("gina".into()))
+                        .unwrap(),
                     login: "gina".into(),
                     impersonated: false,
                     remember: false,
@@ -1720,13 +1722,16 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
     };
     let write = || decide("query.run.write", "database", "analytics");
 
-    // The service was never read: the PDP cannot check the chain of a node below the service.
-    // The grant on the whole service is not affected.
+    // The service was never read: the PDP cannot check the chain of a node below the service,
+    // and it cannot apply the limits of a grant. Only `access` on the service stays (protocol 11.1).
     assert!(
         !write(),
         "never read: the grant on a sub-resource does not apply"
     );
-    assert!(decide("system.read", "service", "db"));
+    assert!(
+        !decide("system.read", "service", "db"),
+        "never read: no decision on the whole service"
+    );
     assert!(
         !decide("system.read", "database", "analytics"),
         "never read: no decision below the service"
@@ -3092,6 +3097,92 @@ fn slow_sign_in_bodies_leave_connections_for_forward_auth() {
         begun.elapsed()
     );
     drop(slow);
+}
+
+/// The audit lead portal/login/argon2-wait-holds-connection-permits: a sign-in that waits for the
+/// Argon2 permit keeps its place in `server.max_login_body_reads`, and it waits only until
+/// `server.body_read_timeout` ends. A queue of right-password sign-ins of one account thus
+/// leaves connections for ForwardAuth, and each one ends at the deadline with `503`.
+#[test]
+fn sign_ins_that_wait_for_the_argon2_check_leave_connections_for_forward_auth() {
+    let node = start_custom(
+        Arc::new(Store::open_in_memory()),
+        None,
+        Custom {
+            server: r#"trusted_proxies = ["127.0.0.1/32"] max_connections = 5 max_login_body_reads = 2 body_read_timeout = "3s""#,
+            ..Custom::default()
+        },
+        "",
+    );
+    insert_account(&node, "mallory", "mallory-dummy-password");
+    // The test holds the Argon2 permit: it stands for a long queue of checks.
+    let held = Arc::clone(&node.state.password_gate)
+        .try_acquire_owned()
+        .unwrap();
+    let mut waiting = Vec::new();
+    for _ in 0..5 {
+        let node = node.clone();
+        waiting.push(std::thread::spawn(move || {
+            let started = Instant::now();
+            let status = login_from(
+                &node,
+                "127.0.0.20",
+                "mallory",
+                "mallory-dummy-password",
+                &[],
+            )
+            .status;
+            (status, started.elapsed())
+        }));
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // Without the fix, five waiting sign-ins hold the five connections, and this one is dropped.
+    let begun = Instant::now();
+    let reply = send(
+        node.port,
+        "GET",
+        VERIFY_PATH,
+        &[("X-Forwarded-Uri", "/app/"), ("X-Forwarded-Method", "GET")],
+        "",
+    );
+    assert_eq!(reply.status, 302, "ForwardAuth gets a connection");
+    assert!(
+        begun.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        begun.elapsed()
+    );
+    assert_eq!(
+        node.state.login_body_gate.available_permits(),
+        0,
+        "the waiting sign-ins keep the body permits"
+    );
+    let results: Vec<(u16, Duration)> = waiting.into_iter().map(|t| t.join().unwrap()).collect();
+    assert!(
+        results.iter().all(|(status, _)| *status == 503),
+        "{results:?}"
+    );
+    let at_deadline = results
+        .iter()
+        .filter(|(_, took)| *took >= Duration::from_millis(2_500))
+        .count();
+    assert_eq!(
+        at_deadline, 2,
+        "two sign-ins waited until the deadline: {results:?}"
+    );
+    drop(held);
+    assert_eq!(
+        login_from(
+            &node,
+            "127.0.0.20",
+            "mallory",
+            "mallory-dummy-password",
+            &[]
+        )
+        .status,
+        303,
+        "a sign-in with a free permit succeeds"
+    );
 }
 
 /// A rotation of the superadmin login, of its password or of the session secret ends the old
@@ -6439,7 +6530,7 @@ fn the_superadmin_gives_the_rights_on_keys_and_the_limit_values_of_a_grant() {
 
 mod inbox_rights_tests {
     use super::*;
-    use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
+    use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Standing, Subscribable};
     use crate::keyauth::Cause;
     use crate::store::KeyRow;
 
@@ -6571,8 +6662,19 @@ mod inbox_rights_tests {
                 authorizer.subscribable("root"),
                 groups(&["infra", "oncall"])
             );
-            // An account that the directory does not know is not a refusal.
-            assert_eq!(authorizer.subscribable("nobody"), Subscribable::Unknown);
+            // An account that the directory does not know is not a refusal with a shared
+            // database: the file of another instance can have it. One instance on SQLite knows
+            // every account: the login is absent (portal/inbox/phones-of-removed-file-account-stay-active).
+            for login in ["alice", "bob", "root"] {
+                assert_eq!(authorizer.standing(login), Standing::Exists, "{login}");
+            }
+            if node.state.store.is_shared() {
+                assert_eq!(authorizer.subscribable("nobody"), Subscribable::Unknown);
+                assert_eq!(authorizer.standing("nobody"), Standing::NotHere);
+            } else {
+                assert_eq!(authorizer.subscribable("nobody"), Subscribable::Absent);
+                assert_eq!(authorizer.standing("nobody"), Standing::Absent);
+            }
             // The stamp changes with the directory.
             let before = authorizer.directory_stamp().unwrap();
             change_grants(
@@ -6587,6 +6689,7 @@ mod inbox_rights_tests {
                 node.state.users.set_last_success(0);
                 assert_eq!(authorizer.subscribable("bob"), Subscribable::Unknown);
                 assert_eq!(authorizer.subscribable("root"), Subscribable::Unknown);
+                assert_eq!(authorizer.standing("root"), Standing::Unknown);
                 assert_eq!(authorizer.directory_stamp(), None);
                 node.state.users.refresh(&node.state.store).unwrap();
                 assert_eq!(authorizer.subscribable("bob"), groups(&[]));
@@ -8094,32 +8197,36 @@ fn the_band_of_the_sign_in_page_shows_the_destination_only_when_there_is_one() {
     let plain = send(node.port, "GET", LOGIN_PATH, &[], "").body;
     assert!(Mask::has_element(&plain, "h1", &[]), "{plain}");
     assert!(!plain.contains("Launcher"), "{plain}");
-    assert!(!plain.contains("To </span>"), "no band: {plain}");
+    assert!(!plain.contains("Redirect</span>"), "no band: {plain}");
     let direct = login_page_for(&node, "/", &[]).body;
-    assert!(!direct.contains("To </span>"), "{direct}");
-    // A destination with a good signature: the band shows the host and the path, without the query.
+    assert!(!direct.contains("Redirect</span>"), "{direct}");
+    // A destination with a good signature: the band shows the path, without the query and without a host. The
+    // destination is on the host of the page, which the address bar shows.
     let page = login_page_for(
         &node,
         "/chdash/x?a=1",
         &[("X-Forwarded-Host", "app.example.com")],
     )
     .body;
-    assert!(page.contains("To </span>"), "{page}");
-    assert!(page.contains(">app.example.com</span>"), "{page}");
-    assert!(page.contains(">/chdash/x</b>"), "{page}");
-    assert!(!page.contains(">/chdash/x?a=1</b>"), "{page}");
-    // Without a forwarded host, the Host header gives the host.
-    let page = login_page_for(&node, "/chdash/", &[]).body;
+    assert!(page.contains("Redirect</span>"), "{page}");
     assert!(
-        page.contains(&format!(">127.0.0.1:{}</span>", node.port)),
+        !page.contains("app.example.com") && !page.contains("signin__host"),
         "{page}"
     );
+    assert!(page.contains(">/chdash/x</b>"), "{page}");
+    assert!(!page.contains(">/chdash/x?a=1</b>"), "{page}");
+    let page = login_page_for(&node, "/chdash/", &[]).body;
+    assert!(!page.contains("127.0.0.1"), "{page}");
+    // A page of the portal shows its path, like any other page: the band never tells the pages of the product.
+    let page = login_page_for(&node, "/auth/settings/services", &[]).body;
+    assert!(page.contains(">/auth/settings/services</b>"), "{page}");
+    assert!(!page.contains("Settings"), "{page}");
     // A destination with a bad signature is the default: no band.
     let path = format!("{LOGIN_PATH}?rd=%2Fchdash%2F&sig=AAAA");
     let forged = send(node.port, "GET", &path, &[], "").body;
-    assert!(!forged.contains("To </span>"), "{forged}");
+    assert!(!forged.contains("Redirect</span>"), "{forged}");
     assert!(!forged.contains("chdash"), "{forged}");
-    // A host that is not a host is not in the page.
+    // A header that is not a host is not in the page.
     let page = login_page_for(&node, "/chdash/", &[("X-Forwarded-Host", "a\"><script>x")]).body;
     assert!(!page.contains("<script>x"), "{page}");
     assert!(page.contains(">/chdash/</b>"), "{page}");
@@ -8134,7 +8241,7 @@ fn an_address_with_markup_stays_text_in_the_band() {
         "/a<img src=x onerror=alert(1)>",
     ] {
         let page = login_page_for(&node, rd, &[("X-Forwarded-Host", "app.example.com")]).body;
-        assert!(page.contains("To </span>"), "{rd}");
+        assert!(page.contains("Redirect</span>"), "{rd}");
         assert!(!page.contains("<script>alert"), "{rd}: {page}");
         assert!(!page.contains("<img src=x"), "{rd}: {page}");
         assert!(!page.contains("<a "), "{rd}: {page}");
@@ -8162,7 +8269,10 @@ fn a_refusal_with_a_destination_has_the_same_band_for_each_cause() {
         let body = login_body_to(&node, &csrf, rd, login, password);
         let reply = post_login(&node, &format!("127.0.5.{}", index + 1), &csrf, &body);
         assert_eq!(reply.status, 401, "{name}: {}", reply.body);
-        assert!(reply.body.contains("To </span>"), "{name}: the band stays");
+        assert!(
+            reply.body.contains("Redirect</span>"),
+            "{name}: the band stays"
+        );
         assert!(reply.body.contains(">/chdash/</b>"), "{name}");
         replies.push((name, reply));
     }
@@ -8469,10 +8579,17 @@ fn stylesheet_of(page: &str) -> String {
 fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     let node = sign_in_node("");
     let icon = ui::favicon_path();
-    // The sign-in page, masked: no mark, no icon link, no product word, and one link in its head.
+    // The sign-in page, masked: no mark, no product word, and the empty icon as its only icon link.
     let login = send(node.port, "GET", LOGIN_PATH, &[], "");
     assert_eq!(login.status, 200);
-    assert!(!login.body.contains("rel=\"icon\""), "{}", login.body);
+    // The only icon of a page before sign-in is the empty one.
+    assert_eq!(
+        login.body.matches("rel=\"icon\"").count(),
+        1,
+        "{}",
+        login.body
+    );
+    assert_eq!(login.body.matches("href=\"data:,\"").count(), 1);
     assert!(!login.body.contains(icon) && !login.body.contains("image/svg+xml"));
     assert_eq!(
         login.body.matches("<symbol").count(),
@@ -8480,7 +8597,7 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
         "the four icons of the sign-in page"
     );
     assert!(!login.body.to_ascii_lowercase().contains("portal"));
-    assert_eq!(login.body.matches("<link ").count(), 1);
+    assert_eq!(login.body.matches("<link ").count(), 2);
     // The 404 page and the status pages: the same.
     let missing = send(
         node.port,
@@ -8493,12 +8610,10 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     let root = sign_in(&node, "root", PASSWORD);
     for path in ["/auth/nothing-here", SUCCESS_PATH, DENIED_PATH] {
         let reply = page(&node, &root, path);
-        assert!(
-            !reply.body.contains("rel=\"icon\"") && !reply.body.contains(icon),
-            "{path}"
-        );
+        assert!(!reply.body.contains(icon), "{path}");
+        assert_eq!(reply.body.matches("href=\"data:,\"").count(), 1, "{path}");
         assert!(!reply.body.contains("<symbol"), "{path}");
-        assert_eq!(reply.body.matches("<link ").count(), 1, "{path}");
+        assert_eq!(reply.body.matches("<link ").count(), 2, "{path}");
     }
     // The launcher: the icon link and no logo. The mask keeps the path of the icon, which has no class.
     let home = page(&node, &root, "/");
@@ -8510,10 +8625,7 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
     );
     assert!(home.body.contains("rel=\"icon\"") && home.body.contains("<symbol"));
     assert!(!home.body.contains("<symbol id=\"i-logo\"") && !home.body.contains("i-logo-"));
-    assert_eq!(
-        stylesheet_of(&home.body),
-        attribute_of(&login.body, "link", "href")
-    );
+    assert_eq!(stylesheet_of(&home.body), stylesheet_of(&login.body));
     for name in [
         Mask::names_in_page(&home.body, false),
         Mask::names_in_page(&home.body, true),
@@ -8551,6 +8663,9 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
         Some("private, max-age=31536000, immutable")
     );
     assert_eq!(file.body, ui::FAVICON_SVG);
+    // Nobody else gets it. The answer is the one of a path that never existed, with the same status and cache headers.
+    let unknown = send(node.port, "GET", "/auth/a/0000000000000000.svg", &[], "");
+    assert_eq!(unknown.status, 302);
     for anonymous in [
         send(node.port, "GET", icon, &[], ""),
         send(
@@ -8561,8 +8676,16 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
             "",
         ),
     ] {
-        assert_eq!(anonymous.status, 404);
+        assert_eq!(anonymous.status, unknown.status);
         assert!(!anonymous.body.contains("svg"));
+        assert_eq!(
+            anonymous.header("content-type"),
+            unknown.header("content-type")
+        );
+        assert_eq!(
+            anonymous.header("cache-control"),
+            unknown.header("cache-control")
+        );
     }
     // ForwardAuth does not let the icon pass without a session: it is not a neutral asset.
     let verify = send(
@@ -8573,6 +8696,99 @@ fn the_tab_icon_is_for_the_signed_in_pages_only_and_no_page_body_has_a_logo() {
         "",
     );
     assert_ne!(verify.status, 204);
+}
+
+#[test]
+fn no_page_that_a_visitor_without_a_session_can_reach_shows_the_icon_of_the_product() {
+    let node = sign_in_node("");
+    let icon = ui::favicon_path();
+    // The paths that a scraper or a browser asks for, and the pages of the sign-in. Each answer is a redirect, an
+    // unknown path or a page. A page has no icon, or the empty one.
+    let paths = [
+        "/",
+        LOGIN_PATH,
+        "/auth/login?rd=%2Fchdash%2F",
+        "/auth/login/code",
+        "/auth/login/enrol",
+        DENIED_PATH,
+        SUCCESS_PATH,
+        "/auth/nothing-here",
+        "/favicon.ico",
+        "/favicon.svg",
+        "/apple-touch-icon.png",
+        "/apple-touch-icon-precomposed.png",
+        "/browserconfig.xml",
+        "/site.webmanifest",
+        "/manifest.json",
+        icon,
+        "/auth/a/0000000000000000.svg",
+    ];
+    let mut pages = 0;
+    for path in paths {
+        let reply = send(node.port, "GET", path, &[("Accept", "text/html")], "");
+        let kind = reply.header("content-type").unwrap_or_default();
+        assert!(!kind.contains("image/"), "{path}: {kind}");
+        assert!(
+            [200, 302, 303, 404].contains(&reply.status),
+            "{path}: {}",
+            reply.status
+        );
+        if reply.status == 302 {
+            let to = reply.header("location").unwrap_or_default();
+            assert!(to.starts_with(LOGIN_PATH), "{path}: {to}");
+        }
+        if reply.status == 200 {
+            // A page that the visitor can read has the empty icon, and only that.
+            pages += 1;
+            assert_eq!(reply.body.matches("rel=\"icon\"").count(), 1, "{path}");
+            assert_eq!(reply.body.matches("href=\"data:,\"").count(), 1, "{path}");
+        }
+        assert!(
+            !reply.body.contains("image/svg+xml") && !reply.body.contains(icon),
+            "{path}"
+        );
+        assert!(!reply.body.contains("apple-touch"), "{path}");
+        let links = reply.body.matches("rel=\"icon\"").count();
+        assert!(links <= 1, "{path}");
+        assert_eq!(
+            links,
+            reply.body.matches("href=\"data:,\"").count(),
+            "{path}"
+        );
+    }
+    // The sign-in page and its variant with a destination are pages: the other paths are redirects.
+    assert!(pages >= 2, "{pages} pages");
+    // The icon file itself: the answer of an unknown path, the same for a path that never existed. Both are the
+    // redirect to the sign-in page with the path in `rd`, with the same headers.
+    let file = send(node.port, "GET", icon, &[], "");
+    let none = send(node.port, "GET", "/auth/a/0000000000000000.svg", &[], "");
+    assert_eq!(file.status, none.status);
+    assert_eq!(file.status, 302);
+    assert!(file.body.is_empty() && none.body.is_empty());
+    let to = |reply: &Reply| reply.header("location").unwrap_or_default().to_string();
+    assert!(
+        to(&file).starts_with("/auth/login?rd=%2Fauth%2Fa%2F"),
+        "{}",
+        to(&file)
+    );
+    assert!(
+        to(&none).starts_with("/auth/login?rd=%2Fauth%2Fa%2F"),
+        "{}",
+        to(&none)
+    );
+    assert_eq!(file.header("content-type"), none.header("content-type"));
+    let names = |reply: &Reply| {
+        let mut names: Vec<String> = reply.headers.iter().map(|(n, _)| n.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&file), names(&none));
+    // The policy lets the page show the empty icon and nothing else from a `data:` URL.
+    let page = send(node.port, "GET", LOGIN_PATH, &[], "");
+    let policy = page.header("content-security-policy").unwrap_or_default();
+    assert!(policy.contains("img-src 'self' data:"), "{policy}");
+    assert!(policy.contains("default-src 'none';"), "{policy}");
+    assert_eq!(policy.matches("data:").count(), 1, "{policy}");
 }
 
 /// The text of the `title` element of a page.
@@ -8594,19 +8810,24 @@ fn with_favicon_none_no_page_links_an_icon_and_the_icon_route_is_an_unknown_path
         assert_eq!(reply.status, 200, "{path}");
         pages.push(reply);
     }
-    for reply in &pages {
-        assert!(
-            !reply.body.contains("rel=\"icon\"") && !reply.body.contains(icon),
+    for (index, reply) in pages.iter().enumerate() {
+        // The sign-in page has the empty icon. The pages after sign-in have no icon link at all.
+        let blank = usize::from(index == 0);
+        assert_eq!(
+            reply.body.matches("rel=\"icon\"").count(),
+            blank,
             "{}",
             reply.body
         );
+        assert!(!reply.body.contains(icon), "{}", reply.body);
         assert_eq!(
             reply.body.matches("<link ").count(),
-            if reply.body.contains("settings.css") {
-                2
-            } else {
-                1
-            }
+            blank
+                + if reply.body.contains("settings.css") {
+                    2
+                } else {
+                    1
+                }
         );
     }
     // The route: a signed-in browser gets the 404 page of an unknown path, not the file.
@@ -8683,7 +8904,7 @@ fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
         assert!(!["login", "password"].contains(&name.as_str()), "{name}");
     }
     // The mapped stylesheet that the page links has a rule for each of these names.
-    let css_path = attribute_of(&login.body, "link", "href");
+    let css_path = stylesheet_of(&login.body);
     let css = send(node.port, "GET", &css_path, &[], "");
     assert_eq!(css.status, 200);
     assert_eq!(
@@ -8701,9 +8922,9 @@ fn the_pages_of_the_sign_in_and_of_the_status_use_names_that_look_random() {
     assert!(!js.body.contains("data-theme"), "{}", js.body);
     // Two renders differ, and two instances with the same secret use the same files and names.
     assert_ne!(login.body, again.body);
-    assert_eq!(attribute_of(&again.body, "link", "href"), css_path);
+    assert_eq!(stylesheet_of(&again.body), css_path);
     let twin = send(other.port, "GET", LOGIN_PATH, &[], "");
-    assert_eq!(attribute_of(&twin.body, "link", "href"), css_path);
+    assert_eq!(stylesheet_of(&twin.body), css_path);
     assert_eq!(attribute_of(&twin.body, "script", "src"), js_path);
     assert_eq!(send(other.port, "GET", &css_path, &[], "").body, css.body);
     // The 404 page and the 403 page too.
@@ -9381,6 +9602,15 @@ mod mfa_tests {
             Some(SOURCE.parse().unwrap()),
         );
         let pending = hidden_value(&page.body, "pending");
+        // The token of the page holds the proof of the password step: the forged tokens keep it.
+        let opened = crate::mfa::open_pending(
+            &node.state.signing_secret,
+            &pending,
+            &binding,
+            &csrf,
+            unix_now(),
+        )
+        .unwrap();
         let with_tries = |tries: u8| {
             crate::mfa::sign_pending(
                 &node.state.signing_secret,
@@ -9390,6 +9620,7 @@ mod mfa_tests {
                     keep: false,
                     tries,
                     issued: unix_now(),
+                    proof: opened.proof,
                 },
                 &binding,
                 &csrf,
@@ -9493,6 +9724,15 @@ mod mfa_tests {
             &headers,
             Some(SOURCE.parse().unwrap()),
         );
+        let proof = crate::mfa::open_pending(
+            &node.state.signing_secret,
+            &pending,
+            &binding,
+            &csrf,
+            unix_now(),
+        )
+        .unwrap()
+        .proof;
         let old = crate::mfa::sign_pending(
             &node.state.signing_secret,
             &crate::mfa::Pending {
@@ -9501,6 +9741,7 @@ mod mfa_tests {
                 keep: false,
                 tries: 0,
                 issued: unix_now() - crate::mfa::PENDING_TTL_SECS - 60,
+                proof,
             },
             &binding,
             &csrf,
@@ -9864,6 +10105,62 @@ mod mfa_tests {
     }
 
     #[test]
+    fn the_list_of_the_accounts_shows_who_has_a_second_factor() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        insert_account(&node, "bob", "bob-correct-password");
+        enrol(&node, "alice");
+        let root = sign_in(&node, "root", PASSWORD);
+        let access = page(&node, &root, "/auth/settings");
+        assert_eq!(access.status, 200);
+        // The column, and the count in the head of the list: one account of two.
+        assert!(
+            access.body.contains(">2FA</th>")
+                && access
+                    .body
+                    .contains(r#"title="Accounts with two-factor sign-in">"#)
+                && access
+                    .body
+                    .contains(r#"</svg>1/2<span class="visually-hidden"> with two-factor</span>"#),
+            "{}",
+            access.body
+        );
+        // The row of alice has the mark. The row of bob has the dash.
+        let row = |login: &str| {
+            let start = access.body.find(&format!(r#"title="{login}""#)).unwrap();
+            let end = start + access.body[start..].find("</tr>").unwrap();
+            access.body[start..end].to_string()
+        };
+        assert!(
+            row("alice").contains("Two-factor is on"),
+            "{}",
+            row("alice")
+        );
+        assert!(
+            row("bob").contains("Two-factor is off") && !row("bob").contains("Two-factor is on")
+        );
+        // Without the second factor, the page has no column.
+        let off = start_custom(
+            Arc::new(Backend::Sqlite.fresh()),
+            None,
+            Custom::default(),
+            "",
+        );
+        insert_account(&off, "alice", ALICE);
+        let root = sign_in(&off, "root", PASSWORD);
+        let access = page(&off, &root, "/auth/settings");
+        assert_eq!(access.status, 200);
+        assert!(
+            access.body.contains(r#"title="alice""#),
+            "the list shows alice"
+        );
+        assert!(
+            !access.body.contains(">2FA</th>")
+                && !access.body.contains("Accounts with two-factor sign-in"),
+            "no column"
+        );
+    }
+
+    #[test]
     fn the_superadmin_resets_the_second_factor_of_an_account_and_it_is_audited() {
         let node = mfa_node(&Backend::Sqlite, "optional", "");
         insert_account(&node, "bob", "bob-correct-password");
@@ -9954,5 +10251,926 @@ mod mfa_tests {
             );
             assert_eq!(reply.status, 204, "{path}");
         }
+    }
+
+    /// The refusal of a stale pending token: the sign-in page with "open too long", and no session.
+    fn assert_stale(node: &Node, reply: &Reply, why: &str) {
+        assert_eq!(reply.status, 403, "{why}: {}", reply.body);
+        assert!(
+            reply.body.contains("The page was open too long")
+                && reply.body.contains(r#"name="password""#),
+            "{why}: {}",
+            reply.body
+        );
+        assert!(
+            !reply.body.contains(ui::mfa::ENROL_PATH),
+            "{why}: no enrolment"
+        );
+        assert!(
+            reply.cookie(&session_cookie_name(node)).is_none(),
+            "{why}: no session"
+        );
+    }
+
+    /// A pending token of the old password, used after the documented incident response (a new password, a reset
+    /// of the second factor, End all sessions), opens no session and enrols no authenticator of the attacker
+    /// (portal/session/sign-in-proof-outlives-credential-revocation, policy required).
+    #[test]
+    fn a_pending_token_from_before_the_incident_response_opens_no_session_and_enrols_nothing() {
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        enrol(&node, "alice");
+        let (root_secret, _) = enrol(&node, "root");
+        let (page, csrf) = step_one(&node, "root", PASSWORD, false);
+        let root = second(&node, &page, &csrf, &code(&root_secret, 0))
+            .cookie(&session_cookie_name(&node))
+            .expect("a session of the superadmin");
+        let (held, held_csrf) = step_one(&node, "alice", ALICE, true);
+        assert_eq!(held.status, 200);
+        let reset = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-new-alice-password-1",
+        );
+        assert_eq!(
+            reset.location(),
+            Some("/auth/settings/users/alice?s=password-reset")
+        );
+        let reset = post(
+            &node,
+            &root,
+            ui::mfa::RESET_PATH,
+            USERS_TOKEN,
+            "login=alice",
+        );
+        assert_eq!(
+            reset.location(),
+            Some("/auth/settings/users/alice?s=mfa-reset")
+        );
+        let ended = post(
+            &node,
+            &root,
+            END_SESSIONS_PATH,
+            USERS_TOKEN,
+            "confirm=end-all-sessions",
+        );
+        assert_eq!(ended.status, 303);
+        assert_stale(
+            &node,
+            &second(&node, &held, &held_csrf, "000000"),
+            "the old token",
+        );
+        assert!(
+            node.state.store.totp_get("alice").unwrap().is_none(),
+            "no authenticator of the attacker"
+        );
+    }
+
+    /// With the policy optional, a pending token of the old password does not open a session without a code after a
+    /// reset of the second factor (portal/session/sign-in-proof-outlives-credential-revocation, policy optional).
+    #[test]
+    fn a_pending_token_from_before_a_reset_of_the_second_factor_needs_the_password_again() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        enrol(&node, "alice");
+        let root = sign_in(&node, "root", PASSWORD);
+        let (held, csrf) = step_one(&node, "alice", ALICE, true);
+        assert_eq!(held.status, 200);
+        let reset = post(
+            &node,
+            &root,
+            ui::mfa::RESET_PATH,
+            USERS_TOKEN,
+            "login=alice",
+        );
+        assert_eq!(
+            reset.location(),
+            Some("/auth/settings/users/alice?s=mfa-reset")
+        );
+        assert_stale(
+            &node,
+            &second(&node, &held, &csrf, "000000"),
+            "after the reset",
+        );
+        // The password step of now gives a session at once: the account has no second factor.
+        let session = sign_in(&node, "alice", ALICE);
+        assert_eq!(verify(&node, &session, AGENT), 204);
+    }
+
+    /// A pending token of the old password does not open a session after a new password, even with a good code of
+    /// the second factor (portal/mfa/pending-token-not-bound-to-credential-state, case b).
+    #[test]
+    fn a_pending_token_of_an_old_password_is_refused_with_a_good_code() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let (secret, _) = enrol(&node, "alice");
+        let root = sign_in(&node, "root", PASSWORD);
+        let (held, csrf) = step_one(&node, "alice", ALICE, false);
+        let reset = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-new-alice-password-1",
+        );
+        assert_eq!(
+            reset.location(),
+            Some("/auth/settings/users/alice?s=password-reset")
+        );
+        assert_stale(
+            &node,
+            &second(&node, &held, &csrf, &code(&secret, 0)),
+            "an old password",
+        );
+        // The new password and the same factor sign in.
+        let (page, csrf) = step_one(&node, "alice", "a-new-alice-password-1", false);
+        let reply = second(&node, &page, &csrf, &code(&secret, 1));
+        assert_eq!(reply.status, 303, "{}", reply.body);
+    }
+
+    /// With the policy required, the enrolment page of an old password enrols nothing and opens no session
+    /// (portal/mfa/pending-token-not-bound-to-credential-state, case c).
+    #[test]
+    fn the_enrolment_page_of_an_old_password_enrols_nothing() {
+        let node = mfa_node(&Backend::Sqlite, "required", "");
+        let (root_secret, _) = enrol(&node, "root");
+        let (page, csrf) = step_one(&node, "root", PASSWORD, false);
+        let root = second(&node, &page, &csrf, &code(&root_secret, 0))
+            .cookie(&session_cookie_name(&node))
+            .expect("a session of the superadmin");
+        let (held, held_csrf) = step_one(&node, "alice", ALICE, false);
+        assert_eq!(held.status, 200);
+        assert!(held.body.contains(ui::mfa::ENROL_PATH));
+        let reset = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "login=alice&password=a-new-alice-password-1",
+        );
+        assert_eq!(
+            reset.location(),
+            Some("/auth/settings/users/alice?s=password-reset")
+        );
+        let secret = secret_of(&held.body);
+        let body = format!(
+            "csrf={held_csrf}&rd={}&sig={}&pending={}&enrol={}&code={}",
+            percent_encode_query_component(&hidden_value(&held.body, "rd")),
+            hidden_value(&held.body, "sig"),
+            hidden_value(&held.body, "pending"),
+            hidden_value(&held.body, "enrol"),
+            code(&secret, 0),
+        );
+        let reply = post_step(&node, ui::mfa::ENROL_PATH, &held_csrf, &body, AGENT);
+        assert_stale(&node, &reply, "the enrolment of an old password");
+        assert!(node.state.store.totp_get("alice").unwrap().is_none());
+    }
+
+    /// A pending token of the superadmin does not open a session on an instance with a new superadmin password, or
+    /// with a new superadmin login, and the same session secret (portal/session/sign-in-proof-outlives-credential-
+    /// revocation, check 04, and portal/mfa/pending-token-not-bound-to-credential-state, case d).
+    #[test]
+    fn a_pending_token_of_the_superadmin_is_refused_after_a_rotation_of_its_credential() {
+        let store = Arc::new(Backend::Sqlite.fresh());
+        let custom = |login: &'static str, password: &'static str| Custom {
+            mfa: "optional",
+            login,
+            password,
+            ..Custom::default()
+        };
+        let old = start_custom(Arc::clone(&store), None, custom("root", PASSWORD), "");
+        let (secret, _) = enrol(&old, "root");
+        let (held, csrf) = step_one(&old, "root", PASSWORD, false);
+        assert_eq!(held.status, 200);
+        let new_password = start_custom(
+            Arc::clone(&store),
+            None,
+            custom("root", "another-password-for-root"),
+            "",
+        );
+        assert_stale(
+            &new_password,
+            &second(&new_password, &held, &csrf, &code(&secret, 0)),
+            "a new superadmin password",
+        );
+        let new_login = start_custom(
+            Arc::clone(&store),
+            None,
+            custom("root2", "another-password-for-root"),
+            "",
+        );
+        assert_stale(
+            &new_login,
+            &second(&new_login, &held, &csrf, "000000"),
+            "a new superadmin login",
+        );
+        // The instance of the old credential still takes the token: nothing else refused it.
+        let reply = second(&old, &held, &csrf, &code(&secret, 1));
+        assert_eq!(reply.status, 303, "{}", reply.body);
+    }
+
+    /// A good second step of the own account clears the attempts of the second factor of the address, and not the
+    /// failures of the password step that the address made against another login
+    /// (portal/login/ip-limiter-cleared-by-own-sign-in, second-step variant).
+    #[test]
+    fn a_good_second_step_of_another_account_does_not_clear_the_password_failures_of_the_address() {
+        let node = mfa_node(&Backend::Sqlite, "optional", "");
+        let (secret, _) = enrol(&node, "alice");
+        let csrf = "A".repeat(32);
+        let guess = || {
+            post_login(
+                &node,
+                SOURCE,
+                &csrf,
+                &login_body(&node, &csrf, "root", "a-wrong-guess-1"),
+            )
+            .status
+        };
+        for _ in 0..4 {
+            assert_eq!(guess(), 401);
+        }
+        let (page, page_csrf) = step_one(&node, "alice", ALICE, false);
+        assert_eq!(page.status, 200);
+        let reply = second(&node, &page, &page_csrf, &code(&secret, 0));
+        assert_eq!(reply.status, 303, "{}", reply.body);
+        assert_eq!(guess(), 401, "the fifth failure locks");
+        assert_eq!(guess(), 429);
+    }
+}
+
+// Security fixes of the gate, the forms and the PDP --------------------------------------------
+
+/// The real `/auth/verify` with the hrefs of the demo, an escaped href and the text prefixes of
+/// the routers. bob holds `access` on wiki and on `myapp` only.
+#[test]
+fn the_gate_owns_an_escaped_href_and_each_path_that_a_router_prefix_routes() {
+    let node = start_with(
+        Arc::new(Store::open_in_memory()),
+        Some(Duration::ZERO),
+        r#"identity { issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" token_ttl = "5m" }"#,
+    );
+    let catalog = Catalog::build(
+        vec![
+            listed(&[
+                ("portal.id", "files"),
+                ("portal.name", "Files"),
+                ("portal.href", "/files/"),
+            ]),
+            listed(&[
+                ("portal.id", "wiki"),
+                ("portal.name", "Wiki"),
+                ("portal.href", "/wiki/"),
+            ]),
+            listed(&[
+                ("portal.id", "grafana"),
+                ("portal.name", "Grafana"),
+                ("portal.href", "/grafana/"),
+            ]),
+            listed(&[
+                ("portal.id", "myapp"),
+                ("portal.name", "My app"),
+                ("portal.href", "/my%20app/"),
+            ]),
+        ],
+        Vec::new(),
+    );
+    *node.state.catalog.write().unwrap() = Arc::new(catalog);
+    let root = sign_in(&node, "root", PASSWORD);
+    let alice = user_without_grant(&node, &root, "alice");
+    let _ = user_without_grant(&node, &root, "bob");
+    change_grants(
+        &node,
+        "bob",
+        vec![
+            Grant::new(crate::grants::ACCESS, "wiki").unwrap(),
+            Grant::new(crate::grants::ACCESS, "myapp").unwrap(),
+        ],
+    );
+    let bob = sign_in(&node, "bob", "a-long-password-1");
+    for uri in [
+        "/files/secret",
+        "/filesX/secret",
+        "/files-private/secret",
+        "/files.json",
+        "/grafanaapi/admin/users",
+    ] {
+        let reply = open(&node, &bob, uri);
+        assert_eq!(reply.status, 302, "{uri}");
+        assert_eq!(reply.location(), Some("/auth/denied"), "{uri}");
+    }
+    for uri in ["/my%20app/", "/my%20app/admin/settings"] {
+        assert_eq!(open(&node, &alice, uri).status, 302, "{uri}");
+        let reply = open(&node, &bob, uri);
+        assert_eq!(reply.status, 204, "{uri}");
+        let token = reply
+            .header("x-identity-token")
+            .expect("the holder gets the token of the service");
+        assert_eq!(claims(token)["aud"], "myapp");
+    }
+    // A text prefix: the holder passes, without a token, and the others are refused.
+    let reply = open(&node, &bob, "/wiki-old/x");
+    assert_eq!(reply.status, 204);
+    assert!(reply.header("x-identity-token").is_none());
+    assert_eq!(open(&node, &alice, "/wiki-old/x").status, 302);
+    // A path that no service owns, and the pages of the portal, stay open.
+    assert_eq!(open(&node, &alice, "/undeclared/x").status, 204);
+    assert_eq!(open(&node, &alice, "/auth/denied").status, 204);
+    // The superadmin passes each path. The token is only for a page of the service.
+    let reply = open(&node, &root, "/files/secret");
+    assert_eq!(reply.status, 204);
+    assert!(reply.header("x-identity-token").is_some());
+    assert_eq!(open(&node, &root, "/filesX/secret").status, 204);
+}
+
+/// `GET /auth/options` gives a key creator without `access` on a service the answer of a service
+/// that does not exist, whatever the type and the parent. The holder still gets the type check.
+#[test]
+fn the_options_of_a_service_that_the_viewer_cannot_open_tell_nothing_of_it() {
+    let (node, _) = key_node(&Backend::Sqlite);
+    let root = sign_in(&node, "root", PASSWORD);
+    let rights = vec![
+        Grant::parse("keys.own.read on service:portal").unwrap(),
+        Grant::parse("keys.own.create on service:portal/key_kind:mcp").unwrap(),
+        Grant::parse("keys.own.use on service:portal/key_kind:mcp").unwrap(),
+    ];
+    let _ = user_without_grant(&node, &root, "alice");
+    change_grants(&node, "alice", rights.clone());
+    let _ = user_without_grant(&node, &root, "bob");
+    let mut with_access = rights;
+    with_access.push(Grant::new("access", "db").unwrap());
+    change_grants(&node, "bob", with_access);
+    let alice = sign_in(&node, "alice", "a-long-password-1");
+    let bob = sign_in(&node, "bob", "a-long-password-1");
+    let get = |session: &str, query: &str| {
+        let cookie = format!("{}={session}", session_cookie_name(&node));
+        send(
+            node.port,
+            "GET",
+            &format!("/auth/options{query}"),
+            &[("Cookie", &cookie)],
+            "",
+        )
+    };
+    let nothing = r#"{"items":[],"next":null,"unavailable":false}"#;
+    for query in [
+        "?service=db&type=zzz",
+        "?service=db&type=host",
+        "?service=db&type=database",
+        "?service=db&type=database&parent=host%3Ax",
+        "?service=db&type=host&parent=host%3Ax",
+        "?service=db&type=table&parent=database%3Ax",
+        "?service=ghost&type=zzz",
+    ] {
+        let reply = get(&alice, query);
+        assert_eq!((reply.status, reply.body.trim()), (200, nothing), "{query}");
+    }
+    assert_eq!(get(&bob, "?service=db&type=zzz").status, 400);
+    assert_eq!(get(&bob, "?service=db&type=database").status, 400);
+    assert_eq!(get(&alice, "?service=db&type=host&parent=bad").status, 400);
+}
+
+/// The form of an account keeps a narrower grant with its own limit values: the PDP takes the
+/// lowest ceiling of the grants that cover a node. A second save of the same form changes nothing.
+#[test]
+fn the_form_of_an_account_keeps_a_narrower_grant_with_a_tighter_ceiling() {
+    let (node, port) = key_node(&Backend::Sqlite);
+    let root = sign_in(&node, "root", PASSWORD);
+    let ask = |database: &str| -> serde_json::Value {
+        let body = read_body("dave", database, serde_json::json!({}));
+        let reply = pdp(
+            port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &body,
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()
+    };
+    let add = post(
+        &node,
+        &root,
+        USERS_ADD_PATH,
+        USERS_TOKEN,
+        "login=dave&password=a-long-password-1",
+    );
+    assert_eq!(add.status, 303);
+    for (parent_limit, sibling) in [
+        ("", serde_json::json!({"decision": true})),
+        (
+            "&limit1.max_rows=5000",
+            serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 5000}}}),
+        ),
+    ] {
+        let fields = format!(
+            "grants=1&login=dave&grant0=access+on+service%3Adb\
+             &grant1=data.read+on+service%3Adb%2Fhost%3Aprod{parent_limit}\
+             &grant2=data.read+on+service%3Adb%2Fhost%3Aprod%2Fdatabase%3Atest2&limit2.max_rows=100"
+        );
+        let saved = post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, &fields);
+        assert_eq!(
+            saved.location(),
+            Some("/auth/settings/users/dave?s=user-updated"),
+            "{parent_limit}"
+        );
+        assert_eq!(node.state.users.grants_of("dave").unwrap().len(), 3);
+        assert_eq!(
+            ask("test2"),
+            serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 100}}}),
+            "{parent_limit}"
+        );
+        assert_eq!(ask("test1"), sibling, "{parent_limit}");
+        let again = post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, &fields);
+        assert_eq!(
+            again.location(),
+            Some("/auth/settings/users/dave?s=unchanged"),
+            "{parent_limit}"
+        );
+    }
+    // A narrower grant without a limit value adds nothing: the account keeps the broad one.
+    let fields = "grants=1&login=dave&grant0=access+on+service%3Adb\
+        &grant1=data.read+on+service%3Adb%2Fhost%3Aprod\
+        &grant2=data.read+on+service%3Adb%2Fhost%3Aprod%2Fdatabase%3Atest2";
+    post(&node, &root, USERS_UPDATE_PATH, USERS_TOKEN, fields);
+    assert_eq!(node.state.users.grants_of("dave").unwrap().len(), 2);
+}
+
+/// With no good document of the service, the PDP answers `false` for an action on the whole
+/// service: it cannot apply the ceilings and the budgets. Only `access` on the service stays.
+#[test]
+fn without_a_document_the_pdp_refuses_an_action_on_the_whole_service_and_keeps_access() {
+    let pdp_port = free_port();
+    let node = start_with(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        &format!(
+            r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
+            pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 4 }}
+            keys {{}}
+            pdp_client "db" {{ token_env = "TEST_PDP_DB" }}"#
+        ),
+    );
+    // The catalogue holds db, but no read of its document has answered.
+    let catalog = Catalog::build(
+        vec![listed(&[
+            ("portal.name", "Db"),
+            ("portal.id", "db"),
+            ("portal.href", "/db/"),
+            ("portal.actions", DB_ACTIONS_URL),
+        ])],
+        Vec::new(),
+    );
+    *node.state.catalog.write().unwrap() = Arc::new(catalog);
+    wait_until(Duration::from_secs(10), || {
+        TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
+    });
+    stay_in_a_minute();
+    let mut grants = vec![
+        Grant::new("access", "db")
+            .unwrap()
+            .with_limits(limits(r#"{"requests":[{"amount":1,"window":"minute"}]}"#)),
+        Grant::new("data.read", "db")
+            .unwrap()
+            .with_limits(limits(r#"{"max_rows":50}"#)),
+    ];
+    grants.sort();
+    node.state
+        .store
+        .insert_user(&crate::store::UserRow {
+            login: "erin".into(),
+            password_hash: password_hash(PASSWORD),
+            grants,
+            created_at: 1,
+        })
+        .unwrap();
+    node.state.users.refresh(&node.state.store).unwrap();
+    let ask = |subject: &str, action: &str, context: serde_json::Value| -> serde_json::Value {
+        let body = serde_json::json!({
+            "subject": {"type": "user", "id": subject},
+            "action": {"name": action},
+            "resource": {"type": "service", "id": "db"},
+            "context": context
+        })
+        .to_string();
+        let reply = pdp(
+            pdp_port,
+            "/access/v1/evaluation",
+            Some(PDP_DB_TOKEN),
+            &body,
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        reply.json()
+    };
+    let refused = serde_json::json!({"decision": false});
+    assert!(node.state.actions.declared("db").is_none());
+    for context in [
+        serde_json::json!({}),
+        serde_json::json!({"usage": {"units": 1}}),
+    ] {
+        assert_eq!(
+            ask("erin", "data.read", context.clone()),
+            refused,
+            "{context}"
+        );
+        assert_eq!(
+            ask("root", "data.read", context.clone()),
+            refused,
+            "{context}"
+        );
+    }
+    assert_eq!(
+        ask("erin", "access", serde_json::json!({})),
+        serde_json::json!({"decision": true})
+    );
+    // With the document, the ceiling and the budget of erin apply.
+    node.state.actions.set_document(
+        "db",
+        crate::actions::parse("db", KEY_TEST_DOCUMENT.as_bytes()).unwrap(),
+    );
+    assert_eq!(
+        ask("erin", "data.read", serde_json::json!({})),
+        serde_json::json!({"decision": true, "context": {"limits": {"max_rows": 50}}})
+    );
+    let first = ask(
+        "erin",
+        "data.read",
+        serde_json::json!({"usage": {"units": 1}}),
+    );
+    assert_eq!(first["context"]["usage"]["units"], 1, "{first}");
+    let second = ask(
+        "erin",
+        "data.read",
+        serde_json::json!({"usage": {"units": 1}}),
+    );
+    assert_eq!(second["decision"], false, "{second}");
+    assert_eq!(second["context"]["reason"], "budget_exceeded", "{second}");
+}
+
+// The binding of the sign-in proofs and of the sessions to the credential, and the checks of a session after the body
+// of a form (security fixes of the sessions) ---------------------------------------------------------------------
+
+mod credential_binding_tests {
+    use super::*;
+
+    /// Writes the head of a form POST with the `Content-Length` of `body`, and keeps the body. `finish_form` sends it.
+    fn hold_form(node: &Node, session: &str, path: &str, body: &str) -> TcpStream {
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: {len}\r\nUser-Agent: {AGENT}\r\nOrigin: http://127.0.0.1:{port}\r\nContent-Type: application/x-www-form-urlencoded\r\nCookie: {name}={session}\r\n\r\n",
+            port = node.port,
+            len = body.len(),
+            name = session_cookie_name(node),
+        );
+        let mut stream = TcpStream::connect(("127.0.0.1", node.port)).unwrap();
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        stream
+    }
+
+    fn finish_form(mut stream: TcpStream, body: &str) -> Reply {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        stream.write_all(body.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let (head, body) = text.split_once("\r\n\r\n").expect("a complete response");
+        let mut lines = head.lines();
+        let status = lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        Reply {
+            status,
+            headers,
+            body: body.to_string(),
+        }
+    }
+
+    /// A new password reaches the account while a sign-in checks the old one, and the revocation of the sessions runs
+    /// before the sign-in issues its session. The session carries the stamp of the old password: it ends at its first
+    /// use, without any revocation (portal/session/sign-in-proof-outlives-credential-revocation, in-flight variant).
+    #[test]
+    fn a_session_whose_password_changed_ends_at_its_next_use_without_a_revocation() {
+        each_backend(|backend| {
+            let (a, b) = cluster(backend, Some(Duration::ZERO));
+            let root = sign_in(&a, "root", PASSWORD);
+            let carol = user_without_grant(&a, &root, "carol");
+            assert_eq!(verify(&a, &carol, AGENT), 204);
+            assert_eq!(verify(&b, &carol, AGENT), 204);
+            // The write of `handle_users_update`, without its call of `revoke_user`.
+            let hash = password_hash("another-long-password-2");
+            assert!(a
+                .state
+                .store
+                .update_user("carol", Some(&hash), None)
+                .unwrap());
+            assert!(a.state.users.update("carol", Some(hash), None));
+            assert_eq!(verify(&a, &carol, AGENT), 302, "{}", backend.name());
+            crate::sync::run_round(&b.state, 1);
+            assert_eq!(verify(&b, &carol, AGENT), 302, "{}", backend.name());
+            // The new password opens a session that works on both instances.
+            let fresh = sign_in(&a, "carol", "another-long-password-2");
+            assert_eq!(verify(&b, &fresh, AGENT), 204, "{}", backend.name());
+            assert_eq!(verify(&a, &fresh, AGENT), 204, "{}", backend.name());
+        });
+    }
+
+    /// The proof of the password step holds for the hash that the check used. When the account has another hash at
+    /// the moment the session opens, `finish_sign_in` opens no session and gives the sign-in page.
+    #[test]
+    fn a_proof_of_an_old_password_opens_no_session() {
+        let node = start(Arc::new(Backend::Sqlite.fresh()), None);
+        insert_account(&node, "carol", "old-long-password-1");
+        let old = credential_stamp(&node.state, &Principal::User("carol".into())).unwrap();
+        assert!(node
+            .state
+            .users
+            .update("carol", Some(password_hash("new-long-password-2")), None));
+        let client = Client {
+            https: false,
+            ip: Some("127.0.0.1".parse().unwrap()),
+            binding: client_binding(&node, "127.0.0.1"),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(AGENT));
+        let reply = finish_sign_in(
+            &node.state,
+            &client,
+            &headers,
+            "/",
+            SignedIn {
+                principal: Principal::User("carol".into()),
+                credential: old,
+                session_login: "carol".into(),
+                typed: "carol".into(),
+                known: true,
+                keep: true,
+                mfa: false,
+            },
+            Landing::Redirect,
+        );
+        assert_eq!(reply.status(), StatusCode::FORBIDDEN);
+        assert!(reply.headers().get_all(SET_COOKIE).iter().all(|cookie| {
+            !cookie
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{}=", session_cookie_name(&node)))
+        }));
+        assert_eq!(node.state.sessions.active_count(), 0);
+    }
+
+    /// With PostgreSQL, a session of an account of the file survives a restart. A new or a removed `password_hash`
+    /// of the block, and a new account of the same login in the database, end it on every instance
+    /// (portal/store/pg-session-row-bound-to-login-only, and the merged
+    /// portal/session/file-account-credential-change-keeps-shared-sessions).
+    #[test]
+    fn a_new_password_hash_of_a_file_account_or_a_new_account_of_its_login_ends_its_shared_sessions(
+    ) {
+        let Some(backend) = crate::store::testing::postgres() else {
+            return;
+        };
+        let store = Arc::new(backend.fresh());
+        let block = |with_hash: bool| {
+            format!(
+                r#"access {{ grants_mode = "hybrid" }} user "carol" {{ grants = [] {} }}"#,
+                if with_hash {
+                    r#"password_hash_env = "CAROL_HASH""#
+                } else {
+                    ""
+                }
+            )
+        };
+        let node = |hash: Option<&str>, block: &str| {
+            start_custom(
+                Arc::clone(&store),
+                Some(Duration::ZERO),
+                Custom {
+                    env: hash
+                        .map(|password| vec![("CAROL_HASH".to_string(), password_hash(password))])
+                        .unwrap_or_default(),
+                    ..Custom::default()
+                },
+                block,
+            )
+        };
+        let first = node(Some("carol-old-password-1"), &block(true));
+        let rotated = sign_in(&first, "carol", "carol-old-password-1");
+        let removed = sign_in(&first, "carol", "carol-old-password-1");
+        let reused = sign_in(&first, "carol", "carol-old-password-1");
+        for cookie in [&rotated, &removed, &reused] {
+            assert_eq!(verify(&first, cookie, AGENT), 204);
+        }
+        // A restart with a new digest: the old password fails, and the old session ends.
+        let second = node(Some("carol-new-password-2"), &block(true));
+        let csrf = "A".repeat(32);
+        let refused = post_login(
+            &second,
+            "127.0.0.1",
+            &csrf,
+            &login_body(&second, &csrf, "carol", "carol-old-password-1"),
+        );
+        assert_eq!(refused.status, 401);
+        assert_eq!(verify(&second, &rotated, AGENT), 302, "a new digest");
+        assert_eq!(
+            verify(&first, &rotated, AGENT),
+            302,
+            "ended on every instance"
+        );
+        // A restart without the digest: the account opens no session, and its sessions end.
+        let third = node(None, &block(false));
+        assert_eq!(verify(&third, &removed, AGENT), 302, "no digest");
+        // The block goes, and the superadmin makes an account of the database with the same login. A session of the
+        // old account, unused in the meantime, does not pass to the new account.
+        let fourth = node(None, "");
+        let root = sign_in(&fourth, "root", PASSWORD);
+        let new_carol = user_without_grant(&fourth, &root, "carol");
+        assert_eq!(verify(&fourth, &reused, AGENT), 302, "another account");
+        assert_eq!(verify(&fourth, &new_carol, AGENT), 204);
+    }
+
+    /// A form whose head arrived before End all sessions, with the body after it, does nothing: "Log in as" gives no
+    /// new session (portal/http/form-viewer-before-body-no-recheck).
+    #[test]
+    fn a_held_log_in_as_after_end_all_sessions_gives_no_session() {
+        let node = start(Arc::new(Backend::Sqlite.fresh()), None);
+        let root = sign_in(&node, "root", PASSWORD);
+        let _bob = user_without_grant(&node, &root, "bob");
+        let stolen = sign_in(&node, "root", PASSWORD);
+        let token = sign_action_token(&node.state.signing_secret, USERS_TOKEN, &stolen).unwrap();
+        let body = format!("csrf={token}&login=bob");
+        let held = hold_form(&node, &stolen, IMPERSONATE_PATH, &body);
+        std::thread::sleep(Duration::from_millis(300));
+        let ended = post(
+            &node,
+            &root,
+            END_SESSIONS_PATH,
+            USERS_TOKEN,
+            "confirm=end-all-sessions",
+        );
+        assert_eq!(ended.status, 303);
+        assert_eq!(node.state.sessions.active_count(), 0);
+        std::thread::sleep(Duration::from_millis(500));
+        let reply = finish_form(held, &body);
+        assert_eq!(reply.status, 303);
+        assert_eq!(reply.location(), Some(LOGIN_PATH));
+        assert!(reply.cookie(&session_cookie_name(&node)).is_none());
+        assert_eq!(node.state.sessions.active_count(), 0);
+    }
+
+    /// A key form whose head arrived before a new password of the account, with the body after it, makes no key.
+    #[test]
+    fn a_held_key_creation_after_a_new_password_makes_no_key() {
+        let (node, _pdp, alice) = keys_user(&Backend::Sqlite, "");
+        let root = sign_in(&node, "root", PASSWORD);
+        let token = sign_action_token(
+            &node.state.signing_secret,
+            super::super::keys_page::KEYS_TOKEN,
+            &alice,
+        )
+        .unwrap();
+        let body =
+            format!("csrf={token}&kind=mcp&name=held&expires_at=&grant0=access+on+service%3Adb");
+        let keys_before = node.state.users.key_count();
+        let held = hold_form(&node, &alice, "/auth/keys/create", &body);
+        std::thread::sleep(Duration::from_millis(300));
+        let reset = post(
+            &node,
+            &root,
+            USERS_UPDATE_PATH,
+            USERS_TOKEN,
+            "login=alice&password=another-long-password-9",
+        );
+        assert_eq!(reset.status, 303);
+        let reply = finish_form(held, &body);
+        assert_eq!(reply.location(), Some(LOGIN_PATH), "{}", reply.body);
+        assert!(key_text_in(&reply.body).is_none());
+        assert_eq!(node.state.users.key_count(), keys_before);
+    }
+
+    /// The configuration of a start whose superadmin login is the login of an account of the database.
+    fn state_with_superadmin(store: Arc<Store>, login: &str) -> Result<AppState, String> {
+        let login_value = login.to_string();
+        let (config, _) = Config::parse(
+            &format!(
+                r#"server {{ listen_address = "127.0.0.1:{}" trusted_proxies = [] }}
+                authentication {{ superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }}
+                session {{ secret_mode = "provided" secret_env = "S" }}"#,
+                free_port()
+            ),
+            &move |name| match name {
+                "L" => Some(login_value.clone()),
+                "P" => Some(PASSWORD.to_string()),
+                "S" => Some("0123456789abcdef0123456789abcdef".to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let superadmin = SuperAdmin {
+            login: login.into(),
+            password_hash: password_hash(PASSWORD),
+            generation: crate::crypto::superadmin_generation(&SECRET, login, PASSWORD.as_bytes())
+                .unwrap(),
+        };
+        AppState::new(
+            config,
+            superadmin,
+            SECRET.to_vec(),
+            store,
+            Tracker::disabled(),
+            AccessSecrets::default(),
+        )
+    }
+
+    /// The start refuses a superadmin login that an account of the database holds, and the error hides the login
+    /// (portal/bootstrap/superadmin-login-not-checked-against-database-accounts).
+    #[test]
+    fn the_start_refuses_a_superadmin_login_that_an_account_of_the_database_holds() {
+        each_backend(|backend| {
+            let store = Arc::new(backend.fresh());
+            store
+                .insert_user(&crate::store::UserRow {
+                    login: "carol".into(),
+                    password_hash: password_hash("carol-password-1"),
+                    grants: Vec::new(),
+                    created_at: 1,
+                })
+                .unwrap();
+            let error = state_with_superadmin(Arc::clone(&store), "carol")
+                .err()
+                .expect("the start must stop");
+            assert!(
+                error.contains("authentication.superadmin_login") && !error.contains("carol"),
+                "{error}"
+            );
+            assert!(state_with_superadmin(store, "root").is_ok());
+        });
+    }
+
+    /// One account fills only its own places: with 5 places and 2 for each account, the account that signs in again
+    /// and again ends its own oldest session, and the other accounts and the superadmin still sign in
+    /// (portal/session/no-per-account-session-cap).
+    #[test]
+    fn one_account_that_signs_in_again_and_again_leaves_places_for_the_others() {
+        let node = start_custom(
+            Arc::new(Backend::Sqlite.fresh()),
+            None,
+            Custom {
+                session: "max_active_sessions = 5 max_sessions_per_account = 2",
+                ..Custom::default()
+            },
+            "",
+        );
+        let root = sign_in(&node, "root", PASSWORD);
+        insert_account(&node, "mallory", "mallory-password-1");
+        insert_account(&node, "bob", "bob-password-1");
+        let mallory: Vec<String> = (0..5)
+            .map(|_| sign_in(&node, "mallory", "mallory-password-1"))
+            .collect();
+        assert_eq!(node.state.sessions.active_count(), 3);
+        assert_eq!(verify(&node, &mallory[0], AGENT), 302, "the oldest ended");
+        assert_eq!(verify(&node, &mallory[4], AGENT), 204);
+        let bob = sign_in(&node, "bob", "bob-password-1");
+        let root_again = sign_in(&node, "root", PASSWORD);
+        for session in [&root, &bob, &root_again] {
+            assert_eq!(verify(&node, session, AGENT), 204);
+        }
+    }
+
+    /// A good sign-in of the own account of a client does not clear the failures that the address made against
+    /// another login (portal/login/ip-limiter-cleared-by-own-sign-in).
+    #[test]
+    fn a_good_sign_in_of_another_account_does_not_clear_the_failures_of_the_address() {
+        let node = start(Arc::new(Backend::Sqlite.fresh()), None);
+        insert_account(&node, "mallory", "mallory-password-1");
+        let csrf = "A".repeat(32);
+        let attempt = |login: &str, password: &str| {
+            post_login(
+                &node,
+                "127.0.0.5",
+                &csrf,
+                &login_body(&node, &csrf, login, password),
+            )
+            .status
+        };
+        for _ in 0..4 {
+            assert_eq!(attempt("root", "a-wrong-guess-1"), 401);
+        }
+        assert_eq!(attempt("mallory", "mallory-password-1"), 303);
+        assert_eq!(
+            attempt("root", "a-wrong-guess-1"),
+            401,
+            "the fifth failure locks"
+        );
+        assert_eq!(attempt("root", "a-wrong-guess-1"), 429);
+        assert_eq!(attempt("mallory", "mallory-password-1"), 429);
     }
 }

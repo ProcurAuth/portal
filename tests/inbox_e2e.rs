@@ -327,6 +327,7 @@ user "ci" {{
   grants = [
     "keys.own.use on service:portal/key_kind:api",
     "alert.send on service:portal/inbox_group:infra",
+    "alert.read on service:portal/inbox_group:infra",
   ]
 }}
 # access-end
@@ -1807,7 +1808,11 @@ async fn phone_sessions_have_a_budget_that_the_pages_do_not_share() {
             "  trusted_proxies = []\n  max_connections = 3\n  max_login_body_reads = 2\n",
             1,
         )
-        .replacen("    max_devices = 10\n", "    max_devices = 1\n", 1),
+        .replacen(
+            "    max_devices = 10\n",
+            "    max_devices = 1\n    max_per_account = 1\n",
+            1,
+        ),
     )
     .unwrap();
     s.start();
@@ -1867,6 +1872,67 @@ async fn phone_sessions_have_a_budget_that_the_pages_do_not_share() {
     let (again, response) = open("/v1/session").await.expect("the permit came back");
     assert_eq!(response.status(), 101);
     drop((again, held));
+    s.stop();
+}
+
+/// The audit lead portal/inbox-api/body-read-before-token-no-gate: the API of the senders checks
+/// the key before it reads the body. Slow bodies without a valid key get `401` at once, on each
+/// route that reads a body. They do not hold the connections of `server.max_connections` that
+/// ForwardAuth and the probes need for `server.body_read_timeout`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_bodies_without_a_key_get_401_at_once_and_hold_no_connection() {
+    let mut s = Server::setup();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    assert!(text.contains("  trusted_proxies = []\n"));
+    std::fs::write(
+        s.config(),
+        text.replacen(
+            "  trusted_proxies = []\n",
+            "  trusted_proxies = []\n  max_connections = 4\n  max_login_body_reads = 2\n  body_read_timeout = \"30s\"\n",
+            1,
+        ),
+    )
+    .unwrap();
+    s.start();
+    let port = s.port;
+    let begun = Instant::now();
+    let mut held = Vec::new();
+    for path in [
+        "/api/v1/alerts",
+        "/api/v1/notify/infra",
+        "/api/v1/webhooks/alertmanager/infra",
+        "/api/v1/alerts?token=api_not_a_key",
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        // The head is complete, the body has one byte of 1000.
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\nx"
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        held.push((path, stream));
+    }
+    for (path, stream) in &mut held {
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).unwrap_or_else(|e| {
+            panic!("{path}: no answer before the body: {e}");
+        });
+        assert_eq!(&status, b"HTTP/1.1 401", "{path}");
+    }
+    assert!(
+        begun.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        begun.elapsed()
+    );
+    // The connections of the slow bodies hold no permit of the four: the pages and the probes
+    // answer while the clients keep them open.
+    for path in ["/readyz", "/auth/login", "/readyz", "/auth/login"] {
+        let (st, body) = http(port, "GET", path, &[], "");
+        assert_eq!(st, 200, "{path}: {body}");
+    }
+    drop(held);
     s.stop();
 }
 
@@ -2382,6 +2448,347 @@ async fn enrollment_attempts_are_rate_limited() {
         s.log().contains("\"reason\":\"rate_limited\""),
         "the refusal is logged with its reason: {}",
         s.log()
+    );
+    s.stop();
+}
+
+/// Lets the proxy 127.0.0.1 give the client address in `X-Forwarded-For`, so one test plays
+/// several client addresses. `more` is added to the block `inbox.devices`.
+fn behind_proxy(s: &Server, more: &str) {
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    assert!(text.contains("  trusted_proxies = []\n") && text.contains("    max_devices = 10\n"));
+    std::fs::write(
+        s.config(),
+        text.replacen(
+            "  trusted_proxies = []\n",
+            "  trusted_proxies = [\"127.0.0.1/32\"]\n",
+            1,
+        )
+        .replacen(
+            "    max_devices = 10\n",
+            &format!("    max_devices = 10\n{more}"),
+            1,
+        ),
+    )
+    .unwrap();
+}
+
+/// A WebSocket to `path` that the trusted proxy 127.0.0.1 forwards for the client address `from`.
+async fn ws_from(port: u16, path: &str, from: &str) -> Ws {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://127.0.0.1:{port}{path}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("x-forwarded-for", from.parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+
+/// Noise message 1 and message 2 of a session of `dev`, on a WebSocket of the client address
+/// `from`. The frame `ready` is not sent. `Err` is the close code of a refusal.
+async fn half_open_from(port: u16, dev: &Phone, from: &str) -> Result<Conn, Option<u16>> {
+    let mut ws = ws_from(port, "/v1/session", from).await;
+    let hello = serde_json::to_vec(&SessionHello {
+        protocol: inbox_core::PROTOCOL_VERSION,
+        device_id: dev.device_id.clone(),
+        app_version: "e2e".into(),
+    })
+    .unwrap();
+    let (init, m1) =
+        Initiator::start(&dev.device_private_key, &dev.server_public_key, &hello).unwrap();
+    ws.send(Message::Binary(m1.into())).await.unwrap();
+    let m2 = match next_frame(&mut ws).await {
+        Some(Message::Binary(b)) => b,
+        Some(Message::Close(f)) => return Err(f.map(|f| f.code.into())),
+        other => panic!("unexpected handshake reply: {other:?}"),
+    };
+    let (session, _accept) = init.finish(&m2).unwrap();
+    Ok(Conn { ws, session })
+}
+
+/// Sends `ready` on a half-open handshake. The result is the welcome, or the close code.
+async fn ready(conn: &mut Conn) -> Result<ServerMsg, Option<u16>> {
+    conn.send(&ClientMsg::Ready).await;
+    match conn.recv(Duration::from_secs(5)).await {
+        Recv::Msg(m @ ServerMsg::Welcome { .. }) => Ok(m),
+        Recv::Msg(other) => panic!("expected welcome, got {other:?}"),
+        Recv::Closed(code) => Err(code),
+        Recv::Timeout => panic!("no answer to ready"),
+    }
+}
+
+/// The full session of an enrolled phone from the client address `from`.
+async fn session_from(port: u16, dev: &Phone, from: &str) -> Result<Conn, Option<u16>> {
+    let mut conn = half_open_from(port, dev, from).await?;
+    ready(&mut conn).await.map(|_| conn)
+}
+
+/// A client with no key from `from`: one binary frame that is not a Noise message 1.
+async fn garbage_from(port: u16, from: &str) -> Option<u16> {
+    let mut ws = ws_from(port, "/v1/session", from).await;
+    let _ = ws.send(Message::Binary(vec![0x41u8; 48].into())).await;
+    close_code(&mut ws).await
+}
+
+/// Sends a WebSocket ping every second until the server closes the socket. The result is the time
+/// from `opened` and the close code.
+async fn ping_until_closed(ws: &mut Ws, opened: Instant) -> (Duration, Option<u16>) {
+    loop {
+        if ws.send(Message::Ping(vec![1u8].into())).await.is_err() {
+            return (opened.elapsed(), None);
+        }
+        match tokio::time::timeout(Duration::from_secs(1), ws.next()).await {
+            Err(_) | Ok(Some(Ok(Message::Pong(_) | Message::Ping(_)))) => {
+                assert!(opened.elapsed() < Duration::from_secs(40), "never closed");
+            }
+            Ok(Some(Ok(Message::Close(f)))) => return (opened.elapsed(), f.map(|f| f.code.into())),
+            Ok(Some(Ok(other))) => panic!("unexpected frame {other:?}"),
+            Ok(Some(Err(_)) | None) => return (opened.elapsed(), None),
+        }
+    }
+}
+
+/// Finding inbox-session/handshake-timeout-reset-by-ping-holds-budget, part one. The handshake of a
+/// session has one deadline of 15 seconds from the upgrade. A ping or a pong does not extend it:
+/// a socket that only sends pings, before message 1 or after message 2, gives its permit of the
+/// session budget back. Each such timeout counts as a failure of the client address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_handshake_has_one_deadline_that_pings_do_not_extend() {
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    let phone = enroll_as(&s, "deadline-phone", SUPERADMIN).await.unwrap();
+    let opened = Instant::now();
+    let (mut silent, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/v1/session"))
+            .await
+            .unwrap();
+    let mut half = half_open_from(port, &phone, "127.0.0.1").await.unwrap();
+    let (before_m1, after_m2) = tokio::join!(
+        ping_until_closed(&mut silent, opened),
+        ping_until_closed(&mut half.ws, opened)
+    );
+    for (what, (elapsed, code)) in [
+        ("before message 1", before_m1),
+        ("after message 2", after_m2),
+    ] {
+        assert!(
+            elapsed >= Duration::from_secs(13) && elapsed < Duration::from_secs(20),
+            "{what}: closed after {elapsed:?}, the deadline is 15 s from the upgrade"
+        );
+        assert_eq!(code, Some(1001), "{what}");
+    }
+    let metrics = metrics_of(&s);
+    assert!(
+        metrics.contains("portal_inbox_auth_failures_total{kind=\"handshake_timeout\"} 2"),
+        "{metrics}"
+    );
+    // The phone itself is not refused: it proves its key.
+    session_from(port, &phone, "127.0.0.1").await.unwrap();
+    s.stop();
+}
+
+/// Finding inbox-session/handshake-timeout-reset-by-ping-holds-budget, part two. One client address
+/// holds at most `inbox.devices.max_handshakes_per_address` handshakes, so it cannot take the whole
+/// session budget. A newer handshake of a full address ends the oldest one with 1013: a client
+/// that holds silent sockets does not keep out an enrolled phone of its address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_client_address_holds_a_limited_share_of_the_handshakes() {
+    let mut s = Server::setup();
+    behind_proxy(&s, "    max_handshakes_per_address = 2\n");
+    s.start();
+    let port = s.port;
+    const SHARED: &str = "198.51.100.7";
+    const OTHER: &str = "203.0.113.9";
+    let phone = enroll_as(&s, "share-phone", SUPERADMIN).await.unwrap();
+    let other_phone = enroll_as(&s, "share-other", SUPERADMIN).await.unwrap();
+
+    // Five silent sockets of one address: only the two newest stay open.
+    let mut silent = Vec::new();
+    for _ in 0..5 {
+        silent.push(ws_from(port, "/v1/session", SHARED).await);
+    }
+    let mut codes = Vec::new();
+    for ws in silent.iter_mut().take(3) {
+        codes.push(close_code(ws).await);
+    }
+    assert_eq!(codes, [Some(1013); 3], "the oldest handshakes end");
+    for ws in silent.iter_mut().skip(3) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), next_frame(ws))
+                .await
+                .is_err(),
+            "the two newest handshakes stay open"
+        );
+    }
+    // The enrolled phone of the same address gets its session: its handshake ends the oldest.
+    let conn = session_from(port, &phone, SHARED)
+        .await
+        .expect("the phone of the full address gets its session");
+    assert_eq!(close_code(&mut silent[3]).await, Some(1013));
+    // An established session does not count as a handshake: one more handshake fits next to the
+    // last silent socket. The next one ends this socket.
+    let first_enroll = ws_from(port, "/v1/enroll", SHARED).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), next_frame(&mut silent[4]))
+            .await
+            .is_err(),
+        "the session of the phone does not count as a handshake"
+    );
+    let second_enroll = ws_from(port, "/v1/enroll", SHARED).await;
+    assert_eq!(close_code(&mut silent[4]).await, Some(1013));
+    drop((first_enroll, second_enroll));
+    // Another address has its own share.
+    session_from(port, &other_phone, OTHER).await.unwrap();
+    assert!(
+        s.log().contains("\"event\":\"handshake_ended_by_newer\""),
+        "{}",
+        s.log()
+    );
+    drop((conn, silent));
+    s.stop();
+}
+
+/// Finding inbox-limiter/ip-scope-blocks-coresident-phones. The failures of a client with no key
+/// lock its address for enrollments and for the handshakes that prove no device. A phone of the
+/// same address that proves its key still gets its session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_failures_of_one_client_do_not_refuse_the_phones_of_its_address() {
+    let mut s = Server::setup();
+    behind_proxy(&s, "");
+    s.start();
+    let port = s.port;
+    const SHARED: &str = "198.51.100.7";
+    const OTHER: &str = "203.0.113.9";
+    let victim = enroll_as(&s, "victim-phone", SUPERADMIN).await.unwrap();
+    let other = enroll_as(&s, "other-phone", SUPERADMIN).await.unwrap();
+    let mut early = session_from(port, &other, SHARED).await.unwrap();
+
+    // max_auth_failures = 10 garbage first frames from the shared address.
+    for _ in 0..10 {
+        assert_eq!(garbage_from(port, SHARED).await, Some(4401));
+    }
+    // The address is locked for a client that proves nothing, and for an enrollment.
+    assert_eq!(garbage_from(port, SHARED).await, Some(4429));
+    let mut enroll = ws_from(port, "/v1/enroll", SHARED).await;
+    assert_eq!(close_code(&mut enroll).await, Some(4429));
+    // The enrolled phone of the same address proves its key: it gets its session, two times.
+    for _ in 0..2 {
+        let conn = session_from(port, &victim, SHARED).await;
+        assert!(conn.is_ok(), "the phone is refused: {:?}", conn.err());
+    }
+    // A session that was open before the failures goes on.
+    early.send(&ClientMsg::Ping { nonce: 21 }).await;
+    loop {
+        match early.recv(Duration::from_secs(5)).await {
+            Recv::Msg(ServerMsg::Pong { nonce: 21 }) => break,
+            Recv::Msg(_) => continue,
+            other => panic!("the early session ended: {}", describe(&other)),
+        }
+    }
+    // Another address is not locked.
+    assert_eq!(garbage_from(port, OTHER).await, Some(4401));
+    s.stop();
+}
+
+/// Finding inbox/revocation-misses-session-in-handshake. A phone that is revoked between message 2
+/// and `ready` gets the close code 4403 after `ready`, no welcome and no alert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_during_the_handshake_ends_the_session() {
+    let mut s = Server::setup();
+    s.start();
+    let port = s.port;
+    let phone = enroll_as(&s, "revoked-in-handshake", SUPERADMIN)
+        .await
+        .unwrap();
+    let (mut live, _) = Conn::open(port, &phone).await.unwrap();
+    live.subscribe("infra").await;
+    let (st, _) = post_alert(
+        &s,
+        "pending-at-revocation",
+        json!({"group": "infra", "title": "pending at the revocation"}),
+    );
+    assert_eq!(st, 201);
+    live.alert().await;
+    // A spare handshake of the same phone stops before `ready`.
+    let mut spare = half_open_from(port, &phone, "127.0.0.1").await.unwrap();
+    let (st, v) = admin(
+        &s,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", phone.device_id),
+        "{}",
+    );
+    assert_eq!((st, &v["revoked"]), (200, &json!(true)), "{v}");
+    assert_eq!(
+        live.closed_code().await,
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    assert_eq!(
+        ready(&mut spare).await.err(),
+        Some(Some(inbox_core::proto::close::REVOKED)),
+        "the spare handshake must not get a session after the revocation"
+    );
+    let (_, overview) = admin(&s, "GET", "/auth/inbox/api/overview", "");
+    assert_eq!(overview["stats"]["online"], 0, "{overview}");
+    s.stop();
+}
+
+/// Finding inbox/device-limit-global-not-per-account. One account has at most
+/// `inbox.devices.max_per_account` phones that are not revoked. Its refused code stays unused, and
+/// the other accounts still enroll their phones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_account_cannot_take_all_the_places_of_the_phones() {
+    let mut s = Server::setup();
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    std::fs::write(
+        s.config(),
+        text.replacen(
+            "    max_devices = 10\n",
+            "    max_devices = 10\n    max_per_account = 3\n",
+            1,
+        ),
+    )
+    .unwrap();
+    s.start();
+    // mallory holds one grant only: inbox.receive on one group.
+    let _ = s.account_with(
+        "mallory",
+        &["inbox.receive on service:portal/inbox_group:other"],
+    );
+    let mut phones = Vec::new();
+    for n in 0..3 {
+        phones.push(
+            enroll_as(&s, &format!("mallory-{n}"), "mallory")
+                .await
+                .unwrap(),
+        );
+    }
+    let spare = code_for(&s, "mallory");
+    assert!(matches!(
+        enroll_code(&spare, "mallory-3").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    assert!(
+        s.log().contains("\"reason\":\"too_many_account_devices\""),
+        "{}",
+        s.log()
+    );
+    // The other accounts still enroll: the server has free places.
+    let victor = enroll_as(&s, "victor-phone", "victor").await.unwrap();
+    assert_eq!(victor.user_name, "victor");
+    enroll_as(&s, "root-phone", SUPERADMIN).await.unwrap();
+    // A revoked phone gives its place back, and the refused code was not used.
+    let (st, _) = admin(
+        &s,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", phones[0].device_id),
+        "{}",
+    );
+    assert_eq!(st, 200);
+    assert_eq!(
+        enroll_code(&spare, "mallory-3").await.unwrap().user_name,
+        "mallory"
     );
     s.stop();
 }
@@ -3404,6 +3811,63 @@ async fn alerts_are_accepted_and_delivered_while_postgresql_is_away() {
     }
 }
 
+/// The audit case: a webhook alert whose fingerprint holds U+0000 is spooled between two alerts while PostgreSQL is
+/// away. Its key is a digest, so PostgreSQL takes it, and the alert after it reaches the database too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_webhook_alert_with_a_nul_byte_does_not_block_the_replay_of_the_spool() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let proxy = PgProxy::start(&admin_pg.host, admin_pg.port);
+    let mut a = Server::setup_with(Some(admin_pg.clone()));
+    through(&a, &admin_pg, proxy.port);
+    quiet_phones(&a);
+    a.start();
+
+    proxy.blackhole();
+    let (st, before) = post_alert(
+        &a,
+        "ci-before",
+        json!({"group": "infra", "title": "before the poison"}),
+    );
+    assert_eq!(st, 201, "{before}");
+    let payload = json!({
+        "alerts": [
+            {"status": "firing", "labels": {"alertname": "Poison"}, "annotations": {},
+             "startsAt": "t\u{0}", "fingerprint": "fp\u{0}nul"}
+        ]
+    })
+    .to_string();
+    let (st, body) = http(
+        a.port,
+        "POST",
+        "/api/v1/webhooks/alertmanager/infra",
+        &[("Authorization", format!("Bearer {}", a.token))],
+        &payload,
+    );
+    assert_eq!(st, 200, "{body}");
+    let (st, after) = post_alert(
+        &a,
+        "ci-after",
+        json!({"group": "infra", "title": "after the poison"}),
+    );
+    assert_eq!(st, 201, "{after}");
+
+    proxy.pass();
+    let after_id = after["alert_id"].as_str().unwrap().to_string();
+    wait_for(
+        "the three spooled alerts to reach the database",
+        Duration::from_secs(70),
+        || stored_alerts(&a).len() == 3,
+    );
+    assert!(stored_alerts(&a)
+        .iter()
+        .any(|x| x["id"] == after_id.as_str()));
+    let log = a.log();
+    assert!(!log.contains("spool_alert_refused"), "{log}");
+}
+
 /// Two instances, the database away: an alert accepted by one reaches the phone held by the other before the producer is
 /// answered, the same alert sent to both is one alert, and the database ends with one row per alert.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3705,7 +4169,8 @@ async fn a_code_enrolls_one_phone_for_the_account_that_made_it() {
     let parsed = EnrollCode::parse(&text).unwrap();
     assert_eq!(parsed.address, format!("127.0.0.1:{}", s.port));
     assert_eq!(v["fingerprint"].as_str().unwrap(), parsed.fingerprint());
-    assert_eq!(v["fingerprint"].as_str().unwrap().len(), 8);
+    // 80 bits of the digest: 20 hexadecimal characters in five groups of 4.
+    assert_eq!(v["fingerprint"].as_str().unwrap().len(), 24);
     let ends = v["expires_at_ms"].as_i64().unwrap();
     assert!(
         ends >= before + 9 * 60_000 && ends <= before + 11 * 60_000,
@@ -6437,4 +6902,726 @@ async fn two_instances_give_the_same_notifications() {
     assert_eq!(notifications(&a, &on_a.cookie, "").1["level"], "off");
     a.stop();
     b.stop();
+}
+
+/// One Alertmanager alert of a webhook payload, with the start time of the audit case.
+fn am_alert(fingerprint: &str, name: &str, summary: &str) -> Value {
+    json!({"status": "firing",
+           "labels": {"alertname": name, "instance": fingerprint},
+           "annotations": {"summary": summary},
+           "startsAt": "2026-11-05T11:00:00Z", "fingerprint": fingerprint})
+}
+
+/// The audit case of a webhook payload: a new summary of a stored alert, the same alert to a second
+/// group, and a control character in a label. Each alert of the payload is stored, and a repeat
+/// keeps the first title.
+#[test]
+fn each_alert_of_a_webhook_payload_is_stored_and_a_new_summary_is_a_repeat() {
+    let mut s = Server::setup();
+    // One key of the file on two groups.
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let text = text
+        .replace(
+            "    \"alert.send on service:portal/inbox_group:infra\",\n",
+            "    \"alert.send on service:portal/inbox_group:infra\",\n    \"alert.send on service:portal/inbox_group:other\",\n",
+        )
+        .replace("groups = [\"infra\"]", "groups = [\"infra\", \"other\"]");
+    std::fs::write(s.config(), text).unwrap();
+    s.start();
+    let auth = [("Authorization", format!("Bearer {}", s.token))];
+    let post = |group: &str, alerts: Vec<Value>| -> (u64, u64, u64) {
+        let body = json!({"status": "firing", "alerts": alerts}).to_string();
+        let (st, answer) = http(
+            s.port,
+            "POST",
+            &format!("/api/v1/webhooks/alertmanager/{group}"),
+            &auth,
+            &body,
+        );
+        assert_eq!(st, 200, "{answer}");
+        let v: Value = serde_json::from_str(&answer).unwrap();
+        let n = |k: &str| v[k].as_u64().unwrap();
+        (n("created"), n("duplicates"), n("refused"))
+    };
+
+    // A is stored. The next payload has B, A with a new summary, and C.
+    assert_eq!(
+        post("infra", vec![am_alert("fpA", "Load", "load 0.91")]),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        post(
+            "infra",
+            vec![
+                am_alert("fpB", "Load", "load 0.80"),
+                am_alert("fpA", "Load", "load 0.97"),
+                am_alert("fpC", "Load", "load 0.85"),
+            ]
+        ),
+        (2, 1, 0)
+    );
+    assert_eq!(
+        post("infra", vec![am_alert("fpC", "Load", "load 0.85")]),
+        (0, 1, 0)
+    );
+    // The same alert to the second group makes an alert of that group.
+    assert_eq!(
+        post("infra", vec![am_alert("fpD", "Disk", "disk 95%")]),
+        (1, 0, 0)
+    );
+    assert_eq!(
+        post(
+            "other",
+            vec![
+                am_alert("fpD", "Disk", "disk 95%"),
+                am_alert("fpE", "Disk", "disk 96%"),
+            ]
+        ),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        post("other", vec![am_alert("fpE", "Disk", "disk 96%")]),
+        (0, 1, 0)
+    );
+    // A control character in the label alertname becomes a space.
+    assert_eq!(
+        post(
+            "infra",
+            vec![
+                am_alert("fpF", "Bad\u{7}Name", "x"),
+                am_alert("fpG", "Net", "link down"),
+            ]
+        ),
+        (2, 0, 0)
+    );
+    assert_eq!(
+        post("infra", vec![am_alert("fpG", "Net", "link down")]),
+        (0, 1, 0)
+    );
+
+    let (st, v) = admin(&s, "GET", "/auth/inbox/api/alerts", "");
+    assert_eq!(st, 200);
+    let mut seen: Vec<(String, String)> = v["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["group"].as_str().unwrap().to_string(),
+                a["title"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    seen.sort();
+    let want: Vec<(String, String)> = [
+        ("infra", "[FIRING] Bad Name: x"),
+        ("infra", "[FIRING] Disk: disk 95%"),
+        ("infra", "[FIRING] Load: load 0.80"),
+        ("infra", "[FIRING] Load: load 0.85"),
+        ("infra", "[FIRING] Load: load 0.91"),
+        ("infra", "[FIRING] Net: link down"),
+        ("other", "[FIRING] Disk: disk 95%"),
+        ("other", "[FIRING] Disk: disk 96%"),
+    ]
+    .iter()
+    .map(|(g, t)| (g.to_string(), t.to_string()))
+    .collect();
+    assert_eq!(seen, want, "the first title of A stays");
+}
+
+/// A key of the file follows its owner for each action. The groups of its block give
+/// `alert.send`. The delivery status of an alert of a group needs `alert.read` of the owner on the
+/// group, as for a key of the database.
+#[test]
+fn a_key_of_the_file_reads_the_status_of_an_alert_only_with_alert_read_of_its_owner() {
+    let mut s = Server::setup();
+    let grant = "    \"alert.read on service:portal/inbox_group:infra\",\n";
+    let with_read = std::fs::read_to_string(s.config()).unwrap();
+    assert!(with_read.contains(grant));
+    std::fs::write(s.config(), with_read.replace(grant, "")).unwrap();
+    s.start();
+    let (st, v) = post_alert(&s, "k1", json!({"group": "infra", "title": "status"}));
+    assert_eq!(st, 201, "{v}");
+    let id = v["alert_id"].as_str().unwrap().to_string();
+    let by_header = |s: &Server| {
+        http(
+            s.port,
+            "GET",
+            &format!("/api/v1/alerts/{id}"),
+            &[("Authorization", format!("Bearer {}", s.token))],
+            "",
+        )
+    };
+    let by_query = |s: &Server| {
+        http(
+            s.port,
+            "GET",
+            &format!("/api/v1/alerts/{id}?token={}", s.token),
+            &[],
+            "",
+        )
+    };
+    // The owner may send to infra and may not read it: the same answer as for no alert.
+    let (st, body) = by_header(&s);
+    assert_eq!(st, 404, "{body}");
+    assert!(!body.contains("deliveries"), "{body}");
+    assert_eq!(by_query(&s).0, 404);
+    // The owner gets alert.read on infra: the key reads the status.
+    s.stop();
+    std::fs::write(s.config(), &with_read).unwrap();
+    s.start();
+    let (st, body) = by_header(&s);
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(by_query(&s).0, 200);
+}
+
+/// The total of the graph and the title of each bar, as the zone Sent draws them.
+fn graph_of(page: &str) -> (String, Vec<String>) {
+    let total = page
+        .find("over the period: ")
+        .map(|at| {
+            let rest = &page[at + "over the period: ".len()..];
+            rest.split('"').next().unwrap_or("").to_string()
+        })
+        .unwrap_or_else(|| "<no graph>".to_string());
+    let bars: Vec<String> = page
+        .match_indices("<title>")
+        .filter_map(|(at, _)| {
+            let rest = &page[at + 7..];
+            let text = rest.split("</title>").next()?;
+            text.contains("UTC:").then(|| text.to_string())
+        })
+        .collect();
+    (total, bars)
+}
+
+/// The graph of the zone Sent counts the groups that the account may read, as the rows do. A
+/// group where the account holds `alert.send` only adds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_graph_of_the_inbox_counts_only_the_groups_that_the_account_may_read() {
+    let mut s = Server::setup();
+    s.start();
+    for n in 0..4 {
+        let (st, v) = post_alert(
+            &s,
+            &format!("graph-{n}"),
+            json!({"group": "infra", "title": format!("graph title {n}")}),
+        );
+        assert_eq!(st, 201, "{v}");
+    }
+    // vic: alert.send on infra and alert.send_user. sam: alert.send on infra, alert.read on other.
+    let vic = s.account_with(
+        "vic",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.send_user on service:portal",
+        ],
+    );
+    let sam = s.account_with(
+        "sam",
+        &[
+            "alert.send on service:portal/inbox_group:infra",
+            "alert.read on service:portal/inbox_group:other",
+        ],
+    );
+    let una = s.account_with("una", &["alert.read on service:portal/inbox_group:infra"]);
+    for path in ["/auth/settings/inbox", "/auth/settings/inbox?g=infra"] {
+        for (who, cookie) in [("vic", &vic.cookie), ("sam", &sam.cookie)] {
+            let (st, page) = inbox_page_as(&s, cookie, path);
+            assert_eq!(st, 200, "{who} {path}");
+            assert!(
+                page.contains("id=\"sent-title\""),
+                "{who}: the zone Sent shows"
+            );
+            let (total, bars) = graph_of(&page);
+            assert_eq!(total, "0 in total", "{who} {path}");
+            assert!(bars.is_empty(), "{who} {path}: {bars:?}");
+            assert_eq!(page.matches("graph title").count(), 0, "{who} {path}");
+        }
+        // A reader of infra still counts the four alerts.
+        let (st, page) = inbox_page_as(&s, &una.cookie, path);
+        assert_eq!(st, 200);
+        assert_eq!(graph_of(&page).0, "4 in total", "una {path}");
+    }
+}
+
+// ---------------------------------------------------------------- the end of an account
+
+/// The rows of the zone Phones of the superadmin: the name and the login of each device.
+fn phone_logins(s: &Server) -> Vec<(String, String, String)> {
+    let (_, overview) = admin(s, "GET", "/auth/inbox/api/overview", "");
+    overview["devices"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|d| {
+            (
+                d["device"]["name"].as_str().unwrap().to_string(),
+                d["device"]["user_name"].as_str().unwrap().to_string(),
+                d["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The phones that the page "My phones" of an account lists as its own.
+fn own_phone_rows(s: &Server, cookie: &str, login: &str) -> Vec<String> {
+    let (st, page) = inbox_page_as(s, cookie, "/auth/settings/inbox");
+    assert_eq!(st, 200, "{page}");
+    rows(&page, "data-device")
+        .into_iter()
+        .filter(|r| r.contains(&format!("data-login=\"{login}\"")))
+        .collect()
+}
+
+/// The audit finding portal/inbox/phones-of-removed-file-account-stay-active (vrf-34, inverted): the
+/// operator removes the block `user` of an account of the file and starts the server again. The
+/// phones of the account stop, its unused code stops, and a later database account with the same
+/// login gets none of its phones or alerts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_account_of_the_file_loses_its_phones_and_its_codes() {
+    let mut s = Server::setup_with(None);
+    add_file_account(
+        &s,
+        "dave",
+        &["inbox.receive on service:portal/inbox_group:infra"],
+    );
+    s.start();
+    let port = s.port;
+    let _dave = s.file_account("dave");
+    let phone = enroll_as(&s, "dave-phone", "dave").await.unwrap();
+    let spare = code_for(&s, "dave");
+    {
+        let (mut conn, _) = Conn::open(port, &phone).await.unwrap();
+        conn.subscribe("infra").await;
+    }
+    let root = s.session();
+    let (st, head, page) = inbox_form(
+        &s,
+        &root.cookie,
+        "/auth/settings/inbox/send",
+        &format!(
+            "to={}&title={}&key=e2e-file-1",
+            form_value("user:dave"),
+            form_value("a note for the first dave")
+        ),
+    );
+    assert_eq!(st, 303, "{head}{page}");
+    s.stop();
+    // The operator removes the block `user "dave"` from the file and starts the server again.
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    let start = text.find("user \"dave\" {").expect("the block of dave");
+    let end = start + text[start..].find("\n}\n").unwrap() + 3;
+    std::fs::write(s.config(), format!("{}{}", &text[..start], &text[end..])).unwrap();
+    s.start();
+    assert_eq!(sign_in_request(port, "dave", ACCOUNT_PASSWORD).0, 401);
+
+    // The phone gets no session, and a group alert finds no phone.
+    assert_eq!(
+        Conn::open(port, &phone).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    let (st, v) = post_alert(
+        &s,
+        "e2e-file-2",
+        json!({"group": "infra", "title": "after the removal"}),
+    );
+    assert_eq!((st, v["targets"].as_u64()), (201, Some(0)), "{v}");
+    // The unused code of the account is gone.
+    assert!(matches!(
+        enroll_code(&spare, "dave-spare").await,
+        Err(EnrollFail::Closed(Some(4410)))
+    ));
+    // The zone Phones keeps the revoked row, without the login.
+    let rows = phone_logins(&s);
+    let (_, login, status) = rows.iter().find(|r| r.0 == "dave-phone").unwrap();
+    assert_eq!(status, "revoked", "{rows:?}");
+    assert_ne!(login, "dave", "{rows:?}");
+    assert!(!rows.iter().any(|r| r.0 == "dave-spare"), "{rows:?}");
+
+    // A later database account with the same login has no phone and no old alert.
+    let new_dave = s.account_with(
+        "dave",
+        &["inbox.receive on service:portal/inbox_group:other"],
+    );
+    assert!(own_phone_rows(&s, &new_dave.cookie, "dave").is_empty());
+    let (st, v) = notifications(&s, &new_dave.cookie, "?after=0");
+    assert_eq!(st, 200);
+    assert!(titles(&v).is_empty(), "{v}");
+    assert_eq!(
+        Conn::open(port, &phone).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    s.stop();
+}
+
+/// The same finding: the operator changes the login of the superadmin. The phones of the old login
+/// stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_phones_of_an_old_login_of_the_superadmin_stop() {
+    let mut s = Server::setup_with(None);
+    s.start();
+    let port = s.port;
+    let phone = enroll_as(&s, "root-phone", SUPERADMIN).await.unwrap();
+    {
+        let (mut conn, _) = Conn::open(port, &phone).await.unwrap();
+        conn.subscribe("infra").await;
+    }
+    s.stop();
+    std::fs::write(s.dir.join("superadmin_login"), "newroot").unwrap();
+    s.start();
+    assert_eq!(
+        sign_in_request(port, SUPERADMIN, SUPERADMIN_PASSWORD).0,
+        401
+    );
+    assert_eq!(
+        Conn::open(port, &phone).await.err(),
+        Some(inbox_core::proto::close::REVOKED)
+    );
+    let (st, v) = post_alert(
+        &s,
+        "e2e-rename-1",
+        json!({"group": "infra", "title": "after the rename"}),
+    );
+    assert_eq!((st, v["targets"].as_u64()), (201, Some(0)), "{v}");
+    // The first look of the rights after the start ends the old login too, without a session.
+    assert!(s.log().contains("account_inbox_ended"), "{}", s.log());
+    s.stop();
+}
+
+/// The audit finding portal/inbox/login-reuse-inherits-login-keyed-data (vrf-33, inverted): a new
+/// account that gets the login of a deleted account reads none of its records. A control login
+/// that never existed reads none either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_account_with_the_login_of_a_deleted_account_inherits_nothing() {
+    let mut s = Server::setup();
+    s.start();
+    let root = s.session();
+    let grants = [
+        "inbox.receive on service:portal/inbox_group:infra",
+        "alert.send_user on service:portal",
+    ];
+    s.account("bob");
+    enroll_as(&s, "reuse-bob-phone", "bob").await.unwrap();
+    let first = s.account_with("erin", &grants);
+    enroll_as(&s, "reuse-first-erin-phone", "erin")
+        .await
+        .unwrap();
+    let (st, head, _) = inbox_form(
+        &s,
+        &root.cookie,
+        "/auth/settings/inbox/send",
+        &format!(
+            "to={}&title={}&key=reuse-a",
+            form_value("user:erin"),
+            form_value("a note for the first erin")
+        ),
+    );
+    assert_eq!(st, 303, "{head}");
+    let (st, head, _) = inbox_form(
+        &s,
+        &first.cookie,
+        "/auth/settings/inbox/send",
+        &format!(
+            "to={}&title={}&key=reuse-b",
+            form_value("user:bob"),
+            form_value("sent by the first erin to bob")
+        ),
+    );
+    assert_eq!(st, 303, "{head}");
+    let (_, before) = notifications(&s, &first.cookie, "?after=0");
+    assert!(titles(&before).contains(&"a note for the first erin".to_string()));
+
+    delete_account(&s, "erin");
+    let second = s.account_with("erin", &grants);
+    let control = s.account_with("frank", &grants);
+    for (who, cookie) in [("second erin", &second.cookie), ("frank", &control.cookie)] {
+        let (st, v) = notifications(&s, cookie, "?after=0");
+        assert_eq!(st, 200, "{who}");
+        assert!(titles(&v).is_empty(), "{who}: {v}");
+        let (st, page) = inbox_page_as(&s, cookie, "/auth/settings/inbox");
+        assert_eq!(st, 200, "{who}");
+        assert!(!page.contains("reuse-first-erin-phone"), "{who}");
+        assert!(!page.contains("sent by the first erin to bob"), "{who}");
+        let (st, home) = inbox_page_as(&s, cookie, "/");
+        assert_eq!(st, 200, "{who}");
+        assert!(!home.contains("a note for the first erin"), "{who}");
+    }
+    // The new erin may use the key of the old one again: the form takes it as a new alert.
+    enroll_as(&s, "reuse-second-erin-phone", "erin")
+        .await
+        .unwrap();
+    let (st, head, page) = inbox_form(
+        &s,
+        &second.cookie,
+        "/auth/settings/inbox/send",
+        &format!(
+            "to={}&title={}&key=reuse-b",
+            form_value("user:bob"),
+            form_value("sent by the second erin to bob")
+        ),
+    );
+    assert_eq!(st, 303, "{head}{page}");
+    // Bob keeps the alert of the first erin, and the superadmin sees both.
+    let bob = s.account("bob");
+    let (_, v) = notifications(&s, &bob.cookie, "?after=0");
+    let got = titles(&v);
+    assert!(
+        got.contains(&"sent by the first erin to bob".to_string()),
+        "{v}"
+    );
+    assert!(
+        got.contains(&"sent by the second erin to bob".to_string()),
+        "{v}"
+    );
+    s.stop();
+}
+
+/// One POST of the plus button with a token that the test read before. The result is the code
+/// text when the answer has one.
+fn code_post(port: u16, cookie: &str, csrf: &str) -> Option<String> {
+    let host = format!("127.0.0.1:{port}");
+    let (st, _, page) = http_full(
+        port,
+        &host,
+        "POST",
+        "/auth/settings/inbox/code",
+        &[
+            ("Content-Type", "application/x-www-form-urlencoded".into()),
+            ("Origin", format!("http://{host}")),
+            ("Cookie", cookie.to_string()),
+        ],
+        &format!("csrf={csrf}"),
+    );
+    (st == 200 && page.contains("id=\"enroll-code\"")).then(|| code_in(&page))
+}
+
+/// The audit finding portal/inbox/enrollment-code-outlives-account-delete-race (hunter-14 check-04
+/// and vrf-32, inverted): the account asks for codes again and again while the superadmin deletes
+/// it. No code that the answers gave enrolls a phone after the delete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_code_asked_while_the_account_is_deleted_enrolls_no_phone() {
+    // SQLite: the test reads the codes in the file. A phone of a login without an account also
+    // stops at its enrollment there, so the read of the file is the check of the codes.
+    let mut s = Server::setup_with(None);
+    // Each refused code counts as a failure of the address: the test tries many of them.
+    let text = std::fs::read_to_string(s.config()).unwrap();
+    assert!(text.contains("max_auth_failures = 10\n"));
+    std::fs::write(
+        s.config(),
+        text.replace("max_auth_failures = 10\n", "max_auth_failures = 1000\n"),
+    )
+    .unwrap();
+    s.start();
+    let port = s.port;
+    let mut given = 0;
+    for round in 0..6 {
+        let login = format!("racer{round}");
+        let racer = s.account(&login);
+        let csrf = inbox_csrf(port, &racer.cookie);
+        assert!(!csrf.is_empty());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let askers: Vec<_> = (0..3)
+            .map(|_| {
+                let (cookie, csrf, stop) = (racer.cookie.clone(), csrf.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut codes = Vec::new();
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        codes.extend(code_post(port, &cookie, &csrf));
+                    }
+                    codes
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+        delete_account(&s, &login);
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let codes: Vec<String> = askers.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        given += codes.len();
+        // No code of the deleted account is left: the end of the account found every one.
+        let conn = rusqlite::Connection::open(s.dir.join("portal.db")).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        let unused: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM enrollment_codes WHERE login = ?1 AND used_at_ms IS NULL",
+                [&login],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            unused, 0,
+            "round {round}: codes of the deleted account {login} are left"
+        );
+        for code in &codes {
+            let enrolled = enroll_code(code, &format!("{login}-after-delete")).await;
+            assert!(
+                matches!(enrolled, Err(EnrollFail::Closed(Some(4410)))),
+                "round {round}: a code of the deleted account {login} enrolled: {enrolled:?}"
+            );
+        }
+    }
+    assert!(given > 0, "the test made no code at all");
+    assert!(
+        !phone_logins(&s)
+            .iter()
+            .any(|(name, _, status)| name.ends_with("-after-delete") && status != "revoked"),
+        "{:?}",
+        phone_logins(&s)
+    );
+    s.stop();
+}
+
+/// The same finding with PostgreSQL: an instance whose file lacks an account of the file gives the
+/// phone of that account no session (1013) and revokes nothing. The instance whose file has the
+/// account serves the phone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_instance_that_does_not_know_an_account_of_the_file_revokes_nothing() {
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let mut a = Server::setup_with(Some(admin_pg));
+    // The file of the second instance has no block `user "fred"`: a change of the file that
+    // reached only the first instance.
+    let mut b = a.sibling("instance-b");
+    add_file_account(
+        &a,
+        "fred",
+        &["inbox.receive on service:portal/inbox_group:infra"],
+    );
+    a.start();
+    b.start();
+    let _fred = a.file_account("fred");
+    let phone = enroll_as(&a, "fred-phone", "fred").await.unwrap();
+    assert_eq!(Conn::open(b.port, &phone).await.err(), Some(1013));
+    let (mut conn, _) = Conn::open(a.port, &phone).await.unwrap();
+    conn.subscribe("infra").await;
+    // After a look of the rights of the second instance, the phone still works on the first one.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(Conn::open(b.port, &phone).await.err(), Some(1013));
+    let (st, v) = post_alert(
+        &a,
+        "e2e-not-here-1",
+        json!({"group": "infra", "title": "for fred"}),
+    );
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(conn.alert().await.title, "for fred");
+}
+
+/// The audit finding portal/inbox/degraded-cache-ignores-remote-revocation (vrf-30, inverted): a
+/// phone that instance A revokes just before PostgreSQL goes away gets no session on instance B,
+/// which got the notification of the revocation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_on_one_instance_holds_on_the_other_while_postgresql_is_away() {
+    use inbox_core::proto::close;
+    let Some(admin_pg) = pg_admin() else {
+        eprintln!("INBOX_TEST_PG is not set: skipped");
+        return;
+    };
+    let proxy = PgProxy::start(&admin_pg.host, admin_pg.port);
+    let mut a = Server::setup_with(Some(admin_pg.clone()));
+    through(&a, &admin_pg, proxy.port);
+    quiet_phones(&a);
+    let mut b = a.sibling("instance-b");
+    a.start();
+    b.start();
+    let phone = enroll_as(&a, "phone-stale", "alice").await.unwrap();
+    let (mut on_b, _) = Conn::open(b.port, &phone).await.unwrap();
+    on_b.subscribe("infra").await;
+    // The copy of B holds the phone as not revoked, with its subscription.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let (st, v) = admin(
+        &a,
+        "POST",
+        &format!("/auth/inbox/api/devices/{}/revoke", phone.device_id),
+        "{}",
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(on_b.closed_code().await, Some(close::REVOKED));
+    // The database goes away before the next refresh of the copy of B.
+    proxy.blackhole();
+    for s in [&a, &b] {
+        wait_for(
+            "the instance to be degraded",
+            Duration::from_secs(30),
+            || http(s.port, "GET", "/readyz", &[], "").1 == "degraded",
+        );
+    }
+    assert_eq!(Conn::open(a.port, &phone).await.err(), Some(close::REVOKED));
+    assert_eq!(Conn::open(b.port, &phone).await.err(), Some(close::REVOKED));
+    proxy.pass();
+}
+
+/// The rows of the account `login` in a SQLite file. The file is copied first: the replica can
+/// rename a new snapshot over it at any time.
+fn account_rows(dir: &std::path::Path, path: &std::path::Path, login: &str) -> i64 {
+    let copy = dir.join(unique_name("rows-copy"));
+    std::fs::copy(path, &copy).unwrap();
+    let conn = rusqlite::Connection::open(&copy).unwrap();
+    let n = conn
+        .query_row(
+            "SELECT COUNT(*) FROM users WHERE login = ?1",
+            [login],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    let _ = std::fs::remove_file(&copy);
+    n
+}
+
+/// The audit finding portal/inbox-replica/restore-reverts-unsynced-portal-revocations (vrf-24,
+/// inverted): the delete of an account is in the shared directory when the superadmin sees it
+/// done. An unclean stop, then a restart on the same disk or a takeover on an empty disk, keeps the
+/// account deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_account_stays_deleted_after_an_unclean_stop() {
+    let mut s = Server::setup_with(None);
+    let shared = s.dir.join("shared");
+    let local = s.dir.join("portal.db");
+    // Ten minutes between two periodic snapshots: after the first one, only the wait of a form can
+    // make one in this test.
+    s.add_to_inbox(&format!(
+        r#"  replica {{
+    dir               = "{}"
+    snapshot_interval = "10m"
+    lease_ttl         = "5s"
+    sync_timeout      = "5s"
+    sync_alerts       = true
+  }}"#,
+        shared.display()
+    ));
+    s.start();
+    add_account(&s, "eve");
+    assert_eq!(sign_in_request(s.port, "eve", ACCOUNT_PASSWORD).0, 303);
+    let snapshot = shared.join("snapshot-1.db");
+    assert_eq!(account_rows(&s.dir, &snapshot, "eve"), 1);
+    delete_account(&s, "eve");
+    assert_eq!(
+        account_rows(&s.dir, &snapshot, "eve"),
+        0,
+        "the answer of the delete waited for the copy"
+    );
+    let kill = |s: &mut Server| {
+        let mut child = s.child.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+    };
+    // The same node starts again on its own disk, which it keeps.
+    kill(&mut s);
+    s.start();
+    assert!(s.log().contains("\"kept_local\":\"true\""), "{}", s.log());
+    assert_eq!(sign_in_request(s.port, "eve", ACCOUNT_PASSWORD).0, 401);
+    // The node is lost with its disk: the next owner restores the shared directory.
+    kill(&mut s);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", local.display()));
+    }
+    s.start();
+    assert!(s.log().contains("\"kept_local\":\"false\""), "{}", s.log());
+    assert_eq!(sign_in_request(s.port, "eve", ACCOUNT_PASSWORD).0, 401);
+    s.stop();
 }

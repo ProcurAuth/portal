@@ -373,10 +373,15 @@ pub enum CodeInsert {
     Created { expires_at_ms: i64 },
     /// The account has `max_active` codes that are not used and not expired.
     TooMany,
+    /// The account of the database has no row in the table `users` any more: it was deleted.
+    NoAccount,
 }
 
 /// Stores the digest of a new code of `login`. It refuses the code when the account already has
-/// `max_active` codes that are not used and not expired.
+/// `max_active` codes that are not used and not expired. `stored` tells that the account is an
+/// account of the database: the transaction then also reads its row in the table `users` of the
+/// portal. A code is stored only while that row exists, so a delete of the account and its
+/// [`end_account`] leave no code.
 pub fn insert_code(
     conn: &mut Connection,
     digest: &[u8],
@@ -384,8 +389,19 @@ pub fn insert_code(
     now: i64,
     ttl_ms: i64,
     max_active: u32,
+    stored: bool,
 ) -> rusqlite::Result<CodeInsert> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if stored {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE login = ?1)",
+            params![login],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(CodeInsert::NoAccount);
+        }
+    }
     let active: i64 = tx.query_row(
         "SELECT COUNT(*) FROM enrollment_codes
          WHERE login = ?1 AND used_at_ms IS NULL AND expires_at_ms > ?2",
@@ -443,6 +459,18 @@ pub enum Redeem {
     Refused(Refusal),
     /// `max_devices` devices that are not revoked exist. The code stays unused.
     TooManyDevices,
+    /// The account of the code has `max_per_account` devices that are not revoked. The code stays
+    /// unused.
+    TooManyAccountDevices,
+}
+
+/// The limits of the devices that are not revoked, for an enrollment.
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceLimits {
+    /// All the devices of the server (`inbox.devices.max_devices`).
+    pub max_devices: u32,
+    /// The devices of one account (`inbox.devices.max_per_account`).
+    pub max_per_account: u32,
 }
 
 /// Uses a code and stores the device of its account, in one transaction. The code is single use:
@@ -451,7 +479,7 @@ pub fn redeem_code(
     conn: &mut Connection,
     digest: &[u8],
     now: i64,
-    max_devices: u32,
+    limits: DeviceLimits,
     name: &str,
     public_key: &[u8],
     ip: &str,
@@ -473,7 +501,15 @@ pub fn redeem_code(
     if expires_at_ms <= now {
         return Ok(Redeem::Refused(Refusal::Expired));
     }
-    if count_active_devices(&tx)? >= max_devices {
+    let of_account: u32 = tx.query_row(
+        "SELECT COUNT(*) FROM devices WHERE user_name = ?1 AND revoked_at IS NULL",
+        params![login],
+        |r| r.get(0),
+    )?;
+    if of_account >= limits.max_per_account {
+        return Ok(Redeem::TooManyAccountDevices);
+    }
+    if count_active_devices(&tx)? >= limits.max_devices {
         return Ok(Redeem::TooManyDevices);
     }
     tx.execute(
@@ -485,10 +521,21 @@ pub fn redeem_code(
     Ok(Redeem::Enrolled { device_id, login })
 }
 
-/// Deletes the unused codes of `login` and revokes its devices, in one transaction. A phone that
-/// enrolls at the same time either finds its code gone or has its device revoked. The result is the
-/// ids of the devices that this call revoked.
-pub fn revoke_account(conn: &mut Connection, login: &str) -> rusqlite::Result<Vec<String>> {
+/// The name that the rows of an ended account carry in place of its login. It holds the character
+/// `:`, which no login can have (`subject_id::SEPARATOR`), so it never names a later account.
+/// Each call gives a new name.
+pub fn ended_name(login: &str) -> String {
+    format!("{login}:ended:{}", &random_id()[..12])
+}
+
+/// Ends the inbox state of the account `login`, in one transaction. It deletes the unused codes,
+/// revokes the devices and drops their subscriptions. Then it detaches the rows that name the
+/// login, so that a later account with the same login gets none of them: the devices, the alerts
+/// to the account and the alerts that the account sent with the form get [`ended_name`], and the
+/// notification state goes. The connection log keeps the login. A phone that enrolls at the same
+/// time either finds its code gone or has its device revoked. The result is the ids of the devices
+/// that this call revoked. A second call finds nothing to do.
+pub fn end_account(conn: &mut Connection, login: &str) -> rusqlite::Result<Vec<String>> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute(
         "DELETE FROM enrollment_codes WHERE login = ?1 AND used_at_ms IS NULL",
@@ -511,8 +558,27 @@ pub fn revoke_account(conn: &mut Connection, login: &str) -> rusqlite::Result<Ve
             params![id],
         )?;
     }
+    let ended = ended_name(login);
+    tx.execute(
+        "UPDATE devices SET user_name = ?2 WHERE user_name = ?1",
+        params![login, ended],
+    )?;
+    tx.execute(
+        "UPDATE alerts SET target_id = ?2 WHERE target_kind = 'user' AND target_id = ?1",
+        params![login, ended],
+    )?;
+    tx.execute(
+        "UPDATE alerts SET source = ?2 WHERE source = ?1",
+        params![admin_source(login), admin_source(&ended)],
+    )?;
+    tx.execute("DELETE FROM web_notify WHERE login = ?1", params![login])?;
     tx.commit()?;
     Ok(ids)
+}
+
+/// The source of an alert that the account `login` sent with the form of the page.
+pub fn admin_source(login: &str) -> String {
+    format!("admin:{login}")
 }
 
 pub fn find_device(conn: &Connection, id: &str) -> rusqlite::Result<Option<DeviceKey>> {
@@ -650,6 +716,16 @@ pub struct NewAlert {
     pub idempotency_key: String,
 }
 
+/// The start of the source of an alert of the webhook of Alertmanager and Grafana.
+pub const WEBHOOK_SOURCE: &str = "webhook:";
+
+/// Whether a new title fits the alert that the store holds under the same source and key. The
+/// title must be the same, except for an alert of the webhook: its key names the alert, and a
+/// later notification of the same alert can carry a new summary. The first title stays.
+pub fn same_title(source: &str, stored: &str, new: &str) -> bool {
+    stored == new || source.starts_with(WEBHOOK_SOURCE)
+}
+
 pub enum InsertOutcome {
     Created {
         alert_id: String,
@@ -685,7 +761,10 @@ pub fn insert_alert(conn: &mut Connection, alert: &NewAlert) -> rusqlite::Result
         )
         .optional()?;
     if let Some((id, kind, target, title)) = existing {
-        if kind != alert.target.kind() || target != alert.target.id() || title != alert.title {
+        if kind != alert.target.kind()
+            || target != alert.target.id()
+            || !same_title(&alert.source, &title, &alert.title)
+        {
             return Ok(InsertOutcome::Conflict);
         }
         let devices = delivery_devices(&tx, &id)?;
@@ -1486,6 +1565,37 @@ mod tests {
     }
 
     #[test]
+    fn a_new_title_of_the_same_webhook_alert_is_a_repeat_and_the_first_title_stays() {
+        let mut c = mem();
+        let mut first = alert("k");
+        first.source = format!("{WEBHOOK_SOURCE}ci");
+        first.title = "[FIRING] Load: load 0.91".into();
+        let InsertOutcome::Created { alert_id, .. } = insert_alert(&mut c, &first).unwrap() else {
+            panic!()
+        };
+        let mut later = first.clone();
+        later.title = "[FIRING] Load: load 0.97".into();
+        let InsertOutcome::Duplicate {
+            alert_id: again, ..
+        } = insert_alert(&mut c, &later).unwrap()
+        else {
+            panic!("a new summary of the same alert is a repeat")
+        };
+        assert_eq!(again, alert_id);
+        assert_eq!(
+            recent_alerts(&c, 10, 0, 0).unwrap()[0].title,
+            "[FIRING] Load: load 0.91"
+        );
+        // The key names one target: another group with the same key is still a conflict.
+        let mut elsewhere = later;
+        elsewhere.target = Target::Group("other".into());
+        assert!(matches!(
+            insert_alert(&mut c, &elsewhere).unwrap(),
+            InsertOutcome::Conflict
+        ));
+    }
+
+    #[test]
     fn acks_stop_redelivery_and_are_idempotent() {
         let mut c = mem();
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
@@ -1549,15 +1659,21 @@ mod tests {
     const DIGEST_B: [u8; 32] = [0xb2; 32];
     const MINUTE_MS: i64 = 60_000;
 
+    const LIMITS: DeviceLimits = DeviceLimits {
+        max_devices: 10,
+        max_per_account: 10,
+    };
+
     fn redeem(c: &mut Connection, digest: &[u8], now: i64, key: u8) -> Redeem {
-        redeem_code(c, digest, now, 10, "phone", &[key; 32], "1.1.1.1").unwrap()
+        redeem_code(c, digest, now, LIMITS, "phone", &[key; 32], "1.1.1.1").unwrap()
     }
 
     #[test]
     fn a_code_works_one_time_and_gives_its_login_to_the_device() {
         let mut c = mem();
         let now = now_ms();
-        let created = insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5).unwrap();
+        let created =
+            insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5, false).unwrap();
         assert_eq!(
             created,
             CodeInsert::Created {
@@ -1592,7 +1708,7 @@ mod tests {
     fn an_expired_code_is_refused_and_a_refusal_changes_nothing() {
         let mut c = mem();
         let now = now_ms();
-        insert_code(&mut c, &DIGEST_A, "alice", now, MINUTE_MS, 5).unwrap();
+        insert_code(&mut c, &DIGEST_A, "alice", now, MINUTE_MS, 5, false).unwrap();
         assert_eq!(
             redeem(&mut c, &DIGEST_A, now + MINUTE_MS, 1),
             Redeem::Refused(Refusal::Expired),
@@ -1614,12 +1730,65 @@ mod tests {
     fn the_device_limit_leaves_the_code_unused() {
         let mut c = mem();
         let now = now_ms();
-        insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5).unwrap();
-        let full = redeem_code(&mut c, &DIGEST_A, now, 0, "phone", &[1; 32], "ip").unwrap();
+        insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5, false).unwrap();
+        let none = DeviceLimits {
+            max_devices: 0,
+            ..LIMITS
+        };
+        let full = redeem_code(&mut c, &DIGEST_A, now, none, "phone", &[1; 32], "ip").unwrap();
         assert_eq!(full, Redeem::TooManyDevices);
         assert!(matches!(
             redeem(&mut c, &DIGEST_A, now, 1),
             Redeem::Enrolled { .. }
+        ));
+    }
+
+    /// One account cannot use all the places of the server: its phone above `max_per_account` is
+    /// refused, the code stays unused, and a code of another account still enrolls. A revoked phone
+    /// gives its place back.
+    #[test]
+    fn the_device_limit_of_an_account_leaves_room_for_the_other_accounts() {
+        let mut c = mem();
+        let now = now_ms();
+        let limits = DeviceLimits {
+            max_devices: 10,
+            max_per_account: 2,
+        };
+        let mut phones = Vec::new();
+        for i in 0..2u8 {
+            insert_code(&mut c, &[i; 32], "mallory", now, 10 * MINUTE_MS, 5, false).unwrap();
+            let Redeem::Enrolled { device_id, .. } =
+                redeem_code(&mut c, &[i; 32], now, limits, "phone", &[i + 1; 32], "ip").unwrap()
+            else {
+                panic!("phone {i} of the account must enroll")
+            };
+            phones.push(device_id);
+        }
+        insert_code(&mut c, &DIGEST_A, "mallory", now, 10 * MINUTE_MS, 5, false).unwrap();
+        assert_eq!(
+            redeem_code(&mut c, &DIGEST_A, now, limits, "phone", &[9; 32], "ip").unwrap(),
+            Redeem::TooManyAccountDevices
+        );
+        let used: Option<i64> = c
+            .query_row(
+                "SELECT used_at_ms FROM enrollment_codes WHERE digest = ?1",
+                params![&DIGEST_A[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(used.is_none(), "the refused code stays unused");
+        assert_eq!(count_active_devices(&c).unwrap(), 2);
+        // Another account still enrolls: the server has free places.
+        insert_code(&mut c, &DIGEST_B, "victor", now, 10 * MINUTE_MS, 5, false).unwrap();
+        assert!(matches!(
+            redeem_code(&mut c, &DIGEST_B, now, limits, "phone", &[10; 32], "ip").unwrap(),
+            Redeem::Enrolled { login, .. } if login == "victor"
+        ));
+        // A revoked phone of the account gives its place back to the account.
+        assert!(revoke_device(&mut c, &phones[0]).unwrap());
+        assert!(matches!(
+            redeem_code(&mut c, &DIGEST_A, now, limits, "phone", &[9; 32], "ip").unwrap(),
+            Redeem::Enrolled { login, .. } if login == "mallory"
         ));
     }
 
@@ -1628,16 +1797,16 @@ mod tests {
         let mut c = mem();
         let now = now_ms();
         for i in 0..2u8 {
-            let created = insert_code(&mut c, &[i; 32], "alice", now, MINUTE_MS, 2).unwrap();
+            let created = insert_code(&mut c, &[i; 32], "alice", now, MINUTE_MS, 2, false).unwrap();
             assert!(matches!(created, CodeInsert::Created { .. }));
         }
         assert_eq!(
-            insert_code(&mut c, &[9; 32], "alice", now, MINUTE_MS, 2).unwrap(),
+            insert_code(&mut c, &[9; 32], "alice", now, MINUTE_MS, 2, false).unwrap(),
             CodeInsert::TooMany
         );
         // Another account has its own count.
         assert!(matches!(
-            insert_code(&mut c, &[8; 32], "bob", now, MINUTE_MS, 2).unwrap(),
+            insert_code(&mut c, &[8; 32], "bob", now, MINUTE_MS, 2, false).unwrap(),
             CodeInsert::Created { .. }
         ));
         // A used code and an expired code do not count.
@@ -1646,28 +1815,37 @@ mod tests {
             Redeem::Enrolled { .. }
         ));
         assert!(matches!(
-            insert_code(&mut c, &[7; 32], "alice", now, MINUTE_MS, 2).unwrap(),
+            insert_code(&mut c, &[7; 32], "alice", now, MINUTE_MS, 2, false).unwrap(),
             CodeInsert::Created { .. }
         ));
         assert_eq!(
-            insert_code(&mut c, &[6; 32], "alice", now, MINUTE_MS, 2).unwrap(),
+            insert_code(&mut c, &[6; 32], "alice", now, MINUTE_MS, 2, false).unwrap(),
             CodeInsert::TooMany
         );
         assert!(matches!(
-            insert_code(&mut c, &[6; 32], "alice", now + 2 * MINUTE_MS, MINUTE_MS, 2).unwrap(),
+            insert_code(
+                &mut c,
+                &[6; 32],
+                "alice",
+                now + 2 * MINUTE_MS,
+                MINUTE_MS,
+                2,
+                false
+            )
+            .unwrap(),
             CodeInsert::Created { .. }
         ));
         // The same digest twice is a storage error, not a second code.
-        assert!(insert_code(&mut c, &[7; 32], "bob", now, MINUTE_MS, 9).is_err());
+        assert!(insert_code(&mut c, &[7; 32], "bob", now, MINUTE_MS, 9, false).is_err());
     }
 
     #[test]
     fn a_deleted_account_loses_its_unused_codes_and_its_devices() {
         let mut c = mem();
         let now = now_ms();
-        insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5).unwrap();
-        insert_code(&mut c, &DIGEST_B, "alice", now, 10 * MINUTE_MS, 5).unwrap();
-        insert_code(&mut c, &[3; 32], "bob", now, 10 * MINUTE_MS, 5).unwrap();
+        insert_code(&mut c, &DIGEST_A, "alice", now, 10 * MINUTE_MS, 5, false).unwrap();
+        insert_code(&mut c, &DIGEST_B, "alice", now, 10 * MINUTE_MS, 5, false).unwrap();
+        insert_code(&mut c, &[3; 32], "bob", now, 10 * MINUTE_MS, 5, false).unwrap();
         let Redeem::Enrolled { device_id: a, .. } = redeem(&mut c, &DIGEST_A, now, 1) else {
             panic!()
         };
@@ -1675,7 +1853,7 @@ mod tests {
             panic!()
         };
         set_subscription(&c, &a, "infra").unwrap();
-        let revoked = revoke_account(&mut c, "alice").unwrap();
+        let revoked = end_account(&mut c, "alice").unwrap();
         assert_eq!(revoked, vec![a.clone()]);
         assert!(find_device(&c, &a).unwrap().unwrap().revoked);
         assert!(subscriptions(&c, &a).unwrap().is_empty());
@@ -1689,7 +1867,107 @@ mod tests {
             Redeem::Refused(Refusal::Unknown)
         );
         // A second call finds nothing to do.
-        assert!(revoke_account(&mut c, "alice").unwrap().is_empty());
+        assert!(end_account(&mut c, "alice").unwrap().is_empty());
+    }
+
+    /// The audit finding portal/inbox/login-reuse-inherits-login-keyed-data: the rows that name the
+    /// login of an ended account do not pass to a later account with the same login. The rows of
+    /// another account stay as they are.
+    #[test]
+    fn the_rows_of_an_ended_account_do_not_pass_to_a_new_account_with_the_same_login() {
+        let mut c = mem();
+        let erin = insert_device(&c, "erin-phone", "erin", &[1; 32], "ip").unwrap();
+        let bob = insert_device(&c, "bob-phone", "bob", &[2; 32], "ip").unwrap();
+        put(&c, "to-erin", "user", "erin", 100);
+        put(&c, "to-bob", "user", "bob", 110);
+        // An alert that erin sent to bob with the form, and one that bob sent.
+        for (id, sender, at) in [("from-erin", "erin", 120), ("from-bob", "bob", 125)] {
+            c.execute(
+                "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at)
+                 VALUES (?1, 'user', 'bob', ?1, ?2, 'k1', ?3)",
+                params![id, admin_source(sender), at],
+            )
+            .unwrap();
+        }
+        let s = scope(Some(&[]), "erin");
+        notify_set_level(&c, "erin", Level::Off, 0).unwrap();
+        assert_eq!(ids(&notify_view(&c, &s, &ASK, 0).unwrap()), ["to-erin"]);
+
+        assert_eq!(end_account(&mut c, "erin").unwrap(), vec![erin.clone()]);
+
+        // A new account erin: no alert to it, no own phone, and its own notification state.
+        let view = notify_view(&c, &s, &ASK, 0).unwrap();
+        assert!(view.items.is_empty(), "{view:?}");
+        assert_eq!(view.prefs.level, Level::All);
+        let old = find_device(&c, &erin).unwrap().unwrap();
+        assert!(old.revoked);
+        assert_ne!(old.user_name, "erin");
+        assert!(old.user_name.starts_with("erin:ended:"));
+        assert!(crate::users::normalize_login(&old.user_name).is_err());
+        let source: String = c
+            .query_row(
+                "SELECT source FROM alerts WHERE id = 'from-erin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(source, admin_source("erin"));
+        assert!(super::super::target::account_of_source(&source).is_some_and(|l| l != "erin"));
+        // The new erin can use the key of the old one again.
+        c.execute(
+            "INSERT INTO alerts (id, target_kind, target_id, title, source, idempotency_key, created_at)
+             VALUES ('again', 'user', 'bob', 'again', ?1, 'k1', 130)",
+            params![admin_source("erin")],
+        )
+        .unwrap();
+        // Bob keeps his phone, his alert, and the alerts that he received and sent.
+        assert_eq!(find_device(&c, &bob).unwrap().unwrap().user_name, "bob");
+        let bob_view = notify_view(&c, &scope(Some(&[]), "bob"), &ASK, 0).unwrap();
+        assert_eq!(ids(&bob_view), ["again", "from-bob", "from-erin", "to-bob"]);
+        let bob_source: String = c
+            .query_row("SELECT source FROM alerts WHERE id = 'from-bob'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(bob_source, admin_source("bob"));
+        // Two ends of one login give two names.
+        assert_ne!(ended_name("erin"), ended_name("erin"));
+    }
+
+    /// The audit finding portal/inbox/enrollment-code-outlives-account-delete-race: a code of an
+    /// account of the database exists only while the row of the account exists. A code that came
+    /// before the delete goes with the end of the account that follows the delete.
+    #[test]
+    fn a_code_of_a_database_account_needs_the_row_of_the_account() {
+        let mut c = mem();
+        c.execute_batch("CREATE TABLE users (login TEXT NOT NULL UNIQUE);")
+            .unwrap();
+        c.execute("INSERT INTO users (login) VALUES ('eve')", [])
+            .unwrap();
+        let now = now_ms();
+        assert!(matches!(
+            insert_code(&mut c, &DIGEST_A, "eve", now, MINUTE_MS, 5, true).unwrap(),
+            CodeInsert::Created { .. }
+        ));
+        // The portal deletes the row, then ends the inbox state of the account.
+        c.execute("DELETE FROM users WHERE login = 'eve'", [])
+            .unwrap();
+        assert_eq!(
+            insert_code(&mut c, &DIGEST_B, "eve", now, MINUTE_MS, 5, true).unwrap(),
+            CodeInsert::NoAccount
+        );
+        end_account(&mut c, "eve").unwrap();
+        for digest in [DIGEST_A, DIGEST_B] {
+            assert_eq!(
+                redeem(&mut c, &digest, now, 1),
+                Redeem::Refused(Refusal::Unknown)
+            );
+        }
+        // An account of the file or the superadmin has no row: the check does not apply.
+        assert!(matches!(
+            insert_code(&mut c, &[5; 32], "dave", now, MINUTE_MS, 5, false).unwrap(),
+            CodeInsert::Created { .. }
+        ));
     }
 
     #[test]
@@ -1703,6 +1981,7 @@ mod tests {
             now - 3 * CODE_KEEP_MS,
             MINUTE_MS,
             5,
+            false,
         )
         .unwrap();
         insert_code(
@@ -1712,9 +1991,10 @@ mod tests {
             now - CODE_KEEP_MS / 2,
             MINUTE_MS,
             5,
+            false,
         )
         .unwrap();
-        insert_code(&mut c, &[3; 32], "alice", now, MINUTE_MS, 5).unwrap();
+        insert_code(&mut c, &[3; 32], "alice", now, MINUTE_MS, 5, false).unwrap();
         assert_eq!(purge(&mut c, 0, 0).unwrap().2, 1);
         let left: i64 = c
             .query_row("SELECT COUNT(*) FROM enrollment_codes", [], |r| r.get(0))
@@ -1726,10 +2006,10 @@ mod tests {
     fn an_unused_code_can_be_withdrawn_a_used_code_stays() {
         let mut c = mem();
         let now = now_ms();
-        insert_code(&mut c, &DIGEST_A, "alice", now, MINUTE_MS, 5).unwrap();
+        insert_code(&mut c, &DIGEST_A, "alice", now, MINUTE_MS, 5, false).unwrap();
         assert!(delete_code(&c, &DIGEST_A).unwrap());
         assert!(!delete_code(&c, &DIGEST_A).unwrap());
-        insert_code(&mut c, &DIGEST_B, "alice", now, MINUTE_MS, 5).unwrap();
+        insert_code(&mut c, &DIGEST_B, "alice", now, MINUTE_MS, 5, false).unwrap();
         assert!(matches!(
             redeem(&mut c, &DIGEST_B, now, 1),
             Redeem::Enrolled { .. }

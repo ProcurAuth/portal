@@ -16,11 +16,11 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::actions::Document;
-use crate::grants::{Grant, ACCESS};
+use crate::grants::{Grant, Segment, ACCESS};
 use crate::keys::KeyKind;
 use crate::limits::{Budget, Item, Limits, Value, Window};
 use crate::portal_actions;
@@ -168,21 +168,29 @@ fn check_expiry(text: Option<&str>, ctx: &Context<'_>) -> Result<Option<i64>, &'
     Ok(at)
 }
 
-/// The grants of the form, from their texts. Empty fields are blank rows.
+/// The grants of the form, from their texts. Empty fields are blank rows. The check stops at the
+/// first grant over [`MAX_GRANTS`], and it finds a repeated node in a hash set. Thus the work stays
+/// linear in [`MAX_GRANTS`], whatever the number of fields.
 fn read_grants(raw: &RawForm) -> Result<Vec<(usize, Grant)>, &'static str> {
     let mut out: Vec<(usize, Grant)> = Vec::new();
+    let mut nodes: HashSet<(String, String, Vec<Segment>)> = HashSet::new();
     for (n, text) in &raw.grants {
         if text.is_empty() {
             continue;
         }
+        if out.len() == MAX_GRANTS {
+            return Err(BAD_GRANT);
+        }
         let grant = Grant::parse(text).map_err(|_| BAD_GRANT)?;
-        if out.iter().any(|(_, other)| other.same_node(&grant)) {
+        let node = (
+            grant.action.clone(),
+            grant.service.clone(),
+            grant.path.clone(),
+        );
+        if !nodes.insert(node) {
             return Err(BAD_GRANT);
         }
         out.push((*n, grant));
-    }
-    if out.len() > MAX_GRANTS {
-        return Err(BAD_GRANT);
     }
     Ok(out)
 }
@@ -779,6 +787,38 @@ mod tests {
             None
         )
         .is_ok());
+    }
+
+    /// A form with many grant fields is refused at the first grant over the cap (portal 4.1b).
+    /// The work does not grow with the square of the number of fields.
+    #[test]
+    fn a_form_with_too_many_grants_is_refused_without_a_quadratic_scan() {
+        let text = |i: usize| format!("a.b on service:{}/h:{i:05}", "a".repeat(32));
+        let mut many: HashMap<String, String> = (0..20_000)
+            .map(|i| (format!("grant{i}"), text(i)))
+            .collect();
+        many.insert("name".into(), "x".into());
+        let raw = read(many, false).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(read_grants(&raw), Err(BAD_GRANT));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        // The cap itself, with blank rows that do not count.
+        let mut raw = RawForm {
+            grants: (0..MAX_GRANTS).map(|i| (i, text(i))).collect(),
+            ..RawForm::default()
+        };
+        raw.grants
+            .extend((MAX_GRANTS..MAX_GRANTS + 50).map(|i| (i, String::new())));
+        assert_eq!(read_grants(&raw).unwrap().len(), MAX_GRANTS);
+        raw.grants.insert(MAX_GRANTS + 60, text(MAX_GRANTS));
+        assert_eq!(read_grants(&raw), Err(BAD_GRANT));
+        // A repeated node is still refused.
+        raw.grants = [(0, text(1)), (1, text(1))].into_iter().collect();
+        assert_eq!(read_grants(&raw), Err(BAD_GRANT));
     }
 
     #[test]

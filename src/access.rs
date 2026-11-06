@@ -6,6 +6,11 @@
 //! it as a ClickHouse request. The gate reads the path in each way that a proxy or a backend
 //! might read it: `%2f` as a character or as a separator, and `\` as a character or as a
 //! separator. The gate allows the request only if every reading is allowed.
+//!
+//! Traefik matches ``PathPrefix(`/files`)`` as a text prefix: it also routes `/filesX` to that
+//! service. The gate therefore judges `/filesX` as a path of the service of `/files/` (see
+//! [`Catalog::owner`]). The gate reads the `href` of a service with the same percent-decode as a
+//! request path.
 
 use crate::catalog::Catalog;
 use crate::grants::{holds, Grant, ACCESS};
@@ -138,9 +143,16 @@ impl ExcludeRule {
     }
 }
 
-/// A segment that a wildcard can match. It has no hidden separator (`%2f` decoded) and no control character.
+/// A segment that a wildcard can match. It has no hidden separator (`%2f` decoded), no control
+/// character and no `;`. A backend that removes path parameters reads `..;` or `..;x=1` as `..`.
+/// A wildcard therefore never stands for a segment with a `;`, raw or encoded, and the gate never
+/// opens a path that such a backend reads as another path. A dot segment never comes here,
+/// because [`clean`] resolves it. The check refuses it all the same.
 fn plain(segment: &str) -> bool {
-    !segment.is_empty() && !segment.contains(['/', '\\']) && !segment.chars().any(char::is_control)
+    !segment.is_empty()
+        && !matches!(segment, "." | "..")
+        && !segment.contains(['/', '\\', ';'])
+        && !segment.chars().any(char::is_control)
 }
 
 /// The service whose `portal.exclude` rule lets this request through without a session, if any.
@@ -177,20 +189,46 @@ pub fn excluded(catalog: &Catalog, method: Option<&str>, uri: &str) -> Option<St
 /// The segments of a path on this host, after the gate resolves dot segments and empty segments.
 pub type Segments = Vec<String>;
 
-/// The path prefix that a service owns, taken from its `href`. The result is `None` for an
-/// absolute URL. Such a URL lives on another host, and nothing here can gate it. The result is
-/// also `None` for `/`, because that prefix would own everything.
+/// The path prefix that a service owns, taken from its `href`. The gate reads the path of the
+/// `href` as it reads a request path: one percent-decode for each segment, then the dot segments
+/// and the empty segments. Thus the `href` `/my%20app/` owns the request `/my%20app/x`.
+///
+/// The result is `None` for an absolute URL. Such a URL lives on another host, and nothing here
+/// can gate it. The result is also `None` for `/`, because that prefix would own everything. The
+/// result is also `None` for a path that the gate cannot read. The label parser refuses such an
+/// `href` ([`local_href_is_readable`]).
 pub fn href_prefix(href: &str) -> Option<Segments> {
     if !href.starts_with('/') || href.starts_with("//") {
         return None;
     }
     let path = href.split(['?', '#']).next().unwrap_or("");
-    let segments = clean(path.split('/'));
+    let mut decoded = Vec::new();
+    for raw in path.split('/') {
+        decoded.push(percent_decode(raw)?);
+    }
+    let segments = clean(decoded.iter().map(String::as_str));
     if segments.is_empty() {
         None
     } else {
         Some(segments)
     }
+}
+
+/// Whether the gate reads the path of a local `href` in one way only. Each percent escape must be
+/// complete. Each decoded segment must be UTF-8 text without a control character, `/` or `\`. An
+/// encoded `/` or a `\` lets a backend read other segments. Bytes that are not UTF-8 could give
+/// two `href` values the same prefix.
+pub fn local_href_is_readable(href: &str) -> bool {
+    let path = href.split(['?', '#']).next().unwrap_or("");
+    path.split('/').all(|raw| {
+        percent_decode_bytes(raw)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .is_some_and(|text| {
+                !text
+                    .chars()
+                    .any(|c| c == '/' || c == '\\' || c.is_control())
+            })
+    })
 }
 
 /// Every reading of the path of `uri`. The result is `None` when the URI cannot be read safely,
@@ -234,6 +272,17 @@ fn clean<'a>(segments: impl Iterator<Item = &'a str>) -> Segments {
 }
 
 fn percent_decode(raw: &str) -> Option<String> {
+    let out = percent_decode_bytes(raw)?;
+    if out.contains(&0) {
+        return None;
+    }
+    // Bytes that are not UTF-8 cannot spell a service prefix: the label parser refuses such an
+    // `href`. They must only stay distinct from the prefixes.
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The bytes of a segment after one percent-decode. `None` for a broken escape.
+fn percent_decode_bytes(raw: &str) -> Option<Vec<u8>> {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -248,11 +297,7 @@ fn percent_decode(raw: &str) -> Option<String> {
             i += 1;
         }
     }
-    if out.contains(&0) {
-        return None;
-    }
-    // Bytes that are not UTF-8 cannot spell a service prefix. They must only stay distinct.
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(out)
 }
 
 fn hex(b: u8) -> Option<u8> {
@@ -288,6 +333,11 @@ pub enum Decision {
 /// catalogue: an incomplete snapshot cannot prove that a path has no owner. Thus, until the
 /// catalogue is complete, only the superadmin passes. A closed prefix (an entry without a
 /// service) also lets only the superadmin pass.
+///
+/// A service also owns a path whose segment only starts with the last segment of its prefix
+/// (`/filesX` for `/files/`, see [`Catalog::owner`]). Such a path needs `access` on the
+/// service, but it is not a page of the service. The answer names no service, so the request
+/// gets no identity token.
 pub fn decide(catalog: &Catalog, grants: Option<&[Grant]>, uri: &str) -> Decision {
     if grants.is_some() && !catalog.is_complete() {
         return Decision::Deny;
@@ -310,7 +360,9 @@ pub fn decide(catalog: &Catalog, grants: Option<&[Grant]>, uri: &str) -> Decisio
             // A closed prefix: the superadmin passes, and the request has no service.
             None if grants.is_none() => {}
             None => return Decision::Deny,
-            Some(s) if index == 0 => service = Some(s.id.clone()),
+            Some(s) if index == 0 && reading.starts_with(&owner.prefix) => {
+                service = Some(s.id.clone());
+            }
             Some(_) => {}
         }
     }
@@ -475,18 +527,122 @@ mod tests {
         );
     }
 
+    /// Traefik reads ``PathPrefix(`/grafana`)`` as a text prefix: it routes `/grafana-evil/` and
+    /// `/grafanaapi/` to Grafana. The gate judges these paths as Grafana paths, without a token.
     #[test]
-    fn matching_is_on_whole_segments_and_the_longest_prefix_wins() {
-        assert!(allowed(&[], "/grafana-evil/"), "another path, no service");
+    fn the_owner_is_the_longest_prefix_as_a_router_reads_it() {
+        for uri in [
+            "/grafana-evil/",
+            "/grafanaapi/admin/users",
+            "/notes.json",
+            "/notesX/secret",
+            "/clickhouse-private/x",
+        ] {
+            assert_eq!(verdict(&[], uri), Decision::Deny, "{uri}");
+        }
+        assert_eq!(
+            verdict(&["grafana"], "/grafana-evil/"),
+            Decision::Allow { service: None },
+            "the holder passes, but the request is not a page of the service: no token"
+        );
         assert!(
             !allowed(&["grafana"], "/grafana/admin/x"),
             "the nested service needs its own grant"
         );
         assert!(allowed(&["grafana", "nested"], "/grafana/admin/x"));
         assert!(
-            allowed(&["grafana"], "/grafana/administrator"),
-            "not the nested prefix"
+            !allowed(&["grafana"], "/grafana/administrator"),
+            "PathPrefix(`/grafana/admin`) routes it to the nested service"
         );
+        assert!(allowed(&["grafana", "nested"], "/grafana/administrator"));
+        assert_eq!(
+            verdict(&["grafana"], "/grafana"),
+            Decision::Allow {
+                service: Some("other-grafana".into())
+            },
+            "an exact segment is a page of the service"
+        );
+    }
+
+    /// The router of the portal for `/auth/` wins over each router of a service. A service whose
+    /// last segment is a text prefix of `auth` does not own the pages of the portal.
+    #[test]
+    fn a_text_prefix_does_not_take_the_pages_of_the_portal() {
+        let catalog = Catalog::build(vec![svc("A", "/a/"), svc("Au", "/au/x/")], Vec::new());
+        let none: Vec<Grant> = Vec::new();
+        for uri in ["/auth/denied", "/auth/settings", "/auth/x/y"] {
+            assert_eq!(
+                decide(&catalog, Some(&none), uri),
+                Decision::Allow { service: None },
+                "{uri}"
+            );
+        }
+        // `/auth` alone and `/authx/` do not match the router `PathPrefix(`/auth/`)`.
+        assert_eq!(decide(&catalog, Some(&none), "/auth"), Decision::Deny);
+        assert_eq!(decide(&catalog, Some(&none), "/authx/y"), Decision::Deny);
+        assert_eq!(decide(&catalog, Some(&none), "/apps/y"), Decision::Deny);
+    }
+
+    /// The gate reads the `href` with the same percent-decode as the request path.
+    #[test]
+    fn an_escaped_href_owns_the_decoded_request_path() {
+        assert_eq!(href_prefix("/my%20app/").unwrap(), ["my app"]);
+        assert_eq!(href_prefix("/caf%C3%A9/").unwrap(), ["café"]);
+        assert_eq!(href_prefix("/a/%2e%2e/b/").unwrap(), ["b"]);
+        assert!(href_prefix("/a%zz/").is_none());
+        let catalog = Catalog::build(
+            vec![
+                svc("My app", "/my%20app/"),
+                svc("Cafe", "/caf%C3%A9/"),
+                svc("Notes", "/notes/"),
+            ],
+            Vec::new(),
+        );
+        let notes = grants(&["notes"]);
+        for uri in [
+            "/my%20app/",
+            "/my%20app/admin/settings",
+            "/caf%C3%A9/x",
+            "/café/x",
+        ] {
+            assert_eq!(decide(&catalog, Some(&notes), uri), Decision::Deny, "{uri}");
+        }
+        assert_eq!(
+            decide(&catalog, Some(&grants(&["my-app"])), "/my%20app/x"),
+            Decision::Allow {
+                service: Some("other-my-app".into())
+            },
+            "the holder gets the token of the service"
+        );
+        // A closed prefix from an escaped href also stays closed.
+        let closed = Catalog::build_with_closed(
+            vec![svc("Notes", "/notes/")],
+            Vec::new(),
+            vec![href_prefix("/my%20app/").unwrap()],
+        );
+        assert_eq!(decide(&closed, Some(&notes), "/my%20app/x"), Decision::Deny);
+        assert_eq!(
+            decide(&closed, None, "/my%20app/x"),
+            Decision::Allow { service: None }
+        );
+    }
+
+    #[test]
+    fn a_local_href_must_read_in_one_way() {
+        for good in [
+            "/grafana/",
+            "/my%20app/",
+            "/caf%C3%A9/",
+            "/café/",
+            "/a?x=%zz",
+        ] {
+            assert!(local_href_is_readable(good), "{good}");
+        }
+        for bad in [
+            "/a%zz/", "/a%2/", "/a%00b/", "/a%2Fb/", "/a%5Cb/", "/a\\b/", "/a%0Ab/", "/%FF/",
+        ] {
+            assert!(!local_href_is_readable(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -600,6 +756,33 @@ mod exclude_tests {
             !open(Some("PUT"), "/dagu/hooks"),
             "** needs at least one segment"
         );
+    }
+
+    /// The audit lead portal/gate/exclude-wildcard-accepts-path-parameter-dot-segment: a backend
+    /// that removes path parameters reads `..;` as `..`. A wildcard never stands for a segment
+    /// with a `;`, raw or encoded. Thus `/dagu/hooks/..;/..;/admin` is not a hook.
+    #[test]
+    fn a_wildcard_never_stands_for_a_segment_with_a_path_parameter() {
+        for uri in [
+            "/dagu/hooks/..;/..;/admin/api/v1/dags",
+            "/dagu/hooks/..;x=1/..;x=1/admin",
+            "/dagu/hooks/%2e%2e;/admin",
+            "/dagu/hooks/..%3B/admin",
+            "/dagu/hooks/..%3b",
+            "/dagu/hooks/.;/x",
+            "/dagu/hooks/a/..;",
+            "/dagu/hooks/a;b",
+            "/dagu/api/v1/webhooks/..;",
+            "/dagu/api/v1/webhooks/%2e%2e%3B",
+        ] {
+            assert!(!open(Some("POST"), uri), "{uri}");
+            assert!(!open(Some("PUT"), uri), "{uri}");
+        }
+        // The same paths without the parameter: the hooks stay open, the dot segments resolve.
+        assert!(open(Some("POST"), "/dagu/hooks/a/admin"));
+        assert!(open(Some("POST"), "/dagu/api/v1/webhooks/abc"));
+        assert!(!open(Some("POST"), "/dagu/hooks/../../admin/api/v1/dags"));
+        assert!(!plain(".") && !plain(".."));
     }
 
     #[test]

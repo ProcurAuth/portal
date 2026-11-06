@@ -1171,6 +1171,10 @@ input.keyText {
   text-align: right;
 }
 
+.grid .c {
+  text-align: center;
+}
+
 .grid col.w28 {
   width: 28px;
 }
@@ -3132,58 +3136,354 @@ input.keyText {
   margin-left: 6px;
 }
 
-/* The page "Security": one panel with the state, the secret to scan and the forms of the actions. The forms
-   open in place, under their button, and they stack on a narrow screen. */
-.mfaBody {
+/* The page "Security": a head with the state, then a card. The card holds the steps, the code to scan or the actions.
+   An action is a row. Its form opens under the row, with a short motion. The columns stack on a narrow screen. */
+.sec {
   display: grid;
-  justify-items: start;
-  gap: 12px;
-  max-width: 460px;
-  padding: 8px 2px;
-}
-
-.mfaForm {
-  display: grid;
-  gap: 8px;
+  gap: 16px;
   width: 100%;
+  max-width: 680px;
+  margin: 8px auto 0;
 }
 
-.mfaActions {
+.sec__head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.sec__mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-tint);
+  color: var(--accent-text);
+}
+
+.sec__mark .icon {
+  width: 22px;
+  height: 22px;
+}
+
+.sec__heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.sec__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.sec__lead {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sec__state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px 0 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.sec__state--on {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.sec__state--off {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.sec__card {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.sec__how {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: sec-step;
+}
+
+.sec__step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  counter-increment: sec-step;
+}
+
+.sec__step::before {
+  content: counter(sec-step);
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sec__go {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+}
+
+.sec__enrol {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.sec__scan,
+.sec__code {
+  display: grid;
   gap: 8px;
 }
 
-.mfaDo summary {
-  list-style: none;
-  cursor: pointer;
+.sec__code {
+  align-content: start;
+  max-width: 340px;
 }
 
-.mfaDo summary::-webkit-details-marker {
-  display: none;
+.sec__scan .qr {
+  margin: 0 0 4px;
 }
 
-.mfaPanel {
+.sec__num {
   display: grid;
-  gap: 6px;
-  width: min(100%, 320px);
-  margin-top: 6px;
-  padding: 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-compact);
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sec__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.sec__fact {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
   background: var(--panel);
 }
 
-.mfaDo[open] {
-  flex-basis: 100%;
+.sec__fact dt {
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.mfaBody .mfaBox {
-  width: 100%;
+.sec__fact dd {
+  margin: 0;
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
 }
 
-.mfaForm .inline {
+.sec__fact--low dd {
+  color: var(--warning);
+}
+
+.sec__note {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sec__acts {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.secAct {
+  border-top: 1px solid var(--border);
+}
+
+.secAct:first-child {
+  border-top: 0;
+}
+
+.secAct__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  cursor: pointer;
+  list-style: none;
+  transition: background-color 0.15s var(--ease);
+}
+
+.secAct__row::-webkit-details-marker {
+  display: none;
+}
+
+.secAct__row:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.secAct__glyph {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--inset);
+  color: var(--muted);
+}
+
+.secAct--danger .secAct__glyph {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.secAct__text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.secAct__title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.secAct__hint {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.secAct__chev {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  transition: transform 0.25s var(--ease);
+}
+
+.secAct[open] .secAct__chev {
+  transform: rotate(180deg);
+}
+
+.secAct__panel {
+  padding: 2px 16px 16px 64px;
+  animation: secPanelIn 0.26s var(--ease);
+}
+
+.secAct__fixed {
   display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.sec__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   gap: 8px;
+  align-items: center;
+  margin: 0;
+}
+
+.sec__codes {
+  gap: 14px;
+}
+
+.sec__codes .mfaBox {
+  margin: 0;
+}
+
+.sec__warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-control);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+@keyframes secPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@media (max-width: 720px) {
+  .sec__enrol {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .sec__facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sec__head {
+    flex-wrap: wrap;
+  }
+
+  .secAct__panel {
+    padding-left: 16px;
+  }
+
+  .sec__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secAct__panel {
+    animation: none;
+  }
+
+  .secAct__chev {
+    transition: none;
+  }
 }

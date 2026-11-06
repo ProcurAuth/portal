@@ -379,6 +379,18 @@ pub struct SharedSession {
     pub mfa: bool,
     /// Unix time.
     pub expires_at: i64,
+    /// The stamp of the credential that opened the session (see [`crate::session::Credential`]).
+    pub credential: [u8; 32],
+}
+
+/// The limits of the live sessions that a new session must respect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionLimits {
+    /// The largest number of live sessions of every principal (`session.max_active_sessions`).
+    pub max_active: usize,
+    /// The largest number of live sessions of one principal (`session.max_sessions_per_account`). An impersonated
+    /// session does not count.
+    pub max_per_account: usize,
 }
 
 /// The second factor of one account, as the store keeps it. The secret is sealed: only the key of the
@@ -422,6 +434,18 @@ impl TotpLimits {
             (failed, since, None)
         }
     }
+}
+
+/// What [`Store::totp_begin_attempt`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attempt {
+    /// The account has no second factor.
+    NotEnrolled,
+    /// The account takes no code until this Unix time. The attempt does not count.
+    Locked { until: i64 },
+    /// The attempt counts as a failure until a good code clears the count. `locked_until` is set when this
+    /// attempt locks the account.
+    Counted { locked_until: Option<i64> },
 }
 
 /// A line of `sessions_log`, as the import reads and writes it.
@@ -810,13 +834,13 @@ impl Store {
         backend!(self.totp_enable(login, sealed, recovery, step, now))
     }
 
-    /// Records `step` as the last accepted step, and clears the failures. The answer is `true` for one caller only: a
-    /// code is good once, also when two instances check it at the same time.
+    /// Records `step` as the last accepted step, and clears the failures and the lock. The answer is `true` for one
+    /// caller only: a code is good once, also when two instances check it at the same time.
     pub fn totp_accept_step(&self, login: &str, step: i64) -> Result<bool, String> {
         backend!(self.totp_accept_step(login, step))
     }
 
-    /// Consumes one recovery code. The answer is `true` for one caller only.
+    /// Consumes one recovery code, and clears the failures and the lock. The answer is `true` for one caller only.
     pub fn totp_use_recovery(&self, login: &str, hash: &[u8; 32]) -> Result<bool, String> {
         backend!(self.totp_use_recovery(login, hash))
     }
@@ -841,15 +865,17 @@ impl Store {
         backend!(self.totp_remove_all())
     }
 
-    /// Counts one failed attempt against an account that has a second factor. The answer is the end of the lock when
-    /// this failure locks the account. The count is in the database, so every instance adds to it.
-    pub fn totp_fail(
+    /// Reads the lock of an account and counts one attempt of the second step, in one write transaction, before the
+    /// caller compares the code. Attempts that arrive at the same time thus never pass a lock that an earlier attempt
+    /// set. The count is in the database, so every instance adds to it. A good code clears it (see
+    /// [`Store::totp_accept_step`]).
+    pub fn totp_begin_attempt(
         &self,
         login: &str,
         now: i64,
         limits: TotpLimits,
-    ) -> Result<Option<i64>, String> {
-        backend!(self.totp_fail(login, now, limits))
+    ) -> Result<Attempt, String> {
+        backend!(self.totp_begin_attempt(login, now, limits))
     }
 
     // Shared sessions (PostgreSQL only) -------------------------------------------------------
@@ -861,19 +887,22 @@ impl Store {
         }
     }
 
-    /// Records a session and its line of the history. Returns `false` when the limit of live sessions is reached.
-    /// `generation` is the credential generation of the superadmin of this instance.
+    /// Records a session and its line of the history. A session that is not impersonated first ends the sessions
+    /// of its principal that were used least recently. Thus the principal has at most `limits.max_per_account`
+    /// sessions. Returns the identifiers of these ended sessions. Returns `None`, and changes nothing, when
+    /// `limits.max_active` sessions are live. `generation` is the credential generation of the superadmin of this
+    /// instance.
     pub fn session_insert(
         &self,
         digest: &[u8; 32],
         binding: &[u8; 32],
         session: &SharedSession,
         start: &SessionStart,
-        max_active: usize,
+        limits: SessionLimits,
         generation: &[u8; 32],
-    ) -> Result<bool, String> {
+    ) -> Result<Option<Vec<u64>>, String> {
         self.shared()?
-            .session_insert(digest, binding, session, start, max_active, generation)
+            .session_insert(digest, binding, session, start, limits, generation)
     }
 
     /// Returns the live session of `digest` for `binding`. Its idle timer is renewed to `now`.
@@ -2362,6 +2391,15 @@ mod tests {
             remembered: false,
             mfa: false,
             expires_at,
+            credential: [4; 32],
+        }
+    }
+
+    /// A limit of the live sessions, and no limit of the sessions of one principal that a test reaches.
+    fn limits(max: usize) -> SessionLimits {
+        SessionLimits {
+            max_active: max,
+            max_per_account: 1_000,
         }
     }
 
@@ -2405,10 +2443,11 @@ mod tests {
                 &HERE,
                 &session,
                 &started(1, "alice", NOW),
-                10,
+                limits(10),
                 &GEN
             )
-            .unwrap());
+            .unwrap()
+            .is_some());
         let snap = store.snapshot(&[("alice".into(), false)], NOW).unwrap();
         assert_eq!(
             snap.accounts[0].recent.len(),
@@ -2472,7 +2511,7 @@ mod tests {
                     &HERE,
                     &session,
                     &started(u64::from(n), "alice", NOW),
-                    10,
+                    limits(10),
                     &GEN,
                 )
                 .unwrap();
@@ -2525,7 +2564,7 @@ mod tests {
                     ..remembered
                 },
                 &started(3, "alice", NOW),
-                10,
+                limits(10),
                 &GEN,
             )
             .unwrap();
@@ -2552,7 +2591,7 @@ mod tests {
                 &HERE,
                 &session,
                 &started(1, "alice", NOW),
-                10,
+                limits(10),
                 &GEN,
             )
             .unwrap();
@@ -2582,7 +2621,7 @@ mod tests {
                     &HERE,
                     &shared_session(u64::from(n), Some("alice"), expires_at),
                     &started(u64::from(n), "alice", NOW),
-                    10,
+                    limits(10),
                     &GEN,
                 )
                 .unwrap()
@@ -2629,15 +2668,68 @@ mod tests {
                     &HERE,
                     &shared_session(u64::from(n), None, at + 100),
                     &started(u64::from(n), "root", at),
-                    2,
+                    limits(2),
                     &GEN,
                 )
                 .unwrap()
+                .is_some()
         };
         assert!(insert(1, NOW));
         assert!(insert(2, NOW));
         assert!(!insert(3, NOW), "two are live");
         assert!(insert(3, NOW + 200), "the first two have run out by then");
+    }
+
+    /// One principal keeps at most `max_per_account` live sessions: its new session ends its session that was used
+    /// least recently. The other principals and the impersonated sessions keep theirs.
+    #[test]
+    fn a_principal_keeps_its_number_of_sessions_and_its_least_used_one_makes_room() {
+        let Some(pg) = postgres() else { return };
+        let store = pg.fresh();
+        let per_account = SessionLimits {
+            max_active: 10,
+            max_per_account: 2,
+        };
+        let insert = |n: u8, login: Option<&str>, impersonated: bool| {
+            let mut session = shared_session(u64::from(n), login, NOW + 3600);
+            session.impersonated = impersonated;
+            store
+                .session_insert(
+                    &digest(n),
+                    &HERE,
+                    &session,
+                    &started(u64::from(n), login.unwrap_or("root"), NOW),
+                    per_account,
+                    &GEN,
+                )
+                .unwrap()
+        };
+        assert_eq!(insert(1, Some("mallory"), false), Some(vec![]));
+        assert_eq!(insert(2, Some("mallory"), false), Some(vec![]));
+        // The session 1 is in use: the session 2 is the one that was used least recently.
+        assert!(store
+            .session_touch(&digest(1), &HERE, NOW + 5, Idle::same(IDLE), &GEN)
+            .unwrap()
+            .is_some());
+        assert_eq!(insert(3, Some("mallory"), false), Some(vec![2]));
+        assert_eq!(insert(4, Some("bob"), false), Some(vec![]));
+        assert_eq!(
+            insert(5, Some("mallory"), true),
+            Some(vec![]),
+            "an impersonated session ends no session"
+        );
+        assert_eq!(insert(6, None, false), Some(vec![]));
+        assert_eq!(insert(7, None, false), Some(vec![]));
+        assert!(store
+            .session_touch(&digest(7), &HERE, NOW + 5, Idle::same(IDLE), &GEN)
+            .unwrap()
+            .is_some());
+        assert_eq!(insert(8, None, false), Some(vec![6]), "the superadmin too");
+        assert_eq!(store.sessions_count().unwrap(), 6);
+        assert!(store
+            .session_touch(&digest(2), &HERE, NOW + 6, Idle::same(IDLE), &GEN)
+            .unwrap()
+            .is_none());
     }
 
     /// A superadmin or impersonated row is valid only with the credential generation that it
@@ -2660,10 +2752,11 @@ mod tests {
                     &HERE,
                     &session,
                     &started(u64::from(n), "x", NOW),
-                    10,
+                    limits(10),
                     &GEN
                 )
-                .unwrap());
+                .unwrap()
+                .is_some());
         }
         for n in [1, 2] {
             assert!(store
@@ -2705,7 +2798,7 @@ mod tests {
                     &HERE,
                     &shared_session(u64::from(n), login, NOW + 100),
                     &started(u64::from(n), login.unwrap_or("root"), NOW),
-                    10,
+                    limits(10),
                     &GEN,
                 )
                 .unwrap();
@@ -2737,7 +2830,7 @@ mod tests {
                 &HERE,
                 &shared_session(3, Some("alice"), NOW + 100),
                 &started(3, "alice", 100),
-                10,
+                limits(10),
                 &GEN,
             )
             .unwrap();

@@ -180,7 +180,11 @@ mod tests {
 
         let parsed = enroll_parse(&text);
         assert_eq!(parsed["code"]["address"], "inbox.example.com:8080");
-        assert_eq!(parsed["code"]["fingerprint"].as_str().unwrap().len(), 8);
+        // 80 bits of the digest: 20 hexadecimal characters in five groups of 4.
+        let fingerprint = parsed["code"]["fingerprint"].as_str().unwrap();
+        assert_eq!(fingerprint, inbox_core::enroll::key_fingerprint(&key.noise_public));
+        assert_eq!(fingerprint.len(), 24);
+        assert_eq!(fingerprint.split(' ').filter(|g| g.len() == 4).count(), 5);
         assert!(!parsed.to_string().contains("secret"), "the secret stays in Rust");
 
         let (h, m1) = enroll_start(&text, "Pixel", "0.14.0").unwrap();

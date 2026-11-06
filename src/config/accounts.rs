@@ -263,10 +263,15 @@ fn file_key(
         (false, true) => {
             let source = source_of(r, &format!("{path}.key_sha256"));
             let bytes = block.secret_bytes("key_sha256").unwrap_or_default();
-            let text = std::str::from_utf8(bytes).unwrap_or("<not UTF-8>");
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                here(&format!(
+                    "{path}.key_sha256: the value is not valid UTF-8 ({source}; the value is hidden)"
+                ))
+            })?;
             crate::keys::parse_digest_hex(text).map_err(|_| {
                 here(&format!(
-                    "{path}.key_sha256: expected 64 hexadecimal characters, got {text:?} ({source})"
+                    "{path}.key_sha256: expected 64 hexadecimal characters, the value has {} bytes ({source}; the value is hidden)",
+                    bytes.len()
                 ))
             })?
         }

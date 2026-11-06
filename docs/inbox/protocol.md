@@ -42,8 +42,8 @@ portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>
 - White space around the whole text is ignored.
 - The key `k` is the pin. The app trusts no other key for this server.
 - The app shows the address and the fingerprint of `k` before it connects. The fingerprint is
-  the first 8 hexadecimal characters of the SHA-256 digest of the 32 bytes of `k`.
-  The person can compare it with the value of the administrator.
+  the first 20 hexadecimal characters (80 bits) of the SHA-256 digest of the 32 bytes of `k`,
+  in five groups of 4 characters. The person can compare it with the value of the administrator.
 - The secret never leaves the core. Kotlin code does not see it.
 
 ## Enrollment: `GET /v1/enroll` (WebSocket, binary frames)
@@ -76,7 +76,7 @@ device                                           server
 
 | Close code | Cause | Text in the app |
 |---|---|---|
-| 4410 `ENROLL_REFUSED` | The code is unknown, already used or expired. Message 1 cannot be read or is not valid. The limit `inbox.devices.max_devices` is reached. | "The code is not valid. Ask for a new one." |
+| 4410 `ENROLL_REFUSED` | The code is unknown, already used or expired. Message 1 cannot be read or is not valid. The limit `inbox.devices.max_devices` or `inbox.devices.max_per_account` is reached. | "The code is not valid. Ask for a new one." |
 | 4426 `PROTOCOL` | Message 1 is valid but `protocol` is not 4. The first frame is a text frame. | "Update the app." |
 | 4429 `RATE_LIMITED` | Too many attempts from this address. | "Too many attempts." |
 
@@ -106,6 +106,13 @@ binary frame carries exactly one Noise message (at most 65535 bytes).
    the server count the session as established, so a replayed message 1 cannot
    displace a live session.
 4. Server to device: `welcome`, then alerts.
+
+The server closes a session that does not send `ready` within 15 seconds of the upgrade,
+with the code 1001. A ping or a pong does not extend this time. A handshake that proves
+no enrolled device counts as a failure of the client address. When the address has too many
+failures, such a handshake gets 4429. A device that proves its key always gets its session.
+A client address has at most `inbox.devices.max_handshakes_per_address` handshakes on both routes.
+A new handshake of a full address ends the oldest handshake of this address with the code 1013.
 
 ### Device to server
 
@@ -169,7 +176,8 @@ A phone subscribes only to a group for which its account has the permission `inb
 | Code | Use | App behaviour |
 |---|---|---|
 | 1012 | The server restarts | Reconnect immediately. |
-| 1001 | Session timeout | Reconnect. |
+| 1001 | Session timeout or handshake timeout | Reconnect. |
+| 1013 | A newer handshake from the same address took the place, or this instance does not know the account of the phone (PostgreSQL) | Reconnect after a back-off. |
 | 4401 | Unknown device or key mismatch | Enroll again. |
 | 4403 | Device revoked | Enroll again. |
 | 4409 | Replaced by a newer session of the same device | Do not fight it. |
@@ -186,8 +194,10 @@ These choices fill the gaps of the specification. Change them only with a new pr
 2. **Strict code.** The parser is strict. The scheme and the key names are case sensitive.
    Base64url padding is an error. Bits at the end that are not zero are an error.
 3. **Order of keys.** The order of `s`, `k` and `c` in the query is free.
-4. **Fingerprint.** The fingerprint is the first 8 hexadecimal characters (lower case) of
-   SHA-256 over the 32 bytes of the server key. The core computes it.
+4. **Fingerprint.** The fingerprint is the first 20 hexadecimal characters (lower case, 80 bits)
+   of SHA-256 over the 32 bytes of the server key, in five groups of 4 characters with one space
+   between them. The core computes it. The fingerprint is not on the wire, so its length is not
+   part of the protocol version. A different key with the same fingerprint costs about 2^80 digests.
 5. **No reason on refusal.** The server sends 4410 for every refusal that concerns the code
    or message 1. It sends 4426 only when message 1 is valid and the version is wrong,
    or when the first frame is a text frame.

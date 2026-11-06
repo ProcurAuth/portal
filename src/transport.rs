@@ -32,32 +32,6 @@ pub fn is_https(headers: &HeaderMap) -> bool {
     }
 }
 
-/// The longest host (with its port) that the sign-in page shows.
-const MAX_HOST_BYTES: usize = 255;
-
-/// The host that the browser asked for, as text for a page. The value comes from `X-Forwarded-Host`
-/// when the request has one value of it, and from `Host` otherwise. The result is `None` when the
-/// value is missing, too long, or holds a character that a host (with an optional port) never holds.
-/// The page only shows the value, and the checks of the origin do not use it.
-pub fn display_host(headers: &HeaderMap) -> Option<String> {
-    let mut forwarded = headers.get_all("x-forwarded-host").iter();
-    let value = match (forwarded.next(), forwarded.next()) {
-        (Some(value), None) => value,
-        (None, None) => {
-            let mut hosts = headers.get_all(hyper::header::HOST).iter();
-            match (hosts.next(), hosts.next()) {
-                (Some(value), None) => value,
-                _ => return None,
-            }
-        }
-        _ => return None,
-    };
-    let text = value.to_str().ok()?.trim();
-    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']');
-    (!text.is_empty() && text.len() <= MAX_HOST_BYTES && text.chars().all(allowed))
-        .then(|| text.to_ascii_lowercase())
-}
-
 /// The session cookie name for this scheme. Over HTTPS, the name is the configured `__Host-` name.
 /// Over HTTP, the name is the same name without the prefix.
 pub fn session_cookie_name(configured: &str, https: bool) -> &str {
@@ -238,39 +212,6 @@ mod tests {
         ])));
     }
 
-    #[test]
-    fn the_host_of_the_page_is_a_plain_host_with_an_optional_port() {
-        let host = |entries: &[(&'static str, &'static str)]| display_host(&headers(entries));
-        assert_eq!(
-            host(&[("host", "Portal.Example.com")]).as_deref(),
-            Some("portal.example.com")
-        );
-        assert_eq!(
-            host(&[
-                ("host", "inner:4181"),
-                ("x-forwarded-host", "app.example.com:8443")
-            ])
-            .as_deref(),
-            Some("app.example.com:8443")
-        );
-        assert_eq!(
-            host(&[("host", "[::1]:4181")]).as_deref(),
-            Some("[::1]:4181")
-        );
-        assert_eq!(host(&[]), None);
-        assert_eq!(host(&[("host", "a/b")]), None);
-        assert_eq!(host(&[("host", "<script>")]), None);
-        assert_eq!(
-            host(&[("x-forwarded-host", "a.com"), ("x-forwarded-host", "b.com")]),
-            None
-        );
-        assert_eq!(host(&[("host", "a b")]), None);
-        let long = "a".repeat(256);
-        let mut map = HeaderMap::new();
-        map.insert(hyper::header::HOST, HeaderValue::from_str(&long).unwrap());
-        assert_eq!(display_host(&map), None);
-    }
-
     fn nets(list: &[&str]) -> Vec<Cidr> {
         list.iter().map(|n| Cidr::parse(n).unwrap()).collect()
     }
@@ -425,5 +366,51 @@ mod tests {
             binding(SessionBind::IpUserAgent, &empty, ip),
             binding(SessionBind::IpUserAgent, &empty, ip)
         );
+    }
+
+    /// The audit lead portal/deploy/forwardauth-trust-forward-header-guidance: `/auth/verify` knows
+    /// the request only from `X-Forwarded-Uri` and `X-Forwarded-Method`. The Traefik files of the
+    /// repository keep `trustForwardHeader: false` on each ForwardAuth middleware. Their comments
+    /// never advise `true` without the rule for the hop in front of Traefik, and they state it.
+    #[test]
+    fn the_traefik_examples_keep_trust_forward_header_false_and_state_the_rule_of_the_hop() {
+        let read = |name: &str| {
+            std::fs::read_to_string(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        };
+        for name in ["examples/traefik-dynamic.yaml", "demo/traefik-dynamic.yml"] {
+            let text = read(name);
+            let values: Vec<&str> = text
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("trustForwardHeader:"))
+                .map(str::trim)
+                .collect();
+            assert!(!values.is_empty(), "{name} has no forwardAuth middleware");
+            assert!(values.iter().all(|v| *v == "false"), "{name}: {values:?}");
+        }
+        for (name, rule) in [
+            (
+                "examples/traefik-dynamic.yaml",
+                "Set true only when each hop in front of Traefik overwrites or removes the \
+                 X-Forwarded-Uri, X-Forwarded-Method",
+            ),
+            (
+                "examples/traefik-entrypoint-snippet.yaml",
+                "Keep forwardAuth.trustForwardHeader false",
+            ),
+        ] {
+            // The comments as one text: a sentence can go over two lines.
+            let comments = read(name)
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix('#'))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let comments = comments.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                !comments.contains("trustForwardHeader=true")
+                    && !comments.contains("switch this to true"),
+                "{name} advises trustForwardHeader true: {comments}"
+            );
+            assert!(comments.contains(rule), "{name}: {comments}");
+        }
     }
 }

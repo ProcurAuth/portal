@@ -11,7 +11,7 @@ use super::api::{accept_alert, Accepted, ApiError};
 pub use super::db::DeliveryView;
 use inbox_core::proto::Kind;
 
-use super::db::NewAlert;
+use super::db::{admin_source, NewAlert};
 pub use super::db::{AlertCount, AlertDetail, AlertSummary, ConnectionView, DeviceView};
 use super::hub::LiveInfo;
 use super::log;
@@ -182,7 +182,7 @@ pub async fn send_alert(
             kind: Kind::Alert,
             target,
             title,
-            source: format!("admin:{sender}"),
+            source: admin_source(sender),
             idempotency_key,
         },
         "admin",

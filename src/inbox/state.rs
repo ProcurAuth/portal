@@ -1,12 +1,15 @@
 //! The state of the inbox. The program builds it one time at start.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use inbox_core::proto::GroupInfo;
 use inbox_core::server_key::ServerKey;
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
 use super::hub::Hub;
@@ -25,7 +28,10 @@ use crate::config::{InboxConfig, InboxSecrets};
 pub struct FileKey {
     pub name: String,
     pub digest: [u8; 32],
+    /// The groups that the key sends alerts to: the owner holds `alert.send` on each.
     pub groups: Vec<String>,
+    /// The groups of the key where the owner holds `alert.read`.
+    pub read_groups: Vec<String>,
     /// The key sends alerts to accounts (`direct_alerts = true`). The start checked that its
     /// owner holds `alert.send_user`.
     pub direct_alerts: bool,
@@ -73,6 +79,7 @@ impl Secrets {
                 name: name.clone(),
                 digest,
                 groups: block.groups.clone(),
+                read_groups: block.read_groups.clone(),
                 direct_alerts: block.direct_alerts,
                 webhook_send_resolved: block.webhook_send_resolved,
             });
@@ -133,6 +140,8 @@ pub struct App {
     /// The budget of phone sessions. A phone takes one permit before the upgrade and keeps it until
     /// the WebSocket ends. The pages and the API use the budget `server.max_connections`.
     pub session_budget: SessionBudget,
+    /// The handshakes of each client address (`inbox.devices.max_handshakes_per_address`).
+    pub handshakes: Handshakes,
     /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.
     pub authorizer: std::sync::OnceLock<std::sync::Arc<dyn super::rights::Authorizer>>,
 }
@@ -204,32 +213,120 @@ impl SessionBudget {
     }
 }
 
+/// The phone WebSockets of each client address that did not finish their handshake. One address
+/// holds at most `inbox.devices.max_handshakes_per_address` of them. A new handshake of an address
+/// at its maximum ends the oldest handshake of this address. Thus one client cannot keep this share
+/// of the session budget against the other phones of its address: it must open new connections
+/// faster than a phone completes its handshake.
+pub struct Handshakes {
+    max: usize,
+    next_id: AtomicU64,
+    open: std::sync::Mutex<HashMap<IpAddr, Waiting>>,
+}
+
+/// The handshakes of one address, oldest first: the id and the signal of each one.
+type Waiting = VecDeque<(u64, Arc<Notify>)>;
+
+/// One handshake that [`Handshakes`] counts.
+struct HandshakeSlot {
+    ip: IpAddr,
+    id: u64,
+    /// Notified when a newer handshake of the same address ended this one.
+    ended: Arc<Notify>,
+}
+
+impl Handshakes {
+    pub fn new(max: u32) -> Handshakes {
+        Handshakes {
+            max: max as usize,
+            next_id: AtomicU64::new(1),
+            open: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Counts one more handshake of `ip`. When `ip` holds its maximum, the oldest handshake of `ip`
+    /// leaves the count and its owner is notified. The second value is `true` in this case.
+    fn take(&self, ip: IpAddr) -> (HandshakeSlot, bool) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let ended = Arc::new(Notify::new());
+        let mut open = self.open.lock().unwrap_or_else(|p| p.into_inner());
+        let queue = open.entry(ip).or_default();
+        let mut evicted = false;
+        while queue.len() >= self.max {
+            let Some((_, oldest)) = queue.pop_front() else {
+                break;
+            };
+            oldest.notify_one();
+            evicted = true;
+        }
+        queue.push_back((id, Arc::clone(&ended)));
+        (HandshakeSlot { ip, id, ended }, evicted)
+    }
+
+    /// Removes a handshake from the count. A handshake that a newer one ended is not counted any more.
+    fn give_back(&self, slot: &HandshakeSlot) {
+        let mut open = self.open.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(queue) = open.get_mut(&slot.ip) {
+            queue.retain(|(id, _)| *id != slot.id);
+            if queue.is_empty() {
+                open.remove(&slot.ip);
+            }
+        }
+    }
+
+    /// The handshakes of `ip` that the count holds.
+    #[cfg(test)]
+    fn count(&self, ip: IpAddr) -> usize {
+        let open = self.open.lock().unwrap_or_else(|p| p.into_inner());
+        open.get(&ip).map_or(0, VecDeque::len)
+    }
+}
+
 /// The guard of one open WebSocket. The count goes down and the permit of the session budget goes
-/// back when the guard is dropped.
+/// back when the guard is dropped. Until [`SocketGuard::handshake_done`], the WebSocket also counts
+/// as a handshake of its client address.
 pub struct SocketGuard {
-    app: std::sync::Arc<App>,
+    app: Arc<App>,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    handshake: Option<HandshakeSlot>,
+    ended: Arc<Notify>,
 }
 
 impl SocketGuard {
-    /// Counts one more WebSocket and takes a permit of the session budget. The result is `None`
-    /// when the budget is full.
-    pub fn new(app: &std::sync::Arc<App>) -> Option<SocketGuard> {
+    /// Counts one more WebSocket and takes a permit of the session budget. Then it counts one more
+    /// handshake of `ip`. The result is `None` when the budget is full.
+    pub fn new(app: &Arc<App>, ip: IpAddr) -> Option<SocketGuard> {
         let permit = app.session_budget.take()?;
-        app.sockets
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (slot, evicted) = app.handshakes.take(ip);
+        if evicted {
+            super::log::info!(event = "handshake_ended_by_newer", client.address = %ip);
+        }
+        app.sockets.fetch_add(1, Ordering::SeqCst);
         Some(SocketGuard {
-            app: std::sync::Arc::clone(app),
+            app: Arc::clone(app),
             _permit: permit,
+            ended: Arc::clone(&slot.ended),
+            handshake: Some(slot),
         })
+    }
+
+    /// The phone proved its key: the WebSocket does not count as a handshake of its address any more.
+    pub fn handshake_done(&mut self) {
+        if let Some(slot) = self.handshake.take() {
+            self.app.handshakes.give_back(&slot);
+        }
+    }
+
+    /// Completes when a newer handshake of the same address ended this handshake.
+    pub async fn ended_by_newer(&self) {
+        self.ended.notified().await;
     }
 }
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        self.app
-            .sockets
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.handshake_done();
+        self.app.sockets.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -334,5 +431,46 @@ mod tests {
         assert!(budget.take().is_none());
         drop((second, third));
         assert_eq!(budget.available(), 2);
+    }
+
+    /// One client address holds at most its share of handshakes. A newer handshake of a full address
+    /// ends its oldest one, so one client cannot keep the share against the other phones of the
+    /// address. The other addresses are not affected.
+    #[tokio::test]
+    async fn a_new_handshake_of_a_full_address_ends_its_oldest_handshake() {
+        let handshakes = Handshakes::new(2);
+        let shared: IpAddr = "198.51.100.7".parse().unwrap();
+        let other: IpAddr = "203.0.113.9".parse().unwrap();
+        let (first, evicted) = handshakes.take(shared);
+        assert!(!evicted);
+        let (second, evicted) = handshakes.take(shared);
+        assert!(!evicted);
+        let (elsewhere, evicted) = handshakes.take(other);
+        assert!(!evicted, "another address has its own share");
+        assert_eq!(handshakes.count(shared), 2);
+
+        let (third, evicted) = handshakes.take(shared);
+        assert!(
+            evicted,
+            "the third handshake of the address ends the oldest one"
+        );
+        assert_eq!(handshakes.count(shared), 2);
+        let ended = |slot: &HandshakeSlot| {
+            let notified = slot.ended.notified();
+            futures_util::FutureExt::now_or_never(notified).is_some()
+        };
+        assert!(ended(&first), "the oldest handshake is told to end");
+        assert!(!ended(&second) && !ended(&third) && !ended(&elsewhere));
+
+        // A handshake that leaves gives its place back, also when a newer one ended it before.
+        handshakes.give_back(&first);
+        assert_eq!(handshakes.count(shared), 2);
+        handshakes.give_back(&second);
+        assert_eq!(handshakes.count(shared), 1);
+        let (_fourth, evicted) = handshakes.take(shared);
+        assert!(!evicted);
+        handshakes.give_back(&elsewhere);
+        assert_eq!(handshakes.count(other), 0);
+        assert!(!handshakes.open.lock().unwrap().contains_key(&other));
     }
 }

@@ -376,10 +376,11 @@ fn spool(app: &App, body: &[u8]) -> Resp {
         Target::Group(group) => app.group_names.contains_key(group),
         Target::User(login) => !login.is_empty(),
     };
-    if !is_hex_id(&alert.id) || !known_target {
+    // A key that the database refuses would stay in the spool and never reach the database.
+    if !is_hex_id(&alert.id) || !known_target || !super::api::valid_idempotency_key(&alert.key) {
         return text(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "unknown target or malformed id",
+            "unknown target, malformed id or malformed key",
         );
     }
     let Some(spool) = app.db.spool() else {

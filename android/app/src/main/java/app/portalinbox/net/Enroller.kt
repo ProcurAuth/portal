@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 class EnrollCodeInfo(
     val address: ServerAddress,
     val serverPublicKey: ByteArray,
-    /** First 8 hexadecimal characters of the SHA-256 of the server key, to compare with the administrator. */
+    /** First 20 hexadecimal characters (80 bits) of the SHA-256 of the server key, in five groups of 4, to compare with the administrator. */
     val fingerprint: String,
 )
 

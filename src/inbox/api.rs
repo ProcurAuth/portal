@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::db::{InsertOutcome, NewAlert};
+use super::db::{same_title, InsertOutcome, NewAlert, WEBHOOK_SOURCE};
 use super::http::{json, read_body, Resp};
 use super::log;
 use super::rights::{Decision, KeyCheck};
@@ -121,6 +121,15 @@ pub async fn accept_alert(
         }
         _ => {}
     }
+    // Every store must accept the key: PostgreSQL refuses U+0000, and a spooled alert that the
+    // database refuses can never be written.
+    if !valid_idempotency_key(&alert.idempotency_key) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "the idempotency key must be 1..128 bytes without control characters",
+        ));
+    }
     let title = alert.title.trim();
     if title.is_empty() {
         return Err(ApiError::new(
@@ -218,6 +227,12 @@ pub async fn accept_alert(
     }
 }
 
+/// Whether every store accepts the idempotency key: 1 to 128 bytes, and no control character.
+/// The key is not limited to ASCII: the keys of the alerts of the portal hold UTF-8 service ids.
+pub fn valid_idempotency_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 128 && !key.chars().any(char::is_control)
+}
+
 /// The answer for an alert to an account that has no phone to use. The alert is not stored.
 fn no_phone() -> ApiError {
     ApiError::new(
@@ -244,7 +259,7 @@ async fn accept_without_database(
     };
     // Stored a moment ago: the phones know it under that id, a retry must not create another.
     if let Some(known) = pg.cached_alert(&alert.source, &alert.idempotency_key) {
-        if known.target != alert.target || known.title != alert.title {
+        if known.target != alert.target || !same_title(&alert.source, &known.title, &alert.title) {
             return Err(conflict());
         }
         app.metrics
@@ -458,8 +473,9 @@ fn sender<'a>(
     }
 }
 
-/// Lets the sender do `action` on the group. A key of the file needs the group in its list: the
-/// start kept only the groups that its owner may send to. A key of the database needs the decision
+/// Lets the sender do `action` on the group. A key of the file needs the group in the list of the
+/// action: the start kept the groups of the key where its owner holds `alert.send`, and the groups
+/// where it holds `alert.read`. A key of the database needs the decision
 /// of the portal. For `alert.send` the decision counts one use, except for
 /// a critical group: a critical group never has a limit.
 fn authorize(app: &App, sender: &Sender<'_>, action: &str, group: &str) -> Result<(), ApiError> {
@@ -505,9 +521,13 @@ fn authorize_at(
     };
     match sender {
         Sender::FileKey(p) => {
-            let allowed = match group {
-                Some(group) => p.groups.iter().any(|g| g == group),
-                None => p.direct_alerts,
+            // The start kept one list for each action, from the grants of the owner.
+            use crate::portal_actions::{ALERT_READ, ALERT_SEND, ALERT_SEND_USER};
+            let allowed = match (action, group) {
+                (ALERT_SEND, Some(group)) => p.groups.iter().any(|g| g == group),
+                (ALERT_READ, Some(group)) => p.read_groups.iter().any(|g| g == group),
+                (ALERT_SEND_USER, None) => p.direct_alerts,
+                _ => false,
             };
             if allowed {
                 Ok(())
@@ -656,17 +676,23 @@ pub fn idempotency_key(headers: &HeaderMap, content: &[&str]) -> Result<String, 
     Ok(key.to_string())
 }
 
-/// What a producer endpoint has read from a request before it checks the token.
-struct Call {
+/// What a producer endpoint has read from a request: the query, the headers, the sender and the
+/// body.
+struct Call<'a> {
     query: ProducerQuery,
     headers: HeaderMap,
+    who: Sender<'a>,
     body: Bytes,
 }
 
-/// Reads the query and the body, in this order, as the endpoints always did.
-async fn read_call(app: &App, request: Request<Incoming>) -> Result<Call, ApiError> {
+/// Reads the query, finds the sender, then reads the body. The key comes before the body: the
+/// inbox reads no body for a request without a valid key. Thus an anonymous client cannot hold a
+/// connection of `server.max_connections` for `server.body_read_timeout`, and ForwardAuth keeps
+/// its connections.
+async fn read_call<'a>(app: &'a App, request: Request<Incoming>) -> Result<Call<'a>, ApiError> {
     let query = ProducerQuery::read(&request)?;
     let headers = request.headers().clone();
+    let who = sender(app, &headers, &query)?;
     let body = read_body(
         request,
         app.config.devices.max_request_bytes,
@@ -676,6 +702,7 @@ async fn read_call(app: &App, request: Request<Incoming>) -> Result<Call, ApiErr
     Ok(Call {
         query,
         headers,
+        who,
         body,
     })
 }
@@ -699,11 +726,8 @@ pub async fn post_alert(app: &App, request: Request<Incoming>) -> Resp {
 
 async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp, ApiError> {
     let Call {
-        query,
-        headers,
-        body,
+        headers, who, body, ..
     } = read_call(app, request).await?;
-    let who = sender(app, &headers, &query)?;
     let req: AlertRequest = parse_json(&body)?;
     let target = req.target()?;
     match &target {
@@ -792,10 +816,23 @@ async fn get_alert_inner(
 ///
 /// Accepts the Prometheus Alertmanager webhook payload, which Grafana's webhook
 /// contact point also emits. Each alert of the payload becomes one Inbox alert,
-/// deduplicated on fingerprint + status + start time, so Alertmanager repeats and
-/// retries do not page twice.
+/// deduplicated on group + fingerprint + status + start time, so Alertmanager repeats and
+/// retries do not page twice. A repeat with a new summary keeps the first title. The count
+/// `refused` holds each alert that the Inbox refuses: such an alert does not stop the others.
 pub async fn alertmanager(app: &App, request: Request<Incoming>, group: &str) -> Resp {
     respond(alertmanager_inner(app, request, group).await)
+}
+
+/// The idempotency key of an alert of the webhook: a digest of the group, the fingerprint, the
+/// status and the start time. The key has the form of an `Idempotency-Key` header, so every store
+/// accepts it, and the same alert sent to two groups makes one alert in each group.
+fn webhook_key(group: &str, fingerprint: &str, status: &str, starts_at: &str) -> String {
+    let mut h = Sha256::new();
+    for part in [group, fingerprint, status, starts_at] {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    format!("am:{}", hex(&h.finalize()))
 }
 
 async fn alertmanager_inner(
@@ -803,12 +840,7 @@ async fn alertmanager_inner(
     request: Request<Incoming>,
     group: &str,
 ) -> Result<Resp, ApiError> {
-    let Call {
-        query,
-        headers,
-        body,
-    } = read_call(app, request).await?;
-    let who = sender(app, &headers, &query)?;
+    let Call { who, body, .. } = read_call(app, request).await?;
     authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?;
     let payload: Value = parse_json(&body)?;
     let alerts = payload
@@ -821,8 +853,16 @@ async fn alertmanager_inner(
                 "missing alerts array",
             )
         })?;
+    // The group is the same for every alert of the payload: an unknown group refuses the payload.
+    if !app.group_names.contains_key(group) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_group",
+            format!("unknown group {group:?}"),
+        ));
+    }
 
-    let (mut created, mut duplicates, mut skipped) = (0usize, 0usize, 0usize);
+    let (mut created, mut duplicates, mut skipped, mut refused) = (0usize, 0usize, 0usize, 0usize);
     for a in alerts {
         let status = a.get("status").and_then(Value::as_str).unwrap_or("firing");
         if status == "resolved" && !who.sends_resolved() {
@@ -834,7 +874,7 @@ async fn alertmanager_inner(
         let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let name = text(&labels, "alertname").unwrap_or_else(|| "alert".into());
         // "[FIRING] alertname: summary", on one line.
-        let mut title = format!("[{}] {}", status.to_uppercase(), name);
+        let mut title = format!("[{}] {}", one_line(&status.to_uppercase()), one_line(&name));
         if let Some(summary) = text(&annotations, "summary")
             .map(|t| one_line(&t))
             .filter(|t| !t.is_empty())
@@ -847,33 +887,35 @@ async fn alertmanager_inner(
             hex(&Sha256::digest(labels.to_string().as_bytes()))
         });
         let starts_at = text(a, "startsAt").unwrap_or_default();
-        let key = format!("{}:{}:{}", fingerprint, status, starts_at);
-        let key = if key.len() > 128 {
-            hex(&Sha256::digest(key.as_bytes()))
-        } else {
-            key
-        };
-        let accepted = accept_alert(
+        let result = accept_alert(
             app,
             NewAlert {
                 kind: Kind::Alert,
                 target: Target::Group(group.to_string()),
                 title: truncate_chars(&title, MAX_TITLE_CHARS),
-                source: format!("webhook:{}", who.name()),
-                idempotency_key: key,
+                source: format!("{WEBHOOK_SOURCE}{}", who.name()),
+                idempotency_key: webhook_key(group, &fingerprint, status, &starts_at),
             },
             "webhook",
         )
-        .await?;
-        if accepted.duplicate {
-            duplicates += 1
-        } else {
-            created += 1
+        .await;
+        match result {
+            Ok(accepted) if accepted.duplicate => duplicates += 1,
+            Ok(_) => created += 1,
+            // A retry cannot change this answer: the loop continues with the other alerts.
+            Err(e) if e.status().is_client_error() => {
+                refused += 1;
+                app.metrics.alert_refused("webhook");
+                log::warn!(event = "webhook_alert_refused", group = %group, error = %e.summary());
+            }
+            // The storage or the copy failed: the sender sends the whole payload again, and the
+            // keys merge the alerts that are stored.
+            Err(e) => return Err(e),
         }
     }
     Ok(json(
         StatusCode::OK,
-        &json!({ "created": created, "duplicates": duplicates, "skipped": skipped }),
+        &json!({ "created": created, "duplicates": duplicates, "skipped": skipped, "refused": refused }),
     ))
 }
 
@@ -895,9 +937,9 @@ async fn notify_inner(
     let Call {
         query,
         headers,
+        who,
         body,
     } = read_call(app, request).await?;
-    let who = sender(app, &headers, &query)?;
     authorize(app, &who, crate::portal_actions::ALERT_SEND, group)?;
     let header_title = headers
         .get("x-title")
@@ -978,6 +1020,39 @@ mod tests {
         let group = idempotency_key(&headers, &[&Target::Group("a".into()).to_string(), "t"]);
         let user = idempotency_key(&headers, &[&Target::User("a".into()).to_string(), "t"]);
         assert_ne!(group.unwrap(), user.unwrap());
+    }
+
+    #[test]
+    fn every_store_accepts_a_valid_key_and_a_watch_key_with_utf8_is_valid() {
+        for key in [
+            "k",
+            "auto:00ff",
+            "portal:unhealthy:médias-plex:498055",
+            &"x".repeat(128),
+        ] {
+            assert!(valid_idempotency_key(key), "{key}");
+        }
+        for key in ["", "fp\u{0}nul", "a\nb", "bell\u{7}", &"x".repeat(129)] {
+            assert!(!valid_idempotency_key(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn the_key_of_a_webhook_alert_names_the_group_and_has_the_form_of_a_header() {
+        let key = webhook_key("infra", "fp\u{0}nul", "firing", "t");
+        assert!(
+            key.len() <= 128 && key.bytes().all(|b| b.is_ascii_graphic()),
+            "{key}"
+        );
+        assert!(valid_idempotency_key(&key));
+        assert_eq!(key, webhook_key("infra", "fp\u{0}nul", "firing", "t"));
+        // The same alert to another group is another alert. The parts cannot shift.
+        assert_ne!(key, webhook_key("other", "fp\u{0}nul", "firing", "t"));
+        assert_ne!(
+            webhook_key("infra", "ab", "c", ""),
+            webhook_key("infra", "a", "bc", "")
+        );
+        assert_ne!(key, webhook_key("infra", "fp\u{0}nul", "resolved", "t"));
     }
 
     #[test]

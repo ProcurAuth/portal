@@ -281,6 +281,8 @@ pub struct SessionConfig {
     pub bind: SessionBind,
     pub same_site: SameSite,
     pub max_active_sessions: usize,
+    /// The largest number of live sessions of one principal. An impersonated session does not count.
+    pub max_sessions_per_account: usize,
 }
 
 /// The rule of a remembered session, the one that a person asks with "Remember me".
@@ -472,6 +474,13 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
     } else {
         None
     };
+    let max_active_sessions = r.count("session", "max_active_sessions")?;
+    let max_sessions_per_account = r.count("session", "max_sessions_per_account")?;
+    if max_sessions_per_account > max_active_sessions {
+        return Err(format!(
+            "session.max_sessions_per_account must not be larger than session.max_active_sessions: max_sessions_per_account is {max_sessions_per_account}, max_active_sessions is {max_active_sessions}"
+        ));
+    }
     let max_connections = r.count("server", "max_connections")?;
     let max_login_body_reads = r.count("server", "max_login_body_reads")?;
     if max_login_body_reads >= max_connections {
@@ -625,7 +634,8 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
                 "Strict" => SameSite::Strict,
                 _ => SameSite::Lax,
             },
-            max_active_sessions: r.count("session", "max_active_sessions")?,
+            max_active_sessions,
+            max_sessions_per_account,
         },
         security: SecurityConfig {
             max_password_bytes: r.count("security", "max_password_bytes")?,
@@ -695,8 +705,9 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         crate::portal_actions::check_user_grants(&features, &account.grants)
             .map_err(|e| format!("user {login:?}: {e}"))?;
     }
-    if let Some(inbox) = &config.inbox {
-        inbox::check_api_keys(&config, inbox, &features)?;
+    if let Some(mut inbox) = config.inbox.take() {
+        inbox::check_api_keys(&config, &mut inbox, &features)?;
+        config.inbox = Some(inbox);
     }
     if let Some(pdp) = &config.pdp {
         // The two values must agree: an `http` URL needs `plain_http`, and `plain_http` needs an

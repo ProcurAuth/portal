@@ -10,7 +10,7 @@
 //! private network. The inbox uses the database of the portal. Its tables have their own chain
 //! of migrations, with its own version table `inbox_schema_version`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as _;
 use std::future::Future;
 use std::path::Path;
@@ -27,8 +27,9 @@ use tokio::sync::mpsc;
 use tokio_postgres::{AsyncMessage, NoTls};
 
 use super::db::{
-    AckOutcome, AlertDetail, AlertSummary, CodeInsert, ConnectionView, DbError, DeliveryView,
-    DeviceKey, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem, Refusal, CODE_KEEP_MS,
+    same_title, AckOutcome, AlertDetail, AlertSummary, CodeInsert, ConnectionView, DbError,
+    DeliveryView, DeviceKey, DeviceLimits, DeviceView, InsertOutcome, NewAlert, PendingDelivery,
+    Redeem, Refusal, CODE_KEEP_MS,
 };
 use super::hub::LiveInfo;
 use super::log;
@@ -251,6 +252,37 @@ struct Cache {
     devices: HashMap<String, CachedDevice>,
     /// Alerts stored in the database lately, by (source, idempotency key): a producer's retry during an outage finds them.
     recent: HashMap<(String, String), RecentAlert>,
+    /// The devices that this instance revoked, or that a notification of another instance named,
+    /// and that a refresh did not yet read as revoked. A refresh whose queries ran before the
+    /// commit of the revocation must not bring the device back. A revocation is final.
+    revoked: HashSet<String>,
+}
+
+impl Cache {
+    /// Marks a device as revoked, also before a refresh reads it so.
+    fn revoke(&mut self, id: &str) {
+        self.revoked.insert(id.to_string());
+        if let Some(d) = self.devices.get_mut(id) {
+            d.key.revoked = true;
+            d.subscriptions.clear();
+        }
+    }
+
+    /// Takes the place of the cache by `fresh`, the result of a refresh. A revocation that `fresh`
+    /// does not show yet stays: the queries can have run before its commit.
+    fn replace_with(&mut self, mut fresh: Cache) {
+        for id in std::mem::take(&mut self.revoked) {
+            match fresh.devices.get(&id) {
+                Some(d) if d.key.revoked => {}
+                Some(_) => fresh.revoke(&id),
+                // A device that the refresh did not read can come later: a revocation is final.
+                None => {
+                    fresh.revoked.insert(id);
+                }
+            }
+        }
+        *self = fresh;
+    }
 }
 
 struct CachedDevice {
@@ -265,6 +297,17 @@ pub struct RecentAlert {
     pub title: String,
     /// Unix ms: when the alert was stored.
     pub at: i64,
+}
+
+/// The result of one replay of the spool.
+#[derive(Debug, Default)]
+pub struct Replayed {
+    /// The alerts written to the database.
+    pub written: usize,
+    /// The alerts that the database refused. They stay in the spool until they expire.
+    pub refused: usize,
+    /// The devices that still wait for an alert that was written.
+    pub wake: Vec<String>,
 }
 
 /// What the other instances tell this one.
@@ -568,7 +611,7 @@ impl PgStore {
         for (k, v) in cache.recent.drain().filter(|(_, v)| v.at >= horizon) {
             fresh.recent.entry(k).or_insert(v);
         }
-        *cache = fresh;
+        cache.replace_with(fresh);
         Ok(())
     }
 
@@ -613,12 +656,13 @@ impl PgStore {
     pub fn cache_device(&self, id: &str, key: Option<DeviceKey>) {
         let mut cache = self.cache.write().expect("cache lock");
         match key {
-            Some(key) => {
-                let subscriptions = cache
-                    .devices
-                    .get(id)
-                    .map(|d| d.subscriptions.clone())
-                    .unwrap_or_default();
+            Some(mut key) => {
+                // A read that ran before the commit of a revocation does not bring the device back.
+                key.revoked |= cache.revoked.contains(id);
+                let subscriptions = match cache.devices.get(id) {
+                    Some(d) if !key.revoked => d.subscriptions.clone(),
+                    _ => Vec::new(),
+                };
                 cache
                     .devices
                     .insert(id.to_string(), CachedDevice { key, subscriptions });
@@ -631,15 +675,16 @@ impl PgStore {
 
     pub fn cache_subscriptions(&self, id: &str, subscriptions: Vec<String>) {
         if let Some(d) = self.cache.write().expect("cache lock").devices.get_mut(id) {
-            d.subscriptions = subscriptions;
+            if !d.key.revoked {
+                d.subscriptions = subscriptions;
+            }
         }
     }
 
+    /// The device is revoked: by this instance, or by another one that sent the notification. The
+    /// copy of the degraded mode refuses it from now, also before the next refresh.
     pub fn cache_revoked(&self, id: &str) {
-        if let Some(d) = self.cache.write().expect("cache lock").devices.get_mut(id) {
-            d.key.revoked = true;
-            d.subscriptions.clear();
-        }
+        self.cache.write().expect("cache lock").revoke(id);
     }
 
     pub fn cache_alert(&self, source: &str, key: &str, alert: RecentAlert) {
@@ -662,15 +707,30 @@ impl PgStore {
     }
 
     /// Writes what the instance held while the database was away: the alerts of the spool, then the receipts. Idempotent:
-    /// another instance may replay the same alert, and a crash half way replays it again. Returns the alerts written and the
-    /// devices that still wait for one (to wake).
-    pub async fn replay(&self) -> Result<(usize, Vec<String>), DbError> {
-        let mut written = 0;
-        let mut wake: Vec<String> = Vec::new();
+    /// another instance may replay the same alert, and a crash half way replays it again. An alert that the database
+    /// refuses for a reason other than its absence stays in the spool until it expires, and the replay continues with the
+    /// other alerts. Returns the alerts written, the alerts refused and the devices that still wait for one (to wake).
+    pub async fn replay(&self) -> Result<Replayed, DbError> {
+        let mut done = Replayed::default();
         for entry in self.spool.snapshot() {
-            if let Some(waiting) = self.replay_alert(&entry).await? {
-                written += 1;
-                wake.extend(waiting);
+            match self.replay_alert(&entry).await {
+                Ok(Some(waiting)) => {
+                    done.written += 1;
+                    done.wake.extend(waiting);
+                }
+                Ok(None) => {}
+                // The database is away again, or the store stops: the next tick tries again.
+                Err(e @ (DbError::Unavailable(_) | DbError::Closed)) => return Err(e),
+                // A refusal of this alert must not hold back the alerts after it and the receipts.
+                Err(e) => {
+                    done.refused += 1;
+                    log::error!(
+                        event = "spool_alert_refused",
+                        alert.id = %entry.id,
+                        alert.source = %entry.source,
+                        error = %e
+                    );
+                }
             }
         }
         let acks = self.spool.take_db_acks();
@@ -680,9 +740,9 @@ impl PgStore {
                 return Err(e);
             }
         }
-        wake.sort();
-        wake.dedup();
-        Ok((written, wake))
+        done.wake.sort();
+        done.wake.dedup();
+        Ok(done)
     }
 
     /// One alert of the spool into the database, in one transaction. `Some(devices still waiting)` when it was written.
@@ -715,7 +775,10 @@ impl PgStore {
             .map_err(db_error)?;
         let (stored, kind, target, title): (String, String, String, String) =
             (row.get(0), row.get(1), row.get(2), row.get(3));
-        if kind != e.target.kind() || target != e.target.id() || title != e.title {
+        if kind != e.target.kind()
+            || target != e.target.id()
+            || !same_title(&e.source, &title, &e.title)
+        {
             log::warn!(event = "spool_alert_conflict", alert.id = %e.id, alert.source = %e.source);
             self.spool.remove_if_unchanged(&e.id, e.rev);
             return Ok(None);
@@ -1029,16 +1092,33 @@ impl PgStore {
     // ------------------------------------------------------------ devices
 
     /// Stores the digest of a new code of `login`. Two instances that make codes for one account
-    /// at the same time must not both take the last place: the transaction holds a lock.
+    /// at the same time must not both take the last place: the transaction holds a lock. With
+    /// `stored`, the account is an account of the database: the transaction locks its row in the
+    /// table `users` of the portal, and refuses the code when the row is gone. A delete of the row
+    /// waits for the end of this transaction, so the [`PgStore::end_account`] that follows the
+    /// delete finds the code (see `db::insert_code`).
     pub async fn create_code(
         &self,
         digest: &[u8],
         login: &str,
         ttl_ms: i64,
         max_active: u32,
+        stored: bool,
     ) -> Result<CodeInsert, DbError> {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
+        if stored {
+            let row = tx
+                .query_opt(
+                    "SELECT 1 FROM users WHERE login = $1 FOR KEY SHARE",
+                    &[&login],
+                )
+                .await
+                .map_err(db_error)?;
+            if row.is_none() {
+                return Ok(CodeInsert::NoAccount);
+            }
+        }
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_CODES])
             .await
             .map_err(db_error)?;
@@ -1084,7 +1164,7 @@ impl PgStore {
     pub async fn redeem_code(
         &self,
         digest: &[u8],
-        max_devices: u32,
+        limits: DeviceLimits,
         name: &str,
         public_key: &[u8],
         ip: &str,
@@ -1114,12 +1194,23 @@ impl PgStore {
         if expires_at_ms <= now {
             return Ok(Redeem::Refused(Refusal::Expired));
         }
+        let of_account: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM devices WHERE user_name = $1 AND revoked_at IS NULL",
+                &[&login],
+            )
+            .await
+            .map_err(db_error)?
+            .get(0);
+        if of_account >= i64::from(limits.max_per_account) {
+            return Ok(Redeem::TooManyAccountDevices);
+        }
         let active: i64 = tx
             .query_one("SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL", &[])
             .await
             .map_err(db_error)?
             .get(0);
-        if active >= i64::from(max_devices) {
+        if active >= i64::from(limits.max_devices) {
             return Ok(Redeem::TooManyDevices);
         }
         tx.execute(
@@ -1139,9 +1230,10 @@ impl PgStore {
         Ok(Redeem::Enrolled { device_id, login })
     }
 
-    /// Deletes the unused codes of `login` and revokes its devices, in one transaction. The other
-    /// instances close the sessions of the devices. The result is the ids that this call revoked.
-    pub async fn revoke_account(&self, login: &str) -> Result<Vec<String>, DbError> {
+    /// Ends the inbox state of the account `login`, in one transaction, as `db::end_account` does.
+    /// The other instances close the sessions of the devices. The result is the ids that this call
+    /// revoked.
+    pub async fn end_account(&self, login: &str) -> Result<Vec<String>, DbError> {
         let mut c = self.client().await?;
         let tx = c.transaction().await.map_err(db_error)?;
         // The same lock as the enrollment: a phone that enrolls now is before or after this call.
@@ -1173,6 +1265,33 @@ impl PgStore {
             .await
             .map_err(db_error)?;
         }
+        let ended = super::db::ended_name(login);
+        let (old_source, new_source) = (
+            super::db::admin_source(login),
+            super::db::admin_source(&ended),
+        );
+        for (sql, from, to) in [
+            (
+                "UPDATE devices SET user_name = $2 WHERE user_name = $1",
+                login,
+                ended.as_str(),
+            ),
+            (
+                "UPDATE alerts SET target_id = $2 WHERE target_kind = 'user' AND target_id = $1",
+                login,
+                ended.as_str(),
+            ),
+            (
+                "UPDATE alerts SET source = $2 WHERE source = $1",
+                old_source.as_str(),
+                new_source.as_str(),
+            ),
+        ] {
+            tx.execute(sql, &[&from, &to]).await.map_err(db_error)?;
+        }
+        tx.execute("DELETE FROM web_notify WHERE login = $1", &[&login])
+            .await
+            .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok(ids)
     }
@@ -1387,7 +1506,10 @@ impl PgStore {
                 .map_err(db_error)?;
             let (existing, kind, target, title): (String, String, String, String) =
                 (row.get(0), row.get(1), row.get(2), row.get(3));
-            if kind != alert.target.kind() || target != alert.target.id() || title != alert.title {
+            if kind != alert.target.kind()
+                || target != alert.target.id()
+                || !same_title(&alert.source, &title, &alert.title)
+            {
                 return Ok(InsertOutcome::Conflict);
             }
             let devices = Self::delivery_devices(&*tx, &existing).await?;
@@ -2317,6 +2439,61 @@ mod tests {
         assert_eq!(parse_notification("other", "x"), None);
     }
 
+    fn cached(revoked: bool, groups: &[&str]) -> CachedDevice {
+        CachedDevice {
+            key: DeviceKey {
+                public_key: vec![1; 32],
+                revoked,
+                name: "phone".into(),
+                user_name: "alice".into(),
+            },
+            subscriptions: groups.iter().map(|g| g.to_string()).collect(),
+        }
+    }
+
+    /// The audit finding portal/inbox/degraded-cache-ignores-remote-revocation: a revocation that
+    /// the notification of another instance names applies to the copy of the degraded mode at once,
+    /// and a refresh whose queries ran before the commit does not bring the device back.
+    #[test]
+    fn a_revocation_stays_in_the_copy_until_a_refresh_reads_it() {
+        let mut cache = Cache::default();
+        cache
+            .devices
+            .insert("stale".into(), cached(false, &["infra"]));
+        cache
+            .devices
+            .insert("other".into(), cached(false, &["infra"]));
+        cache.revoke("stale");
+        cache.revoke("later");
+        assert!(cache.devices["stale"].key.revoked);
+        assert!(cache.devices["stale"].subscriptions.is_empty());
+        // The refresh read the rows before the commit: the device is not revoked in its answer.
+        let mut fresh = Cache::default();
+        fresh
+            .devices
+            .insert("stale".into(), cached(false, &["infra"]));
+        fresh
+            .devices
+            .insert("other".into(), cached(false, &["infra"]));
+        cache.replace_with(fresh);
+        assert!(cache.devices["stale"].key.revoked);
+        assert!(cache.devices["stale"].subscriptions.is_empty());
+        assert!(
+            !cache.devices["other"].key.revoked,
+            "another device is not touched"
+        );
+        assert!(cache.revoked.contains("stale") && cache.revoked.contains("later"));
+        // A refresh that reads the revocation ends the mark. A device that comes later is revoked.
+        let mut fresh = Cache::default();
+        fresh.devices.insert("stale".into(), cached(true, &[]));
+        fresh
+            .devices
+            .insert("later".into(), cached(false, &["infra"]));
+        cache.replace_with(fresh);
+        assert!(!cache.revoked.contains("stale"));
+        assert!(cache.devices["later"].key.revoked);
+    }
+
     /// A throwaway database on the server of `INBOX_TEST_PG=host:port:user:password`. The tests
     /// that need it end at once without the variable. The database goes away with the value.
     struct TestDatabase {
@@ -2419,9 +2596,14 @@ mod tests {
 
     const MINUTE_MS: i64 = 60_000;
 
+    const LIMITS: DeviceLimits = DeviceLimits {
+        max_devices: 10,
+        max_per_account: 10,
+    };
+
     async fn redeem(store: &PgStore, digest: [u8; 32], key: u8) -> Redeem {
         store
-            .redeem_code(&digest, 10, "phone", &[key; 32], "1.1.1.1")
+            .redeem_code(&digest, LIMITS, "phone", &[key; 32], "1.1.1.1")
             .await
             .unwrap()
     }
@@ -2434,7 +2616,7 @@ mod tests {
         };
         let store = db.store().await;
         let created = store
-            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         let CodeInsert::Created { expires_at_ms } = created else {
@@ -2460,7 +2642,7 @@ mod tests {
         );
         // Time travel: the code ends at its expiry time.
         store
-            .create_code(&[3; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[3; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         db.sql("UPDATE enrollment_codes SET expires_at_ms = created_at_ms WHERE digest = decode(repeat('03', 32), 'hex')")
@@ -2471,17 +2653,73 @@ mod tests {
         );
         // The device limit leaves the code unused.
         store
-            .create_code(&[4; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[4; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
+        let one = DeviceLimits {
+            max_devices: 1,
+            ..LIMITS
+        };
         let full = store
-            .redeem_code(&[4; 32], 1, "phone", &[9; 32], "ip")
+            .redeem_code(&[4; 32], one, "phone", &[9; 32], "ip")
             .await
             .unwrap();
         assert_eq!(full, Redeem::TooManyDevices);
         assert!(matches!(
             redeem(&store, [4; 32], 5).await,
             Redeem::Enrolled { .. }
+        ));
+    }
+
+    /// As the SQLite store: one account cannot use all the places of the server, its refused code
+    /// stays unused, and a revoked phone gives its place back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_the_device_limit_of_an_account_leaves_room_for_the_other_accounts() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let limits = DeviceLimits {
+            max_devices: 10,
+            max_per_account: 2,
+        };
+        let mut phones = Vec::new();
+        for i in 0..3u8 {
+            store
+                .create_code(&[i; 32], "mallory", 10 * MINUTE_MS, 5, false)
+                .await
+                .unwrap();
+        }
+        for i in 0..2u8 {
+            let Redeem::Enrolled { device_id, .. } = store
+                .redeem_code(&[i; 32], limits, "phone", &[i + 1; 32], "ip")
+                .await
+                .unwrap()
+            else {
+                panic!("phone {i} of the account must enroll")
+            };
+            phones.push(device_id);
+        }
+        assert_eq!(
+            store
+                .redeem_code(&[2; 32], limits, "phone", &[9; 32], "ip")
+                .await
+                .unwrap(),
+            Redeem::TooManyAccountDevices
+        );
+        store
+            .create_code(&[8; 32], "victor", 10 * MINUTE_MS, 5, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.redeem_code(&[8; 32], limits, "phone", &[10; 32], "ip").await.unwrap(),
+            Redeem::Enrolled { login, .. } if login == "victor"
+        ));
+        assert!(store.revoke_device(&phones[0]).await.unwrap());
+        assert!(matches!(
+            store.redeem_code(&[2; 32], limits, "phone", &[9; 32], "ip").await.unwrap(),
+            Redeem::Enrolled { login, .. } if login == "mallory"
         ));
     }
 
@@ -2497,7 +2735,7 @@ mod tests {
         let mut made = Vec::new();
         for (i, digest) in digests.iter().enumerate() {
             let store = if i % 2 == 0 { &a } else { &b };
-            made.push(store.create_code(digest, "alice", MINUTE_MS, 3));
+            made.push(store.create_code(digest, "alice", MINUTE_MS, 3, false));
         }
         let results = futures_util::future::join_all(made).await;
         let created = results
@@ -2507,7 +2745,7 @@ mod tests {
         assert_eq!(created, 3, "{results:?}");
         assert!(
             matches!(
-                b.create_code(&[9; 32], "bob", MINUTE_MS, 3).await,
+                b.create_code(&[9; 32], "bob", MINUTE_MS, 3, false).await,
                 Ok(CodeInsert::Created { .. })
             ),
             "another account has its own count"
@@ -2516,7 +2754,7 @@ mod tests {
         db.sql("UPDATE enrollment_codes SET expires_at_ms = created_at_ms WHERE login = 'alice'")
             .await;
         assert!(matches!(
-            a.create_code(&[7; 32], "alice", MINUTE_MS, 3).await,
+            a.create_code(&[7; 32], "alice", MINUTE_MS, 3, false).await,
             Ok(CodeInsert::Created { .. })
         ));
         // An unused code can be withdrawn.
@@ -2531,7 +2769,7 @@ mod tests {
             return;
         };
         let (a, b) = (db.store().await, db.store().await);
-        a.create_code(&[5; 32], "alice", 10 * MINUTE_MS, 5)
+        a.create_code(&[5; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         assert!(matches!(
@@ -2540,7 +2778,7 @@ mod tests {
         ));
         assert_eq!(redeem(&b, [5; 32], 2).await, Redeem::Refused(Refusal::Used));
         // Both instances use the code at the same moment: one wins.
-        a.create_code(&[6; 32], "alice", 10 * MINUTE_MS, 5)
+        a.create_code(&[6; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         let (first, second) = tokio::join!(redeem(&a, [6; 32], 3), redeem(&b, [6; 32], 4));
@@ -2559,15 +2797,15 @@ mod tests {
         };
         let store = db.store().await;
         store
-            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         store
-            .create_code(&[2; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[2; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         store
-            .create_code(&[3; 32], "bob", 10 * MINUTE_MS, 5)
+            .create_code(&[3; 32], "bob", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         let Redeem::Enrolled { device_id: a, .. } = redeem(&store, [1; 32], 1).await else {
@@ -2577,25 +2815,97 @@ mod tests {
             panic!()
         };
         store.subscribe(&a, "infra").await.unwrap();
-        assert_eq!(
-            store.revoke_account("alice").await.unwrap(),
-            vec![a.clone()]
-        );
+        assert_eq!(store.end_account("alice").await.unwrap(), vec![a.clone()]);
         assert!(store.find_device(&a).await.unwrap().unwrap().revoked);
         assert!(!store.find_device(&b).await.unwrap().unwrap().revoked);
         assert_eq!(
             redeem(&store, [2; 32], 3).await,
             Redeem::Refused(Refusal::Unknown)
         );
-        assert!(store.revoke_account("alice").await.unwrap().is_empty());
+        assert!(store.end_account("alice").await.unwrap().is_empty());
         // Retention removes the codes that expired long ago.
         store
-            .create_code(&[4; 32], "bob", MINUTE_MS, 5)
+            .create_code(&[4; 32], "bob", MINUTE_MS, 5, false)
             .await
             .unwrap();
         db.sql("UPDATE enrollment_codes SET expires_at_ms = 1 WHERE login = 'bob' AND used_at_ms IS NULL")
             .await;
         assert_eq!(store.purge(0, 0).await.unwrap().2, 1);
+    }
+
+    /// The audit findings portal/inbox/login-reuse-inherits-login-keyed-data and
+    /// portal/inbox/enrollment-code-outlives-account-delete-race on PostgreSQL: the end of an
+    /// account detaches its rows, and a code of an account of the database needs its row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_the_end_of_an_account_leaves_nothing_to_a_new_account_with_the_login() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        db.sql("CREATE TABLE users (login TEXT NOT NULL UNIQUE); INSERT INTO users (login) VALUES ('erin')")
+            .await;
+        assert!(matches!(
+            store
+                .create_code(&[1; 32], "erin", 10 * MINUTE_MS, 5, true)
+                .await
+                .unwrap(),
+            CodeInsert::Created { .. }
+        ));
+        let Redeem::Enrolled { device_id, .. } = redeem(&store, [1; 32], 1).await else {
+            panic!("enrolled")
+        };
+        store
+            .create_code(&[2; 32], "erin", 10 * MINUTE_MS, 5, true)
+            .await
+            .unwrap();
+        store
+            .insert_alert(&alert_for(Target::User("erin".into()), "to-erin"))
+            .await
+            .unwrap();
+        let mut sent = alert_for(Target::User("erin".into()), "k1");
+        sent.source = super::super::db::admin_source("erin");
+        store.insert_alert(&sent).await.unwrap();
+        store.notify_set_level("erin", Level::Off).await.unwrap();
+
+        // The portal deletes the row, then ends the inbox state of the account.
+        db.sql("DELETE FROM users WHERE login = 'erin'").await;
+        assert_eq!(
+            store
+                .create_code(&[3; 32], "erin", 10 * MINUTE_MS, 5, true)
+                .await
+                .unwrap(),
+            CodeInsert::NoAccount
+        );
+        assert_eq!(
+            store.end_account("erin").await.unwrap(),
+            vec![device_id.clone()]
+        );
+        assert_eq!(
+            redeem(&store, [2; 32], 2).await,
+            Redeem::Refused(Refusal::Unknown)
+        );
+        let old = store.find_device(&device_id).await.unwrap().unwrap();
+        assert!(old.revoked && old.user_name.starts_with("erin:ended:"));
+        let scope = Scope {
+            groups: Some(Vec::new()),
+            login: "erin".into(),
+        };
+        let ask = Ask {
+            since_ms: 0,
+            limit: 10,
+            skip_if_off: false,
+        };
+        let view = store.notify_view(&scope, &ask).await.unwrap();
+        assert!(view.items.is_empty(), "{view:?}");
+        assert_eq!(view.prefs.level, Level::All);
+        // A new account erin can use the key of the old one again.
+        let mut again = alert_for(Target::User("bob".into()), "k1");
+        again.source = super::super::db::admin_source("erin");
+        assert!(matches!(
+            store.insert_alert(&again).await.unwrap(),
+            InsertOutcome::NoPhone
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2658,7 +2968,7 @@ mod tests {
         let store = db.store().await;
         for (n, login) in [(1u8, "alice"), (2, "alice"), (3, "alice"), (4, "bob")] {
             store
-                .create_code(&[n; 32], login, 10 * MINUTE_MS, 5)
+                .create_code(&[n; 32], login, 10 * MINUTE_MS, 5, false)
                 .await
                 .unwrap();
         }
@@ -2724,7 +3034,7 @@ mod tests {
         };
         let store = db.store().await;
         store
-            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5)
+            .create_code(&[1; 32], "alice", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         let Redeem::Enrolled { device_id, .. } = redeem(&store, [1; 32], 1).await else {
@@ -2743,7 +3053,7 @@ mod tests {
         assert!(store.recent_alerts(10, 0, 0).await.unwrap().is_empty());
         // The same key for a group and for an account with the same id are two alerts.
         store
-            .create_code(&[2; 32], "infra", 10 * MINUTE_MS, 5)
+            .create_code(&[2; 32], "infra", 10 * MINUTE_MS, 5, false)
             .await
             .unwrap();
         redeem(&store, [2; 32], 2).await;
@@ -2776,9 +3086,13 @@ mod tests {
             let (lite, closed) = super::super::db::Db::open(&path).unwrap();
             lite.call(|c| {
                 let now = now_ms();
-                super::super::db::insert_code(c, &[1; 32], "alice", now, 10 * MINUTE_MS, 5)?;
-                super::super::db::insert_code(c, &[2; 32], "alice", now, 10 * MINUTE_MS, 5)?;
-                super::super::db::redeem_code(c, &[1; 32], now, 10, "phone", &[7; 32], "ip")?;
+                super::super::db::insert_code(c, &[1; 32], "alice", now, 10 * MINUTE_MS, 5, false)?;
+                super::super::db::insert_code(c, &[2; 32], "alice", now, 10 * MINUTE_MS, 5, false)?;
+                let limits = DeviceLimits {
+                    max_devices: 10,
+                    max_per_account: 10,
+                };
+                super::super::db::redeem_code(c, &[1; 32], now, limits, "phone", &[7; 32], "ip")?;
                 super::super::db::insert_alert(
                     c,
                     &NewAlert {
@@ -2970,5 +3284,120 @@ mod tests {
         // The marker that one instance moves is the marker that the other reads.
         a.notify_mark_read(&s).await.unwrap();
         assert_eq!(b.notify_view(&s, &ASK).await.unwrap().unread, 0);
+    }
+
+    /// A spooled alert that the database refuses does not hold back the replay. The key with U+0000
+    /// is the case of the audit: PostgreSQL refuses it, and no producer path gives it now.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_spooled_alert_that_the_database_refuses_does_not_hold_back_the_others() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        for (key, title) in [
+            ("before", "before the poison"),
+            ("fp\u{0}nul", "poison"),
+            ("after", "after the poison"),
+        ] {
+            let accepted = store.spool().accept(
+                super::super::spool::alert_id("webhook:mallory", key),
+                Kind::Alert,
+                Target::Group("infra".into()),
+                title.into(),
+                "webhook:mallory".into(),
+                key.into(),
+                now_ms(),
+                Vec::new(),
+            );
+            assert!(matches!(
+                accepted,
+                super::super::spool::Accepted::Created(_)
+            ));
+        }
+        let done = store.replay().await.unwrap();
+        assert_eq!((done.written, done.refused), (2, 1));
+        let mut titles: Vec<String> = store
+            .recent_alerts(10, 0, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.title)
+            .collect();
+        titles.sort();
+        assert_eq!(titles, ["after the poison", "before the poison"]);
+        // The refused alert stays until it expires: a refusal that does not last ends at a
+        // later tick.
+        assert_eq!(store.spool().len(), 1);
+        let again = store.replay().await.unwrap();
+        assert_eq!((again.written, again.refused), (0, 1));
+    }
+
+    /// A webhook alert is named by its key: a later summary of the same alert is a repeat, in the
+    /// table and in the replay of the spool. The alerts of the other sources keep the conflict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_a_new_title_of_the_same_webhook_alert_is_a_repeat() {
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let alert = |source: &str, title: &str| NewAlert {
+            kind: Kind::Alert,
+            target: Target::Group("infra".into()),
+            title: title.into(),
+            source: source.into(),
+            idempotency_key: "k".into(),
+        };
+        let InsertOutcome::Created { alert_id, .. } = store
+            .insert_alert(&alert("webhook:ci", "load 0.91"))
+            .await
+            .unwrap()
+        else {
+            panic!("created")
+        };
+        let InsertOutcome::Duplicate {
+            alert_id: again, ..
+        } = store
+            .insert_alert(&alert("webhook:ci", "load 0.97"))
+            .await
+            .unwrap()
+        else {
+            panic!("a new summary of the same alert is a repeat")
+        };
+        assert_eq!(again, alert_id);
+        store
+            .insert_alert(&alert("producer:ci", "first"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .insert_alert(&alert("producer:ci", "second"))
+                .await
+                .unwrap(),
+            InsertOutcome::Conflict
+        ));
+        // A spooled copy with a new summary merges into the stored alert.
+        store.spool().accept(
+            super::super::spool::alert_id("webhook:ci", "k"),
+            Kind::Alert,
+            Target::Group("infra".into()),
+            "load 0.99".into(),
+            "webhook:ci".into(),
+            "k".into(),
+            now_ms(),
+            Vec::new(),
+        );
+        let done = store.replay().await.unwrap();
+        assert_eq!((done.written, done.refused), (1, 0));
+        let titles: Vec<String> = store
+            .recent_alerts(10, 0, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.source == "webhook:ci")
+            .map(|a| a.title)
+            .collect();
+        assert_eq!(titles, ["load 0.91"], "the first title stays");
     }
 }

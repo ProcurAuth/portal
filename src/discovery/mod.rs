@@ -16,6 +16,12 @@
 //! A source that fails keeps its last good answer. It adds a problem message to the snapshot.
 //! A flaky API does not blank the page.
 //!
+//! A source that answers can still miss a workload that Traefik routes: a container that
+//! restarts, or that Compose recreates, is absent from the list for a moment. The path of such a
+//! workload keeps its last owner in the gate for [`KEEP_OWNER_ROUNDS`] refreshes ([`RecentOwners`]).
+//! The gate thus never opens it to each signed-in user. A workload that no listing named yet has
+//! no owner until the first refresh that lists it.
+//!
 //! The interface is [`run`] (the refresh loop) and [`Stats`] (for `/metrics`). The loop publishes
 //! through a callback. Nothing in this module knows about the HTTP server.
 
@@ -32,7 +38,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::catalog::{closed_prefix, parse_labels, Catalog, Health, RuntimeHealth, Service};
+use crate::catalog::{
+    closed_prefix, parse_labels, Catalog, GateEntry, Health, RuntimeHealth, Service,
+};
 use crate::config::DiscoveryConfig;
 
 use docker::Docker;
@@ -40,6 +48,43 @@ use kube::{Kube, PodSet};
 
 /// The most HTTP probes of services at the same time (portal 7.3c).
 const MAX_CONCURRENT_CHECKS: usize = 64;
+
+/// The number of refreshes that a gate prefix keeps its last owner after the last snapshot that
+/// holds it: 5 minutes at the default `discovery.interval`.
+const KEEP_OWNER_ROUNDS: u32 = 20;
+
+/// The owners of the gate prefixes of recent snapshots. A prefix that a snapshot does not hold
+/// keeps the owner of the last snapshot that held it, for [`KEEP_OWNER_ROUNDS`] snapshots. Only
+/// the users that may open that service, and the superadmin, pass its path in this time. A closed
+/// prefix stays closed in the same way.
+#[derive(Default)]
+struct RecentOwners {
+    /// The last entry of each prefix, and the number of snapshots since the last one that held it.
+    entries: std::collections::HashMap<Vec<String>, (GateEntry, u32)>,
+}
+
+impl RecentOwners {
+    /// Records the gate of `catalog`, then gives it the recent owners of the prefixes that it
+    /// does not hold.
+    fn apply(&mut self, catalog: &mut Catalog) {
+        for (_, missed) in self.entries.values_mut() {
+            *missed += 1;
+        }
+        for entry in catalog.gate() {
+            self.entries
+                .insert(entry.prefix.clone(), (entry.clone(), 0));
+        }
+        self.entries
+            .retain(|_, (_, missed)| *missed <= KEEP_OWNER_ROUNDS);
+        let kept = self
+            .entries
+            .values()
+            .filter(|(_, missed)| *missed > 0)
+            .map(|(entry, _)| entry.clone())
+            .collect();
+        catalog.keep_owners(kept);
+    }
+}
 
 /// The data that a source reports about one workload. It contains the labels and, when the source knows them, how to check whether the workload runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +286,7 @@ pub async fn run(
     let mut last_kube: Vec<Workload> = Vec::new();
     let mut last_docker: Vec<Workload> = Vec::new();
     let mut pods: Option<PodSet> = None;
+    let mut recent = RecentOwners::default();
     loop {
         let mut problems = setup_problems.clone();
         let mut healthy = setup_problems.is_empty();
@@ -291,6 +337,7 @@ pub async fn run(
             Ordering::Relaxed,
         );
         let mut catalog = build_catalog(workloads, problems, pods.as_ref(), client.as_ref()).await;
+        recent.apply(&mut catalog);
         catalog.set_complete(is_complete(
             source_setup_failed,
             answered_kube,
@@ -328,7 +375,10 @@ async fn build_catalog(
                 service.runtime = workload.runtime;
                 entries.push((service, workload.hint));
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // The workload is not listed, but Traefik still routes it. Its path stays closed.
+                closed.extend(closed_prefix(&workload.labels));
+            }
             Err(problem) => {
                 // The workload is not listed, but Traefik still routes it. Its path stays closed.
                 closed.extend(closed_prefix(&workload.labels));
@@ -397,9 +447,11 @@ fn embedded_roots() -> Vec<reqwest::Certificate> {
         .collect()
 }
 
-/// The HTTP client of the probes. The other readers of the services also use it (the access actions).
+/// The HTTP client of the readers of the services: the actions documents and the options. It
+/// verifies the TLS certificate and the host name of the service. Only the health probes use a
+/// client without this check ([`probe::build_client`]).
 pub fn http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    probe::build_client(timeout)
+    probe::build_verified_client(timeout)
 }
 
 /// Reads a response body. It fails when the body exceeds `limit` bytes.
@@ -657,6 +709,174 @@ mod tests {
         );
     }
 
+    /// A workload that does not ask for a listing, but that gives a local `href`, keeps this path
+    /// closed: Traefik still routes it. A path that no workload declares stays open.
+    #[test]
+    fn a_workload_that_is_not_listed_keeps_its_href_closed() {
+        let catalog = runtime().block_on(build_catalog(
+            vec![
+                workload(
+                    "grafana",
+                    &[
+                        ("portal.enabled", "false"),
+                        ("portal.name", "Grafana"),
+                        ("portal.href", "/grafana/"),
+                    ],
+                    Hint::Running(true),
+                ),
+                workload(
+                    "apps/registry",
+                    &[
+                        ("gethomepage.dev/name", "Registry"),
+                        ("gethomepage.dev/href", "/registry/"),
+                    ],
+                    Hint::None,
+                ),
+                workload(
+                    "apps/wiki",
+                    &[
+                        ("gethomepage.dev/enabled", "false"),
+                        ("gethomepage.dev/name", "Wiki"),
+                        ("gethomepage.dev/href", "/wiki/"),
+                    ],
+                    Hint::None,
+                ),
+                workload(
+                    "hp",
+                    &[("homepage.group", "Tools"), ("homepage.href", "/hp/")],
+                    Hint::Running(true),
+                ),
+                workload(
+                    "notes",
+                    &[
+                        ("portal.id", "notes"),
+                        ("portal.name", "Notes"),
+                        ("portal.href", "/notes/"),
+                    ],
+                    Hint::Running(true),
+                ),
+            ],
+            Vec::new(),
+            None,
+            None,
+        ));
+        assert_eq!(catalog.service_count(), 1);
+        assert!(catalog.problems().is_empty(), "{:?}", catalog.problems());
+        let none: Vec<crate::grants::Grant> = Vec::new();
+        let notes = vec![crate::grants::Grant::new(crate::grants::ACCESS, "notes").unwrap()];
+        for uri in [
+            "/grafana/api/admin/users",
+            "/registry/v2/_catalog",
+            "/wiki/edit",
+            "/hp/x",
+        ] {
+            for grants in [&none, &notes] {
+                assert_eq!(
+                    crate::access::decide(&catalog, Some(grants), uri),
+                    crate::access::Decision::Deny,
+                    "{uri}"
+                );
+            }
+            assert_eq!(
+                crate::access::decide(&catalog, None, uri),
+                crate::access::Decision::Allow { service: None },
+                "the superadmin passes {uri}"
+            );
+        }
+        assert_eq!(
+            crate::access::decide(&catalog, Some(&none), "/undeclared/x"),
+            crate::access::Decision::Allow { service: None }
+        );
+        assert!(matches!(
+            crate::access::decide(&catalog, Some(&notes), "/notes/x"),
+            crate::access::Decision::Allow { service: Some(_) }
+        ));
+    }
+
+    /// The audit lead portal/catalog/snapshot-gap-leaves-rerouted-href-unowned: a listing that
+    /// answers but misses a routed workload (a restart, a recreate) does not open its path to
+    /// each signed-in user. The path keeps its last owner for `KEEP_OWNER_ROUNDS` refreshes. A
+    /// closed path stays closed in the same way. After this time, the path has no owner.
+    #[test]
+    fn a_listing_that_misses_a_workload_keeps_its_last_owner_for_a_while() {
+        use crate::access::{decide, Decision};
+        use crate::grants::{Grant, ACCESS};
+        fn round(recent: &mut RecentOwners, workloads: Vec<Workload>) -> Catalog {
+            let mut catalog = runtime().block_on(build_catalog(workloads, Vec::new(), None, None));
+            recent.apply(&mut catalog);
+            catalog
+        }
+        let service = |id: &str, name: &str| {
+            let href = format!("/{id}/");
+            workload(
+                id,
+                &[
+                    ("portal.id", id),
+                    ("portal.name", name),
+                    ("portal.href", href.as_str()),
+                ],
+                Hint::Running(true),
+            )
+        };
+        let hidden = || {
+            workload(
+                "hidden",
+                &[
+                    ("portal.enabled", "false"),
+                    ("portal.name", "Hidden"),
+                    ("portal.href", "/hidden/"),
+                ],
+                Hint::Running(true),
+            )
+        };
+        let none: Vec<Grant> = Vec::new();
+        let files = vec![Grant::new(ACCESS, "files").unwrap()];
+        let owned_by_files = Decision::Allow {
+            service: Some("files".to_string()),
+        };
+        let mut recent = RecentOwners::default();
+        let listed = round(
+            &mut recent,
+            vec![service("files", "Files"), service("wiki", "Wiki"), hidden()],
+        );
+        assert_eq!(decide(&listed, Some(&none), "/files/x"), Decision::Deny);
+        for gap in 1..=KEEP_OWNER_ROUNDS {
+            let catalog = round(&mut recent, vec![service("wiki", "Wiki")]);
+            assert_eq!(catalog.service_count(), 1, "the launcher does not show it");
+            for uri in ["/files/x", "/files/api/admin", "/hidden/x"] {
+                assert_eq!(
+                    decide(&catalog, Some(&none), uri),
+                    Decision::Deny,
+                    "{uri} in the gap {gap}"
+                );
+            }
+            assert_eq!(decide(&catalog, Some(&files), "/files/x"), owned_by_files);
+            assert_eq!(decide(&catalog, None, "/files/x"), owned_by_files);
+        }
+        // The workload runs again: the new listing owns the path.
+        let back = round(
+            &mut recent,
+            vec![service("files", "Files"), service("wiki", "Wiki")],
+        );
+        assert_eq!(decide(&back, Some(&none), "/files/x"), Decision::Deny);
+        assert_eq!(decide(&back, Some(&files), "/files/x"), owned_by_files);
+        // A workload that stays away loses its owner after the bound.
+        for _ in 0..KEEP_OWNER_ROUNDS {
+            let catalog = round(&mut recent, vec![service("wiki", "Wiki")]);
+            assert_eq!(decide(&catalog, Some(&none), "/files/x"), Decision::Deny);
+        }
+        let gone = round(&mut recent, vec![service("wiki", "Wiki")]);
+        assert_eq!(
+            decide(&gone, Some(&none), "/files/x"),
+            Decision::Allow { service: None }
+        );
+        assert_eq!(
+            decide(&gone, Some(&none), "/hidden/x"),
+            Decision::Allow { service: None }
+        );
+        assert_eq!(decide(&gone, Some(&none), "/wiki/x"), Decision::Deny);
+    }
+
     /// The completeness of the snapshot: each configured source must have answered once.
     #[test]
     fn the_snapshot_is_complete_only_when_every_source_answered() {
@@ -682,6 +902,107 @@ mod tests {
     #[test]
     fn embedded_roots_are_usable() {
         assert!(embedded_roots().len() > 50);
+    }
+
+    /// A TLS peer on loopback with a self-signed certificate (`openssl s_server`). The process
+    /// stops when the value goes.
+    struct TlsPeer {
+        child: std::process::Child,
+        dir: std::path::PathBuf,
+        port: u16,
+    }
+
+    impl TlsPeer {
+        fn start() -> Self {
+            use std::process::{Command, Stdio};
+            let dir = std::env::temp_dir().join(format!("portal-tls-peer-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (cert, key) = (dir.join("c.pem"), dir.join("k.pem"));
+            let made = Command::new("openssl")
+                .args(["req", "-x509", "-newkey", "ec", "-pkeyopt"])
+                .args([
+                    "ec_paramgen_curve:prime256v1",
+                    "-nodes",
+                    "-subj",
+                    "/CN=peer.invalid",
+                ])
+                .args(["-days", "1", "-keyout"])
+                .arg(&key)
+                .arg("-out")
+                .arg(&cert)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("the test needs the openssl command");
+            assert!(made.success());
+            let port = crate::util::test_ports::free();
+            let child = Command::new("openssl")
+                .args(["s_server", "-quiet", "-www", "-accept"])
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("-cert")
+                .arg(&cert)
+                .arg("-key")
+                .arg(&key)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("the test needs the openssl command");
+            let peer = Self { child, dir, port };
+            let start = std::time::Instant::now();
+            while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10));
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            peer
+        }
+    }
+
+    impl Drop for TlsPeer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Only the health probe accepts a certificate that it cannot verify. The client of the
+    /// actions documents and of the options (it sends the identity token) refuses the peer.
+    #[test]
+    fn only_the_health_probe_accepts_a_certificate_that_it_cannot_verify() {
+        let runtime = runtime();
+        let peer = {
+            let _context = runtime.enter();
+            TlsPeer::start()
+        };
+        let url = format!("https://127.0.0.1:{}/", peer.port);
+        let timeout = std::time::Duration::from_secs(5);
+        let probe = probe::build_client(timeout).unwrap();
+        let answer = runtime.block_on(async { probe.get(&url).send().await.map(|r| r.status()) });
+        assert_eq!(
+            answer.ok().map(|s| s.as_u16()),
+            Some(200),
+            "the probe reaches the peer"
+        );
+        assert_eq!(runtime.block_on(probe::http(&probe, &url)), Health::Up);
+        let reader = http_client(timeout).unwrap();
+        let refused = runtime.block_on(async { reader.get(&url).send().await });
+        assert!(refused.is_err(), "{refused:?}");
+        let options = crate::options::Options::new(timeout).unwrap();
+        let children = runtime.block_on(options.children(
+            &format!("https://127.0.0.1:{}", peer.port),
+            "x-identity-token",
+            "a token that the peer must not get",
+            &crate::options::Query {
+                service: "db".into(),
+                subject: "root".into(),
+                parent: String::new(),
+                kind: "host".into(),
+                q: String::new(),
+                after: String::new(),
+            },
+        ));
+        assert!(children.is_err(), "{children:?}");
     }
 
     #[test]

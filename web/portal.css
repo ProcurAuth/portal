@@ -249,26 +249,100 @@ a {
   background: var(--accent-fill-hover);
 }
 
-.themeSwitch {
+/* Theme selector, as in ClickHouse Dash: one icon button, and a list under it with the two other modes. The script
+   sets aria-expanded, aria-selected and the attribute hidden. No rule here depends on the structure. */
+
+.themeSelect {
   display: none;
-  padding: 2px;
-  gap: 2px;
-  border: 1px solid var(--border);
+  position: relative;
+}
+
+.js .themeSelect {
+  display: inline-block;
+}
+
+.themeSelect__button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-control);
   background: var(--raised);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-radius 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
 }
 
-.js .themeSwitch {
-  display: inline-flex;
+.themeSelect__button:hover,
+.themeSelect__button:focus-visible {
+  color: var(--text);
 }
 
-.themeSwitch button {
+.themeSelect__button[aria-expanded="true"] {
+  position: relative;
+  z-index: 2;
+  border-bottom-color: transparent;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.themeNow {
+  display: none;
+}
+
+html:not([data-theme-mode="dark"], [data-theme-mode="light"]) .themeNow--system,
+html[data-theme-mode="dark"] .themeNow--dark,
+html[data-theme-mode="light"] .themeNow--light {
+  display: block;
+}
+
+.themeSelect__menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  box-sizing: border-box;
+  width: 34px;
+  margin-top: -1px;
+  padding: 4px 2px;
+  border: 1px solid var(--border-strong);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-control) var(--radius-control);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  transform-origin: top;
+  animation: themeMenuIn 0.16s var(--ease);
+}
+
+.themeSelect__menu[hidden] {
+  display: none;
+}
+
+@keyframes themeMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.98);
+  }
+}
+
+.themeSelect__option[hidden] {
+  display: none;
+}
+
+.themeSelect__option {
   display: grid;
   place-items: center;
   width: 30px;
-  height: 28px;
+  height: 30px;
   padding: 0;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
@@ -276,14 +350,16 @@ a {
   transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
 }
 
-.themeSwitch button:hover {
+.themeSelect__option:hover,
+.themeSelect__option:focus-visible {
+  background: var(--accent-tint);
   color: var(--text);
 }
 
-.themeSwitch button[aria-pressed="true"] {
-  background: var(--accent-tint);
-  box-shadow: inset 0 -2px 0 var(--accent-line);
-  color: var(--accent-text);
+@media (prefers-reduced-motion: reduce) {
+  .themeSelect__menu {
+    animation: none;
+  }
 }
 
 /* Launcher: one full-width row per group --------------------------------- */
@@ -723,8 +799,10 @@ a {
   unicode-bidi: isolate;
 }
 
-.signin__host {
+.signin__tag {
+  margin-right: 2px;
   font-weight: 400;
+  opacity: 0.8;
 }
 
 .signin__path {
@@ -1157,9 +1235,18 @@ a {
     height: 44px;
   }
 
-  .themeSwitch button {
+  .themeSelect__button {
     width: 40px;
     height: 40px;
+  }
+
+  .themeSelect__menu {
+    width: 40px;
+  }
+
+  .themeSelect__option {
+    width: 36px;
+    height: 36px;
   }
 
   .card input[type="text"],
@@ -1360,20 +1447,98 @@ a {
   box-shadow: 0 0 0 2px var(--bg);
 }
 
+/* Open: the icon and the panel are one shape. The panel opens at the left side of the icon, with the same top edge.
+   The icon loses its left edge and its left corners, and takes the colour of the panel. The top right corner of the
+   panel is square, so the top edge goes on across the icon. */
+.nbell summary {
+  transition: border-radius 0.2s var(--ease), border-color 0.2s var(--ease), background-color 0.2s var(--ease);
+}
+
 .nbell[open] summary {
+  z-index: 41;
   border-color: var(--border-strong);
+  border-left-color: transparent;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  background: var(--panel);
 }
 
 .nbell__panel {
   position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  top: 0;
+  right: calc(100% - 1px);
   z-index: 40;
   width: min(360px, calc(100vw - 28px));
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-card) 0 var(--radius-card) var(--radius-card);
   background: var(--panel);
   box-shadow: var(--shadow);
+  /* The list hangs from the icon: it opens downward from the top right corner. */
+  transform-origin: 100% 0;
+  transition: opacity 0.18s var(--ease), transform 0.22s var(--ease);
+}
+
+/* Opening: the panel grows out of the icon, to the left and downward, and the rows and the footer follow it. The clip
+   reaches past the edges at the end, so the shadow stays whole. A browser without this motion shows the panel at once. */
+.nbell[open] .nbell__panel {
+  animation: bellUnfold 0.42s var(--ease) backwards;
+}
+
+.nbell[open] .nbell__head {
+  animation: bellFade 0.3s 0.06s var(--ease) backwards;
+}
+
+.nbell[open] .nrow {
+  animation: bellRow 0.38s 0.1s var(--ease) backwards;
+}
+
+.nbell[open] .nbell__empty,
+.nbell[open] .nbell__foot {
+  animation: bellFade 0.3s 0.16s var(--ease) backwards;
+}
+
+@keyframes bellUnfold {
+  from {
+    opacity: 0;
+    transform: translateX(16px) scale(0.94);
+    clip-path: inset(0 0 100% 100% round var(--radius-card) 0 var(--radius-card) var(--radius-card));
+  }
+
+  45% {
+    opacity: 1;
+  }
+
+  to {
+    transform: none;
+    clip-path: inset(-24px -24px -48px -24px round var(--radius-card) 0 var(--radius-card) var(--radius-card));
+  }
+}
+
+@keyframes bellRow {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+
+@keyframes bellFade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Closing, in a browser that keeps the closed content for the motion (`::details-content`): the panel
+   folds back toward the icon. */
+@supports selector(::details-content) {
+  .nbell::details-content {
+    transition: content-visibility 0.22s allow-discrete;
+  }
+
+  .nbell:not([open]) .nbell__panel {
+    opacity: 0;
+    transform: translateX(12px) scale(0.96);
+    pointer-events: none;
+  }
 }
 
 .nbell__head,
@@ -1684,8 +1849,18 @@ a.nrow__in:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .toast {
+  .toast,
+  .nbell[open] .nbell__panel,
+  .nbell[open] .nbell__head,
+  .nbell[open] .nrow,
+  .nbell[open] .nbell__empty,
+  .nbell[open] .nbell__foot {
     animation: none;
+  }
+
+  .nbell__panel,
+  .nbell::details-content {
+    transition: none;
   }
 }
 
@@ -1700,6 +1875,13 @@ a.nrow__in:hover {
     right: 14px;
     left: 14px;
     width: auto;
+    border-radius: var(--radius-card);
+  }
+
+  .nbell[open] summary {
+    border-color: var(--border-strong);
+    border-radius: var(--radius-control);
+    background: var(--raised);
   }
 
   .toasts {

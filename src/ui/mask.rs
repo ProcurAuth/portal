@@ -980,7 +980,6 @@ mod tests {
             rd,
             sig: "s",
             form_token: "t",
-            host: Some("app.example.com"),
             error: Some(crate::ui::signin::INVALID_CREDENTIALS),
             max_password_bytes: 1024,
             keep_for: Some("30 days"),
@@ -1003,7 +1002,6 @@ mod tests {
         crate::ui::signin::code_page(&crate::ui::signin::Code {
             hidden: r#"<input type="hidden" name="csrf" value="c"><input type="hidden" name="pending" value="p">"#,
             rd: "/x",
-            host: Some("app.example.com"),
             error: Some("Invalid code"),
             invalid: "Invalid code",
             action: "/auth/login/code",
@@ -1313,7 +1311,7 @@ mod tests {
             assert!(!page.contains(&assets().js_path), "{name}");
             for word in [
                 "authShell",
-                "themeSwitch",
+                "themeSelect",
                 "button--primary",
                 "appHeader",
                 "tile__",

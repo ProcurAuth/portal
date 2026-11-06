@@ -2673,7 +2673,7 @@ mod tests {
         let mut view = full_view(&rights, &query, &groups);
         view.code = Some(CodeData {
             code: "portal-inbox://enroll?s=h%3A1&k=a&c=b",
-            fingerprint: "0a1b2c3d",
+            fingerprint: "0a1b 2c3d 4e5f 6a7b 8c9d",
             expires_at_ms: NOW,
         });
         let html = page(&view);
@@ -2684,7 +2684,7 @@ mod tests {
         );
         assert!(html.contains(r#"href="portal-inbox://enroll?s=h%3A1&amp;k=a&amp;c=b""#));
         assert!(html.contains(r#"data-copy="enroll-code""#));
-        assert!(html.contains("<code>0a1b2c3d</code>"));
+        assert!(html.contains("<code>0a1b 2c3d 4e5f 6a7b 8c9d</code>"));
         assert!(html
             .contains(r#"<a class="button" href="/auth/settings/inbox" data-code-done>Done</a>"#));
         assert!(html.contains("2023-11-14"));

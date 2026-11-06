@@ -23,7 +23,8 @@ const DEFAULT_GROUP: &str = "Other";
 ///
 /// `Ok(None)` means that the workload does not ask to be listed. `Err` means that the workload
 /// asks to be listed but declares something unusable. The catalogue reports the error and does
-/// not list the workload. The gate keeps the path of its `href` closed (see [`closed_prefix`]).
+/// not list the workload. In both cases, the gate keeps the path of its `href` closed (see
+/// [`closed_prefix`]).
 pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<Service>, String> {
     if !is_listed(labels) {
         return Ok(None);
@@ -113,8 +114,10 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
     }))
 }
 
-/// The path prefix that stays closed for a workload whose labels are unusable. The prefix comes
-/// from the `href` as written. The result is `None` when the labels give no local `href`.
+/// The path prefix that stays closed for a workload that is not listed: its labels are unusable,
+/// or they do not ask for a listing (`portal.enabled=false`, Homepage labels without a name or
+/// without `enabled`). The prefix comes from the `href` as the gate reads it. The result is
+/// `None` when the labels give no local `href`.
 ///
 /// Traefik still routes the workload. If the gate forgot the prefix, a path of the workload
 /// would have no owner, and each signed-in user could open it.
@@ -175,12 +178,16 @@ fn text(raw: &str) -> Result<String, &'static str> {
 }
 
 /// A path (`/grafana/`) or an http(s) URL. The parser refuses anything else (`javascript:`, `//host`).
-/// The value ends up in an `href`.
+/// The value ends up in an `href`. The gate must read a path in one way only: the parser refuses
+/// a broken percent escape, and an escape that decodes to a separator or a control character.
 fn is_safe_href(value: &str) -> bool {
     if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return false;
     }
-    (value.starts_with('/') && !value.starts_with("//")) || is_http_url(value)
+    if value.starts_with('/') && !value.starts_with("//") {
+        return crate::access::local_href_is_readable(value);
+    }
+    is_http_url(value)
 }
 
 fn is_http_url(value: &str) -> bool {
@@ -405,10 +412,23 @@ mod tests {
             "data:text/html,x",
             "http://",
             "/o\u{7}k",
+            // The gate cannot read these paths in one way.
+            "/a%zz/",
+            "/a%2Fb/",
+            "/a%5Cb/",
+            "/a%00b/",
+            "/%FF/",
         ] {
             let result = parse("x", &labels(&[("portal.name", "X"), ("portal.href", href)]));
             assert!(result.is_err(), "{href:?} must be refused");
         }
+        let escaped = parse(
+            "x",
+            &labels(&[("portal.name", "X"), ("portal.href", "/my%20app/")]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(escaped.href, "/my%20app/", "the link keeps the escape");
         assert!(
             parse("x", &labels(&[("portal.name", "X")])).is_err(),
             "href is required"

@@ -1,7 +1,9 @@
-//! The limiter of the authentication attempts of a client address.
+//! The limiter of the failed attempts of a client address.
 //!
-//! The limiter records a password attempt when it starts. OPAQUE detects a wrong password on the
-//! client, so the server never sees the failure. A success clears the record.
+//! The limiter records an enrollment attempt when it starts, and a successful enrollment clears the
+//! record. It also records a session handshake that proves no enrolled phone. It never refuses a
+//! phone that proves its key: the failures of one client must not lock out the other phones of the
+//! same address.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;

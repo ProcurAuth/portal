@@ -98,7 +98,7 @@ impl Sqlite {
         let changed = self
             .conn()
             .execute(
-                "UPDATE totp_credentials SET last_step = ?2, failed = 0, failed_since = 0
+                "UPDATE totp_credentials SET last_step = ?2, failed = 0, failed_since = 0, locked_until = 0
                   WHERE login = ?1 AND last_step < ?2",
                 params![login, step],
             )
@@ -117,7 +117,7 @@ impl Sqlite {
             .map_err(db)?;
         if used == 1 {
             tx.execute(
-                "UPDATE totp_credentials SET failed = 0, failed_since = 0 WHERE login = ?1",
+                "UPDATE totp_credentials SET failed = 0, failed_since = 0, locked_until = 0 WHERE login = ?1",
                 [login],
             )
             .map_err(db)?;
@@ -175,33 +175,39 @@ impl Sqlite {
         Ok(removed)
     }
 
-    pub fn totp_fail(
+    pub fn totp_begin_attempt(
         &self,
         login: &str,
         now: i64,
         limits: TotpLimits,
-    ) -> Result<Option<i64>, String> {
+    ) -> Result<Attempt, String> {
         let mut conn = self.conn();
+        // A write transaction from the start: two attempts never read the same count.
         let tx = begin_write(&mut conn).map_err(db)?;
-        let row: Option<(i64, i64)> = tx
+        let row: Option<(i64, i64, i64)> = tx
             .query_row(
-                "SELECT failed, failed_since FROM totp_credentials WHERE login = ?1",
+                "SELECT failed, failed_since, locked_until FROM totp_credentials WHERE login = ?1",
                 [login],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(db)?;
-        let Some((failed, since)) = row else {
-            return Ok(None);
+        let Some((failed, since, locked_until)) = row else {
+            return Ok(Attempt::NotEnrolled);
         };
-        let (failed, since, locked_until) = limits.after_failure(failed, since, now);
+        if locked_until > now {
+            return Ok(Attempt::Locked {
+                until: locked_until,
+            });
+        }
+        let (failed, since, lock) = limits.after_failure(failed, since, now);
         tx.execute(
             "UPDATE totp_credentials SET failed = ?2, failed_since = ?3,
                     locked_until = MAX(locked_until, ?4) WHERE login = ?1",
-            params![login, failed, since, locked_until.unwrap_or(0)],
+            params![login, failed, since, lock.unwrap_or(0)],
         )
         .map_err(db)?;
         tx.commit().map_err(db)?;
-        Ok(locked_until)
+        Ok(Attempt::Counted { locked_until: lock })
     }
 }

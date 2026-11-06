@@ -12,9 +12,16 @@
 //! - `claim-<epoch>`: a file that an instance creates to take an epoch. Two standby instances
 //!   cannot both take the same epoch.
 //!
-//! A new owner takes the epoch after the last one. It restores the newest snapshot that passes
-//! a consistency check. It writes only `snapshot-<its epoch>.db`. A stale instance can only write
-//! a file that nobody reads.
+//! The snapshot holds the whole database, so every file of the directory has the mode 0600 of the
+//! primary file, whatever the umask of the process. A directory that the inbox creates has the
+//! mode 0700. A directory that exists keeps its mode: the operator owns it.
+//!
+//! A new owner takes the epoch after the last one. It writes its epoch into the database (the
+//! table `inbox_replica_epoch`) before its first snapshot. It restores the newest snapshot that
+//! passes a consistency check, unless its local database belongs to the epoch of that snapshot:
+//! that file is the live database of the owner that wrote the snapshot, so it holds every write of
+//! the snapshot and the writes after it. It writes only `snapshot-<its epoch>.db`. A stale instance
+//! can only write a file that nobody reads.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -78,10 +85,29 @@ fn read_lease(dir: &Path) -> Result<Option<LeaseRecord>, String> {
     }
 }
 
+/// Gives `path` the mode 0600: only the user of the process reads and writes it.
+fn owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Opens `path` with `options` and the mode 0600. The mode is set again after the open, because the
+/// umask can remove bits and a file that exists keeps its mode.
+fn open_owner_only(path: &Path, options: &mut OpenOptions) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = options.mode(0o600).open(path)?;
+    owner_only(path)?;
+    Ok(file)
+}
+
 fn write_lease(dir: &Path, record: &LeaseRecord) -> Result<(), String> {
     let tmp = dir.join(format!(".{LEASE_FILE}.{}.tmp", record.owner));
     let bytes = serde_json::to_vec(record).map_err(|e| e.to_string())?;
-    let mut file = File::create(&tmp).map_err(|e| format!("cannot write {LEASE_FILE}: {e}"))?;
+    let mut file = open_owner_only(
+        &tmp,
+        OpenOptions::new().write(true).create(true).truncate(true),
+    )
+    .map_err(|e| format!("cannot write {LEASE_FILE}: {e}"))?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("cannot write {LEASE_FILE}: {e}"))?;
@@ -149,11 +175,10 @@ fn highest_epoch(dir: &Path) -> Result<u64, String> {
 
 /// Creates `claim-<epoch>` exclusively: false when another instance already took that epoch.
 fn claim(dir: &Path, epoch: u64, owner: &str) -> Result<bool, String> {
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join(format!("claim-{epoch}")))
-    {
+    match open_owner_only(
+        &dir.join(format!("claim-{epoch}")),
+        OpenOptions::new().write(true).create_new(true),
+    ) {
         Ok(mut file) => {
             let _ = file.write_all(owner.as_bytes());
             let _ = file.sync_all();
@@ -294,6 +319,9 @@ fn take_snapshot(source: &Connection, dir: &Path, epoch: u64, owner: &str) -> Re
     let tmp = dir.join(format!(".snapshot-{epoch}.{owner}.tmp"));
     let _ = fs::remove_file(&tmp);
     let copied = (|| -> Result<(), String> {
+        // SQLite opens an empty file as a new database, and gives its journal the same mode.
+        open_owner_only(&tmp, OpenOptions::new().write(true).create_new(true))
+            .map_err(|e| format!("cannot create the snapshot: {e}"))?;
         let mut destination =
             Connection::open(&tmp).map_err(|e| format!("cannot create the snapshot: {e}"))?;
         Backup::new(source, &mut destination)
@@ -358,16 +386,89 @@ fn verify(copy: &Path) -> Result<(), String> {
     }
 }
 
-/// Replaces the local database by the newest snapshot that passes the consistency check.
-/// Returns its epoch, or `None` when there is no snapshot (first start: the local database is kept).
-fn restore(dir: &Path, local: &Path) -> Result<Option<u64>, String> {
+/// The table of the database that names the epoch of the owner that wrote it last.
+const EPOCH_TABLE: &str = "inbox_replica_epoch";
+
+/// Writes `epoch` into the database: the snapshots of this owner carry it, and so does its local
+/// file. The owner calls it before its first snapshot.
+fn mark_epoch(conn: &Connection, epoch: u64) -> Result<(), String> {
+    let epoch = i64::try_from(epoch).map_err(|_| format!("epoch {epoch} is too large"))?;
+    conn.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE IF NOT EXISTS {EPOCH_TABLE} (epoch INTEGER NOT NULL) STRICT;
+         DELETE FROM {EPOCH_TABLE};
+         INSERT INTO {EPOCH_TABLE} (epoch) VALUES ({epoch});
+         COMMIT;"
+    ))
+    .map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK;");
+        format!("replica: cannot write the epoch into the database: {e}")
+    })
+}
+
+/// The epoch that the local database names, when the file exists, passes the consistency check
+/// and names one.
+fn local_epoch(local: &Path) -> Option<u64> {
+    if !local.exists() {
+        return None;
+    }
+    let conn = Connection::open_with_flags(local, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
+    conn.busy_timeout(Duration::from_secs(5)).ok()?;
+    let verdict: String = conn
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .ok()?;
+    if verdict != "ok" {
+        log::error!(event = "replica_local_rejected", error = %verdict);
+        return None;
+    }
+    let epoch: i64 = conn
+        .query_row(&format!("SELECT MAX(epoch) FROM {EPOCH_TABLE}"), [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .ok()??;
+    u64::try_from(epoch).ok()
+}
+
+/// What [`restore`] did.
+#[derive(Debug, PartialEq, Eq)]
+enum Restored {
+    /// No snapshot exists (first start): the local database is kept.
+    Nothing,
+    /// The local database belongs to the epoch of the newest snapshot: it is newer or the same, and
+    /// it is kept.
+    KeptLocal(u64),
+    /// The snapshot of this epoch took the place of the local database.
+    Snapshot(u64),
+}
+
+impl Restored {
+    fn epoch(&self) -> i64 {
+        match self {
+            Restored::Nothing => -1,
+            Restored::KeptLocal(epoch) | Restored::Snapshot(epoch) => *epoch as i64,
+        }
+    }
+}
+
+/// Replaces the local database by the newest snapshot that passes the consistency check. A local
+/// database of the epoch of the newest snapshot stays: a restart of the same node after a crash
+/// keeps the writes that came after the last snapshot.
+fn restore(dir: &Path, local: &Path) -> Result<Restored, String> {
+    let found = snapshots(dir)?;
+    if let Some((newest, _)) = found.first() {
+        if local_epoch(local) == Some(*newest) {
+            return Ok(Restored::KeptLocal(*newest));
+        }
+    }
     let mut staged = local.as_os_str().to_owned();
     staged.push(".restore");
     let staged = PathBuf::from(staged);
-    for (epoch, path) in snapshots(dir)? {
+    for (epoch, path) in found {
         remove_database_files(&staged);
+        // `fs::copy` gives the copy the mode of the snapshot: the local file is owner-only too.
         let attempt = fs::copy(&path, &staged)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(|_| owner_only(&staged).map_err(|e| format!("cannot restore: {e}")))
             .and_then(|_| verify(&staged));
         match attempt {
             Ok(()) => {
@@ -380,7 +481,7 @@ fn restore(dir: &Path, local: &Path) -> Result<Option<u64>, String> {
                 remove_database_files(local);
                 fs::rename(&staged, local)
                     .map_err(|e| format!("cannot restore the database: {e}"))?;
-                return Ok(Some(epoch));
+                return Ok(Restored::Snapshot(epoch));
             }
             Err(e) => {
                 log::error!(event = "replica_snapshot_rejected", epoch, error = %e);
@@ -391,7 +492,7 @@ fn restore(dir: &Path, local: &Path) -> Result<Option<u64>, String> {
     if !snapshots(dir)?.is_empty() {
         return Err("every snapshot in inbox.replica.dir failed its consistency check".into());
     }
-    Ok(None)
+    Ok(Restored::Nothing)
 }
 
 // ---------------------------------------------------------------- running replication
@@ -474,12 +575,17 @@ pub fn boot(
     local: &Path,
     stop: &dyn Fn() -> bool,
 ) -> Result<Option<Boot>, String> {
-    fs::create_dir_all(&config.dir).map_err(|e| {
-        format!(
-            "inbox.replica.dir: cannot use {}: {e}",
-            config.dir.display()
-        )
-    })?;
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&config.dir)
+        .map_err(|e| {
+            format!(
+                "inbox.replica.dir: cannot use {}: {e}",
+                config.dir.display()
+            )
+        })?;
     let Some(lease) = Lease::acquire(&config.dir, config.lease_ttl, stop)? else {
         return Ok(None);
     };
@@ -487,7 +593,8 @@ pub fn boot(
     log::info!(
         event = "replica_ready",
         epoch = lease.epoch,
-        restored_epoch = restored.map(|e| e as i64).unwrap_or(-1)
+        restored_epoch = restored.epoch(),
+        kept_local = matches!(restored, Restored::KeptLocal(_))
     );
     Ok(Some(Boot {
         config: config.clone(),
@@ -518,6 +625,8 @@ impl Boot {
         source
             .busy_timeout(Duration::from_secs(5))
             .map_err(|e| e.to_string())?;
+        // Before the first snapshot: each snapshot of this epoch names it, and the local file too.
+        mark_epoch(&source, lease.epoch)?;
         stats.epoch.store(lease.epoch, SeqCst);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
@@ -782,7 +891,7 @@ mod tests {
         assert!(local.join("a.db-wal").exists());
         let target = local.join("b.db");
         fs::write(&target, b"stale local database").unwrap();
-        assert_eq!(restore(&shared, &target).unwrap(), Some(3));
+        assert_eq!(restore(&shared, &target).unwrap(), Restored::Snapshot(3));
         assert_eq!(rows(&target), ["one", "two"]);
         assert!(!local.join("b.db.restore").exists());
     }
@@ -792,7 +901,10 @@ mod tests {
         let shared = temp("none");
         let local = temp("keep");
         drop(database(&local.join("a.db"), &["kept"]));
-        assert_eq!(restore(&shared, &local.join("a.db")).unwrap(), None);
+        assert_eq!(
+            restore(&shared, &local.join("a.db")).unwrap(),
+            Restored::Nothing
+        );
         assert_eq!(rows(&local.join("a.db")), ["kept"]);
     }
 
@@ -808,7 +920,10 @@ mod tests {
             *byte = 0xff;
         }
         fs::write(snapshot_path(&shared, 2), bytes).unwrap();
-        assert_eq!(restore(&shared, &local.join("b.db")).unwrap(), Some(1));
+        assert_eq!(
+            restore(&shared, &local.join("b.db")).unwrap(),
+            Restored::Snapshot(1)
+        );
         assert_eq!(rows(&local.join("b.db")), ["good"]);
         // All of them corrupt: refuse to start with an empty database.
         fs::write(
@@ -817,6 +932,50 @@ mod tests {
         )
         .unwrap();
         assert!(restore(&shared, &local.join("c.db")).is_err());
+    }
+
+    /// The audit finding portal/inbox-replica/restore-reverts-unsynced-portal-revocations: a
+    /// restart of the owner of the newest epoch keeps its local file, with the writes that came
+    /// after the last snapshot. A local file of an older epoch, or without an epoch, gives way.
+    #[test]
+    fn the_local_file_of_the_newest_epoch_stays_and_an_older_one_gives_way() {
+        let shared = temp("keep-newest");
+        let local = temp("keep-newest-local");
+        let path = local.join("a.db");
+        let owner = database(&path, &["account"]);
+        mark_epoch(&owner, 3).unwrap();
+        take_snapshot(&owner, &shared, 3, "me").unwrap();
+        // The owner deletes the account after the snapshot, then stops without a final snapshot.
+        owner.execute("DELETE FROM t", []).unwrap();
+        drop(owner);
+        assert_eq!(restore(&shared, &path).unwrap(), Restored::KeptLocal(3));
+        assert!(rows(&path).is_empty(), "the delete stays");
+        // A newer epoch took over: its snapshot wins over the old local file.
+        let other = database(&local.join("b.db"), &["account", "newer"]);
+        mark_epoch(&other, 4).unwrap();
+        take_snapshot(&other, &shared, 4, "other").unwrap();
+        assert_eq!(restore(&shared, &path).unwrap(), Restored::Snapshot(4));
+        assert_eq!(rows(&path), ["account", "newer"]);
+        // A local file without an epoch gives way too.
+        let plain = local.join("c.db");
+        drop(database(&plain, &["stale"]));
+        assert_eq!(restore(&shared, &plain).unwrap(), Restored::Snapshot(4));
+        assert_eq!(rows(&plain), ["account", "newer"]);
+        // A corrupt local file of the newest epoch gives way.
+        let broken = local.join("d.db");
+        {
+            let conn = database(&broken, &["x"]);
+            mark_epoch(&conn, 4).unwrap();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+        }
+        let mut bytes = fs::read(&broken).unwrap();
+        for byte in bytes.iter_mut().skip(100).take(4000) {
+            *byte = 0xff;
+        }
+        fs::write(&broken, bytes).unwrap();
+        assert_eq!(restore(&shared, &broken).unwrap(), Restored::Snapshot(4));
+        assert_eq!(rows(&broken), ["account", "newer"]);
     }
 
     #[test]
@@ -934,6 +1093,54 @@ mod tests {
         drop(writer);
         running.finish();
         assert!(read_lease(&shared).unwrap().unwrap().released);
+    }
+
+    /// The audit lead portal/inbox-replica/snapshot-files-not-owner-only: the copies of the
+    /// database, the lease and the claims have the mode 0600 of the primary file, whatever the
+    /// umask. A directory that boot creates has the mode 0700. A restore gives the local file the
+    /// mode 0600 before the store opens it, also from a snapshot of an earlier version (0644).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_files_of_the_shared_directory_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let base = temp("modes");
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        // Neither the volume nor the directory exists: boot creates both.
+        let shared = base.join("volume").join("replica");
+        let local = temp("modes-local");
+        let path = local.join("inbox.db");
+        let writer = database(&path, &["secret row"]);
+        let config = ReplicaConfig {
+            dir: shared.clone(),
+            snapshot_interval: Duration::from_secs(3600),
+            lease_ttl: Duration::from_secs(5),
+            sync_timeout: Duration::from_secs(5),
+            sync_alerts: true,
+        };
+        let booted = boot(&config, &path, &|| false).unwrap().unwrap();
+        let running = booted
+            .start(&path, Shutdown::new(), Arc::new(Stats::default()))
+            .unwrap();
+        running.replica().sync().await.unwrap();
+        assert_eq!(mode(&base.join("volume")), 0o700);
+        assert_eq!(mode(&shared), 0o700);
+        assert_eq!(mode(&shared.join(LEASE_FILE)), 0o600);
+        assert_eq!(mode(&shared.join("claim-1")), 0o600);
+        assert_eq!(mode(&snapshot_path(&shared, 1)), 0o600);
+        drop(writer);
+        running.finish();
+        assert_eq!(mode(&shared.join(LEASE_FILE)), 0o600);
+        // A directory that exists keeps its mode: the operator owns it.
+        assert_eq!(mode(&base), 0o755);
+
+        // A snapshot of an earlier version, with the default mode: the standby copy is 0600.
+        fs::set_permissions(snapshot_path(&shared, 1), fs::Permissions::from_mode(0o644)).unwrap();
+        let standby = temp("modes-standby").join("inbox.db");
+        let booted = boot(&config, &standby, &|| false).unwrap().unwrap();
+        assert_eq!(mode(&standby), 0o600);
+        assert_eq!(rows(&standby), ["secret row"]);
+        assert_eq!(mode(&shared.join("claim-2")), 0o600);
+        drop(booted);
     }
 
     #[tokio::test]

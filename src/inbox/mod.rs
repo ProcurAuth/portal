@@ -284,21 +284,37 @@ impl Slot {
         }
     }
 
-    /// Makes an enrollment code for `login`. `None` without the block `inbox` or before the start.
+    /// Makes an enrollment code for `login`. `stored`: the account is an account of the database,
+    /// and the code needs its row (see `enrollment::create_code`). `None` without the block `inbox`
+    /// or before the start.
     pub async fn create_enrollment_code(
         &self,
         login: &str,
+        stored: bool,
     ) -> Option<Result<enrollment::NewCode, ApiError>> {
         let app = self.app()?;
-        Some(enrollment::create_code(&app, login).await)
+        Some(enrollment::create_code(&app, login, stored).await)
     }
 
-    /// Deletes the unused enrollment codes of `login` and revokes its devices. Without the block
-    /// `inbox`, there is nothing to do and the result is `Ok`.
-    pub async fn revoke_devices_of(&self, login: &str) -> Result<usize, String> {
+    /// Ends the inbox state of the account `login`: its unused enrollment codes, its devices and
+    /// the rows that name the login (see `enrollment::end_account`). Without the block `inbox`,
+    /// there is nothing to do and the result is `Ok`.
+    pub async fn end_account(&self, login: &str) -> Result<usize, String> {
         match self.app() {
-            Some(app) => enrollment::revoke_devices_of(&app, login).await,
+            Some(app) => enrollment::end_account(&app, login).await,
             None => Ok(0),
+        }
+    }
+
+    /// Waits until the copy of the replica holds every write that the database committed. The
+    /// portal calls it after a change, before the answer: a takeover or a restart must not bring
+    /// back a deleted account, a revoked key or a used recovery code. Without the block
+    /// `inbox.replica`, it returns at once. The inbox logs and counts a failure.
+    pub async fn sync_replica(&self) {
+        let Some(app) = self.app() else { return };
+        if let Err(e) = app.replica.sync().await {
+            app.metrics.replica_sync_failure();
+            log::warn!(event = "replica_sync_failed", error = %e);
         }
     }
 
@@ -409,6 +425,7 @@ impl Slot {
             stop: crate::shutdown::Stop::default(),
             sockets: Default::default(),
             session_budget,
+            handshakes: state::Handshakes::new(config.devices.max_handshakes_per_address),
             authorizer: std::sync::OnceLock::new(),
             server_name,
             config,
@@ -469,7 +486,16 @@ impl Slot {
             // What this instance holds for the database goes there before it stops, if the database is back.
             if pg.spool().has_work() {
                 match pg.guard(pg.replay()).await {
-                    Ok((alerts, _)) => log::info!(event = "spool_replayed", alerts),
+                    Ok(done) => {
+                        log::info!(event = "spool_replayed", alerts = done.written);
+                        if done.refused > 0 {
+                            log::error!(
+                                event = "spool_lost",
+                                alerts = pg.spool().len(),
+                                "the database refused alerts accepted without it: they are lost with this instance unless another instance holds a copy"
+                            );
+                        }
+                    }
                     Err(e) => log::error!(
                         event = "spool_lost",
                         alerts = pg.spool().len(),

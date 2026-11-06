@@ -9,7 +9,7 @@ use std::sync::Weak;
 
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
-use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Subscribable};
+use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Standing, Subscribable};
 use crate::keyauth::{self, Cause};
 use crate::portal_actions as actions;
 
@@ -179,12 +179,17 @@ impl Authorizer for PortalAuthorizer {
         if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
             return Subscribable::Groups(ids.collect());
         }
-        let Some(document) = state.actions.declared(actions::SERVICE) else {
-            return Subscribable::Unknown;
-        };
-        // An account that the directory does not know is not a refusal: it can be new on another
-        // instance.
         let Some((grants, _)) = keyauth::person_grants_on(&state, login, actions::SERVICE) else {
+            // With a shared database, an account that the directory does not know is not a refusal:
+            // it can be new on another instance, or be in the file of another instance (see
+            // `standing_of`).
+            return if state.store.is_shared() {
+                Subscribable::Unknown
+            } else {
+                Subscribable::Absent
+            };
+        };
+        let Some(document) = state.actions.declared(actions::SERVICE) else {
             return Subscribable::Unknown;
         };
         let allowed: BTreeSet<String> =
@@ -194,8 +199,41 @@ impl Authorizer for PortalAuthorizer {
         Subscribable::Groups(allowed)
     }
 
+    fn standing(&self, login: &str) -> Standing {
+        match self.state.upgrade() {
+            Some(state) => standing_of(&state, login),
+            None => Standing::Unknown,
+        }
+    }
+
     fn directory_stamp(&self) -> Option<u64> {
         let state = self.state.upgrade()?;
         directory_fresh(&state).then(|| state.users.generation())
+    }
+}
+
+/// Whether an account has `login`: the superadmin, an account of the file or an account of the
+/// database. With SQLite, this instance holds every account, so a login that it does not know is
+/// absent. With a shared database, the call reads the accounts again first: an account can be new
+/// on another instance. Even then, the file of another instance can hold the login, so the answer
+/// is only "not here".
+fn standing_of(state: &AppState, login: &str) -> Standing {
+    if !directory_fresh(state) {
+        return Standing::Unknown;
+    }
+    if keyauth::person_exists(state, login) {
+        return Standing::Exists;
+    }
+    if !state.store.is_shared() {
+        return Standing::Absent;
+    }
+    let since = crate::users::Directory::clock_millis();
+    if !blocking(|| state.users.refresh_since(&state.store, since)) {
+        return Standing::Unknown;
+    }
+    if keyauth::person_exists(state, login) {
+        Standing::Exists
+    } else {
+        Standing::NotHere
     }
 }

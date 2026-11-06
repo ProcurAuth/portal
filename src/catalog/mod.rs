@@ -103,6 +103,19 @@ pub struct GateEntry {
     pub services: Vec<GateService>,
 }
 
+/// The first segment of the paths of the portal. The router of the portal for `/auth/` wins over
+/// each router of a service, so a text prefix of a service never owns a path below `/auth/`.
+const PORTAL_SEGMENT: &str = "auth";
+
+/// The gate prefixes that have one head (every segment but the last one).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Tails {
+    /// The position in `gate` of each last segment.
+    positions: HashMap<String, usize>,
+    /// The different lengths of the keys of `positions`, in bytes, longest first.
+    lengths: Vec<usize>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Catalog {
     groups: Vec<Group>,
@@ -111,10 +124,11 @@ pub struct Catalog {
     /// Path prefixes of the services with a local `href`, longest first. `/auth/verify` matches
     /// a request against these prefixes.
     gate: Vec<GateEntry>,
-    /// The position in `gate` of each prefix: the search of the owner of a path looks for each
-    /// prefix of the path in this table, longest first. It needs at most one search for each
-    /// segment of the path, at any number of services (portal 8.3a).
-    gate_index: HashMap<Segments, usize>,
+    /// The gate prefixes by their head. The search of the owner of a path looks for each head of
+    /// the path, longest first, then for each length of a last segment under this head. It needs
+    /// at most one search of a head for each segment of the path, at any number of services
+    /// (portal 8.3a).
+    gate_index: HashMap<Segments, Tails>,
     /// True when the snapshot holds every service of every source. The snapshot of the start is
     /// not complete. Discovery sets the value for each round.
     complete: bool,
@@ -203,6 +217,27 @@ impl Catalog {
         self.complete = complete;
     }
 
+    /// The entries of the gate, longest prefix first.
+    pub fn gate(&self) -> &[GateEntry] {
+        &self.gate
+    }
+
+    /// Adds each entry of `earlier` whose prefix the gate of this snapshot does not hold. The
+    /// launcher does not show these services: only the gate keeps their owners. Discovery gives
+    /// the owners of recent snapshots, because a listing can miss a workload that Traefik still
+    /// routes.
+    pub fn keep_owners(&mut self, earlier: Vec<GateEntry>) {
+        let held: std::collections::HashSet<Segments> =
+            self.gate.iter().map(|e| e.prefix.clone()).collect();
+        let before = self.gate.len();
+        self.gate
+            .extend(earlier.into_iter().filter(|e| !held.contains(&e.prefix)));
+        if self.gate.len() != before {
+            sort_gate(&mut self.gate);
+            self.gate_index = index_gate(&self.gate);
+        }
+    }
+
     /// The same catalogue without the services that `keep` refuses. Groups that become empty are
     /// removed. The gate index is not carried over. This catalogue is for display only, and
     /// `/auth/verify` uses the full one. `problems` keeps the discovery problems. They name
@@ -234,11 +269,27 @@ impl Catalog {
         }
     }
 
-    /// The services that own the longest prefix of `segments`, if any.
+    /// The services that own `segments`, if any.
+    ///
+    /// A router rule ``PathPrefix(`/files`)`` is a text prefix: Traefik also routes `/filesX` and
+    /// `/files.json` to that service. The last segment of a gate prefix therefore also owns each
+    /// segment that starts with it. The prefix with the most segments wins, then the longest last
+    /// segment, as Traefik orders its rules by their length. An exact segment is the longest.
     pub fn owner(&self, segments: &[String]) -> Option<&GateEntry> {
         (1..=segments.len())
             .rev()
-            .find_map(|length| self.gate_index.get(&segments[..length]))
+            .find_map(|length| {
+                let tails = self.gate_index.get(&segments[..length - 1])?;
+                let last = segments[length - 1].as_str();
+                // `/auth/...` goes to the portal. Only an exact segment owns it.
+                let exact_only = length == 1 && segments.len() > 1 && last == PORTAL_SEGMENT;
+                tails
+                    .lengths
+                    .iter()
+                    .filter(|n| **n <= last.len() && last.is_char_boundary(**n))
+                    .filter(|n| !exact_only || **n == last.len())
+                    .find_map(|n| tails.positions.get(&last[..*n]))
+            })
             .map(|position| &self.gate[*position])
     }
 
@@ -259,12 +310,23 @@ impl Catalog {
     }
 }
 
-/// The position of each prefix in the gate.
-fn index_gate(gate: &[GateEntry]) -> HashMap<Segments, usize> {
-    gate.iter()
-        .enumerate()
-        .map(|(position, entry)| (entry.prefix.clone(), position))
-        .collect()
+/// The position of each prefix in the gate, by its head and its last segment.
+fn index_gate(gate: &[GateEntry]) -> HashMap<Segments, Tails> {
+    let mut index: HashMap<Segments, Tails> = HashMap::new();
+    for (position, entry) in gate.iter().enumerate() {
+        let Some((last, head)) = entry.prefix.split_last() else {
+            continue;
+        };
+        let tails = index.entry(head.to_vec()).or_default();
+        tails.positions.insert(last.clone(), position);
+        if !tails.lengths.contains(&last.len()) {
+            tails.lengths.push(last.len());
+        }
+    }
+    for tails in index.values_mut() {
+        tails.lengths.sort_unstable_by(|a, b| b.cmp(a));
+    }
+    index
 }
 
 fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
@@ -300,13 +362,18 @@ fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
             });
         }
     }
+    sort_gate(&mut entries);
+    entries
+}
+
+/// The longest prefix first, then the order of the text: the order does not depend on the input.
+fn sort_gate(entries: &mut [GateEntry]) {
     entries.sort_by(|a, b| {
         b.prefix
             .len()
             .cmp(&a.prefix.len())
             .then_with(|| a.prefix.cmp(&b.prefix))
     });
-    entries
 }
 
 #[cfg(test)]
@@ -495,7 +562,17 @@ mod tests {
             Some("infra-admin")
         );
         assert_eq!(owner(&["grafana"]).as_deref(), Some("infra-grafana"));
-        assert_eq!(owner(&["grafana-evil"]), None);
+        // ``PathPrefix(`/grafana`)`` also routes these paths to Grafana (a text prefix).
+        assert_eq!(owner(&["grafana-evil"]).as_deref(), Some("infra-grafana"));
+        assert_eq!(owner(&["grafana.json"]).as_deref(), Some("infra-grafana"));
+        assert_eq!(
+            owner(&["grafana", "administrator"]).as_deref(),
+            Some("infra-admin"),
+            "the longest router prefix wins"
+        );
+        assert_eq!(owner(&["grafan"]), None, "shorter than the prefix");
+        assert_eq!(owner(&["xgrafana"]), None, "a prefix starts the segment");
+        assert_eq!(owner(&["auth", "grafana"]), None, "the pages of the portal");
         assert_eq!(
             owner(&["docs"]),
             None,
@@ -506,6 +583,32 @@ mod tests {
             None,
             "a service at / would own everything: it is not indexed"
         );
+    }
+
+    /// The index finds the longest text prefix of a segment, and it never cuts a character.
+    #[test]
+    fn the_longest_text_prefix_of_a_segment_wins() {
+        let catalog = Catalog::build(
+            vec![
+                bound("F", "/f/"),
+                bound("Files", "/files/"),
+                bound("Filesx", "/filesx/"),
+                bound("Cafe", "/caf%C3%A9/"),
+            ],
+            Vec::new(),
+        );
+        let owner = |path: &[&str]| {
+            catalog
+                .owner(&segments(path))
+                .map(|e| e.services[0].id.clone())
+        };
+        assert_eq!(owner(&["filesxy", "a"]).as_deref(), Some("infra-filesx"));
+        assert_eq!(owner(&["filesy"]).as_deref(), Some("infra-files"));
+        assert_eq!(owner(&["files"]).as_deref(), Some("infra-files"));
+        assert_eq!(owner(&["fz"]).as_deref(), Some("infra-f"));
+        assert_eq!(owner(&["cafés"]).as_deref(), Some("infra-cafe"));
+        assert_eq!(owner(&["cafè"]), None);
+        assert_eq!(owner(&["éa"]), None, "no length cuts the character");
     }
 
     #[test]

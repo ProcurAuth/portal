@@ -115,7 +115,7 @@ The Inbox is a feature of the portal. It has one port and one domain.
 - **Phones** use `inbox.devices.public_address`. Set it to the public base URL of the portal: `https://portal.example.org`. A path prefix is possible (`https://host/prefix`), but the portal has no base path. The proxy must remove the prefix before it sends the request.
 - **Separate exposure** needs no second port. Restrict `/v1/` by source address or by rate with a Traefik middleware on the route `portal-inbox`. Keep the pages on routes with ForwardAuth.
 
-The portal reads the client address from `X-Forwarded-For` for the pages, the senders and the phones. It trusts the header from the networks in `server.trusted_proxies` only. The Inbox has no list of its own. The portal has no TLS code: Traefik terminates TLS. Use an HTTPS `inbox.devices.public_address`.
+The portal reads the client address from `X-Forwarded-For` for the pages, the senders and the phones. It trusts the header from the networks in `server.trusted_proxies` only. The middleware `forward-auth` of the cluster must keep `trustForwardHeader: false`. Set `true` only when each hop in front of Traefik overwrites or removes the `X-Forwarded-Uri` and `X-Forwarded-Method` headers of the client. Otherwise a client chooses the request that `/auth/verify` checks (see `SECURITY.md`). The Inbox has no list of its own. The portal has no TLS code: Traefik terminates TLS. Use an HTTPS `inbox.devices.public_address`.
 
 The page of the Inbox is `/auth/settings/inbox` in the portal. ForwardAuth does not protect it. The portal checks the session itself. The launcher has no tile for the Inbox. The gear of the launcher opens the page.
 

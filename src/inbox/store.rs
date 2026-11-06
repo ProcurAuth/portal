@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::db::{
     self, AckOutcome, AlertDetail, AlertSummary, CodeInsert, ConnectionView, Db, DbError,
-    DeviceKey, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem,
+    DeviceKey, DeviceLimits, DeviceView, InsertOutcome, NewAlert, PendingDelivery, Redeem,
 };
 use super::hub::LiveInfo;
 use super::notify::{Ask, Level, Scope, View};
@@ -71,13 +71,15 @@ impl Store {
     // ------------------------------------------------------------ devices
 
     /// Stores the digest of a new enrollment code of `login`, unless the account has `max_active`
-    /// codes that are not used and not expired.
+    /// codes that are not used and not expired. With `stored`, the account is an account of the
+    /// database, and the code needs its row (see `db::insert_code`).
     pub async fn create_code(
         &self,
         digest: [u8; 32],
         login: String,
         ttl_ms: i64,
         max_active: u32,
+        stored: bool,
     ) -> Result<CodeInsert, DbError> {
         match self {
             Store::Sqlite(db) => {
@@ -89,12 +91,13 @@ impl Store {
                         super::util::now_ms(),
                         ttl_ms,
                         max_active,
+                        stored,
                     )?)
                 })
                 .await
             }
             Store::Pg(pg) => {
-                pg.guard(pg.create_code(&digest, &login, ttl_ms, max_active))
+                pg.guard(pg.create_code(&digest, &login, ttl_ms, max_active, stored))
                     .await
             }
         }
@@ -112,7 +115,7 @@ impl Store {
     pub async fn redeem_code(
         &self,
         digest: [u8; 32],
-        max_devices: u32,
+        limits: DeviceLimits,
         name: String,
         public_key: Vec<u8>,
         ip: String,
@@ -124,7 +127,7 @@ impl Store {
                         c,
                         &digest,
                         super::util::now_ms(),
-                        max_devices,
+                        limits,
                         &name,
                         &public_key,
                         &ip,
@@ -133,22 +136,22 @@ impl Store {
                 .await
             }
             Store::Pg(pg) => {
-                pg.guard(pg.redeem_code(&digest, max_devices, &name, &public_key, &ip))
+                pg.guard(pg.redeem_code(&digest, limits, &name, &public_key, &ip))
                     .await
             }
         }
     }
 
-    /// Deletes the unused codes of `login` and revokes its devices. The result is the ids that
-    /// this call revoked.
-    pub async fn revoke_account(&self, login: &str) -> Result<Vec<String>, DbError> {
+    /// Ends the inbox state of the account `login`: its unused codes, its devices and the rows that
+    /// name the login (see `db::end_account`). The result is the ids that this call revoked.
+    pub async fn end_account(&self, login: &str) -> Result<Vec<String>, DbError> {
         match self {
             Store::Sqlite(db) => {
                 let login = login.to_string();
-                db.call(move |c| Ok(db::revoke_account(c, &login)?)).await
+                db.call(move |c| Ok(db::end_account(c, &login)?)).await
             }
             Store::Pg(pg) => {
-                let ids = pg.guard(pg.revoke_account(login)).await?;
+                let ids = pg.guard(pg.end_account(login)).await?;
                 for id in &ids {
                     pg.cache_revoked(id);
                 }

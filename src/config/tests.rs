@@ -1476,6 +1476,34 @@ fn the_sign_in_bodies_must_leave_connections_for_forward_auth() {
     assert_eq!(cfg.server.max_login_body_reads, 2);
 }
 
+/// `session.max_sessions_per_account`: the documented default, a value of the file, the range, and the contradiction
+/// with `session.max_active_sessions`.
+#[test]
+fn one_account_has_a_bound_of_sessions_that_is_at_most_the_global_bound() {
+    let (cfg, _) = ok(&with(""));
+    assert_eq!(cfg.session.max_sessions_per_account, 16);
+    assert_eq!(line(&cfg, "session.max_sessions_per_account").value, "16");
+    let (cfg, _) = ok(&with("session { max_sessions_per_account = 2 }"));
+    assert_eq!(cfg.session.max_sessions_per_account, 2);
+    let message = err(&with("session { max_sessions_per_account = 0 }"));
+    assert!(
+        message.contains("session.max_sessions_per_account"),
+        "{message}"
+    );
+    let message = err(&with("session { max_active_sessions = 8 }"));
+    assert!(
+        message.contains("session.max_sessions_per_account")
+            && message.contains("session.max_active_sessions")
+            && message.contains("16")
+            && message.contains('8'),
+        "{message}"
+    );
+    let (cfg, _) = ok(&with(
+        "session { max_active_sessions = 8 max_sessions_per_account = 8 }",
+    ));
+    assert_eq!(cfg.session.max_sessions_per_account, 8);
+}
+
 // Keys: the block `keys`, the accounts of the file and their keys ---------------------------------
 
 /// The blocks that the block `keys` needs.
@@ -1924,6 +1952,44 @@ fn a_bad_block_key_stops_the_start_and_never_shows_the_text_of_a_key() {
     assert!(message.contains("needs the block keys"), "{message}");
 }
 
+/// An operator can point `key_sha256_env` or `key_sha256_file` at the text of a key by mistake. The
+/// error names the attribute and the source, and it never shows the value.
+#[test]
+fn a_key_text_in_key_sha256_never_appears_in_the_error() {
+    let (vars, text) = vars_with_key();
+    let file = temp_file(text.as_bytes());
+    let not_utf8 = temp_file(&[0xff, 0xfe, b'a']);
+    for (attribute, source) in [
+        (
+            r#"key_sha256_env = "CAROL_KEY""#.to_string(),
+            "env:CAROL_KEY".to_string(),
+        ),
+        (
+            format!(r#"key_sha256_file = "{}""#, file.display()),
+            format!("file:{}", file.display()),
+        ),
+        (
+            format!(r#"key_sha256_file = "{}""#, not_utf8.display()),
+            format!("file:{}", not_utf8.display()),
+        ),
+    ] {
+        let raw = with_keys(&format!(
+            r#"user "carol" {{ grants = [] key "k" {{ {attribute} grants = [] }} }}"#
+        ));
+        let message = parse_keys(&raw, &vars).err().unwrap();
+        assert!(message.contains("user.carol.key.k.key_sha256"), "{message}");
+        assert!(message.contains(&source), "{message}");
+        assert!(message.contains("the value is hidden"), "{message}");
+        assert!(!message.contains(&text), "the text of the key: {message}");
+        assert!(
+            !message.contains(&text[4..20]),
+            "a part of the key: {message}"
+        );
+    }
+    let _ = fs::remove_file(file);
+    let _ = fs::remove_file(not_utf8);
+}
+
 #[test]
 fn a_user_has_at_most_max_per_user_blocks_key_and_each_key_at_most_512_grants() {
     let (mut vars, _) = vars_with_key();
@@ -2066,8 +2132,14 @@ fn the_inbox_block_gives_typed_values_with_documented_defaults() {
     let inbox = config.inbox.as_ref().unwrap();
     assert_eq!(config.server.name, "Portal");
     assert_eq!(inbox.devices.max_devices, 1000);
+    assert_eq!(inbox.devices.max_per_account, 10);
     assert_eq!(inbox.devices.max_auth_failures, 5);
     assert_eq!(inbox.devices.auth_failure_window, Duration::from_secs(600));
+    assert_eq!(inbox.devices.max_handshakes_per_address, 16);
+    assert_eq!(
+        line(&config, "inbox.devices.max_per_account").source,
+        "default"
+    );
     assert_eq!(inbox.devices.max_request_bytes, 64 * 1024);
     assert_eq!(inbox.devices.heartbeat_interval, Duration::from_secs(20));
     assert_eq!(inbox.devices.max_inflight, 32);
@@ -2270,6 +2342,29 @@ fn the_public_address_is_required_and_follows_the_rules_of_the_app() {
 }
 
 #[test]
+fn the_limits_of_the_phones_take_the_values_of_the_file() {
+    let raw = INBOX.replacen(
+        "max_inflight = 32",
+        "max_inflight = 32 max_devices = 5 max_per_account = 5 max_handshakes_per_address = 2",
+        1,
+    );
+    let (config, _) = inbox_ok(&with_inbox(&raw));
+    let devices = &config.inbox.as_ref().unwrap().devices;
+    assert_eq!(
+        (
+            devices.max_devices,
+            devices.max_per_account,
+            devices.max_handshakes_per_address
+        ),
+        (5, 5, 2)
+    );
+    assert_eq!(
+        line(&config, "inbox.devices.max_handshakes_per_address").source,
+        "file"
+    );
+}
+
+#[test]
 fn the_enrollment_block_changes_the_defaults() {
     let raw = INBOX.replace(
         "  storage {",
@@ -2296,6 +2391,21 @@ fn the_inbox_schema_is_closed_and_strict() {
             "inbox.devices.max_inflight",
         ),
         ("max_inflight = 32", "max_inflight = 2000", "out of range"),
+        (
+            "max_inflight = 32",
+            "max_inflight = 32 max_per_account = 0",
+            "inbox.devices.max_per_account",
+        ),
+        (
+            "max_inflight = 32",
+            "max_inflight = 32 max_handshakes_per_address = 0",
+            "inbox.devices.max_handshakes_per_address",
+        ),
+        (
+            "max_inflight = 32",
+            "max_inflight = 32 max_handshakes_per_address = \"16\"",
+            "inbox.devices.max_handshakes_per_address",
+        ),
         (
             "resend_after = \"15s\"",
             "resend_after = \"15\"",
@@ -2447,6 +2557,17 @@ fn the_inbox_values_that_contradict_each_other_stop_the_start() {
             "alert_retention = \"1d\"",
             "inbox.storage.alert_retention must be at least",
         ),
+        (
+            // The default of max_per_account (10) is above this max_devices.
+            "max_inflight = 32",
+            "max_inflight = 32 max_devices = 5",
+            "inbox.devices.max_per_account must be at most inbox.devices.max_devices: max_per_account is 10, max_devices is 5",
+        ),
+        (
+            "max_inflight = 32",
+            "max_inflight = 32 max_devices = 5 max_per_account = 6",
+            "inbox.devices.max_per_account must be at most inbox.devices.max_devices: max_per_account is 6, max_devices is 5",
+        ),
     ] {
         let message = inbox_err(&with_inbox(&INBOX.replacen(from, to, 1)));
         assert!(message.contains(expected), "{to}: {message}");
@@ -2467,6 +2588,24 @@ fn two_api_keys_have_their_own_texts_and_options() {
     let (config, secrets) = inbox_ok(&with_inbox(&two));
     assert!(config.inbox.as_ref().unwrap().api_keys["ci"].webhook_send_resolved);
     assert_eq!(secrets.inbox.unwrap().api_keys.len(), 2);
+}
+
+#[test]
+fn a_key_of_the_file_reads_only_the_groups_of_its_block_where_its_owner_holds_alert_read() {
+    let two = INBOX.replace(r#"groups = ["infra"]"#, r#"groups = ["infra", "oncall"]"#);
+    // The owner sends to both groups and holds no alert.read: the key reads nothing.
+    let (config, _) = inbox_ok(&with_inbox(&two));
+    let key = &config.inbox.as_ref().unwrap().api_keys["grafana"];
+    assert_eq!(key.groups, ["infra", "oncall"]);
+    assert!(key.read_groups.is_empty(), "{:?}", key.read_groups);
+    // With alert.read on oncall, the key reads oncall only.
+    let reader = with_inbox(&two).replace(
+        "    \"alert.send on service:portal/inbox_group:oncall\",\n",
+        "    \"alert.send on service:portal/inbox_group:oncall\",\n    \"alert.read on service:portal/inbox_group:oncall\",\n",
+    );
+    let (config, _) = inbox_ok(&reader);
+    let key = &config.inbox.as_ref().unwrap().api_keys["grafana"];
+    assert_eq!(key.read_groups, ["oncall"]);
 }
 
 #[test]

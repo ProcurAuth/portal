@@ -24,43 +24,47 @@ use inbox_core::proto::{
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
 use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Notify};
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{timeout_at, Instant};
 use zeroize::Zeroize;
 
-use super::db::{DbError, DeviceKey, Redeem};
+use super::db::{DbError, DeviceKey, DeviceLimits, Redeem};
+use super::enrollment;
 use super::http::Resp;
 use super::hub::Live;
 use super::log;
-use super::rights;
+use super::rights::{self, Standing};
 use super::state::{App, SocketGuard};
 use super::util::{is_hex_id, now_ms};
 use super::ws::{self, Message, Socket};
 
+/// A session WebSocket that does not finish the handshake within this time is closed. The time
+/// counts from the upgrade: a ping or a pong does not extend it.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// An enrollment connection that sends no message 1 within this time is closed.
 const ENROLL_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const ENROLL_MAX_MESSAGE: usize = 8 * 1024;
+/// The close code of a handshake that a newer handshake of the same address ended
+/// (`inbox.devices.max_handshakes_per_address`). The app tries again after its back-off.
+const TRY_AGAIN_LATER: u16 = 1013;
 
 /// `GET /v1/enroll`: the upgrade to a WebSocket, then the enrollment.
 pub fn enroll_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
-    let Some(guard) = SocketGuard::new(&app) else {
+    let Some(guard) = SocketGuard::new(&app, ip) else {
         return refuse_busy(&ip);
     };
     let answer = ws::upgrade(request, ENROLL_MAX_MESSAGE, move |socket| async move {
-        let _guard = guard;
-        run_enroll(app, socket, ip).await
+        run_enroll(app, socket, ip, &guard).await
     });
     answer.unwrap_or_else(|refusal| refusal)
 }
 
 /// `GET /v1/session`: the upgrade to a WebSocket, then the session of a phone.
 pub fn session_ws(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Resp {
-    let Some(guard) = SocketGuard::new(&app) else {
+    let Some(mut guard) = SocketGuard::new(&app, ip) else {
         return refuse_busy(&ip);
     };
     let answer = ws::upgrade(request, noise::MAX_MESSAGE, move |socket| async move {
-        let _guard = guard;
-        run_session(app, socket, ip).await
+        run_session(app, socket, ip, &mut guard).await
     });
     answer.unwrap_or_else(|refusal| refusal)
 }
@@ -73,16 +77,6 @@ fn refuse_busy(ip: &IpAddr) -> Resp {
 
 async fn close_with(socket: &mut Socket, code: u16, reason: &str) {
     socket.close_with(code, reason).await;
-}
-
-async fn recv_binary(socket: &mut Socket, limit: Duration) -> Option<Vec<u8>> {
-    loop {
-        match timeout(limit, socket.recv()).await {
-            Ok(Some(Ok(Message::Binary(b)))) => return Some(b.to_vec()),
-            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
-            _ => return None,
-        }
-    }
 }
 
 // ---------------------------------------------------------------- enrollment
@@ -119,13 +113,22 @@ async fn refuse(socket: &mut Socket, ip: IpAddr, code: u16, reason: &str) {
     close_with(socket, code, "enrollment refused").await;
 }
 
-async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
+async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr, guard: &SocketGuard) {
     if !app.limiter.allowed(ip) {
         log::info!(event = "enroll_refused", reason = "rate_limited", client.address = %ip);
         close_with(&mut socket, close::RATE_LIMITED, "rate limited").await;
         return;
     }
-    let message = match first_frame(&mut socket, Instant::now() + ENROLL_HELLO_TIMEOUT).await {
+    // A newer handshake of the same address ends only the wait for message 1. After message 1,
+    // the enrollment ends in a short time, and it must not leave a used code without message 2.
+    let first = tokio::select! {
+        first = first_frame(&mut socket, Instant::now() + ENROLL_HELLO_TIMEOUT) => first,
+        () = guard.ended_by_newer() => {
+            close_with(&mut socket, TRY_AGAIN_LATER, "too many handshakes from this address").await;
+            return;
+        }
+    };
+    let message = match first {
         First::Message(m) => m,
         First::Text => {
             app.limiter.record_failure(ip);
@@ -158,11 +161,15 @@ async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
     let digest: [u8; 32] = Sha256::digest(&hello.secret).into();
     hello.secret.zeroize();
 
+    let limits = DeviceLimits {
+        max_devices: app.config.devices.max_devices,
+        max_per_account: app.config.devices.max_per_account,
+    };
     let redeemed = app
         .db
         .redeem_code(
             digest,
-            app.config.devices.max_devices,
+            limits,
             hello.device_name.clone(),
             device_public,
             ip.to_string(),
@@ -179,12 +186,35 @@ async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
             refuse(&mut socket, ip, close::ENROLL_REFUSED, "too_many_devices").await;
             return;
         }
+        Ok(Redeem::TooManyAccountDevices) => {
+            refuse(
+                &mut socket,
+                ip,
+                close::ENROLL_REFUSED,
+                "too_many_account_devices",
+            )
+            .await;
+            return;
+        }
         Err(e) => {
             log::error!(event = "enroll_store_failed", error = %e);
             close_with(&mut socket, 1011, "storage error").await;
             return;
         }
     };
+    // A code of a login that no account has gives no phone (SQLite): an account of the file that
+    // left the file, or an old login of the superadmin. The state of the login ends, the new device
+    // with it.
+    if rights::standing(&app, &login) == Standing::Absent {
+        if let Err(e) = enrollment::end_account(&app, &login).await {
+            log::error!(event = "absent_account_end_failed", user.name = %login, error = %e);
+            if let Err(e) = app.db.revoke_device(&device_id).await {
+                log::error!(event = "enroll_cleanup_failed", device.id = %device_id, error = %e);
+            }
+        }
+        refuse(&mut socket, ip, close::ENROLL_REFUSED, "no_account").await;
+        return;
+    }
     // The code is used and the device is stored. With a replica, the phone learns of it only
     // after the copy holds it, so a takeover never loses a device that believes it is enrolled.
     if let Err(e) = app.replica.sync().await {
@@ -266,59 +296,74 @@ async fn send_msg(socket: &mut Socket, session: &mut Session, msg: &ServerMsg) -
         .map_err(|_| End::Send)
 }
 
-async fn run_session(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
-    if !app.limiter.allowed(ip) {
-        close_with(&mut socket, close::RATE_LIMITED, "rate limited").await;
-        return;
-    }
-    let reject = |app: &App, ip: IpAddr| {
-        app.limiter.record_failure(ip);
-        app.metrics.auth_failure("device_key");
-    };
+/// A phone that finished the handshake: it proved the key of an enrolled device that is not revoked.
+struct Proven {
+    session: Session,
+    device: DeviceKey,
+    device_id: String,
+    app_version: String,
+}
 
-    let Some(m1) = recv_binary(&mut socket, HANDSHAKE_TIMEOUT).await else {
-        return;
+/// Why a session handshake ended before the phone proved its key.
+enum Unproven {
+    /// The handshake proves no enrolled device. It counts against the client address.
+    Failed {
+        code: u16,
+        reason: &'static str,
+        kind: &'static str,
+    },
+    /// The device is known but revoked, the protocol is wrong, or the storage failed. It does not count.
+    Refused(u16, &'static str),
+    /// The connection ended.
+    Gone,
+}
+
+/// The next binary frame of a handshake. A ping or a pong is skipped.
+async fn handshake_frame(socket: &mut Socket) -> Result<Vec<u8>, Unproven> {
+    loop {
+        match socket.recv().await {
+            Some(Ok(Message::Binary(b))) => return Ok(b.to_vec()),
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+            Some(Ok(Message::Text(_))) => {
+                return Err(Unproven::Refused(close::PROTOCOL, "text frame"))
+            }
+            Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(Unproven::Gone),
+        }
+    }
+}
+
+/// The Noise handshake of a session, up to the frame `ready`. It reads the device row and changes
+/// nothing, so it can stop at any point.
+async fn handshake(app: &App, socket: &mut Socket) -> Result<Proven, Unproven> {
+    let unknown = |reason| Unproven::Failed {
+        code: close::UNKNOWN_DEVICE,
+        reason,
+        kind: "device_key",
     };
+    let m1 = handshake_frame(socket).await?;
     let Ok((responder, remote_static, hello)) =
         Responder::start(&app.secrets.server_key.noise_private, &m1)
     else {
-        reject(&app, ip);
-        close_with(&mut socket, close::UNKNOWN_DEVICE, "handshake failed").await;
-        return;
+        return Err(unknown("handshake failed"));
     };
     let Ok(hello) = serde_json::from_slice::<SessionHello>(&hello) else {
-        close_with(&mut socket, close::PROTOCOL, "malformed hello").await;
-        return;
+        return Err(Unproven::Refused(close::PROTOCOL, "malformed hello"));
     };
     if hello.protocol != PROTOCOL_VERSION {
-        close_with(&mut socket, close::PROTOCOL, "unsupported protocol").await;
-        return;
+        return Err(Unproven::Refused(close::PROTOCOL, "unsupported protocol"));
     }
     if !is_hex_id(&hello.device_id) {
-        reject(&app, ip);
-        close_with(&mut socket, close::UNKNOWN_DEVICE, "unknown device").await;
-        return;
+        return Err(unknown("unknown device"));
     }
-    let device_id = hello.device_id.clone();
-    let id = device_id.clone();
-    let device = match app.db.find_device(&id).await {
-        Ok(d) => d,
+    let device = match app.db.find_device(&hello.device_id).await {
+        Ok(Some(d)) if d.public_key == remote_static && !d.revoked => d,
+        Ok(Some(d)) if d.public_key == remote_static => {
+            return Err(Unproven::Refused(close::REVOKED, "device revoked"))
+        }
+        Ok(_) => return Err(unknown("unknown device")),
         Err(e) => {
             log::error!(event = "session_lookup_failed", error = %e);
-            close_with(&mut socket, 1011, "storage error").await;
-            return;
-        }
-    };
-    let device = match device {
-        Some(d) if d.public_key == remote_static && !d.revoked => d,
-        Some(d) if d.public_key == remote_static => {
-            close_with(&mut socket, close::REVOKED, "device revoked").await;
-            return;
-        }
-        _ => {
-            reject(&app, ip);
-            close_with(&mut socket, close::UNKNOWN_DEVICE, "unknown device").await;
-            return;
+            return Err(Unproven::Refused(1011, "storage error"));
         }
     };
 
@@ -328,45 +373,104 @@ async fn run_session(app: Arc<App>, mut socket: Socket, ip: IpAddr) {
     };
     let accept = serde_json::to_vec(&accept).expect("serializes");
     let Ok((mut session, m2)) = responder.finish(&accept) else {
-        return;
+        return Err(Unproven::Gone);
     };
     if socket.send(Message::Binary(m2.into())).await.is_err() {
-        return;
+        return Err(Unproven::Gone);
     }
-    // The session only counts once the device proves it holds the transport keys.
-    let ready = match recv_binary(&mut socket, HANDSHAKE_TIMEOUT).await {
-        Some(frame) => session
-            .decrypt(&frame)
-            .ok()
-            .and_then(|p| serde_json::from_slice::<ClientMsg>(&p).ok()),
-        None => return,
-    };
+    // The session only counts once the device proves it holds the transport keys. A replay of
+    // message 1 cannot do it.
+    let frame = handshake_frame(socket).await?;
+    let ready = session
+        .decrypt(&frame)
+        .ok()
+        .and_then(|p| serde_json::from_slice::<ClientMsg>(&p).ok());
     if !matches!(ready, Some(ClientMsg::Ready)) {
-        close_with(&mut socket, close::PROTOCOL, "expected ready").await;
-        return;
+        return Err(Unproven::Refused(close::PROTOCOL, "expected ready"));
     }
-
-    established(
-        app,
-        socket,
+    Ok(Proven {
         session,
         device,
-        device_id,
-        hello.app_version,
-        ip,
-    )
-    .await;
+        device_id: hello.device_id,
+        app_version: hello.app_version,
+    })
 }
 
-async fn established(
-    app: Arc<App>,
-    mut socket: Socket,
-    mut session: Session,
-    device: DeviceKey,
-    device_id: String,
-    app_version: String,
-    ip: IpAddr,
-) {
+async fn run_session(app: Arc<App>, mut socket: Socket, ip: IpAddr, guard: &mut SocketGuard) {
+    // One deadline for the whole handshake: a ping or a pong does not extend it. The limiter of
+    // the address applies only to a handshake that proves no device. A phone that proves its key
+    // gets its session, whatever the other clients of its address did.
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let outcome = tokio::select! {
+        outcome = timeout_at(deadline, handshake(&app, &mut socket)) => match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => Err(Unproven::Failed {
+                code: 1001,
+                reason: "handshake timeout",
+                kind: "handshake_timeout",
+            }),
+        },
+        () = guard.ended_by_newer() => {
+            Err(Unproven::Refused(TRY_AGAIN_LATER, "too many handshakes from this address"))
+        }
+    };
+    let proven = match outcome {
+        Ok(proven) => proven,
+        Err(Unproven::Failed { code, reason, kind }) => {
+            app.metrics.auth_failure(kind);
+            if app.limiter.allowed(ip) {
+                app.limiter.record_failure(ip);
+                close_with(&mut socket, code, reason).await;
+            } else {
+                close_with(&mut socket, close::RATE_LIMITED, "rate limited").await;
+            }
+            return;
+        }
+        Err(Unproven::Refused(code, reason)) => {
+            close_with(&mut socket, code, reason).await;
+            return;
+        }
+        Err(Unproven::Gone) => return,
+    };
+    guard.handshake_done();
+    // The account of the phone must exist. An account of the file that left the file, or an old
+    // login of the superadmin, ends here (SQLite). With a shared database, a login that this
+    // instance does not know gets no session and the inbox writes nothing: the file of another
+    // instance can hold it. The phone tries again later.
+    match rights::standing(&app, &proven.device.user_name) {
+        Standing::Absent => {
+            let code = match enrollment::end_account(&app, &proven.device.user_name).await {
+                Ok(_) => close::REVOKED,
+                Err(e) => {
+                    log::error!(event = "absent_account_end_failed", user.name = %proven.device.user_name, error = %e);
+                    1011
+                }
+            };
+            close_with(&mut socket, code, "device revoked").await;
+            return;
+        }
+        Standing::NotHere => {
+            log::info!(
+                event = "session_refused",
+                reason = "no_account_here",
+                device.id = %proven.device_id,
+                user.name = %proven.device.user_name
+            );
+            close_with(&mut socket, TRY_AGAIN_LATER, "no account here").await;
+            return;
+        }
+        Standing::Exists | Standing::Unknown => {}
+    }
+    established(app, socket, proven, ip).await;
+}
+
+async fn established(app: Arc<App>, mut socket: Socket, proven: Proven, ip: IpAddr) {
+    let Proven {
+        mut session,
+        device,
+        device_id,
+        app_version,
+    } = proven;
     let session_id = app.next_session_id.fetch_add(1, Ordering::Relaxed);
     let (kick_tx, mut kick_rx) = watch::channel(None);
     let wake = Arc::new(Notify::new());
@@ -389,6 +493,23 @@ async fn established(
         },
         close::REPLACED,
     );
+    // A revocation during the handshake found no session to kick. The hub holds the session now,
+    // so the row is read again. A revocation stores the row before it kicks: either this read
+    // sees the revocation, or the kick finds this session.
+    match app.db.find_device(&device_id).await {
+        Ok(Some(d)) if d.public_key == device.public_key && !d.revoked => {}
+        Ok(_) => {
+            app.hub.unregister(&device_id, session_id);
+            close_with(&mut socket, close::REVOKED, "device revoked").await;
+            return;
+        }
+        Err(e) => {
+            log::error!(event = "session_lookup_failed", error = %e);
+            app.hub.unregister(&device_id, session_id);
+            close_with(&mut socket, 1011, "storage error").await;
+            return;
+        }
+    }
     let connection_id = match app
         .db
         .record_connect(&device_id, &ip.to_string(), &app_version)

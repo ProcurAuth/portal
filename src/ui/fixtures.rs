@@ -222,6 +222,7 @@ pub(super) fn accounts(catalog: &Catalog) -> Accounts<'_> {
         features: Some(features()),
         max_users: 64,
         token: "tok<en",
+        two_factor: Some(["alice".to_string()].into_iter().collect()),
     }
 }
 

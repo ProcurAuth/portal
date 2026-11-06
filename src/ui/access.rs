@@ -160,6 +160,9 @@ pub struct Accounts<'a> {
     pub max_users: usize,
     /// The anti-CSRF token of the administration forms.
     pub token: &'a str,
+    /// The logins that have a second factor. `None`: the second factor is off, or the database cannot be read.
+    /// The table has the column "2FA" only when this is `Some`.
+    pub two_factor: Option<std::collections::HashSet<String>>,
 }
 
 /// The data of the tab Access.
@@ -490,6 +493,18 @@ fn accounts_zone(view: &AccessView, accounts: &Accounts) -> String {
         "Accounts that match the filters. The limit is {}.",
         accounts.max_users
     );
+    // The number of accounts that have a second factor, among all the accounts of the list.
+    let two_factor_count = accounts.two_factor.as_ref().map(|set| {
+        let on = accounts
+            .users
+            .iter()
+            .filter(|u| set.contains(&u.login))
+            .count();
+        format!(
+            r#"<span class="count" title="Accounts with two-factor sign-in">{}{on}/{total}<span class="visually-hidden"> with two-factor</span></span>"#,
+            icon("lock")
+        )
+    });
     let body = if shown.is_empty() {
         if total == 0 {
             r#"<p class="empty">No account yet.</p>"#.to_string()
@@ -508,7 +523,7 @@ fn accounts_zone(view: &AccessView, accounts: &Accounts) -> String {
             title: "Accounts",
             count: &count,
             count_title: &count_title,
-            chips_html: "",
+            chips_html: two_factor_count.as_deref().unwrap_or_default(),
             tools_html: &tools,
             class: "",
             above_html: "",
@@ -557,6 +572,9 @@ fn accounts_table(
     if keys {
         out.push_str(r#"<col class="w48">"#);
     }
+    if accounts.two_factor.is_some() {
+        out.push_str(r#"<col class="w48">"#);
+    }
     out.push_str(r#"<col class="w136"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
     if inbox {
         out.push_str(r#"<th scope="col">Groups</th>"#);
@@ -578,6 +596,9 @@ fn accounts_table(
     }
     if keys {
         out.push_str(r#"<th scope="col" class="r">Keys</th>"#);
+    }
+    if accounts.two_factor.is_some() {
+        out.push_str(r#"<th scope="col" class="c" title="Two-factor sign-in">2FA</th>"#);
     }
     out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
     for user in shown {
@@ -728,6 +749,19 @@ fn account_row(
                 user.keys.to_string()
             }
         );
+    }
+    if let Some(set) = &accounts.two_factor {
+        if set.contains(&user.login) {
+            let _ = write!(
+                out,
+                r#"<td class="c">{}</td>"#,
+                status_icon("ok", "lock", "Two-factor is on")
+            );
+        } else {
+            out.push_str(
+                r#"<td class="c"><span class="muted" title="Two-factor is off">-</span></td>"#,
+            );
+        }
     }
     let last = match user.activity.last_login {
         Some(at) => time_tag(at, false),

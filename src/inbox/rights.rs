@@ -9,6 +9,7 @@
 //!   `device.rs`). The account of the phone needs `inbox.receive` on the group.
 //! - A change of the directory of the portal. The task [`run`] then removes the subscriptions that an
 //!   account lost.
+//! - A phone that opens a session or enrolls. Its account must exist (see [`Standing`]).
 //!
 //! SAFETY RULE. A subscription is the way to a person that an alert can protect. The inbox
 //! removes a subscription only when a loaded directory positively says that the account has no
@@ -16,6 +17,13 @@
 //! old, and an account that the directory does not know never remove a subscription. The keys of
 //! the file (the blocks `api_key`) never depend on the authorizer: they work when the portal is not
 //! ready.
+//!
+//! The one exception is an account that ended outside a delete: an account of the file that left
+//! the file, or an old login of the superadmin. Only one instance on SQLite can prove it: it holds
+//! the file, the superadmin login and every account of the database, and the file changes only at
+//! a restart. Its verdict is [`Subscribable::Absent`], and the inbox ends the state of the login
+//! (see `enrollment::end_account`). With a shared database, the file of another instance can still
+//! hold the login: the phone gets no session, and the inbox writes nothing.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -59,11 +67,32 @@ pub enum Decision {
 /// The groups for which an account has `inbox.receive`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Subscribable {
-    /// The portal cannot tell: the directory is not ready or is old, or the account is unknown.
-    /// The inbox changes nothing.
+    /// The portal cannot tell: the directory is not ready or is old, or a shared directory does
+    /// not know the account. The inbox changes nothing.
     Unknown,
+    /// One instance holds every account (SQLite), and none has this login: not the superadmin, not
+    /// an account of the file, not an account of the database. The inbox ends the state of the
+    /// login.
+    Absent,
     /// The directory is loaded and knows the account. These are the groups that it allows.
     Groups(BTreeSet<String>),
+}
+
+/// Whether an account has a login, for a phone that opens a session or enrolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// The superadmin, an account of the file or an account of the database has the login.
+    Exists,
+    /// One instance holds every account (SQLite), and none has the login. The inbox ends the state
+    /// of the login.
+    Absent,
+    /// A read of the shared database that started after the question found no account, and the
+    /// file of this instance has none. The file of another instance can still have one, for
+    /// example during a change of the file on each instance in turn. The phone gets no session,
+    /// and the inbox writes nothing.
+    NotHere,
+    /// The portal cannot tell: the directory is not ready, is old, or the database did not answer.
+    Unknown,
 }
 
 /// What the portal gives to the inbox. The calls read memory and, for a use that counts, one row
@@ -84,20 +113,34 @@ pub trait Authorizer: Send + Sync {
     /// cannot tell, because the directory is not ready or is old.
     fn user_exists(&self, login: &str) -> Option<bool>;
 
-    /// The groups that the account may subscribe to, among the groups of the inbox.
+    /// The groups that the account may subscribe to, among the groups of the inbox. It reads
+    /// memory only.
     fn subscribable(&self, login: &str) -> Subscribable;
+
+    /// Whether an account has this login. With a shared database, a login that the directory does
+    /// not know costs one read of the database.
+    fn standing(&self, login: &str) -> Standing;
 
     /// A number that changes when the directory changes. `None`: the directory is not ready.
     fn directory_stamp(&self) -> Option<u64>;
 }
 
 /// The groups that a phone of `login` may subscribe to. `None`: the inbox cannot tell, so it
-/// shows and changes nothing.
+/// shows and changes nothing. A login that no account has may subscribe to no group.
 pub fn subscribable_groups(app: &App, login: &str) -> Option<BTreeSet<String>> {
     let authorizer = app.authorizer()?;
     match authorizer.subscribable(login) {
         Subscribable::Groups(groups) => Some(groups),
+        Subscribable::Absent => Some(BTreeSet::new()),
         Subscribable::Unknown => None,
+    }
+}
+
+/// Whether an account has `login`. Without an authorizer, the inbox cannot tell.
+pub fn standing(app: &App, login: &str) -> Standing {
+    match app.authorizer() {
+        Some(authorizer) => authorizer.standing(login),
+        None => Standing::Unknown,
     }
 }
 
@@ -109,28 +152,43 @@ pub struct Lost {
     pub group: String,
 }
 
-/// The subscriptions to remove. A device that is revoked, a device without subscription and an
-/// account that the authorizer cannot judge give nothing. A subscription goes only when the
-/// authorizer lists the groups of the account and the group is not among them.
-pub fn plan(devices: &[DeviceView], authorizer: &dyn Authorizer) -> Vec<Lost> {
+/// What a look at the rights changes.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// The subscriptions to remove.
+    pub lost: Vec<Lost>,
+    /// The logins that have a device that is not revoked, and no account (SQLite only). The inbox
+    /// ends their state.
+    pub absent: BTreeSet<String>,
+}
+
+/// What to change. A device that is revoked and an account that the authorizer cannot judge give
+/// nothing. A subscription goes only when the authorizer lists the groups of the account and the
+/// group is not among them. A login that no account has goes as a whole.
+pub fn plan(devices: &[DeviceView], authorizer: &dyn Authorizer) -> Plan {
     let mut verdicts: HashMap<&str, Subscribable> = HashMap::new();
-    let mut out = Vec::new();
+    let mut out = Plan::default();
     for device in devices {
-        if device.revoked_at.is_some() || device.subscriptions.is_empty() {
+        if device.revoked_at.is_some() {
             continue;
         }
         let verdict = verdicts
             .entry(device.user_name.as_str())
             .or_insert_with(|| authorizer.subscribable(&device.user_name));
-        let Subscribable::Groups(allowed) = verdict else {
-            continue;
+        let allowed = match verdict {
+            Subscribable::Groups(allowed) => allowed,
+            Subscribable::Absent => {
+                out.absent.insert(device.user_name.clone());
+                continue;
+            }
+            Subscribable::Unknown => continue,
         };
         for group in device
             .subscriptions
             .iter()
             .filter(|g| !allowed.contains(*g))
         {
-            out.push(Lost {
+            out.lost.push(Lost {
                 device_id: device.id.clone(),
                 login: device.user_name.clone(),
                 group: group.clone(),
@@ -140,9 +198,10 @@ pub fn plan(devices: &[DeviceView], authorizer: &dyn Authorizer) -> Vec<Lost> {
     out
 }
 
-/// Removes the subscriptions that the accounts lost (see [`plan`]). The alerts that the inbox
-/// made before stay deliverable. The result is the number of subscriptions that it removed, or
-/// `None` when the storage did not answer: the caller tries again.
+/// Removes the subscriptions that the accounts lost and ends the logins that no account has (see
+/// [`plan`]). The alerts that the inbox made before stay deliverable to the other phones. The
+/// result is the number of subscriptions that it removed, or `None` when the storage did not
+/// answer: the caller tries again.
 pub async fn reconcile(app: &App) -> Option<usize> {
     let Some(authorizer) = app.authorizer() else {
         return Some(0);
@@ -154,7 +213,21 @@ pub async fn reconcile(app: &App) -> Option<usize> {
             return None;
         }
     };
-    let lost = plan(&devices, authorizer.as_ref());
+    let Plan { lost, absent } = plan(&devices, authorizer.as_ref());
+    for login in &absent {
+        // An account of the file that left the file, or an old login of the superadmin.
+        match super::enrollment::end_account(app, login).await {
+            Ok(count) => log::warn!(
+                event = "absent_account_ended",
+                user.name = %login,
+                devices = count
+            ),
+            Err(e) => {
+                log::warn!(event = "absent_account_end_failed", user.name = %login, error = %e);
+                return None;
+            }
+        }
+    }
     let mut touched: BTreeSet<String> = BTreeSet::new();
     for item in &lost {
         match app.db.unsubscribe(&item.device_id, &item.group).await {
@@ -260,6 +333,13 @@ pub mod testing {
                 .cloned()
                 .unwrap_or(Subscribable::Unknown)
         }
+        fn standing(&self, login: &str) -> Standing {
+            match self.subscribable(login) {
+                Subscribable::Groups(_) => Standing::Exists,
+                Subscribable::Absent => Standing::Absent,
+                Subscribable::Unknown => Standing::Unknown,
+            }
+        }
         fn directory_stamp(&self) -> Option<u64> {
             *self.stamp.lock().unwrap()
         }
@@ -301,7 +381,7 @@ mod tests {
             device("a1", "alice", &["infra", "oncall"], false),
             device("b1", "bob", &["infra"], false),
         ];
-        let lost = plan(&devices, authorizer.as_ref());
+        let lost = plan(&devices, authorizer.as_ref()).lost;
         assert_eq!(
             lost,
             [
@@ -328,10 +408,29 @@ mod tests {
             device("a1", "alice", &["infra", "oncall"], false),
             device("c1", "carol", &["infra"], false),
         ];
-        assert!(plan(&devices, authorizer.as_ref()).is_empty());
+        assert_eq!(plan(&devices, authorizer.as_ref()), Plan::default());
         // An account that has no answer at all is unknown too.
         let empty = Fixed::new();
-        assert!(plan(&devices, empty.as_ref()).is_empty());
+        assert_eq!(plan(&devices, empty.as_ref()), Plan::default());
+    }
+
+    /// The audit finding portal/inbox/phones-of-removed-file-account-stay-active: a login that no
+    /// account has goes as a whole, with or without a subscription. A revoked device gives nothing.
+    #[test]
+    fn a_login_without_an_account_goes_as_a_whole() {
+        let authorizer = Fixed::new();
+        authorizer.set("dave", Subscribable::Absent);
+        authorizer.set("alice", groups(&["infra"]));
+        let devices = vec![
+            device("d1", "dave", &["infra"], false),
+            device("d2", "dave", &[], false),
+            device("d3", "old", &["infra"], true),
+            device("a1", "alice", &["infra"], false),
+        ];
+        authorizer.set("old", Subscribable::Absent);
+        let planned = plan(&devices, authorizer.as_ref());
+        assert_eq!(planned.absent, BTreeSet::from(["dave".to_string()]));
+        assert!(planned.lost.is_empty());
     }
 
     #[test]
@@ -342,6 +441,6 @@ mod tests {
             device("a1", "alice", &["infra"], true),
             device("a2", "alice", &[], false),
         ];
-        assert!(plan(&devices, authorizer.as_ref()).is_empty());
+        assert_eq!(plan(&devices, authorizer.as_ref()), Plan::default());
     }
 }

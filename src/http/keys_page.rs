@@ -796,11 +796,11 @@ async fn form_request(
         ));
     }
     // The session first: the portal reads no body for a request that has no session.
-    let Some(viewer) = current_viewer(state, request.headers(), client) else {
+    let headers = request.headers().clone();
+    let Some(first) = current_viewer(state, &headers, client) else {
         return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
     };
-    let rights = rights_of(state, &viewer);
-    if !allowed(&rights) {
+    if !allowed(&rights_of(state, &first)) {
         return Err(forbidden());
     }
     // At most 4 such bodies at the same time (portal 5.8c).
@@ -832,6 +832,14 @@ async fn form_request(
         }
         Err(BodyReadError::Io) => return Err(bad_request()),
     };
+    // The session can end while the body arrives. The action needs the session, the rights and the grants of now.
+    let Some(viewer) = still_current(state, &headers, client, &first) else {
+        return Err(redirect_response(StatusCode::SEE_OTHER, LOGIN_PATH));
+    };
+    let rights = rights_of(state, &viewer);
+    if !allowed(&rights) {
+        return Err(forbidden());
+    }
     let Ok(mut form) = parse_form(&body) else {
         return Err(bad_request());
     };

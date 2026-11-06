@@ -853,6 +853,12 @@ fn decide(
         }
     };
     let document = state.actions.declared(&client.name);
+    // Protocol 11.1: with no good document of the service, the answer is `false` without a
+    // reason for each node, the service included. Only `access` on the service stays. Without
+    // the document, the PDP cannot apply the ceilings and the budgets of a grant.
+    if document.is_none() && !(chain.is_empty() && action == ACCESS) {
+        return Outcome::deny("the document of the service is not known", None);
+    }
     let q = question(client, action, &chain, matching, document.as_deref());
     match SubjectId::parse(&subject.id) {
         SubjectId::User(login) => decide_person(state, login, &q, usage),

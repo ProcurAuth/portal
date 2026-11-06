@@ -7,7 +7,7 @@
 
 use std::fmt::Write as _;
 
-use super::components::{ask, Ask, Side, Strength};
+use super::components::{ask, icon, Ask, Side, Strength};
 use super::settings::{fill_page, notice_html, Frame, Notice, Tab};
 use super::{auth_document, status_icon};
 use crate::mfa::Enrolment;
@@ -30,8 +30,6 @@ pub struct Fields<'a> {
     pub csrf: &'a str,
     pub rd: &'a str,
     pub sig: &'a str,
-    /// The host that the visitor asked for. The band of the card shows it.
-    pub host: Option<&'a str>,
     /// The pending token (see [`crate::mfa::sign_pending`]).
     pub pending: &'a str,
 }
@@ -67,7 +65,6 @@ pub fn code_card(f: &Fields, error: Option<&str>) -> String {
     super::signin::code_page(&super::signin::Code {
         hidden: &hidden(f),
         rd: f.rd,
-        host: f.host,
         error,
         invalid: INVALID_CODE,
         action: CODE_PATH,
@@ -162,70 +159,124 @@ fn proof_fields(token: &str, id: &str) -> String {
     )
 }
 
-/// The page "Two-factor": one panel, dense, with the state, the actions of the state and nothing else.
+/// The head of the page: a lock, the title, one sentence and the state at the right.
+fn sec_head(lead: &str, on: Option<bool>) -> String {
+    let state = match on {
+        Some(true) => format!(
+            r#"<span class="sec__state sec__state--on">{}On</span>"#,
+            icon("circle-check")
+        ),
+        Some(false) => format!(
+            r#"<span class="sec__state sec__state--off">{}Off</span>"#,
+            icon("alert-triangle")
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"<header class="sec__head"><span class="sec__mark">{}</span><div class="sec__heading"><h2 class="sec__title" id="sec-title">Two-factor sign-in</h2><p class="sec__lead">{lead}</p></div>{state}</header>"#,
+        icon("lock")
+    )
+}
+
+/// A row of an action. The row is a `details` element: the form opens under the row. `tone` is `plain` or `danger`.
+fn sec_action(tone: &str, glyph: &str, title: &str, text: &str, form: &str) -> String {
+    format!(
+        r#"<details class="secAct secAct--{tone}"><summary class="secAct__row"><span class="secAct__glyph">{}</span><span class="secAct__text"><span class="secAct__title">{title}</span><span class="secAct__hint">{text}</span></span><span class="secAct__chev">{}</span></summary><div class="secAct__panel">{form}</div></details>"#,
+        icon(glyph),
+        icon("chevron-down"),
+    )
+}
+
+/// The page "Two-factor": the state, then the steps or the actions of the state.
 pub fn security_page(frame: &Frame, view: &SecurityView) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
-    let mut body = String::new();
-    let mut status = String::new();
-    match &view.state {
-        State::Off => {
-            status.push_str(&status_icon("warn", "alert-triangle", "Off"));
-            status.push_str(r#"<span class="count">Off</span>"#);
-            let _ = write!(
-                body,
-                r#"<a class="button button--primary" href="{SECURITY_PATH}?enable=1">Turn on</a>"#
-            );
-        }
-        State::Enrol { enrolment } => {
-            status.push_str(r#"<span class="count">Turn on</span>"#);
-            let _ = write!(
-                body,
-                r#"<form class="mfaForm" method="post" action="{SECURITY_ENABLE_PATH}" autocomplete="off">{}<input type="hidden" name="enrol" value="{}">{}<label class="field__label" for="enrol-code">Code from the app</label><input class="uiInput otp" id="enrol-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" maxlength="7" pattern="[0-9 ]{{6,7}}" required autofocus><div class="inline"><button class="button button--primary" type="submit">Turn on</button><a class="button" href="{SECURITY_PATH}">Cancel</a></div></form>"#,
+    let (head, body) = match &view.state {
+        State::Off => (
+            sec_head(
+                "Ask for a code from an app each time you sign in.",
+                Some(false),
+            ),
+            format!(
+                r#"<div class="sec__card"><ol class="sec__how"><li class="sec__step">Install an authenticator app on your phone.</li><li class="sec__step">Scan the code that this page shows.</li><li class="sec__step">Enter the first code that the app gives.</li></ol><div class="sec__go"><a class="button button--primary" href="{SECURITY_PATH}?enable=1">Turn on</a></div></div>"#
+            ),
+        ),
+        State::Enrol { enrolment } => (
+            sec_head(
+                "Scan the code with an authenticator app. Then enter the code that the app shows.",
+                None,
+            ),
+            format!(
+                r#"<form class="sec__card sec__enrol" method="post" action="{SECURITY_ENABLE_PATH}" autocomplete="off">{}<input type="hidden" name="enrol" value="{}"><div class="sec__scan"><p class="sec__num" aria-hidden="true">1</p>{}</div><div class="sec__code"><p class="sec__num" aria-hidden="true">2</p><label class="field__label" for="enrol-code">Code from the app</label><input class="uiInput otp" id="enrol-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" maxlength="7" pattern="[0-9 ]{{6,7}}" required autofocus><div class="sec__go"><button class="button button--primary" type="submit">Turn on</button><a class="button" href="{SECURITY_PATH}">Cancel</a></div></div></form>"#,
                 csrf(view.token),
                 html_escape(&enrolment.token),
                 secret_block(enrolment),
-            );
-        }
+            ),
+        ),
         State::On {
             since,
             recovery_left,
             locked_on,
         } => {
-            status.push_str(&status_icon("ok", "circle-check", "On"));
-            status.push_str(r#"<span class="count">On</span>"#);
-            let _ = write!(
-                body,
-                r#"<dl class="factLine"><div><dt>Since</dt><dd>{}</dd></div><div><dt>Recovery codes left</dt><dd>{recovery_left}</dd></div></dl>"#,
-                time_tag(*since, false)
+            let low = *recovery_left <= 2;
+            let hint = match *recovery_left {
+                0 => r#"<span class="sec__note">No code left. Make new codes now.</span>"#,
+                1 | 2 => r#"<span class="sec__note">Make new codes soon.</span>"#,
+                _ => "",
+            };
+            let facts = format!(
+                r#"<dl class="sec__facts"><div class="sec__fact"><dt>On since</dt><dd>{}</dd></div><div class="sec__fact{}"><dt>Recovery codes left</dt><dd>{recovery_left}{hint}</dd></div></dl>"#,
+                time_tag(*since, false),
+                if low { " sec__fact--low" } else { "" },
             );
-            let mut actions = String::new();
-            let _ = write!(
-                actions,
-                r#"<details class="mfaDo"><summary class="button">New recovery codes</summary><form class="mfaPanel" method="post" action="{SECURITY_RECOVERY_PATH}">{}<button class="button button--primary" type="submit">Make new codes</button></form></details>"#,
-                proof_fields(view.token, "recovery"),
+            let mut actions = sec_action(
+                "plain",
+                "refresh",
+                "New recovery codes",
+                "Make a new set. The old codes stop working.",
+                &format!(
+                    r#"<form class="sec__form" method="post" action="{SECURITY_RECOVERY_PATH}">{}<button class="button button--primary" type="submit">Make new codes</button></form>"#,
+                    proof_fields(view.token, "recovery"),
+                ),
             );
-            if !locked_on {
+            if *locked_on {
                 let _ = write!(
                     actions,
-                    r#"<details class="mfaDo"><summary class="button button--danger">Turn off</summary><form class="mfaPanel" method="post" action="{SECURITY_DISABLE_PATH}">{}<button class="button button--danger" type="submit">Turn off</button></form></details>"#,
-                    proof_fields(view.token, "disable"),
+                    r#"<p class="secAct__fixed">{}<span>This site requires two-factor. You cannot turn it off.</span></p>"#,
+                    icon("lock")
                 );
+            } else {
+                actions.push_str(&sec_action(
+                    "danger",
+                    "ban",
+                    "Turn off two-factor",
+                    "Sign-in asks for the password only.",
+                    &format!(
+                        r#"<form class="sec__form" method="post" action="{SECURITY_DISABLE_PATH}">{}<button class="button button--danger" type="submit">Turn off</button></form>"#,
+                        proof_fields(view.token, "disable"),
+                    ),
+                ));
             }
-            let _ = write!(body, r#"<div class="mfaActions">{actions}</div>"#);
+            (
+                sec_head("Each sign-in asks for a code from your app.", Some(true)),
+                format!(r#"{facts}<div class="sec__card sec__acts">{actions}</div>"#),
+            )
         }
-        State::Codes { codes } => {
-            status.push_str(r#"<span class="count">Recovery codes</span>"#);
-            let _ = write!(
-                body,
-                r#"{}<a class="button button--primary" href="{SECURITY_PATH}">Done</a>"#,
+        State::Codes { codes } => (
+            sec_head(
+                "Keep these codes in a safe place. Each code works one time.",
+                None,
+            ),
+            format!(
+                r#"<div class="sec__card sec__codes"><p class="sec__warn">{}<span>The page shows these codes one time only.</span></p>{}<div class="sec__go"><a class="button button--primary" href="{SECURITY_PATH}">Done</a></div></div>"#,
+                icon("alert-triangle"),
                 codes_block(codes),
-            );
-        }
-    }
+            ),
+        ),
+    };
     let _ = write!(
         out,
-        r#"<section class="zone zone--security" aria-labelledby="mfa-title"><div class="zone__head"><h2 class="title" id="mfa-title">Two-factor</h2>{status}</div><div class="scroll"><div class="mfaBody">{body}</div></div></section>"#
+        r#"<section class="sec" aria-labelledby="sec-title">{head}{body}</section>"#
     );
     fill_page(Tab::Security, frame, "Two-factor", &out)
 }
@@ -272,7 +323,6 @@ mod tests {
             csrf: "csrf-value",
             rd: "/x?a=1&b=2",
             sig: "sig",
-            host: Some("app.example.com"),
             pending: "pending.token",
         }
     }
@@ -311,8 +361,11 @@ mod tests {
         assert!(!page.contains("mfaUri") && !page.contains(">Link<"));
         assert!(page.contains(&format!(r#"name="enrol" value="{}""#, e.token)));
         assert!(
-            !page.contains("<img") && !page.contains("data:"),
-            "no image request"
+            !page.contains("<img")
+                && !page
+                    .replace(r#"<link rel="icon" href="data:,">"#, "")
+                    .contains("data:"),
+            "no image request: only the empty tab icon has a data URL"
         );
         assert!(!page.contains("style="), "the CSP forbids inline style");
     }
@@ -355,6 +408,60 @@ mod tests {
         let other = mfa.begin("alice", "Prod", 1_700_000_000).unwrap();
         let page = enrol_card(&fields(), &other, None);
         assert!(product_words(&page).is_empty() && !page.contains("Prod"));
+    }
+
+    #[test]
+    fn the_security_page_warns_when_few_recovery_codes_are_left_and_locks_the_turn_off() {
+        let frame = crate::ui::fixtures::full_frame();
+        let page = |recovery_left: u32, locked_on: bool| {
+            security_page(
+                &frame,
+                &SecurityView {
+                    notice: None,
+                    token: "t",
+                    state: State::On {
+                        since: 1_700_000_000,
+                        recovery_left,
+                        locked_on,
+                    },
+                },
+            )
+        };
+        let none = page(0, false);
+        assert!(none.contains("No code left") && none.contains("sec__fact--low"));
+        for left in [1, 2] {
+            let few = page(left, false);
+            assert!(few.contains("Make new codes soon.") && few.contains("sec__fact--low"));
+            assert!(!few.contains("No code left"));
+        }
+        let enough = page(3, false);
+        assert!(!enough.contains("sec__note") && !enough.contains("sec__fact--low"));
+        // A free account can turn it off. A locked account sees the notice and has no turn-off form.
+        assert!(enough.contains(SECURITY_DISABLE_PATH) && !enough.contains("secAct__fixed"));
+        let locked = page(3, true);
+        assert!(
+            locked.contains("This site requires two-factor") && locked.contains("secAct__fixed")
+        );
+        assert!(!locked.contains(SECURITY_DISABLE_PATH) && !locked.contains("Turn off"));
+    }
+
+    #[test]
+    fn the_cards_of_the_second_factor_have_the_empty_icon_and_no_icon_file() {
+        let e = enrolment();
+        let codes = ["abcde-fghij".to_string()];
+        for (name, page) in [
+            ("code", code_card(&fields(), None)),
+            ("enrol", enrol_card(&fields(), &e, None)),
+            ("codes", codes_card(&codes, "/")),
+        ] {
+            assert_eq!(page.matches("rel=\"icon\"").count(), 1, "{name}");
+            assert!(
+                page.contains(r#"<link rel="icon" href="data:,">"#),
+                "{name}"
+            );
+            assert!(!page.contains(crate::ui::favicon_path()), "{name}");
+            assert!(!page.contains("image/svg+xml"), "{name}");
+        }
     }
 
     #[test]
