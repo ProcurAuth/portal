@@ -193,7 +193,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "not_covered" => (
-            "Your rights do not cover a permission of this key.",
+            "Your account does not hold a permission of this key.",
             false,
         ),
         "bad_limits" => (
@@ -201,7 +201,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "needs_access" => (
-            "A permission on a service needs the switch Can open on that service. Tick the switch, then save.",
+            "A permission on a service needs the switch Open on that service. Tick the switch, then save.",
             false,
         ),
         "capacity" => (
@@ -319,7 +319,7 @@ fn can_use(groups: &[(String, String)], line: &KeyLine) -> (String, String) {
             "alert-triangle",
             &format!(
                 "{} no effect: the owner does not hold it any more",
-                super::settings::plural(lost, "right has", "rights have")
+                super::settings::plural(lost, "permission has", "permissions have")
             ),
         ));
     }
@@ -720,7 +720,7 @@ fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, St
 /// The aside of the form of an API key: the calls that the ticked rights allow. The script fills it
 /// from the editor, so without script it is absent. The boxes of the editor already show the rights:
 /// the aside does not list them again.
-const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title" title="The server knows these calls from its own documentation. The key holds at most the rights of its owner.">Calls that these rights allow</h2><div class="mono-line calls" data-calls></div><div class="mono-line">Authorization: Bearer &lt;key&gt;</div></aside>"#;
+const API_ASIDE: &str = r#"<aside class="keyAside" aria-label="What the key can do"><h2 class="title" title="The server knows these calls from its own documentation. The key holds at most the permissions of its owner.">Calls that these permissions allow</h2><div class="mono-line calls" data-calls></div><div class="mono-line">Authorization: Bearer &lt;key&gt;</div></aside>"#;
 
 /// The page "New key" or "Edit key": the fields across the width, then the editor of the
 /// permissions. An MCP key shows the services on the whole width. An API key shows the inbox on the
@@ -1122,7 +1122,7 @@ mod tests {
         v.needs_access = Some("grafana".into());
         let html = page(&v);
         assert!(
-            html.contains("grafana: a permission needs the switch Can open grafana."),
+            html.contains("grafana: a permission needs the switch Open grafana."),
             "{html}"
         );
         assert!(html.contains(r#"value="my &lt;agent&gt;""#));

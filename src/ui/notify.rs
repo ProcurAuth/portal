@@ -183,7 +183,7 @@ fn hidden_if(on: bool) -> &'static str {
 /// returns to. The button of the current level is pressed.
 pub fn level_form(level: Level, csrf: &str, back: &str) -> String {
     let mut out = format!(
-        r#"<form class="nlevel" method="post" action="{LEVEL_PATH}" role="group" aria-label="Toasts" data-notify-form><input type="hidden" name="csrf" value="{}"><input type="hidden" name="back" value="{back}">"#,
+        r#"<form class="nlevel" method="post" action="{LEVEL_PATH}" role="group" aria-label="Notify me" data-notify-form><input type="hidden" name="csrf" value="{}"><input type="hidden" name="back" value="{back}">"#,
         html_escape(csrf)
     );
     for (each, word, label) in [

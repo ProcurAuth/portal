@@ -23,6 +23,8 @@
 //                        source (the demo service Notes has one).
 //   UI_CHECK_WIDE        1: look at the six pages at 1440, 1920 and 2560 px, dark and light.
 //
+// A last check looks at 390 px: no page scrolls sideways, and no part of an action row leaves its row.
+//
 // The editor checks write nothing to the portal: they never click Save. The Inbox checks send alerts,
 // so run them against a portal that is yours (UI_CHECK_INBOX=1).
 
@@ -133,7 +135,7 @@ async function newUser(browser) {
   await expectOpen(page, CH, CH_ID, "1 permission", "resource");
   await page.waitForTimeout(100);
   const said = await page.locator("[data-ge-live]").innerText();
-  check("the live region says that the service opened", said.includes("can open"), said);
+  check("the live region says that the service opened", said.includes(": open"), said);
 
   // A right on a sub-resource: the databases come from the options route.
   await page.waitForSelector('.ge__svc.is-expanded .ge__node[data-path="host:ch-eu1/database:default"]');
@@ -301,7 +303,7 @@ async function inbox(browser) {
     check(`${scheme}: Escape closes New alert`, (await page.locator("details.pop[open]").count()) === 0, "still open");
     const onButton = await page.evaluate(() => document.activeElement && document.activeElement.matches("summary.button--primary"));
     check(`${scheme}: the focus goes back to the button`, onButton, "elsewhere");
-    await page.click('summary[aria-label="Documentation for senders"]');
+    await page.click('summary[aria-label="Guide for senders"]');
     await page.keyboard.press("Escape");
     check(`${scheme}: Escape closes the documentation`, (await page.locator("details.pop[open]").count()) === 0, "still open");
     // The popup keeps its height and the title its place between the two recipients.
@@ -533,11 +535,73 @@ async function wide(browser, login, password) {
   }
 }
 
+// A narrow screen (390 px): no page scrolls sideways, and no part of an action row of the editor of
+// permissions leaves its row (a limit field that covers the next row, for example). The check ticks
+// boxes in the page and never saves.
+async function narrow(browser) {
+  const login = process.env.UI_CHECK_LOGIN || "admin";
+  const password = process.env.UI_CHECK_PASSWORD || "test";
+  const { page } = await signIn(browser, login, password, "/auth/settings", { width: 390, height: 844 }, "dark");
+  // A page that the account cannot open (a status other than 200) is skipped. The pages are read only.
+  const paths = ["/auth/settings", "/auth/settings/services", "/auth/settings/activity", "/auth/settings/inbox", "/auth/settings/security", "/auth/settings/new-user", "/auth/keys/new?kind=mcp"];
+  // The settings pages scroll inside `main`, so the check looks at the document and at `main`.
+  const sideways = () =>
+    page.evaluate(() => {
+      const main = document.querySelector("main");
+      return Math.max(document.documentElement.scrollWidth - window.innerWidth, main ? main.scrollWidth - main.clientWidth : 0);
+    });
+  for (const path of paths) {
+    const response = await page.goto(BASE + path);
+    await page.waitForLoadState("networkidle");
+    if (response.status() !== 200) {
+      console.log(`skip  390 px ${path}: status ${response.status()}`);
+      continue;
+    }
+    const extra = await sideways();
+    check(`390 px ${path}: the page does not scroll sideways`, extra <= 0, String(extra));
+  }
+  // The rows of the actions: open a service, look at the rows, tick the actions that have limits, look again.
+  await page.goto(BASE + "/auth/settings/new-user");
+  await page.waitForSelector(".ge__svc");
+  const names = (await page.locator(".ge__svcName").allInnerTexts()).filter((name) => [CH, "Big database", "Notes"].includes(name));
+  const overflow = () =>
+    page.evaluate(() => {
+      const bad = [];
+      document.querySelectorAll(".ge__act").forEach((row) => {
+        const edge = row.getBoundingClientRect();
+        Array.from(row.children).forEach((child) => {
+          const box = child.getBoundingClientRect();
+          if (box.height > 0 && (box.bottom > edge.bottom + 1 || box.top < edge.top - 1 || box.right > edge.right + 1)) {
+            bad.push((row.querySelector("code") || {}).textContent + ":" + child.className);
+          }
+        });
+      });
+      return bad;
+    });
+  for (const name of names) {
+    await expand(page, name);
+    await node(page, "");
+    const before = await overflow();
+    check(`390 px ${name}: no part of an action row leaves its row`, before.length === 0, before.join());
+    // A row that is ticked draws its fields at once, so the next row with a count of limits is the first one again.
+    const withLimits = page.locator(".ge__svc.is-expanded .ge__act", { has: page.locator(".ge__limits") });
+    const count = Math.min(await withLimits.count(), 3);
+    for (let n = 0; n < count; n += 1) await withLimits.first().locator("input[data-action]").click();
+    const after = await overflow();
+    check(`390 px ${name}: with ${count} action(s) ticked, no part of an action row leaves its row`, after.length === 0, after.join());
+    const extra = await sideways();
+    check(`390 px ${name}: the page does not scroll sideways after the ticks`, extra <= 0, String(extra));
+    await shot(page, `narrow-${name.replace(/\W+/g, "-")}`);
+  }
+  await page.context().close();
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
     await newUser(browser);
     await keyForm(browser);
+    await narrow(browser);
     if (process.env.UI_CHECK_INBOX === "1") {
       await inbox(browser);
       const login = process.env.UI_CHECK_LOGIN || "admin";

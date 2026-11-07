@@ -201,8 +201,8 @@ The form has a box with the field name `keep`. The value of a ticked box is `1`.
 - A failed check of the form and a wrong password give the same answer, with the box ticked or not. The box changes only the session that a good sign-in opens. It does not change a refusal.
 - The page after a refusal never shows the box ticked. The answer to a refusal therefore does not depend on what the client sent. The login and the password are not shown again either.
 - The box has no script. The label holds the box, and its class goes through the mask like all other classes of the page. The mask never wraps a label that holds a field.
-- The words of the label are "Remember me". The life of the session is not in the label. It is in the `title` of the label and in a hidden text, for example "Stay signed in for 30 days". The box points to the hidden text with `aria-describedby`. The identifier goes through the mask like all other identifiers.
-- The row of the box is one group, in the middle of the card. It is as wide as the group, so a click beside the group does not tick the box.
+- The words of the label are the life of the session, for example "Stay signed in for 30 days". The label is the only text of the box: it has no `title`, no hidden text and no `aria-describedby`.
+- The row of the box is one group, at the left edge of the fields. It is as wide as the group, so a click beside the group does not tick the box.
 - With `session.remember = false`, the page has no box. The server still reads the field and ignores its value.
 - The name `keep` is a common word. It does not name the product.
 

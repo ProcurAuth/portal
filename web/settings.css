@@ -23,7 +23,7 @@
   color: var(--on-fill);
 }
 
-/* The tabs stand in the header, on the line of "Back to panel". The header never wraps: only the
+/* The tabs stand in the header, on the line of "Back to services". The header never wraps: only the
    strip of the tabs scrolls sideways, with a thin bar that stays visible. */
 .contentTabs {
   display: flex;
@@ -51,6 +51,26 @@
   white-space: nowrap;
 }
 
+/* A narrow header keeps the icons only, so the strip of the tabs has room. The strip fades at the
+   right edge while more tabs wait there. The script sets `is-more`. */
+@media (max-width: 640px) {
+  .shell .appHeader {
+    gap: 8px;
+  }
+
+  .shell .appHeader .btnText {
+    display: none;
+  }
+
+  .shell .backLink {
+    padding-inline: 4px;
+  }
+
+  .contentTabs.is-more {
+    mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
+  }
+}
+
 .contentTabs__tab:focus-visible {
   outline-offset: -2px;
 }
@@ -64,17 +84,19 @@
   color: var(--text);
 }
 
-/* Compact density, from ClickHouse Dash: 13 px text, controls of 28 px, rows of 26 and 32 px. */
+/* Compact density, from ClickHouse Dash: 13 px text, controls of 28 px, rows of 26 and 32 px.
+   The three sizes are tokens: a list row is `--row-s`, a service row or a form row is `--row-m`, and
+   a control is `--control`. A small control is `--control` less 4 px. */
 .settings {
   --control: 28px;
-  --row: 32px;
-  --row-compact: 26px;
+  --row-m: 32px;
+  --row-s: 26px;
   display: grid;
   align-content: start;
   gap: 12px;
   margin: 0;
   padding: 14px 24px 40px;
-  font-size: 13px;
+  font-size: var(--fs-m);
   line-height: 1.4;
 }
 
@@ -154,7 +176,7 @@ input[type="search"]::-webkit-search-cancel-button {
 .settings code,
 code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .muted {
@@ -240,6 +262,16 @@ code {
   margin: 0;
 }
 
+/* An empty zone of a list: the text starts at the left edge, with its action next to it. */
+.uiState--left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 4px;
+  text-align: left;
+}
+
 .statusIcon {
   display: inline-flex;
   align-items: center;
@@ -268,14 +300,14 @@ time.when {
 .settings .button {
   height: var(--control);
   padding: 0 10px;
-  font-size: 13px;
+  font-size: var(--fs-m);
   border-radius: var(--radius-compact);
 }
 
 .settings .button--small {
-  height: 24px;
+  height: calc(var(--control) - 4px);
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .button--ghost {
@@ -335,9 +367,18 @@ time.when {
 
 /* The head of a form that needs a button far from the top of a long page stays in view. */
 
+/* A disabled control: one rule, one opacity, and a border that stays visible. The text keeps its
+   colour: the opacity is the only dimming, so a pale control does not vanish. */
 .button:disabled,
 .button[aria-disabled="true"] {
-  opacity: 0.5;
+  border-color: var(--border-strong);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+input[type="radio"]:disabled {
+  outline: 1px solid var(--border-strong);
+  outline-offset: -1px;
   cursor: not-allowed;
 }
 
@@ -355,14 +396,14 @@ time.when {
 .segmented__option {
   display: inline-flex;
   align-items: center;
-  height: 24px;
+  height: calc(var(--control) - 4px);
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-compact);
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 600;
   text-decoration: none;
   white-space: nowrap;
@@ -379,7 +420,7 @@ time.when {
 }
 
 .segmented__option:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -388,7 +429,7 @@ time.when {
 .uiField__hint {
   margin: 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 400;
 }
 
@@ -431,7 +472,7 @@ time.when {
 
 .uiInput--mono {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 select.uiInput {
@@ -447,6 +488,51 @@ input[type="radio"] {
   height: 16px;
   margin: 0;
   accent-color: var(--accent-fill);
+}
+
+/* One box for every list, table and matrix: the rows of the keys, the editor of permissions and the matrix of
+   the Inbox. The switch of a service (`data-switch`) has its own look, below. */
+.settings input[type="checkbox"]:not([data-switch]) {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  background: var(--inset);
+  cursor: pointer;
+}
+
+.settings input[type="checkbox"]:not([data-switch]):checked,
+.settings input[type="checkbox"]:not([data-switch]):indeterminate {
+  border-color: var(--accent-fill);
+  background: var(--accent-fill);
+}
+
+.settings input[type="checkbox"]:not([data-switch]):checked::after {
+  width: 8px;
+  height: 4px;
+  margin-top: -2px;
+  border-bottom: 2px solid var(--on-fill);
+  border-left: 2px solid var(--on-fill);
+  content: "";
+  transform: rotate(-45deg);
+}
+
+.settings input[type="checkbox"]:not([data-switch]):indeterminate::after {
+  width: 8px;
+  height: 2px;
+  background: var(--on-fill);
+  content: "";
+}
+
+.settings input[type="checkbox"]:not([data-switch]):disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings input[type="checkbox"]:not([data-switch]):focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 /* Generating needs script; without it the button would do nothing, so it is not shown. */
@@ -574,7 +660,7 @@ input.keyText {
 
 .ge__groupTitle {
   margin: 4px 0 0;
-  font-size: 0.8rem;
+  font-size: var(--fs-s);
   font-weight: 600;
   color: var(--muted);
 }
@@ -599,14 +685,31 @@ input.keyText {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-height: var(--row);
+  min-height: var(--row-m);
   padding: 0 8px 0 10px;
   cursor: pointer;
 }
 
+/* The name cell has a fixed width, so the info text of each row starts at the same place. A long
+   name is cut with an ellipsis. The icon of the control level follows the name. */
 .ge__svcName {
-  min-width: 8rem;
+  flex: 0 0 13rem;
+  min-width: 0;
+  overflow: hidden;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ge__ctl {
+  display: inline-flex;
+  margin-left: 6px;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.ge__ctl--stale {
+  color: var(--warning);
 }
 
 .ge__svcInfo {
@@ -712,6 +815,10 @@ input.keyText {
     padding-block: 8px;
   }
 
+  .ge__svcName {
+    flex: 1 1 8rem;
+  }
+
   .ge__svcInfo {
     flex-basis: 100%;
     order: 3;
@@ -763,7 +870,7 @@ input.keyText {
   display: flex;
   align-items: center;
   gap: 4px;
-  height: var(--row-compact);
+  height: var(--row-s);
   padding-right: 8px;
   border-radius: 4px;
   white-space: nowrap;
@@ -801,7 +908,7 @@ input.keyText {
 .ge__limits,
 .ge__groupCount {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
 }
 
@@ -816,10 +923,10 @@ input.keyText {
 
 .ge__more,
 .ge__note {
-  height: 30px;
-  line-height: 30px;
+  height: var(--row-s);
+  line-height: var(--row-s);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   white-space: nowrap;
 }
 
@@ -846,6 +953,20 @@ input.keyText {
   overflow: auto;
 }
 
+/* The full description of the row under the pointer or the focus: one line. */
+.ge__foot {
+  flex: none;
+  min-height: var(--row-s);
+  padding: 0 10px;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--fs-s);
+  line-height: calc(var(--row-s) - 1px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ge__group {
   position: sticky;
   top: 0;
@@ -853,25 +974,40 @@ input.keyText {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: var(--row-compact);
+  height: var(--row-s);
   padding: 0 10px;
   border-bottom: 1px solid var(--border);
   background: var(--raised);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
   cursor: pointer;
 }
 
+/* A row is one line of 26 px. A row with limit fields has a second line for them, under the name
+   and the description, so nothing covers the next row. */
 .ge__act {
   display: grid;
   grid-template-columns: 16px minmax(8rem, 14rem) minmax(0, 1fr) auto;
+  grid-template-rows: minmax(var(--row-s), auto);
   align-items: center;
-  gap: 8px;
-  height: var(--row-compact);
+  gap: 0 8px;
   padding: 0 10px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
+}
+
+.ge__act > input,
+.ge__act > code,
+.ge__act > .ge__desc,
+.ge__act > .statusIcon,
+.ge__act > .ge__limits {
+  grid-row: 1;
+}
+
+.ge__act > .statusIcon,
+.ge__act > .ge__limits {
+  justify-self: end;
 }
 
 .ge__act.is-on {
@@ -901,16 +1037,69 @@ input.keyText {
   margin-left: auto;
 }
 
+/* The limit fields of an action sit on the second line of its row. */
+.ge__act > .ge__limitsInline {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  justify-content: flex-start;
+  margin: 0 0 6px;
+}
+
+.ge__act > .ge__desc:empty {
+  display: none;
+}
+
+/* The count of the limits, or the note "via ...", stays on one line. */
+.ge__limits {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ge__limit {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font-size: var(--fs-s);
+  white-space: nowrap;
 }
 
 .ge__limit .uiInput {
   width: 4.5rem;
-  height: 22px;
+  height: calc(var(--control) - 4px);
   padding: 0 6px;
+}
+
+@media (max-width: 640px) {
+  /* The description goes under the name, and the fields of the limits under the description. */
+  .ge__act {
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+  }
+
+  .ge__act > .ge__desc {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+
+  .ge__act > .statusIcon,
+  .ge__act > .ge__limits {
+    grid-column: 3;
+  }
+
+  .ge__act > .ge__limitsInline {
+    grid-row: 3;
+  }
+
+  /* The limits of `access` start at the left, and the fields of a budget wrap inside the line. */
+  .ge__svcTop .ge__limitsInline {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .ge__limit {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 899px) {
@@ -919,9 +1108,21 @@ input.keyText {
     height: auto;
   }
 
-  .ge__side,
+  /* The tree takes the height of its rows, up to a part of the window. The list of the permissions
+     takes the rest, and it scrolls inside. */
+  .ge__side {
+    height: auto;
+    max-height: 40dvh;
+  }
+
   .ge__main {
-    height: 20rem;
+    height: auto;
+    min-height: 16rem;
+    max-height: 70dvh;
+  }
+
+  .ge__tree {
+    flex: 0 1 auto;
   }
 }
 
@@ -940,7 +1141,7 @@ input.keyText {
 
 .title {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -948,7 +1149,7 @@ input.keyText {
 
 .count {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1013,7 +1214,7 @@ input.keyText {
   flex: none;
   place-items: center;
   width: 24px;
-  height: 24px;
+  height: calc(var(--control) - 4px);
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -1056,12 +1257,12 @@ input.keyText {
   flex: none;
   align-items: center;
   gap: 4px;
-  height: 22px;
+  height: calc(var(--control) - 4px);
   padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
   text-decoration: none;
   white-space: nowrap;
@@ -1098,6 +1299,10 @@ input.keyText {
 
 .split--services {
   grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+}
+
+.split--inbox {
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr);
 }
 
 .stackcol {
@@ -1147,7 +1352,7 @@ input.keyText {
 
 .grid th,
 .grid td {
-  height: var(--row-compact);
+  height: var(--row-s);
   padding: 0 6px;
   border-bottom: 1px solid var(--border);
   overflow: hidden;
@@ -1164,7 +1369,7 @@ input.keyText {
   border-bottom-color: var(--border-strong);
   background: var(--bg);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .grid .r {
@@ -1189,6 +1394,10 @@ input.keyText {
 
 .grid col.w64 {
   width: 64px;
+}
+
+.grid col.w40 {
+  width: 40px;
 }
 
 .grid col.w80 {
@@ -1274,10 +1483,10 @@ input.keyText {
 }
 
 .grid .grid__group th {
-  height: var(--row-compact);
+  height: var(--row-s);
   background: var(--bg);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .grid .grid__group:hover {
@@ -1285,7 +1494,7 @@ input.keyText {
 }
 
 .grid code {
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .grid input[type="checkbox"] {
@@ -1397,7 +1606,7 @@ input.keyText {
   grid-template-columns: 1fr auto 1fr;
   margin-top: 2px;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.3;
 }
 
@@ -1446,6 +1655,20 @@ input.keyText {
 
 .pop__menu--wide {
   width: min(640px, calc(100vw - 48px));
+}
+
+/* On a narrow screen a popover is a panel under the header, as the panel of the bell. It never
+   leaves the screen. A list that sits in a table cell keeps its place. */
+@media (max-width: 640px) {
+  .pop__menu:not(.pop__menu--list) {
+    position: fixed;
+    top: 56px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100dvh - 72px);
+    overflow: auto;
+  }
 }
 
 .kvs {
@@ -1512,18 +1735,18 @@ input.keyText {
 }
 
 .ask__q {
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .ask .button {
-  height: 22px;
+  height: calc(var(--control) - 4px);
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .ask__name {
   width: 9rem;
-  height: 22px;
+  height: calc(var(--control) - 4px);
 }
 
 /* The bulk action: the button shows the count of the ticked rows, and only while a row is ticked. */
@@ -1548,14 +1771,14 @@ input.keyText {
   align-items: center;
   gap: 6px;
   min-width: 0;
-  min-height: 32px;
+  min-height: var(--row-m);
   margin: 0;
   white-space: nowrap;
 }
 
 .accountBar .name {
   margin: 0 8px 0 0;
-  font-size: 16px;
+  font-size: var(--fs-xl);
   font-weight: 600;
 }
 
@@ -1576,7 +1799,7 @@ input.keyText {
   margin: 0 0 0 8px;
   overflow: hidden;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .factLine > div {
@@ -1693,6 +1916,7 @@ input.keyText {
 .ge__groups .ge__svcList {
   display: flex;
   flex-direction: column;
+  gap: 0;
 }
 
 .ge__groups .ge__svc {
@@ -1703,7 +1927,7 @@ input.keyText {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  min-height: calc(var(--row) + 260px);
+  min-height: calc(var(--row-m) + 260px);
 }
 
 .ge__groups .ge__svc.is-expanded > .ge__svcBody {
@@ -1799,7 +2023,7 @@ input.keyText {
 }
 
 .ge__groups .ge__svcHead input[type="checkbox"]:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -1822,7 +2046,13 @@ input.keyText {
 
   .split,
   .split--services,
-    .stackcol,
+  .split--inbox {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .split,
+  .split--services,
+  .stackcol,
   .split--services .stackcol {
     grid-template-rows: none;
   }
@@ -1848,11 +2078,24 @@ input.keyText {
   flex-wrap: nowrap;
 }
 
+@media (max-width: 999px) {
+  .tbar--inbox {
+    flex-wrap: wrap;
+  }
+}
+
+/* The caption of a control of the bar: it names what the control sets. */
+.bar__cap {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--fs-s);
+}
+
 .bar__range {
   min-width: 0;
   overflow: hidden;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
 }
@@ -1906,7 +2149,7 @@ input.keyText {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: var(--row-compact);
+  height: var(--row-s);
   padding: 0 8px;
   border-radius: 4px;
   color: var(--text);
@@ -1939,7 +2182,7 @@ input.keyText {
 
 .chip:disabled {
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 /* A chip that is a fact, not a control: no link, no hover. With no row to filter it is dimmed. */
@@ -2055,7 +2298,7 @@ input.keyText {
   gap: 16px;
   min-height: 24px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   white-space: nowrap;
 }
 
@@ -2114,7 +2357,7 @@ input.keyText {
 .sectionLabel {
   margin: 0 0 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2127,7 +2370,7 @@ input.keyText {
   border-radius: var(--radius-compact);
   background: var(--inset);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-s);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -2137,7 +2380,7 @@ input.keyText {
   grid-template-columns: 7rem minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: var(--row-compact);
+  min-height: var(--row-s);
   border-bottom: 1px solid var(--border);
 }
 
@@ -2156,6 +2399,18 @@ input.keyText {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
+}
+
+/* On a narrow screen a popup has the width of the screen, and the two columns of the guide stack. */
+@media (max-width: 640px) {
+  .composer,
+  .composer--alert {
+    width: auto;
+  }
+
+  .twoCols {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* A long reason wraps inside the popup: it does not widen the form. */
@@ -2224,7 +2479,7 @@ input.keyText {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: var(--row-compact);
+  height: var(--row-s);
   padding: 0 8px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
@@ -2271,7 +2526,7 @@ input.keyText {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .composer .searchBox .uiInput {
@@ -2298,7 +2553,7 @@ input.keyText {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--raised);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1;
   white-space: nowrap;
 }
@@ -2334,7 +2589,7 @@ input.keyText {
 }
 
 .field__label {
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
 }
 
@@ -2347,7 +2602,7 @@ input.keyText {
   display: grid;
   grid-template-columns: 8rem minmax(0, 1fr);
   align-items: center;
-  min-height: var(--row-compact);
+  min-height: var(--row-s);
   border-bottom: 1px solid var(--border);
 }
 
@@ -2385,7 +2640,7 @@ input.keyText {
   background: var(--inset);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-s);
   line-height: 1.5;
   overflow-wrap: anywhere;
   resize: none;
@@ -2411,10 +2666,6 @@ input.keyText {
 }
 
 /* The zones of the page: a main zone and a stack, or one narrow zone. */
-.split--inbox {
-  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr);
-}
-
 .split--one {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -2433,10 +2684,10 @@ input.keyText {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: var(--row-compact);
+  min-height: var(--row-s);
   margin-top: 8px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2454,7 +2705,7 @@ input.keyText {
 .sub__note {
   margin-left: auto;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 400;
   letter-spacing: 0;
   text-transform: none;
@@ -2469,12 +2720,14 @@ input.keyText {
   margin-left: 8px;
 }
 
+/* A row is 26 px high for one line. A long description takes a second line, and it is cut after it. */
 .frow {
   display: grid;
   grid-template-columns: 16px minmax(7.5rem, 9.5rem) minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  height: var(--row-compact);
+  min-height: var(--row-s);
+  padding-block: 2px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
@@ -2496,7 +2749,13 @@ input.keyText {
 }
 
 .frow .desc {
+  display: -webkit-box;
   color: var(--muted);
+  line-height: 1.3;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .matrix {
@@ -2512,13 +2771,13 @@ input.keyText {
 .matrix > * {
   display: flex;
   align-items: center;
-  min-height: var(--row-compact);
+  min-height: var(--row-s);
   border-bottom: 1px solid var(--border);
 }
 
 .matrix .mh {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -2542,8 +2801,12 @@ input.keyText {
   cursor: pointer;
 }
 
+.matrix .mc input[type="checkbox"]:not([data-switch]):disabled {
+  opacity: 1;
+}
+
 .matrix .mc:has(input:disabled) {
-  opacity: 0.35;
+  opacity: 0.55;
 }
 
 .matrix label.mc.is-lost {
@@ -2558,11 +2821,16 @@ input.keyText {
 
 .limitRow {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  min-height: 30px;
+  gap: 4px 8px;
+  min-height: var(--row-m);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+}
+
+.limitHint {
+  margin: 2px 0 0;
 }
 
 .limitRow .label {
@@ -2581,19 +2849,19 @@ input.keyText {
 
 .unit {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .num-input {
   width: 4.2rem;
-  height: 22px;
+  height: calc(var(--control) - 4px);
   padding: 0 6px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-compact);
   background: var(--inset);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -2605,11 +2873,17 @@ input.keyText {
 }
 
 .num-input:disabled {
-  opacity: 0.4;
+  opacity: 0.55;
 }
 
 .num-input--s {
-  width: 3.1rem;
+  width: 3.75rem;
+}
+
+/* An empty box means no limit. The placeholder says so, in a quiet colour. */
+.num-input::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 /* The pages of a key ------------------------------------------------------------------------ */
@@ -2715,6 +2989,11 @@ input.keyText {
   min-width: 540px;
 }
 
+/* The column of the groups takes the free width. It keeps room for one chip and "+N". */
+.grid--groups {
+  min-width: 680px;
+}
+
 .grid--keys {
   min-width: 480px;
 }
@@ -2784,7 +3063,7 @@ input.keyText {
 
 .fbar__label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -2800,12 +3079,12 @@ input.keyText {
   flex: none;
   align-items: center;
   gap: 4px;
-  height: 22px;
+  height: calc(var(--control) - 4px);
   padding: 0 4px 0 8px;
   border-radius: 999px;
   background: var(--accent-tint);
   color: var(--accent-text);
-  font-size: 12px;
+  font-size: var(--fs-s);
   white-space: nowrap;
 }
 
@@ -2838,7 +3117,7 @@ input.keyText {
 
 .settings .fclear {
   flex: none;
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -2862,7 +3141,7 @@ input.keyText {
   border-radius: 999px;
   background: var(--raised);
   color: var(--text);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1;
   text-decoration: none;
   white-space: nowrap;
@@ -2896,9 +3175,12 @@ input.keyText {
 }
 
 .grid td.tagsCell .tags > .tag:not(.tag--more) {
+  display: block;
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
+  line-height: 16px;
+  text-overflow: ellipsis;
 }
 
 .pop__menu--list {
@@ -2915,7 +3197,7 @@ input.keyText {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: var(--row-compact);
+  min-height: var(--row-s);
 }
 
 .grid .pop__menu {
@@ -2943,6 +3225,19 @@ input.keyText {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
 }
 
+/* A narrow screen shows one field on each line. A field never leaves the screen. */
+@media (max-width: 640px) {
+  .fgrid--user,
+  .fgrid--key,
+  .fgrid--account {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .expiry__date {
+    max-width: 100%;
+  }
+}
+
 .fgrid > .field {
   align-content: start;
 }
@@ -2955,7 +3250,7 @@ input.keyText {
 .field .hint,
 .hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   line-height: 1.4;
 }
 
@@ -2972,7 +3267,7 @@ input.keyText {
 
 .field__error {
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .uiInput.uiInput--error {
@@ -2989,7 +3284,7 @@ input.keyText {
   background: transparent;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .settings .chip.chip--toggle:disabled {
@@ -3019,9 +3314,9 @@ input.keyText {
   min-width: 0;
   align-items: center;
   gap: 6px;
-  min-height: 22px;
+  min-height: var(--row-s);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   white-space: nowrap;
 }
 
@@ -3059,7 +3354,7 @@ input.keyText {
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .svc__flag--stale {
@@ -3102,7 +3397,7 @@ input.keyText {
   border-radius: var(--radius-compact);
   background: var(--inset);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-s);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -3143,7 +3438,7 @@ input.keyText {
   gap: 16px;
   width: 100%;
   max-width: 680px;
-  margin: 8px auto 0;
+  margin: 0;
 }
 
 .sec__head {
@@ -3152,8 +3447,9 @@ input.keyText {
   gap: 14px;
 }
 
+/* The page has the look of the other tabs: no tile, a small upper-case title. */
 .sec__mark {
-  display: grid;
+  display: none;
   flex: none;
   place-items: center;
   width: 44px;
@@ -3175,15 +3471,17 @@ input.keyText {
 
 .sec__title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 650;
+  font-size: var(--fs-s);
+  font-weight: 700;
+  letter-spacing: 0.06em;
   line-height: 1.25;
+  text-transform: uppercase;
 }
 
 .sec__lead {
   margin: 2px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-m);
 }
 
 .sec__state {
@@ -3191,11 +3489,16 @@ input.keyText {
   flex: none;
   align-items: center;
   gap: 6px;
-  height: 26px;
-  padding: 0 11px 0 8px;
+  height: calc(var(--control) - 4px);
+  padding: 0 8px;
   border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: var(--fs-s);
+  font-weight: 600;
+}
+
+.sec__state .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .sec__state--on {
@@ -3244,7 +3547,7 @@ input.keyText {
   border-radius: 50%;
   background: var(--accent-tint);
   color: var(--accent-text);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
 }
 
@@ -3285,7 +3588,7 @@ input.keyText {
   border-radius: 50%;
   background: var(--accent-tint);
   color: var(--accent-text);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
 }
 
@@ -3308,12 +3611,12 @@ input.keyText {
 
 .sec__fact dt {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .sec__fact dd {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--fs-xl);
   font-variant-numeric: tabular-nums;
   font-weight: 650;
 }
@@ -3324,7 +3627,7 @@ input.keyText {
 
 .sec__note {
   display: block;
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 500;
 }
 
@@ -3383,13 +3686,13 @@ input.keyText {
 }
 
 .secAct__title {
-  font-size: 13.5px;
+  font-size: var(--fs-m);
   font-weight: 600;
 }
 
 .secAct__hint {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .secAct__chev {
@@ -3416,7 +3719,7 @@ input.keyText {
   padding: 14px 16px;
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .sec__form {
@@ -3444,7 +3747,7 @@ input.keyText {
   border-radius: var(--radius-control);
   background: var(--warning-bg);
   color: var(--warning);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -3485,5 +3788,45 @@ input.keyText {
 
   .secAct__chev {
     transition: none;
+  }
+}
+
+/* A touch screen: a target is 32 px or more, and a row is 36 px. The look of a mouse screen stays. */
+@media (pointer: coarse) {
+  .settings .chip,
+  .settings .button--small,
+  .segmented__option,
+  .ib {
+    min-height: 32px;
+  }
+
+  .ib {
+    min-width: 32px;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 24px;
+    height: 24px;
+  }
+
+  .ge__node,
+  .ge__group {
+    height: auto;
+    min-height: 36px;
+  }
+
+  .ge__act {
+    grid-template-rows: minmax(36px, auto);
+  }
+
+  .grid th,
+  .grid td {
+    height: 36px;
+  }
+
+  .settings .grid a.rowLink {
+    display: inline-block;
+    padding-block: 8px;
   }
 }

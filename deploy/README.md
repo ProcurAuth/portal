@@ -65,7 +65,7 @@ The manifests in `k3s/` describe the target. This repository does not apply them
 - The Traefik of the cluster has the middlewares `forward-auth` and `secure-headers` in the namespace `edge`.
 - Nodes that run the portal have the label `home.server=true`. Change `nodeSelector` and `tolerations` for other nodes.
 - The pod network is `10.42.0.0/16`. Change `trusted_proxies` in `config.hcl` for another network.
-- The image `portal:5.0.2` is in the registry of the cluster. Change `images` in `kustomization.yaml` to the name that your registry uses.
+- The image `portal:5.0.3` is in the registry of the cluster. Change `images` in `kustomization.yaml` to the name that your registry uses.
 
 ### Secret
 

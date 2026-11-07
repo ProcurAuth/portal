@@ -64,6 +64,35 @@
   }
   shortYears();
 
+  // The strip of the tabs scrolls the current tab into view. It fades at the edge where more tabs wait.
+  function tabsInView() {
+    var strip = document.querySelector(".contentTabs");
+    if (!strip) return;
+    var current = strip.querySelector(".is-active");
+    if (current) {
+      var box = strip.getBoundingClientRect();
+      var at = current.getBoundingClientRect();
+      strip.scrollLeft += at.left - box.left - (box.width - at.width) / 2;
+    }
+    function mark() {
+      strip.classList.toggle("is-more", strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1);
+    }
+    mark();
+    strip.addEventListener("scroll", mark);
+    window.addEventListener("resize", mark);
+  }
+  tabsInView();
+
+  // The button of an empty list "Send an alert" opens the popover "New alert" of the bar.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-open-send]");
+    if (!button) return;
+    var opener = document.querySelector("details.pop > summary.button--primary");
+    if (!opener) return;
+    opener.parentNode.open = true;
+    opener.focus();
+  });
+
   // A form with data-gate: the submit buttons stay disabled until the browser finds the fields valid.
   function gateForm(form) {
     var buttons = Array.prototype.slice.call(form.querySelectorAll('[type="submit"]'));
@@ -73,11 +102,38 @@
     }
     var update = function () {
       var valid = form.checkValidity();
-      for (var j = 0; j < buttons.length; j += 1) buttons[j].disabled = !valid;
+      for (var j = 0; j < buttons.length; j += 1) {
+        buttons[j].disabled = !valid;
+        // A disabled button says why.
+        if (valid) buttons[j].removeAttribute("title");
+        else buttons[j].title = "Fill the required fields. Fix the fields that are not valid.";
+      }
     };
     form.addEventListener("input", update);
     form.addEventListener("change", update);
     update();
+    hintFields(form);
+  }
+
+  // A hint line under a field (`data-hint-for` names the field) turns into an error when the person
+  // leaves the field with a value that is not valid. It turns back when the value is valid.
+  function hintFields(form) {
+    var hints = form.querySelectorAll("[data-hint-for]");
+    Array.prototype.forEach.call(hints, function (hint) {
+      var input = document.getElementById(hint.getAttribute("data-hint-for"));
+      if (!input) return;
+      function show() {
+        var bad = input.value !== "" && !input.validity.valid;
+        hint.classList.toggle("field__error", bad);
+        input.classList.toggle("uiInput--error", bad);
+        if (bad) input.setAttribute("aria-invalid", "true");
+        else input.removeAttribute("aria-invalid");
+      }
+      input.addEventListener("blur", show);
+      input.addEventListener("input", function () {
+        if (input.classList.contains("uiInput--error")) show();
+      });
+    });
   }
 
   var gated = document.querySelectorAll("form[data-gate]");
@@ -357,7 +413,7 @@
     if (toUser) lines.push("POST /api/v1/alerts  (user: an account)");
     calls.textContent = "";
     if (!lines.length) {
-      calls.textContent = "No call yet. Tick a right.";
+      calls.textContent = "No call yet. Tick a permission.";
       return;
     }
     lines.forEach(function (line, at) {
@@ -434,7 +490,7 @@
 
    A pane is the tree of one service and its actions. The page of an account (data-layout="groups")
    has two groups side by side. The group "Services" has one row for each service, and the pane
-   opens under the chosen row. The group "Server features" has one pane, always open. The forms of
+   opens under the chosen row. The group "Server permissions" has one pane, always open. The forms of
    the keys have one list: the features are one more row.
 
    A person who gives a grant does not know the resources of a service. When a node can have
@@ -756,7 +812,7 @@
       if (ticked.has(k)) return;
       if (!owns(serviceId, "access", "")) return;
       ticked.set(k, { action: "access", service: serviceId, path: "", limits: {} });
-      spoken.push(nameOf(serviceId) + ": can open");
+      spoken.push(nameOf(serviceId) + ": open");
     }
 
     // Untick `access`: the rights of the service go too, because they do nothing without it. A right
@@ -924,8 +980,8 @@
       var count = node("span", "count");
       var actSearch = node("input", "uiInput ge__filter");
       actSearch.type = "search";
-      actSearch.placeholder = "Filter the actions";
-      actSearch.setAttribute("aria-label", "Filter the actions");
+      actSearch.placeholder = "Filter the permissions";
+      actSearch.setAttribute("aria-label", "Filter the permissions");
       actSearch.autocomplete = "off";
       var seg = node("div", "segmented");
       var allButton = node("button", "segmented__option is-active", "All");
@@ -935,13 +991,23 @@
       tickedButton.setAttribute("aria-pressed", "false");
       seg.appendChild(allButton);
       seg.appendChild(tickedButton);
+      // One button folds or opens every group of the list. It shows when the list has two groups or more.
+      var foldAll = node("button", "ib ge__fold");
+      foldAll.type = "button";
+      foldAll.hidden = true;
       bar.appendChild(title);
       bar.appendChild(count);
       bar.appendChild(actSearch);
       bar.appendChild(seg);
+      bar.appendChild(foldAll);
       var actList = node("div", "ge__list");
+      // The line under the list gives the full description of the row that the pointer or the focus is on.
+      var foot = node("div", "ge__foot");
       main.appendChild(bar);
       main.appendChild(actList);
+      main.appendChild(foot);
+      // The groups of the list that is drawn: the key of each, and whether it starts closed.
+      var groupInfo = [];
       ui.appendChild(side);
       ui.appendChild(main);
 
@@ -1121,6 +1187,8 @@
         var text = actSearch.value.trim().toLowerCase();
         var scroll = actList.scrollTop;
         actList.textContent = "";
+        foot.textContent = "";
+        groupInfo = [];
         var rows = svc.actions.filter(function (a) {
           if (!applies(a, item)) return false;
           // The switch of the service is this grant: the row of the service has it already.
@@ -1156,13 +1224,14 @@
           // A long list starts with its groups closed, but the groups that hold a ticked action.
           var closedByDefault = available > LONG_LIST && ticks === 0;
           var closed = (closedByDefault !== toggledGroups.has(item.path + "|" + name)) && !text;
+          groupInfo.push({ key: item.path + "|" + name, byDefault: closedByDefault, closed: closed });
           var header = node("div", "ge__group");
           header.dataset.group = name;
           var chev = node("button", "ge__chev");
           chev.type = "button";
           chev.dataset.group = name;
           chev.setAttribute("aria-expanded", closed ? "false" : "true");
-          chev.setAttribute("aria-label", "Actions of " + (name || "the service"));
+          chev.setAttribute("aria-label", "Permissions of " + (name || "the service"));
           chev.appendChild(icon(closed ? "chevron-right" : "chevron-down"));
           header.appendChild(chev);
           var master = node("input");
@@ -1170,7 +1239,7 @@
           master.dataset.groupBox = name;
           master.checked = ticks === list2.length;
           master.indeterminate = ticks > 0 && ticks < list2.length;
-          master.setAttribute("aria-label", "Tick every action of " + (name || "the group"));
+          master.setAttribute("aria-label", "Tick every permission of " + (name || "the group"));
           header.appendChild(master);
           header.appendChild(node("span", "ge__groupName", name || "service"));
           header.appendChild(node("span", "ge__groupCount", ticks + "/" + list2.length));
@@ -1198,7 +1267,9 @@
             desc.title = a.description;
             line.appendChild(desc);
             if (via !== null) {
-              line.appendChild(node("span", "ge__limits", via === "" ? "via the whole service" : "via " + via));
+              var viaNote = node("span", "ge__limits", via === "" ? "via the whole service" : "via " + via);
+              viaNote.title = viaNote.textContent;
+              line.appendChild(viaNote);
             } else if (held && held.locked) {
               var lock = node("span", "statusIcon");
               lock.title = "This permission comes from the configuration file.";
@@ -1207,7 +1278,7 @@
             } else {
               if (isTicked && !owns(svc.id, a.name, item.path)) {
                 var warn = node("span", "statusIcon statusIcon--warn");
-                warn.title = "Your rights do not cover this permission any more.";
+                warn.title = "Your account no longer holds this permission.";
                 warn.appendChild(icon("alert-triangle"));
                 line.appendChild(warn);
               }
@@ -1215,12 +1286,17 @@
                 // A ticked action shows its limit fields on its own line: no table is needed.
                 var inline = node("span", isTicked ? "ge__limitsInline" : "ge__limits");
                 if (isTicked) limitFields(inline, held, svc);
-                else
-                  inline.textContent = a.limits
-                    .map(function (l) {
-                      return l.name;
-                    })
-                    .join(", ");
+                else {
+                  // The row shows the count. The tooltip has the names.
+                  inline.textContent = plural(a.limits.length, "limit", "limits");
+                  inline.title =
+                    "Limits: " +
+                    a.limits
+                      .map(function (l) {
+                        return l.name;
+                      })
+                      .join(", ");
+                }
                 line.appendChild(inline);
               }
             }
@@ -1229,10 +1305,19 @@
         });
         if (!rows.length) {
           var empty = node("div", "uiState uiState--compact");
-          empty.appendChild(node("p", "uiState__body", "No action matches."));
+          empty.appendChild(node("p", "uiState__body", "No permission matches."));
           actList.appendChild(empty);
         }
         actList.scrollTop = scroll;
+        var allClosed = groupInfo.every(function (g) {
+          return g.closed;
+        });
+        foldAll.hidden = groupInfo.length < 2 || !!text;
+        foldAll.textContent = "";
+        foldAll.appendChild(icon(allClosed ? "chevron-down" : "chevron-right"));
+        foldAll.title = allClosed ? "Open every group" : "Close every group";
+        foldAll.setAttribute("aria-label", foldAll.title);
+        foldAll.dataset.fold = allClosed ? "open" : "close";
       }
 
       function select(path) {
@@ -1408,6 +1493,24 @@
         }
         render();
       });
+      foldAll.addEventListener("click", function () {
+        var wantClosed = foldAll.dataset.fold === "close";
+        groupInfo.forEach(function (g) {
+          if (g.byDefault !== wantClosed) toggledGroups.add(g.key);
+          else toggledGroups.delete(g.key);
+        });
+        renderActions();
+        foldAll.focus();
+      });
+      function describeRow(event) {
+        var line = event.target.closest ? event.target.closest(".ge__act") : null;
+        if (!line) return;
+        var name = line.querySelector("code");
+        var text = line.querySelector(".ge__desc");
+        foot.textContent = name && text && text.textContent ? name.textContent + " \u00b7 " + text.textContent : "";
+      }
+      actList.addEventListener("mouseover", describeRow);
+      actList.addEventListener("focusin", describeRow);
       actList.addEventListener("click", function (event) {
         var header = event.target.closest(".ge__group");
         if (!header || event.target.closest("input")) return;
@@ -1602,7 +1705,7 @@
         row.appendChild(desc);
         if (on && !owned && data.owner !== null) {
           var warn = node("span", "statusIcon statusIcon--warn");
-          warn.title = "Your rights do not cover this permission any more.";
+          warn.title = "Your account no longer holds this permission.";
           warn.appendChild(icon("alert-triangle"));
           row.appendChild(warn);
         } else if (isLocked(name, "")) {
@@ -1630,7 +1733,7 @@
         if (!kinds.length || !(actions["keys.own.create"] || actions["keys.own.use"])) return;
         ui.appendChild(sub("tags", "Key kinds"));
         var table = node("div", "matrix matrix--" + kinds.length);
-        table.appendChild(node("div", "mh", "Right"));
+        table.appendChild(node("div", "mh", "Permission"));
         kinds.forEach(function (n) {
           var head = node("div", "mh mc");
           head.appendChild(icon(n.path === "key_kind:api" ? "webhook" : "robot", "icon--sm"));
@@ -1657,6 +1760,7 @@
             input.type = "text";
             input.inputMode = "numeric";
             input.disabled = !item || !!item.locked;
+            input.placeholder = "no limit";
             input.setAttribute("aria-label", "Longest lifetime of a " + n.label.replace(/ keys$/, "") + " key, in days");
             var seconds = item && typeof item.limits.max_key_lifetime === "string" ? item.limits.max_key_lifetime : "";
             input.value = seconds !== "" && !isNaN(Number(seconds)) ? String(Math.round((Number(seconds) / DAY) * 100) / 100) : seconds;
@@ -1672,6 +1776,7 @@
             row.appendChild(unit);
           });
           ui.appendChild(row);
+          ui.appendChild(node("p", "uiField__hint limitHint", "An empty field means no limit."));
         }
       }
 
@@ -1689,7 +1794,7 @@
             if (on && !owns(svc.id, c[0], g.path) && data.owner !== null) lostCount += 1;
           });
         });
-        if (lostCount) head.appendChild(node("span", "sub__note sub__note--warn", plural(lostCount, "right has", "rights have") + " no effect"));
+        if (lostCount) head.appendChild(node("span", "sub__note sub__note--warn", plural(lostCount, "permission has", "permissions have") + " no effect"));
         var sending = groupNodes.filter(function (g) {
           return ticked.has(keyOf(svc.id, "alert.send", g.path));
         });
@@ -1759,6 +1864,7 @@
             input.inputMode = "numeric";
             input.value = budget[w[0]] || "";
             input.disabled = off || !!(item && item.locked);
+            input.placeholder = "no limit";
             input.setAttribute("aria-label", "Alerts sent for each " + w[0]);
             input.addEventListener("input", function () {
               var k = keyOf(svc.id, "access", "");
@@ -1781,6 +1887,7 @@
             row.appendChild(unit);
           });
           ui.appendChild(row);
+          ui.appendChild(node("p", "uiField__hint limitHint", "An empty field means no limit."));
         }
       }
 
@@ -1840,9 +1947,8 @@
       if (src.state === "fresh") {
         line.className += " srcLine--ok";
         line.appendChild(icon("circle-check"));
-        text.appendChild(document.createTextNode("Published by the service at "));
-        text.appendChild(node("code", "", SOURCE_PATH));
-        text.appendChild(document.createTextNode(" \u00b7 read " + minutes(src.secs) + " ago"));
+        text.textContent = "The service publishes its permissions. Last read: " + minutes(src.secs) + " ago.";
+        line.title = SOURCE_PATH;
       } else if (src.state === "stale") {
         line.className += " srcLine--stale";
         line.appendChild(icon("clock"));
@@ -1850,7 +1956,8 @@
       } else {
         line.className += " srcLine--none";
         line.appendChild(icon("ban"));
-        text.textContent = "Not published: access only. The service gives no document at " + SOURCE_PATH + ".";
+        text.textContent = "The service publishes no permissions. Access only.";
+        line.title = SOURCE_PATH;
       }
       line.appendChild(text);
       return line;
@@ -1879,7 +1986,7 @@
       if (featureSvc) {
         var featGroup = node("section", "ge__grp");
         var featHead = node("div", "ge__grpHead");
-        featHead.appendChild(node("h2", "title", "Server features"));
+        featHead.appendChild(node("h2", "title", "Server permissions"));
         featHead.appendChild(featuresCount);
         featGroup.appendChild(featHead);
         var portalLine = node("div", "srcLine srcLine--ok");
@@ -1901,7 +2008,7 @@
       var openCount = 0;
       rowList.forEach(function (svc, at) {
         if (!groups) {
-          var group = svc.feature ? "Server features" : "Services";
+          var group = svc.feature ? "Server permissions" : "Services";
           if (group !== lastGroup) {
             rowsEl.appendChild(node("h3", "ge__groupTitle", group));
             lastGroup = group;
@@ -1924,7 +2031,7 @@
           box.type = "checkbox";
           box.checked = !!open;
           box.dataset.switch = svc.id;
-          box.setAttribute("aria-label", "Can open " + svc.name);
+          box.setAttribute("aria-label", "Open " + svc.name);
           if (open && open.locked) box.disabled = true;
           if (!open && !owns(svc.id, "access", "")) {
             box.disabled = true;
@@ -1932,17 +2039,31 @@
           }
           head.appendChild(box);
         }
-        head.appendChild(node("span", "ge__svcName", svc.name));
+        // The name cell has a fixed width, so the info text of every row starts at the same place. The
+        // control level of the service is an icon after the name. A service with access only has none.
+        var nameCell = node("span", "ge__svcName", svc.name);
+        nameCell.title = svc.name;
         var origin = (svc.source || {}).state;
-        if (!svc.feature && origin === "stale") head.appendChild(node("span", "svc__flag svc__flag--stale", "stale copy"));
-        else if (!svc.feature && origin !== "fresh") head.appendChild(node("span", "svc__flag", "access only"));
-        var info = open ? (groups ? "Opens" : "Can open") : "Cannot open";
+        if (!svc.feature && (origin === "fresh" || origin === "stale")) {
+          var level = node("span", "ge__ctl" + (origin === "stale" ? " ge__ctl--stale" : ""));
+          var levelText =
+            origin === "stale"
+              ? "Stale copy: the last read of the permissions failed. The copy may be old."
+              : "Fine control: the service publishes its permissions.";
+          level.setAttribute("role", "img");
+          level.setAttribute("aria-label", levelText);
+          level.title = levelText;
+          level.appendChild(icon(origin === "stale" ? "alert-triangle" : "shield-check"));
+          nameCell.appendChild(level);
+        }
+        head.appendChild(nameCell);
+        var info = open ? "Open" : "Cannot open";
         if (svc.feature) {
           info = others ? plural(others, "permission", "permissions") : "No permission";
         } else if (others) info += " · " + plural(others, "permission", "permissions");
         if (others && !open && !svc.feature) {
-          // Only a right that nothing could complete is left: the owner has no `access` to give.
-          info += ": it needs the permission to open the service, and nobody can give it here";
+          // Only a permission that nothing could complete is left: the owner has no `access` to give.
+          info += ". No permission opens this service. Nobody here can give it.";
           row.classList.add("is-orphan");
         }
         if (notes[svc.id]) info = notes[svc.id].text;
@@ -2001,7 +2122,7 @@
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
       }
-      servicesCount.textContent = "Opens " + openCount + "/" + rowList.length;
+      servicesCount.textContent = "Open " + openCount + "/" + rowList.length;
       if (featureSvc) {
         var held = 0;
         ticked.forEach(function (item) {
@@ -2014,7 +2135,7 @@
             return applies(a, n);
           }).length;
         });
-        featuresCount.textContent = "Rights " + held + "/" + total;
+        featuresCount.textContent = "" + held + "/" + total;
       }
     }
 
@@ -2096,6 +2217,9 @@
       expandedAt = at;
       services.show(at);
       render();
+      // The open service goes to the top of its list, so the tree and the permissions show with no scroll.
+      var opened = strip.querySelector(".ge__svc.is-expanded");
+      if (opened && opened.scrollIntoView) opened.scrollIntoView({ block: "start" });
     }
     strip.addEventListener("change", function (event) {
       var box = event.target;

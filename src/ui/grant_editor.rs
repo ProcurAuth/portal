@@ -82,7 +82,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,7 +342,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
         path: String::new(),
         kind: SERVICE_TYPE.to_string(),
         label: if portal {
-            "Server features".to_string()
+            "Server permissions".to_string()
         } else {
             "Whole service".to_string()
         },
@@ -470,7 +470,7 @@ impl EditorData {
     pub fn keep(&mut self, grant: &Grant) {
         let service = if grant.service == crate::portal_actions::SERVICE {
             self.features
-                .get_or_insert_with(|| bare_service(&grant.service, "Server features"))
+                .get_or_insert_with(|| bare_service(&grant.service, "Server permissions"))
         } else {
             let at = match self.services.iter().position(|s| s.id == grant.service) {
                 Some(at) => at,
@@ -642,7 +642,7 @@ mod tests {
         let document = crate::actions::parse("portal", text.as_bytes()).unwrap();
         ServiceActions {
             id: "portal".into(),
-            name: "Server features".into(),
+            name: "Server permissions".into(),
             actions: document
                 .actions
                 .iter()
@@ -735,7 +735,7 @@ mod tests {
         let document = crate::portal_actions::document(&features);
         ServiceActions {
             id: crate::portal_actions::SERVICE.into(),
-            name: "Server features".into(),
+            name: "Server permissions".into(),
             actions: document
                 .actions
                 .iter()

@@ -152,7 +152,7 @@ fn signins_table(view: &ActivityView) -> String {
         );
     }
     let mut out = String::from(
-        r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w136"><col class="w120"><col class="w120"><col></colgroup><thead><tr><th scope="col"><span class="visually-hidden">Result</span></th><th scope="col">When</th><th scope="col">Login typed</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#,
+        r#"<table class="grid grid--signins"><colgroup><col class="w28"><col class="w136"><col class="w120"><col class="w120"><col></colgroup><thead><tr><th scope="col"><span class="visually-hidden">Result</span></th><th scope="col">When</th><th scope="col">Login entered</th><th scope="col">Address</th><th scope="col">Browser</th></tr></thead><tbody>"#,
     );
     for row in &view.logins.rows {
         login_row(&mut out, row);

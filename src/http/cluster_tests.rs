@@ -2550,9 +2550,7 @@ fn the_add_form_makes_an_account_without_grants_and_a_save_sets_them() {
         assert!(refused
             .body
             .contains(r#"id="new-login" name="login" type="text" value="uma""#));
-        assert!(refused
-            .body
-            .contains("a permission needs the switch Can open"));
+        assert!(refused.body.contains("a permission needs the switch Open"));
         assert!(refused.body.contains("query.run.read on service:db"));
         assert!(!refused.body.contains("a-long-password-1"));
         assert_eq!(refused.header("cache-control"), Some("no-store"));
@@ -5771,9 +5769,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         );
         assert_eq!(refused.status, 422, "{}", refused.body);
         assert!(refused.body.contains(r#"value="my agent""#));
-        assert!(refused
-            .body
-            .contains("a permission needs the switch Can open"));
+        assert!(refused.body.contains("a permission needs the switch Open"));
         assert!(refused.body.contains("data.read on service:db/host:prod"));
         // The same for the change of a key.
         let refused = keys_post(
@@ -5787,9 +5783,7 @@ fn a_user_makes_uses_changes_and_revokes_a_key_on_the_page() {
         );
         assert_eq!(refused.status, 422, "{}", refused.body);
         assert!(refused.body.contains(r#"value="renamed""#));
-        assert!(refused
-            .body
-            .contains("a permission needs the switch Can open"));
+        assert!(refused.body.contains("a permission needs the switch Open"));
         // A bad request: an unknown field, a bad token, a repeated field.
         assert_eq!(
             keys_post(&node, &alice, "create", "name=x&colour=red").status,
@@ -7571,7 +7565,7 @@ mod kinds_tests {
                 r#"<a class="segmented__option is-active" href="/auth/keys/new?kind=api""#
             ));
             assert!(
-                api.body.contains("Calls that these rights allow")
+                api.body.contains("Calls that these permissions allow")
                     && !api.body.contains("This key can"),
                 "the calls of an API key, and no list that repeats the boxes"
             );
@@ -9306,10 +9300,12 @@ fn the_sign_in_page_shows_the_box_with_the_number_of_days_of_the_file() {
         ),
         "{page}"
     );
-    assert!(page.contains("Remember me</label>"), "{page}");
     assert!(
-        page.contains(r#"title="Stay signed in for 30 days""#)
-            && page.contains("Stay signed in for 30 days</span>"),
+        page.contains("Stay signed in for 30 days</label>"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("Remember me") && !page.contains(r#"title="Stay signed in"#),
         "{page}"
     );
     assert!(!page.contains("Keep me"), "{page}");
@@ -9323,12 +9319,15 @@ fn the_sign_in_page_shows_the_box_with_the_number_of_days_of_the_file() {
     // Another life, another number.
     let node = sign_in_node_with_session(r#"remember_ttl = "90d" remember_idle_timeout = "7d""#);
     let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
-    assert!(page.contains("Stay signed in for 90 days</span>"), "{page}");
-    assert!(page.contains("Remember me</label>"), "{page}");
+    assert!(
+        page.contains("Stay signed in for 90 days</label>"),
+        "{page}"
+    );
+    assert!(!page.contains("Remember me"), "{page}");
     let node =
         sign_in_node_with_session(r#"ttl = "1h" remember_ttl = "1d" remember_idle_timeout = "1d""#);
     let page = send(node.port, "GET", LOGIN_PATH, &[], "").body;
-    assert!(page.contains("Stay signed in for 1 day</span>"), "{page}");
+    assert!(page.contains("Stay signed in for 1 day</label>"), "{page}");
 }
 
 #[test]
@@ -10302,9 +10301,7 @@ mod mfa_tests {
                 && access
                     .body
                     .contains(r#"title="Accounts with two-factor sign-in">"#)
-                && access
-                    .body
-                    .contains(r#"</svg>1/2<span class="visually-hidden"> with two-factor</span>"#),
+                && access.body.contains(r#"</svg>2FA 1/2</span>"#),
             "{}",
             access.body
         );

@@ -1,6 +1,6 @@
 // Checks the sign-in page and the card of the second step in a real browser: the band with the destination (only with a
 // redirect), the floating labels, the button that shows the password, the strip of the message, the targets, the contrast, the
-// position of the card, and a real sign-in, a refused one, one with the box "Remember me", and the second step.
+// position of the card, and a real sign-in, a refused one, one with the box "Stay signed in", and the second step.
 // It runs at 1280 and 390 px (and the widths 320 and 1920 for the layout), in the dark and the light scheme, with and
 // without script. Run it with tools/dev/ui-check.sh and UI_CHECK_SCRIPT=ui-check-login.js.
 //
@@ -166,7 +166,7 @@ function inspect(page) {
       const l = keep.labels[0];
       const lb = l.getBoundingClientRect();
       const cb = card.getBoundingClientRect();
-      out.keep = { text: l.textContent.trim(), title: l.title, described: (document.getElementById(keep.getAttribute("aria-describedby")) || {}).textContent || "", centre: Math.round(((lb.left + lb.right) / 2 - (cb.left + cb.right) / 2) * 10) / 10, box: box(keep), labelBox: box(l), border: getComputedStyle(keep).borderTopColor, checked: keep.checked };
+      out.keep = { text: l.textContent.trim(), title: l.title, described: (document.getElementById(keep.getAttribute("aria-describedby")) || {}).textContent || "", centre: Math.round(((lb.left + lb.right) / 2 - (cb.left + cb.right) / 2) * 10) / 10, left: Math.round(lb.left - form.querySelector("input[name=login]").getBoundingClientRect().left), box: box(keep), labelBox: box(l), border: getComputedStyle(keep).borderTopColor, checked: keep.checked };
       out.contrasts.push(["keep text", ratio(getComputedStyle(l).color, panel), 4.5]);
       out.contrasts.push(["keep box", ratio(getComputedStyle(keep).borderTopColor, panel), 3]);
     }
@@ -273,8 +273,8 @@ async function main() {
           check("password: current-password and its label (" + name + ")", pw.autocomplete === "current-password" && pw.label === "Password", JSON.stringify(pw));
           check("fields are at least 24 px high and the underline is 1 px (" + name + ")", i.fields.every((f) => f.box.h >= 24 && f.underlineWidth === "1px"), JSON.stringify(i.fields.map((f) => f.box)));
           check("the button is full width and at least " + (width < 600 ? 44 : 24) + " px high (" + name + ")", i.buttons[0].width === i.buttons[0].formWidth && i.buttons[0].box.h >= (width < 600 ? 44 : 24), JSON.stringify(i.buttons));
-          check("the box has its label and 24 px (" + name + ")", i.keep.text === "Remember me" && i.keep.title === i.keep.described && /30 days/.test(i.keep.title) && i.keep.labelBox.h >= (width < 600 ? 44 : 24) && !i.keep.checked, JSON.stringify(i.keep));
-          check("the row of the box is in the middle of the card (" + name + ")", Math.abs(i.keep.centre) <= 1, String(i.keep.centre));
+          check("the box has its label and 24 px (" + name + ")", /^Stay signed in for \d+ days$/.test(i.keep.text) && i.keep.title === "" && i.keep.labelBox.h >= (width < 600 ? 44 : 24) && !i.keep.checked, JSON.stringify(i.keep));
+          check("the row of the box is at the left edge of the fields (" + name + ")", Math.abs(i.keep.left) <= 1, String(i.keep.left));
           check("a normal page has no strip, no alert and no empty live line (" + name + ")", i.msg === null && i.alerts === 0 && i.lives === 0, JSON.stringify([i.msg, i.alerts, i.lives]));
           // The eye: only with script.
           if (script) {
@@ -342,7 +342,7 @@ async function main() {
           await Promise.all([page.waitForNavigation(), page.click("button[type=submit]")]);
           const after = await inspect(page);
           check("a refusal: the message, role alert, both fields marked (" + name + ")", after.msg && after.msg.text === "Invalid login or password" && after.msg.role === "alert" && after.fields.every((f) => f.invalid === "true"), JSON.stringify([after.msg, after.fields.map((f) => f.invalid)]));
-          check("a refusal: the strip is 32 px, full width, at the bottom edge, after the button, with an icon, in the type of the band (" + name + ")", after.alerts === 1 && after.strip.height === 32 && after.strip.fullWidth && after.strip.bottomFlush && after.strip.afterButton && after.strip.icon && after.strip.fontSize === "12px" && /mono|Mono|Courier/.test(after.strip.fontFamily), JSON.stringify(after.strip));
+          check("a refusal: the strip is 32 px, full width, at the bottom edge, after the button, with an icon, in the normal type (" + name + ")", after.alerts === 1 && after.strip.height === 32 && after.strip.fullWidth && after.strip.bottomFlush && after.strip.afterButton && after.strip.icon && after.strip.fontSize === "12px" && !/mono|Mono|Courier/.test(after.strip.fontFamily), JSON.stringify(after.strip));
           check("a refusal: the card grows by the strip and the fields do not move more than 16 px (" + name + ")", after.card.h === before.card.h + 32 && Math.abs(after.fieldTop - before.fieldTop) <= 16, JSON.stringify([before.card, after.card, before.fieldTop, after.fieldTop]));
           console.log("      field shift on a refusal (" + name + "): " + (after.fieldTop - before.fieldTop) + " px");
           check("a refusal: the band is the same (" + name + ")", JSON.stringify(before.band && before.band.text) === JSON.stringify(after.band && after.band.text), JSON.stringify([before.band, after.band]));
@@ -355,7 +355,7 @@ async function main() {
     }
   }
 
-  // 4. A real sign-in, with a redirect and without, and with the box "Remember me".
+  // 4. A real sign-in, with a redirect and without, and with the box "Stay signed in".
   for (const [redirect, keep] of [[true, false], [false, false], [false, true]]) {
     const { context, page } = await open(browser, "dark", 1280, true);
     await page.goto(redirect ? await signedLogin(context, DEST) : BASE + "/auth/login");

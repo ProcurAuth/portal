@@ -278,7 +278,7 @@ pub fn denied_page(text: &str, viewer: &str, logout_token: &str) -> String {
     auth_document(
         "Access denied",
         &format!(
-            r#"<h1>Access denied</h1><p>{}</p><div class="authActions"><a class="button button--primary" href="/">Back to panel</a><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit">Sign out</button></form></div><p class="hint">Signed in as <strong>{}</strong>.</p>"#,
+            r#"<h1>Access denied</h1><p>{}</p><div class="authActions"><a class="button button--primary" href="/">Back to services</a><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit">Sign out</button></form></div><p class="hint">Signed in as <strong>{}</strong>.</p>"#,
             html_escape(text),
             html_escape(logout_token),
             html_escape(viewer)
@@ -374,6 +374,15 @@ fn theme_switch() -> String {
 fn sign_out_form(token: &str) -> String {
     format!(
         r##"<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg>Sign out</button></form>"##,
+        html_escape(token)
+    )
+}
+
+/// The same form for the header of the settings pages. The words sit in a `span` that the
+/// stylesheet hides on a narrow screen. The button keeps its name for a screen reader.
+fn sign_out_form_short(token: &str) -> String {
+    format!(
+        r##"<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{}"><button class="button" type="submit" aria-label="Sign out" title="Sign out"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg><span class="btnText">Sign out</span></button></form>"##,
         html_escape(token)
     )
 }
@@ -780,7 +789,7 @@ fn demo_features() -> ServiceActions {
     let document = document(&features);
     ServiceActions {
         id: crate::portal_actions::SERVICE.into(),
-        name: "Server features".into(),
+        name: "Server permissions".into(),
         actions: document
             .actions
             .iter()
@@ -1405,7 +1414,7 @@ mod tests {
     fn no_sign_in_page_and_no_status_page_shows_the_logo_or_links_the_icon_file() {
         let pages = [
             auth_document("Authentication", "<p>x</p>"),
-            message_page("Not found", "No such page.", "Back to panel"),
+            message_page("Not found", "No such page.", "Back to services"),
             denied_page(DENIED_TEXT, "alice", "tok"),
             sign_in_document("<p>x</p>", &["i-lock"], false),
             sign_in_document("<p>x</p>", &["i-lock", "i-alert-triangle"], true),
@@ -1499,7 +1508,7 @@ mod tests {
             &message_page(
                 "Page not found",
                 "There is nothing at this address.",
-                "Back to panel",
+                "Back to services",
             ),
         );
         assert_clean("denied", &denied_page(DENIED_TEXT, "alice", "tok"));
@@ -1757,7 +1766,7 @@ mod tests {
     fn the_denied_page_names_no_service_and_offers_the_way_out() {
         let page = denied_page(DENIED_TEXT, "al<ice", "tok<en");
         assert!(page.contains("You do not have access to this page. Ask the administrator"));
-        assert!(page.contains(r#"<a class="button button--primary" href="/">Back to panel</a>"#));
+        assert!(page.contains(r#"<a class="button button--primary" href="/">Back to services</a>"#));
         assert!(page.contains(r#"action="/auth/logout""#) && page.contains("Sign out"));
         assert!(page.contains("Signed in as <strong>al&lt;ice</strong>"));
         assert!(page.contains(r#"value="tok&lt;en""#));
@@ -1918,9 +1927,9 @@ mod tests {
 
     #[test]
     fn the_message_page_has_one_way_back_to_the_launcher() {
-        let page = message_page("Page not found", "Nothing lives here.", "Back to panel");
+        let page = message_page("Page not found", "Nothing lives here.", "Back to services");
         assert!(page.contains("<h1>Page not found</h1>"));
-        assert!(page.contains(r#"<a class="button button--primary" href="/">Back to panel</a>"#));
+        assert!(page.contains(r#"<a class="button button--primary" href="/">Back to services</a>"#));
         assert!(!page.contains("appBrand"));
         assert!(message_page("<x>", "<y>", "<z>").contains("&lt;x&gt;"));
     }

@@ -1142,7 +1142,7 @@ fn not_found_response(
             ui::message_page(
                 "Page not found",
                 "There is nothing at this address.",
-                "Back to panel",
+                "Back to services",
             ),
         )
     } else {
@@ -1338,7 +1338,16 @@ async fn handle_settings(
         && !(path == ui::settings::ACCESS_PATH && keys_page::list_visible(state, &viewer))
     {
         state.metrics.user_admin("settings", "forbidden");
-        return handle_not_found(state, &Method::GET, uri, headers, client);
+        // The viewer has a session, so the page can say why it is empty. The status stays 404.
+        return masked_response(
+            state,
+            StatusCode::NOT_FOUND,
+            ui::message_page(
+                "No settings page",
+                "Your account has no settings page.",
+                "Back to services",
+            ),
+        );
     }
     let (Ok(logout_token), Ok(users_token)) = (
         sign_action_token(&state.signing_secret, LOGOUT_TOKEN, &viewer.token),
@@ -1953,7 +1962,7 @@ fn feature_actions(
         .unwrap_or_default();
     ui::ServiceActions {
         id: crate::portal_actions::SERVICE.to_string(),
-        name: "Server features".to_string(),
+        name: "Server permissions".to_string(),
         actions: document
             .actions
             .iter()

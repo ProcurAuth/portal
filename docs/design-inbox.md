@@ -146,7 +146,7 @@ The key `server.name` has the default `"Portal"`. It has 1 to 64 bytes, is not b
 
 ## 6. Rights: one scope
 
-The portal has one internal scope for its features: the service `portal`. The PDP of the portal decides in process. The action document comes from the code and follows the file. The groups of the file are the nodes `inbox_group:<id>`. The first plan had a second internal service for the Inbox. Batch C removed it. The service id `inbox` is free for a workload again. The settings pages show the scope as the group **Server features**. The launcher and the page **Services** never list it.
+The portal has one internal scope for its features: the service `portal`. The PDP of the portal decides in process. The action document comes from the code and follows the file. The groups of the file are the nodes `inbox_group:<id>`. The first plan had a second internal service for the Inbox. Batch C removed it. The service id `inbox` is free for a workload again. The settings pages show the scope as the group **Server permissions**. The launcher and the page **Services** never list it.
 
 ### 6.1 The actions
 
@@ -244,7 +244,7 @@ A key has exactly one kind. The prefix of the text gives the kind. The kind deci
 
 - **Users.** The accounts stand on the left. The panels **Sign-ins** and **Recent changes** stand on the right. The sign-in log and the audit events are the data of these panels. The store gives the counts of the chips: `LoginPage.total` and `LoginPage.refused`.
 - **New user.** The button opens `/auth/settings/new-user`. This is the page of an account in create mode. The login, the password and the groups stand in one row. The editor of grants is under them. `POST /auth/users/add` accepts the grants of the editor with the field `grants=1`. It makes the account and its grants in one request. A request without `grants=1` makes an account with no grant, as before. A refused try returns to the create page with a code. The route answers 404 when `users.allow_creation` is `false` or the grants are read-only. The form that made accounts on the page of the accounts is gone.
-- **The account page.** One row of tools: log in as, the password (a popover), the activity (a popover), delete (a confirmation in place), two facts, Save. Under it, the groups **Services** and **Server features** stand side by side. An account of the file has a page too. Its grants have a lock and the page changes nothing.
+- **The account page.** One row of tools: log in as, the password (a popover), the activity (a popover), delete (a confirmation in place), two facts, Save. Under it, the groups **Services** and **Server permissions** stand side by side. An account of the file has a page too. Its grants have a lock and the page changes nothing.
 - **Services.** The table has a selection by link: `?svc=<id>`. The panel **Opened by** shows who opens the selected service and who does not. The page of one service is gone. Its route answers 404, with no redirect. The route `/auth/settings/give` stays: the plus link of the panel uses it. The route `/auth/users/portal-rights` is gone. The grants of the features post to `/auth/users/update`.
 
 ### 9.3 Keys

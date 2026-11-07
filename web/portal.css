@@ -40,6 +40,9 @@
   --mono-filter: invert(0.92);
 }
 
+/* The light tokens stand twice: here, for a browser in light mode with no chosen theme, and in the rule
+   `:root[data-theme="light"]` below, for the chosen theme. CSS cannot share one block between a media
+   query and an attribute. A change to one block MUST be made in the other block too. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
     color-scheme: light;
@@ -107,6 +110,14 @@
   --radius-control: 8px;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --page-width: 1400px;
+  /* The type scale. A size that is not in this list does not exist: 11 for the upper-case titles and
+     the tags, 12 for the notes and the columns, 13 for the body of the settings pages, 14 for the
+     body of the launcher, 18 for the titles. */
+  --fs-xs: 11px;
+  --fs-s: 12px;
+  --fs-m: 13px;
+  --fs-l: 14px;
+  --fs-xl: 18px;
 }
 
 *,
@@ -135,7 +146,7 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.45 var(--font);
+  font: var(--fs-l)/1.45 var(--font);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -393,7 +404,7 @@ html[data-theme-mode="light"] .themeNow--light {
 .group__title {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -401,7 +412,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .group__count {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-variant-numeric: tabular-nums;
 }
 
@@ -411,7 +422,7 @@ html[data-theme-mode="light"] .themeNow--light {
   height: 20px;
   padding: 0 8px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
@@ -430,10 +441,15 @@ html[data-theme-mode="light"] .themeNow--light {
   list-style: none;
 }
 
+/* A tile is a grid: the icon at the left, the name and the state on the first line, and the
+   description under them over the full width. `.tile__body` has no box of its own. */
 .tile {
-  display: flex;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-content: center;
   align-items: center;
-  gap: 12px;
+  column-gap: 12px;
+  row-gap: 2px;
   min-height: 64px;
   height: 100%;
   padding: 12px 14px;
@@ -455,15 +471,16 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .tile__icon {
   display: grid;
+  grid-column: 1;
+  grid-row: 1 / span 2;
   place-items: center;
-  flex: none;
   width: 40px;
   height: 40px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--inset);
   color: var(--text);
-  font-size: 16px;
+  font-size: var(--fs-xl);
   font-weight: 700;
 }
 
@@ -478,13 +495,14 @@ html[data-theme-mode="light"] .themeNow--light {
 }
 
 .tile__body {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  flex: 1;
+  display: contents;
 }
 
 .tile__name {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: end;
+  min-width: 0;
   overflow: hidden;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -492,17 +510,28 @@ html[data-theme-mode="light"] .themeNow--light {
 }
 
 .tile__desc {
+  display: -webkit-box;
+  grid-column: 2 / -1;
+  grid-row: 2;
+  align-self: start;
   overflow: hidden;
   color: var(--muted);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--fs-s);
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.tile__desc:empty {
+  display: none;
 }
 
 .tile__state {
-  flex: none;
-  align-self: flex-start;
-  font-size: 12px;
+  grid-column: 3;
+  grid-row: 1;
+  align-self: end;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -602,7 +631,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .empty h1 {
   margin: 0;
-  font-size: 18px;
+  font-size: var(--fs-xl);
   font-weight: 700;
 }
 
@@ -613,7 +642,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .empty code {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   color: var(--text);
 }
 
@@ -638,7 +667,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .card h1 {
   margin: 0 0 6px;
-  font-size: 18px;
+  font-size: var(--fs-xl);
   font-weight: 700;
   letter-spacing: -0.01em;
 }
@@ -651,7 +680,7 @@ html[data-theme-mode="light"] .themeNow--light {
 .card label {
   display: block;
   margin: 14px 0 6px;
-  font-size: 13px;
+  font-size: var(--fs-m);
   font-weight: 600;
 }
 
@@ -726,7 +755,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .card p.hint {
   margin: 14px 0 0;
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .card p.hint strong {
@@ -736,13 +765,13 @@ html[data-theme-mode="light"] .themeNow--light {
 .card .return-target {
   margin: 16px 0 0;
   overflow-wrap: anywhere;
-  font-size: 13px;
+  font-size: var(--fs-m);
 }
 
 .return-target code {
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .error {
@@ -778,7 +807,7 @@ html[data-theme-mode="light"] .themeNow--light {
   padding: 0 16px;
   background: var(--accent-fill);
   color: var(--on-fill);
-  font: 12px/16px var(--font-mono);
+  font: var(--fs-s)/16px var(--font-mono);
 }
 
 .signin__lock {
@@ -849,7 +878,7 @@ html[data-theme-mode="light"] .themeNow--light {
   color: var(--text);
   caret-color: var(--accent-text);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-l);
   line-height: 20px;
 }
 
@@ -865,7 +894,7 @@ html[data-theme-mode="light"] .themeNow--light {
 /* The 6 digits, or the recovery code: tabular, spaced out. */
 .signin__field--code .signin__in {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: var(--fs-xl);
   letter-spacing: 0.3em;
   font-variant-numeric: tabular-nums;
 }
@@ -879,7 +908,7 @@ html[data-theme-mode="light"] .themeNow--light {
   margin: 0;
   padding: 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-m);
   font-weight: 400;
   line-height: 20px;
   white-space: nowrap;
@@ -1009,7 +1038,7 @@ html[data-theme-mode="light"] .themeNow--light {
   background: var(--danger-bg);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--danger) 35%, transparent);
   color: var(--danger);
-  font: 12px/16px var(--font-mono);
+  font: var(--fs-s)/16px var(--font);
   overflow-wrap: anywhere;
 }
 
@@ -1025,17 +1054,17 @@ html[data-theme-mode="light"] .themeNow--light {
   margin-top: 32px;
 }
 
-/* The box and its words are one group, in the middle of the card. The row is as wide as the group, so a click beside
-   the group does not tick the box. */
+/* The box and its words are one group, at the left edge of the fields. The row is as wide as the group, so a click
+   beside the group does not tick the box. */
 .signin__check {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   width: fit-content;
   max-width: 100%;
   min-height: 28px;
-  margin: 8px auto 0;
+  margin: 8px 0 0;
   color: var(--text);
   cursor: pointer;
 }
@@ -1123,7 +1152,7 @@ html[data-theme-mode="light"] .themeNow--light {
   justify-content: center;
   min-height: 28px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   line-height: 16px;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -1173,7 +1202,7 @@ html[data-theme-mode="light"] .themeNow--light {
 .hint {
   margin: 4px 0;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
 }
 
 .button--icon {
@@ -1324,7 +1353,7 @@ html[data-theme-mode="light"] .themeNow--light {
 .mfaLabel {
   margin: 6px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -1339,13 +1368,13 @@ html[data-theme-mode="light"] .themeNow--light {
   background: var(--inset);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   overflow-wrap: anywhere;
   user-select: all;
 }
 
 .mfaSecret {
-  font-size: 14px;
+  font-size: var(--fs-l);
   letter-spacing: 0.04em;
 }
 
@@ -1356,7 +1385,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .card .altCode {
   margin: 16px 0 0;
-  font-size: 13px;
+  font-size: var(--fs-m);
 }
 
 .card .altCode summary {
@@ -1382,7 +1411,7 @@ html[data-theme-mode="light"] .themeNow--light {
   background: var(--inset);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 13.5px;
+  font-size: var(--fs-m);
   resize: none;
 }
 
@@ -1415,7 +1444,7 @@ html[data-theme-mode="light"] .themeNow--light {
   border-radius: 999px;
   background: var(--accent-fill);
   color: var(--on-fill);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -1573,7 +1602,7 @@ html[data-theme-mode="light"] .themeNow--light {
   background: transparent;
   color: var(--accent-text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1585,7 +1614,7 @@ html[data-theme-mode="light"] .themeNow--light {
 
 .nbell__open {
   color: var(--accent-text);
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 600;
   text-decoration: none;
 }
@@ -1671,7 +1700,7 @@ a.nrow__in:hover {
 .nrow__meta,
 .nrow__time {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .nrow__time {
@@ -1697,7 +1726,7 @@ a.nrow__in:hover {
   background: transparent;
   color: var(--muted);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1790,11 +1819,11 @@ a.nrow__in:hover {
 
 .toast__meta {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-s);
 }
 
 .toast__link {
-  font-size: 12.5px;
+  font-size: var(--fs-s);
   font-weight: 600;
 }
 
@@ -1826,7 +1855,7 @@ a.nrow__in:hover {
   background: var(--panel);
   box-shadow: var(--shadow);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-s);
   font-weight: 600;
   text-align: center;
   text-decoration: none;

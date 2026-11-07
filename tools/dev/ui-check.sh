@@ -8,7 +8,7 @@
 # UI_CHECK_SHOTS: see the header of tools/dev/ui-check.js. UI_CHECK_SHOTS must be a directory of the
 # host: the script mounts it and gives the path in the container.
 # UI_CHECK_SCRIPT: the script to run (default ui-check.js). ui-check-notify.js checks the notifications: see its header.
-# ui-check-keep.js checks the box "Remember me" of the sign-in page and the session cookie: see its header.
+# ui-check-keep.js checks the box "Stay signed in" of the sign-in page and the session cookie: see its header.
 # ui-check-login.js checks the sign-in page, its band and the second step: see its header. It reads UI_CHECK_HOST too.
 # ui-check-theme.js checks the theme selector of the launcher (the demo is fine: it only signs in): see its header.
 # PLAYWRIGHT_IMAGE: the image of the browser (default mcr.microsoft.com/playwright:v1.49.1-noble).

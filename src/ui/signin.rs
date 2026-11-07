@@ -26,8 +26,6 @@ pub const INVALID_CREDENTIALS: &str = "Invalid login or password";
 const TITLE_ID: &str = "signin-title";
 /// The id of the strip of the message. A field that the message concerns points to it.
 const MESSAGE_ID: &str = "signin-msg";
-/// The id of the hidden text that gives the life of a remembered session to the box.
-const KEEP_ID: &str = "signin-keep";
 
 /// The longest path (in characters) that the band shows. The stylesheet cuts what does not fit.
 const MAX_PATH_CHARS: usize = 96;
@@ -172,13 +170,13 @@ pub struct LoginNames {
 pub fn login_page(l: &Login) -> String {
     let invalid = l.error == Some(INVALID_CREDENTIALS);
     let marks = invalid_attributes(invalid);
-    // The words "Remember me" are the label. The life of the session is in the title of the row and in a hidden text
-    // that describes the box. The hidden text is not a part of the label, so it is not a part of the name of the box.
+    // One text says what the box does: "Stay signed in for 30 days". It is the label, and so the name of the box.
     let keep = l.keep_for.map_or_else(String::new, |words| {
-        let life = format!("Stay signed in for {}", html_escape(words));
         format!(
-            r#"<label class="signin__check" title="{life}"><input type="checkbox" name="{}" value="{}" aria-describedby="{KEEP_ID}">Remember me</label><span class="visually-hidden" id="{KEEP_ID}">{life}</span>"#,
-            l.names.keep, l.names.keep_value,
+            r#"<label class="signin__check"><input type="checkbox" name="{}" value="{}">Stay signed in for {}</label>"#,
+            l.names.keep,
+            l.names.keep_value,
+            html_escape(words),
         )
     });
     let form = format!(
@@ -423,9 +421,7 @@ mod tests {
         assert!(page.contains(r#"autocomplete="current-password""#));
         assert!(page.contains(r#"autocomplete="username""#));
         assert!(page.contains("autofocus"));
-        assert!(page.contains(
-            r#"name="keep" value="1" aria-describedby="signin-keep">Remember me</label>"#
-        ));
+        assert!(page.contains(r#"name="keep" value="1">Stay signed in for 30 days</label>"#));
         assert!(!page.contains("style=") && !page.contains("<script>"));
     }
 
@@ -480,22 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn the_box_says_remember_me_and_keeps_the_life_in_a_title_and_a_description() {
+    fn the_box_has_one_text_that_says_how_long_the_session_stays() {
         let page = login("/", None);
-        assert!(
-            page.contains(r#"<label class="signin__check" title="Stay signed in for 30 days">"#)
-        );
-        assert!(page.contains("Remember me</label>"));
         assert!(page.contains(
-            r#"<span class="visually-hidden" id="signin-keep">Stay signed in for 30 days</span>"#
+            r#"<label class="signin__check"><input type="checkbox" name="keep" value="1">Stay signed in for 30 days</label>"#
         ));
-        assert!(page.contains(r#"aria-describedby="signin-keep""#));
-        // The description is not a part of the label, so it is not a part of the name of the box.
-        let label = &page[page.find("<label class=\"signin__check\"").unwrap()..];
-        let label = &label[..label.find("</label>").unwrap()];
-        assert!(!label.contains("visually-hidden") && !label.contains("<span"));
-        // The old words are gone.
-        assert!(!page.contains("Keep me") && !page.contains("signed in for 30 days</label>"));
+        // One text only: no second wording, no title and no hidden description.
+        assert!(!page.contains("Remember me") && !page.contains("Keep me"));
+        assert!(!page.contains("signin-keep") && !page.contains(r#"title="Stay signed in"#));
         // The box comes after the eye button and before the button of the form.
         let eye = page.find("data-reveal").unwrap();
         let keep = page.find("name=\"keep\"").unwrap();
@@ -517,7 +505,7 @@ mod tests {
                 keep_value: "1",
             },
         });
-        assert!(!none.contains("Remember me") && !none.contains("signin-keep"));
+        assert!(!none.contains("Stay signed in") && !none.contains("signin__check"));
     }
 
     #[test]

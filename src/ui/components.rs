@@ -608,9 +608,9 @@ mod tests {
             post.contains(r#"method="post" action="/do""#)
                 && post.contains(r#"aria-label="Log in as carol""#)
         );
-        let count = icon_count("Keys: 5 of 8 rights", "key", 5);
+        let count = icon_count("Keys: 5 of 8 permissions", "key", 5);
         assert!(
-            count.contains(r#"role="img" aria-label="Keys: 5 of 8 rights""#)
+            count.contains(r#"role="img" aria-label="Keys: 5 of 8 permissions""#)
                 && count.contains(">5<")
         );
     }

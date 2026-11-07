@@ -16,7 +16,7 @@
 //! | `service` | The accounts that open the service. The column shows their rights on it. | The keys with a grant on the service. |
 //!
 //! The columns of the keys, of the groups and of the features are absent when the file turns the
-//! feature off. With no key and no group, the column "Opens" shows the services of each account.
+//! feature off. With no key and no group, the column "Open" shows the services of each account.
 
 use std::fmt::Write as _;
 
@@ -501,7 +501,7 @@ fn accounts_zone(view: &AccessView, accounts: &Accounts) -> String {
             .filter(|u| set.contains(&u.login))
             .count();
         format!(
-            r#"<span class="count" title="Accounts with two-factor sign-in">{}{on}/{total}<span class="visually-hidden"> with two-factor</span></span>"#,
+            r#"<span class="count" title="Accounts with two-factor sign-in">{}2FA {on}/{total}</span>"#,
             icon("lock")
         )
     });
@@ -553,7 +553,11 @@ fn accounts_table(
         .max()
         .unwrap_or(0)
         .min(13);
-    let mut out = String::from(r#"<table class="grid grid--users"><colgroup>"#);
+    let mut out = String::from(if inbox {
+        r#"<table class="grid grid--users grid--groups"><colgroup>"#
+    } else {
+        r#"<table class="grid grid--users"><colgroup>"#
+    });
     if inbox || opens {
         let _ = write!(out, r#"<col class="{}">"#, col_class(widest, 88));
     } else {
@@ -570,23 +574,23 @@ fn accounts_table(
         out.push_str(r#"<col class="w80">"#);
     }
     if keys {
-        out.push_str(r#"<col class="w48">"#);
+        out.push_str(r#"<col class="w40">"#);
     }
     if accounts.two_factor.is_some() {
-        out.push_str(r#"<col class="w48">"#);
+        out.push_str(r#"<col class="w40">"#);
     }
-    out.push_str(r#"<col class="w136"><col class="w48"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
+    out.push_str(r#"<col class="w120"><col class="w64"><col class="w56"></colgroup><thead><tr><th scope="col">Account</th>"#);
     if inbox {
         out.push_str(r#"<th scope="col">Groups</th>"#);
     }
     if opens {
-        out.push_str(r#"<th scope="col">Opens</th>"#);
+        out.push_str(r#"<th scope="col">Open</th>"#);
     }
     let _ = write!(
         out,
         r#"<th scope="col">{}</th>"#,
         if service.is_some() {
-            "Rights"
+            "Permissions"
         } else {
             "Services"
         }
@@ -600,7 +604,7 @@ fn accounts_table(
     if accounts.two_factor.is_some() {
         out.push_str(r#"<th scope="col" class="c" title="Two-factor sign-in">2FA</th>"#);
     }
-    out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sess.</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
+    out.push_str(r#"<th scope="col" class="r">Last sign-in</th><th scope="col" class="r" title="Sessions, 30 days">Sessions</th><th scope="col" class="r" title="Refused sign-ins, 30 days">Refused</th></tr></thead><tbody>"#);
     for user in shown {
         account_row(&mut out, view, accounts, user, service);
     }
@@ -675,7 +679,7 @@ fn account_row(
             r#"<td class="tagsCell">{}</td>"#,
             tags(
                 &tag_list,
-                2,
+                1,
                 &format!("All {} groups of {}", tag_list.len(), user.login)
             )
         );
@@ -696,7 +700,7 @@ fn account_row(
             if rights == 0 {
                 out.push_str(r#"<span class="muted">-</span>"#);
             } else if publishes {
-                out.push_str(&plural(rights, "right", "rights"));
+                out.push_str(&plural(rights, "permission", "permissions"));
             } else {
                 out.push_str("access");
             }
@@ -727,7 +731,7 @@ fn account_row(
             if shown && held > 0 {
                 any = true;
                 out.push_str(&icon_count(
-                    &format!("{}: {held} of {total} rights", feature.name()),
+                    &format!("{}: {held} of {total} permissions", feature.name()),
                     feature.icon(),
                     held,
                 ));
@@ -873,10 +877,10 @@ mod tests {
         );
         // The features are icons with counts and a name.
         assert!(
-            accounts.contains(r#"role="img" aria-label="Keys: 2 of 8 rights""#),
+            accounts.contains(r#"role="img" aria-label="Keys: 2 of 8 permissions""#),
             "{accounts}"
         );
-        assert!(accounts.contains(r#"aria-label="Inbox: 1 of 7 rights""#));
+        assert!(accounts.contains(r#"aria-label="Inbox: 1 of 7 permissions""#));
         assert!(
             accounts.contains(r#"<td class="r num">3</td>"#),
             "the keys of alice"
@@ -898,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn each_account_shows_its_groups_as_two_chips_and_a_plus_chip_with_all_of_them() {
+    fn each_account_shows_its_first_group_as_a_chip_and_a_plus_chip_with_all_of_them() {
         let cat = catalog();
         let mut v = view(&cat);
         v.groups.push(GroupLine {
@@ -910,8 +914,9 @@ mod tests {
             vec!["infra".into(), "db".into(), "oncall".into()];
         let html = page(&v);
         let accounts = zone_of(&html, "accounts-title");
-        // Alice: two chips, then "+1" with a popover that lists the three groups and their members.
-        assert!(accounts.contains(r#"<summary class="tag tag--more" aria-label="All 3 groups of alice" title="All 3 groups of alice">+1</summary>"#), "{accounts}");
+        // Alice: one chip, then "+2" with a popover that lists the three groups and their members. The
+        // cell is narrow: one chip and "+N" fit, and nothing is cut in the middle of a word.
+        assert!(accounts.contains(r#"<summary class="tag tag--more" aria-label="All 3 groups of alice" title="All 3 groups of alice">+2</summary>"#), "{accounts}");
         assert!(accounts.contains(r#"href="/auth/settings?group=infra""#));
         assert!(
             accounts.contains("3 accounts"),
@@ -962,7 +967,7 @@ mod tests {
         );
         assert!(html.contains("Last sign-in") && html.contains("Services</th>"));
         assert!(
-            html.contains("Opens</th>"),
+            html.contains("Open</th>"),
             "the column of the services that an account opens"
         );
         // Keys on, inbox off: the column of the keys, one icon, no group.
@@ -974,9 +979,11 @@ mod tests {
             users[0].grants.push(grant("inbox.receive", PORTAL));
         }
         let html = page(&v);
-        assert!(html.contains("Keys</th>") && html.contains("aria-label=\"Keys: 1 of 8 rights\""));
+        assert!(
+            html.contains("Keys</th>") && html.contains("aria-label=\"Keys: 1 of 8 permissions\"")
+        );
         assert!(!html.contains("Inbox: ") && !html.contains("Groups</th>"));
-        assert!(!html.contains("Opens</th>"));
+        assert!(!html.contains("Open</th>"));
     }
 
     #[test]
@@ -1106,10 +1113,10 @@ mod tests {
         v.query.service = "infra-grafana".into();
         let html = page(&v);
         let accounts = zone_of(&html, "accounts-title");
-        assert!(accounts.contains("Rights</th>") && !accounts.contains("Services</th>"));
+        assert!(accounts.contains("Permissions</th>") && !accounts.contains("Services</th>"));
         assert!(accounts.contains("users/alice") && !accounts.contains("users/bob"));
         assert!(
-            accounts.contains(r#"<td class="num">1 right</td>"#),
+            accounts.contains(r#"<td class="num">1 permission</td>"#),
             "{accounts}"
         );
         // A service that publishes no action: its right is "access".

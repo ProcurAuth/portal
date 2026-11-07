@@ -683,9 +683,9 @@ fn docs_popover(view: &InboxView, docs: &DocsData) -> String {
         }
     );
     popover_with(
-        "Documentation for senders",
-        "ib",
-        &icon("book"),
+        "Guide for senders",
+        "button button--small",
+        &format!("{}Guide", icon("book")),
         Side::End,
         " pop__menu--wide pop__menu--pad",
         &body,
@@ -864,6 +864,14 @@ fn send_popover(view: &InboxView) -> String {
     }
 }
 
+/// An empty zone: one line of text at the left edge, where the first row would start, and one action
+/// when the account has it. `action_html` is empty when there is no action.
+fn empty_state(text: &str, action_html: &str) -> String {
+    format!(
+        r#"<div class="uiState uiState--left"><p class="uiState__body">{text}</p>{action_html}</div>"#
+    )
+}
+
 fn bar(view: &InboxView) -> String {
     let mut out = String::from(r#"<div class="tbar tbar--inbox">"#);
     if view.sent.is_some() {
@@ -880,6 +888,7 @@ fn bar(view: &InboxView) -> String {
     }
     if let Some(level) = view.notify_level {
         if !view.impersonated {
+            out.push_str(r#"<span class="bar__cap">Notify me</span>"#);
             out.push_str(&super::notify::level_form(
                 level,
                 view.csrf,
@@ -1150,11 +1159,17 @@ fn sent_zone(view: &InboxView, sent: &SentData) -> String {
 
     let mut body = String::new();
     if shown.is_empty() {
-        body.push_str(if sent.alerts.is_empty() {
-            r#"<p class="empty">No alert in this period.</p>"#
+        if sent.alerts.is_empty() {
+            // The button opens the popover "New alert" of the bar. It needs script.
+            let action = if view.rights.can_send() && !view.impersonated {
+                r#"<button class="button button--small" type="button" data-open-send>Send an alert</button>"#
+            } else {
+                ""
+            };
+            body.push_str(&empty_state("No alert in this period.", action));
         } else {
-            r#"<p class="empty">No alert for these filters.</p>"#
-        });
+            body.push_str(&empty_state("No alert for these filters.", ""));
+        }
     } else {
         body.push_str(r#"<table class="grid grid--sent"><colgroup><col class="w28"><col class="wtime"><col class="w136"><col><col class="w128"></colgroup><thead class="visually-hidden"><tr><th scope="col">State</th><th scope="col">When</th><th scope="col">To</th><th scope="col">Title</th><th scope="col">Sent by</th></tr></thead><tbody>"#);
         for row in &shown {
@@ -1477,11 +1492,19 @@ fn phones_zone(view: &InboxView, data: &PhonesData) -> String {
         body.push_str(&bulk_form(&bulk));
     }
     if rows.is_empty() {
-        body.push_str(if data.rows.is_empty() {
-            r#"<p class="empty">No phone yet.</p>"#
+        if data.rows.is_empty() {
+            let action = if view.rights.own_phones {
+                format!(
+                    r#"<form class="inline" method="post" action="{CODE_PATH}"><input type="hidden" name="csrf" value="{}"><button class="button button--small" type="submit">Add a phone</button></form>"#,
+                    html_escape(view.csrf)
+                )
+            } else {
+                String::new()
+            };
+            body.push_str(&empty_state("No phone yet.", &action));
         } else {
-            r#"<p class="empty">No phone for these filters.</p>"#
-        });
+            body.push_str(&empty_state("No phone for these filters.", ""));
+        }
     } else {
         body.push_str(r#"<table class="grid grid--phones"><colgroup>"#);
         if any_box {
@@ -1700,11 +1723,14 @@ fn connections_zone(view: &InboxView, data: &ConnData) -> String {
     );
     let mut body = String::new();
     if rows.is_empty() {
-        body.push_str(if query.login.is_empty() && query.conn.is_none() {
-            r#"<p class="empty">No connection in the log.</p>"#
-        } else {
-            r#"<p class="empty">No connection for these filters.</p>"#
-        });
+        body.push_str(&empty_state(
+            if query.login.is_empty() && query.conn.is_none() {
+                "No connection in the log."
+            } else {
+                "No connection for these filters."
+            },
+            "",
+        ));
     } else {
         body.push_str(r#"<table class="grid grid--conn"><colgroup><col class="w28"><col class="wtime"><col class="w88"><col><col class="w120"></colgroup><thead><tr><th scope="col"><span class="visually-hidden">State</span></th><th scope="col">Start</th><th scope="col">Login</th><th scope="col">Phone</th><th scope="col">End</th></tr></thead><tbody>"#);
         for c in &rows {
@@ -2017,7 +2043,7 @@ mod tests {
             r#"id="phones-title""#,
             r#"id="connections-title""#,
             "New alert",
-            r#"aria-label="Documentation for senders""#,
+            r#"aria-label="Guide for senders""#,
             r#"aria-label="Add a phone""#,
         ] {
             assert!(html.contains(part), "{part}");
@@ -2052,7 +2078,7 @@ mod tests {
             r#"id="sent-title""#,
             r#"id="connections-title""#,
             "Send alert",
-            "Documentation for senders",
+            "Guide for senders",
             r#"class="tbar"#,
             "Period",
             "<th scope=\"col\">Owner</th>",
@@ -2076,7 +2102,7 @@ mod tests {
         view.phones = None;
         view.connections = None;
         let html = page(&view);
-        assert!(html.contains("New alert") && html.contains("Documentation for senders"));
+        assert!(html.contains("New alert") && html.contains("Guide for senders"));
         // The documentation says that a login is an account of the database or of the file.
         assert!(
             html.contains("an account of the database or of the file"),

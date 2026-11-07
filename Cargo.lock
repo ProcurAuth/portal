@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "inbox-android"
-version = "5.0.2"
+version = "5.0.3"
 dependencies = [
  "inbox-core",
  "jni 0.21.1",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "inbox-core"
-version = "5.0.2"
+version = "5.0.3"
 dependencies = [
  "base64 0.22.1",
  "rand_core 0.6.4",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "portal"
-version = "5.0.2"
+version = "5.0.3"
 dependencies = [
  "argon2",
  "aws-lc-rs",

@@ -1,6 +1,6 @@
 //! The settings of the superadmin. Each tab is one HTML page, and each page is built from the parts
 //! of [`super::components`]. The tabs are Access, Services, Activity and Inbox, and they stand in
-//! the header, on the line of "Back to panel". A tab shows only when its feature is on. The page of
+//! the header, on the line of "Back to services". A tab shows only when its feature is on. The page of
 //! one account, "New user", "New key" and "Edit key" are child pages of Access, not tabs: each one
 //! fills the window, and the tab Access stays marked.
 //!
@@ -9,7 +9,7 @@
 //! - The Access page has the accounts and the keys side by side (see [`super::access`]).
 //! - The Activity page has the sign-ins and the changes (see [`super::activity`]).
 //! - The page of an account has one row of tools (log in as, the password, the activity, delete,
-//!   Save). Under it, the groups "Services" and "Server features" stand side by side. The editor of
+//!   Save). Under it, the groups "Services" and "Server permissions" stand side by side. The editor of
 //!   grants draws them.
 //! - "New user" opens a page with the login, the password, the groups and the same editor.
 //! - The Services page has the services on the left. A click on a row selects it, with a link.
@@ -29,7 +29,7 @@ use super::components::{
     zone, Ask, Chip, PageHead, Side, Strength, Tag, Zone,
 };
 use super::grant_editor::{self, Place};
-use super::{document_class, sign_out_form, status_icon, theme_switch};
+use super::{document_class, sign_out_form_short, status_icon, theme_switch};
 use crate::actions::Document;
 use crate::catalog::{Catalog, Service};
 use crate::grants::{holds, Grant, Mode, ACCESS};
@@ -210,7 +210,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "needs-access" => (
-            "A permission on a service needs the switch Can open on that service. Tick the switch, then save.",
+            "A permission on a service needs the switch Open on that service. Tick the switch, then save.",
             false,
         ),
         "keys-needs" => (
@@ -309,10 +309,10 @@ fn shell_class(
     let mut body = String::new();
     let _ = write!(
         body,
-        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back to panel</a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
+        r##"<a class="skipLink" href="#main">Skip to content</a><header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/" aria-label="Back to services" title="Back to services"><svg class="icon icon--lg" aria-hidden="true"><use href="#i-arrow-left"/></svg><span class="btnText">Back to services</span></a></div>{}<div class="appHeader__right">{}{}</div></header><main class="settings{class}" id="main" tabindex="-1"><h1 class="visually-hidden">{}</h1>{content}</main>"##,
         tab_strip(tabs, tab, frame.notify.as_ref()),
         theme_switch(),
-        sign_out_form(frame.logout_token),
+        sign_out_form_short(frame.logout_token),
         html_escape(title)
     );
     if let Some(header) = &frame.notify {
@@ -859,16 +859,19 @@ fn password_form(login: &str, token: &str) -> String {
         r#"<form class="pwForm" method="post" action="/auth/users/update"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="login" value="{}">{}<button class="button" type="submit" title="The sessions of this account end at once">Change</button></form>"#,
         html_escape(token),
         html_escape(login),
-        password_input(&id, "New password", "At least 10 characters", false),
+        password_input(&id, "New password", "At least 10 characters", false, false),
     )
 }
 
 /// A password field with its "Generate" button (script). The button shows the result of the
 /// action in its own slot: a second icon that takes the place of the first at the same size, so
 /// nothing moves (the live region for a screen reader takes no room).
-fn password_input(id: &str, label: &str, hint: &str, invalid: bool) -> String {
+/// `described`: a hint line `{id}-hint` stands under the field, and the field points to it.
+fn password_input(id: &str, label: &str, hint: &str, invalid: bool, described: bool) -> String {
     let invalid = if invalid {
         format!(r#" uiInput--error" aria-invalid="true" aria-describedby="{id}-error"#)
+    } else if described {
+        format!(r#"" aria-describedby="{id}-hint"#)
     } else {
         String::new()
     };
@@ -1012,7 +1015,7 @@ pub struct NeedsAccess {
 
 /// The message of a refusal because of `access`. `name` is the name of the service.
 pub fn needs_access_text(name: &str) -> String {
-    format!("{name}: a permission needs the switch Can open {name}. Tick the switch, then save.")
+    format!("{name}: a permission needs the switch Open {name}. Tick the switch, then save.")
 }
 
 /// The data of the page "New user".
@@ -1082,16 +1085,39 @@ pub fn new_user_page(frame: &Frame, view: &NewUserView) -> String {
     };
     let (login_class, login_error) = field_error("new-login", message(UserField::Login));
     let (_, password_error) = field_error("new-password", message(UserField::Password));
+    // A field with no server error shows a hint. The script turns the hint into an error when the
+    // person leaves the field with a value that is not valid.
+    let hint = |id: &str, error: &str, text: &str| {
+        if error.is_empty() {
+            format!(
+                r#"<span class="uiField__hint" id="{id}-hint" data-hint-for="{id}">{text}</span>"#
+            )
+        } else {
+            error.to_string()
+        }
+    };
+    let login_hint = hint(
+        "new-login",
+        &login_error,
+        "1 to 32 characters. Use letters, digits, dot, dash and underscore.",
+    );
+    let password_hint = hint("new-password", &password_error, "At least 10 characters.");
+    let login_describe = if login_error.is_empty() {
+        r#" aria-describedby="new-login-hint""#
+    } else {
+        ""
+    };
     let _ = write!(
         out,
-        r##"<form class="fgrid fgrid--user" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><div class="field"><label class="field__label" for="new-login">Login</label><input class="uiInput{login_class}" id="new-login" name="login" type="text" value="{}" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1 to 32 characters" title="1 to 32 characters: letters, digits, dot, dash, underscore">{login_error}</div><div class="field"><label class="field__label" for="new-password">Password</label><span class="pwRow">{}</span>{password_error}</div>{}</form>"##,
+        r##"<form class="fgrid fgrid--user" id="add-user" data-gate method="post" action="/auth/users/add"><input type="hidden" name="csrf" value="{}"><input type="hidden" name="grants" value="1"><div class="field"><label class="field__label" for="new-login">Login</label><input class="uiInput{login_class}" id="new-login" name="login" type="text" value="{}" maxlength="32" pattern="[A-Za-z0-9._\-]{{1,32}}" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="1 to 32 characters" title="1 to 32 characters: letters, digits, dot, dash, underscore"{login_describe}>{login_hint}</div><div class="field"><label class="field__label" for="new-password">Password</label><span class="pwRow">{}</span>{password_hint}</div>{}</form>"##,
         html_escape(view.token),
         html_escape(typed_login),
         password_input(
             "new-password",
             "Password",
             "At least 10 characters",
-            !password_error.is_empty()
+            !password_error.is_empty(),
+            password_error.is_empty()
         ),
         groups_field(&view.groups, &[], true),
     );
@@ -1459,7 +1485,7 @@ fn source_line(source: crate::actions::Source, problem: Option<&str>) -> String 
             "ok",
             "circle-check",
             format!(
-                "Published by the service at <code>{SOURCE_PATH}</code> · read {} ago",
+                "The service publishes its permissions. Last read: {} ago.",
                 minutes(age)
             ),
         ),
@@ -1480,14 +1506,16 @@ fn source_line(source: crate::actions::Source, problem: Option<&str>) -> String 
                     "The last read failed: {}. No copy applies: access only.",
                     html_escape(p)
                 ),
-                None => format!(
-                    "Not published: access only. The service gives no document at {SOURCE_PATH}."
-                ),
+                None => "The service publishes no permissions. Access only.".to_string(),
             },
         ),
     };
-    // The line is cut at the width of the panel: the tooltip gives the problem in full.
-    let title = problem.map_or(String::new(), |p| format!(r#" title="{}""#, html_escape(p)));
+    // The line is cut at the width of the panel: the tooltip gives the problem in full. Without a
+    // problem, the tooltip gives the address of the document.
+    let title = format!(
+        r#" title="{}""#,
+        problem.map_or_else(|| SOURCE_PATH.to_string(), html_escape)
+    );
     format!(
         r#"<div class="srcLine srcLine--{class}"{title}>{}<span>{text}</span></div>"#,
         icon(icon_name)
@@ -1701,7 +1729,7 @@ mod tests {
             }
             // The header starts with the way back, which is the first action.
             assert!(html.contains(
-                r##"<header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/">"##
+                r##"<header class="appHeader"><div class="appHeader__left"><a class="backLink" href="/" aria-label="Back to services" title="Back to services">"##
             ));
             // The tab icon.
             assert!(html.contains(&super::super::favicon_link()));
@@ -1785,10 +1813,12 @@ mod tests {
             assert!(html.contains(r##"<a class="skipLink" href="#main">Skip to content</a>"##));
             assert!(html.contains(r#"<body class="shell">"#));
             assert!(html.contains(r#"<main class="settings settings--fill""#));
-            assert!(html.contains(r##"<a class="backLink" href="/">"##));
-            assert!(html.contains("Back to panel"));
+            assert!(
+                html.contains(r##"<a class="backLink" href="/" aria-label="Back to services""##)
+            );
+            assert!(html.contains("Back to services"));
             assert!(html.contains(r#"action="/auth/logout""#) && html.contains("out&lt;"));
-            // The tabs are in the header, on the line of "Back to panel". No row of tabs is under it.
+            // The tabs are in the header, on the line of "Back to services". No row of tabs is under it.
             let header = &html[html.find("<header").unwrap()..html.find("</header>").unwrap()];
             assert_eq!(
                 header.matches(r#"class="contentTabs__tab"#).count(),
@@ -1796,7 +1826,7 @@ mod tests {
                 "four tabs, in the header"
             );
             assert!(
-                header.find("Back to panel").unwrap() < header.find("contentTabs").unwrap()
+                header.find("Back to services").unwrap() < header.find("contentTabs").unwrap()
                     && header.find("contentTabs").unwrap()
                         < header.find("appHeader__right").unwrap(),
                 "the tabs stand between the way back and the controls"
@@ -1876,7 +1906,7 @@ mod tests {
         ] {
             let html = fill_page(only.tabs()[0], &only, "x", "");
             assert!(!html.contains("contentTabs"), "{:?}", only.tabs());
-            assert!(html.contains("Back to panel") && html.contains("Sign out"));
+            assert!(html.contains("Back to services") && html.contains("Sign out"));
         }
     }
 
@@ -1976,7 +2006,7 @@ mod tests {
             html.contains("Change the \\u003cdashboards\\u003e."),
             "escaped"
         );
-        assert!(!html.contains("Save access") && !html.contains("Opens 2/4"));
+        assert!(!html.contains("Save access") && !html.contains("Open 2/4"));
         // Without script the grants are a read-only list.
         assert!(html.contains(r#"<noscript><ul class="grantList"><li><code>"#));
         // Without keys, the delete needs one click.
@@ -2271,7 +2301,7 @@ mod tests {
         let html = new_user_page(&frame(), &view);
         assert!(html.contains(r#"value="ma&lt;x&gt;""#) && !html.contains("ma<x>"));
         assert!(
-            html.contains("Grafana: a permission needs the switch Can open Grafana."),
+            html.contains("Grafana: a permission needs the switch Open Grafana."),
             "{html}"
         );
         assert!(
@@ -2694,7 +2724,8 @@ mod tests {
         use std::time::Duration;
         let fresh = source_line(Source::Fresh(Duration::from_secs(125)), None);
         assert!(fresh.contains(r#"class="srcLine srcLine--ok""#));
-        assert!(fresh.contains("read 2 min ago"), "{fresh}");
+        assert!(fresh.contains("Last read: 2 min ago."), "{fresh}");
+        assert!(fresh.contains(r#"title="/.well-known/procurauth/actions""#));
         let stale = source_line(
             Source::Stale(Duration::from_secs(2_400)),
             Some("a <b> problem"),
@@ -2706,16 +2737,19 @@ mod tests {
         assert!(source_line(Source::Fresh(Duration::from_secs(10)), None)
             .contains("less than a minute"));
         let none = source_line(Source::Absent, None);
-        assert!(none.contains("srcLine--none") && none.contains("Not published: access only."));
+        assert!(
+            none.contains("srcLine--none")
+                && none.contains("The service publishes no permissions. Access only.")
+        );
         assert!(source_line(Source::Absent, Some("x")).contains("The last read failed: x."));
         // The editor writes the same words: the two lines do not drift apart.
         let js = include_str!("../../web/settings.js");
         for phrase in [
-            "Published by the service at ",
+            "The service publishes its permissions. Last read: ",
             " ago",
             "Last good copy from ",
             ". The last read failed.",
-            "Not published: access only. The service gives no document at ",
+            "The service publishes no permissions. Access only.",
             "/.well-known/procurauth/actions",
             "less than a minute",
         ] {

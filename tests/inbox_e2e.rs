@@ -5863,7 +5863,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
         "four tabs"
     );
     // The inbox is a feature of the portal, as the keys are: the Services page does not list it, and
-    // it has no page of a service. The editor of permissions shows it in the group "Server features".
+    // it has no page of a service. The editor of permissions shows it in the group "Server permissions".
     let (st, services) = inbox_page(&s, "/auth/settings/services");
     assert_eq!(st, 200);
     assert!(
@@ -5875,7 +5875,7 @@ async fn the_pages_of_the_inbox_follow_the_permissions_of_the_account() {
     let (st, editor) = inbox_page(&s, "/auth/settings/users/pia");
     assert_eq!(st, 200);
     assert!(
-        has(&editor, "Server features")
+        has(&editor, "Server permissions")
             && has(&editor, "inbox_group:infra")
             && has(&editor, "Infra")
             && has(&editor, "phone.revoke"),

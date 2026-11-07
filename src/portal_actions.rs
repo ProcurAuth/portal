@@ -1,7 +1,7 @@
 //! The service `portal`: the actions of the features of the portal itself (portal 6).
 //!
 //! The portal is one internal scope with its own action document: the settings pages call it
-//! "Server features". The code holds the document: no read of the catalogue replaces it, and the
+//! "Server permissions". The code holds the document: no read of the catalogue replaces it, and the
 //! PDP reads it from memory. It has two features. Each feature is in the document only when the
 //! file turns it on.
 //!
