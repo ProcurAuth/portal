@@ -234,6 +234,12 @@ async function newUser(browser) {
   check("the list of the actions has no horizontal scroll", width <= 0, String(width));
 
   // A right of the portal features adds no `access on service:portal`.
+  // The server is the first row of the list. It starts closed and has no switch.
+  const server = page.locator(".ge__svc--server");
+  check("the first row is the server, with no switch", (await server.count()) === 1 && (await server.locator("input[data-switch]").count()) === 0 && (await page.locator(".ge__svc").first().evaluate((el) => el.classList.contains("ge__svc--server"))), "row");
+  check("the server row is closed at the start", (await server.locator("[data-toggle]").getAttribute("aria-expanded")) === "false", "open");
+  await server.locator("[data-toggle]").click();
+  check("the server row opens its sections", (await server.locator(".featBox").count()) === 1, "no section");
   await page.locator('.featBox input[data-cell-action="keys.own.read"]').check();
   const sent = await fields(page);
   check("portal feature: the right is sent without access on the portal", sent.includes("keys.own.read on service:portal") && !sent.includes("access on service:portal"), sent.join());

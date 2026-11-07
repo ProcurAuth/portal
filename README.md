@@ -1784,6 +1784,11 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
 
+Version 5.0.4 changes the settings pages and fixes one fault. It has no change of the database, the configuration or the protocol. Read these points before you upgrade from 5.0.3:
+
+- The page of an account that another instance made a moment ago opens at once. Before, the redirect after "New user" could give "Page not found" when it reached an instance that had not read the accounts yet. The pages and the actions of the superadmin that name an unknown account now read the accounts again from the shared database first.
+- The account page and the New user page show the server permissions as the first row of the Services list, named Server, and no longer in a separate column.
+
 Version 5.0.3 changes the settings pages and the sign-in page. It has no change of the database, the configuration or the protocol. Read these points before you upgrade from 5.0.2:
 
 - The grant editor and the pages have a layout for narrow screens. A row of an action with limits has a second line for the limits.

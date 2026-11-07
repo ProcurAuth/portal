@@ -9,8 +9,8 @@
 //! - The Access page has the accounts and the keys side by side (see [`super::access`]).
 //! - The Activity page has the sign-ins and the changes (see [`super::activity`]).
 //! - The page of an account has one row of tools (log in as, the password, the activity, delete,
-//!   Save). Under it, the groups "Services" and "Server permissions" stand side by side. The editor of
-//!   grants draws them.
+//!   Save). Under it, one list of services stands. Its first row, "Server", holds the permissions of
+//!   the portal itself. The editor of grants draws the list.
 //! - "New user" opens a page with the login, the password, the groups and the same editor.
 //! - The Services page has the services on the left. A click on a row selects it, with a link.
 //!   The panel "Opened by" shows which accounts open the selected service and which do not.

@@ -653,6 +653,30 @@ fn an_account_created_on_one_instance_signs_in_and_is_known_on_the_other() {
 }
 
 #[test]
+fn the_page_of_an_account_made_on_the_other_instance_opens_at_once() {
+    each_backend(|backend| {
+        let (a, b) = cluster(backend, Some(Duration::ZERO));
+        let root = sign_in(&a, "root", PASSWORD);
+        let reply = post(
+            &a,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "login=frank&password=a-long-password-1",
+        );
+        assert_eq!(reply.status, 303);
+        // The redirect after "New user" can reach the other instance. It has not read the accounts yet.
+        assert_eq!(
+            page(&b, &root, "/auth/settings/users/frank").status,
+            200,
+            "the page of the new account must open"
+        );
+        // A login that nobody made stays unknown.
+        assert_eq!(page(&b, &root, "/auth/settings/users/nobody").status, 404);
+    });
+}
+
+#[test]
 fn a_session_opened_for_an_account_the_instance_has_not_heard_of_yet_is_not_ended() {
     each_backend(|backend| {
         let (a, b) = cluster(backend, Some(Duration::ZERO));

@@ -489,9 +489,9 @@
    `limit<n>.<name>[.<window>]`.
 
    A pane is the tree of one service and its actions. The page of an account (data-layout="groups")
-   has two groups side by side. The group "Services" has one row for each service, and the pane
-   opens under the chosen row. The group "Server permissions" has one pane, always open. The forms of
-   the keys have one list: the features are one more row.
+   has one list. Its first row is "Server": the portal features, with their own sections. The other
+   rows are the services, and the pane opens under the chosen row. The forms of the keys have one
+   list too: the features are one more row, after the services.
 
    A person who gives a grant does not know the resources of a service. When a node can have
    children that the document does not list, the editor asks the portal for them
@@ -553,17 +553,21 @@
       return;
     }
     // The editor has two parts: the services (the workloads of the launcher) and the portal
-    // features (keys, inbox). With the layout "groups" the features have a group of their own.
-    // Without it they are one more row, after the services.
+    // features (keys, inbox). With the layout "groups" the features are the first row of the list,
+    // with sections of their own. Without it they are one more row, after the services, and the
+    // pane of the services draws them.
     var groups = root.dataset.layout === "groups";
-    var rowList = data.services.slice();
+    var paneList = data.services.slice();
     var featureSvc = null;
     if (data.features) {
       data.features.feature = true;
       if (groups) featureSvc = data.features;
-      else rowList.push(data.features);
+      else paneList.push(data.features);
     }
-    if (!rowList.length && !featureSvc) {
+    var rowList = featureSvc ? [featureSvc].concat(paneList) : paneList;
+    // The pane has no row for the features, so its index is one less than the index of the row.
+    var rowOffset = featureSvc ? 1 : 0;
+    if (!rowList.length) {
       root.insertBefore(node("div", "uiState uiState--compact", "No service to give access to."), fields);
       return;
     }
@@ -630,7 +634,7 @@
       for (var s = 0; s < saveButtons.length; s += 1) saveButtons[s].disabled = !dirty;
     }
 
-    var serviceAt = 0;
+    var serviceAt = rowOffset;
     var query = new URLSearchParams(window.location.search);
     var wanted = query.get("service");
     if (wanted) {
@@ -640,7 +644,10 @@
       for (var i = 0; i < rowList.length; i += 1) if (rowList[i].id === first.service) serviceAt = i;
     }
     // The service whose permissions are open under its row. -1: none.
-    var expandedAt = rowList.length === 1 ? 0 : wanted ? serviceAt : -1;
+    var expandedAt = -1;
+    if (rowList.length === 1) expandedAt = 0;
+    else if (wanted) expandedAt = serviceAt;
+    else if (paneList.length === 1) expandedAt = rowOffset;
 
     function owns(serviceId, action, path) {
       if (data.owner === null) return true;
@@ -1964,41 +1971,22 @@
     }
 
     // ---- the rows of the services: the switch of `access`, a short sentence, the button
-    var services = rowList.length ? makePane(rowList, serviceAt, false) : null;
+    var services = paneList.length ? makePane(paneList, Math.max(0, serviceAt - rowOffset), false) : null;
     var features = featureSvc ? makeFeatures(featureSvc) : null;
     var strip = node("div", groups ? "ge__groups" : "ge__svcList");
     strip.setAttribute("role", "group");
     strip.setAttribute("aria-label", "Permissions");
     var rowsEl = groups ? node("div") : strip;
     var servicesCount = node("span", "count");
-    var featuresCount = node("span", "count");
     if (groups) {
-      if (rowList.length) {
-        var svcGroup = node("section", "ge__grp");
-        var head = node("div", "ge__grpHead");
-        head.appendChild(node("h2", "title", "Services"));
-        head.appendChild(servicesCount);
-        svcGroup.appendChild(head);
-        rowsEl = node("div", "ge__svcList");
-        svcGroup.appendChild(rowsEl);
-        strip.appendChild(svcGroup);
-      }
-      if (featureSvc) {
-        var featGroup = node("section", "ge__grp");
-        var featHead = node("div", "ge__grpHead");
-        featHead.appendChild(node("h2", "title", "Server permissions"));
-        featHead.appendChild(featuresCount);
-        featGroup.appendChild(featHead);
-        var portalLine = node("div", "srcLine srcLine--ok");
-        portalLine.title = "This server builds this document in its own code. It does not serve it over HTTP.";
-        portalLine.appendChild(icon("circle-check"));
-        portalLine.appendChild(node("span", "", "Published by this server. Built in, always current."));
-        featGroup.appendChild(portalLine);
-        var featBody = node("div", "ge__featBody");
-        featBody.appendChild(features.ui);
-        featGroup.appendChild(featBody);
-        strip.appendChild(featGroup);
-      }
+      var svcGroup = node("section", "ge__grp");
+      var head = node("div", "ge__grpHead");
+      head.appendChild(node("h2", "title", "Services"));
+      head.appendChild(servicesCount);
+      svcGroup.appendChild(head);
+      rowsEl = node("div", "ge__svcList");
+      svcGroup.appendChild(rowsEl);
+      strip.appendChild(svcGroup);
     }
     root.insertBefore(strip, fields);
 
@@ -2007,6 +1995,9 @@
       var lastGroup = "";
       var openCount = 0;
       rowList.forEach(function (svc, at) {
+        // The first row of the page of an account is the portal features: "Server".
+        var server = groups && !!svc.feature;
+        var shown = server ? "Server" : svc.name;
         if (!groups) {
           var group = svc.feature ? "Server permissions" : "Services";
           if (group !== lastGroup) {
@@ -2021,10 +2012,18 @@
           if (item.service === svc.id && !(item.action === "access" && item.path === "")) others += 1;
         });
         var expanded = at === expandedAt;
-        var row = node("div", "ge__svc" + (open ? " is-open" : "") + (expanded ? " is-expanded" : ""));
+        var row = node(
+          "div",
+          "ge__svc" + (open ? " is-open" : "") + (expanded ? " is-expanded" : "") + (server ? " ge__svc--server" : "")
+        );
         row.dataset.at = String(at);
         var head = node("div", "ge__svcHead");
-        if (!svc.feature) {
+        if (server) {
+          // The server has no switch, but its icon takes the place of the switch: the names align.
+          var lead = node("span", "ge__lead");
+          lead.appendChild(icon("settings", "icon--lg"));
+          head.appendChild(lead);
+        } else if (!svc.feature) {
           // The switch of a service is its grant `access`. A portal feature has no switch: no path
           // belongs to it, and its permissions work as they are.
           var box = node("input");
@@ -2041,8 +2040,8 @@
         }
         // The name cell has a fixed width, so the info text of every row starts at the same place. The
         // control level of the service is an icon after the name. A service with access only has none.
-        var nameCell = node("span", "ge__svcName", svc.name);
-        nameCell.title = svc.name;
+        var nameCell = node("span", "ge__svcName", shown);
+        nameCell.title = shown;
         var origin = (svc.source || {}).state;
         if (!svc.feature && (origin === "fresh" || origin === "stale")) {
           var level = node("span", "ge__ctl" + (origin === "stale" ? " ge__ctl--stale" : ""));
@@ -2091,8 +2090,8 @@
         toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
         toggle.appendChild(icon(expanded ? "chevron-down" : "chevron-right"));
         if (groups) {
-          toggle.setAttribute("aria-label", "Permissions of " + svc.name);
-          toggle.title = "Permissions of " + svc.name;
+          toggle.setAttribute("aria-label", "Permissions of " + shown);
+          toggle.title = "Permissions of " + shown;
         } else {
           toggle.appendChild(document.createTextNode("Permissions"));
         }
@@ -2100,6 +2099,17 @@
         row.appendChild(head);
         if (expanded) {
           var body = node("div", "ge__svcBody");
+          if (server) {
+            var portalLine = node("div", "srcLine srcLine--ok");
+            portalLine.title = "This server builds this document in its own code. It does not serve it over HTTP.";
+            portalLine.appendChild(icon("circle-check"));
+            portalLine.appendChild(node("span", "", "Published by this server. Built in, always current."));
+            body.appendChild(portalLine);
+            body.appendChild(features.ui);
+            row.appendChild(body);
+            rowsEl.appendChild(row);
+            return;
+          }
           // The limits of `access` (the requests of the service) sit on the line of the switch,
           // not in the list of the actions.
           var top = node("div", "ge__svcTop");
@@ -2122,21 +2132,7 @@
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
       }
-      servicesCount.textContent = "Open " + openCount + "/" + rowList.length;
-      if (featureSvc) {
-        var held = 0;
-        ticked.forEach(function (item) {
-          if (item.service === featureSvc.id && item.action !== "access") held += 1;
-        });
-        var total = 0;
-        featureSvc.actions.forEach(function (a) {
-          if (a.name === "access") return;
-          total += featureSvc.nodes.filter(function (n) {
-            return applies(a, n);
-          }).length;
-        });
-        featuresCount.textContent = "" + held + "/" + total;
-      }
+      servicesCount.textContent = "Open " + openCount + "/" + paneList.length;
     }
 
     // The row of a service holds the controls that the person reaches first: the switch, the button
@@ -2144,7 +2140,7 @@
     // change, so the control that had the focus gets it back.
     function headFocus() {
       var active = document.activeElement;
-      if (!active || !rowsEl.contains(active) || (services && services.ui.contains(active))) return null;
+      if (!active || !rowsEl.contains(active) || (services && services.ui.contains(active)) || (features && features.ui.contains(active))) return null;
       var d = active.dataset || {};
       if (d.undo !== undefined) return { attr: "switch", value: d.undo };
       var names = ["switch", "same", "toggle"];
@@ -2160,10 +2156,11 @@
     }
 
     function render() {
-      var paneKept = services && expandedAt >= 0 ? services.save() : null;
+      var paneOpen = !!services && expandedAt >= rowOffset;
+      var paneKept = paneOpen ? services.save() : null;
       var headKept = headFocus();
       renderList();
-      if (services && expandedAt >= 0) {
+      if (paneOpen) {
         services.draw();
         if (paneKept) services.restore(paneKept);
       }
@@ -2215,7 +2212,7 @@
         return;
       }
       expandedAt = at;
-      services.show(at);
+      if (at >= rowOffset) services.show(at - rowOffset);
       render();
       // The open service goes to the top of its list, so the tree and the permissions show with no scroll.
       var opened = strip.querySelector(".ge__svc.is-expanded");
@@ -2260,7 +2257,7 @@
       var key = keyOf(wanted, "access", "");
       if (!ticked.has(key)) ticked.set(key, { action: "access", service: wanted, path: "", limits: {} });
     }
-    if (services && expandedAt >= 0) services.select("");
+    if (services && expandedAt >= rowOffset) services.select("");
     render();
   }
 

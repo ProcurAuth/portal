@@ -1842,7 +1842,7 @@ input.keyText {
   display: inline-grid;
 }
 
-/* The editor of grants on the page of an account: two groups side by side ---------------------- */
+/* The editor of grants on the page of an account: one list of services ------------------------- */
 
 .grantEditor[data-layout="groups"] {
   display: flex;
@@ -1853,15 +1853,12 @@ input.keyText {
 .ge__groups {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 12px 28px;
   min-height: 0;
 }
 
-.ge__groups:has(> .ge__grp:only-child) {
-  grid-template-columns: minmax(0, 1fr);
-}
 
 .ge__grp {
   display: flex;
@@ -1879,8 +1876,7 @@ input.keyText {
   border-bottom: 1px solid var(--border);
 }
 
-.ge__groups .ge__svcList,
-.ge__featBody {
+.ge__groups .ge__svcList {
   display: block;
   flex: 1 1 auto;
   min-height: 0;
@@ -1939,11 +1935,6 @@ input.keyText {
 .ge__groups .ge__svcBody .ge {
   height: auto;
   min-height: 220px;
-}
-
-.ge__featBody .ge {
-  height: 100%;
-  min-height: 280px;
 }
 
 .ge--stack {
@@ -2031,6 +2022,48 @@ input.keyText {
   margin-left: auto;
 }
 
+/* The first row is the server: the permissions of the portal itself. It stands out from the
+   services with an accent bar, a tint, a stronger name and a divider under it. Its icon takes the
+   place of the switch, so the names of all the rows start at the same place. */
+.ge__groups .ge__svc--server {
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent-line);
+}
+
+.ge__groups .ge__svc--server:not(.is-expanded):hover {
+  border-bottom-color: var(--border-strong);
+}
+
+.ge__groups .ge__svc--server.is-expanded {
+  display: block;
+  flex: none;
+  min-height: 0;
+}
+
+.ge__groups .ge__svc--server .ge__svcHead {
+  padding-left: 1px;
+  background: color-mix(in srgb, var(--accent-tint) 45%, transparent);
+}
+
+.ge__groups .ge__svc--server .ge__svcName {
+  font-weight: 700;
+}
+
+.ge__lead {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  color: var(--accent-text);
+}
+
+.ge__groups .ge__svc--server .ge__svcBody {
+  display: block;
+  padding: 4px 8px 12px 4px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ge__groups .ge__svcHead input[type="checkbox"]::after {
     transition: none;
@@ -2062,12 +2095,10 @@ input.keyText {
   }
 
   .ge__groups {
-    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: none;
   }
 
-  .ge__groups .ge__svcList,
-  .ge__featBody {
+  .ge__groups .ge__svcList {
     overflow: visible;
   }
 }

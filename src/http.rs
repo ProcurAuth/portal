@@ -1460,7 +1460,7 @@ async fn handle_settings(
             let login = query_value(uri, "user");
             let service = query_value_up_to(uri, "service", grants::MAX_SERVICE_CHARS * 4);
             match (login, service) {
-                (Some(login), Some(service)) if state.users.get(&login).is_some() => {
+                (Some(login), Some(service)) if directory_holds_user(state, &login) => {
                     return redirect_response(
                         StatusCode::SEE_OTHER,
                         &ui::settings::give_target(&login, &service),
@@ -1474,6 +1474,8 @@ async fn handle_settings(
             let asked = path
                 .strip_prefix(ui::settings::USER_PATH_PREFIX)
                 .unwrap_or_default();
+            // The account can come from another instance, a moment ago (the redirect after "New user").
+            directory_holds_user(state, asked);
             let (users, snapshot) = load_admin_data(state).await;
             let two_factor = mfa_page::enabled_logins(state).await;
             match user_view(
@@ -2131,6 +2133,22 @@ fn refresh_directory_if_due(state: &AppState) -> bool {
                 .users
                 .refresh_if_due(&state.store, UNKNOWN_LOGIN_REFRESH_GAP)
         })
+}
+
+/// Whether the directory holds the account `login`. With a shared database, an account that another instance created a
+/// moment ago is not in the directory yet: the portal reads the accounts again first, with no minimum gap. The pages of
+/// the superadmin use this check: the redirect after "New user" can reach another instance than the one that made the
+/// account, and the page must open. A request needs a session of the superadmin for this read.
+fn directory_holds_user(state: &AppState, login: &str) -> bool {
+    if state.users.get(login).is_some() {
+        return true;
+    }
+    // A name that is not a login needs no read.
+    if !state.store.is_shared() || login.is_empty() || login.len() > 128 {
+        return false;
+    }
+    let since = crate::users::Directory::clock_millis();
+    blocking(|| state.users.refresh_since(&state.store, since)) && state.users.get(login).is_some()
 }
 
 // The binding of the sign-in proofs and of the sessions to the credential ----------------------------------------
@@ -3689,7 +3707,7 @@ async fn handle_users_delete(
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
     let login = match normalize_login(&login) {
-        Ok(login) if state.users.get(&login).is_some() => login,
+        Ok(login) if directory_holds_user(state, &login) => login,
         _ => {
             state.metrics.user_admin("delete", "rejected");
             return settings_redirect("no-user");
@@ -3784,6 +3802,7 @@ async fn handle_users_update(
         Ok(login) => login,
         Err(_) => return rejected("no-user"),
     };
+    directory_holds_user(state, &login);
     let Some(current) = state.users.get(&login) else {
         return rejected("no-user");
     };
@@ -3932,7 +3951,7 @@ async fn handle_impersonate(
         return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
     }
     let login = match normalize_login(&login) {
-        Ok(login) if state.users.get(&login).is_some() => login,
+        Ok(login) if directory_holds_user(state, &login) => login,
         _ => {
             state.metrics.user_admin("impersonate", "rejected");
             return settings_redirect("no-user");

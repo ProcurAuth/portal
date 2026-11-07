@@ -82,7 +82,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/><use href="#i-settings"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,8 +94,9 @@ pub struct Place {
     /// The number of text fields for a grant in a browser without script. The forms of the keys
     /// have them.
     pub blank_rows: usize,
-    /// Draw the portal features as a group beside the services, always open (the page of an
-    /// account). Without it, the features are one more row of the list (the forms of the keys).
+    /// Draw the portal features as the first row of the list, with sections of their own (the
+    /// pages of an account). Without it, the features are one more row, after the services (the
+    /// forms of the keys).
     pub groups: bool,
 }
 
