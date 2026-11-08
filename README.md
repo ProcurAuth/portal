@@ -920,6 +920,8 @@ The Inbox uses the database of the portal. With SQLite, it uses the same file. W
 
 The Inbox and the portal have two independent chains of migrations. The portal keeps its version in `PRAGMA user_version` (SQLite) or in `schema_migrations` (PostgreSQL). The Inbox keeps its version in the table `inbox_schema_version`. Each chain refuses a schema that is newer than its binary. The tables of the Inbox are `devices`, `subscriptions`, `alerts`, `deliveries`, `connections`, `enrollment_codes` and, with PostgreSQL, `instances`.
 
+Release 5.1.0 adds the tables of the items: `items`, `turns`, `approvals`, `item_events`, `approval_intents`, `approval_mute`, `account_prefs`, `items_heartbeat` and `content_key_check`. See "The engine of the items".
+
 With PostgreSQL, any number of instances can run. They share the phones, the alerts and the sessions through the database, `LISTEN` and `NOTIFY`. If the database has no writable primary, the Inbox goes on. It accepts alerts in memory and delivers them to the phones that are connected. It writes them when the database is back. With the block `inbox.cluster`, the instances copy these alerts to each other before the sender gets its answer.
 
 With SQLite, the block `inbox.replica` copies the whole file to a shared directory. The copy holds the tables of the portal too. Each file of the directory has the mode 0600, as the database file has. A directory that the portal creates has the mode 0700. Run each instance with the same user id. A form of the portal that changes the database answers only after the copy holds the change, as an alert does. The metrics `portal_inbox_replica_*` show the state of the copy.
@@ -933,6 +935,7 @@ An instance that owns the lease serves. A standby instance waits for the lease b
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the text of an API key (`api_`, 43 characters and 6 characters of checksum). The file never gets overwritten. |
 | `portal inbox content-key --out FILE` | Makes a key that seals the contents of the items: the base64 text of 32 random bytes. The file never gets overwritten. |
+| `portal inbox content-purge --config FILE --key ID` | Erases the sealed contents of a key that the file lost, and keeps the metadata. It refuses a key that the file still holds. |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the Inbox. A file of the earlier standalone alert server has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the portal port. |
 
@@ -1086,6 +1089,28 @@ The seal does not protect against a person who has the key and the process of th
 Keep the keys outside the data volume and outside the backups of the database. A lost key makes the contents unreadable and keeps the metadata. See [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md).
 
 At start, the portal compares each key with a check value in the table `content_key_check`. A key that changed under the same id stops the start. `portal check-config` shows the id, `active` or `read-only`, and the source of each key. It hides the secret.
+
+### The engine of the items
+
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The engine has no route and no frame yet: the next lots of 5.1.0 add them.
+
+An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
+
+The agent states the wait time as `lease_s` or as `until`. The effective lease is 3 times `lease_s` from the last renewal. It never passes the start of the chain plus `inbox.items.max_lifetime`. A renewal writes the lease at most one time in `lease_s`.
+
+When the lease and `inbox.items.lease.grace` end, the item becomes `abandoned`. This is not a refusal. During `inbox.items.lease.revive_window`, a renewal of the same key brings the item back, at most `inbox.items.lease.max_revivals` times. Each revival sends one message.
+
+An answer is one compare-and-set on the row of the item. Two devices that answer at the same time get one `accepted` and one `already_answered`. An answer after the lease and its grace gets `abandoned`. An answer with another effect hash than the stored one gets `effect_mismatch` and changes nothing.
+
+A supersede is one transaction. It makes the old item `superseded` and makes a new item in the same chain. The chain keeps its start time, so a supersede never extends `max_lifetime`.
+
+The row of the table `alerts` for an item has the kind of the item, a fixed title and the column `request_id`. It never holds a body. A change of state adds a row of the database kind `settled`. No frame has this kind. A renewal adds no row. The table `item_events` has one row for each change of state and never a body.
+
+The task of the server writes a heartbeat in the table `items_heartbeat`. After a gap longer than `inbox.items.lease.grace`, it extends each open lease by the gap. With PostgreSQL, two instances never take the same row. An item never uses the spool. When PostgreSQL has no writable primary, a write of an item gets `503 storage_degraded`.
+
+The task erases the sealed body after `inbox.items.body_purge_after`. It deletes a final item after `inbox.items.retention` and its events after `audit_retention`. The effect hash stays with the metadata until the item goes.
+
+The metrics `portal_item_*` count the events, the answers, the lease writes and the bodies that the portal served. The journal has the lines `approval_requested`, `approval_answered`, `approval_consumed`, `approval_abandoned`, `approval_revived`, `approval_superseded`, `approval_expired`, `body_served`, `body_read` and `body_effect_mismatch`. No line holds a body.
 
 ### Stop
 
@@ -1892,7 +1917,10 @@ Roll the instances one at a time. A new instance opens its ports only when its c
 Version 5.1.0 adds the blocks `inbox.items` and `inbox.at_rest`. The release is not complete: this text lists the points that exist. Read them before you upgrade from 5.0.x:
 
 - The blocks are optional, and each one needs the other. Without them, the Inbox runs as before.
-- The table `content_key_check` is new. It changed the base schema of the Inbox in place: the schema version did not change, and there is no migration. A database that 5.0.x made lacks the table. With the block `inbox.at_rest`, the portal stops at start and says so. Make a new database, or add the table by hand.
+- The tables of the items are new: `items`, `turns`, `approvals`, `item_events`, `approval_intents`, `approval_mute`, `account_prefs`, `items_heartbeat` and `content_key_check`. The table `alerts` has two new columns, `request_id` and `seq`.
+- This changed the base schema of the Inbox in place: the schema version did not change, and there is no migration. A database that 5.0.x made lacks the tables. With the block `inbox.at_rest`, the portal stops at start and names the table. Make a new inbox database.
+- A sealed content needs its key. The portal stops at start when sealed rows name a key that the file lost. The error gives the key id and the count. Add the key again, or run `portal inbox content-purge`.
+- `portal inbox import-sqlite` refuses a SQLite file that holds items.
 - The content keys must live outside the data volume and outside the backups of the database. The Compose script `init-secrets.sh` makes the file `inbox_content_key`. The K3s Secret `portal-secret` gets the key `inbox_content_key`.
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:
