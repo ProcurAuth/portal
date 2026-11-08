@@ -6,7 +6,9 @@ This page is for the whole repository: the portal, the Inbox, the shared crates 
 
 - Write code, comments and documents in English.
 - Write documents in ASD-STE100 Simplified Technical English. A procedure sentence has 20 words at most. A descriptive sentence has 25 words at most.
+- Keep a paragraph to 6 sentences at most. Run `python3 tools/dev/ste-check.py FILE` on each document that you change. The script reports the long sentences, the long paragraphs, the -ing forms and the phrasal verbs. It needs only Python 3.
 - Keep each patch small and focused. Do not format code that you do not change.
+- Give each new requirement of `docs/inbox/SPEC.md` an id and a testable verb. Put the test name in the table of section 6.12 when you write the test.
 - Update the tests and the documents with each change of behavior. The documents are the root `README.md`, `SECURITY.md`, `deploy/README.md`, `docs/design-inbox.md` and the files of `docs/inbox/`.
 - Change `protocol.md` when you change the protocol. Raise `PROTOCOL_VERSION` when the change is not compatible.
 - The delivery guarantees are not negotiable. A change MUST NOT let an accepted alert be lost or shown two times.
@@ -24,6 +26,7 @@ All commands run in Docker. The host needs only Docker.
 | Format and clippy | `tools/dev/lint.sh` |
 | Tests | `tools/dev/test.sh --workspace --no-fail-fast` |
 | End-to-end tests of the Inbox on PostgreSQL | `INBOX_E2E_BACKEND=postgres tools/dev/test.sh --test inbox_e2e` |
+| STE limits of a document | `python3 tools/dev/ste-check.py docs/inbox/SPEC.md docs/design-inbox.md` |
 | Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
 | Image and Compose stack | `tools/build.sh image` then `tools/dev/smoke.sh` |
 
