@@ -34,6 +34,7 @@ fi
 inbox() { docker run --rm --network none -u "$(id -u):$(id -g)" -v "$PWD/$secrets:/out" local/portal:demo inbox "$@"; }
 [ -f "$secrets/inbox_server_key" ] || inbox keygen --out /out/inbox_server_key > /dev/null
 [ -f "$secrets/inbox_api_key" ] || inbox token --out /out/inbox_api_key > /dev/null
+[ -f "$secrets/inbox_content_key" ] || inbox content-key --out /out/inbox_content_key > /dev/null 2>&1
 {
   echo "URL:        http://localhost:8088/"
   echo "superadmin: admin / $(cat "$secrets/superadmin_password")"

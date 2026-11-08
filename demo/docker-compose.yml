@@ -44,6 +44,7 @@ services:
       - pdp_token_notes
       - inbox_server_key
       - inbox_api_key
+      - inbox_content_key
       - totp_key
     ports:
       # The listener of the portal without Traefik, for the metrics and the health check from the
@@ -224,5 +225,7 @@ secrets:
     file: ./.secrets/inbox_server_key
   inbox_api_key:
     file: ./.secrets/inbox_api_key
+  inbox_content_key:
+    file: ./.secrets/inbox_content_key
   totp_key:
     file: ./.secrets/totp_key

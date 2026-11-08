@@ -133,6 +133,41 @@ inbox {
     peers  = ["portal-peers.edge.svc.cluster.local:8082"]
   }
 
+  # The items are the approvals and the questions that an agent sends to a person. The limits have no default:
+  # the portal stops at start when one is absent. The values are the recommended ones.
+  items {
+    max_lifetime       = "90d"   # the longest life of a chain of requests
+    max_open_per_key   = 5
+    max_open_per_owner = 20
+    max_open_total     = 1000
+    retention          = "180d"  # at least max_lifetime + lease.revive_window
+    body_purge_after   = "30d"   # the sealed contents are erased at this age
+    audit_retention    = "365d"  # at least retention
+
+    lease {
+      min           = "30s"
+      max           = "7d"
+      grace         = "2m"
+      revive_window = "7d"
+    }
+
+    digest {
+      mode     = "daily"
+      at       = "08:30"
+      timezone = "UTC"
+    }
+  }
+
+  # The portal seals the contents of the items with these keys. The key file is outside the data volume and outside
+  # the backups of the database: a copy of the database alone shows no content. Make it once with
+  # `portal inbox content-key --out FILE`. Keep a copy of it apart. A lost key makes the sealed contents unreadable.
+  at_rest {
+    active_key = "k1"
+    key "k1" {
+      secret_file = "/run/secrets/inbox_content_key"
+    }
+  }
+
   group "infra" {
     name        = "Infra"
     description = "Outages of the infrastructure"

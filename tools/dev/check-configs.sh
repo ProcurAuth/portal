@@ -21,6 +21,7 @@ random 32 > "$secrets/db_password"
 openssl genpkey -algorithm ed25519 -out "$secrets/identity_key" 2>/dev/null
 portal() { docker run --rm --network none -u "$(id -u):$(id -g)" -v "$secrets:/out" "$image" "$@" >/dev/null; }
 portal inbox keygen --out /out/inbox_server_key
+portal inbox content-key --out /out/inbox_content_key
 for t in inbox_api_key inbox_alerting_key inbox_grafana_key; do
   portal inbox token --out "/out/$t"
 done
