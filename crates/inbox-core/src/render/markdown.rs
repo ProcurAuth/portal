@@ -234,7 +234,10 @@ impl Builder<'_> {
     fn add_inline(&mut self, node: Inline) -> Option<()> {
         // A list holds items only. Text outside an item cannot happen in a parsed document, but the tree must
         // stay valid if it does: the text goes to the level above.
-        if matches!(self.stack.last(), Some(Frame::List { .. } | Frame::Code { .. })) {
+        if matches!(
+            self.stack.last(),
+            Some(Frame::List { .. } | Frame::Code { .. } | Frame::Raw { .. })
+        ) {
             return Some(());
         }
         if let Inline::Text { s } = &node
@@ -713,6 +716,102 @@ mod tests {
         let _ = parse(&bomb);
         let bomb = "<".repeat(7999);
         let _ = parse(&bomb);
+    }
+
+    #[test]
+    fn nested_structures_keep_their_shape() {
+        // A loose list, a code block and a quote in an item, a list in a quote.
+        let b = p(
+            "1. one\n\n   para two\n\n   ```sql\n   select 1\n   ```\n\n2. two\n\n> - a\n> - b\n>\n> text\n",
+        );
+        let Block::List { ordered: true, items, .. } = &b[0] else { panic!("{b:?}") };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0].c[0], Block::Paragraph { .. }));
+        assert!(matches!(&items[0].c[1], Block::Paragraph { .. }));
+        assert_eq!(items[0].c[2], Block::Code { lang: Language::Sql, text: "select 1".into() });
+        let Block::Quote { c } = &b[1] else { panic!("{b:?}") };
+        assert!(matches!(&c[0], Block::List { ordered: false, .. }));
+        assert!(matches!(&c[1], Block::Paragraph { .. }));
+        // Emphasis in a link in a list item.
+        let b = p("- see [*the* docs](https://h.example/)\n");
+        let Block::List { items, .. } = &b[0] else { panic!() };
+        let Block::Paragraph { c } = &items[0].c[0] else { panic!() };
+        assert!(c.iter().any(|n| matches!(n, Inline::Link { host, .. } if host == "h.example")));
+    }
+
+    /// A small generator without a dependency.
+    struct Soup(u64);
+    impl Soup {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn random_markdown_never_panics_and_always_gives_a_tree() {
+        const PIECES: &[&str] = &[
+            "*",
+            "**",
+            "_",
+            "`",
+            "```",
+            "~~~",
+            "# ",
+            "## ",
+            "#### ",
+            "> ",
+            "- ",
+            "1. ",
+            "- [ ] ",
+            "- [x] ",
+            "[",
+            "]",
+            "(",
+            ")",
+            "](",
+            "https://h.example/",
+            "javascript:x",
+            "![",
+            "<",
+            ">",
+            "<script>",
+            "</b>",
+            "<!--",
+            "&amp;",
+            "&#",
+            "\\",
+            "\n",
+            "\n\n",
+            "  \n",
+            "    ",
+            "\t",
+            "|",
+            "---",
+            "===",
+            "[^1]",
+            "[a]: b",
+            "\u{202e}",
+            "\u{0}",
+            "\u{1f600}",
+            "e\u{301}",
+            "word ",
+            "x",
+        ];
+        let mut rng = Soup(0x2545F4914F6CDD1D);
+        for _ in 0..600 {
+            let mut text = String::new();
+            for _ in 0..(1 + rng.next() % 120) {
+                text.push_str(PIECES[(rng.next() as usize) % PIECES.len()]);
+            }
+            let doc = parse(&text);
+            let json = serde_json::to_string(&doc).unwrap();
+            assert!(!json.is_empty());
+            // A tree that is not the plain fallback never holds more than the limits.
+            assert!(doc.fallback || json.len() < 400_000);
+        }
     }
 
     #[test]
