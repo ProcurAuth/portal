@@ -39,6 +39,8 @@ mod items_store;
 #[cfg(test)]
 mod items_tests;
 pub mod log;
+mod mcp;
+mod mcp_tools;
 pub mod metrics;
 pub mod notify;
 mod peer;
@@ -67,14 +69,14 @@ use zeroize::Zeroizing;
 use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBackend};
 pub use api::ApiError;
 use db::Db;
-pub use http::{owns, serve};
+pub use http::{owns_at, serve};
 pub use items::{approval_key_hash, Clock};
 pub use items_ops::Consumed;
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
-    pub(crate) use super::items::{Caller, Loaded};
-    pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled};
+    pub(crate) use super::items::{owner_text_payload, Caller, Loaded};
+    pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, TurnOut};
     pub(crate) use super::items_store::{Answer, Answered, ItemError, Items};
     pub(crate) use super::pg::tests::TestDatabase;
 }
@@ -537,6 +539,7 @@ impl Slot {
             authorizer: std::sync::OnceLock::new(),
             clock,
             item_changed: tokio::sync::Notify::new(),
+            mcp: mcp::McpState::new(config.mcp.as_ref()),
             server_name,
             config,
         });

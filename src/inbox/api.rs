@@ -622,6 +622,21 @@ fn check_user_exists(app: &App, login: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Reads a body that must be a JSON object. A derived `Deserialize` also reads a JSON array as a struct, so the form is
+/// checked first.
+fn parse_object<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError> {
+    let value: Value = parse_json(body)?;
+    if !value.is_object() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            "the body must be a JSON object",
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()))
+}
+
 fn parse_json<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(body)
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()))
@@ -766,6 +781,207 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
     )
     .await?;
     Ok(created_or_ok(&accepted))
+}
+
+// ---------------------------------------------------------------- the agent channel (REST door)
+
+/// The key of an agent on the REST door: `Authorization: Bearer api_...`, a key of the directory. A key of the kind `mcp`
+/// gets the same `401` as a text with a bad form. The routes of the items need the block `inbox.items`: without it the
+/// routes do not exist.
+fn agent_key(app: &App, headers: &HeaderMap) -> Result<super::approvals::Requester, ApiError> {
+    use super::rights::{AgentCheck, Door};
+    let unauthorized = || {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid bearer token",
+        )
+    };
+    if app.config.items.is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    let token = super::http::bearer_token(headers).ok_or_else(unauthorized)?;
+    let not_ready = || {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "directory_not_ready",
+            "the portal cannot check keys yet, retry in a moment",
+        )
+    };
+    let authorizer = app.authorizer().ok_or_else(not_ready)?;
+    match authorizer.check_agent_key(token, Door::Rest) {
+        AgentCheck::Valid(key) => Ok(super::approvals::Requester {
+            key_id: key.key_id,
+            owner: key.owner,
+            interaction: key.interaction,
+        }),
+        AgentCheck::NotReady => Err(not_ready()),
+        AgentCheck::NotAKey | AgentCheck::Invalid => {
+            app.metrics.auth_failure("agent_key");
+            Err(unauthorized())
+        }
+    }
+}
+
+/// The error of the agent core as the REST door answers it.
+fn agent_error(e: super::mcp_tools::AgentError) -> ApiError {
+    let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let error = ApiError::new(status, e.code, e.message);
+    match e.retry_after {
+        Some(seconds) => error.retry_after(seconds),
+        None => error,
+    }
+}
+
+fn agent_reply(
+    status: StatusCode,
+    result: Result<Value, super::mcp_tools::AgentError>,
+) -> Result<Resp, ApiError> {
+    let value = result.map_err(agent_error)?;
+    Ok(json(status, &super::mcp_tools::with_notice(value)))
+}
+
+/// The value of one number of the query, such as `wait=20`. A value that is not a whole number gives `400`.
+fn query_number(uri: &Uri, name: &str) -> Result<Option<u64>, ApiError> {
+    let mut found = None;
+    for pair in uri.query().unwrap_or_default().split('&') {
+        let Some(value) = pair
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('='))
+        else {
+            continue;
+        };
+        let number = value.parse::<u64>().map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_query",
+                format!("the parameter {name} is not a whole number of at most 18 digits"),
+            )
+        })?;
+        if found.replace(number).is_some() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_query",
+                format!("the parameter {name} occurs two times"),
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// `POST /api/v1/approval-intents`
+pub async fn post_intent(app: &App, request: Request<Incoming>) -> Resp {
+    respond(post_intent_inner(app, request).await)
+}
+
+async fn post_intent_inner(app: &App, request: Request<Incoming>) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.headers())?;
+    let body = read_body(
+        request,
+        app.config.devices.max_request_bytes,
+        app.http.body_read_timeout,
+    )
+    .await?;
+    let args: super::mcp_tools::IntentArgs = parse_object(&body)?;
+    agent_reply(
+        StatusCode::CREATED,
+        super::mcp_tools::approval_intent(app, &who, args).await,
+    )
+}
+
+/// `GET /api/v1/items/{id}`: the answer of an item of the key. With `wait` the call renews the lease and waits at most
+/// `wait` seconds, and never more than `inbox.items.wait_max`. Without `wait` it renews nothing.
+pub async fn get_item(app: &App, request: Request<Incoming>, id: &str) -> Resp {
+    respond(get_item_inner(app, request, id).await)
+}
+
+async fn get_item_inner(app: &App, request: Request<Incoming>, id: &str) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.headers())?;
+    let wait = query_number(request.uri(), "wait")?.map(|seconds| {
+        let bound = app
+            .config
+            .items
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |i| i.wait_max);
+        std::time::Duration::from_secs(seconds).min(bound)
+    });
+    let after_seq = query_number(request.uri(), "after_seq")?.unwrap_or(0);
+    agent_reply(
+        StatusCode::OK,
+        super::mcp_tools::get_answer(app, &who, id, wait, after_seq).await,
+    )
+}
+
+/// `DELETE /api/v1/items/{id}`: the agent withdraws its item.
+pub async fn delete_item(app: &App, request: Request<Incoming>, id: &str) -> Resp {
+    respond(delete_item_inner(app, request, id).await)
+}
+
+async fn delete_item_inner(
+    app: &App,
+    request: Request<Incoming>,
+    id: &str,
+) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.headers())?;
+    agent_reply(
+        StatusCode::OK,
+        super::mcp_tools::cancel(app, &who, id).await,
+    )
+}
+
+/// The body of `POST /api/v1/items/{id}/turns`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TurnRequest {
+    text: String,
+    #[serde(default)]
+    expect_seq: Option<u64>,
+}
+
+/// `POST /api/v1/items/{id}/keepalive`, `/turns` and `/supersede`.
+pub async fn item_action(app: &App, request: Request<Incoming>, id: &str, action: &str) -> Resp {
+    respond(item_action_inner(app, request, id, action).await)
+}
+
+async fn item_action_inner(
+    app: &App,
+    request: Request<Incoming>,
+    id: &str,
+    action: &str,
+) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.headers())?;
+    let body = read_body(
+        request,
+        app.config.devices.max_request_bytes,
+        app.http.body_read_timeout,
+    )
+    .await?;
+    match action {
+        "keepalive" => agent_reply(
+            StatusCode::OK,
+            super::mcp_tools::keepalive(app, &who, id).await,
+        ),
+        "turns" => {
+            let turn: TurnRequest = parse_object(&body)?;
+            agent_reply(
+                StatusCode::CREATED,
+                super::mcp_tools::say(app, &who, id, &turn.text, turn.expect_seq).await,
+            )
+        }
+        "supersede" => agent_reply(
+            StatusCode::OK,
+            super::mcp_tools::supersede(app, &who, id).await,
+        ),
+        _ => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        )),
+    }
 }
 
 /// `GET /api/v1/alerts/{id}`: delivery status, for producers that escalate elsewhere.

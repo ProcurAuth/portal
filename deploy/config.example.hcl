@@ -172,6 +172,14 @@ inbox {
   #   consume_within = "5m"   # the time after the decision in which the approval can be used
   # }
 
+  # Optional: the MCP endpoint of the agents (`/mcp`), with the tools approval_intent, get_answer, keepalive, say,
+  # supersede and cancel. It needs the block items and keys.mcp = true, which this example does not have. Defaults:
+  # path = "/mcp", max_wait = "25s" (at most items.wait_max), rate_limit_per_minute = 120,
+  # max_unauthenticated_per_minute = 10, max_body_bytes = "64KiB". `allowed_origins` and `allowed_client_cidrs` are
+  # lists; without them, no browser origin passes and each client address passes.
+  # mcp {
+  # }
+
   group "infra" {
     name        = "Infra prod"
     description = "Production outages"

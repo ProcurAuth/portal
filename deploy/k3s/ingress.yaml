@@ -3,8 +3,8 @@
 # X-Identity-Token to the request.
 #
 # The inbox is a feature of the portal, with one port and one domain. The senders, the webhooks and the phones use
-# the same domain as the pages: the route portal-inbox sends /v1/ (the phones, WebSocket), /api/v1/ and /api/version
-# to the portal without ForwardAuth, because they have no session and prove themselves. The admin pages of the inbox
+# the same domain as the pages: the route portal-inbox sends /v1/ (the phones, WebSocket), /api/v1/, /mcp (the agents)
+# and /api/version to the portal without ForwardAuth, because they have no session and prove themselves. The admin pages of the inbox
 # are pages of the portal under /auth/settings/inbox.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -51,9 +51,10 @@ spec:
     idleConnTimeout: 30s
 ---
 # The routes of the inbox: the phones (/v1/enroll and /v1/session, WebSocket upgrades over HTTP/1.1; Traefik carries them
-# with path routing), the API of the senders and the webhooks (Alertmanager, Grafana, scripts), and the version. No
-# ForwardAuth: a phone proves itself with the Noise handshake, a sender sends an API key, and the inbox checks
-# it. No secure-headers middleware: the routes answer with their own headers, and an added header must not touch the
+# with path routing), the API of the senders and the webhooks (Alertmanager, Grafana, scripts), the MCP endpoint of
+# the agents (/mcp, the default of inbox.mcp.path: change the rule when the file sets another path), and the version.
+# No ForwardAuth: a phone proves itself with the Noise handshake, a sender sends an API key, an agent sends an
+# mcp key, and the inbox checks it. No secure-headers middleware: the routes answer with their own headers, and an added header must not touch the
 # upgrade. Without a prefix, the portal serves these paths at the root. A route under a prefix needs a StripPrefix
 # middleware: the portal has no base path.
 apiVersion: traefik.io/v1alpha1
@@ -65,7 +66,7 @@ spec:
   entryPoints: [websecure]
   routes:
     - kind: Rule
-      match: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      match: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/mcp`) || Path(`/api/version`)
       priority: 50000
       services:
         - name: portal

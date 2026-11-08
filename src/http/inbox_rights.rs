@@ -9,7 +9,9 @@ use std::sync::Weak;
 
 use super::pdp::{decide_key_for, UseVerdict};
 use super::*;
-use crate::inbox::rights::{Authorizer, Decision, KeyCheck, Services, Standing, Subscribable};
+use crate::inbox::rights::{
+    AgentCheck, AgentKey, Authorizer, Decision, Door, KeyCheck, Services, Standing, Subscribable,
+};
 use crate::keyauth::{self, Cause};
 use crate::portal_actions as actions;
 
@@ -95,6 +97,72 @@ impl PortalAuthorizer {
 }
 
 impl Authorizer for PortalAuthorizer {
+    fn check_agent_key(&self, token: &str, door: Door) -> AgentCheck {
+        use crate::keys::KeyKind;
+        let Some(state) = self.state.upgrade() else {
+            return AgentCheck::NotReady;
+        };
+        let kind = match door {
+            Door::Mcp => KeyKind::Mcp,
+            Door::Rest => KeyKind::Api,
+        };
+        // The file turns the kind on (`keys.mcp`, `keys.api`), and the text has the form of the kind.
+        let door_open = state
+            .config
+            .keys
+            .as_ref()
+            .is_some_and(|keys| keys.kinds().contains(&kind));
+        if !door_open || crate::keys::check_format(token) != Ok(kind) {
+            return AgentCheck::NotAKey;
+        }
+        if keyauth::directory_too_old(&state) {
+            state.key_stats.failed(Cause::DirectoryTooOld);
+            return AgentCheck::NotReady;
+        }
+        let digest = crate::keys::digest(token);
+        let key = state.users.key_by_digest(&digest).or_else(|| {
+            // The key can come from another instance, a few seconds ago (portal 10.7c).
+            refresh_directory_if_due(&state)
+                .then(|| state.users.key_by_digest(&digest))
+                .flatten()
+        });
+        let Some(key) = key else {
+            state.key_stats.failed(Cause::UnknownKey);
+            return AgentCheck::Invalid;
+        };
+        if key.kind != kind {
+            state.key_stats.failed(Cause::WrongKind);
+            return AgentCheck::Invalid;
+        }
+        let now = unix_now();
+        match keyauth::resolve(&state, &key, now) {
+            Ok(principal) => {
+                state.key_checks.record(&key, now);
+                state.key_stats.passed();
+                AgentCheck::Valid(AgentKey {
+                    key_id: key.id.clone(),
+                    owner: principal.owner_login(&state.superadmin_login).to_string(),
+                    interaction: match key.interaction {
+                        crate::keys::Interaction::Conversational => {
+                            inbox_core::proto::Interaction::Conversational
+                        }
+                        crate::keys::Interaction::OneShot => {
+                            inbox_core::proto::Interaction::OneShot
+                        }
+                    },
+                })
+            }
+            Err(Cause::DirectoryTooOld) => {
+                state.key_stats.failed(Cause::DirectoryTooOld);
+                AgentCheck::NotReady
+            }
+            Err(cause) => {
+                state.key_stats.failed(cause);
+                AgentCheck::Invalid
+            }
+        }
+    }
+
     fn check_key(&self, token: &str) -> KeyCheck {
         let Some(state) = self.state.upgrade() else {
             return KeyCheck::NotReady;

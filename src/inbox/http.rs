@@ -29,6 +29,7 @@ use tokio::sync::Semaphore;
 
 use super::api::{self, ApiError};
 use super::log;
+use super::mcp;
 use super::state::App;
 use super::{device, peer};
 
@@ -161,6 +162,18 @@ pub async fn accept_cluster(app: Arc<App>, listener: TcpListener) {
     }
 }
 
+/// The key of an agent in the header `Authorization`: the scheme `Bearer`, a space and the text. The scheme has no case. A
+/// request with two headers has no key.
+pub fn bearer_token(headers: &hyper::header::HeaderMap) -> Option<&str> {
+    let mut all = headers.get_all(hyper::header::AUTHORIZATION).iter();
+    let value = all.next()?;
+    if all.next().is_some() {
+        return None;
+    }
+    let (scheme, rest) = value.to_str().ok()?.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+}
+
 /// The path after `prefix`, when it is one segment that is not empty.
 fn segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     path.strip_prefix(prefix)
@@ -177,6 +190,11 @@ pub fn owns(path: &str) -> bool {
         || matches!(path, "/readyz" | "/api/version")
 }
 
+/// The same, with the path of the MCP endpoint (`inbox.mcp.path`) that the file may set. `None`: no endpoint.
+pub fn owns_at(path: &str, mcp_path: Option<&str>) -> bool {
+    owns(path) || mcp_path == Some(path)
+}
+
 /// Answers one request that [`owns`] names, on the listener of the portal. `ip` is the client
 /// address that the portal found with `server.trusted_proxies`. The limiter of the enrollment
 /// attempts uses it.
@@ -185,6 +203,9 @@ pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Res
     let path = request.uri().path().to_string();
     let get = method == Method::GET;
     let post = method == Method::POST;
+    if app.config.mcp.as_ref().is_some_and(|m| m.path == path) {
+        return mcp::serve(app, ip, request).await;
+    }
     match path.as_str() {
         "/v1/enroll" | "/v1/session" if !get => return empty(StatusCode::METHOD_NOT_ALLOWED),
         "/v1/enroll" => return device::enroll_ws(app, ip, request),
@@ -194,6 +215,34 @@ pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Res
     if path == "/api/v1/alerts" {
         return if post {
             api::post_alert(&app, request).await
+        } else {
+            empty(StatusCode::METHOD_NOT_ALLOWED)
+        };
+    }
+    if path == "/api/v1/approval-intents" {
+        return if post {
+            api::post_intent(&app, request).await
+        } else {
+            empty(StatusCode::METHOD_NOT_ALLOWED)
+        };
+    }
+    if let Some(id) = segment(&path, "/api/v1/items/") {
+        return if get {
+            api::get_item(&app, request, id).await
+        } else if method == Method::DELETE {
+            api::delete_item(&app, request, id).await
+        } else {
+            empty(StatusCode::METHOD_NOT_ALLOWED)
+        };
+    }
+    if let Some((id, action)) = path
+        .strip_prefix("/api/v1/items/")
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(id, action)| !id.is_empty() && !action.is_empty() && !action.contains('/'))
+        .filter(|(_, action)| matches!(*action, "keepalive" | "turns" | "supersede"))
+    {
+        return if post {
+            api::item_action(&app, request, id, action).await
         } else {
             empty(StatusCode::METHOD_NOT_ALLOWED)
         };

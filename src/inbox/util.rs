@@ -139,6 +139,29 @@ pub fn parse_rfc3339_ms(text: &str) -> Option<i64> {
     (seconds >= 0).then_some(seconds * 1000 + millis)
 }
 
+/// Writes Unix milliseconds as a time in RFC 3339 form, in UTC, with the unit of a second: `2030-01-01T00:00:00Z`.
+/// A time before 1970 is written as 1970.
+pub fn format_rfc3339_ms(ms: i64) -> String {
+    let seconds = ms.max(0) / 1000;
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    // The civil-from-days algorithm of H. Hinnant.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +193,16 @@ mod tests {
             "1969-12-31T23:59:59Z",
         ] {
             assert_eq!(parse_rfc3339_ms(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn times_are_written_in_rfc_3339_form_and_read_back() {
+        assert_eq!(format_rfc3339_ms(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339_ms(1_893_456_000_999), "2030-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339_ms(1_835_438_400_000), "2028-02-29T12:00:00Z");
+        for ms in [0, 86_399_000, 951_782_400_000, 4_102_444_799_000] {
+            assert_eq!(parse_rfc3339_ms(&format_rfc3339_ms(ms)), Some(ms));
         }
     }
 

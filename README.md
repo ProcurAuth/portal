@@ -31,6 +31,7 @@ The data lives in one database. By default it is one SQLite file. The SQLite lib
  Key callers ── Traefik ──ForwardAuth (/auth/verify-key)──▶ portal  same port   MCP keys
  Services ──────────AuthZEN────────▶ portal  pdp.listen_address (4182)  decisions
  Senders ── Traefik, no ForwardAuth ──▶ portal  listen_address (4181)      /api/v1/*: alerts, webhooks (same port as the pages)
+ Agents ─── Traefik, no ForwardAuth ──▶ portal  listen_address (4181)      /mcp and /api/v1/items/*: the agent channel
  Phones ── Traefik, no ForwardAuth ───▶ portal  listen_address (4181)      /v1/*: enrollment, sessions (WebSocket, Noise)
                                      portal  inbox.cluster.listen       other instances (optional)
                                        │
@@ -39,7 +40,7 @@ The data lives in one database. By default it is one SQLite file. The SQLite lib
 
 | Listener | Key | Use | Who reaches it |
 |---|---|---|---|
-| Portal | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz` and `/metrics`. With the block `inbox`, also the Inbox. The Inbox has the API for the senders and the webhooks (`/api/v1/*`, `/api/version`). It also has the routes of the phones (`/v1/enroll`, `/v1/session`) and `/readyz`. | Traefik and Prometheus. Traefik sends `/v1/`, `/api/v1/` and `/api/version` to it without ForwardAuth. |
+| Portal | `server.listen_address` | The pages of the portal, the settings, `/auth/verify`, `/auth/verify-key`, `/healthz` and `/metrics`. With the block `inbox`, also the Inbox. The Inbox has the API for the senders and the webhooks (`/api/v1/*`, `/api/version`). It also has the routes of the phones (`/v1/enroll`, `/v1/session`), the MCP endpoint of the agents (`/mcp`) and `/readyz`. | Traefik and Prometheus. Traefik sends `/v1/`, `/api/v1/`, `/mcp` and `/api/version` to it without ForwardAuth. |
 | PDP | `pdp.listen_address` | The AuthZEN decisions. Optional. | The services only. Do not route it through Traefik. |
 | Cluster | `inbox.cluster.listen` | Copies of alerts between instances. Optional. | The pods of the service only. |
 
@@ -94,7 +95,7 @@ The portal knows nothing about TLS. Its listeners speak plain HTTP. Traefik term
 1. Publish only Traefik. Do not publish the ports of the portal. The PDP port is for the services only.
 2. Make the ForwardAuth middleware `portal-user` for `/auth/verify`. It copies `Cookie` and `User-Agent` to the portal and the identity token back. Set it on the entry point, or on each service router.
 3. Route `/auth/` and `/` to the portal. Do not apply ForwardAuth to `/auth/`: the portal checks the session itself.
-4. Route `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. Add the middleware `retry`. A phone and a sender have no session.
+4. Route `/v1/`, `/api/v1/`, `/mcp` and `/api/version` to the portal without ForwardAuth. Add the middleware `retry`. A phone, a sender and an agent have no session.
 5. For key routes of agents, use a second ForwardAuth middleware that points to `/auth/verify-key`. It copies `Authorization`.
 6. Set `server.trusted_proxies` to the network of Traefik. The portal then reads `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` from Traefik only.
 7. Keep `trustForwardHeader: false` on each ForwardAuth middleware. Traefik then writes `X-Forwarded-Uri` and `X-Forwarded-Method` from the real request.
@@ -650,7 +651,7 @@ The block `keys` has two switches. `keys.mcp` has the default `true`. `keys.api`
 
 - **Key page:** `GET /auth/keys` is one page. The list of the keys is on the left. It has a kind icon, the chips of the kinds, the filter Mine and All, and a box in each row for **Revoke (N)**. The form of a key is a pane on the right. With the pane closed, the toolbar has **New key**. With the pane open, the toolbar button is absent, and the head of the pane has the title, **Cancel** and the action (**Create** or **Save**). `GET /auth/keys/new` and `GET /auth/keys/edit?id=<id>` are direct links that open the page with the pane in that state. The kind selector is a small GET form: `?kind=` loads the pane again. An API key has the matrix of the Inbox and the budget of the alerts. An MCP key has the services only. The pane shows the text of a new key one time, with a **Copy** button and **Done**. A refused form returns to the pane of a new key, with the reason in a notice.
 - **Edge:** `GET /auth/verify-key` is the ForwardAuth address for the key routes of agents. It reads only memory. A good `mcp_` key gives status 200 and an identity token. A bad key gives status 401, the header `WWW-Authenticate: Bearer error="invalid_token"` and an empty body.
-- **Senders:** the routes of the Inbox verify the `api_` keys. See "Senders of alerts" in the section "Inbox".
+- **Senders and agents:** the routes of the Inbox verify the `api_` keys, and the MCP endpoint verifies the `mcp_` keys. See "Agents and senders" in the section "Inbox".
 
 ### Rights, limits and commands
 
@@ -1049,7 +1050,7 @@ With SQLite, the Inbox also ends the state of a login that no account has any mo
 
 ### Listeners
 
-The Inbox is a feature of the portal, so it has no listener for the senders or the phones. The listener of the portal, `server.listen_address`, serves the pages and all the routes of the Inbox. The portal gives the paths `/v1/`, `/api/v1/`, `/readyz` and `/api/version` to the Inbox and to no other handler, before every other route. A path under these prefixes that the Inbox does not know gets `404`. These routes need no session of the portal and set no cookie. The portal applies no CSRF check, no origin check and no security header to them. A proxy must send them to the portal without ForwardAuth (see "Reverse proxy").
+The Inbox is a feature of the portal, so it has no listener for the senders or the phones. The listener of the portal, `server.listen_address`, serves the pages and all the routes of the Inbox. The portal gives these paths to the Inbox and to no other handler, before every other route: `/v1/`, `/api/v1/`, `/readyz`, `/api/version` and `inbox.mcp.path`. A path under these prefixes that the Inbox does not know gets `404`. These routes need no session of the portal and set no cookie. The portal applies no CSRF check, no origin check and no security header to them. A proxy must send them to the portal without ForwardAuth (see "Reverse proxy").
 
 **The routes of the phones** use the Noise handshake inside the WebSocket. A phone proves itself with it.
 
@@ -1066,6 +1067,15 @@ The Inbox is a feature of the portal, so it has no listener for the senders or t
 | `POST /api/v1/webhooks/alertmanager/{group}`, `POST /api/v1/notify/{group}` | Webhooks. |
 | `GET /readyz`, `GET /api/version` | Readiness and version. They need no key. |
 
+**The agent channel** needs an `mcp_` key at the endpoint and an `api_` key at the REST routes (see "Agents and senders").
+
+| Route | Use |
+|---|---|
+| `POST /mcp` (`inbox.mcp.path`) | The MCP endpoint. The tools of the agent. |
+| `POST /api/v1/approval-intents` | Prepare an approval. |
+| `GET`, `DELETE /api/v1/items/{id}` | Read the answer of an item and renew its lease with `?wait=N`. Withdraw an item. |
+| `POST /api/v1/items/{id}/keepalive`, `/turns`, `/supersede` | Renew the lease. Talk to the person. Replace an item. |
+
 `GET /healthz` is a route of the portal, not of the Inbox. `/readyz` answers `200` with PostgreSQL, also when the database has no writable primary (`degraded`). With SQLite it answers `503` when the file does not answer. After SIGTERM it answers `503` with `draining`. The cluster then removes the instance from its Service. `portal healthcheck` checks `/healthz` and the Inbox `/readyz` of the portal port. `portal inbox healthcheck --config FILE` checks the Inbox only.
 
 **Two budgets of connections.** A phone session is long-lived. It must not starve the page requests. The listener keeps two budgets. The pages and the API use `server.max_connections`. A connection that upgrades to a phone session gives its permit of the pages back and takes a permit of the session budget. The session budget is `server.max_connections` plus two times `inbox.devices.max_devices`. The first term covers the phones that do not finish the handshake. A handshake has 15 seconds from the upgrade, and a ping does not extend this time. One client address holds at most `inbox.devices.max_handshakes_per_address` handshakes. The second term covers one live session and one session that the server has not yet detected as lost, for each phone. A phone that cannot get a permit gets `503` with `Retry-After: 5` before the upgrade. No WebSocket exists for it. The refusal by rate limit is different: it closes the WebSocket with the code 4429 after the upgrade.
@@ -1078,7 +1088,7 @@ With the block `inbox.cluster`, the Inbox has a second listener for the other in
 
 ### Reverse proxy
 
-Traefik must send `/v1/`, `/api/v1/` and `/api/version` to the portal without ForwardAuth. A phone, an Alertmanager and a script have no session. In Traefik, use a router with the rule ``PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)``. Give it a high priority and the service of the portal. Add the middleware `retry` (4 attempts, initial interval 100 ms). Traefik retries a request only when the server did not answer at all. It never repeats a request after the first byte of the answer, so an upgrade that got `101` is not repeated. The files `demo/docker-compose.yml` (labels), `demo/traefik-dynamic.yml` and `deploy/k3s/ingress.yaml` (IngressRoute `portal-inbox`) show it. To restrict the phones by source address or by rate, add a middleware to this router. When no proxy is in front, the pages, the senders and the phones share the port of the portal directly. Do not route a path `/v1/` of another service to the same host: the portal owns this prefix.
+Traefik must send `/v1/`, `/api/v1/`, `/mcp` and `/api/version` to the portal without ForwardAuth. A phone, an Alertmanager, a script and an agent have no session. In Traefik, use a router with the rule ``PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/mcp`) || Path(`/api/version`)``. When the file sets another `inbox.mcp.path`, write this path in place of `/mcp`. Give it a high priority and the service of the portal. Add the middleware `retry` (4 attempts, initial interval 100 ms). Traefik retries a request only when the server did not answer at all. It never repeats a request after the first byte of the answer, so an upgrade that got `101` is not repeated. The files `demo/docker-compose.yml` (labels), `demo/traefik-dynamic.yml` and `deploy/k3s/ingress.yaml` (IngressRoute `portal-inbox`) show it. To restrict the phones by source address or by rate, add a middleware to this router. When no proxy is in front, the pages, the senders and the phones share the port of the portal directly. Do not route a path `/v1/` of another service to the same host: the portal owns this prefix.
 
 ### Storage
 
@@ -1127,7 +1137,7 @@ The text of a grant is, for example, `alert.send on service:portal/inbox_group:i
 - **Phones.** A phone subscribes to a group only when its account has `inbox.receive` on the group. The message `welcome` lists these groups. A `subscribe` to another group gets the error `forbidden_group`. When an account loses the permission, the Inbox removes the subscription and tells the phone with the message `subscriptions`. The Inbox checks this when the directory of the portal changes, not for each alert. The Inbox never removes a subscription when it does not know. A directory that is not ready, old or empty changes nothing. An account that the directory does not know changes nothing. An alert that exists stays deliverable. The accounts of the file (blocks `user`) and the superadmin follow the same rules.
 - **No block `inbox`.** The file has no Inbox actions, no tab Inbox, no route of the Inbox, no phone endpoint and no `api_` kind. A grant that names an Inbox action stops the start.
 
-### Senders of alerts
+### Agents and senders
 
 The two kinds of key are in "Keys and limits". The kind `api_` sends alerts. A sender sends alerts with an API key. The header is `Authorization: Bearer <key>`. The portal reads the key only in this header. A request with the key in the query of the URL and no header gets `401`. Two sources of API key work at the same time.
 
@@ -1135,6 +1145,18 @@ The two kinds of key are in "Keys and limits". The kind `api_` sends alerts. A s
 - **A key of the database** is made in the tab **Access** with the kind API. The Inbox checks the key in process, then asks the portal for the decision `alert.send` on `service:portal/inbox_group:<id>` with the key and its owner. A decision no gives `403` with the code `forbidden_group`, or `forbidden_user` for an alert to an account. A budget with no room gives `429`. A key can also read the status of an alert (`GET /api/v1/alerts/{id}`) with `alert.read` on its group. A key sends no notification of the type resolved. When the directory of the portal is not ready, the Inbox answers `503` with the code `directory_not_ready`.
 
 An `mcp_` key, a key with a bad form and an unknown prefix get `401` with no detail. The routes are `POST /api/v1/alerts`, `POST /api/v1/notify/{group}` and `POST /api/v1/webhooks/alertmanager/{group}`. The book icon of the tab Inbox opens a popover with the routes, the groups and the form of the header. `docs/inbox/README.md` has the long text: the recipes for Grafana and Alertmanager and the table of the HTTP statuses.
+
+**Agents.** An agent talks to the portal for everything except the command of an action. The block `inbox.mcp` starts the MCP endpoint at `inbox.mcp.path`, `/mcp` by default. It needs `inbox.items` and `keys.mcp = true`. The agent sends an `mcp_` key and calls the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The explanation, the flags, the comment of the person and the thread go through the portal.
+
+The service never sees these texts: it learns the verdict only.
+
+The endpoint speaks JSON-RPC over Streamable HTTP with JSON answers, no session and no SSE. It supports the protocol versions `2026-07-28`, `2025-11-25` and `2025-06-18`. It checks a request in this order: the method, the `Origin`, the client address and the key. Then it checks the rate of the key and the size of the body. The message comes last. A request with no valid key gets `401` with an empty body.
+
+A client address that sends too many requests with no valid key gets `429` before the portal checks the key. Each instance keeps these limits in memory.
+
+The REST routes are the twin of the tools. They use an `api_` key. They are `POST /api/v1/approval-intents`, `GET` and `DELETE /api/v1/items/{id}`, and `POST` to `/api/v1/items/{id}/keepalive`, `/turns` and `/supersede`. A `GET` with `?wait=N` renews the lease and waits at most `inbox.items.wait_max` seconds. An `mcp_` key does not open the REST door, and an `api_` key does not open the endpoint.
+
+A key reads and speaks only on the items that it made. An item of another key gives `not_found`. Each text of the person is in an `untrusted` object after a `data_notice`. A result never shows the approver or the device. A renewal makes no row and takes no unit of a budget. `docs/inbox/agents.md` tells how an agent uses the tools.
 
 ### The tab Inbox
 
@@ -1258,7 +1280,7 @@ At start, the portal compares each key with a check value in the table `content_
 
 ### The engine of the items
 
-One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The next lots of 5.1.0 add the agent channel, the frames of the phone and the web pages.
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The agent channel reads and writes the items (see "Agents and senders"). The next lots of 5.1.0 add the frames of the phone and the web pages.
 
 An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
 
@@ -1796,6 +1818,20 @@ This block is optional and is inside the block `inbox`. The portal seals the con
 |---|---|---|---|
 | `active_key` | text: the label of a block `key` of this block: 1 to 16 characters of a-z, 0-9, '-' and '_' | required | The key that seals the new contents. The other keys of the block stay readable: use them for a rotation. No switch turns the seal off. |
 | `admin_body_read` | `true` or `false` | `false` | `true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it. |
+
+#### Block `inbox.mcp`
+
+This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them. The endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `path` | text: an absolute URL path of at most 128 bytes, not `/`, not /healthz, /readyz or /api/version, and not under /auth/, /v1/ or /api/v1/ | `"/mcp"` | The URL path of the MCP endpoint. The endpoint answers `POST` only. It must not be the path of the metrics endpoint. |
+| `max_wait` | duration, 0s to 1m | `"25s"` | The longest time that one call of `get_answer` waits for an answer. A longer `wait_s` of the agent is cut to this value. A real client stops a call near 60 seconds, so keep the value lower. It must not be above `inbox.items.wait_max`. `0s`: a call never waits. |
+| `allowed_origins` | list of at most 32 quoted strings: origins such as "https://app.example": a scheme, a host and an optional port, with no path | none | The values of the header `Origin` that the endpoint accepts. A request with no `Origin` header comes from a program and passes. A request with another `Origin` gets `403`. This stops a web page from calling the endpoint with the key of a visitor (DNS rebinding). Without this key, no browser origin passes. |
+| `allowed_client_cidrs` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | none | The client networks that the endpoint accepts. The client address is the address that `server.trusted_proxies` finds. A client in no network gets `403`. Without this key, each address passes. |
+| `rate_limit_per_minute` | number, 1 to 100000 | `120` | The most requests of one key in one minute on this instance. Each request counts, also `tools/list` and `ping`. A key over the limit gets `429` with `Retry-After`. The limit is a bucket in the memory of the instance: with N instances, a key can send N times this value. |
+| `max_unauthenticated_per_minute` | number, 1 to 10000 | `10` | The most requests with no valid key that one client address can send in one minute on this instance. An address over the limit gets `429` with `Retry-After` before the portal checks the key. |
+| `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest body of a request. A larger body gets `413`. |
 
 #### Block `inbox.approvals`
 

@@ -31,6 +31,8 @@ pub struct InboxConfig {
     pub at_rest: Option<AtRestConfig>,
     /// `None` without the block `inbox.approvals`. The block comes with `inbox.items`.
     pub approvals: Option<ApprovalsConfig>,
+    /// `None` without the block `inbox.mcp`. The block needs `inbox.items` and `keys.mcp = true`.
+    pub mcp: Option<McpConfig>,
     /// The blocks `group`, by id.
     pub groups: BTreeMap<String, GroupConfig>,
     /// The blocks `api_key`, by name.
@@ -192,6 +194,20 @@ pub struct ApprovalsConfig {
     pub mute_for: Duration,
     #[allow(dead_code)] // the web page of lot L10 reads it
     pub web_approval: bool,
+}
+
+/// The block `inbox.mcp`: the MCP endpoint of the portal for the agents.
+#[derive(Clone, Debug)]
+pub struct McpConfig {
+    pub path: String,
+    pub max_wait: Duration,
+    /// The values of the header `Origin` that pass. Empty: no browser origin passes.
+    pub allowed_origins: Vec<String>,
+    /// The networks of the client address that pass. `None`: each address passes.
+    pub allowed_client_cidrs: Option<Vec<crate::transport::Cidr>>,
+    pub rate_limit_per_minute: u32,
+    pub max_unauthenticated_per_minute: u32,
+    pub max_body_bytes: usize,
 }
 
 /// A block `group`.
@@ -375,6 +391,46 @@ pub fn build(
         None
     };
 
+    let mcp = if r.has_block("inbox.mcp") {
+        let items = items
+            .as_ref()
+            .ok_or("the block inbox.mcp needs the block inbox.items: the agents read and speak on items; add the block inbox.items, or remove the block inbox.mcp")?;
+        let mcp = McpConfig {
+            path: r.text("inbox.mcp", "path")?,
+            max_wait: r.duration("inbox.mcp", "max_wait")?,
+            allowed_origins: if r.has("inbox.mcp", "allowed_origins") {
+                r.list("inbox.mcp", "allowed_origins")?
+            } else {
+                Vec::new()
+            },
+            allowed_client_cidrs: if r.has("inbox.mcp", "allowed_client_cidrs") {
+                let mut cidrs = Vec::new();
+                for text in r.list("inbox.mcp", "allowed_client_cidrs")? {
+                    cidrs.push(crate::transport::Cidr::parse(&text).map_err(|e| {
+                        format!("invalid inbox.mcp.allowed_client_cidrs: {text:?}: {e}")
+                    })?);
+                }
+                Some(cidrs)
+            } else {
+                None
+            },
+            rate_limit_per_minute: r.int("inbox.mcp", "rate_limit_per_minute")? as u32,
+            max_unauthenticated_per_minute: r.int("inbox.mcp", "max_unauthenticated_per_minute")?
+                as u32,
+            max_body_bytes: r.size("inbox.mcp", "max_body_bytes")?,
+        };
+        if mcp.max_wait > items.wait_max {
+            return Err(format!(
+                "inbox.mcp.max_wait must be at most inbox.items.wait_max: max_wait is {}, wait_max is {}",
+                show_duration(mcp.max_wait),
+                show_duration(items.wait_max)
+            ));
+        }
+        Some(mcp)
+    } else {
+        None
+    };
+
     let mut groups = BTreeMap::new();
     for block in r.labeled.iter().filter(|b| b.kind == "group") {
         super::keys::check_inbox_id(&block.label)
@@ -491,6 +547,7 @@ pub fn build(
         items,
         at_rest,
         approvals,
+        mcp,
         groups,
         api_keys,
     };

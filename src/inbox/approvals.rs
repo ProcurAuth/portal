@@ -14,7 +14,7 @@
 //! - The creation limits (cap each hour, mute, deny time) run in the transaction of the creation, so two instances
 //!   cannot both pass them.
 
-// The agent channel of lot L9 calls `intent` and its types. Until then only the tests call them.
+// The agent channel (`mcp_tools.rs`) calls `intent` and its types. Some other functions and fields are used by the tests only.
 #![allow(dead_code)]
 
 use inbox_core::effect::{check_view, effect_hash, Op, View};

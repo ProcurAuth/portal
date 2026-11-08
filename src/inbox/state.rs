@@ -181,6 +181,8 @@ pub struct App {
     pub clock: std::sync::Arc<super::items::SystemClock>,
     /// Wakes the agents that wait for an item when an item changes.
     pub item_changed: tokio::sync::Notify,
+    /// The limits of the MCP endpoint that live in memory.
+    pub mcp: super::mcp::McpState,
     /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.
     pub authorizer: std::sync::OnceLock<std::sync::Arc<dyn super::rights::Authorizer>>,
 }

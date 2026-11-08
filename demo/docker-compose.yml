@@ -70,7 +70,7 @@ services:
       # WebSocket upgrades), and the API of the producers and the webhooks. They have no session and
       # prove themselves (Noise, token or key), so no ForwardAuth applies. The middleware inbox-retry
       # (traefik-dynamic.yml) sends a request again when the portal does not answer at all.
-      traefik.http.routers.portal-inbox.rule: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/api/version`)
+      traefik.http.routers.portal-inbox.rule: PathPrefix(`/v1/`) || PathPrefix(`/api/v1/`) || Path(`/mcp`) || Path(`/api/version`)
       traefik.http.routers.portal-inbox.entrypoints: web
       traefik.http.routers.portal-inbox.priority: "50000"
       traefik.http.routers.portal-inbox.middlewares: inbox-retry@file

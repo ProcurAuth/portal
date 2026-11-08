@@ -168,6 +168,19 @@ inbox {
     }
   }
 
+  # The MCP endpoint of the agents. The route /mcp of the IngressRoute portal-inbox sends the requests to it without
+  # ForwardAuth. An agent sends an mcp key; the portal checks the key itself. Each value shown is the default.
+  # A real MCP client stops a call near 60 seconds, so keep max_wait low. Each instance keeps its own limits.
+  mcp {
+    path                           = "/mcp"
+    max_wait                       = "25s"   # at most inbox.items.wait_max
+    rate_limit_per_minute          = 120
+    max_unauthenticated_per_minute = 10
+    max_body_bytes                 = "64KiB"
+    # allowed_origins              = []      # a browser Origin that may call the endpoint
+    # allowed_client_cidrs         = ["10.42.0.0/16"]   # without this key, each address passes
+  }
+
   group "infra" {
     name        = "Infra"
     description = "Outages of the infrastructure"

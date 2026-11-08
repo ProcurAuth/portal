@@ -4421,3 +4421,149 @@ fn a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key
         8192
     );
 }
+
+// ---------------------------------------------------------------- inbox.mcp
+
+const MCP_BLOCK: &str = "  mcp { }\n";
+
+#[test]
+fn the_block_mcp_has_the_documented_defaults_and_the_set_values_apply() {
+    let config = approvals_ok(MCP_BLOCK, PDP_PARTS);
+    let m = config.inbox.as_ref().unwrap().mcp.as_ref().unwrap();
+    assert_eq!(m.path, "/mcp");
+    assert_eq!(m.max_wait, Duration::from_secs(25));
+    assert!(m.allowed_origins.is_empty());
+    assert!(m.allowed_client_cidrs.is_none());
+    assert_eq!(m.rate_limit_per_minute, 120);
+    assert_eq!(m.max_unauthenticated_per_minute, 10);
+    assert_eq!(m.max_body_bytes, 64 * 1024);
+    for (key, shown) in [
+        ("path", "\"/mcp\""),
+        ("max_wait", "\"25s\""),
+        ("rate_limit_per_minute", "120"),
+        ("max_unauthenticated_per_minute", "10"),
+        ("max_body_bytes", "\"64KiB\""),
+    ] {
+        let l = line(&config, &format!("inbox.mcp.{key}"));
+        assert_eq!(
+            (l.value.as_str(), l.source.as_str()),
+            (shown, "default"),
+            "{key}"
+        );
+    }
+    let set = approvals_ok(
+        r#"mcp { path = "/agents/mcp" max_wait = "0s" allowed_origins = ["https://app.example", "http://[::1]:8080"]
+                 allowed_client_cidrs = ["10.42.0.0/16", "127.0.0.1/32"] rate_limit_per_minute = 100000
+                 max_unauthenticated_per_minute = 1 max_body_bytes = "1MiB" }"#,
+        PDP_PARTS,
+    );
+    let m = set.inbox.unwrap().mcp.unwrap();
+    assert_eq!(m.path, "/agents/mcp");
+    assert_eq!(m.max_wait, Duration::ZERO);
+    assert_eq!(
+        m.allowed_origins,
+        ["https://app.example", "http://[::1]:8080"]
+    );
+    let cidrs = m.allowed_client_cidrs.unwrap();
+    assert!(cidrs[0].contains("10.42.7.1".parse().unwrap()));
+    assert!(!cidrs[0].contains("10.43.0.1".parse().unwrap()));
+    assert_eq!(m.rate_limit_per_minute, 100_000);
+    assert_eq!(m.max_unauthenticated_per_minute, 1);
+    assert_eq!(m.max_body_bytes, 1024 * 1024);
+    let without = approvals_ok("", PDP_PARTS);
+    assert!(without.inbox.unwrap().mcp.is_none());
+}
+
+#[test]
+fn a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value(
+) {
+    for (keys, expected) in [
+        (r#"path = "mcp""#, "inbox.mcp.path"),
+        (r#"path = "/""#, "inbox.mcp.path"),
+        (r#"path = "/mcp/""#, "inbox.mcp.path"),
+        (r#"path = "/api/v1/mcp""#, "inbox.mcp.path"),
+        (r#"path = "/auth/mcp""#, "inbox.mcp.path"),
+        (r#"path = "/v1/mcp""#, "inbox.mcp.path"),
+        (r#"path = "/readyz""#, "inbox.mcp.path"),
+        (r#"max_wait = "61s""#, "inbox.mcp.max_wait"),
+        (r#"allowed_origins = ["*"]"#, "inbox.mcp.allowed_origins"),
+        (
+            r#"allowed_origins = ["https://a.example/path"]"#,
+            "inbox.mcp.allowed_origins",
+        ),
+        (
+            r#"allowed_origins = ["ftp://a.example"]"#,
+            "inbox.mcp.allowed_origins",
+        ),
+        (
+            r#"allowed_origins = ["https://a.example:"]"#,
+            "inbox.mcp.allowed_origins",
+        ),
+        (
+            r#"allowed_client_cidrs = ["10.0.0.1/8"]"#,
+            "inbox.mcp.allowed_client_cidrs",
+        ),
+        (
+            r#"allowed_client_cidrs = ["nope"]"#,
+            "inbox.mcp.allowed_client_cidrs",
+        ),
+        (
+            "rate_limit_per_minute = 0",
+            "inbox.mcp.rate_limit_per_minute",
+        ),
+        (
+            "rate_limit_per_minute = 100001",
+            "inbox.mcp.rate_limit_per_minute",
+        ),
+        (
+            "max_unauthenticated_per_minute = 0",
+            "inbox.mcp.max_unauthenticated_per_minute",
+        ),
+        (
+            "max_unauthenticated_per_minute = 10001",
+            "inbox.mcp.max_unauthenticated_per_minute",
+        ),
+        (r#"max_body_bytes = "512""#, "inbox.mcp.max_body_bytes"),
+        (r#"max_body_bytes = "2MiB""#, "inbox.mcp.max_body_bytes"),
+        ("unknown_key = 1", "unknown_key"),
+        // A duplicate attribute stops the start too.
+        (r#"path = "/a" path = "/b""#, "path"),
+    ] {
+        let message = approvals_err(&format!("mcp {{ {keys} }}"), PDP_PARTS, true);
+        assert!(message.contains(expected), "{keys}: {message}");
+    }
+    // The block needs the keys of the kind mcp.
+    let message = approvals_err(MCP_BLOCK, PDP_PARTS, false);
+    assert!(
+        message.contains("inbox.mcp needs keys.mcp = true"),
+        "{message}"
+    );
+    // `max_wait` is at most `wait_max` of the items.
+    let (raw, file) = approvals_file("mcp { max_wait = \"20s\" }", PDP_PARTS, true);
+    let raw = raw.replace(
+        "max_open_total = 1000",
+        "max_open_total = 1000 wait_max = \"10s\"",
+    );
+    let message = match items_parse(&raw) {
+        Ok(_) => panic!("must be rejected:\n{raw}"),
+        Err(e) => e,
+    };
+    fs::remove_file(file).ok();
+    assert!(
+        message.contains("inbox.mcp.max_wait must be at most inbox.items.wait_max")
+            && message.contains("20s")
+            && message.contains("10s"),
+        "{message}"
+    );
+    // The path of the endpoint is not the path of the metrics.
+    let (raw, file) = approvals_file(r#"mcp { path = "/metrics" }"#, PDP_PARTS, true);
+    let message = match items_parse(&raw) {
+        Ok(_) => panic!("must be rejected:\n{raw}"),
+        Err(e) => e,
+    };
+    fs::remove_file(file).ok();
+    assert!(
+        message.contains("inbox.mcp.path must not be metrics.path"),
+        "{message}"
+    );
+}
