@@ -1,0 +1,12 @@
+{
+  "t": "welcome",
+  "server_name": "Prod",
+  "groups": [],
+  "subscriptions": [],
+  "heartbeat_interval_ms": 15000,
+  "offline_warning_after_ms": 60000,
+  "server_time_ms": 1788000000000,
+  "user_name": "alice",
+  "prefs": {},
+  "body_purge_after_ms": 0
+}

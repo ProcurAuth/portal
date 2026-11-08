@@ -1,0 +1,8 @@
+{
+  "t": "answer",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-1",
+  "action": "accept",
+  "text": "x",
+  "intent": "comment"
+}

@@ -1,0 +1,10 @@
+{
+  "t": "digest",
+  "id": "66666666666666666666666666666666",
+  "count": 1,
+  "oldest_created_at_ms": 1,
+  "ids": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dddddddddddddddddddddddddddddddd"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "t": "welcome",
+  "server_name": "Prod",
+  "groups": [
+    {
+      "id": "infra",
+      "name": "Infra",
+      "description": "Servers"
+    }
+  ],
+  "subscriptions": [
+    "infra"
+  ],
+  "heartbeat_interval_ms": 15000,
+  "offline_warning_after_ms": 60000,
+  "server_time_ms": 1788000000000,
+  "user_name": "alice",
+  "prefs": {
+    "quiet": {
+      "from": "22:00",
+      "to": "07:00",
+      "tz": "Europe/Paris",
+      "high_rings": true
+    },
+    "digest": {
+      "mode": "daily",
+      "at": "09:00",
+      "tz": "Europe/Paris"
+    }
+  },
+  "body_purge_after_ms": 2592000000,
+  "signature": "abc"
+}

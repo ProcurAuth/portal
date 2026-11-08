@@ -404,7 +404,7 @@ mod tests {
             EnrollInitiator::start(&device.private, &code, "  Pixel de garde ", "0.14.0").unwrap();
         let (resp, device_public, hello) = EnrollResponder::start(&server.private, &m1).unwrap();
         assert_eq!(device_public, device.public);
-        assert_eq!(hello.protocol, 4);
+        assert_eq!(hello.protocol, 5);
         assert_eq!(hello.secret, code.secret);
         assert_eq!(hello.device_name, "Pixel de garde");
         assert_eq!(hello.app_version, "0.14.0");
@@ -415,23 +415,23 @@ mod tests {
     #[test]
     fn wire_payloads_match_the_contract() {
         let hello = EnrollHello {
-            protocol: 4,
+            protocol: 5,
             secret: vec![0u8; 16],
             device_name: "p".into(),
             app_version: "1".into(),
         };
         assert_eq!(
             serde_json::to_string(&hello).unwrap(),
-            r#"{"protocol":4,"secret":"AAAAAAAAAAAAAAAAAAAAAA==","device_name":"p","app_version":"1"}"#
+            r#"{"protocol":5,"secret":"AAAAAAAAAAAAAAAAAAAAAA==","device_name":"p","app_version":"1"}"#
         );
         assert_eq!(
             serde_json::to_string(&accept()).unwrap(),
             format!(
-                r#"{{"protocol":4,"device_id":"{DEVICE_ID}","server_name":"Prod","user_name":"alice"}}"#
+                r#"{{"protocol":5,"device_id":"{DEVICE_ID}","server_name":"Prod","user_name":"alice"}}"#
             )
         );
         assert!(serde_json::from_str::<EnrollAccept>(&format!(
-            r#"{{"protocol":4,"device_id":"{DEVICE_ID}","server_name":"P","user_name":"u","x":1}}"#
+            r#"{{"protocol":5,"device_id":"{DEVICE_ID}","server_name":"P","user_name":"u","x":1}}"#
         ))
         .is_err());
     }
@@ -515,11 +515,11 @@ mod tests {
         };
         let secret = "AAAAAAAAAAAAAAAAAAAAAA==";
         let ok =
-            format!(r#"{{"protocol":4,"secret":"{secret}","device_name":"p","app_version":"1"}}"#);
+            format!(r#"{{"protocol":5,"secret":"{secret}","device_name":"p","app_version":"1"}}"#);
         assert!(send(&ok).is_ok());
         assert_eq!(
-            send(&ok.replace(r#""protocol":4"#, r#""protocol":3"#)).err(),
-            Some(Error::UnsupportedProtocol(3))
+            send(&ok.replace(r#""protocol":5"#, r#""protocol":4"#)).err(),
+            Some(Error::UnsupportedProtocol(4))
         );
         assert!(send(&ok.replace(secret, "AAAA")).is_err());
         assert!(send(&ok.replace(r#""device_name":"p""#, r#""device_name":"""#)).is_err());

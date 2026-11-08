@@ -1,0 +1,8 @@
+{
+  "t": "message",
+  "id": "11111111111111111111111111111111",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 1,
+  "by": "agent",
+  "created_at_ms": 1
+}

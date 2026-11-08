@@ -1,0 +1,9 @@
+{
+  "t": "message",
+  "id": "22222222222222222222222222222222",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 2,
+  "by": "user",
+  "created_at_ms": 1788000200000,
+  "text": "Why not use the staging database?"
+}

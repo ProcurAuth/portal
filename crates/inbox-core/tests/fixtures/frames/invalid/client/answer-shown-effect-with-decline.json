@@ -1,0 +1,7 @@
+{
+  "t": "answer",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-1",
+  "action": "decline",
+  "shown_effect": "sha256:9e07172b785fdac847ecde1c13a6245449c0a4a691454245dcf155b457014290"
+}

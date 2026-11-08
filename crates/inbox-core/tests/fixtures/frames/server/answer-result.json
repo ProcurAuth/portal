@@ -1,0 +1,7 @@
+{
+  "t": "answer_result",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-0001",
+  "status": "already_answered",
+  "state": "answered"
+}

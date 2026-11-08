@@ -1,0 +1,9 @@
+{
+  "t": "alert",
+  "alert_id": "cccccccccccccccccccccccccccccccc",
+  "kind": "settled",
+  "group": "infra",
+  "group_name": "Infra",
+  "title": "x",
+  "created_at_ms": 1
+}

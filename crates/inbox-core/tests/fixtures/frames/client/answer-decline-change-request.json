@@ -1,0 +1,8 @@
+{
+  "t": "answer",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-0002",
+  "action": "decline",
+  "text": "Use the staging database.",
+  "intent": "change_request"
+}

@@ -1,0 +1,13 @@
+{
+  "t": "set_prefs",
+  "quiet": {
+    "from": "22:00",
+    "to": "07:00",
+    "tz": "Europe/Paris",
+    "high_rings": false
+  },
+  "digest": {
+    "mode": "every",
+    "every_h": 6
+  }
+}

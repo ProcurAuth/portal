@@ -1,0 +1,7 @@
+{
+  "t": "set_prefs",
+  "digest": {
+    "mode": "every",
+    "every_h": 0
+  }
+}
