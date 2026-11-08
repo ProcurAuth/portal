@@ -262,6 +262,36 @@ pub extern "system" fn Java_app_portalinbox_core_Native_viewResolve<'l>(
     })
 }
 
+/// The tree of a Markdown text: the safe subset of `inbox_core::render::markdown`. Returns JSON text, never an error.
+/// Over a limit the tree has one `text` block and `"fallback": true`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_portalinbox_core_Native_markdownParse<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let text = string(env, &text)?;
+        new_string(env, &bridge::markdown_parse(&text))
+    })
+}
+
+/// The color of a code text. Returns a JSON array `[[start, end, "class"], ...]` with offsets in UTF-16 units. The
+/// tokens cover the whole text. A language that is not in the closed list gives `plain`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_portalinbox_core_Native_highlightTokens<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    language: JString<'l>,
+    text: JString<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let language = string(env, &language)?;
+        let text = string(env, &text)?;
+        new_string(env, &bridge::highlight_tokens(&language, &text))
+    })
+}
+
 /// Library and protocol versions, for the about screen.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_portalinbox_core_Native_protocolVersion<'l>(
@@ -290,7 +320,7 @@ mod tests {
             .filter_map(|l| l.split("external fun ").nth(1))
             .filter_map(|l| l.split('(').next())
             .collect();
-        assert_eq!(names.len(), 12, "{names:?}");
+        assert_eq!(names.len(), 14, "{names:?}");
         for name in names {
             let symbol = format!("fn Java_app_portalinbox_core_Native_{name}<");
             assert!(source.contains(&symbol), "{symbol}");
@@ -299,6 +329,6 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("pub extern \"system\" fn Java_app_portalinbox_core_Native_"))
             .count();
-        assert_eq!(exported, 12, "each exported symbol has the package of the app");
+        assert_eq!(exported, 14, "each exported symbol has the package of the app");
     }
 }

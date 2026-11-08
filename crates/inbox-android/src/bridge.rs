@@ -190,6 +190,26 @@ pub fn view_resolve(op_json: &str, view_json: &str) -> Value {
     }
 }
 
+/// The tree of a Markdown text, as JSON text. It never fails: over a limit the tree is one `text` block with
+/// `"fallback": true`. The shape is the serialization of `inbox_core::render::markdown::Doc`.
+pub fn markdown_parse(text: &str) -> String {
+    serde_json::to_string(&inbox_core::render::markdown::parse(text))
+        .unwrap_or_else(|_| r#"{"fallback":true,"blocks":[]}"#.to_string())
+}
+
+/// The tokens of a code text, as a JSON array `[[start, end, "class"], ...]`. The offsets are in UTF-16 code units,
+/// as Java and Kotlin index a string. The tokens cover the whole text. A language that is not in the closed list gives
+/// `plain`.
+pub fn highlight_tokens(language: &str, text: &str) -> String {
+    use inbox_core::render::highlight::{Language, tokens_utf16};
+    let lang = Language::parse(language).unwrap_or(Language::Plain);
+    let rows: Vec<Value> = tokens_utf16(lang, text)
+        .into_iter()
+        .map(|(start, end, class)| json!([start, end, class.as_str()]))
+        .collect();
+    Value::Array(rows).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +371,27 @@ mod tests {
         assert_eq!(view_resolve(op, missing)["error"]["code"], "invalid_view");
         assert_eq!(view_resolve(op, "not json")["error"]["code"], "invalid_view");
         assert_eq!(view_resolve("[1]", view)["error"]["code"], "invalid_op");
+    }
+
+    #[test]
+    fn markdown_and_highlight_bridges() {
+        let tree: Value =
+            serde_json::from_str(&markdown_parse("a **b**\n\n```sql\nselect 1\n```")).unwrap();
+        assert_eq!(tree["blocks"][0]["t"], "paragraph");
+        assert_eq!(tree["blocks"][1]["lang"], "sql");
+        assert!(tree.get("fallback").is_none());
+        let long: Value = serde_json::from_str(&markdown_parse(&"x".repeat(9000))).unwrap();
+        assert_eq!(long["fallback"], true);
+        // Offsets are UTF-16 units: the emoji counts for two.
+        let rows: Value =
+            serde_json::from_str(&highlight_tokens("sql", "select '\u{1f600}' -- c")).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows[0], json!([0, 6, "keyword"]));
+        assert!(rows.iter().any(|r| r[2] == "string" && r[1].as_u64() == Some(11)), "{rows:?}");
+        assert_eq!(rows.last().unwrap()[2], "comment");
+        assert_eq!(rows.last().unwrap()[1].as_u64(), Some(16));
+        // An unknown language gives one plain token, an empty text gives none.
+        assert_eq!(highlight_tokens("cobol", "x y"), r#"[[0,3,"plain"]]"#);
+        assert_eq!(highlight_tokens("rust", ""), "[]");
     }
 }
