@@ -34,6 +34,8 @@ mod items_ops;
 mod items_pg;
 mod items_sql;
 mod items_store;
+#[cfg(test)]
+mod items_tests;
 pub mod log;
 pub mod metrics;
 pub mod notify;
