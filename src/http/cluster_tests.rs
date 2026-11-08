@@ -11125,3 +11125,57 @@ fn the_start_refuses_a_file_that_gives_a_right_other_than_access_on_an_external_
         "{error}"
     );
 }
+
+// Latency of a plain evaluation ------------------------------------------------------------------
+
+/// The time of a plain `evaluation` (no `confirm`, no `usage`) over HTTP, for a key and for a person. The test is
+/// slow and gives no verdict: run it by hand to compare two versions.
+/// `tools/dev/test.sh --release http::cluster_tests::pdp_latency_of_a_plain_evaluation -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn pdp_latency_of_a_plain_evaluation() {
+    let (node, port) = key_node(&Backend::Sqlite);
+    add_alice(&node, &[]);
+    add_key(
+        &node,
+        "9b1c04e2aa71f0c3",
+        Some("alice"),
+        1,
+        vec![Grant::from_path_text("data.read", "db", "host:prod/database:test2").unwrap()],
+    );
+    let samples = std::env::var("PDP_LATENCY_SAMPLES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20_000);
+    for (label, subject) in [("key", "key:9b1c04e2aa71f0c3"), ("person", "alice")] {
+        let body = read_body(subject, "test2", serde_json::json!({}));
+        let ask = || {
+            let begun = Instant::now();
+            let reply = pdp(
+                port,
+                "/access/v1/evaluation",
+                Some(PDP_DB_TOKEN),
+                &body,
+                None,
+            );
+            let took = begun.elapsed();
+            assert_eq!(reply.status, 200, "{}", reply.body);
+            took
+        };
+        for _ in 0..2_000 {
+            ask();
+        }
+        let mut times: Vec<Duration> = (0..samples).map(|_| ask()).collect();
+        times.sort();
+        let at = |p: f64| times[((times.len() as f64 * p) as usize).min(times.len() - 1)];
+        eprintln!(
+            "PDP-LATENCY {label}: n={} p50={:?} p90={:?} p99={:?} p999={:?} max={:?}",
+            times.len(),
+            at(0.50),
+            at(0.90),
+            at(0.99),
+            at(0.999),
+            times[times.len() - 1]
+        );
+    }
+}
