@@ -170,7 +170,7 @@ An approval asks the owner of a key to allow one exact action of an agent. The p
 
 3.7.2 **[5.1.0]** When `confirm` applies and no usable approval exists, the PDP MUST answer `false` with the reason `approval_required` and an `evaluation_id`. The answer MUST NOT take a unit of a budget. A service without `approvals = true` MUST get a plain `false`.
 
-3.7.3 **[5.1.0]** The `evaluation_id` MUST be stateless. It MUST hold a key id, the time of issue and an HMAC. The HMAC covers the service, the subject, the action, the resource, the effect and the time. It MUST be valid for `inbox.approvals.evaluation_ttl`. A submission without a valid `evaluation_id` for the same subject, action and resource MUST be refused.
+3.7.3 **[5.1.0]** The `evaluation_id` MUST be stateless. It MUST hold a key id, the time of issue and an HMAC. The HMAC covers the service, the subject, the action, the resource, the effect and the time. It MUST also hold the subject, the action and the resource, sealed with the content key, because a submission does not have them. It MUST be valid for `inbox.approvals.evaluation_ttl`. A submission without a valid `evaluation_id` for the same subject, action and resource MUST be refused.
 
 3.7.4 **[5.1.0]** A message of approval has two parts. The command is the text of the service, made of `op` and `view`, and is bound to the effect hash. The explanation is the text of the agent, and nothing binds it. The explanation MUST NOT enter `effect`, `shown_effect` or the local hash of the phone.
 
@@ -200,7 +200,7 @@ An approval asks the owner of a key to allow one exact action of an agent. The p
 
 3.7.17 **[5.1.0]** After an explicit refusal, the same key and the same effect MUST NOT get a new request for `deny_cooldown`. No other end gives a cooldown. After `mute_after_refusals` refusals in a row, the portal MUST mute the key for `mute_for` and alert the owner. The owner MAY refuse and mute a key for one hour.
 
-3.7.18 **[5.1.0]** A key MUST NOT create more than `max_requests_per_key_per_hour` requests in one hour. A request above the limit MUST get `approval_rate_limited` with `retry_after`. The replacements count as creations.
+3.7.18 **[5.1.0]** A key MUST NOT create more than `max_requests_per_key_per_hour` requests in one hour. A request above the limit MUST get `429` with `retry_after`. The code of the body is `rate_limited` (protocol 17.4), and the PEP shows it as `approval_rate_limited`. The replacements count as creations.
 
 3.7.19 **[5.1.0]** The portal MUST give the service only the verdict: `pending`, `approved`, `denied` or `void`. The verdict `pending` covers `pending` and `replied`. The verdict `approved` or `denied` covers `answered`. Every other state gives `void`. The service MUST NOT learn which end or why.
 
@@ -499,18 +499,18 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.3 | 5.1.0 | L5 | `items::tests::state_machine_every_state_times_event_table` |
 | 3.6.4 | 5.1.0 | L5 | `cas_two_racers_one_answer`, `an_approval_is_consumed_once_released_and_lapses` |
 | 3.6.5 | 5.1.0 | L5 | `answer_after_abandon_returns_abandoned`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before`, `items::tests::abandon_after_lease_plus_grace_not_before` |
-| 3.6.6 | 5.1.0 | L5, L7 | L5: `items::tests::waits_are_checked_and_never_changed`, `until_expires_and_never_abandons`. L7: to fill |
+| 3.6.6 | 5.1.0 | L5, L7 | L5: `items::tests::waits_are_checked_and_never_changed`, `until_expires_and_never_abandons`. L7: `approval_api_tests::a02_lease_out_of_range_422_no_clamp`, `approval_api_tests::a02_lease_and_until_together_422`, `approval_api_tests::a10_intent_rules_explanation_one_shot` |
 | 3.6.7 | 5.1.0 | L5 | `items::tests::lease_effective_is_three_times_lease_s`, `items::tests::max_lifetime_caps_lease_and_supersede_does_not_extend`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
 | 3.6.8 | 5.1.0 | L5, L9 | L5: `items::tests::renewal_write_at_most_once_per_lease_s`, `renewal_writes_at_most_once_per_lease_s_in_both_databases`, `events_one_row_per_transition_none_per_renewal`. L9: to fill |
 | 3.6.9 | 5.1.0 | L5 | `items::tests::abandon_after_lease_plus_grace_not_before`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before` |
 | 3.6.10 | 5.1.0 | L5 | `items::tests::until_reached_is_expired_neutral`, `until_expires_and_never_abandons`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
 | 3.6.11 | 5.1.0 | L5 | `revive_in_window_max_three_notifications_once`, `revive_after_window_refused_new_request_needs_previous_id`, `items::tests::revive_needs_the_window_the_count_and_the_body`. The `410` is in L9 |
-| 3.6.12 | 5.1.0 | L5, L7 | L5: `supersede_race_one_winner_old_approval_cancelled`. L7: to fill |
+| 3.6.12 | 5.1.0 | L5, L7 | L5: `supersede_race_one_winner_old_approval_cancelled`. L7: `approval_api_tests::supersedes_cancels_old_approval` |
 | 3.6.13 | 5.1.0 | L5, L9 | L5: `the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items`. L9: to fill |
 | 3.6.14 | 5.1.0 | L5, L8 | L5: `cas_two_racers_one_answer`, `answer_effect_mismatch_state_unchanged`, `answer_after_abandon_returns_abandoned`. L8: to fill |
 | 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L8, L9: to fill |
 | 3.6.16 | 5.1.0 | L2 | `key_interaction_default_by_kind`, `config_interaction_values_closed`, `the_interaction_field_is_closed_and_an_absent_field_changes_nothing`, `grant_roundtrip_confirm_both_backends` |
-| 3.6.17 | 5.1.0 | L7, L9 | to fill |
+| 3.6.17 | 5.1.0 | L7, L9 | L7: `approval_api_tests::a10_intent_rules_explanation_one_shot` (`422 interaction_not_allowed`). L9: to fill (the refusal of a `reply` and a `say` of a `one_shot` item) |
 | 3.6.18 | 5.1.0 | L5 | `caps_per_key_owner_total` |
 | 3.6.19 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
 | 3.6.20 | 5.1.0 | L5 | `outage_extends_open_leases_by_the_gap_no_false_abandon`, `degraded_storage_returns_storage_degraded_and_writes_nothing` |
@@ -521,13 +521,13 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.25 | 5.2.0 | L13 | to fill |
 | 3.7.1 | 5.1.0 | L2 | `confirm_true_when_key_or_owner_grant_has_it`, `superadmin_owner_uses_key_confirm_only`, `config_confirm_on_portal_service_stops_start`, `config_confirm_on_access_stops_start` |
 | 3.7.2 | 5.1.0 | L6 | Conformance D76, D82, D86 to D88 (`conformance_d::the_cases_of_the_series_d_pass`), `pdp::approval_tests::confirm_with_client_without_approvals_flag_plain_false`, `pdp::approval_tests::answers_carry_only_listed_reasons`, `pdp::approval_tests::other_subject_resource_or_effect_not_applicable` |
-| 3.7.3 | 5.1.0 | L6, L7 | L6: `pdp::approval::tests::the_evaluation_id_is_stateless_valid_on_another_instance_for_the_ttl_and_binds_each_fact`, `pdp::approval::tests::an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file`, `pdp::approval_tests::the_evaluation_id_of_an_answer_binds_the_question_and_works_on_another_instance`. L7: the refusal of a submission, to fill |
-| 3.7.4 | 5.1.0 | L3, L7 | L3: `frames::golden_approval_verifies_and_a_changed_op_does_not`. L7: to fill |
-| 3.7.5 | 5.1.0 | L3, L7 | L3: `effect::tests::effect_vectors_match`, `effect::tests::view_pointer_must_exist`, `effect::tests::effect_changes_with_service_action_resource_op_each`. L7: to fill |
-| 3.7.6 | 5.1.0 | L3, L7 | L3: `effect::tests::jcs_rejects_float_and_integer_above_2_53`. L7: to fill |
-| 3.7.7 | 5.1.0 | L7 | to fill |
-| 3.7.8 | 5.1.0 | L7 | to fill |
-| 3.7.9 | 5.1.0 | L7 | to fill |
+| 3.7.3 | 5.1.0 | L6, L7 | L6: `pdp::approval::tests::the_evaluation_id_is_stateless_valid_on_another_instance_for_the_ttl_and_binds_each_fact`, `pdp::approval::tests::an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file`, `pdp::approval_tests::the_evaluation_id_of_an_answer_binds_the_question_and_works_on_another_instance`. L7: `approval_api_tests::a01_evaluation_id_required_other_subject_422`, `pdp::approval::tests::a_submission_opens_the_id_with_the_service_and_the_effect_and_gets_the_sealed_facts` |
+| 3.7.4 | 5.1.0 | L3, L7 | L3: `frames::golden_approval_verifies_and_a_changed_op_does_not`. L7: `approval_api_tests::a11_ref_single_use_bound_to_key_expires` (the effect of a request with an explanation is the effect of `op`) |
+| 3.7.5 | 5.1.0 | L3, L7 | L3: `effect::tests::effect_vectors_match`, `effect::tests::view_pointer_must_exist`, `effect::tests::effect_changes_with_service_action_resource_op_each`. L7: `approval_api_tests::a08_effect_mismatch_invalid_view_command_too_large` |
+| 3.7.6 | 5.1.0 | L3, L7 | L3: `effect::tests::jcs_rejects_float_and_integer_above_2_53`. L7: `approval_api_tests::a08_effect_mismatch_invalid_view_command_too_large`, `approval_api::tests::a_bad_op_is_invalid_op_and_a_bad_envelope_is_invalid_argument` |
+| 3.7.7 | 5.1.0 | L7 | `approval_api_tests::a08_effect_mismatch_invalid_view_command_too_large`, `approval_api_tests::a10_intent_rules_explanation_one_shot` |
+| 3.7.8 | 5.1.0 | L7 | `approval_api_tests::a11_ref_single_use_bound_to_key_expires`, `approval_api_tests::intent_content_not_readable_by_pep`, `approval_api_tests::a10_intent_rules_explanation_one_shot` |
+| 3.7.9 | 5.1.0 | L7 | `approval_api_tests::a01_idempotent_repost_same_id_no_renewal_no_body_swap`, `approval_api_tests::idempotence_under_concurrency_one_open_request_for_each_effect`, `approval_api_tests::a_unique_index_on_the_hash_refuses_a_second_open_request_and_frees_it_at_the_end` |
 | 3.7.10 | 5.1.0 | L8 | to fill |
 | 3.7.11 | 5.1.0 | L8 | to fill |
 | 3.7.12 | 5.1.0 | L8, L10 | to fill |
@@ -535,11 +535,11 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.14 | 5.1.0 | L6 | Conformance D77, D78, D81, `pdp::approval_tests::consume_takes_one_unit_once`, `pdp::approval_tests::budget_exceeded_keeps_approval_usable_release_path`, `pdp::approval_tests::two_resume_calls_race_one_true`, `pdp::approval_tests::hundred_concurrent_resumes_one_true`, `items_tests::concurrent_consumes_use_an_approval_once_and_status_consumes_nothing` |
 | 3.7.15 | 5.1.0 | L6 | Conformance D80, `pdp::approval_tests::crash_between_consume_and_count_never_double_executes`, `pdp::approval_tests::abandoned_or_lapsed_reads_as_approval_expired`, `items_tests::an_approval_is_consumed_once_released_and_lapses` |
 | 3.7.16 | 5.1.0 | L6 | Conformance D84, `pdp::approval_tests::revoked_key_or_removed_grant_after_approval_is_false`, `pdp::approval_tests::revoking_a_key_cancels_its_open_approvals` |
-| 3.7.17 | 5.1.0 | L7 | to fill |
-| 3.7.18 | 5.1.0 | L7 | to fill |
-| 3.7.19 | 5.1.0 | L7 | to fill |
-| 3.7.20 | 5.1.0 | L7, L12 | to fill |
-| 3.7.21 | 5.1.0 | L7 | to fill |
+| 3.7.17 | 5.1.0 | L7 | `approval_api_tests::deny_cooldown_same_effect_only_and_not_after_abandon`, `approval_api_tests::mute_after_three_refusals_alerts_owner`. The button "refuse and mute the key for one hour" comes with the phone and the web |
+| 3.7.18 | 5.1.0 | L7 | `approval_api_tests::a01_429_after_cap` |
+| 3.7.19 | 5.1.0 | L7 | `approval_api_tests::the_verdict_follows_the_state_and_only_four_values_exist`, `approval_api_tests::a12_get_returns_only_verdict_fields` |
+| 3.7.20 | 5.1.0 | L7, L12 | L7: `approval_api_tests::pep_observation_unit`, `approval_api_tests::a12_get_returns_only_verdict_fields`, `approval_api_tests::the_routes_of_the_api_answer_the_methods_and_the_unknown_paths_as_17_4_says`. L12: to fill (the full canary of the release) |
+| 3.7.21 | 5.1.0 | L7 | `approval_api_tests::a03_renew_only_with_subject_of_requester` |
 | 3.7.22 | 5.1.0 | L10, A2 | to fill |
 | 3.7.23 | 5.1.0 | A2 | to fill |
 | 3.7.24 | 5.1.0 | L10 | to fill |
@@ -563,7 +563,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.9.6 | 5.1.0 | L11 | to fill |
 | 3.10.1 | 5.1.0 | L3 | `frames::every_frame_rejects_unknown_field`, `invalid/client/answer-with-signature.json` in `frames::invalid_frames_are_refused` |
 | 3.10.2 | 5.1.0 | L2 | `config_risk_key_is_refused_and_no_document_depends_on_a_risk_level` |
-| 3.10.3 | 5.1.0 | L7 | to fill |
+| 3.10.3 | 5.1.0 | L7 | L7: `approval_api_tests::no_phone_409`, `approval_api_tests::mute_after_three_refusals_alerts_owner` (the owner is the only recipient). L8 and L10 add the phone and the web screens |
 | 3.10.4 | 5.1.0 | L12 | to fill |
 | 3.10.5 | 5.1.0 | L4 | to fill |
 | 3.10.6 | 5.1.0 | L10 | to fill |
@@ -601,10 +601,10 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.12.4 | 5.2.0 | L14, A4 | to fill |
 | 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
 | 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |
-| 6.9.3 | 5.1.0 | L6, L7 | L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within`, `evaluation_ttl`, `deny_cooldown`, the blocks `pdp` and `keys.mcp`). L7: the other keys, to fill |
+| 6.9.3 | 5.1.0 | L6, L7 | L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within`, `evaluation_ttl`, `deny_cooldown`, the blocks `pdp` and `keys.mcp`). L7: `config::tests::the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
 | 6.9.4 | 5.1.0 | L2, L6 | L2: `config_confirm_is_a_member_of_a_grant_object_with_the_default_false`. L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` |
 | 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within` above `max_lifetime` cannot happen with today's ranges: 1 hour at most against 1 day at least) |
-| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7, L9: to fill |
+| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7: `config::tests::a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_command_bytes` above `pdp.max_body_bytes`, `require_explanation` with `max_explanation_chars = 0`). L9: to fill |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |

@@ -407,7 +407,9 @@ A question with an effect, a spent approval and no `usage` gets `approval_requir
 
 The answers `approval_required` and `approval_pending` have `context.evaluation_id` when the question had an effect. The server sends this value back when it submits the request. It never reads it.
 
-The `evaluation_id` holds no state. It has the id of a content key, the time of issue and an HMAC-SHA-256. The HMAC covers the server, the subject, the action, the resource, the effect and the time. Each instance that has the content keys can check it.
+The `evaluation_id` holds no state. It has the id of a content key, the time of issue, an HMAC-SHA-256 and the sealed facts of the question. The HMAC covers the server, the subject, the action, the resource, the effect and the time. The facts are the subject, the action and the resource, sealed with the content key.
+
+A submission has no subject, no action and no resource. The portal reads them from the sealed part. The server sees no fact in clear text. Each instance that has the content keys can check the value.
 
 The `evaluation_id` is valid for `inbox.approvals.evaluation_ttl`.
 
@@ -425,7 +427,7 @@ The PDP checks the subject and the grants before the approval. A key that is rev
 
 An answer holds the reason and the `evaluation_id` and nothing else. It never shows the owner, the device, the comment or the time of the answer (protocol 17.12).
 
-With the block `inbox.approvals`, the metadata of the PDP has these members (protocol 17.4, 17.5). The values come from the file. A server that does not know them ignores them.
+With the block `inbox.approvals`, the metadata of the PDP has these twelve members (protocol 17.4, 17.5). The values come from the file. A server that does not know them ignores them.
 
 | Member | Value |
 |---|---|
@@ -437,10 +439,86 @@ With the block `inbox.approvals`, the metadata of the PDP has these members (pro
 | `procurauth_approval_consume_seconds` | `inbox.approvals.consume_within` |
 | `procurauth_approval_deny_seconds` | `inbox.approvals.deny_cooldown` |
 | `procurauth_approval_evaluation_ttl_seconds` | `inbox.approvals.evaluation_ttl` |
-
-The members `procurauth_approval_ref_ttl_seconds` and `procurauth_approval_max_command_bytes` come with the submission API.
+| `procurauth_approval_ref_ttl_seconds` | `inbox.approvals.intent_ttl` |
+| `procurauth_approval_max_command_bytes` | `inbox.approvals.max_command_bytes` |
 
 The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: `approval_required`, `approval_pending`, `approval_denied`, `approval_expired`, `consumed`, `released` and `not_enabled`. The metric `portal_pdp_decisions_total` has the four reasons too. The journal of the items has `approval_consumed` and `approval_released`. No line holds a command.
+
+#### The approval API for a service
+
+A server with `approvals = true` that gets `approval_required` or `approval_pending` submits its request to the portal. The API has three routes on the listener of the PDP. It uses the bearer token of the block `pdp_client`. A token of a server without `approvals = true` gets `403`, and a request without a valid token gets `401`. The API has no TLS, like the rest of the listener. The command goes in clear text on the pod network, so limit the network of the listener (see `deploy/k3s/network-policy.yaml`).
+
+| Request | Answer |
+|---|---|
+| `POST /approval/v1/requests` | `201`, or `200` for a request that waits already: `{"request_id", "code", "verdict"}` |
+| `GET /approval/v1/requests/{id}?subject=...&wait=...&renew=true` | `200 {"verdict"}` |
+| `POST /approval/v1/requests/{id}/keepalive` with `{"subject": "..."}` | `200 {"verdict"}` |
+
+The body of a submission is a JSON object with `evaluation_id`, `effect`, `op`, `view` and exactly one of `approval_ref`, `lease_s` and `until`. It can have `supersedes`, the id of an earlier request of the same subject. A member that is not in this list stops the request. The body is at most `pdp.max_body_bytes`, and `op` and `view` are at most `inbox.approvals.max_command_bytes` as compact JSON.
+
+The portal checks a submission in this order:
+
+1. The wait: `lease_s` is a whole number of seconds, `until` is a time in RFC 3339 form, and only one of the three is present.
+2. The size of the command.
+3. The `evaluation_id`: it must be valid, for the server of the token and for the effect of the body. The subject must be a key that the PDP can still use.
+4. The effect: the portal computes it again from the server of the token, the action, the resource and `op` (protocol 17.3). An `op` with a float, a big integer or a duplicate member name is `invalid_op`. An `op` that is not an object is `invalid_op` too.
+5. The `view`: each pointer must name a value of `op` (protocol 17.9).
+6. The range of the wait. The portal never changes a value to fit.
+7. An open request for the same server, subject, action, resource and effect. It is the answer: the same `request_id` and `code`, status `200`. It renews no lease and replaces no body.
+8. The request to replace, the `approval_ref`, and the limits of the creation (below).
+
+The answer holds `request_id`, `code` and `verdict`, and nothing else. The `verdict` is `pending`, `approved`, `denied` or `void`. A request that waits is `pending`, also with an open question of the owner. An answered request is `approved` or `denied`.
+
+An approval that the server did not consume before `consume_before` is `void`. An abandoned, expired, cancelled or replaced request is `void`. The server never learns which end it is, or why. No route gives a turn, a comment, an approver, a device, a time of an answer or a lease (protocol 17.12). An error has the body `{"error": "<code>"}`. A status `429` also has `retry_after` in whole seconds and the header `Retry-After`.
+
+| Status | `error` | Cause |
+|---|---|---|
+| 401, 403 | | no valid token, or the server has no `approvals = true` |
+| 404 | `not_found` | an unknown request, a request of another server, or of another subject |
+| 405, 415 | | a wrong method, or a body that is not `application/json` |
+| 409 | `no_device` | the owner has no phone, and `web_approval` is false |
+| 409 | `cannot_supersede` | the request to replace was consumed |
+| 413 | `command_too_large` | `op` and `view` are above `max_command_bytes`, or the body is above `pdp.max_body_bytes` |
+| 422 | `invalid_argument` | a bad member, a bad or used or foreign or expired `approval_ref`, an unknown request to replace |
+| 422 | `lease_required`, `invalid_lease` | no wait, two waits, or a wait outside the range |
+| 422 | `invalid_evaluation`, `effect_mismatch`, `invalid_view`, `invalid_op`, `explanation_required` | a mistake of the server |
+| 429 | `rate_limited` | a limit of the creation (below), a muted key, or a deny time |
+| 503 | `storage_degraded`, `unavailable` | the inbox cannot write |
+
+The reference PEP of the protocol maps these answers to the errors of its tool:
+
+- `429` gives `approval_rate_limited`.
+- `409 no_device` gives `approval_unavailable`.
+- `413`, and `422` with `invalid_argument`, `invalid_lease` or `lease_required`, give `invalid_argument`.
+- A `404` of a read gives `invalid_argument`.
+
+Any other answer gives its own HTTP `503`. So the portal uses the other codes only for the mistakes of the server.
+
+A read renews the lease only with `renew=true`, and only when `subject` is the requester key of the request. The keepalive always renews. A read without `renew` never renews, also late. The server must never renew on a timer of its own (protocol 17.7). The portal cannot enforce this rule.
+
+The `wait` is a whole number of seconds. The portal bounds it by `inbox.items.wait_max`, and a long `wait` is never an error. A wait ends when the owner answers. The wait holds a connection of the PDP listener, so keep `wait_max` small.
+
+An agent that has a channel to the portal makes an intent before the server submits. The intent has the wait (`lease_s` or `until`), an explanation, a `hint`, `allow_custom` and `allow_ask_back`. The portal returns an `approval_ref`: 32 random bytes in base64url. The agent gives it to the server, and the server sends it with the submission.
+
+The portal keeps only the digest of the reference, and it seals the explanation and the hint. The reference works one time, for the key that made it, until `inbox.approvals.intent_ttl` ends. The server cannot read it. An intent has these limits:
+
+- The explanation is at most `max_explanation_chars` characters. A longer text gets `422 explanation_too_long`, and the portal never cuts it. With `require_explanation`, a request without an explanation gets `422 explanation_required`. A submission with no `approval_ref` has no explanation.
+- `allow_custom` and `allow_ask_back` need a key with the interaction `conversational`. A key `one_shot` gets `422 interaction_not_allowed`.
+- A key has at most `max_requests_per_key_per_hour` intents that wait.
+- `previous_id` names an earlier request of the same key that ended. The new request follows it.
+
+The portal limits the requests of a key. These limits run in the transaction of the creation, so two instances cannot both pass them:
+
+- `max_requests_per_key_per_hour` requests in one hour. A replacement counts, a repeat of an open request does not. The error is `429` with the time to wait.
+- After an explicit refusal, the same key and the same effect get no new request during `deny_cooldown`. The error is `429`. An abandon, an expiry and a cancel start no such time, and another effect never depends on it.
+- After `mute_after_refusals` explicit refusals in a row, the key is muted for `mute_for`. An approval ends the row. The owner gets a plain alert on each phone. A muted key gets `429`.
+- `inbox.items.max_open_per_key`, `max_open_per_owner` and `max_open_total` limit the open requests. The error is `429`.
+
+A request that replaces another one (`supersedes`) is one transaction. The old request becomes `superseded`, also an approval that was answered and not consumed. A request that was consumed gives `409 cannot_supersede`. A request that is already final stays as it is, and the new request is a plain creation.
+
+The database keeps one open request for each effect: a unique index on `approvals.open_hash` that is NULL after the request ends. The check of the code and the index agree, also with several instances.
+
+The metadata of the PDP has the members `procurauth_approval_ref_ttl_seconds` and `procurauth_approval_max_command_bytes`. The journal has no line with a command or an explanation.
 
 ### Actions of the services
 
@@ -1180,7 +1258,7 @@ At start, the portal compares each key with a check value in the table `content_
 
 ### The engine of the items
 
-One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The engine has no route and no frame yet. The PDP uses `consume` and `release` (see "The approval gate"). The next lots of 5.1.0 add the routes and the frames.
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The next lots of 5.1.0 add the agent channel, the frames of the phone and the web pages.
 
 An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
 
@@ -1195,6 +1273,10 @@ A supersede is one transaction. It makes the old item `superseded` and makes a n
 The row of the table `alerts` for an item has the kind of the item, a fixed title and the column `request_id`. It never holds a body. A change of state adds a row of the database kind `settled`. No frame has this kind. A renewal adds no row. The table `item_events` has one row for each change of state and never a body.
 
 The task of the server writes a heartbeat in the table `items_heartbeat`. After a gap longer than `inbox.items.lease.grace`, it extends each open lease by the gap. With PostgreSQL, two instances never take the same row. An item never uses the spool. When PostgreSQL has no writable primary, a write of an item gets `503 storage_degraded`.
+
+The table `approval_intents` has what an agent says about its next approval. The key of the row is the digest of the `approval_ref`. The explanation and the hint are sealed. A request that uses the intent erases the sealed text of the intent. The task deletes the rows that expired.
+
+The table `approval_mute` has the end of the mute of a subject. The column `approvals.open_hash` has the `key_hash` while the item is open, and NULL after. A unique index on it gives one open request for each effect.
 
 The task erases the sealed body after `inbox.items.body_purge_after`. It deletes a final item after `inbox.items.retention` and its events after `audit_retention`. The effect hash stays with the metadata until the item goes.
 
