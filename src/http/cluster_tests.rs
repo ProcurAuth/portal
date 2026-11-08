@@ -843,6 +843,7 @@ fn publish_catalog(node: &Node, db_actions: &[&str]) {
                 resource_types: vec!["service".into(), "database".into()],
                 description: format!("The action {name}."),
                 limits: Vec::new(),
+                approval: false,
             })
             .collect(),
     );
@@ -1805,6 +1806,7 @@ fn the_pdp_refuses_a_grant_on_a_sub_resource_when_the_service_does_not_declare_i
             resource_types: vec!["service".into()],
             description: String::new(),
             limits: Vec::new(),
+            approval: false,
         }],
     );
     assert!(!write(), "the new document removes the type");
