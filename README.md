@@ -212,10 +212,23 @@ The `<id>` is the id of the service in the catalogue. The id is the label `porta
 - The encoding is canonical. portal refuses a different encoding of the same id, for example `%2f` or `%61`.
 - A decoded id has 1 to 256 bytes, without a control character. portal uses the id as it is. portal does not change its case. The settings pages show the decoded ids.
 - `access` has no grant below the service. `access` opens the whole service.
+- A grant can have the property `confirm` (see "Approval of an action"). It is not a limit: it has no value and no counter, and the text form of the grant does not show it.
 - A new user has no grant. The user sees no service until the superadmin gives a grant.
 - The superadmin has all grants. The superadmin has no `user` block.
 
 portal has no groups of users. Each user has their own grants.
+
+### Approval of an action
+
+A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. This release stores and shows the property. The PDP does not use it yet: a later release makes the PDP answer with a reason that asks for an approval.
+
+- A service marks the actions that can ask. The document of the service has `"approval": "optional"` on the action. This is the only value of the member. Any other value, or a member of another type, makes the whole document bad.
+- The grant editor shows a lock button on the row of a ticked permission whose action has `"approval": "optional"`. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. A grant of another action has no lock.
+- The server refuses `confirm` on a grant of the service `portal` and on the action `access`. A form that asks for it gets a bad grant. A file that asks for it stops at start.
+- The decision for a person asks for an approval when a grant that covers the action has `confirm`. The decision for a key asks when a grant of the key has `confirm`. It also asks when a grant of the owner has `confirm`. The two sides combine with OR, as the limits do. When the owner is the superadmin, only the grants of the key count.
+- A key shows the chip `confirm` in the list of the keys. The editor of a key shows the lock closed and locked when a grant of the owner asks for the approval. The person cannot open it, because the key cannot go beyond its owner.
+- Two grants that differ only by `confirm` count as one grant with `confirm`.
+- In the file, an item of `grants` can be an object: `{ grant = "query.run.write on service:clickhouse-dash/host:prod", confirm = true }`. The value is `true` or `false`, without quotes. The default is `false`.
 
 ### Where the grants come from
 
@@ -368,6 +381,7 @@ portal reads the actions of each service at `/.well-known/procurauth/actions`. T
 - For an https URL, portal verifies the certificate and the host name with the embedded Mozilla roots. A read that fails this check gives no document. For a service with a private CA, use an http URL on the internal network.
 - When the PDP gives `invalid_resource` to a service, portal reads the document of this service again at once. The service can have a new tree that portal does not know yet. portal does this at most once in each `access.actions_refresh` interval for each service. The early read has the same timeout, size limit and number of concurrent reads as the other reads. The log has one line `actions_read_early` with the service.
 - The field `server` of the document must be the id of the service. Set `portal.id` to the name of the server.
+- An action can have the member `approval`. Its only value is `"optional"`: a grant of this action can have `confirm`. The member is optional. Any other value makes the document bad. See "Approval of an action".
 - The top-level list `resource_types` declares the tree of types (protocol 5.2). Each item has `name`, `parent` and `description`. A name starts with `a-z`, then has `a-z`, `0-9` and `_`, 1 to 32 characters. It is not `service`. The parent is `service` or another declared type. The tree has no cycle and at most 4 levels below `service`. The list has at most 16 types.
 - When the document has this list, each type in the list of an action is `service` or a declared type. A type occurs one time in the list of an action.
 - The document can have an optional list `resources`. This list names the nodes of the tree that the service knows, for example its hosts. Each item has `path` (the text form of a grant, for example `host:prod`), an optional `label`, and an optional list `actions`. A path follows the declared types. A path occurs one time. Each action of an item lists the type of the node. Without `actions`, the item takes each action that lists its type. The settings pages show each named resource apart, with the actions that apply on it only. The list has 256 items at most. The list is not part of AuthZEN: a service that does not give it works as before, and the superadmin types the ids.
@@ -423,6 +437,8 @@ The remembered sessions need one more change. SQLite goes to schema version 8. P
 
 The external services (5.0.5) changed the schema version 8 in place, as the second factor did. They add the table `external_services`: the id, the name, the link and the creation time of each service. A database that an earlier 5.0 made lacks the table. The portal stops at start and says so. See "Upgrades".
 
+The approvals (5.1.0) change the schema version 8 in place, as the external services did. They add the column `confirm` to `user_grants` and to `key_grants`, and the column `interaction` to `keys`. A database that an earlier 5.0 made lacks the columns, and the portal stops at start and says so. A database of schema version 7 or less gets the columns from the migration. A key of kind `api` then gets `one_shot`, and the other keys get `conversational`. See "Upgrades".
+
 ### Paths open without a session (`portal.exclude`)
 
 A caller that cannot sign in (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
@@ -472,6 +488,7 @@ A verifier refuses an unknown prefix, a bad length, a bad character and a bad ch
 - **The pane shows only what the account may make.** With two kinds, the pane of a new key has a selector. With one kind, it has no selector. With no kind, the page has no **New key**.
 - **A key holds what its kind lists.** An MCP key holds grants on services. It holds no action of the portal. An API key holds `alert.send` and `alert.read` on groups of the Inbox, and `alert.send_user` on the service. It holds the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on another service.
 - **A key never goes beyond its owner.** The account can tick only the rights that the owner holds. A right that the owner lost has a warning mark in the pane.
+- **A key has an interaction.** The value is `conversational` or `one_shot`. A `conversational` key is for an agent that discusses with a person in free text. A `one_shot` key is for a system that decides with no free text, and it gets closed questions only. The owner sets the value with two radio buttons in the form of the key, and the agent cannot set it. The default is `conversational` for an `mcp_` key and `one_shot` for an `api_` key. This release stores the value, and a later release uses it.
 
 ### Switches
 
@@ -657,6 +674,8 @@ A service can have hundreds of actions and hundreds of resources. A box for each
 
 At the left is the tree of the resources of a service, with a search field and the number of ticked grants of each node. A list of the services shows when the editor has more than one. At the right are the actions of the chosen node, in groups by the first part of the name. Each action has one line. A list of more than 60 actions starts with its groups closed. A filter and the button **Ticked** narrow the list. The box of a group ticks the actions that the list shows. An action that a grant above the node covers shows ticked, with the words "via the whole service" or "via" and the node. An action shows on the whole service only when its document lists the type `service`.
 
+A ticked action whose document has `"approval": "optional"` shows a lock button at the end of its row. The button is flat and has no text. It has two states: an open lock for no approval, and a closed lock for "asks for an approval". On the form of a key, the lock is closed and disabled when a grant of the owner asks for an approval. The key must then ask too. A permission of the file shows a closed lock that cannot change. The server reads the state from the field `confirm<n>`, which has the value `1` when the lock is closed.
+
 A ticked action shows its limit fields on its own line, with the largest value of the document as a hint. Each service has a row with a switch for the grant `access` and a count of its permissions. The list of the actions has no row `access`, because the switch is this grant. The limits of `access` show on the line of the source, at the right. On a form of a key, the button **Same as mine** ticks all the permissions that the owner holds on that service.
 
 Any right on a service opens the service in the editor. A person can tick an action on the whole service, on a resource or on a sub-resource at any depth. The editor then ticks the switch of the service in the same step. The row shows "Open" and the count of the permissions at once. The rule is the same for each way to tick: one action, the box of a group, **Same as mine**, and the link "Give access". The last right that a person removes does not untick the switch, because an account can have access only. When a person unticks the switch, the editor removes the rights of the service too, because they do nothing without access. The row then says "Access off" and the number of rights removed, with a button **Undo**. The note stays until the next change. **Undo** puts the rights and the switch back. A re-tick of the switch does not bring them back. A live region tells a screen reader about the note and about a service that opens by itself. The focus and the scroll of the lists stay after each tick. The tree answers to the keys Up, Down, Home, End, Left and Right. A permission that comes from the configuration file cannot be removed, so the switch stays on. The group **Server permissions** has no switch and no such rule.
@@ -665,7 +684,7 @@ The form of a key offers a service only when the owner holds `access` on it, bec
 
 The service lists its own resources. The editor shows the nodes of the member `resources` of the action document. When a node can have children that the document does not list, the editor asks the portal: `GET /auth/options?service=<id>&type=<type>&parent=<path>&q=<text>&after=<cursor>`. The portal asks the service at `/.well-known/procurauth/resources` (protocol 5.6), with an identity token for the person who fills the form. The portal makes this token only when the person can open the service. The service lists only what this person can see. The portal asks for 50 items at a time. It keeps each answer for 60 seconds, for at most 5,000 entries and 32 MiB (portal 3.1c). The tree shows **Show more** under a page that has a next cursor. A search asks the service for the children of the chosen node. A service that has no such route gives no option. The page of the superadmin and the page of a user who makes keys use the route. The CSP allows `connect-src 'self'` for it.
 
-The page also writes the ticked grants as hidden fields, with the names that the server reads: `grant<n>` and `limit<n>.<name>[.<window>]`. A browser without script sends these fields as they are, so a change that does not touch the grants keeps them. The form of a key also has a text field for each blank grant in a `<noscript>` element. A key holds 512 grants at most.
+The page also writes the ticked grants as hidden fields, with the names that the server reads: `grant<n>`, `limit<n>.<name>[.<window>]` and `confirm<n>`. A browser without script sends these fields as they are, so a change that does not touch the grants keeps them. The form of a key also has a text field for each blank grant in a `<noscript>` element. A key holds 512 grants at most.
 
 The group **Server permissions** is not a tree. It shows plain rows and compact matrices. The part **Keys** is a plain row. The part **Key kinds** has the longest lifetime of each kind. The part **Inbox** has one row for each group, with the columns Receive, Send and Read, and the budget of the alerts. The part **Phones** is a plain row. A feature that the file turns off has no row. A critical group has a mark, because a limit never stops its alerts. The kind API comes before the kind MCP, and the critical groups come last. The editor writes the grant `access on service:portal` only when a window of the budget has a value. The matrices need script. Without script, the page lists the grants as text.
 
@@ -1809,6 +1828,16 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 - An old name is an unknown name. The configuration has no alias for a block, a key or a command of an earlier name. `portal check-config` names the key that it refuses.
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
+
+Version 5.1.0 adds approvals to grants and the interaction of a key. Read these points before you upgrade from 5.0.5:
+
+- A grant can have the property `confirm`, and a key has the attribute `interaction`. See "Approval of an action" and "Rules of the keys". The PDP does not use them in this step.
+- The columns `user_grants.confirm`, `key_grants.confirm` and `keys.interaction` are new. They changed the schema version 8 in place: the schema version did not change, and there is no migration. A database that 5.0.5 made lacks the columns, and the portal stops at start and says so. Make a new database, or add the columns by hand.
+- For SQLite, add `confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1))` to `user_grants` and to `key_grants`. Add `interaction TEXT NOT NULL DEFAULT 'conversational' CHECK (interaction IN ('conversational', 'one_shot'))` to `keys`. For PostgreSQL, use `confirm BOOLEAN NOT NULL DEFAULT false`.
+- Then run `UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';`. A start from an empty database makes the columns.
+- An item of `grants` in the file can have `confirm = true`. A grant of the service `portal` or of the action `access` with `confirm = true` stops the start.
+- The attribute `interaction` is new in the blocks `key` and `api_key`. Its default is `conversational` for `key` and `one_shot` for `api_key`.
+- The command `import-sqlite` copies the new columns. A file that lacks them gets the defaults.
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:
 
