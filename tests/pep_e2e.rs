@@ -371,6 +371,7 @@ fn answer(req: &RequestMsg, id: &str, action: Action, text: Option<&str>) -> Cli
         choice: None,
         text: text.map(str::to_string),
         intent: text.map(|_| Intent::ChangeRequest),
+        answers: None,
     })
 }
 
