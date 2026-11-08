@@ -182,7 +182,7 @@ The codes of `error` are `unknown_group`, `forbidden_group`, `unavailable` and `
 
 `unavailable`: the storage or the rights are not ready, so send the message again later.
 `not_enabled`: the server does not handle this frame.
-It answers each of `answer`, `reply`, `refresh`, `sync` and `set_prefs` so, until the items are enabled.
+A server without the blocks `inbox.items` and `inbox.at_rest` answers each of `answer`, `reply`, `refresh`, `sync` and `set_prefs` so.
 
 ## Receipts
 
@@ -196,6 +196,10 @@ Each row of the queue has an id of 32 hexadecimal characters. The receipt `ack` 
 
 The device stores the frame durably before it sends `ack`. It deduplicates on the id of the delivery.
 The server sends a row again until the receipt arrives. A receipt is idempotent.
+
+Each device of an owner gets the same id for the same message, and each device has its own receipt.
+The frames that answer `refresh` and `sync` have a new id that is in no queue. The device stores them as any frame.
+The server ignores a receipt for an id that it does not know.
 The field `alert_id` of `ack` in protocol 4 is now `id`. The old name is not valid.
 
 ## Frames of the server
@@ -221,6 +225,8 @@ The field `alert_id` of `ack` in protocol 4 is now `id`. The old name is not val
 | `user_name` | string | Login of the account. Read-only. |
 | `prefs` | object | The preferences of the account. `{}` when the account has none. See "Preferences". |
 | `body_purge_after_ms` | u64 | Age at which the server erases the body of a final item. 0: the server has no items. |
+
+The server reads `prefs` in the table of the account at each session. A phone that sent `set_prefs` gets its values back here.
 
 ### `alert`
 
@@ -267,6 +273,9 @@ Members of both kinds:
 `owner` (login, 1 to 64 characters), `via` (`mcp` or `api`) and `interaction` (`conversational` or `one_shot`).
 An item of a `one_shot` key has `allow_custom` and `allow_ask_back` false.
 
+The portal writes `label` and `key_name` from the name that the owner gave to the key. A label that the agent gives never enters them.
+A key that the portal does not find has the name `key` and the first 8 characters of its id.
+
 Members of a question:
 
 | Member | Type | Rule |
@@ -308,8 +317,8 @@ Members of an approval: the member `approval` only.
 | `view` | object | `{title, fields[], body, body_label?}`. See "Effect". |
 | `explanation` | string, optional | Text of the agent, not verified. 1 to 8000 characters. It is not part of the effect. |
 | `hint` | object, optional | As for a question. |
-| `previous` | `{approved_at_ms, consumed}`, optional | The same effect was approved earlier. |
-| `follows` | `{code, intent}`, optional | The item follows an earlier item that the owner declined with a text. |
+| `previous` | `{approved_at_ms, consumed}`, optional | The same service, subject, action, resource and effect were approved earlier. `consumed` tells whether the service used it. |
+| `follows` | `{code, intent}`, optional | The item follows an earlier item that the owner declined with a text. The server reads it from `previous_id`. |
 
 The command of an approval is the value that `view.body` points to in `op`. It is not in the frame a second time.
 The device computes the effect again from `service`, `action`, `resource` and `op`.
@@ -362,7 +371,10 @@ An item is final. The device removes it from the list "to answer" and withdraws 
 | `at_ms` | time | |
 
 The reasons that the server sends now are `answered`, `lease_lapsed`, `until_reached`, `max_lifetime`,
-`agent_cancelled`, `key_revoked`, `owner_deleted`, `admin_cancelled` and `superseded`.
+`agent_cancelled`, `key_revoked`, `owner_deleted`, `admin_cancelled`, `superseded` and `item_gone`.
+`item_gone` answers a `refresh` or a `sync` for an item that the server does not hold any more. The item is `cancelled`.
+
+The phone that answered gets `answer_result`, not `settled`. The server sends `settled` to the other phones of the owner.
 A later version can add a reason. A device shows a reason that it does not know as it is.
 
 ### `digest`
@@ -394,9 +406,12 @@ The result of an `answer` or a `reply`.
 | `closed` | The item is final in another way. |
 | `abandoned`, `superseded`, `expired`, `cancelled` | The item is in this state. |
 | `effect_mismatch` | `shown_effect` is not the effect of the item. |
-| `device_revoked` | The device is revoked. |
+| `device_revoked` | The device is revoked. The state of the item does not change, and the server closes the session with 4403. |
 | `custom_not_allowed` | The item has `allow_custom` false, and the frame has a text. |
-| `ask_back_not_allowed` | The item has `allow_ask_back` false. |
+| `ask_back_not_allowed` | The item has `allow_ask_back` false, or the thread has the most turns that the file allows. |
+
+A `reply` or an `answer` for an item that the owner does not have gets `closed` and no `state`.
+A frame that the server cannot handle now (the storage is away) gets the `error` frame `unavailable`. The outbox sends it again.
 
 ## Frames of the device
 
@@ -432,17 +447,22 @@ The user never edits the command. A `change_request` is a text for the agent.
 ### `refresh`
 
 `{"t":"refresh","request_id":"bbbb..."}`. The server sends the `request` frame of the item, or its `settled` frame.
+The `request` frame has the state of the item now (`seq`, lease). An item that the server does not hold gets `settled` with the reason `item_gone`.
 
 ### `sync`
 
 `{"t":"sync","open":[{"request_id":"bbbb...","seq":2}]}`. At most 500 entries.
 The server sends the `request` frames that the device lacks or knows in an older state.
-It sends a `settled` frame for each item that is final.
+It sends a `settled` frame for each item that is final or that it does not hold any more.
+It sends nothing for an item that the device holds in the newest state.
 
 ### `set_prefs`
 
 The frame has the members of `prefs`. It replaces the preferences of the account.
 An absent block means: no preference of the account, use the default of the file of the portal.
+
+The server stores the frame and sends no answer. The next `welcome` has the stored values.
+The server applies no preference in version 5.1.0. The digest and the flag `quiet` come with a later lot.
 
 ## Preferences
 
@@ -533,6 +553,15 @@ The other devices of the owner get `settled`.
   derived from this id, so a retransmission never shows twice.
 - **Outbox.** The device keeps each `answer` and each `reply` until it gets `answer_result`.
   It sends them again after each reconnection.
+- **Items have no age limit.** An item stays in the queue until the device confirms it. The lease and `max_lifetime` end an item.
+  `storage.delivery_ttl` does not apply to an item.
+- **Catch-up.** A device that enrolls after an item came gets the open items of its owner at its first session.
+  The same holds at each reconnection. A device that is away gets the items that it lacks.
+- **Order.** The server sends `request`, `message` and `settled` in the order of the queue.
+  A device that was offline gets the `request` before its `settled`.
+- **Abandoned items.** An item that is `abandoned` when its first delivery is due does not go to a device that never got it.
+  The server withdraws the deliveries of this item for this device. A revival sends a new `request`.
+- **Out of date.** The server withdraws a `settled` for an item that is open again, and a delivery that it cannot build.
 - **Expiry.** A delivery not received within `storage.delivery_ttl` is no longer
   sent and is reported as expired. A revoked device's rows are abandoned.
 

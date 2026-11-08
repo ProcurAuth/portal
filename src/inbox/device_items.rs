@@ -43,7 +43,7 @@ const DEFAULT_CONSUME_WITHIN: Duration = Duration::from_secs(300);
 const SYNC_LIMIT: u32 = 1000;
 
 /// What the builder makes of one delivery.
-pub(super) enum Built {
+pub(crate) enum Built {
     /// The encoded frame, ready to encrypt.
     Frame(Vec<u8>),
     /// The delivery is not sent and not kept: the reason is for the log.
@@ -53,7 +53,7 @@ pub(super) enum Built {
 }
 
 /// Reads the items of one flush once and builds the frames of their deliveries.
-pub(super) struct Builder<'a> {
+pub(crate) struct Builder<'a> {
     app: &'a App,
     items: Items<'a>,
     login: &'a str,
@@ -75,7 +75,7 @@ fn encode(msg: &ServerMsg) -> Built {
 
 impl<'a> Builder<'a> {
     /// `None` when the server has no items. `queue` is the part of the queue that the flush will send.
-    pub(super) fn new(app: &'a App, login: &'a str, queue: &[ItemDelivery]) -> Option<Builder<'a>> {
+    pub(crate) fn new(app: &'a App, login: &'a str, queue: &[ItemDelivery]) -> Option<Builder<'a>> {
         Some(Builder {
             app,
             items: app.items()?,
@@ -103,7 +103,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The frame of one delivery of the queue.
-    pub(super) async fn delivery(&mut self, d: &ItemDelivery) -> Result<Built, ItemError> {
+    pub(crate) async fn delivery(&mut self, d: &ItemDelivery) -> Result<Built, ItemError> {
         let Some(l) = self.load(&d.request_id).await? else {
             return Ok(Built::Withdraw("item_gone"));
         };
@@ -122,7 +122,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The `request` frame of an item with the current state of the thread.
-    pub(super) async fn request(&mut self, l: &Loaded, id: &str) -> Result<Built, ItemError> {
+    pub(crate) async fn request(&mut self, l: &Loaded, id: &str) -> Result<Built, ItemError> {
         let plain = match self.items.serve_body(l).await? {
             Served::Body(plain) => plain,
             Served::Purged => return Ok(Built::Withdraw("body_purged")),
@@ -369,11 +369,7 @@ pub(super) async fn answer(
     let Some(items) = app.items() else {
         return not_enabled(socket, session).await;
     };
-    let owner_answer = OwnerAnswer {
-        choice: a.choice.clone(),
-        text: a.text.clone(),
-        intent: a.intent,
-    };
+    let owner_answer = OwnerAnswer::from_msg(&a);
     let payload = (!owner_answer.is_empty()).then(|| Zeroizing::new(owner_answer.to_plain()));
     let given = Answer {
         login: login.to_string(),

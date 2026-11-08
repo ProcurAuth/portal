@@ -817,3 +817,29 @@ async fn two_instances_each_flush_their_own_phone() {
     );
     assert_eq!(pep.resume(&c)["decision"], true);
 }
+
+/// An item goes to the phones of its owner only. A phone of another account gets nothing, and its answer is refused:
+/// the item stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_phone_of_another_account_gets_nothing_and_cannot_answer() {
+    let pep = Pep::new();
+    let owner_phone = pep.phone("pixel").await;
+    let c = command(15);
+    let (id, _) = pep.submit(&c, 60);
+    let mut owner = connect(&pep, &owner_phone).await;
+    let req = first_request(&mut owner).await;
+
+    let eve = common::enroll_as(&pep.s, "eve-phone", "eve")
+        .await
+        .expect("a phone of another account");
+    let mut conn = connect(&pep, &eve).await;
+    nothing_arrives(&mut conn, Duration::from_secs(2)).await;
+    conn.send(&answer(&req, "m-eve", Action::Accept, Some(shown(&req))))
+        .await;
+    let result = next_result(&mut conn, WAIT).await;
+    assert_eq!((result.status, result.state), (AnswerStatus::Closed, None));
+    conn.send(&ClientMsg::Sync { open: vec![] }).await;
+    nothing_arrives(&mut conn, Duration::from_secs(2)).await;
+    assert_eq!(pep.verdict(&id)["verdict"], "pending");
+    assert_eq!(pep.resume(&c)["decision"], false);
+}

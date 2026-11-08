@@ -507,8 +507,8 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.11 | 5.1.0 | L5 | `revive_in_window_max_three_notifications_once`, `revive_after_window_refused_new_request_needs_previous_id`, `items::tests::revive_needs_the_window_the_count_and_the_body`. The `410` is in L9 |
 | 3.6.12 | 5.1.0 | L5, L7 | L5: `supersede_race_one_winner_old_approval_cancelled`. L7: `approval_api_tests::supersedes_cancels_old_approval` |
 | 3.6.13 | 5.1.0 | L5, L9 | L5: `the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items`. L9: to fill |
-| 3.6.14 | 5.1.0 | L5, L8 | L5: `cas_two_racers_one_answer`, `answer_effect_mismatch_state_unchanged`, `answer_after_abandon_returns_abandoned`. L8: to fill |
-| 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L8, L9: to fill |
+| 3.6.14 | 5.1.0 | L5, L8 | L5: `cas_two_racers_one_answer`, `answer_effect_mismatch_state_unchanged`, `answer_after_abandon_returns_abandoned`. L8: `approve_on_phone_then_pdp_true_once`, `two_phones_race_one_accepted_other_settled`, `answer_after_abandon_gets_abandoned_and_settled` |
+| 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L8: `approval_api_tests::reply_moves_to_replied_and_agent_sees_user_message`, `custom_and_ask_back_are_refused_without_the_flags`. L9: to fill |
 | 3.6.16 | 5.1.0 | L2 | `key_interaction_default_by_kind`, `config_interaction_values_closed`, `the_interaction_field_is_closed_and_an_absent_field_changes_nothing`, `grant_roundtrip_confirm_both_backends` |
 | 3.6.17 | 5.1.0 | L7, L9 | L7: `approval_api_tests::a10_intent_rules_explanation_one_shot` (`422 interaction_not_allowed`). L9: to fill (the refusal of a `reply` and a `say` of a `one_shot` item) |
 | 3.6.18 | 5.1.0 | L5 | `caps_per_key_owner_total` |
@@ -529,9 +529,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.8 | 5.1.0 | L7 | `approval_api_tests::a11_ref_single_use_bound_to_key_expires`, `approval_api_tests::intent_content_not_readable_by_pep`, `approval_api_tests::a10_intent_rules_explanation_one_shot` |
 | 3.7.9 | 5.1.0 | L7 | `approval_api_tests::a01_idempotent_repost_same_id_no_renewal_no_body_swap`, `approval_api_tests::idempotence_under_concurrency_one_open_request_for_each_effect`, `approval_api_tests::a_unique_index_on_the_hash_refuses_a_second_open_request_and_frees_it_at_the_end` |
 | 3.7.10 | 5.1.0 | L8 | to fill |
-| 3.7.11 | 5.1.0 | L8 | to fill |
-| 3.7.12 | 5.1.0 | L8, L10 | to fill |
-| 3.7.13 | 5.1.0 | L8 | to fill |
+| 3.7.11 | 5.1.0 | L8 | `approval_api_tests::decline_with_comment_reaches_agent_never_pep`, `frames::tests::previous_and_follows_come_from_the_facts` |
+| 3.7.12 | 5.1.0 | L8, L10 | L8: `a_phone_of_another_account_gets_nothing_and_cannot_answer`, `revoked_device_answer_refused_4403_and_no_state_change`. L10: to fill |
+| 3.7.13 | 5.1.0 | L8 | `two_phones_race_one_accepted_other_settled`, `phone_enrolled_after_creation_receives_open_items`, `two_instances_each_flush_their_own_phone` |
 | 3.7.14 | 5.1.0 | L6 | Conformance D77, D78, D81, `pdp::approval_tests::consume_takes_one_unit_once`, `pdp::approval_tests::budget_exceeded_keeps_approval_usable_release_path`, `pdp::approval_tests::two_resume_calls_race_one_true`, `pdp::approval_tests::hundred_concurrent_resumes_one_true`, `items_tests::concurrent_consumes_use_an_approval_once_and_status_consumes_nothing` |
 | 3.7.15 | 5.1.0 | L6 | Conformance D80, `pdp::approval_tests::crash_between_consume_and_count_never_double_executes`, `pdp::approval_tests::abandoned_or_lapsed_reads_as_approval_expired`, `items_tests::an_approval_is_consumed_once_released_and_lapses` |
 | 3.7.16 | 5.1.0 | L6 | Conformance D84, `pdp::approval_tests::revoked_key_or_removed_grant_after_approval_is_false`, `pdp::approval_tests::revoking_a_key_cancels_its_open_approvals` |
@@ -552,13 +552,13 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.8.4 | 5.1.0 | L9 | to fill |
 | 3.8.5 | 5.1.0 | L9 | to fill |
 | 3.8.6 | 5.1.0 | L9 | to fill |
-| 3.8.7 | 5.1.0 | L10, A2 | to fill |
+| 3.8.7 | 5.1.0 | L8, L10, A2 | L8: `frames::tests::the_line_from_never_holds_text_of_an_agent`. L10, A2: to fill |
 | 3.8.8 | 5.1.0 | L9 | to fill |
 | 3.8.9 | 5.1.0 | L9 | to fill |
 | 3.9.1 | 5.1.0 | L11 | to fill |
 | 3.9.2 | 5.1.0 | L11 | to fill |
 | 3.9.3 | 5.1.0 | L11 | to fill |
-| 3.9.4 | 5.1.0 | L11 | to fill |
+| 3.9.4 | 5.1.0 | L8, L11 | L8: `set_prefs_is_stored_and_comes_back_in_the_welcome`. L11: to fill |
 | 3.9.5 | 5.1.0 | A3 | to fill |
 | 3.9.6 | 5.1.0 | L11 | to fill |
 | 3.10.1 | 5.1.0 | L3 | `frames::every_frame_rejects_unknown_field`, `invalid/client/answer-with-signature.json` in `frames::invalid_frames_are_refused` |
@@ -569,15 +569,15 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.10.6 | 5.1.0 | L10 | to fill |
 | 4.9.2a | 5.1.0 | L5 | `degraded_storage_returns_storage_degraded_and_writes_nothing` |
 | 4.11.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
-| 4.11.2 | 5.1.0 | L8 | to fill |
-| 4.11.3 | 5.1.0 | L8 | to fill |
+| 4.11.2 | 5.1.0 | L8 | `phone_enrolled_after_creation_receives_open_items`, `offline_phone_receives_request_and_settled_on_reconnect`, `answer_after_abandon_gets_abandoned_and_settled` |
+| 4.11.3 | 5.1.0 | L8 | `no_plaintext_in_alerts_table_after_cycle`, `frames::tests::an_approval_frame_carries_the_command_and_verifies` |
 | 4.11.4 | 5.1.0 | A1 | to fill |
-| 4.11.5 | 5.1.0 | A1, L8 | to fill |
-| 4.11.6 | 5.1.0 | L8 | to fill |
-| 4.11.7 | 5.1.0 | L8 | to fill |
-| 4.11.8 | 5.1.0 | L8 | to fill |
-| 4.11.9 | 5.1.0 | L8 | to fill |
-| 4.11.10 | 5.1.0 | L8 | to fill |
+| 4.11.5 | 5.1.0 | A1, L8 | L8: `approve_on_phone_then_pdp_true_once` (the same `client_msg_id` again), `ack_by_id_stops_retransmission`. A1: to fill |
+| 4.11.6 | 5.1.0 | L8 | `two_phones_race_one_accepted_other_settled`, `offline_phone_receives_request_and_settled_on_reconnect` |
+| 4.11.7 | 5.1.0 | L8 | `effect_mismatch_refused`, `revoked_device_answer_refused_4403_and_no_state_change`, `custom_and_ask_back_are_refused_without_the_flags`, `answer_after_abandon_gets_abandoned_and_settled` |
+| 4.11.8 | 5.1.0 | L8 | `offline_phone_receives_request_and_settled_on_reconnect`, `two_phones_race_one_accepted_other_settled` |
+| 4.11.9 | 5.1.0 | L8 | `sync_reconciles_open_and_closed`, `phone_enrolled_after_creation_receives_open_items` |
+| 4.11.10 | 5.1.0 | L8 | The answer of a phone calls `Items::answer`, which waits for the copy of the replica before it returns (test of L5: `canary_absent_in_every_column_and_in_replica_snapshot`). No separate test |
 | 5.11.1 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.2 | 5.1.0 | L5 | `canary_absent_in_every_column_and_in_replica_snapshot` |
 | 5.11.3 | 5.1.0 | L4 | `seal_open_round_trip`, `aad_binds_request_field_seq_and_effect` |
@@ -608,7 +608,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
-| 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected` |
+| 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected`. L8: `approve_on_phone_then_pdp_true_once`, `sync_reconciles_open_and_closed`, `frames::tests::a_digest_has_the_count_and_the_oldest_first_and_never_comes_empty` |
 | 6.10.3 | 5.1.0 | L3 | `frames::request_fits_one_noise_message_at_max_sizes`, `frames::encode_refuses_a_frame_above_one_noise_message` |
 | 6.10.4 | 5.1.0 | L5 | `old_inbox_schema_stops_start` |
 | 6.11.1 | 5.1.0 | L5 | `the_journal_and_the_metrics_follow_the_names_of_the_specification` |

@@ -98,6 +98,15 @@ pub struct OwnerAnswer {
 }
 
 impl OwnerAnswer {
+    /// What an `answer` frame says besides the action: the choice, the text and the intent.
+    pub fn from_msg(msg: &inbox_core::proto::AnswerMsg) -> OwnerAnswer {
+        OwnerAnswer {
+            choice: msg.choice.clone(),
+            text: msg.text.clone(),
+            intent: msg.intent,
+        }
+    }
+
     /// Whether the answer holds anything to seal.
     pub fn is_empty(&self) -> bool {
         self.choice.is_none() && self.text.is_none() && self.intent.is_none()
