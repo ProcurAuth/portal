@@ -103,6 +103,20 @@ impl Store {
         }
     }
 
+    /// Binds each content key to its check value in the database (see `db::bind_content_keys`).
+    pub async fn bind_content_keys(
+        &self,
+        checks: Vec<(String, [u8; 32])>,
+    ) -> Result<db::KeyBind, DbError> {
+        match self {
+            Store::Sqlite(db) => {
+                db.call(move |c| Ok(db::bind_content_keys(c, &checks)?))
+                    .await
+            }
+            Store::Pg(pg) => pg.guard(pg.bind_content_keys(&checks)).await,
+        }
+    }
+
     /// Removes a code that is not used.
     pub async fn delete_code(&self, digest: [u8; 32]) -> Result<bool, DbError> {
         match self {

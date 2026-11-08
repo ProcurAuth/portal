@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+use super::content_box::{self, ContentBox};
 use super::hub::Hub;
 use super::metrics::InboxMetrics;
 use super::peer::Cluster;
@@ -45,6 +46,8 @@ pub struct FileKey {
 pub struct Secrets {
     pub server_key: ServerKey,
     pub file_keys: Vec<FileKey>,
+    /// The keys that seal the contents of the items. `None` without the block `inbox.at_rest`.
+    pub content: Option<ContentBox>,
 }
 
 impl Secrets {
@@ -87,11 +90,40 @@ impl Secrets {
                 webhook_send_resolved: block.webhook_send_resolved,
             });
         }
+        let content = match &config.at_rest {
+            Some(at_rest) => Some(load_content_keys(
+                &secrets.content_keys,
+                &at_rest.active_key,
+            )?),
+            None => None,
+        };
         Ok(Secrets {
             server_key,
             file_keys,
+            content,
         })
     }
+}
+
+/// Decodes the keys of the blocks `inbox.at_rest.key`. The error names the key and what is wrong, never the
+/// value. Two keys must not have the same bytes: a copy under a new id would hide a key that did not change.
+fn load_content_keys(
+    texts: &[(String, crate::config::Secret)],
+    active: &str,
+) -> Result<ContentBox, String> {
+    let mut keys: Vec<(String, Zeroizing<[u8; content_box::KEY_BYTES]>)> = Vec::new();
+    for (id, text) in texts {
+        let label = format!("inbox.at_rest.key.{id}.secret");
+        let bytes = content_box::parse_secret(text.as_bytes())
+            .map_err(|e| format!("{label}: {e} (the value is hidden)"))?;
+        if let Some((other, _)) = keys.iter().find(|(_, b)| **b == *bytes) {
+            return Err(format!(
+                "{label}: the key has the same bytes as inbox.at_rest.key.{other}.secret: two ids must hold two keys (the value is hidden)"
+            ));
+        }
+        keys.push((id.clone(), bytes));
+    }
+    ContentBox::new(&keys, active)
 }
 
 fn text(bytes: &[u8], label: &str) -> Result<Zeroizing<String>, String> {
@@ -475,5 +507,116 @@ mod tests {
         handshakes.give_back(&elsewhere);
         assert_eq!(handshakes.count(other), 0);
         assert!(!handshakes.open.lock().unwrap().contains_key(&other));
+    }
+
+    /// The inbox with `items` and `at_rest`. `keys` holds the id and the text of each content key.
+    fn load_content(keys: &[(&str, &str)], active: &str) -> Result<Secrets, String> {
+        let blocks: String = keys
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| format!("key \"{id}\" {{ secret_env = \"C{i}\" }}\n"))
+            .collect();
+        let raw = format!(
+            r#"
+            server {{ listen_address = "0.0.0.0:4181" trusted_proxies = [] }}
+            authentication {{ superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }}
+            inbox {{
+              server_key_env = "K"
+              devices {{
+                public_address = "inbox.example.org:8080"
+                heartbeat_interval = "20s" session_timeout = "60s" resend_after = "15s"
+                max_inflight = 32 unreachable_after = "2m" offline_warning_after = "3m"
+              }}
+              storage {{ delivery_ttl = "7d" alert_retention = "30d" connection_log_retention = "90d" }}
+              group "infra" {{ name = "Infra" }}
+              items {{
+                max_lifetime = "90d" max_open_per_key = 5 max_open_per_owner = 20 max_open_total = 1000
+                retention = "180d" body_purge_after = "30d" audit_retention = "365d"
+                lease {{ min = "30s" max = "7d" grace = "2m" revive_window = "7d" }}
+                digest {{ mode = "off" }}
+              }}
+              at_rest {{ active_key = "{active}" {blocks} }}
+            }}"#
+        );
+        let server_key = ServerKey::generate().unwrap().encode().to_string();
+        let (config, mut secrets) = Config::parse(&raw, &|name| match name {
+            "L" => Some("root".into()),
+            "P" => Some("a password for the tests".into()),
+            "K" => Some(server_key.clone()),
+            other => other
+                .strip_prefix('C')
+                .and_then(|i| i.parse::<usize>().ok())
+                .map(|i| keys[i].1.to_string()),
+        })?;
+        Secrets::load(
+            &secrets.inbox.take().unwrap(),
+            config.inbox.as_ref().unwrap(),
+        )
+    }
+
+    fn content_text(seed: u8) -> String {
+        let bytes: Vec<u8> = (0..32u8)
+            .map(|i| seed.wrapping_add(i.wrapping_mul(5)))
+            .collect();
+        inbox_core::b64::encode(&bytes)
+    }
+
+    #[test]
+    fn the_content_keys_decode_into_a_box_with_the_active_key() {
+        let (a, b) = (content_text(1), content_text(2));
+        let secrets = load_content(&[("old", &a), ("new", &b)], "new").unwrap();
+        let content = secrets.content.as_ref().unwrap();
+        assert_eq!(content.active_kid(), "new");
+        assert_eq!(content.kids().collect::<Vec<_>>(), ["old", "new"]);
+        let aad = content_box::aad("r", content_box::FIELD_BODY, 0, None);
+        assert!(content
+            .open(&content.seal(b"x", &aad).unwrap(), &aad)
+            .is_some());
+    }
+
+    #[test]
+    fn secret_not_32_bytes_or_all_equal_stops_start() {
+        let good = content_text(1);
+        let equal = inbox_core::b64::encode(&[9u8; 32]);
+        let short = inbox_core::b64::encode(&[1u8; 16]);
+        let long = inbox_core::b64::encode(&[1u8; 33]);
+        let bang = "!".repeat(44);
+        let hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        for (text, expected) in [
+            (equal.as_str(), "all bytes of the value are equal"),
+            (short.as_str(), "the value has 24 characters"),
+            (long.as_str(), "not the canonical base64 of 32 bytes"),
+            (hex, "the value has 64 characters"),
+            (bang.as_str(), "not base64"),
+            ("", ""),
+        ] {
+            // The configuration refuses the empty value before the start does.
+            let result = load_content(&[("k1", text), ("k2", &good)], "k2");
+            let error = result.err().expect("must be refused");
+            assert!(error.contains(expected), "{text}: {error}");
+            if !text.is_empty() {
+                assert!(
+                    error.contains("inbox.at_rest.key.k1.secret")
+                        && error.contains("expected the base64 text of 32 random bytes"),
+                    "{error}"
+                );
+                assert!(
+                    !error.contains(text),
+                    "the error never shows the value: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_ids_with_one_key_stop_the_start() {
+        let a = content_text(1);
+        let error = load_content(&[("k1", &a), ("k2", &a)], "k1").err().unwrap();
+        assert!(
+            error.contains("inbox.at_rest.key.k2.secret")
+                && error.contains("inbox.at_rest.key.k1.secret")
+                && !error.contains(&a),
+            "{error}"
+        );
     }
 }

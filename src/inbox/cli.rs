@@ -3,6 +3,8 @@
 //!
 //! - `keygen --out FILE`: makes the key of the server. The file holds the Noise key pair only.
 //! - `token --out FILE`: makes the text of an API key, for a block `api_key` of the file.
+//! - `content-key --out FILE`: makes a key that seals the contents of the items, for a block
+//!   `inbox.at_rest.key` of the file.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
 //! - `healthcheck --config FILE`: asks `/readyz` of the listener of the portal.
@@ -54,6 +56,7 @@ impl Flags {
 pub const USAGE: &str = "\
   portal inbox keygen --out FILE
   portal inbox token --out FILE
+  portal inbox content-key --out FILE
   portal inbox import-sqlite --config FILE --from SQLITE_FILE
   portal inbox healthcheck --config FILE";
 
@@ -80,6 +83,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let token = crate::keys::generate(crate::keys::KeyKind::Api)?;
             write_new_secret(&out, &token)?;
             eprintln!("API key written to {}", out.display());
+            Ok(())
+        }
+        "content-key" => {
+            let f = Flags::parse(rest, &["--out"])?;
+            let out = PathBuf::from(f.required("--out")?);
+            let mut bytes = Zeroizing::new([0u8; super::content_box::KEY_BYTES]);
+            crate::crypto::random_bytes(&mut *bytes)?;
+            let text = Zeroizing::new(inbox_core::b64::encode(&*bytes));
+            write_new_secret(&out, &text)?;
+            eprintln!(
+                "content key written to {} (keep it outside the data volume and outside the backups of the database; a lost key makes the sealed contents unreadable)",
+                out.display()
+            );
             Ok(())
         }
         "import-sqlite" => {
@@ -190,5 +206,63 @@ pub fn healthcheck(listen: SocketAddr) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("not ready: {}", status.trim()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("portal-cli-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn content_key_command_never_overwrites() {
+        let path = temp_path("content-key");
+        let _ = std::fs::remove_file(&path);
+        let args = [
+            "content-key".to_string(),
+            "--out".into(),
+            path.display().to_string(),
+        ];
+        run(&args).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.ends_with('\n') && text.trim_end().len() == 44,
+            "{text:?}"
+        );
+        // The key has the form that the configuration reads.
+        let bytes = super::super::content_box::parse_secret(text.trim_end().as_bytes()).unwrap();
+        assert_eq!(bytes.len(), 32);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A second run refuses and keeps the first key.
+        let error = run(&args).unwrap_err();
+        assert!(
+            error.contains("cannot create") && error.contains("exists"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // Another run in another file gives another key.
+        let other = temp_path("content-key-2");
+        let _ = std::fs::remove_file(&other);
+        run(&[
+            "content-key".into(),
+            "--out".into(),
+            other.display().to_string(),
+        ])
+        .unwrap();
+        assert_ne!(std::fs::read_to_string(&other).unwrap(), text);
+        // The flag is required and nothing else is accepted.
+        assert!(run(&["content-key".into()])
+            .unwrap_err()
+            .contains("--out is required"));
+        assert!(run(&["content-key".into(), "--force".into()]).is_err());
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(other).ok();
     }
 }

@@ -137,6 +137,12 @@ CREATE INDEX connections_device ON connections(device_id, connected_at);
 CREATE INDEX connections_time ON connections(connected_at);
 CREATE INDEX connections_user ON connections(user_name, connected_at);
 CREATE INDEX connections_open ON connections(instance) WHERE disconnected_at IS NULL;
+
+-- 5.1.0, in place: the check value of each key that seals contents.
+CREATE TABLE content_key_check (
+    body_kid    TEXT PRIMARY KEY,
+    check_value BYTEA NOT NULL
+);
 "#,
     r#"
 -- Protocol 4: an account of the portal makes a one-time enrollment code. The table keeps the
@@ -1186,6 +1192,54 @@ impl PgStore {
             .await
             .map_err(db_error)?;
         Ok(n > 0)
+    }
+
+    /// Binds each content key to its check value (see `db::bind_content_keys`). `INSERT ... ON CONFLICT DO
+    /// NOTHING` makes two instances that start together agree: the first row stays.
+    pub async fn bind_content_keys(
+        &self,
+        checks: &[(String, [u8; 32])],
+    ) -> Result<super::db::KeyBind, DbError> {
+        let c = self.client().await?;
+        let table = c
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM information_schema.tables
+                 WHERE table_schema = current_schema() AND table_name = 'content_key_check'",
+                &[],
+            )
+            .await
+            .map_err(db_error)?
+            .get::<_, i64>(0);
+        if table == 0 {
+            return Ok(super::db::KeyBind::NoTable);
+        }
+        let mut mismatch = Vec::new();
+        for (kid, check) in checks {
+            let value: &[u8] = &check[..];
+            c.execute(
+                "INSERT INTO content_key_check (body_kid, check_value) VALUES ($1, $2)
+                 ON CONFLICT (body_kid) DO NOTHING",
+                &[kid, &value],
+            )
+            .await
+            .map_err(db_error)?;
+            let stored: Vec<u8> = c
+                .query_one(
+                    "SELECT check_value FROM content_key_check WHERE body_kid = $1",
+                    &[kid],
+                )
+                .await
+                .map_err(db_error)?
+                .get(0);
+            if stored != check[..] {
+                mismatch.push(kid.clone());
+            }
+        }
+        Ok(if mismatch.is_empty() {
+            super::db::KeyBind::Bound
+        } else {
+            super::db::KeyBind::Mismatch(mismatch)
+        })
     }
 
     /// Uses a code and stores the device of its account, in one transaction. The row of the code
@@ -2886,6 +2940,45 @@ mod tests {
         db.sql("UPDATE enrollment_codes SET expires_at_ms = 1 WHERE login = 'bob' AND used_at_ms IS NULL")
             .await;
         assert_eq!(store.purge(0, 0).await.unwrap().2, 1);
+    }
+
+    /// The check values of content keys on PostgreSQL: the first instance writes, the others compare.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_wrong_key_same_id_fails_check_value() {
+        use super::super::db::KeyBind;
+        let Some(db) = TestDatabase::create().await else {
+            eprintln!("INBOX_TEST_PG is not set: skipped");
+            return;
+        };
+        let store = db.store().await;
+        let first = vec![("k1".to_string(), [1u8; 32])];
+        let other = vec![("k1".to_string(), [2u8; 32])];
+        assert_eq!(
+            store.bind_content_keys(&first).await.unwrap(),
+            KeyBind::Bound
+        );
+        assert_eq!(
+            store.bind_content_keys(&first).await.unwrap(),
+            KeyBind::Bound
+        );
+        assert_eq!(
+            store.bind_content_keys(&other).await.unwrap(),
+            KeyBind::Mismatch(vec!["k1".into()])
+        );
+        // Two instances that start together agree on one value.
+        let a = vec![("k2".to_string(), [3u8; 32])];
+        let b = vec![("k2".to_string(), [4u8; 32])];
+        let (ra, rb) = tokio::join!(store.bind_content_keys(&a), store.bind_content_keys(&b));
+        let (ra, rb) = (ra.unwrap(), rb.unwrap());
+        assert!(
+            (ra == KeyBind::Bound) != (rb == KeyBind::Bound),
+            "exactly one of the two keys is bound: {ra:?} {rb:?}"
+        );
+        db.sql("DROP TABLE content_key_check").await;
+        assert_eq!(
+            store.bind_content_keys(&first).await.unwrap(),
+            KeyBind::NoTable
+        );
     }
 
     /// The audit findings portal/inbox/login-reuse-inherits-login-keyed-data and
