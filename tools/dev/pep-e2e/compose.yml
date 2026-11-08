@@ -1,0 +1,71 @@
+# The throwaway stack of tools/dev/pep-e2e.sh. Do not start it by hand: the script makes the variables and the files.
+# Project name, ports and directories come from the script. The stack opens ports on 127.0.0.1 only.
+services:
+  # The real PEP: the reference service of the ProcurAuth repository.
+  service:
+    image: ${PEP_E2E_PA_IMAGE}
+    command: ["reference-service", "/run/secrets/service.json"]
+    volumes:
+      - ${PEP_E2E_DIR}/secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${PEP_E2E_PORT_SERVICE}:8080"
+    networks: [stack]
+
+  # The tap: the link of the service to the PDP goes through it. It records each exchange.
+  tap:
+    image: ${PEP_E2E_SIDECAR_IMAGE}
+    command: ["python3", "/side/sidecar.py", "tap"]
+    user: "10001:10001"
+    environment:
+      TARGET: portal:4182
+      TAP_LOG: /tap/tap.jsonl
+    volumes:
+      - ./sidecar.py:/side/sidecar.py:ro
+      - ${PEP_E2E_DIR}/tap:/tap
+    networks: [stack]
+
+  # The fake Docker socket. It lists the service, so the portal learns its actions and its path.
+  sock:
+    image: ${PEP_E2E_SIDECAR_IMAGE}
+    command: ["python3", "/side/sidecar.py", "docker"]
+    user: "10001:10001"
+    environment:
+      SOCKET_PATH: /sock/docker.sock
+      ACTIONS_URL: http://service:8080/.well-known/procurauth/actions
+    volumes:
+      - ./sidecar.py:/side/sidecar.py:ro
+      - ${PEP_E2E_DIR}/sock:/sock
+    networks: [stack]
+
+  # The real PDP and Inbox: the portal, built from this checkout.
+  portal:
+    image: ${PEP_E2E_PORTAL_IMAGE}
+    command: ["run", "--config", "/etc/portal/config.hcl"]
+    depends_on: [service, tap, sock]
+    volumes:
+      - ${PEP_E2E_DIR}/config.hcl:/etc/portal/config.hcl:ro
+      - ${PEP_E2E_DIR}/secrets:/run/secrets:ro
+      - ${PEP_E2E_DIR}/content:/run/content:ro
+      - ${PEP_E2E_DIR}/sock:/sock:ro
+      - data:/var/lib/portal
+    ports:
+      - "127.0.0.1:${PEP_E2E_PORT_PORTAL}:4181"
+    networks: [stack]
+
+  # Only with PEP_E2E_BACKEND=postgres.
+  postgres:
+    profiles: [postgres]
+    image: ${PEP_E2E_POSTGRES_IMAGE}
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_USER: portal
+      POSTGRES_DB: portal
+    volumes:
+      - ${PEP_E2E_DIR}/secrets:/run/secrets:ro
+    networks: [stack]
+
+volumes:
+  data:
+
+networks:
+  stack:

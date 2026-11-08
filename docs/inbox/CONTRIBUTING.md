@@ -29,6 +29,7 @@ All commands run in Docker. The host needs only Docker.
 | STE limits of a document | `python3 tools/dev/ste-check.py docs/inbox/SPEC.md docs/design-inbox.md` |
 | Configuration files of `deploy/` | `tools/dev/check-configs.sh` |
 | Image and Compose stack | `tools/build.sh image` then `tools/dev/smoke.sh` |
+| Portal against the real reference PEP of ProcurAuth | `tools/dev/pep-e2e.sh` (see "End-to-end check with the real PEP") |
 
 Set `PORTAL_SLOT=<name>` to keep the build output of a worktree apart from the others. To regenerate the configuration reference, run `portal config-reference` and put the output between the markers of the root `README.md`. A test fails when the text is not the generated text.
 
@@ -39,6 +40,64 @@ The helpers of the end-to-end tests are in `tests/common/mod.rs`. They start the
 The tests of the inbox are in `tests/inbox_e2e.rs`. The tests of items are in `tests/items_e2e.rs`. The conformance series D and E are in `src/http/conformance_tests.rs`. They use the harness of `src/http/cluster_tests.rs`. Add a new helper to `tests/common/mod.rs`, not to a test file.
 
 The tests of the approval API of the services are in `src/http/approval_api_tests.rs`. They have a recorder that keeps each answer that the service gets. Add a new answer to the check of `check_what_the_service_learned`, not a new way to read it. The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals. It also writes approvals in any state.
+
+## End-to-end check with the real PEP
+
+The tests in `src/http/approval_api_tests.rs` use a client that records the answers. The script `tools/dev/pep-e2e.sh` uses the real PEP: the reference service of the ProcurAuth repository. Run it when you change the PDP, the approval API or the agent channel.
+
+### What the script builds
+
+The script builds a stack of Docker containers. It never touches another stack. It opens ports on `127.0.0.1` only. It pushes no image to a registry.
+
+| Part | What it is |
+|---|---|
+| `portal` | The portal, built from this checkout, with `inbox.items`, `inbox.at_rest`, `inbox.approvals` and `inbox.mcp`. |
+| `service` | `reference-service`, built from the ProcurAuth checkout. The checkout is a read-only build context. |
+| `tap` | A proxy on the link from the service to the PDP. It records each request and each answer. It never writes the token of the service. |
+| `sock` | A fake Docker socket. It lets the portal find the service, its actions and its path. |
+| `postgres` | PostgreSQL, only with `PEP_E2E_BACKEND=postgres`. SQLite is the default. |
+
+The portal advertises the tap as its PDP URL. The service checks this URL in the metadata of the PDP. The content key is in its own directory, outside the data volume.
+
+### What it runs
+
+The test `tests/pep_e2e.rs` is `#[ignore]`. The script sets the variables that it needs. The test plays the agent and the phone of the owner. It calls `/auth/verify-key` as Traefik does, and it gives the identity token to the service. The phone speaks Noise, as in `tests/items_e2e.rs`.
+
+| Scenario | What it proves |
+|---|---|
+| S1 | The first call gives `awaiting_approval`, an id and a code. A second call gives the same request. The phone approves, and the tool runs one time. A call after the use asks again. |
+| S2 | A decline with a comment reaches the agent at the portal. The service reads `denied` and `approval_denied`, and never the comment. A changed command has another effect and no deny time. |
+| S3 | `get_action_status` renews the lease. When the reads stop, the request is `abandoned`. A late answer of the phone is refused. A read inside the revive window revives the request. |
+| S4 | A message of the agent in the thread goes to the portal only. |
+| S5 | The tool ran one time for each approval, and no more. A used `approval_ref` is refused. A call with `wait_s` runs the tool in the same call. |
+| S6 | The tap shows that the service received only `request_id`, `code`, `verdict`, `evaluation_id` and the reasons of the PDP. The canary strings of the explanation, the hint, the comment and the thread are in no exchange and in no log. |
+
+After the scenarios, the script reads the logs of each container for the canary strings. It then runs the series U of the ProcurAuth runner against the same `reference-service` binary.
+
+### The series U and the portal
+
+The runner `access-conformance` is the PDP of each case. It plays a script, for example `approval_expired` between two questions. A real PDP does not give such an answer on demand. The runner has no key to call another PDP. Its only fallback is the `fake-pdp` of the process.
+
+The script therefore runs the series U with the runner as PDP. It proves the service binary, not the portal. The scenarios S1 to S6 prove the same behavior with the real portal. The table shows the link.
+
+| Case | Scenario with the portal |
+|---|---|
+| U100, U108, U109 | S1: the submission has `effect`, `op` and `view`, and the effect is the effect of the phone. The PEP sends no explanation and no hint. |
+| U101 | S1: a call while the request is pending gives the same id and code. |
+| U102, U30 | S1 and S5: one question with `usage` after the approval, and one execution. |
+| U103 | S2: a changed argument gives another effect. |
+| U104, U105 | S1 and S2: a used approval asks again. `approval_denied` has no comment. |
+| U106 | S3: the renewal comes from `get_action_status` only. |
+| U107 | S6: the question holds the effect only. |
+| U110 | S1 to S3: the service reads `pending`, `approved`, `denied` or `void`. |
+
+### Run it
+
+Run `tools/dev/pep-e2e.sh` from the root of the checkout. The script needs Docker with Compose, `openssl` and `curl`. It finds the ProcurAuth checkout in `../procurauth` or `../../procurauth`. Set `PEP_E2E_PROCURAUTH` for another place.
+
+Set `PORTAL_SLOT` to keep the build volume of a worktree apart. Set `PEP_E2E_KEEP_BUILD=1` to keep the images and the build volume for the next run. Without it, the script removes them. The first build takes several minutes.
+
+The header of the script lists the other variables: the port base, the backend, `PEP_E2E_KEEP`, `PEP_E2E_SKIP_UNIT`, `PEP_E2E_SKIP_RUNNER` and `PEP_E2E_TEST_ARGS`. The run takes about two minutes when the images are in the cache. The test waits for real leases of 5 seconds, so it is slow by design.
 
 ## Pull requests
 
