@@ -7,22 +7,42 @@ import app.portalinbox.R
 import app.portalinbox.alert.Alerter
 import app.portalinbox.core.Native
 import app.portalinbox.data.Alert
-import app.portalinbox.data.AlertFrame
 import app.portalinbox.data.Group
+import app.portalinbox.data.ItemEvent
+import app.portalinbox.data.Kind
 import app.portalinbox.data.KeyVault
 import app.portalinbox.data.Levels
+import app.portalinbox.data.OutboxEntry
 import app.portalinbox.data.Reconcile
 import app.portalinbox.data.Store
 import app.portalinbox.net.Http
 import app.portalinbox.net.ServerAddress
+import app.portalinbox.proto.AckFrame
+import app.portalinbox.proto.AnswerResultFrame
+import app.portalinbox.proto.ClientFrame
+import app.portalinbox.proto.ClientFrames
+import app.portalinbox.proto.DigestFrame
+import app.portalinbox.proto.ErrorFrame
+import app.portalinbox.proto.FrameException
+import app.portalinbox.proto.MessageFrame
+import app.portalinbox.proto.PingFrame
+import app.portalinbox.proto.PongFrame
+import app.portalinbox.proto.ReadyFrame
+import app.portalinbox.proto.RequestFrame
+import app.portalinbox.proto.ServerAlertFrame
+import app.portalinbox.proto.ServerFrame
+import app.portalinbox.proto.ServerFrames
+import app.portalinbox.proto.SettledFrame
+import app.portalinbox.proto.SubscribeFrame
+import app.portalinbox.proto.SubscriptionsFrame
+import app.portalinbox.proto.UnsubscribeFrame
+import app.portalinbox.proto.WelcomeFrame
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
-import org.json.JSONArray
-import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -35,6 +55,11 @@ import kotlin.random.Random
  * before the transport receipt (`received`) is sent; a retransmitted alert is
  * recognised by its id and only receipted again; the notification is posted once.
  * Alerts are one-way: nothing else is ever sent about an alert.
+ *
+ * Items (protocol 5): the `ItemEngine` writes each `request`, `message`, `settled` and `digest`
+ * frame in one transaction. Only then does this class send the receipt `ack` with the `id` of the
+ * delivery. At each `welcome` it sends `sync` and the outbox. A frame of the server that breaks a
+ * rule is logged without its content and dropped: it is never acknowledged.
  */
 class ServerConnection(private val context: Context, val serverId: Long) {
     private sealed interface Event {
@@ -43,8 +68,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         class Text(val text: String) : Event
         class Closed(val code: Int, val reason: String) : Event
         class Failure(val error: Throwable) : Event
-        class Command(val json: JSONObject) : Event
+        class Command(val frame: ClientFrame) : Event
         object Wake : Event
+        object Flush : Event
         object Stop : Event
     }
 
@@ -63,6 +89,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     }
 
     private val store = Store.get(context)
+    private val engine = Items.engine(context)
     private val events = LinkedBlockingQueue<Event>()
     @Volatile private var running = true
     @Volatile private var connected = false
@@ -71,6 +98,12 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private var failures = 0
     private var nonce = 0L
     private val pingSentAt = sortedMapOf<Long, Long>()
+
+    /** True while the server of this session handles items (`welcome` with a purge age, no `not_enabled`). */
+    private var itemsEnabled = false
+
+    /** The outbox entries that this session already sent. */
+    private val outboxSent = HashSet<String>()
 
     /** When this session last asked the server to subscribe to each group. */
     private val subscribeSentAt = HashMap<String, Long>()
@@ -91,6 +124,14 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     fun isConnected() = connected
 
     /**
+     * Sends the frames of the outbox that this session did not send yet. Call it after
+     * `ItemEngine.approve`, `decline` or `reply`. Offline, the frames wait for the next `welcome`.
+     */
+    fun flushOutbox() {
+        events.offer(Event.Flush)
+    }
+
+    /**
      * Sets this phone's level for a group (null = off). The level stays on the phone:
      * the server only learns whether the group is subscribed. Offline changes are
      * applied by the next Welcome reconciliation.
@@ -98,8 +139,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     fun setLevel(group: String, action: String?) {
         store.setLevel(serverId, group, action)
         // The pseudo group of the alerts to the account is not on the server: nothing to send.
-        val t = if (action == null) "unsubscribe" else "subscribe"
-        if (connected && Levels.isServerGroup(group)) events.offer(Event.Command(JSONObject().put("t", t).put("group", group)))
+        val frame = if (action == null) UnsubscribeFrame(group) else SubscribeFrame(group)
+        if (connected && Levels.isServerGroup(group)) events.offer(Event.Command(frame))
         Registry.changed()
     }
 
@@ -192,6 +233,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private fun runSession(server: app.portalinbox.data.Server): Long {
         events.clear()
         pingSentAt.clear()
+        outboxSent.clear()
+        itemsEnabled = false
         val address = ServerAddress.parse(server.address) ?: run {
             store.setReenroll(serverId, "Invalid address")
             return 0
@@ -205,7 +248,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         try {
             // Handshake.
             expectOpen()
-            val hello = JSONObject()
+            val hello = org.json.JSONObject()
                 .put("protocol", Native.protocolVersion())
                 .put("device_id", server.deviceId)
                 .put("app_version", BuildConfig.VERSION_NAME)
@@ -218,9 +261,9 @@ class ServerConnection(private val context: Context, val serverId: Long) {
             session = ByteBuffer.wrap(started, 0, 8).long
             ws.send(started.copyOfRange(8, started.size).toByteString())
             val msg2 = expectBinary()
-            val accept = JSONObject(String(Native.sessionFinish(session, msg2)))
+            val accept = org.json.JSONObject(String(Native.sessionFinish(session, msg2)))
             Log.i(TAG, "session established with ${accept.optString("server_name")}")
-            send(JSONObject().put("t", "ready"))
+            send(ReadyFrame)
 
             // Established: wait for welcome, then serve.
             var heartbeat = server.heartbeatMs
@@ -240,27 +283,38 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                     is Event.Binary -> {
                         lastFrame = System.currentTimeMillis()
                         Registry.frame(serverId, lastFrame)
-                        val msg = JSONObject(String(Native.sessionDecrypt(session, e.bytes)))
-                        when (msg.getString("t")) {
-                            "welcome" -> {
-                                heartbeat = msg.getLong("heartbeat_interval_ms").coerceAtLeast(5_000L)
-                                val reconcile = onWelcome(msg)
+                        val frame = decode(Native.sessionDecrypt(session, e.bytes))
+                        when (frame) {
+                            null -> {}
+                            is WelcomeFrame -> {
+                                heartbeat = frame.heartbeatIntervalMs.coerceAtLeast(5_000L)
+                                val reconcile = onWelcome(frame)
                                 welcomed = true
                                 connected = true
                                 failures = 0
-                                Registry.setStatus(serverId, LinkState.CONNECTED, msg.optString("server_name"))
-                                for (g in reconcile.subscribe) send(JSONObject().put("t", "subscribe").put("group", g))
-                                for (g in reconcile.unsubscribe) send(JSONObject().put("t", "unsubscribe").put("group", g))
+                                Registry.setStatus(serverId, LinkState.CONNECTED, frame.serverName)
+                                for (g in reconcile.subscribe) send(SubscribeFrame(g))
+                                for (g in reconcile.unsubscribe) send(UnsubscribeFrame(g))
+                                // The items: tell the server which ones are open, then send the outbox again.
+                                val start = engine.onWelcome(serverId, frame)
+                                itemsEnabled = frame.itemsEnabled
+                                start.sync?.let { send(it) }
+                                flush(start.outbox)
+                                Registry.changed()
                                 ping()
                             }
-                            "alert" -> onAlert(msg)
-                            "subscriptions" -> onSubscriptions(msg)
-                            "pong" -> onPong(msg.getLong("nonce"))
-                            "error" -> Log.w(TAG, "server error ${msg.optString("code")}: ${msg.optString("message")}")
-                            else -> Log.w(TAG, "unknown message ${msg.getString("t")}")
+                            is ServerAlertFrame -> onAlert(frame)
+                            is SubscriptionsFrame -> onSubscriptions(frame)
+                            is PongFrame -> onPong(frame.nonce)
+                            is ErrorFrame -> {
+                                Log.w(TAG, "server error ${frame.code}: ${frame.message}")
+                                if (frame.isNotEnabled) itemsEnabled = false
+                            }
+                            is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame -> onItemFrame(frame)
                         }
                     }
-                    is Event.Command -> if (connected) send(e.json)
+                    is Event.Command -> if (connected) send(e.frame)
+                    Event.Flush -> if (connected && itemsEnabled) flush(engine.pendingOutbox(serverId))
                     is Event.Closed -> return onClosed(e.code, e.reason, welcomed)
                     is Event.Failure -> throw SessionEnd(backoff(), e.error.message ?: "Connection lost")
                     Event.Stop -> return 0
@@ -354,11 +408,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         }
     }
 
-    private fun send(msg: JSONObject) {
+    private fun send(frame: ClientFrame) {
         val ws = socket ?: throw SessionEnd(backoff(), "Connection lost")
-        if (msg.optString("t") == "subscribe") subscribeSentAt[msg.optString("group")] = System.currentTimeMillis()
-        val frame = Native.sessionEncrypt(session, msg.toString().toByteArray())
-        if (!ws.send(frame.toByteString())) throw SessionEnd(backoff(), "Connection lost")
+        if (frame is SubscribeFrame) subscribeSentAt[frame.group] = System.currentTimeMillis()
+        val sealed = Native.sessionEncrypt(session, ClientFrames.encode(frame))
+        if (!ws.send(sealed.toByteString())) throw SessionEnd(backoff(), "Connection lost")
     }
 
     /** Heartbeat; its pong gives the round trip shown on the server screen. */
@@ -366,32 +420,43 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         val n = ++nonce
         pingSentAt[n] = System.currentTimeMillis()
         if (pingSentAt.size > 64) pingSentAt.remove(pingSentAt.firstKey())
-        send(JSONObject().put("t", "ping").put("nonce", n))
+        send(PingFrame(n))
+    }
+
+    /** Sends the entries that this session did not send, oldest first. Each one waits for its `answer_result`. */
+    private fun flush(entries: List<OutboxEntry>) {
+        for (entry in entries) {
+            if (!outboxSent.add(entry.clientMsgId)) continue
+            val frame = try {
+                entry.toFrame()
+            } catch (e: FrameException) {
+                Log.w(TAG, "outbox entry ${entry.clientMsgId} is not a valid frame: ${e.message}")
+                continue
+            }
+            send(frame)
+            engine.markSent(entry)
+        }
+    }
+
+    /** Reads a frame of the server. A frame that breaks a rule is dropped and never acknowledged. */
+    private fun decode(plain: ByteArray): ServerFrame? = try {
+        ServerFrames.decode(plain)
+    } catch (e: FrameException) {
+        Log.w(TAG, "refused a frame of ${plain.size} bytes: ${e.message}")
+        null
     }
 
     // ------------------------------------------------------------ messages
 
-    /** Protocol v2: the server's subscriptions are group ids only. */
-    private fun parseSubscriptions(arr: JSONArray): Set<String> = buildSet {
-        for (i in 0 until arr.length()) add(arr.getString(i))
-    }
-
-    private fun onWelcome(msg: JSONObject): Reconcile {
-        val groups = msg.getJSONArray("groups")
-        val list = (0 until groups.length()).map {
-            val g = groups.getJSONObject(it)
-            Group(g.getString("id"), g.getString("name"), g.getString("description"))
-        }
-        return store.saveWelcome(
-            serverId,
-            msg.getString("server_name"),
-            msg.optNullableString("user_name"),
-            list,
-            parseSubscriptions(msg.getJSONArray("subscriptions")),
-            msg.getLong("heartbeat_interval_ms"),
-            msg.getLong("offline_warning_after_ms"),
-        )
-    }
+    private fun onWelcome(f: WelcomeFrame): Reconcile = store.saveWelcome(
+        serverId,
+        f.serverName,
+        f.userName.ifEmpty { null },
+        f.groups.map { Group(it.id, it.name, it.description) },
+        f.subscriptions.toSet(),
+        f.heartbeatIntervalMs,
+        f.offlineWarningAfterMs,
+    )
 
     /**
      * The server sends its subscriptions after each change, also when the account lost the
@@ -399,8 +464,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
      * screen tells the truth. A group that this session asked for a moment ago is left alone: the
      * message can be older than the request.
      */
-    private fun onSubscriptions(msg: JSONObject) {
-        val server = parseSubscriptions(msg.getJSONArray("subscriptions"))
+    private fun onSubscriptions(frame: SubscriptionsFrame) {
+        val server = frame.subscriptions.toSet()
         val now = System.currentTimeMillis()
         for (group in Levels.lostOnServer(store.levels(serverId), server, subscribeSentAt, now, SUBSCRIBE_SETTLE_MS)) {
             store.setLevel(serverId, group, null)
@@ -408,14 +473,13 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         Registry.changed()
     }
 
-    private fun onAlert(msg: JSONObject) {
-        val frame = AlertFrame.parse(msg)
+    private fun onAlert(frame: ServerAlertFrame) {
         val alert = Alert(
             serverId = serverId,
             alertId = frame.alertId,
             group = frame.group,
             groupName = frame.groupName,
-            kind = frame.kind,
+            kind = Kind.ALERT,
             title = frame.title,
             createdAtMs = frame.createdAtMs,
             receivedAtMs = System.currentTimeMillis(),
@@ -427,7 +491,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         // 1. Durable before acknowledging: if we die after this, it is shown at restart.
         val isNew = store.insertAlertIfNew(alert)
         // 2. Stop server retransmission (also for duplicates whose first ack was lost).
-        send(JSONObject().put("t", "ack").put("id", alert.alertId).put("stage", "received"))
+        send(AckFrame(alert.alertId))
         if (!isNew) return
         // 3. Show it exactly once.
         Alerter.present(context, alert)
@@ -442,8 +506,22 @@ class ServerConnection(private val context: Context, val serverId: Long) {
      */
     private fun localAction(group: String): String = Levels.alertAction(group, store.levels(serverId))
 
-    private fun JSONObject.optNullableString(key: String): String? =
-        if (!has(key) || isNull(key)) null else getString(key).ifEmpty { null }
+    /**
+     * A frame about an item. The engine stores it durably in one transaction. The receipt goes
+     * out after that. A failure of the storage ends the session: the server sends the row again.
+     */
+    private fun onItemFrame(frame: ServerFrame) {
+        val outcome = engine.onFrame(serverId, frame)
+        outcome.ack?.let { send(AckFrame(it)) }
+        for (event in outcome.events) present(event)
+        if (outcome.events.isNotEmpty()) Registry.changed()
+    }
+
+    /** The place where the screens and the notifications of the items hook in (lot A2). */
+    @Suppress("UNUSED_PARAMETER")
+    private fun present(event: ItemEvent) {
+        Log.d(TAG, "item event ${event.javaClass.simpleName}")
+    }
 
     private fun onPong(n: Long) {
         val now = System.currentTimeMillis()
