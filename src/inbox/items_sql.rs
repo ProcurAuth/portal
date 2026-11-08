@@ -87,6 +87,25 @@ pub const APPROVAL_COLUMNS: [&str; 14] = [
     "lapsed_at",
 ];
 
+/// The columns that a write of an approval sets: the 14 of [`APPROVAL_COLUMNS`] and `open_hash`.
+pub const APPROVAL_WRITE_COLUMNS: [&str; 15] = [
+    "request_id",
+    "service",
+    "subject",
+    "action",
+    "resource_path",
+    "effect",
+    "key_hash",
+    "evaluation_id",
+    "code",
+    "decision",
+    "shown_effect",
+    "consume_before",
+    "consumed_at",
+    "lapsed_at",
+    "open_hash",
+];
+
 /// The text of an enum as the database holds it (`snake_case`).
 pub fn text_of<T: Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
@@ -157,6 +176,18 @@ pub fn approval_values(a: &ApprovalRow) -> Vec<V> {
         V::int(a.consumed_at),
         V::int(a.lapsed_at),
     ]
+}
+
+/// The values of a write of an approval, in the order of [`APPROVAL_WRITE_COLUMNS`]. `open_hash` is the `key_hash`
+/// while the item is open and NULL after: a unique index on it allows one open item for each effect.
+pub fn approval_write_values(l: &Loaded, a: &ApprovalRow) -> Vec<V> {
+    let mut values = approval_values(a);
+    values.push(if l.item.is_open() {
+        V::Text(a.key_hash.clone())
+    } else {
+        V::NullText
+    });
+    values
 }
 
 /// `SELECT` of an item with its approval. The columns of the item come first, then the 14 of the approval.

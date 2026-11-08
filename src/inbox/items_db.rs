@@ -10,11 +10,11 @@ use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::db::DbError;
-use super::items::{Loaded, NewEvent, Notice, Rules};
-use super::items_ops::{ItemTx, ListFilter, Scope, Sealed, TurnRow};
+use super::items::{Loaded, NewEvent, Notice, OwnerAlert, Rules};
+use super::items_ops::{IntentRow, ItemTx, ListFilter, Scope, Sealed, TurnRow};
 use super::items_sql::{
-    approval_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
-    APPROVAL_COLUMNS, ITEM_COLUMNS, V,
+    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
+    APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
 };
 
 /// Runs a future whose steps never wait.
@@ -84,10 +84,10 @@ impl ItemTx for SqliteTx<'_, '_> {
             .prepare_cached(&sql)?
             .execute(params_from_iter(item_values(&l.item).iter().map(value)))?;
         if let Some(a) = &l.approval {
-            let sql = update_sql("approvals", &APPROVAL_COLUMNS, &ph);
-            self.0
-                .prepare_cached(&sql)?
-                .execute(params_from_iter(approval_values(a).iter().map(value)))?;
+            let sql = update_sql("approvals", &APPROVAL_WRITE_COLUMNS, &ph);
+            self.0.prepare_cached(&sql)?.execute(params_from_iter(
+                approval_write_values(l, a).iter().map(value),
+            ))?;
         }
         Ok(())
     }
@@ -102,10 +102,10 @@ impl ItemTx for SqliteTx<'_, '_> {
             .prepare_cached(&sql)?
             .execute(params_from_iter(values.iter().map(value)))?;
         if let Some(a) = &l.approval {
-            let sql = insert_sql("approvals", &APPROVAL_COLUMNS, &ph);
-            self.0
-                .prepare_cached(&sql)?
-                .execute(params_from_iter(approval_values(a).iter().map(value)))?;
+            let sql = insert_sql("approvals", &APPROVAL_WRITE_COLUMNS, &ph);
+            self.0.prepare_cached(&sql)?.execute(params_from_iter(
+                approval_write_values(l, a).iter().map(value),
+            ))?;
         }
         Ok(())
     }
@@ -326,6 +326,168 @@ impl ItemTx for SqliteTx<'_, '_> {
         let mut stmt = self.0.prepare_cached(&sql)?;
         let rows = stmt.query_map(params_from_iter(args), |r| Ok(decode(r)))?;
         rows.map(|r| r?).collect()
+    }
+
+    async fn created_since(
+        &mut self,
+        key_id: &str,
+        since: i64,
+    ) -> Result<(i64, Option<i64>), DbError> {
+        Ok(self.0.query_row(
+            "SELECT COUNT(*), MIN(created_at) FROM items
+             WHERE kind = 'approval' AND requester_key_id = ?1 AND created_at > ?2",
+            params![key_id, since],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    async fn mute_until(&mut self, subject: &str) -> Result<Option<i64>, DbError> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT muted_until FROM approval_mute WHERE subject = ?1",
+                params![subject],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    async fn set_mute(&mut self, subject: &str, until: i64, reason: &str) -> Result<(), DbError> {
+        self.0.execute(
+            "INSERT INTO approval_mute (subject, muted_until, reason) VALUES (?1, ?2, ?3)
+             ON CONFLICT (subject) DO UPDATE SET muted_until = excluded.muted_until, reason = excluded.reason",
+            params![subject, until, reason],
+        )?;
+        Ok(())
+    }
+
+    async fn recent_answers(
+        &mut self,
+        key_id: &str,
+        since: i64,
+        limit: u32,
+    ) -> Result<Vec<Option<String>>, DbError> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT answer_action FROM items
+             WHERE kind = 'approval' AND requester_key_id = ?1 AND state = 'answered' AND answered_at > ?2
+             ORDER BY answered_at DESC, request_id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![key_id, since, limit], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    async fn insert_intent(&mut self, row: &IntentRow) -> Result<(), DbError> {
+        self.0.execute(
+            "INSERT INTO approval_intents (ref_digest, requester_key_id, lease_s, until_at, allow_custom, allow_ask_back,
+                 body_kid, body_ct, body_size, expires_at, used_at, request_id, previous_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                row.ref_digest,
+                row.requester_key_id,
+                row.lease_s,
+                row.until_at,
+                row.allow_custom as i64,
+                row.allow_ask_back as i64,
+                row.body.as_ref().map(|b| b.kid.clone()),
+                row.body.as_ref().map(|b| b.ct.clone()),
+                row.body_size,
+                row.expires_at,
+                row.used_at,
+                row.request_id,
+                row.previous_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn live_intents(&mut self, key_id: &str, now: i64) -> Result<i64, DbError> {
+        Ok(self.0.query_row(
+            "SELECT COUNT(*) FROM approval_intents WHERE requester_key_id = ?1 AND used_at IS NULL AND expires_at > ?2",
+            params![key_id, now],
+            |r| r.get(0),
+        )?)
+    }
+
+    async fn find_intent(&mut self, digest: &str) -> Result<Option<IntentRow>, DbError> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT requester_key_id, lease_s, until_at, allow_custom, allow_ask_back, body_kid, body_ct, body_size,
+                        expires_at, used_at, request_id, previous_id
+                 FROM approval_intents WHERE ref_digest = ?1",
+                params![digest],
+                |r| {
+                    let kid: Option<String> = r.get(5)?;
+                    let ct: Option<Vec<u8>> = r.get(6)?;
+                    Ok(IntentRow {
+                        ref_digest: digest.to_string(),
+                        requester_key_id: r.get(0)?,
+                        lease_s: r.get(1)?,
+                        until_at: r.get(2)?,
+                        allow_custom: r.get::<_, i64>(3)? != 0,
+                        allow_ask_back: r.get::<_, i64>(4)? != 0,
+                        body: kid.zip(ct).map(|(kid, ct)| Sealed { kid, ct }),
+                        body_size: r.get(7)?,
+                        expires_at: r.get(8)?,
+                        used_at: r.get(9)?,
+                        request_id: r.get(10)?,
+                        previous_id: r.get(11)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    async fn use_intent(
+        &mut self,
+        digest: &str,
+        key_id: &str,
+        now: i64,
+        request_id: &str,
+    ) -> Result<bool, DbError> {
+        let n = self.0.execute(
+            "UPDATE approval_intents SET used_at = ?1, request_id = ?2, body_ct = NULL
+             WHERE ref_digest = ?3 AND requester_key_id = ?4 AND used_at IS NULL AND expires_at > ?1",
+            params![now, request_id, digest, key_id],
+        )?;
+        Ok(n == 1)
+    }
+
+    async fn delete_intents(&mut self, now: i64) -> Result<u64, DbError> {
+        Ok(self.0.execute(
+            "DELETE FROM approval_intents WHERE expires_at < ?1",
+            params![now],
+        )? as u64)
+    }
+
+    async fn insert_owner_alert(
+        &mut self,
+        a: &OwnerAlert,
+        now: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let id = super::util::random_id();
+        let created = self
+            .0
+            .prepare_cached(
+                "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
+                 VALUES (?1, 'alert', 'user', ?2, ?3, 'portal', ?4, ?5)
+                 ON CONFLICT (source, idempotency_key) DO NOTHING",
+            )?
+            .execute(params![id, a.owner, a.title, a.key, now])?;
+        if created == 0 {
+            return Ok(Vec::new());
+        }
+        self.0
+            .prepare_cached(
+                "INSERT INTO deliveries (alert_id, device_id)
+                 SELECT ?1, d.id FROM devices d WHERE d.user_name = ?2 AND d.revoked_at IS NULL ORDER BY d.id",
+            )?
+            .execute(params![id, a.owner])?;
+        let mut stmt = self.0.prepare_cached(
+            "SELECT device_id FROM deliveries WHERE alert_id = ?1 ORDER BY device_id",
+        )?;
+        let rows = stmt.query_map(params![id], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     async fn beat(&mut self, now: i64) -> Result<Option<i64>, DbError> {

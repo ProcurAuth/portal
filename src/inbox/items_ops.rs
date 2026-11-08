@@ -22,7 +22,7 @@ use inbox_core::proto::{
 use super::db::DbError;
 use super::items::{
     can_revive, check_wait, finish, renew, settle_due, transition, ApprovalRow, Caller, Effects,
-    Event, ItemRow, Loaded, NewEvent, NoRevive, Notice, Rules, Wait, WaitError,
+    Event, ItemRow, Loaded, NewEvent, NoRevive, Notice, OwnerAlert, Rules, Wait, WaitError,
     MIN_AGENT_TURN_GAP_MS,
 };
 
@@ -31,6 +31,24 @@ use super::items::{
 pub struct Sealed {
     pub kid: String,
     pub ct: Vec<u8>,
+}
+
+/// A row of `approval_intents`: what an agent said about its next approval. The explanation and the hint are sealed
+/// in `body`. The reference is never kept, only its digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntentRow {
+    pub ref_digest: String,
+    pub requester_key_id: String,
+    pub lease_s: Option<i64>,
+    pub until_at: Option<i64>,
+    pub allow_custom: bool,
+    pub allow_ask_back: bool,
+    pub body: Option<Sealed>,
+    pub body_size: i64,
+    pub expires_at: i64,
+    pub used_at: Option<i64>,
+    pub request_id: Option<String>,
+    pub previous_id: Option<String>,
 }
 
 /// A row of `turns`.
@@ -128,6 +146,55 @@ pub trait ItemTx {
     /// Serializes the creations, so the counts of the limits and the idempotency hold with several instances.
     fn lock_creation(&mut self) -> impl Future<Output = Result<(), DbError>>;
     fn list(&mut self, filter: &ListFilter) -> impl Future<Output = Result<Vec<Loaded>, DbError>>;
+    // The approval API: the cap of the creations, the mute of a key, the intents, the alerts to an owner.
+    /// The number of approvals that the key created since `since`, and the time of the oldest of them.
+    fn created_since(
+        &mut self,
+        key_id: &str,
+        since: i64,
+    ) -> impl Future<Output = Result<(i64, Option<i64>), DbError>>;
+    /// The end of the mute of a subject. `None` when the subject was never muted.
+    fn mute_until(&mut self, subject: &str) -> impl Future<Output = Result<Option<i64>, DbError>>;
+    fn set_mute(
+        &mut self,
+        subject: &str,
+        until: i64,
+        reason: &str,
+    ) -> impl Future<Output = Result<(), DbError>>;
+    /// The `answer_action` of the newest answered approvals of a key since `since`, newest first.
+    fn recent_answers(
+        &mut self,
+        key_id: &str,
+        since: i64,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<Option<String>>, DbError>>;
+    fn insert_intent(&mut self, row: &IntentRow) -> impl Future<Output = Result<(), DbError>>;
+    /// The intents of a key that are not used and not expired.
+    fn live_intents(
+        &mut self,
+        key_id: &str,
+        now: i64,
+    ) -> impl Future<Output = Result<i64, DbError>>;
+    fn find_intent(
+        &mut self,
+        digest: &str,
+    ) -> impl Future<Output = Result<Option<IntentRow>, DbError>>;
+    /// Marks an intent used by a request, and erases its sealed text. It is one compare-and-set: the result is false
+    /// when the intent is unknown, of another key, used, or expired.
+    fn use_intent(
+        &mut self,
+        digest: &str,
+        key_id: &str,
+        now: i64,
+        request_id: &str,
+    ) -> impl Future<Output = Result<bool, DbError>>;
+    fn delete_intents(&mut self, now: i64) -> impl Future<Output = Result<u64, DbError>>;
+    /// Writes a plain alert for the devices of an owner. The result is the devices of the deliveries.
+    fn insert_owner_alert(
+        &mut self,
+        a: &OwnerAlert,
+        now: i64,
+    ) -> impl Future<Output = Result<Vec<String>, DbError>>;
     // The sweeper.
     /// Writes the time of the pass and returns the time of the previous one.
     fn beat(&mut self, now: i64) -> impl Future<Output = Result<Option<i64>, DbError>>;
@@ -209,13 +276,17 @@ async fn flush<T: ItemTx>(tx: &mut T, cx: &Cx, mut fx: Effects) -> Result<Effect
         let devices = tx.insert_notice(n, cx.now).await?;
         fx.woken.extend(devices);
     }
+    for a in &fx.alerts {
+        let devices = tx.insert_owner_alert(a, cx.now).await?;
+        fx.woken.extend(devices);
+    }
     fx.woken.sort();
     fx.woken.dedup();
     let mut requests: Vec<String> = fx.events.iter().map(|e| e.request_id.clone()).collect();
     requests.extend(fx.notices.iter().map(|n| n.request_id.clone()));
     requests.sort();
     requests.dedup();
-    if !requests.is_empty() {
+    if !requests.is_empty() || !fx.woken.is_empty() {
         tx.announce(&fx.woken, &requests).await?;
     }
     Ok(fx)
@@ -280,6 +351,37 @@ pub struct NewItem {
     pub approval: Option<NewApproval>,
     /// Refuse the creation when the owner has no phone that is not revoked.
     pub require_device: bool,
+    /// The limits of the approval API. `None` for an item that the API did not make.
+    pub guard: Option<Guard>,
+}
+
+/// The limits of the approval API that need the same transaction as the creation, so that two instances cannot both
+/// pass them.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    /// The subject of the question, such as `key:conf0001`. The mute is bound to it.
+    pub subject: String,
+    /// `max_requests_per_key_per_hour`.
+    pub per_hour: u32,
+    /// `deny_cooldown` in milliseconds. 0: no cooldown.
+    pub deny_cooldown_ms: i64,
+    /// The digest of the `approval_ref` that the request uses. The creation marks the intent used.
+    pub intent: Option<String>,
+}
+
+/// Why the approval API does not create a request. The item that exists, or a time, goes with it.
+#[derive(Debug)]
+pub enum Refused {
+    /// The key is muted until this time (Unix milliseconds).
+    Muted { until: i64 },
+    /// The same effect was declined, and the deny time lasts until this time.
+    Cooling { until: i64 },
+    /// The key created too many requests in one hour.
+    Capped { retry_after_ms: i64 },
+    /// The intent is unknown, used, expired, or of another key.
+    BadIntent,
+    /// An open request has the same effect: it is the answer.
+    Duplicate(Box<Loaded>),
 }
 
 /// The metadata of a new approval.
@@ -306,6 +408,62 @@ pub enum CreateOutcome {
     TooManyForKey,
     TooManyForOwner,
     TooManyOpen,
+    Refused(Refused),
+}
+
+/// The limits of the approval API, checked in the transaction of the creation. `old` is the request that a
+/// replacement withdraws.
+async fn guard_checks<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    new: &NewItem,
+    fx: &mut Effects,
+) -> Result<Option<Refused>, DbError> {
+    let (Some(g), Some(a)) = (&new.guard, &new.approval) else {
+        return Ok(None);
+    };
+    if let Some(id) = tx.find_open_by_hash(&a.key_hash).await? {
+        if let Some(l) = fresh(tx, cx, &id, fx).await? {
+            if l.item.is_open() {
+                return Ok(Some(Refused::Duplicate(Box::new(l))));
+            }
+        }
+    }
+    if let Some(until) = tx.mute_until(&g.subject).await? {
+        if until > cx.now {
+            return Ok(Some(Refused::Muted { until }));
+        }
+    }
+    if g.deny_cooldown_ms > 0 {
+        if let Some(id) = tx
+            .approvals_by_hash(&a.key_hash, 1)
+            .await?
+            .into_iter()
+            .next()
+        {
+            if let Some(l) = tx.load(&id).await? {
+                let until = l.item.answered_at.unwrap_or(0) + g.deny_cooldown_ms;
+                let declined = l.item.state == ItemState::Answered
+                    && l.approval.as_ref().and_then(|a| a.decision) == Some(Decision::Deny);
+                if declined && until > cx.now {
+                    return Ok(Some(Refused::Cooling { until }));
+                }
+            }
+        }
+    }
+    if g.per_hour > 0 {
+        let hour = 3_600_000;
+        let (count, oldest) = tx
+            .created_since(&new.requester_key_id, cx.now - hour)
+            .await?;
+        if count >= g.per_hour as i64 {
+            let retry = oldest.map_or(hour, |at| at + hour - cx.now).max(1000);
+            return Ok(Some(Refused::Capped {
+                retry_after_ms: retry,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn build_row(
@@ -408,6 +566,9 @@ pub async fn create<T: ItemTx>(
     if let Err(e) = check_wait(new.wait, cx.now, cx.now, &cx.rules) {
         return done(tx, cx, CreateOutcome::BadWait(e), fx).await;
     }
+    if let Some(refused) = guard_checks(tx, cx, new, &mut fx).await? {
+        return done(tx, cx, CreateOutcome::Refused(refused), fx).await;
+    }
     let rules = &cx.rules;
     let counts = [
         (
@@ -429,6 +590,14 @@ pub async fn create<T: ItemTx>(
     }
     if new.require_device && tx.owner_devices(&new.owner).await?.is_empty() {
         return done(tx, cx, CreateOutcome::NoDevice, fx).await;
+    }
+    if let Some(digest) = new.guard.as_ref().and_then(|g| g.intent.as_deref()) {
+        if !tx
+            .use_intent(digest, &new.requester_key_id, cx.now, request_id)
+            .await?
+        {
+            return done(tx, cx, CreateOutcome::Refused(Refused::BadIntent), fx).await;
+        }
     }
     let l = build_row(
         cx,
@@ -524,7 +693,13 @@ pub async fn renew_lease<T: ItemTx>(
             loaded: Box::new(l),
             written,
         }
-    } else if can_revive(&l.item, cx.now, &cx.rules).is_ok() {
+    } else if can_revive(&l.item, cx.now, &cx.rules).is_ok()
+        && match &l.approval {
+            // A request for the same effect is open: the unique index allows one.
+            Some(a) => tx.find_open_by_hash(&a.key_hash).await?.is_none(),
+            None => true,
+        }
+    {
         let item = &mut l.item;
         item.state = transition(ItemState::Abandoned, Event::Revive).unwrap_or(ItemState::Pending);
         item.revivals += 1;
@@ -864,6 +1039,9 @@ pub async fn answer<T: ItemTx>(
     .await?;
     fx.event(&l.item, cx.now, "answered", &via, Some(detail));
     fx.settled_notice(&l, device);
+    if a.action == Action::Decline && l.approval.is_some() {
+        mute_after_refusals(tx, cx, &l, &mut fx).await?;
+    }
     done(
         tx,
         cx,
@@ -874,6 +1052,47 @@ pub async fn answer<T: ItemTx>(
         fx,
     )
     .await
+}
+
+/// After an explicit refusal: when the key has `mute_after_refusals` refusals in a row since its last mute, the key is
+/// muted for `mute_for` and the owner gets an alert. An answer `accept` ends the row. Another end of a request (an
+/// abandon, an expiry) is not an answer and does not count.
+async fn mute_after_refusals<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    l: &Loaded,
+    fx: &mut Effects,
+) -> Result<(), DbError> {
+    let (n, Some(a)) = (cx.rules.mute_after_refusals, l.approval.as_ref()) else {
+        return Ok(());
+    };
+    if n == 0 {
+        return Ok(());
+    }
+    let since = tx.mute_until(&a.subject).await?.unwrap_or(0);
+    let recent = tx
+        .recent_answers(&l.item.requester_key_id, since, n)
+        .await?;
+    if recent.len() as u32 == n && recent.iter().all(|r| r.as_deref() == Some("decline")) {
+        let until = cx.now + cx.rules.mute_for_ms;
+        tx.set_mute(&a.subject, until, "refusals").await?;
+        fx.event(
+            &l.item,
+            cx.now,
+            "muted",
+            "server",
+            Some(format!("subject={} until={until}", a.subject)),
+        );
+        fx.alerts.push(OwnerAlert {
+            owner: l.item.requester_owner.clone(),
+            title: format!(
+                "The key {} is muted: {n} approvals in a row were declined",
+                l.item.requester_key_id
+            ),
+            key: format!("mute:{}:{until}", l.item.requester_key_id),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- cancel and supersede
@@ -952,6 +1171,7 @@ pub enum SupersedeOut {
     BadWait(WaitError),
     /// The idempotency key of the new item names an item that exists.
     Existing(Box<Loaded>),
+    Refused(Refused),
     Created {
         old: Box<Loaded>,
         new: Box<Loaded>,
@@ -994,6 +1214,14 @@ pub async fn supersede<T: ItemTx>(
     let mut item = new.clone();
     item.requester_key_id = key_id.to_string();
     item.owner = old.item.requester_owner.clone();
+    if let Some(refused) = guard_checks(tx, cx, &item, &mut fx).await? {
+        return done(tx, cx, SupersedeOut::Refused(refused), fx).await;
+    }
+    if let Some(digest) = item.guard.as_ref().and_then(|g| g.intent.as_deref()) {
+        if !tx.use_intent(digest, key_id, cx.now, new_id).await? {
+            return done(tx, cx, SupersedeOut::Refused(Refused::BadIntent), fx).await;
+        }
+    }
     let created = build_row(
         cx,
         new_id,
@@ -1201,6 +1429,7 @@ pub struct MaintainReport {
     pub bodies_purged: u64,
     pub items_deleted: u64,
     pub events_deleted: u64,
+    pub intents_deleted: u64,
 }
 
 /// The retention: erases the sealed bodies after `body_purge_after`, deletes the final items after `retention` and
@@ -1210,6 +1439,7 @@ pub async fn maintain<T: ItemTx>(tx: &mut T, cx: &Cx) -> Result<MaintainReport, 
         bodies_purged: tx.purge_bodies(cx.now, &cx.rules).await?,
         items_deleted: tx.delete_final(cx.now, &cx.rules).await?,
         events_deleted: tx.delete_events(cx.now, &cx.rules).await?,
+        intents_deleted: tx.delete_intents(cx.now).await?,
     })
 }
 

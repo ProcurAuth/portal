@@ -13,15 +13,15 @@
 use inbox_core::proto::{Action, AnswerStatus, Kind};
 use zeroize::Zeroizing;
 
-use super::content_box::{self, ContentBox, FIELD_BODY, FIELD_TURN};
+use super::content_box::{self, ContentBox, FIELD_BODY, FIELD_INTENT, FIELD_TURN};
 use super::db::DbError;
 use super::hub::Hub;
-use super::items::{Caller, Clock, Effects, Loaded, NewEvent, Rules};
+use super::items::{Caller, Clock, Effects, Loaded, NewEvent, Rules, Wait};
 use super::items_db;
 use super::items_ops::{
     self as ops, AnswerIn, AnswerOut, AnswerVia, CancelBy, Cancelled, Consumed, CreateOutcome, Cx,
-    ItemTx, ListFilter, MaintainReport, NewItem, Renewed, Sealed, Speaker, SupersedeOut,
-    SweepReport, TurnIn, TurnOut, TurnRow,
+    IntentRow, ItemTx, ListFilter, MaintainReport, NewItem, Refused, Renewed, Sealed, Speaker,
+    SupersedeOut, SweepReport, TurnIn, TurnOut, TurnRow,
 };
 use super::items_pg::PgTx;
 use super::log;
@@ -119,6 +119,8 @@ pub enum Created {
     BadWait(super::items::WaitError),
     NoDevice,
     TooMany(Limit),
+    /// The approval API does not create the request: see [`Refused`].
+    Refused(Refused),
 }
 
 /// The limit that a creation passed.
@@ -170,6 +172,29 @@ pub enum Served {
 pub struct TurnPlain {
     pub row: TurnRow,
     pub text: Option<Zeroizing<Vec<u8>>>,
+}
+
+/// An intent that the engine stores.
+pub struct NewIntent<'a> {
+    /// The digest of the `approval_ref`.
+    pub digest: &'a str,
+    pub key_id: &'a str,
+    pub wait: Wait,
+    pub allow_custom: bool,
+    pub allow_ask_back: bool,
+    pub previous_id: Option<&'a str>,
+    /// The clear JSON that the engine seals.
+    pub content: &'a [u8],
+    pub ttl_ms: i64,
+}
+
+/// An intent that a submission reads, with its text unsealed.
+pub struct IntentPlain {
+    pub wait: Wait,
+    pub allow_custom: bool,
+    pub allow_ask_back: bool,
+    pub previous_id: Option<String>,
+    pub content: Zeroizing<Vec<u8>>,
 }
 
 /// The engine of the items, as the caller uses it.
@@ -315,6 +340,7 @@ impl Items<'_> {
             CreateOutcome::TooManyForKey => Created::TooMany(Limit::PerKey),
             CreateOutcome::TooManyForOwner => Created::TooMany(Limit::PerOwner),
             CreateOutcome::TooManyOpen => Created::TooMany(Limit::Total),
+            CreateOutcome::Refused(r) => Created::Refused(r),
         };
         Ok(created)
     }
@@ -540,6 +566,95 @@ impl Items<'_> {
         Err(ItemError::Storage(DbError::Pg(
             "the thread moves too fast".into(),
         )))
+    }
+
+    // ------------------------------------------------------------ the intents of the agents
+
+    /// Stores an intent: what an agent says about its next approval. `content` is the clear JSON of the explanation and
+    /// the hint: the engine seals it and keeps no clear copy. `digest` is the digest of the `approval_ref`; the
+    /// reference itself is never kept. The result is the time at which the intent expires.
+    pub async fn create_intent(&self, new: NewIntent<'_>) -> Result<i64, ItemError> {
+        self.writable()?;
+        let now = self.clock.now_ms();
+        let expires_at = now + new.ttl_ms;
+        let sealed = self.seal(
+            new.content,
+            &content_box::aad(new.digest, FIELD_INTENT, 0, None),
+        )?;
+        let (lease_s, until_at) = match new.wait {
+            Wait::Lease { lease_s } => (Some(lease_s), None),
+            Wait::Until { at_ms } => (None, Some(at_ms)),
+        };
+        let row = IntentRow {
+            ref_digest: new.digest.to_string(),
+            requester_key_id: new.key_id.to_string(),
+            lease_s,
+            until_at,
+            allow_custom: new.allow_custom,
+            allow_ask_back: new.allow_ask_back,
+            body_size: sealed.ct.len() as i64,
+            body: Some(sealed),
+            expires_at,
+            used_at: None,
+            request_id: None,
+            previous_id: new.previous_id.map(str::to_string),
+        };
+        in_tx!(self, [row], tx, tx.insert_intent(&row))?;
+        Ok(expires_at)
+    }
+
+    /// The number of intents of a key that are not used and not expired.
+    pub async fn live_intents(&self, key_id: &str) -> Result<i64, ItemError> {
+        let (key_id, now) = (key_id.to_string(), self.clock.now_ms());
+        in_tx!(self, [key_id, now], tx, tx.live_intents(&key_id, now))
+    }
+
+    /// The open approval that has this `key_hash`, after the clock settled it. `None` when none waits.
+    pub async fn open_approval(&self, key_hash: &str) -> Result<Option<Loaded>, ItemError> {
+        Ok(match self.status_for_pdp(key_hash).await? {
+            Consumed::Pending(l) => Some(*l),
+            _ => None,
+        })
+    }
+
+    /// Reads an intent for the submission that names it. `None` when the digest is unknown, or the intent is of another
+    /// key, used, expired, or its text does not open. The read does not use the intent: the creation does.
+    pub async fn read_intent(
+        &self,
+        digest: &str,
+        key_id: &str,
+    ) -> Result<Option<IntentPlain>, ItemError> {
+        let owned = digest.to_string();
+        let Some(row) = in_tx!(self, [owned], tx, tx.find_intent(&owned))? else {
+            return Ok(None);
+        };
+        if row.requester_key_id != key_id
+            || row.used_at.is_some()
+            || row.expires_at <= self.clock.now_ms()
+        {
+            return Ok(None);
+        }
+        let Some(sealed) = row.body else {
+            return Ok(None);
+        };
+        let Some(content) = self
+            .content
+            .open(&sealed.ct, &content_box::aad(digest, FIELD_INTENT, 0, None))
+        else {
+            return Ok(None);
+        };
+        let wait = match (row.lease_s, row.until_at) {
+            (Some(lease_s), None) => Wait::Lease { lease_s },
+            (None, Some(at_ms)) => Wait::Until { at_ms },
+            _ => return Ok(None),
+        };
+        Ok(Some(IntentPlain {
+            wait,
+            allow_custom: row.allow_custom,
+            allow_ask_back: row.allow_ask_back,
+            previous_id: row.previous_id,
+            content,
+        }))
     }
 
     // ------------------------------------------------------------ the approval of the PDP
@@ -817,5 +932,83 @@ impl Items<'_> {
         let sealed = self.seal_body(&request_id, Some(&s.effect), b"{\"op\":{},\"view\":{}}")?;
         in_tx!(self, [l, sealed], tx, tx.insert(&l, Some(&sealed)))?;
         Ok(request_id)
+    }
+}
+
+/// Raw SQL for the tests of the layers above the engine: the tables are those of the inbox database.
+#[cfg(test)]
+impl Items<'_> {
+    /// A phone of `login` that is not revoked.
+    pub async fn seed_device(&self, id: &str, login: &str) -> Result<(), ItemError> {
+        match self.store {
+            Store::Sqlite(db) => {
+                let (id, login) = (id.to_string(), login.to_string());
+                db.call(move |c| {
+                    c.execute(
+                        "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip)
+                         VALUES (?1, 'phone', ?2, x'00', 1, 'ip')",
+                        rusqlite::params![id, login],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .map_err(ItemError::from)
+            }
+            Store::Pg(pg) => pg
+                .guard(async {
+                    let c = pg.client().await?;
+                    c.execute(
+                        "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip)
+                         VALUES ($1, 'phone', $2, '\\x00'::bytea, 1, 'ip')",
+                        &[&id, &login],
+                    )
+                    .await
+                    .map_err(pg::db_error)?;
+                    Ok(())
+                })
+                .await
+                .map_err(ItemError::from),
+        }
+    }
+
+    /// The first number of the result of a `SELECT`.
+    pub async fn test_count(&self, sql: &str) -> i64 {
+        match self.store {
+            Store::Sqlite(db) => {
+                let sql = sql.to_string();
+                db.call(move |c| Ok(c.query_row(&sql, [], |r| r.get(0))?))
+                    .await
+                    .unwrap()
+            }
+            Store::Pg(pg) => {
+                let c = pg.client().await.unwrap();
+                c.query_one(sql, &[]).await.unwrap().get(0)
+            }
+        }
+    }
+
+    /// Runs a statement. The error is the text of the database error.
+    pub async fn test_exec(&self, sql: &str) -> Result<(), String> {
+        match self.store {
+            Store::Sqlite(db) => {
+                let sql = sql.to_string();
+                db.call(move |c| Ok(c.execute_batch(&sql)?))
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Store::Pg(pg) => {
+                let c = pg.client().await.map_err(|e| e.to_string())?;
+                c.execute(sql, &[])
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    /// The row of an intent, as the database holds it.
+    pub async fn test_intent(&self, digest: &str) -> Option<IntentRow> {
+        let digest = digest.to_string();
+        in_tx!(self, [digest], tx, tx.find_intent(&digest)).unwrap()
     }
 }

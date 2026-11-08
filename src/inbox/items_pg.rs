@@ -7,11 +7,11 @@ use deadpool_postgres::Transaction;
 use tokio_postgres::types::ToSql;
 
 use super::db::DbError;
-use super::items::{Loaded, NewEvent, Notice, Rules};
-use super::items_ops::{ItemTx, ListFilter, Scope, Sealed, TurnRow};
+use super::items::{Loaded, NewEvent, Notice, OwnerAlert, Rules};
+use super::items_ops::{IntentRow, ItemTx, ListFilter, Scope, Sealed, TurnRow};
 use super::items_sql::{
-    approval_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
-    APPROVAL_COLUMNS, ITEM_COLUMNS, V,
+    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
+    APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
 };
 use super::pg::{db_error, LOCK_ITEMS, WAKE_CHUNK};
 
@@ -101,8 +101,8 @@ impl ItemTx for PgTx<'_> {
         .await?;
         if let Some(a) = &l.approval {
             self.run(
-                &update_sql("approvals", &APPROVAL_COLUMNS, &ph),
-                &args(&approval_values(a)),
+                &update_sql("approvals", &APPROVAL_WRITE_COLUMNS, &ph),
+                &args(&approval_write_values(l, a)),
             )
             .await?;
         }
@@ -118,8 +118,8 @@ impl ItemTx for PgTx<'_> {
             .await?;
         if let Some(a) = &l.approval {
             self.run(
-                &insert_sql("approvals", &APPROVAL_COLUMNS, &ph),
-                &args(&approval_values(a)),
+                &insert_sql("approvals", &APPROVAL_WRITE_COLUMNS, &ph),
+                &args(&approval_write_values(l, a)),
             )
             .await?;
         }
@@ -394,6 +394,199 @@ impl ItemTx for PgTx<'_> {
             a.len()
         ));
         self.rows(&sql, &a).await?.iter().map(decode).collect()
+    }
+
+    async fn created_since(
+        &mut self,
+        key_id: &str,
+        since: i64,
+    ) -> Result<(i64, Option<i64>), DbError> {
+        let rows = self
+            .rows(
+                "SELECT COUNT(*)::bigint, MIN(created_at) FROM items
+                 WHERE kind = 'approval' AND requester_key_id = $1 AND created_at > $2",
+                &[Box::new(key_id.to_string()), Box::new(since)],
+            )
+            .await?;
+        Ok((rows[0].get(0), rows[0].get(1)))
+    }
+
+    async fn mute_until(&mut self, subject: &str) -> Result<Option<i64>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT muted_until FROM approval_mute WHERE subject = $1",
+                &one(subject.to_string()),
+            )
+            .await?;
+        Ok(rows.first().map(|r| r.get(0)))
+    }
+
+    async fn set_mute(&mut self, subject: &str, until: i64, reason: &str) -> Result<(), DbError> {
+        self.run(
+            "INSERT INTO approval_mute (subject, muted_until, reason) VALUES ($1, $2, $3)
+             ON CONFLICT (subject) DO UPDATE SET muted_until = EXCLUDED.muted_until, reason = EXCLUDED.reason",
+            &[
+                Box::new(subject.to_string()),
+                Box::new(until),
+                Box::new(reason.to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn recent_answers(
+        &mut self,
+        key_id: &str,
+        since: i64,
+        limit: u32,
+    ) -> Result<Vec<Option<String>>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT answer_action FROM items
+                 WHERE kind = 'approval' AND requester_key_id = $1 AND state = 'answered' AND answered_at > $2
+                 ORDER BY answered_at DESC, request_id LIMIT $3",
+                &[
+                    Box::new(key_id.to_string()),
+                    Box::new(since),
+                    Box::new(limit as i64),
+                ],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
+    async fn insert_intent(&mut self, row: &IntentRow) -> Result<(), DbError> {
+        let a: Vec<Arg> = vec![
+            Box::new(row.ref_digest.clone()),
+            Box::new(row.requester_key_id.clone()),
+            Box::new(row.lease_s),
+            Box::new(row.until_at),
+            Box::new(row.allow_custom as i64),
+            Box::new(row.allow_ask_back as i64),
+            Box::new(row.body.as_ref().map(|b| b.kid.clone())),
+            Box::new(row.body.as_ref().map(|b| b.ct.clone())),
+            Box::new(row.body_size),
+            Box::new(row.expires_at),
+            Box::new(row.used_at),
+            Box::new(row.request_id.clone()),
+            Box::new(row.previous_id.clone()),
+        ];
+        self.run(
+            "INSERT INTO approval_intents (ref_digest, requester_key_id, lease_s, until_at, allow_custom, allow_ask_back,
+                 body_kid, body_ct, body_size, expires_at, used_at, request_id, previous_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            &a,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn live_intents(&mut self, key_id: &str, now: i64) -> Result<i64, DbError> {
+        let rows = self
+            .rows(
+                "SELECT COUNT(*)::bigint FROM approval_intents WHERE requester_key_id = $1 AND used_at IS NULL AND expires_at > $2",
+                &[Box::new(key_id.to_string()), Box::new(now)],
+            )
+            .await?;
+        Ok(rows[0].get(0))
+    }
+
+    async fn find_intent(&mut self, digest: &str) -> Result<Option<IntentRow>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT requester_key_id, lease_s, until_at, allow_custom, allow_ask_back, body_kid, body_ct, body_size,
+                        expires_at, used_at, request_id, previous_id
+                 FROM approval_intents WHERE ref_digest = $1",
+                &one(digest.to_string()),
+            )
+            .await?;
+        Ok(rows.first().map(|r| {
+            let kid: Option<String> = r.get(5);
+            let ct: Option<Vec<u8>> = r.get(6);
+            IntentRow {
+                ref_digest: digest.to_string(),
+                requester_key_id: r.get(0),
+                lease_s: r.get(1),
+                until_at: r.get(2),
+                allow_custom: r.get::<_, i64>(3) != 0,
+                allow_ask_back: r.get::<_, i64>(4) != 0,
+                body: kid.zip(ct).map(|(kid, ct)| Sealed { kid, ct }),
+                body_size: r.get(7),
+                expires_at: r.get(8),
+                used_at: r.get(9),
+                request_id: r.get(10),
+                previous_id: r.get(11),
+            }
+        }))
+    }
+
+    async fn use_intent(
+        &mut self,
+        digest: &str,
+        key_id: &str,
+        now: i64,
+        request_id: &str,
+    ) -> Result<bool, DbError> {
+        let n = self
+            .run(
+                "UPDATE approval_intents SET used_at = $1, request_id = $2, body_ct = NULL
+                 WHERE ref_digest = $3 AND requester_key_id = $4 AND used_at IS NULL AND expires_at > $1",
+                &[
+                    Box::new(now),
+                    Box::new(request_id.to_string()),
+                    Box::new(digest.to_string()),
+                    Box::new(key_id.to_string()),
+                ],
+            )
+            .await?;
+        Ok(n == 1)
+    }
+
+    async fn delete_intents(&mut self, now: i64) -> Result<u64, DbError> {
+        self.run(
+            "DELETE FROM approval_intents WHERE expires_at < $1",
+            &one(now),
+        )
+        .await
+    }
+
+    async fn insert_owner_alert(
+        &mut self,
+        a: &OwnerAlert,
+        now: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let id = super::util::random_id();
+        let created = self
+            .run(
+                "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
+                 VALUES ($1, 'alert', 'user', $2, $3, 'portal', $4, $5)
+                 ON CONFLICT (source, idempotency_key) DO NOTHING",
+                &[
+                    Box::new(id.clone()),
+                    Box::new(a.owner.clone()),
+                    Box::new(a.title.clone()),
+                    Box::new(a.key.clone()),
+                    Box::new(now),
+                ],
+            )
+            .await?;
+        if created == 0 {
+            return Ok(Vec::new());
+        }
+        self.run(
+            "INSERT INTO deliveries (alert_id, device_id)
+             SELECT $1, d.id FROM devices d WHERE d.user_name = $2 AND d.revoked_at IS NULL ORDER BY d.id",
+            &[Box::new(id.clone()), Box::new(a.owner.clone())],
+        )
+        .await?;
+        let rows = self
+            .rows(
+                "SELECT device_id FROM deliveries WHERE alert_id = $1 ORDER BY device_id",
+                &one(id),
+            )
+            .await?;
+        Ok(ids(rows))
     }
 
     async fn beat(&mut self, now: i64) -> Result<Option<i64>, DbError> {

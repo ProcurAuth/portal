@@ -106,6 +106,10 @@ pub struct Rules {
     pub retention_ms: i64,
     pub body_purge_ms: i64,
     pub audit_retention_ms: i64,
+    /// `inbox.approvals.mute_after_refusals`. 0: a key is never muted.
+    pub mute_after_refusals: u32,
+    /// `inbox.approvals.mute_for`, in milliseconds.
+    pub mute_for_ms: i64,
 }
 
 impl Rules {
@@ -126,7 +130,16 @@ impl Rules {
             retention_ms: ms(c.retention),
             body_purge_ms: ms(c.body_purge_after),
             audit_retention_ms: ms(c.audit_retention),
+            mute_after_refusals: 0,
+            mute_for_ms: 0,
         }
+    }
+
+    /// The same rules with the values of the block `inbox.approvals`.
+    pub fn with_approvals(mut self, a: &crate::config::ApprovalsConfig) -> Rules {
+        self.mute_after_refusals = a.mute_after_refusals;
+        self.mute_for_ms = a.mute_for.as_millis() as i64;
+        self
     }
 
     /// The end of the life of a chain. A supersede never moves it.
@@ -493,12 +506,24 @@ pub struct Notice {
     pub except_device: Option<String>,
 }
 
+/// An alert of the portal to the devices of an owner. It names no item: it is a plain alert (`kind = 'alert'`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerAlert {
+    pub owner: String,
+    /// A fixed text. It never holds a body.
+    pub title: String,
+    /// Makes the alert idempotent: one alert for each key.
+    pub key: String,
+}
+
 /// What one operation writes besides the rows of the item: the events and the messages. The storage code writes
 /// them in the transaction. The caller reads them after the commit, for the log and the metrics.
 #[derive(Debug, Default)]
 pub struct Effects {
     pub events: Vec<NewEvent>,
     pub notices: Vec<Notice>,
+    /// Alerts of the portal to an owner that name no item, such as the mute of a key.
+    pub alerts: Vec<OwnerAlert>,
     /// The devices that have a new delivery, filled when the notices are written.
     pub woken: Vec<String>,
 }
@@ -683,6 +708,8 @@ pub(crate) mod tests {
             retention_ms: 180 * day,
             body_purge_ms: 30 * day,
             audit_retention_ms: 365 * day,
+            mute_after_refusals: 3,
+            mute_for_ms: 3_600_000,
         }
     }
 

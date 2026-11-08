@@ -197,7 +197,13 @@ impl App {
         Some(super::items_store::Items {
             store: &self.db,
             content,
-            rules: super::items::Rules::from_config(config),
+            rules: {
+                let rules = super::items::Rules::from_config(config);
+                match &self.config.approvals {
+                    Some(approvals) => rules.with_approvals(approvals),
+                    None => rules,
+                }
+            },
             clock: &*self.clock,
             hub: Some(&self.hub),
             replica: Some(&self.replica),

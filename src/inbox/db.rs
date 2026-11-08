@@ -231,9 +231,13 @@ CREATE TABLE approvals (
     shown_effect   TEXT,
     consume_before INTEGER,
     consumed_at    INTEGER,
-    lapsed_at      INTEGER
+    lapsed_at      INTEGER,
+    -- Equal to `key_hash` while the item is open (`pending` or `replied`), and NULL after. The unique index below
+    -- makes the database refuse a second open item for one effect, whatever the instance.
+    open_hash      TEXT
 ) STRICT;
 CREATE INDEX approvals_hash ON approvals(key_hash);
+CREATE UNIQUE INDEX approvals_open_hash ON approvals(open_hash) WHERE open_hash IS NOT NULL;
 
 -- One row for each transition, never for a renewal, and never with a body.
 CREATE TABLE item_events (
@@ -261,7 +265,8 @@ CREATE TABLE approval_intents (
     body_size        INTEGER NOT NULL,
     expires_at       INTEGER NOT NULL,
     used_at          INTEGER,
-    request_id       TEXT
+    request_id       TEXT,
+    previous_id      TEXT
 ) STRICT;
 CREATE INDEX approval_intents_kid ON approval_intents(body_kid) WHERE body_kid IS NOT NULL;
 CREATE INDEX approval_intents_expires ON approval_intents(expires_at);

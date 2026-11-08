@@ -45,6 +45,8 @@ const TAG_LEN: usize = 16;
 pub const FIELD_BODY: &str = "body";
 /// The field of the payload of a turn of a thread.
 pub const FIELD_TURN: &str = "turn";
+/// The field of the explanation of an intent. The id of the request is the digest of the `approval_ref`.
+pub const FIELD_INTENT: &str = "intent";
 
 /// The associated data of a sealed value: the prefix `portal-content/v1`, the id of the request, the
 /// name of the field, the sequence number and the effect (empty when the item has none). Each text has

@@ -222,6 +222,7 @@ fn approval(n: u32) -> (NewItem, Vec<u8>) {
             evaluation_id: None,
         }),
         require_device: false,
+        guard: None,
     };
     (item, body)
 }
