@@ -165,7 +165,7 @@ pub(super) struct Seed<'a> {
 /// Writes one approval into the engine of the node and returns its request id.
 pub(super) fn seed(app: &crate::inbox::App, s: &Seed<'_>) -> String {
     let items = app.items().expect("the inbox has items");
-    let seed = SeedApproval {
+    let make = || SeedApproval {
         key_id: s
             .subject
             .strip_prefix("key:")
@@ -184,9 +184,18 @@ pub(super) fn seed(app: &crate::inbox::App, s: &Seed<'_>) -> String {
         consumed_at: s.consumed_at,
         lease_s: 900,
     };
-    runtime()
-        .block_on(items.seed_approval(seed))
-        .unwrap_or_else(|e| panic!("seed: {e:?}"))
+    // A loaded machine can make the shared PostgreSQL answer late: the engine then says `Degraded` at once. The
+    // seed tries again a few times before it fails the test.
+    for attempt in 0..6 {
+        match runtime().block_on(items.seed_approval(make())) {
+            Ok(id) => return id,
+            Err(crate::inbox::testing::ItemError::Degraded) if attempt < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => panic!("seed: {e:?}"),
+        }
+    }
+    unreachable!("the loop returns or panics")
 }
 
 /// The approvals of the data of a case (`approvals.json`), written into the engine. The clock of the data is `now`
