@@ -31,6 +31,7 @@ pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
                 created_at: 0,
                 expires_at: None,
                 kind: crate::keys::KeyKind::Mcp,
+                interaction: key.interaction,
                 grants: key.grants.clone(),
             });
         }

@@ -3518,13 +3518,15 @@ fn audit(
 /// so a form sends both. The account keeps the broad grant only.
 ///
 /// A narrower grant with limit values stays: the PDP takes the lowest ceiling of the grants that
-/// cover a node (`decision::ceilings_of`), so this grant restricts its node.
+/// cover a node (`decision::ceilings_of`), so this grant restricts its node. A narrower grant with
+/// `confirm` stays too: the rule of the approval is an OR over the covering grants.
 fn drop_covered(mut grants: Vec<Grant>) -> Vec<Grant> {
     grants.sort();
-    grants.dedup();
+    crate::grants::merge_confirm(&mut grants);
     let all = grants.clone();
     grants.retain(|grant| {
         !grant.limits.is_empty()
+            || grant.confirm
             || !all.iter().any(|other| {
                 other != grant
                     && other.action == grant.action
@@ -3553,6 +3555,10 @@ fn account_grants(
     unknown_code: &'static str,
 ) -> Result<Vec<Grant>, GrantsError> {
     let raw = key_forms::read(fields, true).map_err(|_| GrantsError::Bad)?;
+    // The interaction belongs to a key. An account has none.
+    if raw.interaction.is_some() {
+        return Err(GrantsError::Bad);
+    }
     account_context(state, old_grants, |context| {
         key_forms::check_grants(&raw, context, key_forms::Holder::Account)
             .map(drop_covered)
@@ -3573,6 +3579,9 @@ fn account_needs_access(
     fields: std::collections::HashMap<String, String>,
 ) -> Option<(Vec<Grant>, String)> {
     let raw = key_forms::read(fields, true).ok()?;
+    if raw.interaction.is_some() {
+        return None;
+    }
     account_context(state, None, |context| {
         key_forms::grants_without_access(&raw, context, key_forms::Holder::Account)
     })

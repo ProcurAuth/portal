@@ -382,7 +382,8 @@ input[type="radio"]:disabled {
   cursor: not-allowed;
 }
 
-.segmented {
+.segmented,
+.choiceGroup {
   display: inline-flex;
   flex-wrap: wrap;
   max-width: 100%;
@@ -393,7 +394,8 @@ input[type="radio"]:disabled {
   background: var(--raised);
 }
 
-.segmented__option {
+.segmented__option,
+.choiceGroup__option {
   display: inline-flex;
   align-items: center;
   height: calc(var(--control) - 4px);
@@ -410,7 +412,8 @@ input[type="radio"]:disabled {
   cursor: pointer;
 }
 
-.segmented__option:hover {
+.segmented__option:hover,
+.choiceGroup__option:hover {
   color: var(--text);
 }
 
@@ -1001,13 +1004,40 @@ input.keyText {
 .ge__act > code,
 .ge__act > .ge__desc,
 .ge__act > .statusIcon,
+.ge__act > .ge__tools,
 .ge__act > .ge__limits {
   grid-row: 1;
 }
 
 .ge__act > .statusIcon,
+.ge__act > .ge__tools,
 .ge__act > .ge__limits {
   justify-self: end;
+}
+
+/* The last cell of a row can hold a warning and the lock of the approval. The lock is a flat
+   icon button: its colour tells the state (muted: no approval, accent: asks for an approval). */
+.ge__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ge__confirm.is-on {
+  color: var(--accent-text);
+}
+
+.ge__confirm.is-on:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.ge__confirm:disabled {
+  cursor: not-allowed;
+}
+
+.ge__confirm:focus-visible {
+  outline: 2px solid var(--accent-tint);
+  outline-offset: 0;
 }
 
 .ge__act.is-on {
@@ -1083,6 +1113,7 @@ input.keyText {
   }
 
   .ge__act > .statusIcon,
+  .ge__act > .ge__tools,
   .ge__act > .ge__limits {
     grid-column: 3;
   }
@@ -1829,7 +1860,8 @@ input.keyText {
 
 /* The badge of an external service, in a row of the table and in the editor of the permissions. The arrow says that
    the link leaves the portal. */
-.badge--external {
+.badge--external,
+.badge--confirm {
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -1838,9 +1870,29 @@ input.keyText {
   vertical-align: middle;
 }
 
-.badge--external .icon {
+.badge--external .icon,
+.badge--confirm .icon {
   width: 12px;
   height: 12px;
+}
+
+/* The chip of a key that asks for approvals, in the list of the keys. It sits in the column "Can
+   use", in the flex line of the marks, so it keeps the row on one line. */
+.badge--confirm {
+  flex: none;
+  margin-right: 0;
+}
+
+/* The choice of the interaction of a key: radio buttons that look like the segmented control, so
+   the choice works without script. */
+.choiceGroup__option:has(input:checked) {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.choiceGroup__option:has(input:focus-visible) {
+  outline: 2px solid var(--accent-tint);
+  outline-offset: 0;
 }
 
 /* "Add external service": a small form in a popover. */

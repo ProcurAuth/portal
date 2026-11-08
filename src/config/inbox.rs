@@ -193,6 +193,10 @@ pub struct ApiKeyConfig {
     /// The key can send an alert to an account. The owner holds `alert.send_user`.
     pub direct_alerts: bool,
     pub webhook_send_resolved: bool,
+    /// The attribute `interaction` of the block. The default is `one_shot`. The agent channel reads
+    /// it (lot L9): this lot only stores and checks it.
+    #[allow(dead_code)]
+    pub interaction: crate::keys::Interaction,
 }
 
 /// The secrets of the inbox. The program erases them from memory when it drops them.
@@ -399,6 +403,10 @@ pub fn build(
                 services: crate::inbox::rights::Services::Only(Default::default()),
                 direct_alerts,
                 webhook_send_resolved: block.bool("webhook_send_resolved")?,
+                interaction: crate::keys::Interaction::from_name(&block.text("interaction")?)
+                    .ok_or_else(|| {
+                        format!("inbox.api_key.{name}.interaction: internal error: not known")
+                    })?,
             },
         );
         texts.push((name, secret));

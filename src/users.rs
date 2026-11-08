@@ -63,6 +63,8 @@ pub struct KeyRecord {
     pub expires_at: Option<i64>,
     /// The kind of the key: the prefix of its text (portal 5.1).
     pub kind: crate::keys::KeyKind,
+    /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
+    pub interaction: crate::keys::Interaction,
     pub grants: Vec<Grant>,
 }
 
@@ -114,6 +116,7 @@ fn key_record(row: KeyRow) -> KeyRecord {
         created_at: row.created_at,
         expires_at: row.expires_at,
         kind: row.kind,
+        interaction: row.interaction,
         grants: row.grants,
     }
 }
@@ -808,6 +811,7 @@ mod tests {
     fn key_row(id: &str, owner: Option<&str>, byte: u8) -> KeyRow {
         KeyRow {
             kind: crate::keys::KeyKind::Mcp,
+            interaction: crate::keys::Interaction::Conversational,
             id: id.into(),
             owner: owner.map(Into::into),
             name: format!("key {id}"),
@@ -857,6 +861,7 @@ mod tests {
     fn a_key_of_the_file_has_an_id_a_subject_and_counters_of_the_file() {
         let file = KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
+            interaction: crate::keys::Interaction::Conversational,
             id: "34b1100f45b235ba".into(),
             owner: KeyOwner::File("carol".into()),
             name: "nightly report".into(),
@@ -884,6 +889,7 @@ mod tests {
     fn a_key_is_expired_at_its_date_and_too_old_after_the_maximum_lifetime_of_its_owner() {
         let mut key = KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
+            interaction: crate::keys::Interaction::Conversational,
             id: "k".into(),
             owner: KeyOwner::User("alice".into()),
             name: "k".into(),

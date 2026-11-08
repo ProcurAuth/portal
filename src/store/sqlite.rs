@@ -217,6 +217,11 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// for each service that the superadmin added by hand: the id (`ext-` and the slug of the name), the name and the
 /// absolute link. The id is the resource id of the grants `access` on the service. A file that the version 8 made
 /// before the external services lacks the table: [`Sqlite::init`] refuses it.
+///
+/// The approvals (5.1.0) are part of this version too. `user_grants.confirm` and `key_grants.confirm` hold the property
+/// `confirm` of a grant. `keys.interaction` holds `conversational` or `one_shot`: a key of kind `api` that exists before
+/// gets `one_shot`, the others get `conversational`. A file that the version 8 made before the approvals lacks the three
+/// columns: [`Sqlite::init`] refuses it.
 const SESSION_REMEMBERED_SCHEMA: &str = "
 ALTER TABLE sessions_log ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions_log ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;
@@ -244,6 +249,11 @@ CREATE TABLE external_services (
   href TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+ALTER TABLE user_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
+ALTER TABLE key_grants ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0 CHECK (confirm IN (0, 1));
+ALTER TABLE keys ADD COLUMN interaction TEXT NOT NULL DEFAULT 'conversational'
+  CHECK (interaction IN ('conversational', 'one_shot'));
+UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';
 ";
 
 /// The columns of `user_grants` in a file of a given schema version.
@@ -257,6 +267,8 @@ enum GrantColumns {
     Path,
     /// Version 6 and later: `resource_path` and `limits`.
     PathLimits,
+    /// A file of version 8 made with the approvals: `resource_path`, `limits` and `confirm`.
+    Full,
 }
 
 impl GrantColumns {
@@ -266,6 +278,15 @@ impl GrantColumns {
             4 => Self::SubResource,
             5 => Self::Path,
             _ => Self::PathLimits,
+        }
+    }
+
+    /// The layout of a file that the caller opened: the version and the columns that the file has.
+    fn of_file(conn: &Connection, version: i64) -> Result<Self, String> {
+        if version >= 6 && has_column(conn, "user_grants", "confirm")? {
+            Ok(Self::Full)
+        } else {
+            Ok(Self::of(version))
         }
     }
 }
@@ -312,23 +333,28 @@ fn migrate_to_resource_path(conn: &Connection) -> Result<(), String> {
 /// import reads files of earlier versions.
 fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<Vec<Grant>, String> {
     let sql = match columns {
+        GrantColumns::Full => {
+            "SELECT action, resource_type, resource_id, resource_path, '', limits, confirm
+               FROM user_grants WHERE user_id = ?1
+              ORDER BY action, resource_id, resource_path"
+        }
         GrantColumns::PathLimits => {
-            "SELECT action, resource_type, resource_id, resource_path, '', limits
+            "SELECT action, resource_type, resource_id, resource_path, '', limits, 0
                FROM user_grants WHERE user_id = ?1
               ORDER BY action, resource_id, resource_path"
         }
         GrantColumns::Path => {
-            "SELECT action, resource_type, resource_id, resource_path, '', '{}'
+            "SELECT action, resource_type, resource_id, resource_path, '', '{}', 0
                FROM user_grants WHERE user_id = ?1
               ORDER BY action, resource_id, resource_path"
         }
         GrantColumns::SubResource => {
-            "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id, '{}'
+            "SELECT action, resource_type, resource_id, sub_resource_type, sub_resource_id, '{}', 0
                FROM user_grants WHERE user_id = ?1
               ORDER BY action, resource_id, sub_resource_type, sub_resource_id"
         }
         GrantColumns::ServiceOnly => {
-            "SELECT action, resource_type, resource_id, '', '', '{}' FROM user_grants
+            "SELECT action, resource_type, resource_id, '', '', '{}', 0 FROM user_grants
               WHERE user_id = ?1 ORDER BY action, resource_id"
         }
     };
@@ -343,6 +369,7 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, bool>(6)?,
             ))
         })
         .map_err(db)?
@@ -350,12 +377,12 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
         .map_err(db)?;
     let mut grants = rows
         .iter()
-        .map(|(action, kind, id, third, fourth, limits)| {
+        .map(|(action, kind, id, third, fourth, limits, confirm)| {
             let path = match columns {
-                GrantColumns::Path | GrantColumns::PathLimits => third.clone(),
+                GrantColumns::Path | GrantColumns::PathLimits | GrantColumns::Full => third.clone(),
                 _ => migrated_path(third, fourth)?,
             };
-            grant_from_row(action, kind, id, &path, limits)
+            grant_from_row(action, kind, id, &path, limits, *confirm)
         })
         .collect::<Result<Vec<_>, _>>()?;
     grants.sort();
@@ -364,12 +391,12 @@ fn grants_of(conn: &Connection, user_id: i64, columns: GrantColumns) -> Result<V
 
 fn insert_grants(conn: &Connection, user_id: i64, grants: &[Grant]) -> rusqlite::Result<()> {
     for grant in grants {
-        let (kind, id, path, limits) = grant_columns(grant);
+        let (kind, id, path, limits, confirm) = grant_columns(grant);
         conn.execute(
             "INSERT OR IGNORE INTO user_grants
-               (user_id, action, resource_type, resource_id, resource_path, limits)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![user_id, grant.action, kind, id, path, limits],
+               (user_id, action, resource_type, resource_id, resource_path, limits, confirm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![user_id, grant.action, kind, id, path, limits, confirm],
         )?;
     }
     Ok(())
@@ -472,6 +499,14 @@ impl Sqlite {
                         "the database was made by schema version {SCHEMA_VERSION} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see README, Upgrades, version 5.0.5)"
                     ));
                 }
+                if !(has_column(&conn, "user_grants", "confirm")?
+                    && has_column(&conn, "key_grants", "confirm")?
+                    && has_column(&conn, "keys", "interaction")?)
+                {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)"
+                    ));
+                }
             }
             newer => {
                 return Err(format!(
@@ -526,7 +561,7 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         for (id, user) in &mut users {
-            user.grants = grants_of(conn, *id, GrantColumns::PathLimits)?;
+            user.grants = grants_of(conn, *id, GrantColumns::Full)?;
         }
         Ok(users.into_iter().map(|(_, user)| user).collect())
     }
@@ -1072,7 +1107,7 @@ impl Sqlite {
         let mut with_grants = Vec::with_capacity(users.len());
         for (id, mut user) in users {
             if version >= 3 {
-                user.grants = grants_of(conn, id, GrantColumns::of(version))?;
+                user.grants = grants_of(conn, id, GrantColumns::of_file(conn, version)?)?;
             }
             with_grants.push((id, user));
         }
@@ -1350,6 +1385,9 @@ mod tests {
         }
         assert!(has_column(&store, "user_grants", "limits"));
         assert!(has_column(&store, "key_grants", "limits"));
+        assert!(has_column(&store, "user_grants", "confirm"));
+        assert!(has_column(&store, "key_grants", "confirm"));
+        assert!(has_column(&store, "keys", "interaction"));
         assert_eq!(count(&store, "directory_version"), 1);
         let version: i64 = store
             .conn()
@@ -1373,7 +1411,8 @@ mod tests {
         // This is the file of the portal before version 7: the column `kind` did not exist.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+             ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -1442,6 +1481,139 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The approvals changed the base schema in place: a file of version 8 without the columns is refused.
+    #[test]
+    fn a_database_made_before_the_approvals_is_refused_with_a_message_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("portal-v8-approvals-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        for (drop_column, name) in [
+            (
+                "ALTER TABLE user_grants DROP COLUMN confirm;",
+                "user_grants.confirm",
+            ),
+            (
+                "ALTER TABLE key_grants DROP COLUMN confirm;",
+                "key_grants.confirm",
+            ),
+            (
+                "ALTER TABLE keys DROP COLUMN interaction;",
+                "keys.interaction",
+            ),
+        ] {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(drop_column).unwrap();
+            drop(conn);
+            let error = Sqlite::open(&path).err().expect("the file is refused");
+            assert!(
+                error.contains("before the approvals")
+                    && error.contains("user_grants.confirm")
+                    && error.contains("keys.interaction")
+                    && error.contains("5.1.0"),
+                "{name}: {error}"
+            );
+            // A new file has the columns, and the second start finds nothing to do.
+            std::fs::remove_file(&path).unwrap();
+            drop(Sqlite::open(&path).unwrap());
+            assert!(Sqlite::open(&path).is_ok(), "{name}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_database_at_version_seven_gains_the_approval_columns_and_the_interaction_follows_the_kind()
+    {
+        let dir = std::env::temp_dir().join(format!("portal-v7-approvals-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        store.insert_user(&user("alice", &["db"])).unwrap();
+        store.execute_raw(
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, kind)
+             SELECT 'mcp1', id, 'agent', zeroblob(32), 'ab12', 1, 'mcp' FROM users WHERE login = 'alice';
+             INSERT INTO keys (id, owner_id, name, digest, hint, created_at, kind)
+             SELECT 'api1', id, 'hook', x'0100000000000000000000000000000000000000000000000000000000000000', 'cd34', 1, 'api' FROM users WHERE login = 'alice';
+             INSERT INTO key_grants (key_id, action, resource_type, resource_id)
+             VALUES ('mcp1', 'access', 'service', 'db');",
+        );
+        drop(store);
+        // The file of the portal before the approvals, at version 7.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Sqlite::open(&path).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert!(has_column(&store, "user_grants", "confirm"));
+        assert!(has_column(&store, "key_grants", "confirm"));
+        assert!(has_column(&store, "keys", "interaction"));
+        let directory = store.load_directory().unwrap();
+        let interaction = |id: &str| {
+            directory
+                .keys
+                .iter()
+                .find(|k| k.id == id)
+                .unwrap()
+                .interaction
+        };
+        assert_eq!(
+            interaction("mcp1"),
+            crate::keys::Interaction::Conversational
+        );
+        assert_eq!(interaction("api1"), crate::keys::Interaction::OneShot);
+        assert!(directory
+            .keys
+            .iter()
+            .flat_map(|k| &k.grants)
+            .all(|g| !g.confirm));
+        // The column accepts the two values and no other.
+        let bad = store
+            .conn()
+            .execute("UPDATE keys SET interaction = 'chat'", []);
+        assert!(bad.is_err(), "the closed list of values");
+        let bad = store
+            .conn()
+            .execute("UPDATE key_grants SET confirm = 2", []);
+        assert!(bad.is_err(), "confirm is 0 or 1");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_import_reads_a_file_of_version_eight_that_has_no_approval_columns() {
+        let dir = std::env::temp_dir().join(format!("portal-dump-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        let store = Sqlite::open(&path).unwrap();
+        store.insert_user(&user("alice", &["db"])).unwrap();
+        store.execute_raw(
+            "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, kind)
+             SELECT 'api1', id, 'hook', zeroblob(32), 'cd34', 1, 'api' FROM users WHERE login = 'alice';
+             INSERT INTO key_grants (key_id, action, resource_type, resource_id)
+             VALUES ('api1', 'access', 'service', 'db');",
+        );
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;",
+        )
+        .unwrap();
+        drop(conn);
+        // The import opens the file as it is, with no change: it gives the defaults.
+        let dump = Sqlite::open_read_only(&path).unwrap().dump().unwrap();
+        assert_eq!(
+            dump.users[0].1.grants,
+            [Grant::new("access", "db").unwrap()]
+        );
+        assert_eq!(dump.keys[0].interaction, crate::keys::Interaction::OneShot);
+        assert!(dump.keys[0].grants.iter().all(|g| !g.confirm));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_database_at_version_seven_gains_the_remembered_flag_of_the_history() {
         let dir = std::env::temp_dir().join(format!("portal-v7-remembered-{}", std::process::id()));
@@ -1452,7 +1624,8 @@ mod tests {
         // This is the file of the portal before version 8: the column did not exist. The file has one open session.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+            "ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                VALUES (1, 'alice', 0, 0, 'ua', 10, 10);
              PRAGMA user_version = 7;",
@@ -1484,6 +1657,7 @@ mod tests {
         conn.execute_batch(
             "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
              DROP TABLE keys; DROP TABLE directory_version;
+             ALTER TABLE user_grants DROP COLUMN confirm;
              ALTER TABLE user_grants DROP COLUMN limits;
              ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 5;",

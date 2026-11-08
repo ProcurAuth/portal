@@ -73,40 +73,50 @@ fn within_capacity(tx: &Transaction<'_>, caps: &KeyCaps) -> rusqlite::Result<boo
 
 fn insert_key_grants(tx: &Transaction<'_>, key_id: &str, grants: &[Grant]) -> rusqlite::Result<()> {
     for grant in grants {
-        let (kind, id, path, limits) = grant_columns(grant);
+        let (kind, id, path, limits, confirm) = grant_columns(grant);
         tx.execute(
             "INSERT OR IGNORE INTO key_grants
-               (key_id, action, resource_type, resource_id, resource_path, limits)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![key_id, grant.action, kind, id, path, limits],
+               (key_id, action, resource_type, resource_id, resource_path, limits, confirm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![key_id, grant.action, kind, id, path, limits, confirm],
         )?;
     }
     Ok(())
 }
 
-fn key_grants_of(conn: &Connection, key_id: &str) -> Result<Vec<Grant>, String> {
+/// The grants of a key. `with_confirm`: the table has the column `confirm` (a file of version 8
+/// that the approvals did not make has none: the import reads it as `false`).
+fn key_grants_of(
+    conn: &Connection,
+    key_id: &str,
+    with_confirm: bool,
+) -> Result<Vec<Grant>, String> {
+    let confirm = if with_confirm { "confirm" } else { "0" };
     let rows = conn
-        .prepare_cached(
-            "SELECT action, resource_type, resource_id, resource_path, limits
-               FROM key_grants WHERE key_id = ?1",
-        )
+        .prepare_cached(&format!(
+            "SELECT action, resource_type, resource_id, resource_path, limits, {confirm}
+               FROM key_grants WHERE key_id = ?1"
+        ))
         .map_err(db)?
         .query_map([key_id], |row| {
-            Ok([
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ])
+            Ok((
+                [
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ],
+                row.get::<_, bool>(5)?,
+            ))
         })
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
     let mut grants = rows
         .iter()
-        .map(|[action, kind, id, path, limits]| {
-            grant_from_row(action, kind, id, path, limits)
+        .map(|([action, kind, id, path, limits], confirm)| {
+            grant_from_row(action, kind, id, path, limits, *confirm)
                 .map_err(|e| e.replacen("user_grants", "key_grants", 1))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -153,12 +163,20 @@ fn clock_seconds() -> f64 {
 
 /// The keys with their grants, oldest first.
 pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow>, String> {
-    // A file of version 6 has no column `kind`: its keys are MCP keys.
+    // A file of version 6 has no column `kind`: its keys are MCP keys. A file that the approvals
+    // did not make has no column `interaction` and no column `confirm`: the keys get the default
+    // of their kind, and no grant confirms.
     let kind = if with_kind { "k.kind" } else { "'mcp'" };
+    let interaction = if has_column(conn, "keys", "interaction")? {
+        "k.interaction"
+    } else {
+        "''"
+    };
+    let with_confirm = has_column(conn, "key_grants", "confirm")?;
     let rows = conn
         .prepare(&format!(
             "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                        k.last_check_at, k.check_count, {kind}
+                        k.last_check_at, k.check_count, {kind}, {interaction}
                    FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                   ORDER BY k.created_at, k.id",
         ))
@@ -175,19 +193,39 @@ pub(super) fn read_keys(conn: &Connection, with_kind: bool) -> Result<Vec<KeyRow
                 row.get::<_, Option<i64>>(7)?,
                 row.get::<_, i64>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })
         .map_err(db)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db)?;
     let mut keys = Vec::with_capacity(rows.len());
-    for (id, owner, name, digest, hint, created_at, expires_at, last_check_at, check_count, kind) in
-        rows
+    for (
+        id,
+        owner,
+        name,
+        digest,
+        hint,
+        created_at,
+        expires_at,
+        last_check_at,
+        check_count,
+        kind,
+        interaction,
+    ) in rows
     {
+        let kind = crate::keys::KeyKind::from_name(&kind)
+            .ok_or_else(|| format!("keys: the kind {kind:?} of the key {id} is not known"))?;
         keys.push(KeyRow {
-            kind: crate::keys::KeyKind::from_name(&kind)
-                .ok_or_else(|| format!("keys: the kind {kind:?} of the key {id} is not known"))?,
-            grants: key_grants_of(conn, &id)?,
+            interaction: if interaction.is_empty() {
+                crate::keys::Interaction::default_for(kind)
+            } else {
+                crate::keys::Interaction::from_name(&interaction).ok_or_else(|| {
+                    format!("keys: the interaction {interaction:?} of the key {id} is not known")
+                })?
+            },
+            kind,
+            grants: key_grants_of(conn, &id, with_confirm)?,
             id,
             owner,
             name,
@@ -392,16 +430,17 @@ impl Sqlite {
         let conn = self.conn();
         let mut statement = conn
             .prepare(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
-                            NULL AS revoked_at, k.owner_id AS owner_id, k.kind AS kind
+                            NULL AS revoked_at, k.owner_id AS owner_id, k.kind AS kind,
+                            k.interaction AS interaction
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, '', h.created_at, NULL, h.last_check_at,
-                            h.check_count, h.revoked_at, h.owner_id, NULL
+                            h.check_count, h.revoked_at, h.owner_id, NULL, NULL
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    )
                   WHERE (?1 OR (?2 IS NOT NULL AND login = ?2) OR (?3 AND owner_id IS NULL))
@@ -434,6 +473,9 @@ impl Sqlite {
                         kind: row
                             .get::<_, Option<String>>(9)?
                             .and_then(|name| crate::keys::KeyKind::from_name(&name)),
+                        interaction: row
+                            .get::<_, Option<String>>(10)?
+                            .and_then(|name| crate::keys::Interaction::from_name(&name)),
                         grants: Vec::new(),
                     })
                 },
@@ -442,7 +484,7 @@ impl Sqlite {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         for item in items.iter_mut().filter(|i| i.revoked_at.is_none()) {
-            item.grants = key_grants_of(&conn, &item.id)?;
+            item.grants = key_grants_of(&conn, &item.id, true)?;
         }
         Ok(items)
     }
@@ -507,8 +549,8 @@ impl Sqlite {
         }
         tx.execute(
             "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                               last_check_at, check_count, kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                               last_check_at, check_count, kind, interaction)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 key.id,
                 owner_id,
@@ -519,7 +561,8 @@ impl Sqlite {
                 key.expires_at,
                 key.last_check_at,
                 key.check_count,
-                key.kind.name()
+                key.kind.name(),
+                key.interaction.name()
             ],
         )
         .map_err(db)?;
@@ -536,6 +579,7 @@ impl Sqlite {
         id: &str,
         owner: Option<&str>,
         name: &str,
+        interaction: crate::keys::Interaction,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
@@ -555,8 +599,11 @@ impl Sqlite {
         if found.is_none() {
             return Err(KeyWriteError::UnknownKey);
         }
-        tx.execute("UPDATE keys SET name = ?2 WHERE id = ?1", params![id, name])
-            .map_err(db)?;
+        tx.execute(
+            "UPDATE keys SET name = ?2, interaction = ?3 WHERE id = ?1",
+            params![id, name, interaction.name()],
+        )
+        .map_err(db)?;
         tx.execute("DELETE FROM key_grants WHERE key_id = ?1", [id])
             .map_err(db)?;
         insert_key_grants(&tx, id, grants).map_err(db)?;

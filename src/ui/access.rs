@@ -1238,6 +1238,36 @@ mod tests {
     }
 
     #[test]
+    fn the_chip_confirm_shows_for_a_key_whose_grant_asks_or_whose_owner_side_asks() {
+        let cat = catalog();
+        let mut v = view(&cat);
+        // No grant asks: no chip.
+        let html = page(&v);
+        assert!(!zone_of(&html, "keys-title").contains("badge--confirm"));
+        // A grant of the key asks.
+        let keys = v.keys.as_mut().unwrap();
+        keys.lines[1].grants[1].grant = keys.lines[1].grants[1].grant.clone().with_confirm(true);
+        let html = page(&v);
+        let zone = zone_of(&html, "keys-title");
+        assert_eq!(zone.matches("badge--confirm").count(), 1, "{zone}");
+        assert!(
+            zone.contains(r#"title="1 permission asks for an approval""#),
+            "{zone}"
+        );
+        assert!(zone.contains("#i-lock"), "{zone}");
+        // The owner side asks for the other grant: the chip counts both and says why.
+        let keys = v.keys.as_mut().unwrap();
+        keys.lines[1].grants[0].imposed = true;
+        let html = page(&v);
+        assert!(
+            zone_of(&html, "keys-title").contains(
+                r#"title="2 permissions ask for an approval, 1 because the owner asks for it""#
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
     fn the_keys_list_has_kind_icons_a_bulk_revoke_and_a_new_key_link_and_no_button_in_a_row() {
         let cat = catalog();
         let html = page(&view(&cat));

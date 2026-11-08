@@ -509,7 +509,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.13 | 5.1.0 | L5, L9 | to fill |
 | 3.6.14 | 5.1.0 | L5, L8 | to fill |
 | 3.6.15 | 5.1.0 | L5, L8, L9 | to fill |
-| 3.6.16 | 5.1.0 | L2 | to fill |
+| 3.6.16 | 5.1.0 | L2 | `key_interaction_default_by_kind`, `config_interaction_values_closed`, `the_interaction_field_is_closed_and_an_absent_field_changes_nothing`, `grant_roundtrip_confirm_both_backends` |
 | 3.6.17 | 5.1.0 | L7, L9 | to fill |
 | 3.6.18 | 5.1.0 | L5 | to fill |
 | 3.6.19 | 5.1.0 | L5 | to fill |
@@ -519,7 +519,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.23 | 5.2.0 | L13 | to fill |
 | 3.6.24 | 5.2.0 | L13 | to fill |
 | 3.6.25 | 5.2.0 | L13 | to fill |
-| 3.7.1 | 5.1.0 | L2 | to fill |
+| 3.7.1 | 5.1.0 | L2 | `confirm_true_when_key_or_owner_grant_has_it`, `superadmin_owner_uses_key_confirm_only`, `config_confirm_on_portal_service_stops_start`, `config_confirm_on_access_stops_start` |
 | 3.7.2 | 5.1.0 | L6 | to fill |
 | 3.7.3 | 5.1.0 | L6 | to fill |
 | 3.7.4 | 5.1.0 | L3, L7 | L3: `frames::golden_approval_verifies_and_a_changed_op_does_not`. L7: to fill |
@@ -562,7 +562,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.9.5 | 5.1.0 | A3 | to fill |
 | 3.9.6 | 5.1.0 | L11 | to fill |
 | 3.10.1 | 5.1.0 | L3 | `frames::every_frame_rejects_unknown_field`, `invalid/client/answer-with-signature.json` in `frames::invalid_frames_are_refused` |
-| 3.10.2 | 5.1.0 | L2 | to fill |
+| 3.10.2 | 5.1.0 | L2 | `config_risk_key_is_refused_and_no_document_depends_on_a_risk_level` |
 | 3.10.3 | 5.1.0 | L7 | to fill |
 | 3.10.4 | 5.1.0 | L12 | to fill |
 | 3.10.5 | 5.1.0 | L4 | to fill |
@@ -602,7 +602,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
 | 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |
 | 6.9.3 | 5.1.0 | L6, L7 | to fill |
-| 6.9.4 | 5.1.0 | L2, L6 | to fill |
+| 6.9.4 | 5.1.0 | L2, L6 | L2: `config_confirm_is_a_member_of_a_grant_object_with_the_default_false`. L6: to fill |
 | 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: to fill (`consume_within`) |
 | 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6, L7, L9: to fill |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |

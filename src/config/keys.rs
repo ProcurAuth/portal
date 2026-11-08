@@ -30,7 +30,8 @@ pub enum Kind {
         max_items: usize,
     },
     /// A list of grants. An item is a quoted grant, or an object with the members `grant` (the
-    /// quoted grant) and `limits` (an object of limit values). `expected` describes an item.
+    /// quoted grant), `limits` (an object of limit values) and `confirm` (`true` or `false`).
+    /// `expected` describes an item.
     Grants {
         expected: &'static str,
         max_items: usize,
@@ -196,7 +197,7 @@ impl Key {
                 expected,
                 max_items,
             } => format!(
-                "a list of at most {max_items} grants. Each item is a quoted grant or an object with grant and limits: {expected}"
+                "a list of at most {max_items} grants. Each item is a quoted grant or an object with grant, limits and confirm: {expected}"
             ),
             Kind::Secret { .. } => "a secret".to_string(),
         }
@@ -1595,12 +1596,12 @@ pub static LABELED_KEYS: &[Key] = &[
         block: "user",
         name: "grants",
         kind: Kind::Grants {
-            expected: "a grant such as \"access on service:grafana\" or \"query.run.write on service:clickhouse-dash/host:local/database:analytics\": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded. To give limit values, write { grant = \"access on service:datastore\", limits = { requests = [ { amount = 300, window = \"minute\" } ] } }",
+            expected: "a grant such as \"access on service:grafana\" or \"query.run.write on service:clickhouse-dash/host:local/database:analytics\": an action, the word on, service: and the id of the service, then 0 to 4 segments /type:id with each id percent-encoded. To give limit values, write { grant = \"access on service:datastore\", limits = { requests = [ { amount = 300, window = \"minute\" } ] } }. To ask for an approval, write { grant = \"query.run.write on service:clickhouse-dash/host:local\", confirm = true }",
             max_items: 30_000,
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the user. The user is an account of the file, with no row in the database. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. The `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget value is only on the grant `access` on a service. A grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON. The number of grants is at most `users.max_grants`. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give.",
+        doc: "The grants of the user. The user is an account of the file, with no row in the database. `access` lets the user open the service. The other actions are the names that the service publishes at `/.well-known/procurauth/actions`. A grant names a node of the resource tree of the service: `<action> on service:<id>`, then 0 to 4 segments `/<type>:<id>`, for example `query.run.read on service:clickhouse-dash/host:local/database:analytics`. A grant covers its node and each node below it. A type starts with a-z, then has a-z, 0-9 and '_', 1 to 32 characters, and is not `service`. Each id is percent-encoded: each byte outside A-Z a-z 0-9 - . _ ~ is %XX with upper-case hex digits, for example `bucket:a%2Fb` for the id `a/b`. Another encoding of the same id stops the start. A decoded id has 1 to 256 bytes, without a control character. The action `access` has grants on the service only. The `confirm` member of an object is `true` or `false`, and the default is `false`. With `confirm = true`, each use of the action needs the approval of a person. A grant of the service `portal` or of the action `access` with `confirm = true` stops the start. The `limits` object holds one member for each limit. A ceiling is a whole number. A budget is a list of objects with `amount` and `window` (`second`, `minute`, `hour` or `day`). A budget value is only on the grant `access` on a service. A grant has at most 8 limit values. A value is at most 1,000,000,000. The limit values take at most 1024 bytes as compact JSON. The number of grants is at most `users.max_grants`. At start, the server checks only the form of each grant: the services and their trees of types are known at run time. The Services page of the settings shows a grant that does not follow the tree of its service. The PDP does not apply this grant. A block `user` stops the server when it gives `keys.own.create`, or an action that needs another action that it does not give.",
     },
     Key {
         block: "user",
@@ -1619,7 +1620,15 @@ pub static LABELED_KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::LabeledBlock,
-        doc: "The grants of the key, in the form of `user.grants`. A key holds at most 512 grants. A grant of an action of the service `portal` stops the server. The decision for a key never gives more than the grants of its owner.",
+        doc: "The grants of the key, in the form of `user.grants`. A key holds at most 512 grants. A grant of an action of the service `portal` stops the server. The decision for a key never gives more than the grants of its owner. The key needs an approval when a grant of the key or a grant of its owner has `confirm = true`.",
+    },
+    Key {
+        block: "key",
+        name: "interaction",
+        kind: Kind::Enum(&["conversational", "one_shot"]),
+        presence: Presence::Default("conversational"),
+        when: When::LabeledBlock,
+        doc: "What the key can do when the server asks a person. `conversational`: an agent that can discuss and read free text. `one_shot`: a system that decides without free text and gets closed questions only. The agent cannot change this value.",
     },
     Key {
         block: "key",
@@ -1705,6 +1714,14 @@ pub static LABELED_KEYS: &[Key] = &[
         presence: Presence::Default("false"),
         when: When::LabeledBlock,
         doc: "`true`: the key can send an alert to any account (`POST /api/v1/alerts` with the field `user`). The owner must hold `alert.send_user` on `service:portal`. `false`: the key sends to groups only.",
+    },
+    Key {
+        block: "api_key",
+        name: "interaction",
+        kind: Kind::Enum(&["conversational", "one_shot"]),
+        presence: Presence::Default("one_shot"),
+        when: When::LabeledBlock,
+        doc: "What the key can do when the server asks a person. `one_shot`: a system that decides without free text and gets closed questions only. `conversational`: an agent that can discuss and read free text. The service cannot change this value.",
     },
     Key {
         block: "api_key",
@@ -2260,7 +2277,7 @@ fn type_cell(key: &Key) -> String {
             expected,
             max_items,
         } => format!(
-            "list of at most {max_items} grants, each a quoted text or an object with `grant` and `limits`: {expected}"
+            "list of at most {max_items} grants, each a quoted text or an object with `grant`, `limits` and `confirm`: {expected}"
         ),
         Kind::Secret { .. } => format!(
             "secret: give `{0}_env` (a variable name) or `{0}_file` (an absolute path), not both",

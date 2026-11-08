@@ -78,6 +78,9 @@ pub enum Cover {
 pub struct GrantLine {
     pub grant: Grant,
     pub cover: Cover,
+    /// A grant of the owner with `confirm` covers the node: the side of the owner asks for the
+    /// approval whatever the grant of the key says.
+    pub imposed: bool,
 }
 
 /// One line of the page: a key, or the summary row of a revoked key.
@@ -103,6 +106,8 @@ pub struct KeyLine {
     pub grants: Vec<GrantLine>,
     /// Services where the key has a node grant and no grant `access` (portal 4.2b).
     pub no_access: Vec<String>,
+    /// The interaction of a key that exists. `None` for a revoked key.
+    pub interaction: Option<crate::keys::Interaction>,
     /// The user can change the key: the row has a link to the page of the change.
     pub can_change: bool,
 }
@@ -166,6 +171,8 @@ pub struct KeysView<'a> {
     pub max_lifetime: Option<u64>,
     /// The name that the form of a new key has when it copies a key (portal 4.1a).
     pub copy_name: String,
+    /// The interaction that the form of a key shows.
+    pub interaction: Option<crate::keys::Interaction>,
     /// The id of the service that has a right and no `access`, when the server refused the form
     /// for this reason. The form shows again with the values that the person typed.
     pub needs_access: Option<String>,
@@ -198,6 +205,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "bad_limits" => (
             "A limit value is not valid for its permission.",
+            false,
+        ),
+        "bad_interaction" => (
+            "The interaction of a key is conversational or one shot.",
             false,
         ),
         "needs_access" => (
@@ -330,6 +341,7 @@ fn can_use(groups: &[(String, String)], line: &KeyLine) -> (String, String) {
             "A service of this key has no access permission",
         ));
     }
+    out.push_str(&confirm_chip(line));
     (
         format!(r#"<span class="canuse">{out}</span>"#),
         plain.join("; "),
@@ -394,6 +406,31 @@ pub(super) fn key_groups(line: &KeyLine) -> Vec<&str> {
         .collect()
 }
 
+/// The chip `confirm` of a key that has a grant that asks for an approval: a grant of the key with
+/// `confirm`, or a grant that the side of the owner makes ask. Empty for a key with none. It sits
+/// in the column "Can use", with the other marks, because the name of the key is cut when it is long.
+fn confirm_chip(line: &KeyLine) -> String {
+    let count = line
+        .grants
+        .iter()
+        .filter(|g| g.grant.confirm || g.imposed)
+        .count();
+    if count == 0 {
+        return String::new();
+    }
+    let owner = line.grants.iter().filter(|g| g.imposed).count();
+    let title = match (count, owner) {
+        (1, 0) => "1 permission asks for an approval".to_string(),
+        (n, 0) => format!("{n} permissions ask for an approval"),
+        (n, o) => format!("{n} permissions ask for an approval, {o} because the owner asks for it"),
+    };
+    format!(
+        r#"<span class="badge badge--confirm" title="{}">{}confirm</span>"#,
+        html_escape(&title),
+        icon("lock")
+    )
+}
+
 fn key_row(out: &mut String, list: &KeysList, bulk: &Bulk, boxes: bool, line: &KeyLine) {
     // One line: the kind, the name, what the key can use, when it ends, when it was used. The id,
     // the hint and the creation date are in the tooltip of the name.
@@ -437,9 +474,13 @@ fn key_row(out: &mut String, list: &KeysList, bulk: &Bulk, boxes: bool, line: &K
     } else {
         format!(" {}", line.state.icon())
     };
+    let interaction = match line.interaction {
+        Some(value) => format!(" Interaction: {}.", value.label().to_lowercase()),
+        None => String::new(),
+    };
     let _ = write!(
         out,
-        r#"<td>{kind_cell}</td><td title="Id {}.{hint}{created}">{}{}{}"#,
+        r#"<td>{kind_cell}</td><td title="Id {}.{hint}{created}{interaction}">{}{}{}"#,
         html_escape(&line.id),
         html_escape(&line.name),
         state,
@@ -703,6 +744,36 @@ fn kind_field(view: &KeysView<'_>, editing: bool) -> String {
     )
 }
 
+/// The choice of the interaction of a key. Two radio buttons that look like the segmented control:
+/// the choice works without script. The key kind gives the default.
+fn interaction_field(view: &KeysView<'_>) -> String {
+    let Some(kind) = view.kind else {
+        return String::new();
+    };
+    let current = view
+        .interaction
+        .unwrap_or(crate::keys::Interaction::default_for(kind));
+    let mut options = String::new();
+    for each in crate::keys::Interaction::ALL {
+        let _ = write!(
+            options,
+            r#"<label class="choiceGroup__option" title="{}"><input class="visually-hidden" type="radio" name="interaction" value="{}"{}>{}</label>"#,
+            match each {
+                crate::keys::Interaction::Conversational =>
+                    "The agent can discuss with the person and send free text",
+                crate::keys::Interaction::OneShot =>
+                    "A system that decides with no free text. It gets closed questions only",
+            },
+            each.name(),
+            if each == current { " checked" } else { "" },
+            each.label()
+        );
+    }
+    format!(
+        r#"<div class="field"><span class="field__label" id="key-interaction-label">Interaction</span><div class="choiceGroup" role="radiogroup" aria-labelledby="key-interaction-label">{options}</div></div>"#
+    )
+}
+
 /// The message under a field that a refused form names, and the attributes that tie it to it.
 fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, String) {
     match view.notice.filter(|n| !n.ok && view.field == Some(field)) {
@@ -800,14 +871,15 @@ fn form_page(view: &KeysView<'_>) -> String {
     // as they are before the choice.
     let _ = write!(
         out,
-        r#"<div class="fgrid fgrid--key">{}<div class="field"><label class="field__label" for="key-name">Name</label><input class="uiInput {name_class}" type="text" id="key-name" name="name" value="{}" maxlength="64" required placeholder="1 to 64 characters" autocomplete="off"{}>{name_error}</div>"#,
+        r#"<div class="fgrid fgrid--key">{}<div class="field"><label class="field__label" for="key-name">Name</label><input class="uiInput {name_class}" type="text" id="key-name" name="name" value="{}" maxlength="64" required placeholder="1 to 64 characters" autocomplete="off"{}>{name_error}</div>{}"#,
         kind_field(view, edit.is_some()),
         html_escape(name),
         if name_error.is_empty() {
             ""
         } else {
             r#" aria-invalid="true" aria-describedby="key-name-error""#
-        }
+        },
+        interaction_field(view)
     );
     if edit.is_none() {
         let hint = match view.max_lifetime {
@@ -941,6 +1013,7 @@ mod tests {
             expires_at: "2026-12-01T00:00:00Z".into(),
             max_lifetime: None,
             copy_name: String::new(),
+            interaction: None,
             needs_access: None,
         }
     }
@@ -1154,5 +1227,56 @@ mod tests {
         let html = page(&view(Pane::New, &BOTH));
         assert!(!html.contains(" style=") && !html.contains("<style"));
         assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn the_form_of_a_key_has_the_choice_of_the_interaction_with_the_default_of_its_kind() {
+        let checked = |html: &str| -> Vec<String> {
+            html.match_indices(r#"name="interaction" value=""#)
+                .filter_map(|(at, _)| {
+                    let rest = &html[at + r#"name="interaction" value=""#.len()..];
+                    let value = &rest[..rest.find('"').unwrap()];
+                    let tag = &rest[..rest.find('>').unwrap()];
+                    tag.contains("checked").then(|| value.to_string())
+                })
+                .collect()
+        };
+        // The form of a new key without a typed value: the default of the kind.
+        for (kind, expected) in [(KeyKind::Mcp, "conversational"), (KeyKind::Api, "one_shot")] {
+            let mut v = view(Pane::New, &BOTH);
+            v.kind = Some(kind);
+            let html = page(&v);
+            assert_eq!(checked(&html), [expected], "{kind:?}");
+            // Both choices are radio buttons of one group, in labels, with no script.
+            assert_eq!(
+                html.matches(r#"type="radio" name="interaction""#).count(),
+                2
+            );
+            assert!(html.contains(r#"role="radiogroup" aria-labelledby="key-interaction-label""#));
+            assert!(html.contains(">Conversational</label>") && html.contains(">One shot</label>"));
+        }
+        // A key that exists shows its own value, and a typed value wins on a refused form.
+        let mut edit = view(
+            Pane::Edit(EditTarget {
+                id: "k1".into(),
+                name: "ci".into(),
+            }),
+            &BOTH,
+        );
+        edit.kind = Some(KeyKind::Mcp);
+        edit.interaction = Some(crate::keys::Interaction::OneShot);
+        assert_eq!(checked(&page(&edit)), ["one_shot"]);
+        // The radio group is inside the form of the key: it posts with the other fields.
+        let html = page(&edit);
+        let form = &html[html.find(r#"id="key-form""#).unwrap()..];
+        let form = &form[..form.find("</form>").unwrap()];
+        assert!(form.contains(r#"name="interaction""#));
+    }
+
+    #[test]
+    fn a_page_without_a_kind_has_no_interaction_field() {
+        let mut v = view(Pane::New, &[]);
+        v.kind = None;
+        assert!(!page(&v).contains("interaction"));
     }
 }

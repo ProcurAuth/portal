@@ -33,14 +33,16 @@ const MAX_LOGIN_ROWS: i64 = 20_000;
 
 /// A row of `user_grants` as a grant. The column `resource_path` holds the segments after the
 /// service in their text form (`host:local/database:analytics`). It is empty for a grant on the
-/// whole service. The column `limits` holds the limit values as JSON. A row that is not a valid
-/// grant stops the read: the database holds only what the servers wrote.
+/// whole service. The column `limits` holds the limit values as JSON. The column `confirm` holds
+/// the property of the same name. A row that is not a valid grant stops the read: the database
+/// holds only what the servers wrote.
 fn grant_from_row(
     action: &str,
     kind: &str,
     id: &str,
     path: &str,
     limits: &str,
+    confirm: bool,
 ) -> Result<Grant, String> {
     if kind != crate::grants::SERVICE_TYPE {
         return Err(format!("user_grants: unknown resource type {kind:?}"));
@@ -48,18 +50,19 @@ fn grant_from_row(
     let limits = crate::limits::Limits::from_json(limits)
         .map_err(|e| format!("user_grants: the limits of a grant: {e}"))?;
     Grant::from_path_text(action, id, path)
-        .map(|grant| grant.with_limits(limits))
+        .map(|grant| grant.with_limits(limits).with_confirm(confirm))
         .map_err(|e| format!("user_grants: {e}"))
 }
 
-/// The columns of a grant in `user_grants`: `resource_type`, `resource_id`, `resource_path` and
-/// `limits`.
-fn grant_columns(grant: &Grant) -> (&'static str, &str, String, String) {
+/// The columns of a grant in `user_grants`: `resource_type`, `resource_id`, `resource_path`,
+/// `limits` and `confirm`.
+fn grant_columns(grant: &Grant) -> (&'static str, &str, String, String, bool) {
     (
         crate::grants::SERVICE_TYPE,
         grant.service.as_str(),
         grant.path_text(),
         grant.limits.to_json(),
+        grant.confirm,
     )
 }
 
@@ -116,6 +119,8 @@ pub struct KeyRow {
     pub check_count: i64,
     /// The kind of the key: the prefix of its text (portal 5.1).
     pub kind: crate::keys::KeyKind,
+    /// What the key can do when the portal asks a person (design of the dialogue, 1.6).
+    pub interaction: crate::keys::Interaction,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
@@ -178,6 +183,8 @@ pub struct KeyListItem {
     pub revoked_at: Option<i64>,
     /// The kind of a key that exists. `None` for a revoked key: its summary row has no kind.
     pub kind: Option<crate::keys::KeyKind>,
+    /// The interaction of a key that exists. `None` for a revoked key.
+    pub interaction: Option<crate::keys::Interaction>,
     /// The grants of a key that exists. Empty for a revoked key.
     pub grants: Vec<Grant>,
 }
@@ -702,17 +709,18 @@ impl Store {
         backend!(self.insert_key(key, caps))
     }
 
-    /// Changes the name and the grants of a key (portal 5.8d). `owner` is the login of the owner:
-    /// the key must be his. `None` is the key of the superadmin.
+    /// Changes the name, the interaction and the grants of a key (portal 5.8d). `owner` is the login
+    /// of the owner: the key must be his. `None` is the key of the superadmin.
     pub fn update_key(
         &self,
         id: &str,
         owner: Option<&str>,
         name: &str,
+        interaction: crate::keys::Interaction,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
-        backend!(self.update_key(id, owner, name, grants, caps))
+        backend!(self.update_key(id, owner, name, interaction, grants, caps))
     }
 
     /// Revokes a key: deletes it with its grants and its counters, and keeps one summary row.
@@ -1183,6 +1191,7 @@ mod tests {
         grants.sort();
         KeyRow {
             kind: crate::keys::KeyKind::Mcp,
+            interaction: crate::keys::Interaction::Conversational,
             id: id.into(),
             owner: owner.map(Into::into),
             name: format!("key {id}"),
@@ -1397,6 +1406,79 @@ mod tests {
     }
 
     #[test]
+    fn grant_roundtrip_confirm_both_backends() {
+        use crate::keys::Interaction;
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let asking = Grant::from_path_text("data.write", "db", "host:prod")
+                .unwrap()
+                .with_confirm(true);
+            let plain = Grant::from_path_text("data.write", "db", "host:dev").unwrap();
+            let mut grants = vec![asking.clone(), plain.clone()];
+            grants.sort();
+            let mut alice = user("alice", &[]);
+            alice.grants = grants.clone();
+            store.insert_user(&alice).unwrap();
+            // The grants of an account come back with confirm.
+            let back = store.load_directory().unwrap().users;
+            assert_eq!(back[0].grants, grants);
+            assert!(back[0].grants.iter().any(|g| g.confirm));
+            assert!(back[0].grants.iter().any(|g| !g.confirm));
+            // A change of the grants keeps the property too.
+            let flipped = vec![
+                asking.clone().with_confirm(false),
+                plain.clone().with_confirm(true),
+            ];
+            let mut flipped = flipped;
+            flipped.sort();
+            store.update_user("alice", None, Some(&flipped)).unwrap();
+            assert_eq!(store.load_directory().unwrap().users[0].grants, flipped);
+            // The grants of a key, and its interaction.
+            let mut one = key("k1", Some("alice"), 1);
+            one.grants = grants.clone();
+            one.interaction = Interaction::OneShot;
+            store.insert_key(&one, &caps()).unwrap();
+            let mut two = key("k2", Some("alice"), 2);
+            two.kind = crate::keys::KeyKind::Api;
+            two.interaction = Interaction::Conversational;
+            store.insert_key(&two, &caps()).unwrap();
+            let directory = store.load_directory().unwrap();
+            let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
+            assert_eq!(*k1, one, "grants with confirm and the interaction");
+            let k2 = directory.keys.iter().find(|k| k.id == "k2").unwrap();
+            assert_eq!(k2.interaction, Interaction::Conversational);
+            assert!(k2.grants.iter().all(|g| !g.confirm));
+            // The list of the keys has the interaction and the grants with confirm.
+            let items = store.list_keys(KeyScope::All, None, 10).unwrap();
+            let item = items.iter().find(|i| i.id == "k1").unwrap();
+            assert_eq!(item.interaction, Some(Interaction::OneShot));
+            assert_eq!(item.grants, grants);
+            // The change of a key writes the interaction and the grants.
+            store
+                .update_key(
+                    "k1",
+                    Some("alice"),
+                    "k1",
+                    Interaction::Conversational,
+                    std::slice::from_ref(&plain),
+                    &caps(),
+                )
+                .unwrap();
+            let after = store.load_directory().unwrap();
+            let k1 = after.keys.iter().find(|k| k.id == "k1").unwrap();
+            assert_eq!(k1.interaction, Interaction::Conversational);
+            assert_eq!(k1.grants, [plain]);
+            // A revoked key has no interaction in the list.
+            assert!(store.revoke_key("k2", None, NOW).unwrap());
+            let items = store.list_keys(KeyScope::All, None, 10).unwrap();
+            assert_eq!(
+                items.iter().find(|i| i.id == "k2").unwrap().interaction,
+                None
+            );
+        });
+    }
+
+    #[test]
     fn a_user_has_at_most_max_per_user_active_keys() {
         each_backend(|backend| {
             let store = backend.fresh();
@@ -1486,15 +1568,38 @@ mod tests {
                 (Some("alice"), "missing"),
             ] {
                 assert_eq!(
-                    store.update_key(id, owner, "renamed", &one, &caps()),
+                    store.update_key(
+                        id,
+                        owner,
+                        "renamed",
+                        crate::keys::Interaction::Conversational,
+                        &one,
+                        &caps()
+                    ),
                     Err(KeyWriteError::UnknownKey),
                     "{owner:?} {id}"
                 );
             }
             store
-                .update_key("k1", Some("alice"), "renamed", &one, &caps())
+                .update_key(
+                    "k1",
+                    Some("alice"),
+                    "renamed",
+                    crate::keys::Interaction::Conversational,
+                    &one,
+                    &caps(),
+                )
                 .unwrap();
-            store.update_key("s1", None, "root", &one, &caps()).unwrap();
+            store
+                .update_key(
+                    "s1",
+                    None,
+                    "root",
+                    crate::keys::Interaction::Conversational,
+                    &one,
+                    &caps(),
+                )
+                .unwrap();
             let directory = store.load_directory().unwrap();
             let k1 = directory.keys.iter().find(|k| k.id == "k1").unwrap();
             assert_eq!((k1.name.as_str(), &k1.grants), ("renamed", &one));

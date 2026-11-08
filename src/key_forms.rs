@@ -9,19 +9,22 @@
 //! - `expires_at`: a date and a time in UTC, or empty for no expiry date (only for a new key);
 //! - `grant<n>`: the text form of a grant. `<n>` is a whole number from 0, with no leading zero;
 //! - `limit<n>.<name>`: the value of a ceiling of the grant `<n>`;
-//! - `limit<n>.<name>.<window>`: the amount of one window of a budget of the grant `<n>`.
+//! - `limit<n>.<name>.<window>`: the amount of one window of a budget of the grant `<n>`;
+//! - `confirm<n>`: the value `1` when the grant `<n>` has `confirm`. The field is absent otherwise;
+//! - `interaction`: `conversational` or `one_shot`, the interaction of the key (only in the form of
+//!   a key).
 //!
 //! A field that is unknown, or a field name that has none of these forms, is a bad request (HTTP
 //! 400). The caller reads the fields with `parse_form`, which refuses a repeated field.
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::actions::Document;
 use crate::grants::{Grant, Segment, ACCESS};
-use crate::keys::KeyKind;
+use crate::keys::{Interaction, KeyKind};
 use crate::limits::{Budget, Item, Limits, Value, Window};
 use crate::portal_actions;
 
@@ -50,6 +53,10 @@ pub struct RawForm {
     pub expires_at: Option<String>,
     pub grants: BTreeMap<usize, String>,
     pub limits: BTreeMap<usize, Vec<LimitField>>,
+    /// The numbers of the grants that have the field `confirm<n>`.
+    pub confirm: BTreeSet<usize>,
+    /// The text of the field `interaction`. `None` when the form has no such field.
+    pub interaction: Option<String>,
 }
 
 /// A form that the rules accept.
@@ -58,6 +65,9 @@ pub struct KeyForm {
     pub name: String,
     /// The expiry date. `None`: no expiry date.
     pub expires_at: Option<i64>,
+    /// The interaction of the form. `None`: the form has no such field, so a new key gets the
+    /// default of its kind and a key that exists keeps its value.
+    pub interaction: Option<Interaction>,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
@@ -84,8 +94,15 @@ pub fn read(mut fields: HashMap<String, String>, edit: bool) -> Result<RawForm, 
     if !edit {
         form.expires_at = fields.remove("expires_at");
     }
+    form.interaction = fields.remove("interaction");
     for (field, value) in fields {
-        if let Some(rest) = field.strip_prefix("grant") {
+        if let Some(rest) = field.strip_prefix("confirm") {
+            let n = number(rest).ok_or_else(|| format!("the field {field:?} is not known"))?;
+            if value != "1" {
+                return Err(format!("the field {field:?} has only the value 1"));
+            }
+            form.confirm.insert(n);
+        } else if let Some(rest) = field.strip_prefix("grant") {
             let n = number(rest).ok_or_else(|| format!("the field {field:?} is not known"))?;
             if value.len() > MAX_GRANT_TEXT {
                 return Err(format!("the field {field:?} is too long"));
@@ -144,6 +161,8 @@ pub const BAD_EXPIRY: &str = "bad_expiry";
 pub const BAD_GRANT: &str = "bad_grant";
 pub const NOT_COVERED: &str = "not_covered";
 pub const BAD_LIMITS: &str = "bad_limits";
+/// The field `interaction` has a value that is not known.
+pub const BAD_INTERACTION: &str = "bad_interaction";
 /// A right on a service, and no grant `access` on this service.
 pub const NEEDS_ACCESS: &str = "needs_access";
 
@@ -331,6 +350,11 @@ fn check_grants_apart(
             Some(fields) => limits_of(fields)?,
             None => Limits::new(),
         };
+        let confirm = raw.confirm.contains(&n);
+        // The service `portal` and the action `access` have no approval.
+        if confirm && crate::grants::confirm_refusal(&grant).is_some() {
+            return Err(BAD_GRANT);
+        }
         // An external service has no document and no action. A key never holds a right on it. An account holds
         // `access` on the whole service and nothing else, whatever it held before.
         if (ctx.is_external)(&grant.service)
@@ -346,10 +370,10 @@ fn check_grants_apart(
         if holder == Holder::Account
             && ctx.old_grants.is_some_and(|old| {
                 old.iter()
-                    .any(|o| o.same_node(&grant) && o.limits == limits)
+                    .any(|o| o.same_node(&grant) && o.limits == limits && o.confirm == confirm)
             })
         {
-            grants.push(grant.with_limits(limits));
+            grants.push(grant.with_limits(limits).with_confirm(confirm));
             continue;
         }
         if let Holder::Key(kind) = holder {
@@ -382,6 +406,10 @@ fn check_grants_apart(
             if grant.path.is_empty() && !action.resource_types.iter().any(|t| t == "service") {
                 return Err(BAD_GRANT);
             }
+            // A grant can ask for an approval only when the document says that the action can.
+            if confirm && !action.approval_optional() {
+                return Err(BAD_GRANT);
+            }
             document.check_grant(&grant).map_err(|_| BAD_GRANT)?;
             // The nodes of the service `portal` are the groups of the inbox and the kinds of key.
             if grant.service == portal_actions::SERVICE
@@ -407,7 +435,7 @@ fn check_grants_apart(
         if compact.len() > crate::limits::MAX_JSON_BYTES {
             return Err(BAD_LIMITS);
         }
-        grants.push(grant.with_limits(limits));
+        grants.push(grant.with_limits(limits).with_confirm(confirm));
     }
     // A limit field of a grant number that has no grant gives no value.
     for (n, fields) in &raw.limits {
@@ -416,6 +444,14 @@ fn check_grants_apart(
         {
             return Err(BAD_LIMITS);
         }
+    }
+    // A confirm field of a grant number that has no grant is a fault of the form.
+    if raw
+        .confirm
+        .iter()
+        .any(|n| raw.grants.get(n).is_none_or(|t| t.is_empty()))
+    {
+        return Err(BAD_GRANT);
     }
     Ok(grants)
 }
@@ -440,9 +476,14 @@ pub fn check(raw: &RawForm, ctx: &Context<'_>, kind: KeyKind) -> Result<KeyForm,
         }
     }
     grants.sort();
+    let interaction = match raw.interaction.as_deref() {
+        None => None,
+        Some(text) => Some(Interaction::from_name(text).ok_or(BAD_INTERACTION)?),
+    };
     Ok(KeyForm {
         name: raw.name.clone(),
         expires_at,
+        interaction,
         grants,
     })
 }
@@ -461,7 +502,9 @@ mod tests {
                                     {"name":"database","parent":"host","description":"d"}],
                   "actions":[{"name":"data.read","resource_types":["host","database"],"description":"r",
                               "limits":["requests","max_rows"]},
-                             {"name":"data.admin","resource_types":["service"],"description":"a"}],
+                             {"name":"data.admin","resource_types":["service"],"description":"a"},
+                             {"name":"data.purge","resource_types":["host","database"],"description":"w",
+                              "approval":"optional"}],
                   "limits":[{"name":"requests","label":"R","description":"d","unit":"request","kind":"budget"},
                             {"name":"max_rows","label":"M","description":"d","unit":"row","kind":"ceiling","min":1,"max":100000}]}"#,
             )
@@ -1217,5 +1260,135 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_grant_of_a_form_asks_for_an_approval_only_when_its_action_allows_it() {
+        let owner = grants(&[
+            "access on service:datastore",
+            "data.purge on service:datastore",
+            "data.read on service:datastore",
+        ]);
+        let form = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![
+                ("name", "n"),
+                ("grant0", "access on service:datastore"),
+                ("grant1", "data.purge on service:datastore/host:prod"),
+                ("grant2", "data.read on service:datastore/host:prod"),
+            ];
+            pairs.extend_from_slice(extra);
+            run(&pairs, Some(&owner), None, None)
+        };
+        // Without the field, no grant asks.
+        assert!(form(&[]).unwrap().grants.iter().all(|g| !g.confirm));
+        // The field confirm1 sets the property on the grant 1 only.
+        let done = form(&[("confirm1", "1")]).unwrap();
+        let asking: Vec<&str> = done
+            .grants
+            .iter()
+            .filter(|g| g.confirm)
+            .map(|g| g.action.as_str())
+            .collect();
+        assert_eq!(asking, ["data.purge"]);
+        // An action that the document does not mark with approval optional cannot ask.
+        assert_eq!(form(&[("confirm2", "1")]), Err(BAD_GRANT));
+        // The action `access` cannot ask, and a blank grant has no confirm.
+        assert_eq!(form(&[("confirm0", "1")]), Err(BAD_GRANT));
+        assert_eq!(form(&[("confirm5", "1")]), Err(BAD_GRANT));
+        // The service `portal` cannot ask, even for an action that a key may hold.
+        let alerts = run_api(
+            &[
+                ("name", "n"),
+                ("grant0", "alert.send on service:portal/inbox_group:infra"),
+                ("confirm0", "1"),
+            ],
+            None,
+        );
+        assert_eq!(alerts, Err(BAD_GRANT));
+        // The field has one value: 1. Another value is a bad request.
+        for bad in ["0", "true", "", "yes", "2"] {
+            assert!(
+                read(
+                    fields(&[("name", "n"), ("grant0", "x"), ("confirm0", bad)]),
+                    false
+                )
+                .is_err(),
+                "{bad:?}"
+            );
+        }
+        // A number that is not a whole number without a leading zero is a bad request too.
+        for bad in ["confirm", "confirm01", "confirm-1", "confirmx"] {
+            assert!(
+                read(fields(&[("name", "n"), (bad, "1")]), false).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_interaction_field_is_closed_and_an_absent_field_changes_nothing() {
+        let owner = grants(&["access on service:datastore"]);
+        let run_with = |value: Option<&str>| {
+            let mut pairs = vec![("name", "n"), ("grant0", "access on service:datastore")];
+            if let Some(value) = value {
+                pairs.push(("interaction", value));
+            }
+            run(&pairs, Some(&owner), None, None)
+        };
+        assert_eq!(run_with(None).unwrap().interaction, None);
+        assert_eq!(
+            run_with(Some("one_shot")).unwrap().interaction,
+            Some(Interaction::OneShot)
+        );
+        assert_eq!(
+            run_with(Some("conversational")).unwrap().interaction,
+            Some(Interaction::Conversational)
+        );
+        for bad in ["", "oneshot", "One_Shot", "chat", " one_shot"] {
+            assert_eq!(run_with(Some(bad)), Err(BAD_INTERACTION), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_account_keeps_a_held_confirm_that_the_document_no_longer_names_and_can_remove_it() {
+        // The account holds `data.read` with confirm. The document does not mark the action now.
+        let held = vec![Grant::parse("data.read on service:datastore/host:prod")
+            .unwrap()
+            .with_confirm(true)];
+        let document = document();
+        let lookup = move |service: &str| (service == "datastore").then(|| Arc::clone(&document));
+        let exists = |service: &str| service == "datastore";
+        let check_form = |pairs: &[(&str, &str)]| {
+            let raw = read(fields(pairs), true).unwrap();
+            check_grants(
+                &raw,
+                &Context {
+                    now: NOW,
+                    owner_grants: None,
+                    max_lifetime: None,
+                    document: &lookup,
+                    service_exists: &exists,
+                    is_external: &|_| false,
+                    old_grants: Some(&held),
+                },
+                Holder::Account,
+            )
+        };
+        let base = [
+            ("grant0", "access on service:datastore"),
+            ("grant1", "data.read on service:datastore/host:prod"),
+        ];
+        let mut with_confirm = base.to_vec();
+        with_confirm.push(("confirm1", "1"));
+        let kept = check_form(&with_confirm).unwrap();
+        assert!(kept.iter().any(|g| g.action == "data.read" && g.confirm));
+        // The form without the field removes the property.
+        let removed = check_form(&base).unwrap();
+        assert!(removed.iter().all(|g| !g.confirm));
+        // A new confirm on this action is refused: the document does not allow it.
+        let mut other = base.to_vec();
+        other[1] = ("grant1", "data.read on service:datastore/host:test");
+        other.push(("confirm1", "1"));
+        assert_eq!(check_form(&other), Err(BAD_GRANT));
     }
 }

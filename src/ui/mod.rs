@@ -972,9 +972,11 @@ fn demo_keys() -> keys::KeysList {
             .map(|g| keys::GrantLine {
                 grant: crate::grants::Grant::parse(g).unwrap(),
                 cover: keys::Cover::Full,
+                imposed: false,
             })
             .collect(),
         no_access: Vec::new(),
+        interaction: Some(crate::keys::Interaction::default_for(kind)),
         can_change: owner.is_none(),
     };
     keys::KeysList {

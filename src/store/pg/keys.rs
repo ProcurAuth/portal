@@ -80,11 +80,11 @@ pub(super) fn insert_key_grants(
     grants: &[Grant],
 ) -> Result<(), postgres::Error> {
     for grant in grants {
-        let (kind, id, path, limits) = grant_columns(grant);
+        let (kind, id, path, limits, confirm) = grant_columns(grant);
         tx.execute(
-            "INSERT INTO key_grants (key_id, action, resource_type, resource_id, resource_path, limits)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-            &[&key_id, &grant.action, &kind, &id, &path, &limits],
+            "INSERT INTO key_grants (key_id, action, resource_type, resource_id, resource_path, limits, confirm)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+            &[&key_id, &grant.action, &kind, &id, &path, &limits, &confirm],
         )?;
     }
     Ok(())
@@ -314,17 +314,17 @@ impl Pg {
         };
         let (mut items, grants) = self.run(|c| {
             let rows = c.query(
-                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind
+                "SELECT id, login, name, hint, created_at, expires_at, last_check_at, check_count, revoked_at, kind, interaction
                    FROM (
                      SELECT k.id AS id, u.login AS login, k.name AS name, k.hint AS hint,
                             k.created_at AS created_at, k.expires_at AS expires_at,
                             k.last_check_at AS last_check_at, k.check_count AS check_count,
                             NULL::bigint AS revoked_at, k.owner_id AS owner_id,
-                            k.kind AS kind
+                            k.kind AS kind, k.interaction AS interaction
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                      UNION ALL
                      SELECT h.id, u.login, h.name, ''::text, h.created_at, NULL::bigint,
-                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id, NULL::text
+                            h.last_check_at, h.check_count, h.revoked_at, h.owner_id, NULL::text, NULL::text
                        FROM key_history h LEFT JOIN users u ON u.id = h.owner_id
                    ) AS lines
                   WHERE ($1::boolean OR ($2::text IS NOT NULL AND login = $2::text)
@@ -349,6 +349,9 @@ impl Pg {
                     kind: row
                         .get::<_, Option<String>>(9)
                         .and_then(|name| crate::keys::KeyKind::from_name(&name)),
+                    interaction: row
+                        .get::<_, Option<String>>(10)
+                        .and_then(|name| crate::keys::Interaction::from_name(&name)),
                     grants: Vec::new(),
                 })
                 .collect();
@@ -359,7 +362,7 @@ impl Pg {
                 .collect();
             let grants = c
                 .query(
-                    "SELECT key_id, action, resource_type, resource_id, resource_path, limits
+                    "SELECT key_id, action, resource_type, resource_id, resource_path, limits, confirm
                        FROM key_grants WHERE key_id = ANY($1::text[])",
                     &[&ids],
                 )?
@@ -367,20 +370,23 @@ impl Pg {
                 .map(|row| {
                     (
                         row.get::<_, String>(0),
-                        [
-                            row.get::<_, String>(1),
-                            row.get::<_, String>(2),
-                            row.get::<_, String>(3),
-                            row.get::<_, String>(4),
-                            row.get::<_, String>(5),
-                        ],
+                        (
+                            [
+                                row.get::<_, String>(1),
+                                row.get::<_, String>(2),
+                                row.get::<_, String>(3),
+                                row.get::<_, String>(4),
+                                row.get::<_, String>(5),
+                            ],
+                            row.get::<_, bool>(6),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
             Ok((items, grants))
         })?;
         for item in items.iter_mut().filter(|i| i.revoked_at.is_none()) {
-            let rows: Vec<[String; 5]> = grants
+            let rows: Vec<GrantRow> = grants
                 .iter()
                 .filter(|(key_id, _)| *key_id == item.id)
                 .map(|(_, row)| row.clone())
@@ -417,7 +423,7 @@ impl Pg {
             let keys = tx
                 .query(
                     "SELECT k.id, u.login, k.name, k.digest, k.hint, k.created_at, k.expires_at,
-                            k.last_check_at, k.check_count, k.kind
+                            k.last_check_at, k.check_count, k.kind, k.interaction
                        FROM keys k LEFT JOIN users u ON u.id = k.owner_id
                       ORDER BY k.created_at, k.id",
                     &[],
@@ -435,12 +441,13 @@ impl Pg {
                         row.get::<_, Option<i64>>(7),
                         row.get::<_, i64>(8),
                         row.get::<_, String>(9),
+                        row.get::<_, String>(10),
                     )
                 })
                 .collect::<Vec<_>>();
             let grants = tx
                 .query(
-                    "SELECT key_id, action, resource_type, resource_id, resource_path, limits
+                    "SELECT key_id, action, resource_type, resource_id, resource_path, limits, confirm
                        FROM key_grants",
                     &[],
                 )?
@@ -448,13 +455,16 @@ impl Pg {
                 .map(|row| {
                     (
                         row.get::<_, String>(0),
-                        [
-                            row.get::<_, String>(1),
-                            row.get::<_, String>(2),
-                            row.get::<_, String>(3),
-                            row.get::<_, String>(4),
-                            row.get::<_, String>(5),
-                        ],
+                        (
+                            [
+                                row.get::<_, String>(1),
+                                row.get::<_, String>(2),
+                                row.get::<_, String>(3),
+                                row.get::<_, String>(4),
+                                row.get::<_, String>(5),
+                            ],
+                            row.get::<_, bool>(6),
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -463,7 +473,7 @@ impl Pg {
             Ok((version, users, keys, grants, externals))
         })?;
         let users = Self::assemble_users(user_rows)?;
-        let mut by_key: std::collections::HashMap<String, Vec<[String; 5]>> =
+        let mut by_key: std::collections::HashMap<String, Vec<GrantRow>> =
             std::collections::HashMap::new();
         for (key_id, row) in grant_rows {
             by_key.entry(key_id).or_default().push(row);
@@ -480,10 +490,15 @@ impl Pg {
             last_check_at,
             check_count,
             kind,
+            interaction,
         ) in key_rows
         {
             let kind = crate::keys::KeyKind::from_name(&kind)
                 .ok_or_else(|| format!("keys: the kind {kind:?} of the key {id} is not known"))?;
+            let interaction =
+                crate::keys::Interaction::from_name(&interaction).ok_or_else(|| {
+                    format!("keys: the interaction {interaction:?} of the key {id} is not known")
+                })?;
             let mut grants = grants_from(by_key.remove(&id).unwrap_or_default())
                 .map_err(|e| e.replacen("user_grants", "key_grants", 1))?;
             grants.sort();
@@ -498,6 +513,7 @@ impl Pg {
                 last_check_at,
                 check_count,
                 kind,
+                interaction,
                 grants,
             });
         }
@@ -536,8 +552,8 @@ impl Pg {
             }
             tx.execute(
                 "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                   last_check_at, check_count, kind)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                                   last_check_at, check_count, kind, interaction)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 &[
                     &key.id,
                     &owner_id,
@@ -549,6 +565,7 @@ impl Pg {
                     &key.last_check_at,
                     &key.check_count,
                     &key.kind.name(),
+                    &key.interaction.name(),
                 ],
             )?;
             insert_key_grants(&mut tx, &key.id, &key.grants)?;
@@ -567,6 +584,7 @@ impl Pg {
         id: &str,
         owner: Option<&str>,
         name: &str,
+        interaction: crate::keys::Interaction,
         grants: &[Grant],
         caps: &KeyCaps,
     ) -> Result<(), KeyWriteError> {
@@ -581,7 +599,10 @@ impl Pg {
             if found.is_none() {
                 return Ok(Err(KeyWriteError::UnknownKey));
             }
-            tx.execute("UPDATE keys SET name = $2 WHERE id = $1", &[&id, &name])?;
+            tx.execute(
+                "UPDATE keys SET name = $2, interaction = $3 WHERE id = $1",
+                &[&id, &name, &interaction.name()],
+            )?;
             tx.execute("DELETE FROM key_grants WHERE key_id = $1", &[&id])?;
             insert_key_grants(&mut tx, id, grants)?;
             insert_counter_rows(&mut tx, Subject::Key(id), grants)?;

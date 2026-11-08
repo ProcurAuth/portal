@@ -61,6 +61,8 @@ keys {
 # The account of the file that owns the API key "grafana". A key follows its owner: it can do only what the
 # key and its owner can both do. The owner needs `keys.own.use` on the kind, and `alert.send` on each group.
 # To let a key alert an account, give the owner `alert.send_user on service:portal` and set `direct_alerts = true`.
+# A grant of a service can ask for an approval before each use: write { grant = "<action> on service:<id>", confirm = true }.
+# A grant of the service `portal` or of the action `access` cannot do this.
 user "grafana" {
   grants = [
     "keys.own.use on service:portal/key_kind:api",
@@ -178,6 +180,7 @@ inbox {
     secret_file           = "/run/secrets/inbox_grafana_key"
     groups                = ["infra"]
     # direct_alerts       = false   # true: the key can send an alert to any account
+    # interaction         = "one_shot"   # or "conversational": what the key can do when the server asks a person
     webhook_send_resolved = false
   }
 

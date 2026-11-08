@@ -87,6 +87,31 @@ impl fmt::Display for Segment {
     }
 }
 
+/// Why a grant cannot carry `confirm`, or `None` when it can. The service `portal` has no action
+/// that asks for an approval, and the action `access` opens a service: a person cannot approve it
+/// one time. The file refuses these grants at start, and the forms refuse them too.
+pub fn confirm_refusal(grant: &Grant) -> Option<&'static str> {
+    if grant.service == crate::portal_actions::SERVICE {
+        Some("confirm is not for a grant of the service portal")
+    } else if grant.action == ACCESS {
+        Some("confirm is not for the action access")
+    } else {
+        None
+    }
+}
+
+/// Joins the grants that differ only by `confirm`: one grant stays, with `confirm` when one of
+/// them has it (OR rule). The grants must be sorted.
+pub fn merge_confirm(grants: &mut Vec<Grant>) {
+    grants.dedup_by(|later, earlier| {
+        let same = later.same_node(earlier) && later.limits == earlier.limits;
+        if same {
+            earlier.confirm |= later.confirm;
+        }
+        same
+    });
+}
+
 /// The text form of a path: the segments joined by `/`. The path of the service itself is empty.
 pub fn path_text(path: &[Segment]) -> String {
     path.iter()
@@ -117,12 +142,18 @@ pub fn parse_path(text: &str) -> Result<Vec<Segment>, String> {
 /// node below it. An empty `path` is the whole service. A grant can carry limit values (see
 /// [`crate::limits`]). The text form does not show them: the settings pages and the database keep
 /// them apart.
+///
+/// A grant can also carry `confirm`: the holder can do the action only with the approval of a
+/// person (design of the approvals, 6.3). It is a property of the grant, not a limit: it has no
+/// value and no counter, and the text form does not show it. It is the last field, so two grants
+/// that differ only by `confirm` sort one after the other and [`merge_confirm`] joins them.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Grant {
     pub action: String,
     pub service: String,
     pub path: Vec<Segment>,
     pub limits: Limits,
+    pub confirm: bool,
 }
 
 impl Grant {
@@ -135,6 +166,7 @@ impl Grant {
             service: service.to_string(),
             path: Vec::new(),
             limits: Limits::new(),
+            confirm: false,
         })
     }
 
@@ -142,6 +174,13 @@ impl Grant {
     /// does it against the document of the service.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The same grant with `confirm` set to this value. The check of the action and the service
+    /// that allow `confirm` is not here: [`confirm_refusal`] does it.
+    pub fn with_confirm(mut self, confirm: bool) -> Self {
+        self.confirm = confirm;
         self
     }
 
@@ -426,7 +465,7 @@ impl Policy {
             out.extend(stored.iter().cloned());
         }
         out.sort();
-        out.dedup();
+        merge_confirm(&mut out);
         out
     }
 }
@@ -768,5 +807,57 @@ mod tests {
             !covers(&encoded, "read", "s3", &[seg("bucket", "a"), seg("b", "x")]),
             "a / in an id never divides a segment"
         );
+    }
+
+    #[test]
+    fn confirm_is_not_a_limit_and_not_in_the_text_form() {
+        let plain = grant("data.write on service:db/host:prod");
+        let asking = plain.clone().with_confirm(true);
+        assert!(asking.confirm && !plain.confirm);
+        // The text form does not show it, and the limit values do not hold it.
+        assert_eq!(asking.to_string(), plain.to_string());
+        assert_eq!(asking.limits, plain.limits);
+        assert!(asking.same_node(&plain));
+        assert_ne!(asking, plain);
+        // The parser gives grants without confirm: a text cannot ask for it.
+        assert!(!grant(&asking.to_string()).confirm);
+    }
+
+    #[test]
+    fn two_grants_that_differ_only_by_confirm_merge_with_or() {
+        let plain = grant("data.write on service:db/host:prod");
+        let asking = plain.clone().with_confirm(true);
+        let other = grant("data.read on service:db/host:prod");
+        let configured: BTreeMap<String, Vec<Grant>> =
+            [("alice".to_string(), vec![plain.clone(), other.clone()])]
+                .into_iter()
+                .collect();
+        let policy = Policy::new(Mode::Hybrid, configured);
+        let merged = policy.effective("alice", std::slice::from_ref(&asking));
+        assert_eq!(
+            merged,
+            [other.clone(), asking.clone()],
+            "one grant, with confirm"
+        );
+        // The order of the sources does not matter.
+        let configured: BTreeMap<String, Vec<Grant>> =
+            [("alice".to_string(), vec![asking.clone()])]
+                .into_iter()
+                .collect();
+        let policy = Policy::new(Mode::Hybrid, configured);
+        assert_eq!(
+            policy.effective("alice", &[plain, other.clone()]),
+            [other, asking]
+        );
+    }
+
+    #[test]
+    fn confirm_is_refused_on_the_service_portal_and_on_access() {
+        let on_portal = grant("alert.send on service:portal").with_confirm(true);
+        let on_access = grant("access on service:db").with_confirm(true);
+        let fine = grant("data.write on service:db").with_confirm(true);
+        assert!(confirm_refusal(&on_portal).is_some());
+        assert!(confirm_refusal(&on_access).is_some());
+        assert!(confirm_refusal(&fine).is_none());
     }
 }

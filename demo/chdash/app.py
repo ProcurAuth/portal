@@ -14,6 +14,8 @@ HOSTS = {
 }
 HOST_LABELS = {"ch-eu1": "Paris, production", "ch-eu2": "Frankfurt, replica", "ch-us1": "Virginia, multi-tenant"}
 ALL = ["service", "host", "database"]
+# The actions that a grant can mark with confirm: the document says "approval": "optional".
+APPROVAL = {"query.run.write"}
 ACTIONS = [
     ("query.run.read", ALL, "Run read-only queries.", ["requests", "max_rows"]),
     ("query.run.write", ALL, "Run queries that change data.", ["requests"]),
@@ -40,7 +42,13 @@ def document():
             {"name": "database", "parent": "host", "description": "One database of a host."},
         ],
         "actions": [
-            {"name": n, "resource_types": t, "description": d, **({"limits": l} if l else {})}
+            {
+                "name": n,
+                "resource_types": t,
+                "description": d,
+                **({"limits": l} if l else {}),
+                **({"approval": "optional"} if n in APPROVAL else {}),
+            }
             for n, t, d, l in ACTIONS
         ],
         "limits": [

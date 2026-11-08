@@ -423,6 +423,7 @@ mod tests {
     fn key(id: &str, file: bool) -> KeyRecord {
         KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
+            interaction: crate::keys::Interaction::Conversational,
             id: id.into(),
             owner: if file {
                 KeyOwner::File("carol".into())

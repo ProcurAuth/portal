@@ -53,6 +53,8 @@ pub struct GrantItem {
     pub text: String,
     /// The members of the object `limits`, in the order of the file. Empty without the object.
     pub limits: Vec<(String, Lit)>,
+    /// The member `confirm` of the object. `false` without it.
+    pub confirm: bool,
 }
 
 /// A typed value.
@@ -581,6 +583,7 @@ fn parse_scalar(key: &Key, literal: &Lit) -> Result<Val, String> {
                 items.push(GrantItem {
                     text: text.clone(),
                     limits: Vec::new(),
+                    confirm: false,
                 });
             }
             Ok(Val::Grants(items))
@@ -609,16 +612,19 @@ fn parse_scalar(key: &Key, literal: &Lit) -> Result<Val, String> {
     }
 }
 
-/// One item of a list of grants: a quoted grant, or an object with `grant` and `limits`.
+/// One item of a list of grants: a quoted grant, or an object with `grant`, `limits` and
+/// `confirm`.
 fn grant_item(item: &Lit) -> Result<GrantItem, String> {
     match item {
         Lit::Str(text) => Ok(GrantItem {
             text: text.clone(),
             limits: Vec::new(),
+            confirm: false,
         }),
         Lit::Object(members) => {
             let mut text = None;
             let mut limits = Vec::new();
+            let mut confirm = false;
             for (name, value) in members {
                 match (name.as_str(), value) {
                     ("grant", Lit::Str(grant)) => text = Some(grant.clone()),
@@ -635,19 +641,32 @@ fn grant_item(item: &Lit) -> Result<GrantItem, String> {
                             other.shown()
                         ))
                     }
+                    ("confirm", Lit::Word(word)) if word == "true" || word == "false" => {
+                        confirm = word == "true";
+                    }
+                    ("confirm", other) => {
+                        return Err(format!(
+                            "the member confirm must be true or false, without quotes, got {}",
+                            other.shown()
+                        ))
+                    }
                     (other, _) => {
                         return Err(format!(
-                            "the member {other} is not known: an object of a grant has grant and limits"
+                            "the member {other} is not known: an object of a grant has grant, limits and confirm"
                         ))
                     }
                 }
             }
             let text =
                 text.ok_or_else(|| "an object of a grant needs the member grant".to_string())?;
-            Ok(GrantItem { text, limits })
+            Ok(GrantItem {
+                text,
+                limits,
+                confirm,
+            })
         }
         other => Err(format!(
-            "an item is a quoted grant or an object with grant and limits, got {}",
+            "an item is a quoted grant or an object with grant, limits and confirm, got {}",
             other.shown()
         )),
     }

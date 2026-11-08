@@ -79,6 +79,12 @@ pub struct Verdict {
     /// The counters of a use. They are empty when no budget applies to the subject for this
     /// action. Empty also for a `false` answer.
     pub counters: Vec<Counter>,
+    /// The action needs the approval of a person: a grant that covers the node has `confirm`, on
+    /// the side of the key or on the side of the owner (OR rule, like the limits of protocol 8.1).
+    /// When the owner is the superadmin, only the side of the key counts. A question about a
+    /// subtree (`Matching::Subtree`) answers `false`: it is for the display only. Always `false`
+    /// for a `false` answer.
+    pub approval: bool,
 }
 
 impl Verdict {
@@ -87,8 +93,14 @@ impl Verdict {
             allowed: false,
             ceilings: Limits::new(),
             counters: Vec::new(),
+            approval: false,
         }
     }
+}
+
+/// Whether one grant of the covering set has `confirm`.
+fn confirms(grants: &[&Grant]) -> bool {
+    grants.iter().any(|grant| grant.confirm)
 }
 
 /// Whether a grant applies to the question: its action and service, and the document.
@@ -199,6 +211,7 @@ pub fn person(login: &str, grants: &[Grant], q: &Question<'_>) -> Verdict {
         Matching::Node if node.is_empty() => Verdict::denied(),
         Matching::Node => Verdict {
             allowed: true,
+            approval: confirms(&node),
             ceilings: ceilings_of(node.into_iter(), q),
             counters: counters_of(&CounterOwner::User(login.to_string()), grants, q),
         },
@@ -206,6 +219,7 @@ pub fn person(login: &str, grants: &[Grant], q: &Question<'_>) -> Verdict {
             allowed: !node.is_empty() || extending(grants, q).next().is_some(),
             ceilings: Limits::new(),
             counters: Vec::new(),
+            approval: false,
         },
     }
 }
@@ -238,6 +252,7 @@ pub fn key(
             }
             Verdict {
                 allowed: true,
+                approval: confirms(&key_node),
                 ceilings: ceilings_of(key_node.into_iter(), q),
                 counters: counters_of(key_counters, key_grants, q),
             }
@@ -247,6 +262,7 @@ pub fn key(
             if key_node.is_empty() || owner_node.is_empty() {
                 return Verdict::denied();
             }
+            let approval = confirms(&key_node) || confirms(&owner_node);
             let ceilings =
                 ceilings_of(key_node.into_iter(), q).lower(&ceilings_of(owner_node.into_iter(), q));
             let mut counters = counters_of(key_counters, key_grants, q);
@@ -255,17 +271,20 @@ pub fn key(
                 allowed: true,
                 ceilings,
                 counters,
+                approval,
             }
         }
         (Matching::Subtree, Owner::Superadmin) => Verdict {
             allowed: !key_node.is_empty() || extending(key_grants, q).next().is_some(),
             ceilings: Limits::new(),
             counters: Vec::new(),
+            approval: false,
         },
         (Matching::Subtree, Owner::Person(owner_grants)) => Verdict {
             allowed: shares_a_node(key_grants, owner_grants, q),
             ceilings: Limits::new(),
             counters: Vec::new(),
+            approval: false,
         },
     }
 }
@@ -786,5 +805,116 @@ mod tests {
             )
             .allowed
         );
+    }
+
+    /// A grant of `data.write` with `confirm` on the host `prod`, with no limit value.
+    fn confirming(text: &str) -> Grant {
+        Grant::parse(text).unwrap().with_confirm(true)
+    }
+
+    fn write_chain() -> Vec<Segment> {
+        path("host:prod/database:test2")
+    }
+
+    #[test]
+    fn confirm_true_when_key_or_owner_grant_has_it() {
+        let document = datastore();
+        let chain = write_chain();
+        let q = ask(&document, "data.write", &chain, Matching::Node);
+        let plain = vec![grant("data.write on service:datastore/host:prod", "{}")];
+        let asking = vec![confirming("data.write on service:datastore/host:prod")];
+        let who = CounterOwner::Key("k".into());
+        let owner_who = CounterOwner::User("alice".into());
+        // Nobody asks: no approval.
+        let verdict = key(&who, &plain, Owner::Person(&plain), &owner_who, &q);
+        assert!(verdict.allowed && !verdict.approval);
+        // The side of the key asks.
+        let verdict = key(&who, &asking, Owner::Person(&plain), &owner_who, &q);
+        assert!(verdict.allowed && verdict.approval, "key side");
+        // The side of the owner asks: every key of the owner asks.
+        let verdict = key(&who, &plain, Owner::Person(&asking), &owner_who, &q);
+        assert!(verdict.allowed && verdict.approval, "owner side");
+        // A grant above the node asks for the node below.
+        let above = vec![confirming("data.write on service:datastore/host:prod")];
+        assert!(person("alice", &above, &q).approval);
+        // A grant of another action, or on another node, does not ask.
+        let other = vec![
+            confirming("data.read on service:datastore/host:prod"),
+            confirming("data.write on service:datastore/host:dev"),
+        ];
+        let verdict = person("alice", &other, &q);
+        assert!(!verdict.allowed && !verdict.approval, "no covering grant");
+        // Two covering grants: one with confirm is enough (OR rule).
+        let mixed = vec![
+            grant("data.write on service:datastore/host:prod", "{}"),
+            confirming("data.write on service:datastore/host:prod/database:test2"),
+        ];
+        assert!(person("alice", &mixed, &q).approval);
+        // A denied question never asks.
+        let denied = key(&who, &asking, Owner::Person(&[]), &owner_who, &q);
+        assert!(!denied.allowed && !denied.approval);
+    }
+
+    #[test]
+    fn superadmin_owner_uses_key_confirm_only() {
+        let document = datastore();
+        let chain = write_chain();
+        let q = ask(&document, "data.write", &chain, Matching::Node);
+        let plain = vec![grant("data.write on service:datastore/host:prod", "{}")];
+        let asking = vec![confirming("data.write on service:datastore/host:prod")];
+        let who = CounterOwner::Key("k".into());
+        let owner_who = CounterOwner::User("root".into());
+        // The superadmin has no grant: there is no owner side to ask.
+        let verdict = key(&who, &plain, Owner::Superadmin, &owner_who, &q);
+        assert!(verdict.allowed && !verdict.approval);
+        // The grants that the owner row would hold do not count: only the key decides.
+        let verdict = key(&who, &asking, Owner::Superadmin, &owner_who, &q);
+        assert!(verdict.allowed && verdict.approval);
+    }
+
+    #[test]
+    fn subtree_answers_true_with_confirm() {
+        let document = datastore();
+        let host = path("host:prod");
+        let q = ask(&document, "data.write", &host, Matching::Subtree);
+        let asking = vec![confirming(
+            "data.write on service:datastore/host:prod/database:test2",
+        )];
+        let who = CounterOwner::Key("k".into());
+        let owner_who = CounterOwner::User("alice".into());
+        // The grant is below the node: the display question is true, and confirm changes nothing.
+        let verdict = person("alice", &asking, &q);
+        assert!(verdict.allowed);
+        let verdict = key(&who, &asking, Owner::Person(&asking), &owner_who, &q);
+        assert!(verdict.allowed);
+        let verdict = key(&who, &asking, Owner::Superadmin, &owner_who, &q);
+        assert!(verdict.allowed);
+        // A question about a subtree is for the display only: it never asks for an approval.
+        assert!(!verdict.approval);
+    }
+
+    #[test]
+    fn confirm_is_not_a_limit() {
+        // A grant with confirm has no limit value and no counter: the decision does not change.
+        let document = datastore();
+        let chain = write_chain();
+        let q = ask(&document, "data.write", &chain, Matching::Node);
+        let plain = vec![
+            grant("access on service:datastore", ACCESS_BUDGET),
+            grant(
+                "data.write on service:datastore/host:prod",
+                r#"{"max_duration":10}"#,
+            ),
+        ];
+        let asking: Vec<Grant> = plain
+            .iter()
+            .cloned()
+            .map(|g| g.with_confirm(true))
+            .collect();
+        let a = person("alice", &plain, &q);
+        let b = person("alice", &asking, &q);
+        assert_eq!(a.ceilings, b.ceilings);
+        assert_eq!(a.counters, b.counters);
+        assert!(!a.approval && b.approval);
     }
 }

@@ -607,11 +607,12 @@
       });
       return out;
     }
+    // `confirm`: the grant asks for the approval of a person (g[4]).
     data.ticked.forEach(function (g) {
-      ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]) });
+      ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]), confirm: !!g[4] });
     });
     (data.locked || []).forEach(function (g) {
-      ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]), locked: true });
+      ticked.set(keyOf(g[1], g[0], g[2]), { action: g[0], service: g[1], path: g[2], limits: limitsToText(g[3]), confirm: !!g[4], locked: true });
     });
 
     // Save stays grey until a grant changes (CTRL-17). The first state is the baseline.
@@ -622,7 +623,7 @@
             return !i.locked;
           })
           .map(function (i) {
-            return [i.service, i.action, i.path, i.limits];
+            return [i.service, i.action, i.path, i.limits, !!i.confirm];
           })
       );
     }
@@ -725,6 +726,7 @@
           fields.appendChild(input);
         }
         add("grant" + n, textOf(item));
+        if (item.confirm) add("confirm" + n, "1");
         Object.keys(item.limits).forEach(function (name) {
           var value = item.limits[name];
           if (typeof value === "string") {
@@ -737,6 +739,20 @@
         });
       });
       updateSave();
+    }
+
+    // The side of the owner asks for the approval of this grant: a grant of the owner with `confirm`
+    // covers the node. The key shows the lock on and the person cannot turn it off.
+    function ownerConfirms(item) {
+      if (data.owner === null) return false;
+      return data.owner.some(function (g) {
+        return (
+          !!g[4] &&
+          g[0] === item.action &&
+          g[1] === item.service &&
+          (g[2] === "" || item.path === g[2] || item.path.indexOf(g[2] + "/") === 0)
+        );
+      });
     }
 
     function ownerValue(item, name) {
@@ -1195,6 +1211,23 @@
       }
 
       // ---- the actions of the chosen node
+      // The lock of a ticked grant whose action can ask for an approval. It is a flat icon button
+      // that holds a state: an open lock for "no approval", a closed lock for "asks for an
+      // approval". When the owner side asks, the lock is closed, and the person cannot open it.
+      function confirmButton(held, name) {
+        var imposed = ownerConfirms(held);
+        var on = !!held.confirm || imposed;
+        var button = node("button", "ib ge__confirm" + (on ? " is-on" : ""));
+        button.type = "button";
+        button.dataset.action = name;
+        button.setAttribute("aria-pressed", on ? "true" : "false");
+        button.setAttribute("aria-label", "Asks for an approval");
+        button.title = imposed ? "Asks for an approval. Your own grant asks for it, so this key must too." : "Asks for an approval";
+        button.disabled = imposed;
+        button.appendChild(icon(on ? "lock" : "lock-open"));
+        return button;
+      }
+
       function renderActions() {
         var svc = service();
         var tree = treeOf(svc);
@@ -1287,16 +1320,34 @@
               viaNote.title = viaNote.textContent;
               line.appendChild(viaNote);
             } else if (held && held.locked) {
+              var fileTools = node("span", "ge__tools");
+              if (held.confirm) {
+                var sealed = node("span", "statusIcon");
+                sealed.title = "Asks for an approval. The configuration file sets this.";
+                sealed.setAttribute("role", "img");
+                sealed.setAttribute("aria-label", sealed.title);
+                sealed.appendChild(icon("lock"));
+                fileTools.appendChild(sealed);
+              }
               var lock = node("span", "statusIcon");
               lock.title = "This permission comes from the configuration file.";
               lock.appendChild(icon("lock"));
-              line.appendChild(lock);
+              fileTools.appendChild(lock);
+              line.appendChild(fileTools);
             } else {
-              if (isTicked && !owns(svc.id, a.name, item.path)) {
-                var warn = node("span", "statusIcon statusIcon--warn");
-                warn.title = "Your account no longer holds this permission.";
-                warn.appendChild(icon("alert-triangle"));
-                line.appendChild(warn);
+              var lost = isTicked && !owns(svc.id, a.name, item.path);
+              var asks = isTicked && a.approval;
+              if (lost || asks) {
+                // The warning and the lock of the approval share the last cell of the row.
+                var tools = node("span", "ge__tools");
+                if (lost) {
+                  var warn = node("span", "statusIcon statusIcon--warn");
+                  warn.title = "Your account no longer holds this permission.";
+                  warn.appendChild(icon("alert-triangle"));
+                  tools.appendChild(warn);
+                }
+                if (asks) tools.appendChild(confirmButton(held, a.name));
+                line.appendChild(tools);
               }
               if (a.limits.length) {
                 // A ticked action shows its limit fields on its own line: no table is needed.
@@ -1528,6 +1579,17 @@
       actList.addEventListener("mouseover", describeRow);
       actList.addEventListener("focusin", describeRow);
       actList.addEventListener("click", function (event) {
+        var lockButton = event.target.closest ? event.target.closest(".ge__confirm") : null;
+        if (lockButton) {
+          event.preventDefault();
+          var held = ticked.get(keyOf(service().id, lockButton.dataset.action, current));
+          if (held && !held.locked && !lockButton.disabled) {
+            begin();
+            held.confirm = !held.confirm;
+            render();
+          }
+          return;
+        }
         var header = event.target.closest(".ge__group");
         if (!header || event.target.closest("input")) return;
         var key = current + "|" + header.dataset.group;
