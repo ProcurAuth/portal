@@ -108,7 +108,16 @@ fn grants_of(items: Vec<GrantItem>, what: &str) -> Result<Vec<Grant>, String> {
                 item.text
             ));
         }
-        grants.push(grant.with_limits(limits));
+        let grant = grant.with_limits(limits).with_confirm(item.confirm);
+        if item.confirm {
+            if let Some(reason) = crate::grants::confirm_refusal(&grant) {
+                return Err(format!(
+                    "invalid {what}.grants: item {:?}: confirm = true: {reason}",
+                    item.text
+                ));
+            }
+        }
+        grants.push(grant);
     }
     grants.sort();
     Ok(grants)
@@ -295,6 +304,8 @@ fn file_key(
         name: name.clone(),
         id,
         digest,
+        interaction: crate::keys::Interaction::from_name(&block.text("interaction")?)
+            .ok_or_else(|| here("internal error: the value of interaction is not known"))?,
         grants,
     })
 }

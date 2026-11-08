@@ -1029,6 +1029,9 @@ pub(super) async fn handle_keys_create(
         &[
             ("key", id),
             ("owner", viewer.login.clone()),
+        interaction: form
+            .interaction
+            .unwrap_or(crate::keys::Interaction::default_for(kind)),
             ("kind", kind.name().to_string()),
             (
                 "expires_at",
@@ -1134,7 +1137,7 @@ pub(super) async fn handle_keys_edit(
     let written = {
         let (id, name, grants) = (id.clone(), form.name.clone(), form.grants.clone());
         tokio::task::spawn_blocking(move || {
-            store.update_key(&id, login.as_deref(), &name, &grants, &caps)
+            store.update_key(&id, login.as_deref(), &name, interaction, &grants, &caps)
         })
         .await
     };
@@ -1162,6 +1165,7 @@ pub(super) async fn handle_keys_edit(
         &[("key", id), ("owner", viewer.login.clone())],
     );
     refusal_redirect("edited")
+        let interaction = form.interaction.unwrap_or(key.interaction);
 }
 
 /// `POST /auth/keys/revoke` (portal 5.8e).

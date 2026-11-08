@@ -111,6 +111,8 @@ pub struct FileKey {
     /// The local part of the subject id (portal 3.4c).
     pub id: String,
     pub digest: [u8; 32],
+    /// The attribute `interaction` of the block.
+    pub interaction: crate::keys::Interaction,
     pub grants: Vec<Grant>,
 }
 

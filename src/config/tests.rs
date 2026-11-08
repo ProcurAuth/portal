@@ -3461,3 +3461,170 @@ fn the_key_of_the_second_factor_is_checked_at_start_and_never_shown() {
         "{message}"
     );
 }
+
+/// A configuration with one account of the file and these grants.
+fn with_grants_of_carol(grants: &str) -> String {
+    with(&format!(
+        r#"access {{ grants_mode = "static" }} users {{ allow_creation = false }} user "carol" {{ grants = [{grants}] }}"#
+    ))
+}
+
+#[test]
+fn config_confirm_is_a_member_of_a_grant_object_with_the_default_false() {
+    let (cfg, _) = ok(&with_grants_of_carol(
+        r#"{ grant = "query.run.write on service:db/host:prod", confirm = true },
+           { grant = "query.run.read on service:db", confirm = false },
+           "data.read on service:db",
+           { grant = "data.write on service:db", limits = { max_rows = 10 }, confirm = true }"#,
+    ));
+    let grants = &cfg.access.accounts["carol"].grants;
+    let confirm = |action: &str| {
+        grants
+            .iter()
+            .find(|g| g.action == action)
+            .unwrap_or_else(|| panic!("{action}"))
+            .confirm
+    };
+    assert!(confirm("query.run.write"));
+    assert!(!confirm("query.run.read"), "false is the default");
+    assert!(!confirm("data.read"), "a quoted grant has no confirm");
+    assert!(confirm("data.write"), "confirm and limits go together");
+    // The value is a bare true or false. Nothing is coerced.
+    for bad in [
+        r#"confirm = "true""#,
+        "confirm = 1",
+        "confirm = yes",
+        "confirm = []",
+    ] {
+        let message = err(&with_grants_of_carol(&format!(
+            r#"{{ grant = "query.run.write on service:db", {bad} }}"#
+        )));
+        assert!(message.contains("confirm"), "{bad}: {message}");
+    }
+}
+
+#[test]
+fn config_confirm_on_portal_service_stops_start() {
+    let message = err(&with_grants_of_carol(
+        r#"{ grant = "alert.send_user on service:portal", confirm = true }"#,
+    ));
+    assert!(
+        message.contains("confirm") && message.contains("portal") && message.contains("user.carol"),
+        "{message}"
+    );
+}
+
+#[test]
+fn config_confirm_on_access_stops_start() {
+    let message = err(&with_grants_of_carol(
+        r#"{ grant = "access on service:db", confirm = true }"#,
+    ));
+    assert!(
+        message.contains("confirm") && message.contains("access"),
+        "{message}"
+    );
+    // A key of the file follows the same rule.
+    let (vars, _) = vars_with_key();
+    let raw = with_keys(
+        r#"user "carol" { grants = [] key "k" { key_env = "CAROL_KEY" grants = [{ grant = "access on service:db", confirm = true }] } }"#,
+    );
+    let message = parse_keys(&raw, &vars).err().expect("must stop");
+    assert!(
+        message.contains("confirm") && message.contains("user.carol.key.k"),
+        "{message}"
+    );
+}
+
+#[test]
+fn config_interaction_values_closed() {
+    let (vars, _) = vars_with_key();
+    let key = |attributes: &str| {
+        with_keys(&format!(
+            r#"user "carol" {{ grants = [] key "k" {{ key_env = "CAROL_KEY" {attributes} grants = [] }} }}"#
+        ))
+    };
+    // The default of a key of a person (kind `mcp`) is conversational.
+    let (cfg, _) = parse_keys(&key(""), &vars).unwrap();
+    assert_eq!(
+        cfg.access.accounts["carol"].keys[0].interaction,
+        crate::keys::Interaction::Conversational
+    );
+    assert_eq!(line(&cfg, "user.carol.key.k.interaction").source, "default");
+    for (value, expected) in [
+        ("conversational", crate::keys::Interaction::Conversational),
+        ("one_shot", crate::keys::Interaction::OneShot),
+    ] {
+        let (cfg, _) = parse_keys(&key(&format!(r#"interaction = "{value}""#)), &vars).unwrap();
+        assert_eq!(cfg.access.accounts["carol"].keys[0].interaction, expected);
+    }
+    // Any other value stops the start, with the key, the range and the value.
+    for bad in [
+        r#"interaction = "oneshot""#,
+        r#"interaction = "One_Shot""#,
+        r#"interaction = "interactive""#,
+        r#"interaction = """#,
+        "interaction = true",
+    ] {
+        let message = parse_keys(&key(bad), &vars).err().expect(bad);
+        assert!(
+            message.contains("interaction") && message.contains("conversational"),
+            "{bad}: {message}"
+        );
+    }
+    // A duplicate attribute stops the start too.
+    let message = parse_keys(
+        &key(r#"interaction = "one_shot" interaction = "conversational""#),
+        &vars,
+    )
+    .err()
+    .expect("duplicate");
+    assert!(message.contains("interaction"), "{message}");
+    // The key of a service (block `api_key`) defaults to one_shot.
+    let (cfg, _) = inbox_ok(&with_inbox(INBOX));
+    let api = &cfg.inbox.as_ref().unwrap().api_keys["grafana"];
+    assert_eq!(api.interaction, crate::keys::Interaction::OneShot);
+    assert_eq!(
+        line(&cfg, "inbox.api_key.grafana.interaction").source,
+        "default"
+    );
+    let changed = INBOX.replace(
+        r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] }"#,
+        r#"api_key "grafana" { owner = "ci" secret_env = "INBOX_TOKEN" groups = ["infra"] interaction = "conversational" }"#,
+    );
+    let (cfg, _) = inbox_ok(&with_inbox(&changed));
+    assert_eq!(
+        cfg.inbox.as_ref().unwrap().api_keys["grafana"].interaction,
+        crate::keys::Interaction::Conversational
+    );
+    let bad = INBOX.replace(
+        r#"groups = ["infra"] }"#,
+        r#"groups = ["infra"] interaction = "chat" }"#,
+    );
+    let message = inbox_err(&with_inbox(&bad));
+    assert!(
+        message.contains("interaction") && message.contains("one_shot"),
+        "{message}"
+    );
+}
+
+#[test]
+fn config_risk_key_is_refused_and_no_document_depends_on_a_risk_level() {
+    // The closed schema refuses a key `risk` in each place that holds grants, and at the top.
+    for raw in [
+        with_grants_of_carol(r#"{ grant = "query.run.write on service:db", risk = "high" }"#),
+        with(r#"access { grants_mode = "static" risk = "high" }"#),
+        with(r#"access { grants_mode = "static" } user "carol" { grants = [] risk = "high" }"#),
+        with(r#"risk { level = "high" }"#),
+    ] {
+        let message = err(&raw);
+        assert!(message.contains("risk"), "{message}");
+    }
+    // An action document has no member for a risk class: the member is not read, and the action
+    // is the same with it or without it.
+    let plain = br#"{"server":"db","resource_types":[],"actions":[{"name":"a.b","resource_types":["service"],"description":"d"}]}"#;
+    let risky = br#"{"server":"db","resource_types":[],"actions":[{"name":"a.b","resource_types":["service"],"description":"d","risk":"high"}]}"#;
+    assert_eq!(
+        crate::actions::parse("db", plain).unwrap(),
+        crate::actions::parse("db", risky).unwrap()
+    );
+}

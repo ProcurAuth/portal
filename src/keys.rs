@@ -79,6 +79,53 @@ impl KeyKind {
             .find(|k| text.starts_with(k.prefix()))
     }
 }
+/// What a key can do when the portal asks a person (design of the dialogue, 1.6). The owner sets it
+/// when the key is made, and the form of the key can change it. The agent never sets it. It is a
+/// property of the key, not a grant: no limit and no right depends on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Interaction {
+    /// An agent that can read free text and discuss with the person.
+    Conversational,
+    /// A system that decides without free text. It gets closed questions and no discussion.
+    OneShot,
+}
+
+impl Interaction {
+    /// Every value, in the order of the pages.
+    pub const ALL: [Interaction; 2] = [Interaction::Conversational, Interaction::OneShot];
+
+    /// The default of a key of this kind: `conversational` for an `mcp_` key, `one_shot` for an
+    /// `api_` key.
+    pub const fn default_for(kind: KeyKind) -> Interaction {
+        match kind {
+            KeyKind::Mcp => Interaction::Conversational,
+            KeyKind::Api => Interaction::OneShot,
+        }
+    }
+
+    /// The name: the value of the column `interaction`, of the field of the form and of the
+    /// attribute of the file.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Interaction::Conversational => "conversational",
+            Interaction::OneShot => "one_shot",
+        }
+    }
+
+    /// The label that the pages show.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Interaction::Conversational => "Conversational",
+            Interaction::OneShot => "One shot",
+        }
+    }
+
+    /// The value with this name. `None`: no such value.
+    pub fn from_name(name: &str) -> Option<Interaction> {
+        Interaction::ALL.into_iter().find(|i| i.name() == name)
+    }
+}
+
 /// The number of characters of a hint.
 pub const HINT_CHARS: usize = 4;
 /// The number of characters of the id of a key of the database.
@@ -381,6 +428,30 @@ mod tests {
             &" ab".repeat(21),
         ] {
             assert!(parse_digest_hex(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn key_interaction_default_by_kind() {
+        assert_eq!(
+            Interaction::default_for(KeyKind::Mcp),
+            Interaction::Conversational
+        );
+        assert_eq!(Interaction::default_for(KeyKind::Api), Interaction::OneShot);
+        // The names are the values of the column, of the field of the form and of the file.
+        for each in Interaction::ALL {
+            assert_eq!(Interaction::from_name(each.name()), Some(each));
+        }
+        assert_eq!(
+            Interaction::from_name("conversational"),
+            Some(Interaction::Conversational)
+        );
+        assert_eq!(
+            Interaction::from_name("one_shot"),
+            Some(Interaction::OneShot)
+        );
+        for bad in ["", "oneshot", "One_Shot", "interactive", " one_shot"] {
+            assert_eq!(Interaction::from_name(bad), None, "{bad:?}");
         }
     }
 }

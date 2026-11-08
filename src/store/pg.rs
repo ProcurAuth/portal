@@ -293,15 +293,29 @@ CREATE TABLE external_services (
   href TEXT NOT NULL,
   created_at BIGINT NOT NULL
 );
+-- The approvals (5.1.0) are part of this version too. user_grants.confirm and key_grants.confirm hold the property
+-- confirm of a grant. keys.interaction holds conversational or one_shot: a key of kind api that exists before gets
+-- one_shot, the others get conversational. A database that the version 8 made before the approvals lacks the three
+-- columns: the check at the end of the migration refuses it.
+ALTER TABLE user_grants ADD COLUMN confirm BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE key_grants ADD COLUMN confirm BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE keys ADD COLUMN interaction TEXT NOT NULL DEFAULT 'conversational'
+  CHECK (interaction IN ('conversational', 'one_shot'));
+UPDATE keys SET interaction = 'one_shot' WHERE kind = 'api';
 ",
 ];
 
-/// The grants of the rows of `user_grants`: action, resource type, resource id, resource path and
-/// limits. A row that is not a valid grant stops the read. The database holds only what the
-/// servers wrote.
-fn grants_from(rows: Vec<[String; 5]>) -> Result<Vec<Grant>, String> {
+/// A row of `user_grants` or `key_grants`: action, resource type, resource id, resource path and
+/// limits, then `confirm`.
+type GrantRow = ([String; 5], bool);
+
+/// The grants of the rows of `user_grants`. A row that is not a valid grant stops the read. The
+/// database holds only what the servers wrote.
+fn grants_from(rows: Vec<GrantRow>) -> Result<Vec<Grant>, String> {
     rows.iter()
-        .map(|[action, kind, id, path, limits]| grant_from_row(action, kind, id, path, limits))
+        .map(|([action, kind, id, path, limits], confirm)| {
+            grant_from_row(action, kind, id, path, limits, *confirm)
+        })
         .collect()
 }
 
@@ -311,19 +325,27 @@ fn insert_grants(
     grants: &[Grant],
 ) -> Result<(), postgres::Error> {
     for grant in grants {
-        let (kind, id, path, limits) = grant_columns(grant);
+        let (kind, id, path, limits, confirm) = grant_columns(grant);
         tx.execute(
             "INSERT INTO user_grants
-               (user_id, action, resource_type, resource_id, resource_path, limits)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-            &[&user_id, &grant.action, &kind, &id, &path, &limits],
+               (user_id, action, resource_type, resource_id, resource_path, limits, confirm)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+            &[
+                &user_id,
+                &grant.action,
+                &kind,
+                &id,
+                &path,
+                &limits,
+                &confirm,
+            ],
         )?;
     }
     Ok(())
 }
 
 /// A row of the read of the users: login, password hash, creation time and one grant, if any.
-type UserQueryRow = (String, String, i64, Option<[String; 5]>);
+type UserQueryRow = (String, String, i64, Option<GrantRow>);
 
 /// What went wrong. The cause is included when the server does not state it.
 /// A refused connection reads "error connecting to server: Connection refused" rather than the first half only.
@@ -660,6 +682,22 @@ impl Pg {
                     SCHEMA.len()
                 )));
             }
+            let with_approvals: bool = tx
+                .query_one(
+                    "SELECT (SELECT COUNT(*) FROM information_schema.columns
+                              WHERE table_schema = current_schema()
+                                AND ((table_name = 'user_grants' AND column_name = 'confirm')
+                                  OR (table_name = 'key_grants' AND column_name = 'confirm')
+                                  OR (table_name = 'keys' AND column_name = 'interaction'))) = 3",
+                    &[],
+                )?
+                .get(0);
+            if !with_approvals {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the approvals, and this portal has no migration for it: make a new database, or add the columns user_grants.confirm, key_grants.confirm and keys.interaction by hand (see README, Upgrades, version 5.1.0)",
+                    SCHEMA.len()
+                )));
+            }
             let with_externals: bool = tx
                 .query_one("SELECT to_regclass('external_services') IS NOT NULL", &[])?
                 .get(0);
@@ -689,7 +727,7 @@ impl Pg {
     ) -> Result<Vec<UserQueryRow>, postgres::Error> {
         Ok(c.query(
             "SELECT u.login, u.password_hash, u.created_at, g.action, g.resource_type,
-                    g.resource_id, g.resource_path, g.limits
+                    g.resource_id, g.resource_path, g.limits, g.confirm
                FROM users u LEFT JOIN user_grants g ON g.user_id = u.id
               ORDER BY u.login COLLATE \"C\", g.action COLLATE \"C\",
                        g.resource_id COLLATE \"C\", g.resource_path COLLATE \"C\"",
@@ -703,8 +741,11 @@ impl Pg {
                 row.get::<_, Option<String>>(5),
                 row.get::<_, Option<String>>(6),
                 row.get::<_, Option<String>>(7),
+                row.get::<_, Option<bool>>(8),
             ) {
-                (Some(a), Some(k), Some(i), Some(p), Some(l)) => Some([a, k, i, p, l]),
+                (Some(a), Some(k), Some(i), Some(p), Some(l), Some(c)) => {
+                    Some(([a, k, i, p, l], c))
+                }
                 _ => None,
             };
             (
@@ -1384,8 +1425,8 @@ impl Pg {
                 };
                 tx.execute(
                     "INSERT INTO keys (id, owner_id, name, digest, hint, created_at, expires_at,
-                                       last_check_at, check_count, kind)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                                       last_check_at, check_count, kind, interaction)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                     &[
                         &key.id,
                         &owner_id,
@@ -1397,6 +1438,7 @@ impl Pg {
                         &key.last_check_at,
                         &key.check_count,
                         &key.kind.name(),
+                        &key.interaction.name(),
                     ],
                 )?;
                 keys::insert_key_grants(&mut tx, &key.id, &key.grants)?;
@@ -1794,6 +1836,7 @@ mod tests {
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
                  DROP TABLE keys; DROP TABLE directory_version;
                  ALTER TABLE user_grants DROP COLUMN limits;
+                 ALTER TABLE user_grants DROP COLUMN confirm;
                  ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
@@ -1924,6 +1967,78 @@ mod tests {
         );
     }
 
+    /// The approvals changed the base schema in place: a database of version 8 without the columns is refused.
+    #[test]
+    fn a_database_made_before_the_approvals_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        for drop_column in [
+            "ALTER TABLE user_grants DROP COLUMN confirm;",
+            "ALTER TABLE key_grants DROP COLUMN confirm;",
+            "ALTER TABLE keys DROP COLUMN interaction;",
+        ] {
+            let Store::Pg(fresh) = Backend::Postgres(url.clone()).fresh() else {
+                unreachable!()
+            };
+            let config = fresh.pool.config.clone();
+            let mut admin = config.connect(NoTls).unwrap();
+            admin.batch_execute(drop_column).unwrap();
+            drop(fresh);
+            let error = Pg::start(config, 2, Duration::from_secs(5))
+                .err()
+                .expect("the database is refused");
+            assert!(
+                error.contains("before the approvals")
+                    && error.contains("user_grants.confirm")
+                    && error.contains("keys.interaction")
+                    && error.contains("5.1.0"),
+                "{drop_column}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_migration_to_version_eight_adds_the_approval_columns_and_the_interaction_follows_the_kind(
+    ) {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        // This database was made by the portal before the approvals, at version 7.
+        admin
+            .batch_execute(
+                "INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);
+                 INSERT INTO keys (id, owner_id, name, digest, hint, created_at, kind)
+                   VALUES ('mcp1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1, 'mcp'),
+                          ('api1', 1, 'hook', decode(repeat('01', 32), 'hex'), 'cd34', 1, 'api');
+                 INSERT INTO key_grants (key_id, action, resource_type, resource_id)
+                   VALUES ('mcp1', 'access', 'service', 'db');
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
+                 DELETE FROM schema_migrations WHERE version > 7;",
+            )
+            .unwrap();
+        drop(fresh);
+        let migrated = Pg::start(config, 2, Duration::from_secs(5)).unwrap();
+        let keys = migrated.load_directory().unwrap().keys;
+        let interaction = |id: &str| keys.iter().find(|k| k.id == id).unwrap().interaction;
+        assert_eq!(
+            interaction("mcp1"),
+            crate::keys::Interaction::Conversational
+        );
+        assert_eq!(interaction("api1"), crate::keys::Interaction::OneShot);
+        assert!(keys.iter().flat_map(|k| &k.grants).all(|g| !g.confirm));
+        let bad = admin.batch_execute("UPDATE keys SET interaction = 'chat'");
+        assert!(bad.is_err(), "the closed list of values");
+    }
+
     /// The column `credential` of `sessions` changed the base schema in place: a database without it is refused.
     #[test]
     fn a_database_made_before_the_stamp_of_the_sessions_is_refused_with_a_message_that_says_why() {
@@ -1963,6 +2078,7 @@ mod tests {
             .batch_execute(&format!(
                 "ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa;
                  ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
                  DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 7;
                  INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
@@ -2010,6 +2126,7 @@ mod tests {
                  INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
+                 ALTER TABLE user_grants DROP COLUMN confirm; ALTER TABLE key_grants DROP COLUMN confirm; ALTER TABLE keys DROP COLUMN interaction;
                  ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )
