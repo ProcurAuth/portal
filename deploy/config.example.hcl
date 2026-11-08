@@ -162,6 +162,13 @@ inbox {
     }
   }
 
+  # Optional: the approval of an action. A grant with `confirm = true` then needs the approval of the owner of the
+  # key. It needs keys.mcp = true and the blocks identity and pdp, which this example does not have. A server of the
+  # PDP also needs `approvals = true` in its block pdp_client. Defaults: evaluation_ttl = "5m", deny_cooldown = "5m".
+  # approvals {
+  #   consume_within = "5m"   # the time after the decision in which the approval can be used
+  # }
+
   group "infra" {
     name        = "Infra prod"
     description = "Production outages"

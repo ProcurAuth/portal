@@ -288,6 +288,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "inbox.at_rest",
         "This block is optional and is inside the block `inbox`. The portal seals the contents of the items with a key of the server before it writes them. It never writes a content in clear text. The block has one block `key \"<id>\"` for each key. The block needs the block `inbox.items`, and the block `inbox.items` needs this block.",
     ),
+    (
+        "inbox.approvals",
+        "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.",
+    ),
 ];
 
 /// Every key. The order is the order of resolution: a key comes after the keys that its
@@ -1554,6 +1558,30 @@ pub static KEYS: &[Key] = &[
         when: When::Always,
         doc: "`true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it.",
     },
+    Key {
+        block: "inbox.approvals",
+        name: "consume_within",
+        kind: Kind::Duration { min: secs(5), max: secs(HOUR) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The time after the decision in which the approval can be used. It never limits the wait for the decision. The window that applies is the larger of this value and `lease_s` of the request. It must not be above `inbox.items.max_lifetime`. Recommended: `\"5m\"`.",
+    },
+    Key {
+        block: "inbox.approvals",
+        name: "evaluation_ttl",
+        kind: Kind::Duration { min: secs(10), max: secs(HOUR) },
+        presence: Presence::Default("5m"),
+        when: When::Always,
+        doc: "The time in which an `evaluation_id` of the PDP is valid. A service submits its request before this time ends.",
+    },
+    Key {
+        block: "inbox.approvals",
+        name: "deny_cooldown",
+        kind: Kind::Duration { min: secs(0), max: secs(DAY) },
+        presence: Presence::Default("5m"),
+        when: When::Always,
+        doc: "The time after an explicit refusal in which the PDP answers `approval_denied` for the same key and the same effect. Another effect, and each other end of a request, start no such time. `0s`: the PDP never answers `approval_denied`.",
+    },
 ];
 
 /// The blocks with a label, in the order of the reference. The label names a user or a server.
@@ -1740,6 +1768,14 @@ pub static LABELED_KEYS: &[Key] = &[
         doc: "The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token.",
     },
     Key {
+        block: "pdp_client",
+        name: "approvals",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::LabeledBlock,
+        doc: "`true`: the server can ask for the approval of an action, with `context.approval.effect`, and it can use the approval API. It needs the block `inbox.approvals`. `false`: a grant with `confirm` gives this server a plain `false` without a reason.",
+    },
+    Key {
         block: "inbox.at_rest.key",
         name: "secret",
         kind: Kind::Secret { max_bytes: 128 },
@@ -1793,6 +1829,7 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "watch"),
     ("inbox", "items"),
     ("inbox", "at_rest"),
+    ("inbox", "approvals"),
     ("inbox.items", "lease"),
     ("inbox.items", "digest"),
 ];
@@ -1841,6 +1878,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox.watch" => Some("inbox.watch"),
         "inbox.items" | "inbox.items.lease" | "inbox.items.digest" => Some("inbox.items"),
         "inbox.at_rest" => Some("inbox.at_rest"),
+        "inbox.approvals" => Some("inbox.approvals"),
         _ => None,
     }
 }

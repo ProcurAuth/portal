@@ -53,6 +53,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// `None` when the file has no `inbox` block: the inbox is off.
     pub inbox: Option<InboxConfig>,
+    /// The servers whose block `pdp_client` has `approvals = true`.
+    pub pdp_approvals: std::collections::BTreeSet<String>,
     /// The value of each key that applies, with its source. Secrets are hidden.
     pub effective: Vec<Effective>,
 }
@@ -589,6 +591,12 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
     };
 
     let inbox_built = inbox::build(r, keys.as_ref().is_some_and(|k| k.api))?;
+    let mut pdp_approvals = std::collections::BTreeSet::new();
+    for block in r.labeled.iter().filter(|b| b.kind == "pdp_client") {
+        if block.bool("approvals")? {
+            pdp_approvals.insert(block.label.clone());
+        }
+    }
 
     let kubernetes = if r.bool("discovery", "kubernetes")? {
         Some(kubernetes_api(r, env)?)
@@ -696,6 +704,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
             level: LogLevel::parse(&r.text("logging", "level")?)?,
         },
         inbox: None,
+        pdp_approvals,
         effective: std::mem::take(&mut r.effective),
     };
     let mut config = config;
@@ -704,6 +713,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         config.inbox = Some(inbox);
         secrets.inbox = Some(inbox_secrets);
     }
+    check_approvals(&config)?;
     // The grants of the accounts of the file on the service portal follow the document of the
     // features that the file turns on.
     let features = config.portal_features();
@@ -890,6 +900,31 @@ fn build_access(
             max_document_bytes: r.count("access", "max_document_bytes")?,
         },
     })
+}
+
+/// The keys that the approvals need: the block `inbox.approvals` needs the PDP and the keys of the kind `mcp`, and a
+/// server with `approvals = true` needs the block.
+fn check_approvals(config: &Config) -> Result<(), String> {
+    let has_block = config
+        .inbox
+        .as_ref()
+        .is_some_and(|inbox| inbox.approvals.is_some());
+    if let Some(name) = config.pdp_approvals.iter().next() {
+        if !has_block {
+            return Err(format!(
+                "pdp_client.{name}.approvals is true and the block inbox.approvals is absent: expected approvals = false, or the block inbox.approvals"
+            ));
+        }
+    }
+    if has_block {
+        if config.pdp.is_none() {
+            return Err("the block inbox.approvals needs the block pdp: the PDP gates the actions; add the block pdp, or remove the block inbox.approvals".into());
+        }
+        if !config.keys.as_ref().is_some_and(|keys| keys.mcp) {
+            return Err("the block inbox.approvals needs keys.mcp = true: an agent holds a key of the kind mcp; set keys.mcp = true, or remove the block inbox.approvals".into());
+        }
+    }
+    Ok(())
 }
 
 /// The token of each `pdp_client` block. A short token, or a token that another `pdp_client` block has, stops the start.

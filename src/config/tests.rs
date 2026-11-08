@@ -4189,3 +4189,134 @@ fn config_risk_key_is_refused_and_no_document_depends_on_a_risk_level() {
         crate::actions::parse("db", risky).unwrap()
     );
 }
+
+// ---------------------------------------------------------------- inbox.approvals and pdp_client approvals
+
+/// The blocks that the approvals need besides the inbox: the identity and the PDP. The keys block of the fixture has
+/// `mcp = false`: `approvals_file` turns the kind `mcp` on.
+const PDP_PARTS: &str = r#"
+    identity { issuer = "https://portal.test" signing_key_env = "IDENTITY_KEY" }
+    pdp { listen_address = "0.0.0.0:4182" url = "http://pdp:4182" plain_http = true }
+"#;
+
+/// A file with the inbox (items, at_rest and `approvals`) and `rest` after it. `mcp` turns the kind `mcp` of the keys
+/// on, which needs the blocks of `PDP_PARTS`.
+fn approvals_file(approvals: &str, rest: &str, mcp: bool) -> (String, PathBuf) {
+    let (raw, file) = items_config(&format!("{ITEMS}{approvals}"), AT_REST);
+    let raw = if mcp {
+        raw.replace(
+            "keys { mcp = false api = true }",
+            "keys { mcp = true api = true }",
+        )
+    } else {
+        raw
+    };
+    (format!("{raw}\n{rest}"), file)
+}
+
+fn approvals_ok(approvals: &str, rest: &str) -> Config {
+    let (raw, file) = approvals_file(approvals, rest, true);
+    let result = items_parse(&raw).unwrap_or_else(|e| panic!("{e}\n{raw}"));
+    fs::remove_file(file).ok();
+    result.0
+}
+
+fn approvals_err(approvals: &str, rest: &str, mcp: bool) -> String {
+    let (raw, file) = approvals_file(approvals, rest, mcp);
+    let result = items_parse(&raw);
+    fs::remove_file(file).ok();
+    match result {
+        Ok(_) => panic!("must be rejected:\n{raw}"),
+        Err(e) => e,
+    }
+}
+
+const APPROVALS: &str = r#"
+  approvals { consume_within = "5m" }
+"#;
+
+#[test]
+fn the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client() {
+    let rest = format!(
+        "{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" approvals = true }}\n pdp_client \"chat\" {{ token_env = \"PDP_CHAT\" }}"
+    );
+    let config = approvals_ok(APPROVALS, &rest);
+    let approvals = config.inbox.as_ref().unwrap().approvals.as_ref().unwrap();
+    assert_eq!(approvals.consume_within, Duration::from_secs(300));
+    assert_eq!(approvals.evaluation_ttl, Duration::from_secs(300));
+    assert_eq!(approvals.deny_cooldown, Duration::from_secs(300));
+    assert_eq!(
+        config.pdp_approvals.iter().collect::<Vec<_>>(),
+        ["db"],
+        "only the server with approvals = true"
+    );
+    assert_eq!(line(&config, "pdp_client.chat.approvals").value, "false");
+    assert_eq!(
+        line(&config, "inbox.approvals.evaluation_ttl").value,
+        "\"5m\""
+    );
+    let set = approvals_ok(
+        r#"approvals { consume_within = "90s" evaluation_ttl = "10s" deny_cooldown = "0s" }"#,
+        &rest,
+    );
+    let approvals = set.inbox.unwrap().approvals.unwrap();
+    assert_eq!(approvals.consume_within, Duration::from_secs(90));
+    assert_eq!(approvals.evaluation_ttl, Duration::from_secs(10));
+    assert_eq!(approvals.deny_cooldown, Duration::ZERO);
+    let without = approvals_ok("", PDP_PARTS);
+    assert!(without.inbox.unwrap().approvals.is_none());
+}
+
+#[test]
+fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value() {
+    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" approvals = true }";
+    let with_parts = format!("{PDP_PARTS}\n{client}");
+    for (approvals, rest, mcp, expected) in [
+        // consume_within is mandatory, in its range, and at most max_lifetime.
+        (
+            "approvals { }",
+            with_parts.as_str(),
+            true,
+            "inbox.approvals.consume_within",
+        ),
+        (
+            r#"approvals { consume_within = "1s" }"#,
+            with_parts.as_str(),
+            true,
+            "inbox.approvals.consume_within",
+        ),
+        (
+            r#"approvals { consume_within = "2h" }"#,
+            with_parts.as_str(),
+            true,
+            "inbox.approvals.consume_within",
+        ),
+        (
+            r#"approvals { consume_within = "5m" evaluation_ttl = "5s" }"#,
+            with_parts.as_str(),
+            true,
+            "inbox.approvals.evaluation_ttl",
+        ),
+        (
+            r#"approvals { consume_within = "5m" deny_cooldown = "2d" }"#,
+            with_parts.as_str(),
+            true,
+            "inbox.approvals.deny_cooldown",
+        ),
+        // The block needs the PDP and the keys of the kind mcp.
+        (APPROVALS, "", false, "inbox.approvals needs the block pdp"),
+        (APPROVALS, PDP_PARTS, false, "keys.mcp = true"),
+        // A server with approvals needs the block.
+        (
+            "",
+            with_parts.as_str(),
+            true,
+            "pdp_client.db.approvals is true",
+        ),
+    ] {
+        let message = approvals_err(approvals, rest, mcp);
+        assert!(message.contains(expected), "{approvals} {rest}: {message}");
+    }
+    // `consume_within` has at most 1 hour and `max_lifetime` at least 1 day: the check against `max_lifetime` guards
+    // a future change of the ranges and cannot fail today.
+}

@@ -12,6 +12,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 - `inbox.devices.public_address` is the public base URL of the portal as the phones reach it. The portal has no base path. A proxy under a prefix removes the prefix.
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
 - The blocks `items` and `at_rest` are optional, but they go together. Each one needs the other. The block `items` holds the blocks `lease` and `digest`. The block `at_rest` holds one block `key "<id>"` for each content key.
+- The block `approvals` is optional. It starts the approval of an action at the PDP. See "Approvals".
 - The blocks `group "<id>"` and `api_key "<name>"` can occur more than once. The block `inbox` needs one group at least.
 - The Inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
 
@@ -34,6 +35,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.cluster` needs the block `postgres`. Its `listen` must not use the port of `server.listen_address` or of `pdp.listen_address`.
 - `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
 - `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
+- `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A block `pdp_client` with `approvals = true` needs the block `inbox.approvals`. See "Approvals".
 
 ## Keys of the senders
 
@@ -89,6 +91,16 @@ Keep the key file outside the data volume and outside the backups of the databas
 At start, the portal compares each key with the check value that the database keeps. A key that changed under the same id stops the start. The message names the id. To change a key, add a new key with a new id, make it the `active_key`, and restart each instance. A database from a version before 5.1.0 has no table for the check values. The portal stops at start and says so (see the README, "Upgrades").
 
 `portal check-config` shows for each key its id, whether it is `active` or `read-only`, and its source as `env:VAR` or `file:/path`. It never shows the secret.
+
+## Approvals
+
+The block `inbox.approvals` sets how the PDP gates an action that a grant marks with `confirm`. It has three keys.
+
+- `consume_within` is mandatory. It is the time after the decision of the owner in which the approval can be used. The range is `5s` to `1h`. The time that applies is the larger of this value and `lease_s` of the request.
+- `evaluation_ttl` is the time in which an `evaluation_id` is valid. The range is `10s` to `1h`. The default is `5m`.
+- `deny_cooldown` is the time after an explicit refusal in which the PDP answers `approval_denied` for the same effect. The range is `0s` to `24h`. The default is `5m`. With `0s`, the PDP never answers `approval_denied`.
+
+A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate".
 
 ## Switches that touch the Inbox
 

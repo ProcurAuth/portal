@@ -1646,6 +1646,16 @@ This block is optional and is inside the block `inbox`. The portal seals the con
 | `active_key` | text: the label of a block `key` of this block: 1 to 16 characters of a-z, 0-9, '-' and '_' | required | The key that seals the new contents. The other keys of the block stay readable: use them for a rotation. No switch turns the seal off. |
 | `admin_body_read` | `true` or `false` | `false` | `true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it. |
 
+#### Block `inbox.approvals`
+
+This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `consume_within` | duration, 5s to 1h | required | The time after the decision in which the approval can be used. It never limits the wait for the decision. The window that applies is the larger of this value and `lease_s` of the request. It must not be above `inbox.items.max_lifetime`. Recommended: `"5m"`. |
+| `evaluation_ttl` | duration, 10s to 1h | `"5m"` | The time in which an `evaluation_id` of the PDP is valid. A service submits its request before this time ends. |
+| `deny_cooldown` | duration, 0s to 1d | `"5m"` | The time after an explicit refusal in which the PDP answers `approval_denied` for the same key and the same effect. Another effect, and each other end of a request, start no such time. `0s`: the PDP never answers `approval_denied`. |
+
 #### Block `user "<login>"`
 
 This block has a label and can occur more than one time. The grants of one user that the configuration gives (modes `static` and `hybrid`). The label is the login, as the server keeps it: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'. The account itself is in the database. The superadmin has all grants and has no `user` block.
@@ -1696,6 +1706,7 @@ This block has a label and can occur more than one time. One server that asks th
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token. |
+| `approvals` | `true` or `false` | `false` | `true`: the server can ask for the approval of an action, with `context.approval.effect`, and it can use the approval API. It needs the block `inbox.approvals`. `false`: a grant with `confirm` gives this server a plain `false` without a reason. |
 
 #### Block `inbox.at_rest.key "<id>"`
 

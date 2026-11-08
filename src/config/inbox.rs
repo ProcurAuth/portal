@@ -29,6 +29,8 @@ pub struct InboxConfig {
     pub items: Option<ItemsConfig>,
     /// `None` without the block `inbox.at_rest`.
     pub at_rest: Option<AtRestConfig>,
+    /// `None` without the block `inbox.approvals`. The block comes with `inbox.items`.
+    pub approvals: Option<ApprovalsConfig>,
     /// The blocks `group`, by id.
     pub groups: BTreeMap<String, GroupConfig>,
     /// The blocks `api_key`, by name.
@@ -126,7 +128,6 @@ pub struct ItemsConfig {
     pub digest: DigestConfig,
     #[allow(dead_code)] // lot L13 reads it
     pub max_body_bytes: usize,
-    #[allow(dead_code)] // lots L7 and L9 read it
     pub wait_max: Duration,
 }
 
@@ -165,6 +166,17 @@ pub struct AtRestConfig {
     pub keys: Vec<String>,
     /// The superadmin can read the contents.
     pub admin_body_read: bool,
+}
+
+/// The block `inbox.approvals`: what the PDP needs to gate an action. Lot L7 adds the keys of the submission API.
+#[derive(Clone, Debug)]
+pub struct ApprovalsConfig {
+    /// The time after the decision in which the approval can be used.
+    pub consume_within: Duration,
+    /// The time in which an `evaluation_id` is valid.
+    pub evaluation_ttl: Duration,
+    /// The time after an explicit refusal in which the PDP answers `approval_denied`.
+    pub deny_cooldown: Duration,
 }
 
 /// A block `group`.
@@ -313,6 +325,27 @@ pub fn build(
         ));
     }
 
+    let approvals = if r.has_block("inbox.approvals") {
+        let items = items
+            .as_ref()
+            .ok_or("the block inbox.approvals needs the block inbox.items")?;
+        let approvals = ApprovalsConfig {
+            consume_within: r.duration("inbox.approvals", "consume_within")?,
+            evaluation_ttl: r.duration("inbox.approvals", "evaluation_ttl")?,
+            deny_cooldown: r.duration("inbox.approvals", "deny_cooldown")?,
+        };
+        if approvals.consume_within > items.max_lifetime {
+            return Err(format!(
+                "inbox.approvals.consume_within must be at most inbox.items.max_lifetime: consume_within is {}, max_lifetime is {}",
+                show_duration(approvals.consume_within),
+                show_duration(items.max_lifetime)
+            ));
+        }
+        Some(approvals)
+    } else {
+        None
+    };
+
     let mut groups = BTreeMap::new();
     for block in r.labeled.iter().filter(|b| b.kind == "group") {
         super::keys::check_inbox_id(&block.label)
@@ -428,6 +461,7 @@ pub fn build(
         watch,
         items,
         at_rest,
+        approvals,
         groups,
         api_keys,
     };
