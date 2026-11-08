@@ -12,6 +12,14 @@ use crate::store::testing::{each_backend, Backend};
 
 // The conformance cases of the series D (a PDP) --------------------------------------------------
 
+/// A case that the portal cannot run yet: it lists a condition of `skip_if` that the portal does not
+/// meet. The portal has no approval support until lot L6 of the plan; that lot removes this condition.
+fn not_run_yet(case: &serde_json::Value) -> bool {
+    case["skip_if"]
+        .as_array()
+        .is_some_and(|list| list.iter().any(|c| c == "no_approval_support"))
+}
+
 /// The cases of the public repository of the protocol (`conformance/`). Each case loads its
 /// directory in the portal, sends its steps to the PDP and checks the answers. The test reads the
 /// path of the directory `conformance/` in `PROCURAUTH_CONFORMANCE`. Without this variable, the test
@@ -426,6 +434,9 @@ mod conformance_d {
             for path in &paths {
                 let case = read_json(path);
                 let id = case["id"].as_str().unwrap().to_string();
+                if not_run_yet(&case) {
+                    continue;
+                }
                 if only
                     .as_ref()
                     .is_some_and(|only| !only.split(',').any(|o| o == id))
@@ -1038,6 +1049,9 @@ mod conformance_e {
             for path in &paths {
                 let case: Value =
                     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+                if not_run_yet(&case) {
+                    continue;
+                }
                 run += 1;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_case(&backend, &case)

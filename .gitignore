@@ -17,3 +17,4 @@
 /target*/
 /target/
 deploy/compose/secrets/
+__pycache__/
