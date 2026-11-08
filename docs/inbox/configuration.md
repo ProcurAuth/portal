@@ -13,6 +13,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
 - The blocks `items` and `at_rest` are optional, but they go together. Each one needs the other. The block `items` holds the blocks `lease` and `digest`. The block `at_rest` holds one block `key "<id>"` for each content key.
 - The block `approvals` is optional. It starts the approval of an action at the PDP. See "Approvals".
+- The block `mcp` is optional. It starts the MCP endpoint of the agents. See "The MCP endpoint".
 - The blocks `group "<id>"` and `api_key "<name>"` can occur more than once. The block `inbox` needs one group at least.
 - The Inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
 
@@ -36,6 +37,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
 - `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
 - `inbox.approvals` needs `inbox.items`, `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A block `pdp_client` with `approvals = true` needs the block `inbox.approvals`. See "Approvals".
+- `inbox.mcp` needs `inbox.items` and `keys.mcp = true`. Its `max_wait` is at most `inbox.items.wait_max`. Its `path` is not `metrics.path`. See "The MCP endpoint".
 
 ## Keys of the senders
 
@@ -110,6 +112,20 @@ The block `inbox.approvals` sets how the PDP gates an action that a grant marks 
 - `web_approval` is `true` by default. With `false`, the web page lists the requests and does not decide them, so an owner with no phone gets `409 no_device`.
 
 A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate" and "The approval API for a service".
+
+## The MCP endpoint
+
+The block `inbox.mcp` starts the endpoint of the agents. All its keys have a default, so the block can be empty. [`agents.md`](agents.md) tells how an agent uses the endpoint.
+
+- `path` is the URL path of the endpoint. The default is `/mcp`. It must not be `/`, `/healthz`, `/readyz` or `/api/version`. It must not be under `/auth/`, `/v1/` or `/api/v1/`. It must not be the path of the metrics. Make the proxy send this path to the portal without ForwardAuth.
+- `max_wait` is the longest wait of one call of `get_answer`. The range is `0s` to `60s`. The default is `25s`. It must not be above `inbox.items.wait_max`. A real client stops a call near 60 seconds, so keep the value low.
+- `allowed_origins` lists the values of the header `Origin` that pass. A request with no `Origin` header comes from a program and passes. A request with another origin gets `403`. Without this key, no browser origin passes.
+- `allowed_client_cidrs` lists the networks of the client address. The client address is the address that `server.trusted_proxies` finds. A client in no network gets `403`. Without this key, each address passes.
+- `rate_limit_per_minute` is the bucket of one key. The range is `1` to `100000`. The default is `120`. Each request counts, also `tools/list` and `ping`.
+- `max_unauthenticated_per_minute` is the number of requests with no valid key that one client address can send. The range is `1` to `10000`. The default is `10`. The portal counts a bad key only, never a good one.
+- `max_body_bytes` is the largest body. The range is `1KiB` to `1MiB`. The default is `64KiB`.
+
+Each instance keeps its limits in memory. With N instances, a key can send N times `rate_limit_per_minute`. A client address that sends too many requests with no valid key gets `429` before the portal checks the key.
 
 ## Switches that touch the Inbox
 

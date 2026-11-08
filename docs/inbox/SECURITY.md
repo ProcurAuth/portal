@@ -46,6 +46,16 @@ The metadata stays in clear: the request id, the service, the action, the resour
 
 The portal erases the sealed body of a final item after `inbox.items.body_purge_after`. The effect hash and the audit events stay. A body that the portal serves is checked first: the portal computes the effect hash of the opened command again. On a difference, it serves nothing and writes the log line `body_effect_mismatch`. At start, the portal stops when sealed rows name a key that the file lost. The command `portal inbox content-purge --config FILE --key ID` erases the contents of that key and keeps the metadata.
 
+## The agent channel
+
+The agent sends its explanation and its talk to the portal, and the service never sees them. The service learns the verdict only. The portal checks the key in process, and the endpoint `/mcp` needs no ForwardAuth.
+
+- The endpoint checks the method, the `Origin`, the client address, the key, the rate and the size, in this order. A request that fails a check gets its answer before the portal reads more of it.
+- A key reads and speaks only on its own items. Another item gives `not_found`, as an item that does not exist.
+- The text of the person that the agent reads is in an `untrusted` object, after a data notice. The text can hold instructions, so the agent must read it as data. The portal replaces a control character with U+FFFD and never shows the approver or the device.
+- An `mcp_` key does not open the REST routes, and an `api_` key does not open the endpoint.
+- A bad key is counted for the client address. An address over the limit gets `429` before the portal checks the key. Each instance keeps its own counters.
+
 ## Limits of the model
 
 - The portal knows nothing about TLS. Noise protects the phones. The bearer key of a sender travels in clear text on plain HTTP. Terminate TLS in the reverse proxy, or use a private network.

@@ -2,7 +2,7 @@
 
 The Inbox is a feature of the portal. It sends alerts to Android phones. It makes sure that each subscribed phone shows each alert one time. The senders, the pages and the phones use the same port of the portal.
 
-This chapter is for operators and for people who send alerts. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements. [`protocol.md`](protocol.md) has the wire protocol of the phones. [`SECURITY.md`](SECURITY.md) has the security model. [`configuration.md`](configuration.md) has the rules that the reference table cannot show. [`../design-inbox.md`](../design-inbox.md) has the design and the decisions.
+This chapter is for operators and for people who send alerts. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements. [`protocol.md`](protocol.md) has the wire protocol of the phones. [`SECURITY.md`](SECURITY.md) has the security model. [`configuration.md`](configuration.md) has the rules that the reference table cannot show. [`agents.md`](agents.md) tells how an agent uses the tools of the portal. [`../design-inbox.md`](../design-inbox.md) has the design and the decisions.
 
 ## Concepts
 
@@ -12,6 +12,7 @@ This chapter is for operators and for people who send alerts. The root [`README.
 | Group | A named list of phones that follow it. The configuration file defines the groups. A group can be `critical`. |
 | Sender | A program that sends alerts: a script, Grafana, Alertmanager, a service or the portal itself. It uses an API key. |
 | API key | A key with the prefix `api_`. The routes of the Inbox verify it. |
+| Agent | A program that asks a person to approve an action or to answer. It uses an `mcp_` key at the MCP endpoint, or an `api_` key at the REST routes of the items. See [`agents.md`](agents.md). |
 | Phone | An Android phone that runs the app Portal Inbox and enrolled with an account of the portal. |
 | Account | An account of the portal. It owns its phones. Its login is the user name of each phone. |
 | Subscription | The link between one phone and one group. The phone chooses it. The account must have the permission `inbox.receive` on the group. |

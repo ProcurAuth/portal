@@ -461,6 +461,8 @@ The blocks `inbox.items`, `inbox.at_rest`, `inbox.approvals` and `inbox.mcp` fol
 - A block `inbox.at_rest` without `inbox.items`.
 - A block `inbox.mcp` without `keys.mcp = true`.
 - `inbox.mcp.max_wait` above `wait_max`.
+- A block `inbox.mcp` without `inbox.items`.
+- `inbox.mcp.path` equal to `metrics.path`.
 
 6.9.7 **[5.1.0]** A configuration secret of items MUST come from `_env` or `_file`. `portal check-config` MUST show for each key of content its id, whether it is active or read-only, and its source as `env:VAR` or `file:/path`. It MUST hide the secret. No key of this section MUST be editable from the web.
 
@@ -493,7 +495,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | Requirement | Release | Lot | Test |
 |---|---|---|---|
 | 3.1.5a | 5.1.0 | L3 | `proto::tests::the_kind_of_an_alert_is_alert_and_nothing_else`, `frames::the_golden_files_cover_every_frame_in_both_directions`, `old_hello_protocol_4_gets_4426` |
-| 3.3.8a | 5.1.0 | L9 | to fill |
+| 3.3.8a | 5.1.0 | L9 | `agent_channel::api_key_cannot_use_mcp_and_mcp_key_cannot_use_rest_alerts`, `mcp_contract::the_key_and_tool_cases_k01_k02_k03_r01_to_r09` (K01) |
 | 3.6.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked`, `create_idempotent_same_request_same_id` |
 | 3.6.2 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked`, `renewal_writes_at_most_once_per_lease_s_in_both_databases` |
 | 3.6.3 | 5.1.0 | L5 | `items::tests::state_machine_every_state_times_event_table` |
@@ -501,16 +503,16 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.5 | 5.1.0 | L5 | `answer_after_abandon_returns_abandoned`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before`, `items::tests::abandon_after_lease_plus_grace_not_before` |
 | 3.6.6 | 5.1.0 | L5, L7 | L5: `items::tests::waits_are_checked_and_never_changed`, `until_expires_and_never_abandons`. L7: `approval_api_tests::a02_lease_out_of_range_422_no_clamp`, `approval_api_tests::a02_lease_and_until_together_422`, `approval_api_tests::a10_intent_rules_explanation_one_shot` |
 | 3.6.7 | 5.1.0 | L5 | `items::tests::lease_effective_is_three_times_lease_s`, `items::tests::max_lifetime_caps_lease_and_supersede_does_not_extend`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
-| 3.6.8 | 5.1.0 | L5, L9 | L5: `items::tests::renewal_write_at_most_once_per_lease_s`, `renewal_writes_at_most_once_per_lease_s_in_both_databases`, `events_one_row_per_transition_none_per_renewal`. L9: to fill |
+| 3.6.8 | 5.1.0 | L5, L9 | L5: `items::tests::renewal_write_at_most_once_per_lease_s`, `renewal_writes_at_most_once_per_lease_s_in_both_databases`, `events_one_row_per_transition_none_per_renewal`. L9: `agent_channel::get_answer_renews_lease_without_budget_unit` (`get_answer`, `keepalive` and a read with `wait` renew, a read without `wait` does not, and no table gains a row) |
 | 3.6.9 | 5.1.0 | L5 | `items::tests::abandon_after_lease_plus_grace_not_before`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before` |
 | 3.6.10 | 5.1.0 | L5 | `items::tests::until_reached_is_expired_neutral`, `until_expires_and_never_abandons`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
-| 3.6.11 | 5.1.0 | L5 | `revive_in_window_max_three_notifications_once`, `revive_after_window_refused_new_request_needs_previous_id`, `items::tests::revive_needs_the_window_the_count_and_the_body`. The `410` is in L9 |
+| 3.6.11 | 5.1.0 | L5 | `revive_in_window_max_three_notifications_once`, `revive_after_window_refused_new_request_needs_previous_id`, `items::tests::revive_needs_the_window_the_count_and_the_body`. L9: `agent_channel::keepalive_revives_in_the_window_and_gives_410_after` (the `410` and `revivable` false) |
 | 3.6.12 | 5.1.0 | L5, L7 | L5: `supersede_race_one_winner_old_approval_cancelled`. L7: `approval_api_tests::supersedes_cancels_old_approval` |
-| 3.6.13 | 5.1.0 | L5, L9 | L5: `the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items`. L9: to fill |
+| 3.6.13 | 5.1.0 | L5, L9 | L5: `the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items`. L9: `agent_channel::cancel_makes_pep_see_void` (the key cancels, the service reads `void`) |
 | 3.6.14 | 5.1.0 | L5, L8 | L5: `cas_two_racers_one_answer`, `answer_effect_mismatch_state_unchanged`, `answer_after_abandon_returns_abandoned`. L8: to fill |
-| 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L8, L9: to fill |
+| 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L9: `agent_channel::say_needs_allow_ask_back_and_conversational_key` (`replied`, the `say` back to `pending`, `too_fast`, `stale_thread`). L8: to fill |
 | 3.6.16 | 5.1.0 | L2 | `key_interaction_default_by_kind`, `config_interaction_values_closed`, `the_interaction_field_is_closed_and_an_absent_field_changes_nothing`, `grant_roundtrip_confirm_both_backends` |
-| 3.6.17 | 5.1.0 | L7, L9 | L7: `approval_api_tests::a10_intent_rules_explanation_one_shot` (`422 interaction_not_allowed`). L9: to fill (the refusal of a `reply` and a `say` of a `one_shot` item) |
+| 3.6.17 | 5.1.0 | L7, L9 | L7: `approval_api_tests::a10_intent_rules_explanation_one_shot` (`422 interaction_not_allowed`). L9: `agent_channel::say_needs_allow_ask_back_and_conversational_key` (a `say` of a `one_shot` key: the tool is hidden at the endpoint, and `422 interaction_not_allowed` at the REST door); the refusal of a `reply` of a `one_shot` item is in L5 `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent` |
 | 3.6.18 | 5.1.0 | L5 | `caps_per_key_owner_total` |
 | 3.6.19 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
 | 3.6.20 | 5.1.0 | L5 | `outage_extends_open_leases_by_the_gap_no_false_abandon`, `degraded_storage_returns_storage_degraded_and_writes_nothing` |
@@ -546,15 +548,15 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.25 | 5.1.0 | L10 | to fill |
 | 3.7.26 | 5.1.0 | L10 | to fill |
 | 3.7.27 | 5.1.0 | L10 | to fill |
-| 3.8.1 | 5.1.0 | L9 | to fill |
-| 3.8.2 | 5.1.0 | L9 | to fill |
-| 3.8.3 | 5.1.0 | L9 | to fill |
-| 3.8.4 | 5.1.0 | L9 | to fill |
-| 3.8.5 | 5.1.0 | L9 | to fill |
-| 3.8.6 | 5.1.0 | L9 | to fill |
+| 3.8.1 | 5.1.0 | L9 | `mcp_contract::the_transport_cases_t01_to_t13` (T01 to T13: JSON only, no session, the versions), `agent_channel::the_endpoint_follows_the_path_of_the_file_and_the_block_gates_the_tools`, `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`keys.mcp = true`) |
+| 3.8.2 | 5.1.0 | L9 | `agent_channel::rest_door_serves_the_same_core_with_its_statuses`, `get_answer_renews_lease_without_budget_unit` (the read with `wait` renews, the read without it does not) |
+| 3.8.3 | 5.1.0 | L9 | `mcp_contract::the_transport_cases_t01_to_t13` (T09 to T12, the order of the checks), `the_key_and_tool_cases_k01_k02_k03_r01_to_r09` (K01, K02), `agent_channel::one_shot_key_tools_list_hides_say_and_supersede`, `unauthenticated_flood_limited_per_address`, `key_over_its_rate_gets_429_and_retry_after` |
+| 3.8.4 | 5.1.0 | L9 | `agent_channel::wait_never_exceeds_max_wait`, `supersede_cancels_old_approval_and_new_waits` (the wait wakes at once), `get_answer_returns_comment_in_untrusted_with_intent` (a pending read is short), `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_wait` against `wait_max`) |
+| 3.8.5 | 5.1.0 | L9 | `agent_channel::agent_cannot_read_or_speak_on_another_keys_item`, `api_key_cannot_use_mcp_and_mcp_key_cannot_use_rest_alerts`, `cancel_makes_pep_see_void` |
+| 3.8.6 | 5.1.0 | L9 | `agent_channel::get_answer_returns_comment_in_untrusted_with_intent` (the notice first, the intent, no approver and no device), `the_texts_of_the_agent_never_reach_the_service_through_the_channel`, `mcp_tools::tests::the_notice_is_the_first_member_of_a_result_with_untrusted_text` |
 | 3.8.7 | 5.1.0 | L10, A2 | to fill |
-| 3.8.8 | 5.1.0 | L9 | to fill |
-| 3.8.9 | 5.1.0 | L9 | to fill |
+| 3.8.8 | 5.1.0 | L9 | `agent_channel::get_answer_renews_lease_without_budget_unit` (an item that the service made with `lease_s` and no intent), `approval_api_tests::pep_observation_unit` (L7) |
+| 3.8.9 | 5.1.0 | L9 | `config::tests::the_block_mcp_has_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
 | 3.9.1 | 5.1.0 | L11 | to fill |
 | 3.9.2 | 5.1.0 | L11 | to fill |
 | 3.9.3 | 5.1.0 | L11 | to fill |
@@ -604,7 +606,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.3 | 5.1.0 | L6, L7 | L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within`, `evaluation_ttl`, `deny_cooldown`, the blocks `pdp` and `keys.mcp`). L7: `config::tests::the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
 | 6.9.4 | 5.1.0 | L2, L6 | L2: `config_confirm_is_a_member_of_a_grant_object_with_the_default_false`. L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` |
 | 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within` above `max_lifetime` cannot happen with today's ranges: 1 hour at most against 1 day at least) |
-| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7: `config::tests::a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_command_bytes` above `pdp.max_body_bytes`, `require_explanation` with `max_explanation_chars = 0`). L9: to fill |
+| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7: `config::tests::a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_command_bytes` above `pdp.max_body_bytes`, `require_explanation` with `max_explanation_chars = 0`). L9: `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`inbox.mcp` without `keys.mcp = true`, `max_wait` above `wait_max`, the path of the metrics) |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
