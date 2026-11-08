@@ -227,6 +227,41 @@ pub extern "system" fn Java_app_portalinbox_core_Native_sessionFree<'l>(
     })
 }
 
+/// The effect hash of an operation. Returns `{"effect": "sha256:..."}` or `{"error": {...}}`.
+/// `op_json` is the JSON text of `op`: the parser refuses a float and a duplicate member name.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_portalinbox_core_Native_effectCompute<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    service: JString<'l>,
+    action: JString<'l>,
+    resource: JString<'l>,
+    op_json: JString<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let service = string(env, &service)?;
+        let action = string(env, &action)?;
+        let resource = string(env, &resource)?;
+        let op = string(env, &op_json)?;
+        new_string(env, &bridge::effect_compute(&service, &action, &resource, &op).to_string())
+    })
+}
+
+/// The view of an approval with the values of `op`. Returns `{"view": {...}}` or `{"error": {...}}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_portalinbox_core_Native_viewResolve<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    op_json: JString<'l>,
+    view_json: JString<'l>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let op = string(env, &op_json)?;
+        let view = string(env, &view_json)?;
+        new_string(env, &bridge::view_resolve(&op, &view).to_string())
+    })
+}
+
 /// Library and protocol versions, for the about screen.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_portalinbox_core_Native_protocolVersion<'l>(
@@ -255,7 +290,7 @@ mod tests {
             .filter_map(|l| l.split("external fun ").nth(1))
             .filter_map(|l| l.split('(').next())
             .collect();
-        assert_eq!(names.len(), 10, "{names:?}");
+        assert_eq!(names.len(), 12, "{names:?}");
         for name in names {
             let symbol = format!("fn Java_app_portalinbox_core_Native_{name}<");
             assert!(source.contains(&symbol), "{symbol}");
@@ -264,6 +299,6 @@ mod tests {
             .lines()
             .filter(|l| l.starts_with("pub extern \"system\" fn Java_app_portalinbox_core_Native_"))
             .count();
-        assert_eq!(exported, 10, "each exported symbol has the package of the app");
+        assert_eq!(exported, 12, "each exported symbol has the package of the app");
     }
 }
