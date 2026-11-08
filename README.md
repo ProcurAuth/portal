@@ -932,6 +932,7 @@ An instance that owns the lease serves. A standby instance waits for the lease b
 |---|---|
 | `portal inbox keygen --out FILE` | Makes the key of the server. The file holds one line: the Noise key pair of the server. The command never overwrites a file. |
 | `portal inbox token --out FILE` | Makes the text of an API key (`api_`, 43 characters and 6 characters of checksum). The file never gets overwritten. |
+| `portal inbox content-key --out FILE` | Makes a key that seals the contents of the items: the base64 text of 32 random bytes. The file never gets overwritten. |
 | `portal inbox import-sqlite --config FILE --from SQLITE_FILE` | Copies a SQLite file into the empty PostgreSQL database that the configuration names. The file must have the current schema of the Inbox. A file of the earlier standalone alert server has an older schema, so the command refuses it. |
 | `portal inbox healthcheck --config FILE` | Asks `/readyz` of the portal port. |
 
@@ -1065,6 +1066,26 @@ With several instances, each instance detects the same event. The idempotency ke
 The detectors run in a background task. They never block the sign-in or the launcher. The sign-in path only adds to a counter that already exists. If the Inbox refuses an alert, the portal logs the event `watch_failed`. It tries again after 10 seconds. If the portal restarts, it forgets what it sent. The key stops a second alert in the same bucket. The portal does not send `healthy again` for an alert that an earlier process sent.
 
 The metrics `portal_watch_sent_total{kind}` and `portal_watch_failed_total{kind}` count the alerts, with the kinds `service_unhealthy`, `service_recovered` and `sign_in_burst`. A key that comes near its budget does not raise an alert in this version.
+
+### Items and content keys
+
+The blocks `inbox.items` and `inbox.at_rest` prepare the approvals and the questions that an agent sends to a person. They are optional, and each one needs the other.
+
+The block `inbox.items` sets the limits: the life of a request, the open items, the lease, the retention and the digest. The key reference lists the keys. The keys that have no default are mandatory.
+
+The portal seals the content of an item with a key of the server before it writes it. It never writes a content in clear text. The block `inbox.at_rest` names the keys. `active_key` seals the new contents. The other keys stay readable, so a rotation is possible.
+
+A key is the base64 text of 32 random bytes. `portal inbox content-key --out FILE` makes one. The file has `secret_env` or `secret_file`, never the text.
+
+**This is not end-to-end encryption.** The portal reads every content, because it opens the sealed bytes to serve the owner.
+
+The seal protects a leak of the database, a backup, a copy of the replica and a disk image. It protects against a database administrator who has no key. It protects against an attacker who can write in the database.
+
+The seal does not protect against a person who has the key and the process of the portal. It does not protect a portal that is compromised while it runs. It does not protect a stolen phone or browser. It does not protect the plain HTTP hop from the proxy to the portal.
+
+Keep the keys outside the data volume and outside the backups of the database. A lost key makes the contents unreadable and keeps the metadata. See [`docs/inbox/SECURITY.md`](docs/inbox/SECURITY.md).
+
+At start, the portal compares each key with a check value in the table `content_key_check`. A key that changed under the same id stops the start. `portal check-config` shows the id, `active` or `read-only`, and the source of each key. It hides the secret.
 
 ### Stop
 
@@ -1448,7 +1469,7 @@ The log.
 
 #### Block `inbox`
 
-This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group "<id>"` and `api_key "<name>"` are inside this block.
+This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster`, `inbox.watch`, `inbox.items` and `inbox.at_rest` are optional. The block `inbox.items` has the blocks `lease` and `digest`. The block `inbox.at_rest` has the blocks `key "<id>"`. The blocks `group "<id>"` and `api_key "<name>"` are inside this block.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -1530,6 +1551,57 @@ This block is optional and is inside the block `inbox`. If it is present, the po
 | `repeat_after` | duration, 1m to 7d | `"1h"` | The shortest time between two alerts of the same kind and the same subject. A service that stays unhealthy raises the alert again after this time. A burst that continues does the same. The alerts of this time have one shared identity, so two instances send one alert. |
 | `recovered` | `true` or `false` | `true` | `true`: the portal sends a short alert when a service is healthy again after the portal sent an alert about it. |
 
+#### Block `inbox.items`
+
+This block is optional and is inside the block `inbox`. It sets the limits of the items: the approvals and the questions that an agent sends to a person. It has the blocks `lease` and `digest`. Each limit that the file does not give a default for is mandatory: a wrong default would hide an item or keep it too long. The block needs the block `inbox.at_rest`, and the block `inbox.at_rest` needs this block.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `max_lifetime` | duration, 1d to 365d | required | The longest life of a chain of requests, from the start of the thread. At this age the item is `expired`, which is a neutral end. A replacement does not extend it. It does not set how long a request waits. Recommended: `"90d"`. |
+| `max_open_per_key` | number, 1 to 1000 | required | The most open items of one key. Recommended: `5`. |
+| `max_open_per_owner` | number, 1 to 10000 | required | The most open items of one owner. Recommended: `20`. |
+| `max_open_total` | number, 1 to 1000000 | required | The most open items in all. A new item above this number is refused. |
+| `max_chain` | number, 1 to 50 | `10` | The most replacements in one thread. |
+| `max_turns` | number, 2 to 200 | `40` | The most turns in one thread. |
+| `stale_after` | duration, 1m to 365d | `"24h"` | The age from which a screen shows the banner "old request" and asks for one more confirmation. |
+| `retention` | duration, 1d to 3650d | required | How long a finished item stays, with its metadata only. It must be at least `max_lifetime` plus `lease.revive_window`. |
+| `body_purge_after` | duration, 0s to 3650d | required | The age from which the sealed contents are erased. The metadata and the effect hash stay. It must not be above `retention`. Recommended: `"30d"`. |
+| `audit_retention` | duration, 1d to 3650d | required | How long the audit events stay. They hold metadata only. It must be at least `retention`. |
+| `max_body_bytes` | size, 1KiB to 32KiB | `"16KiB"` | The largest content of an item of a question. An approval has its own limits. |
+| `wait_max` | duration, 0s to 1m | `"25s"` | The longest `wait` that the API accepts for a long poll. |
+
+#### Block `inbox.items.lease`
+
+This block is inside the block `inbox.items`. The lease is the time that an item stays open while its agent shows that it is alive. An agent that sends no keepalive loses the item.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `min` | duration, 5s to 1h | required | The smallest `lease_s` that the portal accepts. Recommended: `"30s"`. |
+| `max` | duration, 5s to 30d | required | The largest `lease_s`. The lease that applies is three times `lease_s`. It must be at least `lease.min` and at most `max_lifetime`. Recommended: `"7d"`. |
+| `grace` | duration, 0s to 1h | required | The time after the end of a lease before the item is `abandoned`. Recommended: `"2m"`. |
+| `revive_window` | duration, 0s to 365d | required | The time after an abandon in which a keepalive of the same key opens the item again. `"0s"` means never. It must not be above `max_lifetime`. Recommended: `"7d"`. |
+| `max_revivals` | number, 0 to 10 | `3` | The most times that one item opens again. |
+
+#### Block `inbox.items.digest`
+
+This block is inside the block `inbox.items`. It sets the default summary of the open items that a phone gets. An account can change its own summary, but never above a limit of this file.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mode` | `off`, `daily`, `every` | required | The default summary of the open items. `off`: no summary. `daily`: one summary each day at `at`, in `timezone`. `every`: one summary at each interval `every`. Recommended: `"daily"`. |
+| `at` | text: a time of the day as HH:MM, from 00:00 to 23:59 | required | The time of the daily summary, as `HH:MM` on a 24-hour clock. Applies only when `inbox.items.digest.mode` is `daily`. |
+| `timezone` | text: an IANA time zone name, such as Europe/Paris or UTC | required | The time zone of `at`, as an IANA name. The start checks the form of the name. A later release checks the name in a time zone database. Applies only when `inbox.items.digest.mode` is `daily`. |
+| `every` | duration, 1h to 7d | required | The interval between two summaries. Applies only when `inbox.items.digest.mode` is `every`. |
+
+#### Block `inbox.at_rest`
+
+This block is optional and is inside the block `inbox`. The portal seals the contents of the items with a key of the server before it writes them. It never writes a content in clear text. The block has one block `key "<id>"` for each key. The block needs the block `inbox.items`, and the block `inbox.items` needs this block.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `active_key` | text: the label of a block `key` of this block: 1 to 16 characters of a-z, 0-9, '-' and '_' | required | The key that seals the new contents. The other keys of the block stay readable: use them for a rotation. No switch turns the seal off. |
+| `admin_body_read` | `true` or `false` | `false` | `true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it. |
+
 #### Block `user "<login>"`
 
 This block has a label and can occur more than one time. The grants of one user that the configuration gives (modes `static` and `hybrid`). The label is the login, as the server keeps it: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'. The account itself is in the database. The superadmin has all grants and has no `user` block.
@@ -1578,6 +1650,14 @@ This block has a label and can occur more than one time. One server that asks th
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | secret: give `token_env` (a variable name) or `token_file` (an absolute path), not both | required | The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token. |
+
+#### Block `inbox.at_rest.key "<id>"`
+
+This block has a label and can occur more than one time. One key that seals the contents of the items. The block is inside the block `inbox.at_rest`, which has 1 to 8 of these blocks. The label is the id of the key. A key that is not the `active_key` stays readable and seals nothing.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `secret` | secret: give `secret_env` (a variable name) or `secret_file` (an absolute path), not both | required | The key: the base64 text of 32 random bytes, 44 characters. Make it with `portal inbox content-key`. The bytes must not all be equal. Two keys must not have the same text. The file never holds the text: give `secret_env` or `secret_file`. |
 <!-- config-reference:end -->
 
 ## HTTP protection
@@ -1722,6 +1802,7 @@ portal reset-two-factor --config FILE (--user LOGIN | --all)
 portal hash-password < password.txt
 portal inbox keygen --out FILE
 portal inbox token --out FILE
+portal inbox content-key --out FILE
 portal inbox import-sqlite --config FILE --from SQLITE_FILE
 portal inbox healthcheck --config FILE
 portal version
@@ -1807,6 +1888,12 @@ Version 5.0.0 is the first version of the merged product. Read these points befo
 - An old name is an unknown name. The configuration has no alias for a block, a key or a command of an earlier name. `portal check-config` names the key that it refuses.
 
 Roll the instances one at a time. A new instance opens its ports only when its catalogue is complete. See "Start and stop".
+
+Version 5.1.0 adds the blocks `inbox.items` and `inbox.at_rest`. The release is not complete: this text lists the points that exist. Read them before you upgrade from 5.0.x:
+
+- The blocks are optional, and each one needs the other. Without them, the Inbox runs as before.
+- The table `content_key_check` is new. It changed the base schema of the Inbox in place: the schema version did not change, and there is no migration. A database that 5.0.x made lacks the table. With the block `inbox.at_rest`, the portal stops at start and says so. Make a new database, or add the table by hand.
+- The content keys must live outside the data volume and outside the backups of the database. The Compose script `init-secrets.sh` makes the file `inbox_content_key`. The K3s Secret `portal-secret` gets the key `inbox_content_key`.
 
 Version 5.0.5 changes how the launcher opens a service, and it adds external services. It adds one table to the database. It has no change of the protocol. Read these points before you upgrade from 5.0.4:
 

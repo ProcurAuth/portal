@@ -4,6 +4,7 @@
 //! stops with the portal. It does not use the sessions or the directory of the portal: it can
 //! deliver an alert when the rest of the portal is not ready.
 //!
+//! - `content_box`: the seal of the contents of the items at rest.
 //! - `device`: enrollment and sessions of the phones (WebSocket, protocol 4).
 //! - `enrollment`: the enrollment codes that the accounts make, and the devices of an account.
 //! - `api`: the API of the producers and the webhooks.
@@ -18,6 +19,7 @@
 pub mod admin;
 mod api;
 pub mod cli;
+pub mod content_box;
 mod db;
 mod device;
 mod enrollment;
@@ -255,6 +257,34 @@ impl Lifecycle {
     }
 }
 
+/// Compares the content keys of the file with the check values of the database (see
+/// `db::bind_content_keys`). A key id with another check value, and a database from version 5.0, stop the start.
+async fn bind_content_keys(db: &Store, content: &content_box::ContentBox) -> Result<(), String> {
+    match db
+        .bind_content_keys(content.check_values())
+        .await
+        .map_err(|e| format!("inbox storage: {e}"))?
+    {
+        db::KeyBind::Bound => {
+            for kid in content.kids() {
+                log::info!(
+                    event = "content_key_loaded",
+                    kid = kid,
+                    active = kid == content.active_kid()
+                );
+            }
+            Ok(())
+        }
+        db::KeyBind::Mismatch(ids) => Err(format!(
+            "inbox.at_rest.key {}: the check value in the database is not the check value of this key: the file holds another key under the same id (or another instance holds another key); use the key that sealed the contents, or give the new key a new id and make it active",
+            ids.iter().map(|id| format!("{id:?}")).collect::<Vec<_>>().join(", ")
+        )),
+        db::KeyBind::NoTable => Err(
+            "the inbox database was made by a version before 5.1.0 and has no table content_key_check: this portal has no migration for it; make a new database, or add the table by hand (see README, Upgrades, version 5.1.0)".into(),
+        ),
+    }
+}
+
 /// The place of the inbox in the state of the portal.
 #[derive(Default)]
 pub struct Slot {
@@ -370,6 +400,11 @@ impl Slot {
                 Store::Pg(Arc::new(PgStore::connect(&settings).await?))
             }
         };
+        // The database keeps the check value of each key that seals contents. The program stops, and seals
+        // nothing, when the file holds another key under the same id.
+        if let Some(content) = &secrets.content {
+            bind_content_keys(&db, content).await?;
+        }
         let group_ids: Vec<String> = config.groups.keys().cloned().collect();
         let pruned = db
             .prune_subscriptions(group_ids)

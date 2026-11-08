@@ -80,6 +80,7 @@ Create the Secret `portal-secret` in the namespace `edge` before the pods start.
 | `db_password` | Password of the role `portal` | The same value as in the database. |
 | `identity_key` | Ed25519 key of the identity tokens | `openssl genpkey -algorithm ed25519` |
 | `inbox_server_key` | Noise key of the inbox server | `portal inbox keygen --out FILE` |
+| `inbox_content_key` | Key that seals the contents of the items: the base64 text of 32 random bytes. All instances share it. Keep it outside the backups of the database. | `portal inbox content-key --out FILE` |
 | `inbox_alerting_key` | API key of the block `api_key "alerting"`. The owner is an account of the file. | `portal inbox token --out FILE` |
 
 Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the configuration.
@@ -88,7 +89,7 @@ Add a key `pdp_token_<name>` for each block `pdp_client` that you add to the con
 kubectl -n edge create secret generic portal-secret \
   --from-file=superadmin_login --from-file=superadmin_password --from-file=session_secret --from-file=totp_key \
   --from-file=db_password --from-file=identity_key --from-file=inbox_server_key \
-  --from-file=inbox_alerting_key
+  --from-file=inbox_content_key --from-file=inbox_alerting_key
 ```
 
 ### Configuration

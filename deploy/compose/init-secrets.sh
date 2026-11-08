@@ -7,10 +7,13 @@
 #   totp_key               key that encrypts the TOTP secrets (64 hexadecimal characters)
 #   db_password            password of the PostgreSQL user
 #   inbox_server_key       Noise key of the inbox server (portal inbox keygen)
-#   inbox_api_key   bearer key of the sender "local" (portal inbox token)
+#   inbox_api_key          bearer key of the sender "local" (portal inbox token)
+#   inbox_content_key      key that seals the contents of the items (portal inbox content-key)
 #
 # An existing file is never replaced: delete it to make it again.
 # A new inbox_server_key makes every enrolled phone and every enrollment code invalid: back it up.
+# The content key stays in this directory, outside the volume of the database (postgres_data) and outside its backups.
+# Back it up apart. A lost key makes the sealed contents unreadable.
 # There is no shared device password. A phone enrolls with a code that a signed-in account makes.
 #
 # Environment:
@@ -75,6 +78,11 @@ fi
 if [ ! -f "$dir/inbox_api_key" ]; then
   portal inbox token --out /out/inbox_api_key
   seal inbox_api_key
+fi
+
+if [ ! -f "$dir/inbox_content_key" ]; then
+  portal inbox content-key --out /out/inbox_content_key
+  seal inbox_content_key
 fi
 
 echo "secrets ready in $dir"

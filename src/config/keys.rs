@@ -84,6 +84,10 @@ pub enum When {
     KeysBlock,
     /// A block with a label: the key applies in each block of its kind.
     LabeledBlock,
+    /// `inbox.items.digest.mode` is `daily`.
+    DigestDaily,
+    /// `inbox.items.digest.mode` is `every`.
+    DigestEvery,
 }
 
 impl When {
@@ -106,6 +110,8 @@ impl When {
             When::SecretProvided => "session.secret_mode is ephemeral",
             When::RememberOn => "session.remember is false",
             When::MfaOn => "authentication.mfa is \"off\"",
+            When::DigestDaily => "inbox.items.digest.mode is not \"daily\"",
+            When::DigestEvery => "inbox.items.digest.mode is not \"every\"",
         }
     }
 
@@ -132,6 +138,8 @@ impl When {
             When::SecretProvided => "Applies only when `session.secret_mode` is `provided`.",
             When::RememberOn => "Applies only when `session.remember` is `true`.",
             When::MfaOn => "Applies only when `authentication.mfa` is `optional` or `required`.",
+            When::DigestDaily => "Applies only when `inbox.items.digest.mode` is `daily`.",
+            When::DigestEvery => "Applies only when `inbox.items.digest.mode` is `every`.",
         }
     }
 }
@@ -237,7 +245,7 @@ pub const BLOCKS: &[(&str, &str)] = &[
     ("logging", "The log."),
     (
         "inbox",
-        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster` and `inbox.watch` are optional. The blocks `group \"<id>\"` and `api_key \"<name>\"` are inside this block.",
+        "This block is optional. If it is present, this server runs the inbox: it sends alerts to phones. The inbox uses the database of the portal. The blocks `inbox.devices` and `inbox.storage` are mandatory inside this block. The blocks `inbox.replica`, `inbox.cluster`, `inbox.watch`, `inbox.items` and `inbox.at_rest` are optional. The block `inbox.items` has the blocks `lease` and `digest`. The block `inbox.at_rest` has the blocks `key \"<id>\"`. The blocks `group \"<id>\"` and `api_key \"<name>\"` are inside this block.",
     ),
     (
         "inbox.devices",
@@ -262,6 +270,22 @@ pub const BLOCKS: &[(&str, &str)] = &[
     (
         "inbox.watch",
         "This block is optional and is inside the block `inbox`. If it is present, the portal sends alerts about itself to one group: when a service of the launcher is unhealthy, and when sign-ins fail in a burst. Without this block, the portal sends no alert about itself.",
+    ),
+    (
+        "inbox.items",
+        "This block is optional and is inside the block `inbox`. It sets the limits of the items: the approvals and the questions that an agent sends to a person. It has the blocks `lease` and `digest`. Each limit that the file does not give a default for is mandatory: a wrong default would hide an item or keep it too long. The block needs the block `inbox.at_rest`, and the block `inbox.at_rest` needs this block.",
+    ),
+    (
+        "inbox.items.lease",
+        "This block is inside the block `inbox.items`. The lease is the time that an item stays open while its agent shows that it is alive. An agent that sends no keepalive loses the item.",
+    ),
+    (
+        "inbox.items.digest",
+        "This block is inside the block `inbox.items`. It sets the default summary of the open items that a phone gets. An account can change its own summary, but never above a limit of this file.",
+    ),
+    (
+        "inbox.at_rest",
+        "This block is optional and is inside the block `inbox`. The portal seals the contents of the items with a key of the server before it writes them. It never writes a content in clear text. The block has one block `key \"<id>\"` for each key. The block needs the block `inbox.items`, and the block `inbox.items` needs this block.",
     ),
 ];
 
@@ -1336,6 +1360,199 @@ pub static KEYS: &[Key] = &[
         when: When::Always,
         doc: "`true`: the portal sends a short alert when a service is healthy again after the portal sent an alert about it.",
     },
+    Key {
+        block: "inbox.items",
+        name: "max_lifetime",
+        kind: Kind::Duration { min: secs(DAY), max: secs(365 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The longest life of a chain of requests, from the start of the thread. At this age the item is `expired`, which is a neutral end. A replacement does not extend it. It does not set how long a request waits. Recommended: `\"90d\"`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_open_per_key",
+        kind: Kind::Int { min: 1, max: 1000 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The most open items of one key. Recommended: `5`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_open_per_owner",
+        kind: Kind::Int { min: 1, max: 10000 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The most open items of one owner. Recommended: `20`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_open_total",
+        kind: Kind::Int { min: 1, max: 1000000 },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The most open items in all. A new item above this number is refused.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_chain",
+        kind: Kind::Int { min: 1, max: 50 },
+        presence: Presence::Default("10"),
+        when: When::Always,
+        doc: "The most replacements in one thread.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_turns",
+        kind: Kind::Int { min: 2, max: 200 },
+        presence: Presence::Default("40"),
+        when: When::Always,
+        doc: "The most turns in one thread.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "stale_after",
+        kind: Kind::Duration { min: secs(MINUTE), max: secs(365 * DAY) },
+        presence: Presence::Default("24h"),
+        when: When::Always,
+        doc: "The age from which a screen shows the banner \"old request\" and asks for one more confirmation.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "retention",
+        kind: Kind::Duration { min: secs(DAY), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "How long a finished item stays, with its metadata only. It must be at least `max_lifetime` plus `lease.revive_window`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "body_purge_after",
+        kind: Kind::Duration { min: secs(0), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The age from which the sealed contents are erased. The metadata and the effect hash stay. It must not be above `retention`. Recommended: `\"30d\"`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "audit_retention",
+        kind: Kind::Duration { min: secs(DAY), max: secs(3650 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "How long the audit events stay. They hold metadata only. It must be at least `retention`.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "max_body_bytes",
+        kind: Kind::Size { min: 1024, max: 32 * 1024 },
+        presence: Presence::Default("16KiB"),
+        when: When::Always,
+        doc: "The largest content of an item of a question. An approval has its own limits.",
+    },
+    Key {
+        block: "inbox.items",
+        name: "wait_max",
+        kind: Kind::Duration { min: secs(0), max: secs(60) },
+        presence: Presence::Default("25s"),
+        when: When::Always,
+        doc: "The longest `wait` that the API accepts for a long poll.",
+    },
+    Key {
+        block: "inbox.items.lease",
+        name: "min",
+        kind: Kind::Duration { min: secs(5), max: secs(HOUR) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The smallest `lease_s` that the portal accepts. Recommended: `\"30s\"`.",
+    },
+    Key {
+        block: "inbox.items.lease",
+        name: "max",
+        kind: Kind::Duration { min: secs(5), max: secs(30 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The largest `lease_s`. The lease that applies is three times `lease_s`. It must be at least `lease.min` and at most `max_lifetime`. Recommended: `\"7d\"`.",
+    },
+    Key {
+        block: "inbox.items.lease",
+        name: "grace",
+        kind: Kind::Duration { min: secs(0), max: secs(HOUR) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The time after the end of a lease before the item is `abandoned`. Recommended: `\"2m\"`.",
+    },
+    Key {
+        block: "inbox.items.lease",
+        name: "revive_window",
+        kind: Kind::Duration { min: secs(0), max: secs(365 * DAY) },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The time after an abandon in which a keepalive of the same key opens the item again. `\"0s\"` means never. It must not be above `max_lifetime`. Recommended: `\"7d\"`.",
+    },
+    Key {
+        block: "inbox.items.lease",
+        name: "max_revivals",
+        kind: Kind::Int { min: 0, max: 10 },
+        presence: Presence::Default("3"),
+        when: When::Always,
+        doc: "The most times that one item opens again.",
+    },
+    Key {
+        block: "inbox.items.digest",
+        name: "mode",
+        kind: Kind::Enum(&["off", "daily", "every"]),
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The default summary of the open items. `off`: no summary. `daily`: one summary each day at `at`, in `timezone`. `every`: one summary at each interval `every`. Recommended: `\"daily\"`.",
+    },
+    Key {
+        block: "inbox.items.digest",
+        name: "at",
+        kind: Kind::Text {
+            expected: "a time of the day as HH:MM, from 00:00 to 23:59",
+            check: check_digest_time,
+        },
+        presence: Presence::Required,
+        when: When::DigestDaily,
+        doc: "The time of the daily summary, as `HH:MM` on a 24-hour clock.",
+    },
+    Key {
+        block: "inbox.items.digest",
+        name: "timezone",
+        kind: Kind::Text {
+            expected: "an IANA time zone name, such as Europe/Paris or UTC",
+            check: check_time_zone_name,
+        },
+        presence: Presence::Required,
+        when: When::DigestDaily,
+        doc: "The time zone of `at`, as an IANA name. The start checks the form of the name. A later release checks the name in a time zone database.",
+    },
+    Key {
+        block: "inbox.items.digest",
+        name: "every",
+        kind: Kind::Duration { min: secs(HOUR), max: secs(7 * DAY) },
+        presence: Presence::Required,
+        when: When::DigestEvery,
+        doc: "The interval between two summaries.",
+    },
+    Key {
+        block: "inbox.at_rest",
+        name: "active_key",
+        kind: Kind::Text {
+            expected: "the label of a block `key` of this block: 1 to 16 characters of a-z, 0-9, '-' and '_'",
+            check: check_content_key_id,
+        },
+        presence: Presence::Required,
+        when: When::Always,
+        doc: "The key that seals the new contents. The other keys of the block stay readable: use them for a rotation. No switch turns the seal off.",
+    },
+    Key {
+        block: "inbox.at_rest",
+        name: "admin_body_read",
+        kind: Kind::Bool,
+        presence: Presence::Default("false"),
+        when: When::Always,
+        doc: "`true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it.",
+    },
 ];
 
 /// The blocks with a label, in the order of the reference. The label names a user or a server.
@@ -1364,6 +1581,11 @@ pub const LABELED_BLOCKS: &[(&str, &str, &str)] = &[
         "pdp_client",
         "<server>",
         "One server that asks the PDP for decisions. The label is the name of the server: the id of its service in the catalogue, and the audience of its identity tokens. The PDP answers only for the resources of this server.",
+    ),
+    (
+        "inbox.at_rest.key",
+        "<id>",
+        "One key that seals the contents of the items. The block is inside the block `inbox.at_rest`, which has 1 to 8 of these blocks. The label is the id of the key. A key that is not the `active_key` stays readable and seals nothing.",
     ),
 ];
 
@@ -1500,6 +1722,14 @@ pub static LABELED_KEYS: &[Key] = &[
         when: When::LabeledBlock,
         doc: "The bearer token of the server. It has at least 32 bytes. Two servers must not have the same token.",
     },
+    Key {
+        block: "inbox.at_rest.key",
+        name: "secret",
+        kind: Kind::Secret { max_bytes: 128 },
+        presence: Presence::Required,
+        when: When::LabeledBlock,
+        doc: "The key: the base64 text of 32 random bytes, 44 characters. Make it with `portal inbox content-key`. The bytes must not all be equal. Two keys must not have the same text. The file never holds the text: give `secret_env` or `secret_file`.",
+    },
 ];
 
 pub fn find(block: &str, name: &str) -> Option<&'static Key> {
@@ -1528,8 +1758,12 @@ pub fn all_block_names() -> Vec<&'static str> {
 }
 
 /// The blocks with a label that a block with a label holds: `(parent, child)`.
-pub const NESTED_BLOCKS: &[(&str, &str)] =
-    &[("user", "key"), ("inbox", "group"), ("inbox", "api_key")];
+pub const NESTED_BLOCKS: &[(&str, &str)] = &[
+    ("user", "key"),
+    ("inbox", "group"),
+    ("inbox", "api_key"),
+    ("inbox.at_rest", "key"),
+];
 
 /// The blocks without a label that a block without a label holds: `(parent, child)`. The keys of
 /// the child are in the block `parent.child` of the table.
@@ -1540,14 +1774,32 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "replica"),
     ("inbox", "cluster"),
     ("inbox", "watch"),
+    ("inbox", "items"),
+    ("inbox", "at_rest"),
+    ("inbox.items", "lease"),
+    ("inbox.items", "digest"),
 ];
+
+/// The kind of a block with a label inside a block: the name alone inside a block of the top level,
+/// and `parent.name` inside a block that another block holds. The kind is the name in the table.
+fn nested_kind(parent: &str, child: &str) -> String {
+    if parent.contains('.') {
+        format!("{parent}.{child}")
+    } else {
+        child.to_string()
+    }
+}
 
 /// The name of each block with a label at the top of the file, for the closed list of the parser.
 pub fn labeled_block_names() -> Vec<&'static str> {
     LABELED_BLOCKS
         .iter()
         .map(|(name, _, _)| *name)
-        .filter(|name| !NESTED_BLOCKS.iter().any(|(_, child)| child == name))
+        .filter(|name| {
+            !NESTED_BLOCKS
+                .iter()
+                .any(|(parent, child)| nested_kind(parent, child) == *name)
+        })
         .collect()
 }
 
@@ -1570,6 +1822,8 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox.replica" => Some("inbox.replica"),
         "inbox.cluster" => Some("inbox.cluster"),
         "inbox.watch" => Some("inbox.watch"),
+        "inbox.items" | "inbox.items.lease" | "inbox.items.digest" => Some("inbox.items"),
+        "inbox.at_rest" => Some("inbox.at_rest"),
         _ => None,
     }
 }
@@ -1755,6 +2009,61 @@ pub fn check_inbox_id(value: &str) -> Result<(), String> {
         return Err("not 1 to 64 characters of a-z, 0-9, '-' and '_'".into());
     }
     Ok(())
+}
+
+/// The id of a content key: 1 to 16 characters of a-z, 0-9, '-' and '_'.
+pub fn check_content_key_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 16
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err("not 1 to 16 characters of a-z, 0-9, '-' and '_'".into());
+    }
+    Ok(())
+}
+
+/// A time of the day: `HH:MM`, from 00:00 to 23:59.
+fn check_digest_time(value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let digit = |i: usize| {
+        bytes
+            .get(i)
+            .filter(|b| b.is_ascii_digit())
+            .map(|b| b - b'0')
+    };
+    match (
+        bytes.len(),
+        digit(0),
+        digit(1),
+        bytes.get(2),
+        digit(3),
+        digit(4),
+    ) {
+        (5, Some(h1), Some(h2), Some(b':'), Some(m1), Some(m2))
+            if h1 * 10 + h2 <= 23 && m1 * 10 + m2 <= 59 =>
+        {
+            Ok(())
+        }
+        _ => Err("not a time HH:MM from 00:00 to 23:59".into()),
+    }
+}
+
+/// The form of an IANA time zone name: segments of letters, digits, '_', '+' and '-' that '/'
+/// separates. This check does not look in a time zone database.
+fn check_time_zone_name(value: &str) -> Result<(), String> {
+    let segment = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 32
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-'))
+    };
+    if value.len() <= 64 && value.split('/').count() <= 3 && value.split('/').all(segment) {
+        Ok(())
+    } else {
+        Err("not an IANA name: segments of letters, digits, '_', '+' and '-' that '/' separates, up to 64 bytes".into())
+    }
 }
 
 /// The login of an account: 1 to 32 characters of a-z, 0-9, '.', '-' and '_'.

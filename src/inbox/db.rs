@@ -137,6 +137,13 @@ CREATE TABLE connections (
 ) STRICT;
 CREATE INDEX connections_device ON connections(device_id, connected_at);
 CREATE INDEX connections_time ON connections(connected_at);
+
+-- 5.1.0, in place: the check value of each key that seals contents. A key that changes under the
+-- same id stops the start (see `bind_content_keys`).
+CREATE TABLE content_key_check (
+    body_kid    TEXT PRIMARY KEY,
+    check_value BLOB NOT NULL
+) STRICT;
 "#,
     r#"
 -- Alerts are one-way: no displayed / acknowledged stages any more.
@@ -431,6 +438,56 @@ pub fn delete_code(conn: &Connection, digest: &[u8]) -> rusqlite::Result<bool> {
         params![digest],
     )?;
     Ok(n > 0)
+}
+
+/// The result of the comparison of the content keys of the file with the database.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyBind {
+    /// Each key has its check value in the table: the program wrote the missing ones and found that the
+    /// others agree.
+    Bound,
+    /// The table holds another check value for these key ids: the file has another key under the same id.
+    Mismatch(Vec<String>),
+    /// The database has no table `content_key_check`: a version 5.0 made it.
+    NoTable,
+}
+
+/// Binds each content key to its check value. A missing row is written. Two instances that start at the same
+/// time write the same value or one finds the row of the other, so the result does not depend on the order.
+pub fn bind_content_keys(
+    conn: &mut Connection,
+    checks: &[(String, [u8; 32])],
+) -> rusqlite::Result<KeyBind> {
+    let table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'content_key_check'",
+        [],
+        |r| r.get(0),
+    )?;
+    if table == 0 {
+        return Ok(KeyBind::NoTable);
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut mismatch = Vec::new();
+    for (kid, check) in checks {
+        tx.execute(
+            "INSERT OR IGNORE INTO content_key_check (body_kid, check_value) VALUES (?1, ?2)",
+            params![kid, &check[..]],
+        )?;
+        let stored: Vec<u8> = tx.query_row(
+            "SELECT check_value FROM content_key_check WHERE body_kid = ?1",
+            params![kid],
+            |r| r.get(0),
+        )?;
+        if stored != check[..] {
+            mismatch.push(kid.clone());
+        }
+    }
+    tx.commit()?;
+    Ok(if mismatch.is_empty() {
+        KeyBind::Bound
+    } else {
+        KeyBind::Mismatch(mismatch)
+    })
 }
 
 /// Why a code does not work. The phone never learns it: every cause gives the same close code.
@@ -1490,6 +1547,61 @@ mod tests {
         c.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         migrate(&mut c).unwrap();
         c
+    }
+
+    /// The check values of the content keys `ids`, each from its own bytes.
+    fn checks(ids: &[(&str, u8)]) -> Vec<(String, [u8; 32])> {
+        let keys: Vec<_> = ids
+            .iter()
+            .map(|(id, seed)| {
+                let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+                for (i, b) in bytes.iter_mut().enumerate() {
+                    *b = seed.wrapping_add(i as u8);
+                }
+                (id.to_string(), bytes)
+            })
+            .collect();
+        super::super::content_box::ContentBox::new(&keys, ids[0].0)
+            .unwrap()
+            .check_values()
+    }
+
+    /// The database keeps the check value of each key that seals contents. A key that changes under the same
+    /// id is found at the next start. A new id is bound at its first start, and a key that leaves stays bound.
+    #[test]
+    fn wrong_key_same_id_fails_check_value() {
+        let mut c = mem();
+        let first = checks(&[("k1", 1)]);
+        assert_eq!(bind_content_keys(&mut c, &first).unwrap(), KeyBind::Bound);
+        assert_eq!(
+            bind_content_keys(&mut c, &first).unwrap(),
+            KeyBind::Bound,
+            "the same key again"
+        );
+        // Another key under the same id.
+        let other = checks(&[("k1", 2)]);
+        assert_eq!(
+            bind_content_keys(&mut c, &other).unwrap(),
+            KeyBind::Mismatch(vec!["k1".into()])
+        );
+        // The wrong key changed nothing: the right key still agrees.
+        assert_eq!(bind_content_keys(&mut c, &first).unwrap(), KeyBind::Bound);
+        // A rotation adds the key k2. The old key stays readable, and the pair agrees.
+        let both = checks(&[("k2", 7), ("k1", 1)]);
+        assert_eq!(bind_content_keys(&mut c, &both).unwrap(), KeyBind::Bound);
+        let k2_changed = checks(&[("k2", 8), ("k1", 1)]);
+        assert_eq!(
+            bind_content_keys(&mut c, &k2_changed).unwrap(),
+            KeyBind::Mismatch(vec!["k2".into()])
+        );
+        // The table holds nothing else than the check values: no key bytes.
+        let rows: i64 = c
+            .query_row("SELECT COUNT(*) FROM content_key_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        // A database that a version 5.0 made has no table.
+        c.execute_batch("DROP TABLE content_key_check").unwrap();
+        assert_eq!(bind_content_keys(&mut c, &first).unwrap(), KeyBind::NoTable);
     }
 
     fn alert(key: &str) -> NewAlert {

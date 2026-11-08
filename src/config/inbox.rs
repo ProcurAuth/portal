@@ -25,6 +25,11 @@ pub struct InboxConfig {
     pub cluster: Option<ClusterConfig>,
     /// `None` without the block `inbox.watch`.
     pub watch: Option<WatchConfig>,
+    /// `None` without the block `inbox.items`. The block comes with `inbox.at_rest`, never alone.
+    #[allow(dead_code)] // the item engine reads the limits
+    pub items: Option<ItemsConfig>,
+    /// `None` without the block `inbox.at_rest`.
+    pub at_rest: Option<AtRestConfig>,
     /// The blocks `group`, by id.
     pub groups: BTreeMap<String, GroupConfig>,
     /// The blocks `api_key`, by name.
@@ -102,6 +107,66 @@ pub struct WatchConfig {
     pub recovered: bool,
 }
 
+/// The block `inbox.items`: the limits of the approvals and of the questions. Each limit is the
+/// value of the file or the documented default.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // the item engine reads the values
+pub struct ItemsConfig {
+    pub max_lifetime: Duration,
+    pub max_open_per_key: u32,
+    pub max_open_per_owner: u32,
+    pub max_open_total: u32,
+    pub lease: LeaseConfig,
+    pub max_chain: u32,
+    pub max_turns: u32,
+    pub stale_after: Duration,
+    pub retention: Duration,
+    pub body_purge_after: Duration,
+    pub audit_retention: Duration,
+    pub digest: DigestConfig,
+    pub max_body_bytes: usize,
+    pub wait_max: Duration,
+}
+
+/// The block `inbox.items.lease`.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // the item engine reads the values
+pub struct LeaseConfig {
+    pub min: Duration,
+    pub max: Duration,
+    pub grace: Duration,
+    pub revive_window: Duration,
+    pub max_revivals: u32,
+}
+
+/// The block `inbox.items.digest`: the default summary of the open items.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DigestConfig {
+    Off,
+    /// One summary each day at `hour`:`minute`, in the time zone `timezone` (an IANA name that
+    /// the start checks for its form only).
+    Daily {
+        hour: u8,
+        minute: u8,
+        timezone: String,
+    },
+    /// One summary at each interval.
+    Every(Duration),
+}
+
+/// The block `inbox.at_rest`: the keys that seal the contents. The secrets are in
+/// [`InboxSecrets::content_keys`].
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // the item engine reads the values
+pub struct AtRestConfig {
+    /// The id of the key that seals the new contents.
+    pub active_key: String,
+    /// The ids of the blocks `key`, in the order of the file.
+    pub keys: Vec<String>,
+    /// The superadmin can read the contents.
+    pub admin_body_read: bool,
+}
+
 /// A block `group`.
 #[derive(Clone, Debug)]
 pub struct GroupConfig {
@@ -136,6 +201,8 @@ pub struct InboxSecrets {
     pub server_key: Secret,
     /// The text of each block `api_key`, by name.
     pub api_keys: Vec<(String, Secret)>,
+    /// The text of each block `inbox.at_rest.key`, by id, in the order of the file.
+    pub content_keys: Vec<(String, Secret)>,
 }
 
 fn socket(r: &Resolved, block: &str, name: &str) -> Result<SocketAddr, String> {
@@ -224,6 +291,23 @@ pub fn build(
     } else {
         None
     };
+
+    let items = if r.has_block("inbox.items") {
+        Some(build_items(r)?)
+    } else {
+        None
+    };
+    let (at_rest, content_keys) = build_at_rest(r)?;
+    if items.is_some() != at_rest.is_some() {
+        let (present, absent) = if items.is_some() {
+            ("inbox.items", "inbox.at_rest")
+        } else {
+            ("inbox.at_rest", "inbox.items")
+        };
+        return Err(format!(
+            "the block {present} needs the block {absent}: the items are sealed at rest, and the keys seal only items; add the block {absent}, or remove the block {present}"
+        ));
+    }
 
     let mut groups = BTreeMap::new();
     for block in r.labeled.iter().filter(|b| b.kind == "group") {
@@ -325,6 +409,7 @@ pub fn build(
             .take_secret("inbox", "server_key")
             .ok_or("internal error: the secret inbox.server_key is missing")?,
         api_keys: texts,
+        content_keys,
     };
     let config = InboxConfig {
         devices,
@@ -333,11 +418,190 @@ pub fn build(
         replica,
         cluster,
         watch,
+        items,
+        at_rest,
         groups,
         api_keys,
     };
     check_values(&config)?;
     Ok(Some((config, secrets)))
+}
+
+/// Reads the block `inbox.items` and checks the limits that contradict each other.
+fn build_items(r: &Resolved) -> Result<ItemsConfig, String> {
+    const B: &str = "inbox.items";
+    const L: &str = "inbox.items.lease";
+    const D: &str = "inbox.items.digest";
+    let lease = LeaseConfig {
+        min: r.duration(L, "min")?,
+        max: r.duration(L, "max")?,
+        grace: r.duration(L, "grace")?,
+        revive_window: r.duration(L, "revive_window")?,
+        max_revivals: small(r, L, "max_revivals")?,
+    };
+    let digest = match r.text(D, "mode")?.as_str() {
+        "off" => DigestConfig::Off,
+        "daily" => {
+            let at = r.text(D, "at")?;
+            // The table checked the form `HH:MM`.
+            let number = |range: std::ops::Range<usize>| {
+                at[range]
+                    .parse::<u8>()
+                    .map_err(|_| format!("internal error: {D}.at is not a time"))
+            };
+            DigestConfig::Daily {
+                hour: number(0..2)?,
+                minute: number(3..5)?,
+                timezone: r.text(D, "timezone")?,
+            }
+        }
+        "every" => DigestConfig::Every(r.duration(D, "every")?),
+        other => return Err(format!("internal error: {D}.mode is {other:?}")),
+    };
+    let items = ItemsConfig {
+        max_lifetime: r.duration(B, "max_lifetime")?,
+        max_open_per_key: small(r, B, "max_open_per_key")?,
+        max_open_per_owner: small(r, B, "max_open_per_owner")?,
+        max_open_total: small(r, B, "max_open_total")?,
+        lease,
+        max_chain: small(r, B, "max_chain")?,
+        max_turns: small(r, B, "max_turns")?,
+        stale_after: r.duration(B, "stale_after")?,
+        retention: r.duration(B, "retention")?,
+        body_purge_after: r.duration(B, "body_purge_after")?,
+        audit_retention: r.duration(B, "audit_retention")?,
+        digest,
+        max_body_bytes: r.size(B, "max_body_bytes")?,
+        wait_max: r.duration(B, "wait_max")?,
+    };
+    check_items(&items)?;
+    Ok(items)
+}
+
+/// The limits of the items that contradict each other. Each error names the two keys and the two
+/// values.
+fn check_items(i: &ItemsConfig) -> Result<(), String> {
+    let l = &i.lease;
+    let shown = show_duration;
+    if l.min > l.max {
+        return Err(format!(
+            "inbox.items.lease.min must be at most inbox.items.lease.max: min is {}, max is {}",
+            shown(l.min),
+            shown(l.max)
+        ));
+    }
+    if l.max > i.max_lifetime {
+        return Err(format!(
+            "inbox.items.lease.max must be at most inbox.items.max_lifetime: lease.max is {}, max_lifetime is {}",
+            shown(l.max),
+            shown(i.max_lifetime)
+        ));
+    }
+    if l.revive_window > i.max_lifetime {
+        return Err(format!(
+            "inbox.items.lease.revive_window must be at most inbox.items.max_lifetime: revive_window is {}, max_lifetime is {}",
+            shown(l.revive_window),
+            shown(i.max_lifetime)
+        ));
+    }
+    if i.retention < i.max_lifetime + l.revive_window {
+        return Err(format!(
+            "inbox.items.retention must be at least inbox.items.max_lifetime plus inbox.items.lease.revive_window: retention is {}, max_lifetime is {}, revive_window is {}",
+            shown(i.retention),
+            shown(i.max_lifetime),
+            shown(l.revive_window)
+        ));
+    }
+    if i.audit_retention < i.retention {
+        return Err(format!(
+            "inbox.items.audit_retention must be at least inbox.items.retention: audit_retention is {}, retention is {}",
+            shown(i.audit_retention),
+            shown(i.retention)
+        ));
+    }
+    if i.body_purge_after > i.retention {
+        return Err(format!(
+            "inbox.items.body_purge_after must be at most inbox.items.retention: body_purge_after is {}, retention is {}",
+            shown(i.body_purge_after),
+            shown(i.retention)
+        ));
+    }
+    Ok(())
+}
+
+/// Reads the block `inbox.at_rest` and its blocks `key`. The result has no block without the
+/// block `inbox.at_rest`. The text of each key stays a secret: the checks of its form are in
+/// `crate::inbox`, where the program decodes it.
+#[allow(clippy::type_complexity)]
+fn build_at_rest(
+    r: &mut Resolved,
+) -> Result<(Option<AtRestConfig>, Vec<(String, Secret)>), String> {
+    const B: &str = "inbox.at_rest";
+    const K: &str = "inbox.at_rest.key";
+    if !r.has_block(B) {
+        if let Some(block) = r.labeled.iter().find(|b| b.kind == K) {
+            return Err(format!(
+                "{K} {:?}: a block key needs the block inbox.at_rest",
+                block.label
+            ));
+        }
+        return Ok((None, Vec::new()));
+    }
+    let active_key = r.text(B, "active_key")?;
+    let mut ids = Vec::new();
+    let mut secrets: Vec<(String, Secret)> = Vec::new();
+    for block in r.labeled.iter_mut().filter(|b| b.kind == K) {
+        let id = block.label.clone();
+        super::keys::check_content_key_id(&id)
+            .map_err(|e| format!("{K} {id:?}: the label is not a key id: {e}"))?;
+        let secret = block
+            .take_secret("secret")
+            .ok_or_else(|| format!("internal error: {K}.{id} has no secret"))?;
+        ids.push(id.clone());
+        secrets.push((id, secret));
+    }
+    if ids.is_empty() || ids.len() > 8 {
+        return Err(format!(
+            "the block {B} needs 1 to 8 blocks key \"<id>\" {{ secret_file = \"...\" }}, found {}",
+            ids.len()
+        ));
+    }
+    if !ids.contains(&active_key) {
+        return Err(format!(
+            "invalid {B}.active_key: expected the label of a block key ({}), got {active_key:?}",
+            ids.iter()
+                .map(|id| format!("{id:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // The effective configuration tells for each key whether it seals or only reads.
+    for id in &ids {
+        let after = format!("{K}.{id}.secret");
+        let at = r
+            .effective
+            .iter()
+            .position(|line| line.key == after)
+            .map_or(r.effective.len(), |i| i + 1);
+        r.effective.insert(
+            at,
+            super::resolve::Effective {
+                key: format!("{K}.{id}.use"),
+                value: if *id == active_key {
+                    "\"active\"".into()
+                } else {
+                    "\"read-only\"".into()
+                },
+                source: format!("derived from {B}.active_key"),
+            },
+        );
+    }
+    let config = AtRestConfig {
+        active_key,
+        keys: ids,
+        admin_body_read: r.bool(B, "admin_body_read")?,
+    };
+    Ok((Some(config), secrets))
 }
 
 /// The keys of the inbox that contradict each other.

@@ -18,6 +18,32 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 - **Secrets.** The key of the server and the secrets of the `api_key` blocks come from `_file` or `_env`. A clear text secret in the file stops the start. The Inbox never writes a secret to the log.
 - **Cluster.** The requests between instances (`inbox.cluster`) carry an HMAC that the server key derives. Only the pods of the service must reach the cluster port.
 
+## Contents at rest
+
+The portal seals the contents of the items before it writes them. An item is an approval or a question. The content is the command, the explanation, the hint, the turns and the comment of the owner. The portal writes only the sealed bytes. It opens them in memory to serve the owner.
+
+**This is not end-to-end encryption.** The portal reads every content.
+
+The seal uses AES-256-GCM. The keys come from the file (`inbox.at_rest`). Each sealed value names its key. The associated data holds the request id, the field, the sequence number and the effect hash. A sealed value that moves to another row, field or effect does not open.
+
+The seal covers these cases:
+
+- A leak of the database, a dump or a disk image.
+- A backup, and a copy of the SQLite replica.
+- A database administrator who has no key.
+- An attacker who can write in the database. The attacker cannot read, forge or move a sealed value.
+
+The seal does not cover these cases:
+
+- A person who has the key and the process of the portal.
+- A portal that is compromised while it runs.
+- A compromised host of the service that asks for the approval.
+- A stolen phone or browser of the owner.
+- A key that leaves with the database. Keep the keys outside the data volume and outside the backups.
+- The plain HTTP hop from the proxy to the portal. Use a private network or a network policy.
+
+The metadata stays in clear: the request id, the service, the action, the resource path, the owner, the state and the dates. A lost key makes the contents unreadable and keeps the metadata. The check value that the database keeps for each key reveals nothing about the key.
+
 ## Limits of the model
 
 - The portal knows nothing about TLS. Noise protects the phones. The bearer key of a sender travels in clear text on plain HTTP. Terminate TLS in the reverse proxy, or use a private network.
@@ -32,6 +58,7 @@ The security model of the portal is in the root [`SECURITY.md`](../../SECURITY.m
 ## Operator checklist
 
 - Keep a copy of the key file of the server and of the database. Protect both. Both are secrets.
+- Keep the content keys (`inbox.at_rest`) outside the data volume and outside the backups of the database. Keep a copy of them in a separate place. A backup of the database with its keys shows every content.
 - Send alerts with the header `Authorization: Bearer`. The server reads the key only in this header. A request with a key in the query and no header gets `401`. Do not put a key in a URL: query strings are often in logs.
 - Use an HTTPS `inbox.devices.public_address`.
 - List only the real proxies in `server.trusted_proxies`. Do not list the Docker gateway or a whole bridge range. The same list gives the client address for the limiter of the enrollment attempts.
