@@ -4320,3 +4320,104 @@ fn a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_t
     // `consume_within` has at most 1 hour and `max_lifetime` at least 1 day: the check against `max_lifetime` guards
     // a future change of the ranges and cannot fail today.
 }
+
+#[test]
+fn the_keys_of_the_approval_api_have_the_documented_defaults_and_the_set_values_apply() {
+    let rest =
+        format!("{PDP_PARTS}\n pdp_client \"db\" {{ token_env = \"PDP_DB\" approvals = true }}");
+    let config = approvals_ok(APPROVALS, &rest);
+    let a = config.inbox.as_ref().unwrap().approvals.as_ref().unwrap();
+    assert_eq!(a.max_command_bytes, 16 * 1024);
+    assert_eq!(a.max_explanation_chars, 2000);
+    assert!(!a.require_explanation);
+    assert_eq!(a.max_comment_chars, 2000);
+    assert_eq!(a.intent_ttl, Duration::from_secs(600));
+    assert_eq!(a.max_requests_per_key_per_hour, 20);
+    assert_eq!(a.mute_after_refusals, 3);
+    assert_eq!(a.mute_for, Duration::from_secs(3600));
+    assert!(a.web_approval);
+    for (key, shown) in [
+        ("max_command_bytes", "\"16KiB\""),
+        ("max_explanation_chars", "2000"),
+        ("require_explanation", "false"),
+        ("max_comment_chars", "2000"),
+        ("intent_ttl", "\"10m\""),
+        ("max_requests_per_key_per_hour", "20"),
+        ("mute_after_refusals", "3"),
+        ("mute_for", "\"1h\""),
+        ("web_approval", "true"),
+    ] {
+        let l = line(&config, &format!("inbox.approvals.{key}"));
+        assert_eq!(
+            (l.value.as_str(), l.source.as_str()),
+            (shown, "default"),
+            "{key}"
+        );
+    }
+    let set = approvals_ok(
+        r#"approvals { consume_within = "5m" max_command_bytes = "1KiB" max_explanation_chars = 0
+             max_comment_chars = 8000 intent_ttl = "30s" max_requests_per_key_per_hour = 10000
+             mute_after_refusals = 0 mute_for = "7d" web_approval = false }"#,
+        &rest,
+    );
+    let a = set.inbox.unwrap().approvals.unwrap();
+    assert_eq!(a.max_command_bytes, 1024);
+    assert_eq!(a.max_explanation_chars, 0);
+    assert_eq!(a.max_comment_chars, 8000);
+    assert_eq!(a.intent_ttl, Duration::from_secs(30));
+    assert_eq!(a.max_requests_per_key_per_hour, 10_000);
+    assert_eq!(a.mute_after_refusals, 0);
+    assert_eq!(a.mute_for, Duration::from_secs(7 * 86_400));
+    assert!(!a.web_approval);
+}
+
+#[test]
+fn a_bad_key_of_the_approval_api_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value(
+) {
+    let client = "pdp_client \"db\" { token_env = \"PDP_DB\" approvals = true }";
+    let rest = format!("{PDP_PARTS}\n{client}");
+    for (keys, expected) in [
+        (r#"max_command_bytes = "512""#, "inbox.approvals.max_command_bytes"),
+        (r#"max_command_bytes = "33KiB""#, "inbox.approvals.max_command_bytes"),
+        ("max_explanation_chars = 8001", "inbox.approvals.max_explanation_chars"),
+        ("max_comment_chars = 0", "inbox.approvals.max_comment_chars"),
+        ("max_comment_chars = 8001", "inbox.approvals.max_comment_chars"),
+        (r#"intent_ttl = "29s""#, "inbox.approvals.intent_ttl"),
+        (r#"intent_ttl = "2h""#, "inbox.approvals.intent_ttl"),
+        ("max_requests_per_key_per_hour = 0", "inbox.approvals.max_requests_per_key_per_hour"),
+        ("max_requests_per_key_per_hour = 10001", "inbox.approvals.max_requests_per_key_per_hour"),
+        ("mute_after_refusals = 101", "inbox.approvals.mute_after_refusals"),
+        (r#"mute_for = "59s""#, "inbox.approvals.mute_for"),
+        (r#"mute_for = "8d""#, "inbox.approvals.mute_for"),
+        (r#"web_approval = "yes""#, "inbox.approvals.web_approval"),
+        (r#"unknown_key = 1"#, "unknown_key"),
+        // Two keys that contradict each other.
+        (
+            "require_explanation = true max_explanation_chars = 0",
+            "inbox.approvals.require_explanation is true and inbox.approvals.max_explanation_chars is 0",
+        ),
+    ] {
+        let message = approvals_err(&format!(r#"approvals {{ consume_within = "5m" {keys} }}"#), &rest, true);
+        assert!(message.contains(expected), "{keys}: {message}");
+    }
+    // The command is at most the body of the PDP: 16 KiB by default, a body of 8 KiB is too small.
+    let small = format!("{PDP_PARTS}\n{client}",).replace(
+        "plain_http = true",
+        "plain_http = true max_body_bytes = \"8KiB\"",
+    );
+    let message = approvals_err(APPROVALS, &small, true);
+    assert!(
+        message.contains("inbox.approvals.max_command_bytes must be at most pdp.max_body_bytes")
+            && message.contains("16384")
+            && message.contains("8192"),
+        "{message}"
+    );
+    let fits = approvals_ok(
+        r#"approvals { consume_within = "5m" max_command_bytes = "8KiB" }"#,
+        &small,
+    );
+    assert_eq!(
+        fits.inbox.unwrap().approvals.unwrap().max_command_bytes,
+        8192
+    );
+}

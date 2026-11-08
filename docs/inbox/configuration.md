@@ -94,13 +94,22 @@ At start, the portal compares each key with the check value that the database ke
 
 ## Approvals
 
-The block `inbox.approvals` sets how the PDP gates an action that a grant marks with `confirm`. It has three keys.
+The block `inbox.approvals` sets how the PDP gates an action that a grant marks with `confirm`. It also sets the limits of the approval API of the services. Only `consume_within` is mandatory.
 
-- `consume_within` is mandatory. It is the time after the decision of the owner in which the approval can be used. The range is `5s` to `1h`. The time that applies is the larger of this value and `lease_s` of the request.
+- `consume_within` is the time after the decision of the owner in which the approval can be used. The range is `5s` to `1h`. The time that applies is the larger of this value and `lease_s` of the request.
 - `evaluation_ttl` is the time in which an `evaluation_id` is valid. The range is `10s` to `1h`. The default is `5m`.
 - `deny_cooldown` is the time after an explicit refusal in which the PDP answers `approval_denied` for the same effect. The range is `0s` to `24h`. The default is `5m`. With `0s`, the PDP never answers `approval_denied`.
+- `max_command_bytes` is the largest command (`op` and `view`, as compact JSON). The range is `1KiB` to `32KiB`. The default is `16KiB`. It must not be above `pdp.max_body_bytes`. A larger command gets `413 command_too_large`.
+- `max_explanation_chars` is the longest explanation of an agent. The range is `0` to `8000`. The default is `2000`. With `0`, no explanation is accepted. The portal never cuts a text.
+- `require_explanation` is `false` by default. With `true`, a request without an explanation gets `422 explanation_required`. It must not be `true` with `max_explanation_chars = 0`.
+- `max_comment_chars` is the longest text that a person joins to a refusal. The range is `1` to `8000`. The default is `2000`.
+- `intent_ttl` is the time in which an `approval_ref` works. The range is `30s` to `1h`. The default is `10m`.
+- `max_requests_per_key_per_hour` is the most requests that one key creates in one hour. The range is `1` to `10000`. The default is `20`.
+- `mute_after_refusals` is the number of explicit refusals in a row after which a key is muted. The range is `0` to `100`. The default is `3`. With `0`, a key is never muted.
+- `mute_for` is the length of the mute. The range is `1m` to `7d`. The default is `1h`.
+- `web_approval` is `true` by default. With `false`, the web page lists the requests and does not decide them, so an owner with no phone gets `409 no_device`.
 
-A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate".
+A block `pdp_client` has the key `approvals`. The default is `false`. A server without the flag gets a plain `false` for an action with `confirm`. See the README, "The approval gate" and "The approval API for a service".
 
 ## Switches that touch the Inbox
 

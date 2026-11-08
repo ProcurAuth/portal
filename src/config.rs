@@ -23,9 +23,9 @@ use crate::grants::{Grant, Mode};
 
 #[allow(unused_imports)] // some of these types serve only the module `inbox`
 pub use inbox::{
-    ApiKeyConfig, AtRestConfig, ClusterConfig, DevicesConfig, DigestConfig, GroupConfig,
-    InboxConfig, InboxSecrets, InboxStorageConfig, ItemsConfig, LeaseConfig, ReplicaConfig,
-    WatchConfig,
+    ApiKeyConfig, ApprovalsConfig, AtRestConfig, ClusterConfig, DevicesConfig, DigestConfig,
+    GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig, ItemsConfig, LeaseConfig,
+    ReplicaConfig, WatchConfig,
 };
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};
@@ -922,6 +922,17 @@ fn check_approvals(config: &Config) -> Result<(), String> {
         }
         if !config.keys.as_ref().is_some_and(|keys| keys.mcp) {
             return Err("the block inbox.approvals needs keys.mcp = true: an agent holds a key of the kind mcp; set keys.mcp = true, or remove the block inbox.approvals".into());
+        }
+        if let (Some(approvals), Some(pdp)) = (
+            config.inbox.as_ref().and_then(|i| i.approvals.as_ref()),
+            config.pdp.as_ref(),
+        ) {
+            if approvals.max_command_bytes > pdp.max_body_bytes {
+                return Err(format!(
+                    "inbox.approvals.max_command_bytes must be at most pdp.max_body_bytes: max_command_bytes is {}, pdp.max_body_bytes is {}",
+                    approvals.max_command_bytes, pdp.max_body_bytes
+                ));
+            }
         }
     }
     Ok(())

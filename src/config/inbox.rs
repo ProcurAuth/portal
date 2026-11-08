@@ -168,7 +168,7 @@ pub struct AtRestConfig {
     pub admin_body_read: bool,
 }
 
-/// The block `inbox.approvals`: what the PDP needs to gate an action. Lot L7 adds the keys of the submission API.
+/// The block `inbox.approvals`: what the PDP needs to gate an action, and the limits of the approval API.
 #[derive(Clone, Debug)]
 pub struct ApprovalsConfig {
     /// The time after the decision in which the approval can be used.
@@ -177,6 +177,21 @@ pub struct ApprovalsConfig {
     pub evaluation_ttl: Duration,
     /// The time after an explicit refusal in which the PDP answers `approval_denied`.
     pub deny_cooldown: Duration,
+    /// The largest command (`op` and `view`, as compact JSON), in bytes.
+    pub max_command_bytes: usize,
+    /// The longest explanation of an agent, in characters. 0: none is accepted.
+    pub max_explanation_chars: usize,
+    pub require_explanation: bool,
+    #[allow(dead_code)] // the phone and the web screens of lots L8 and L10 read it
+    pub max_comment_chars: usize,
+    /// How long an intent (`approval_ref`) stays valid.
+    pub intent_ttl: Duration,
+    pub max_requests_per_key_per_hour: u32,
+    /// Explicit refusals in a row before a key is muted. 0: never.
+    pub mute_after_refusals: u32,
+    pub mute_for: Duration,
+    #[allow(dead_code)] // the web page of lot L10 reads it
+    pub web_approval: bool,
 }
 
 /// A block `group`.
@@ -333,7 +348,21 @@ pub fn build(
             consume_within: r.duration("inbox.approvals", "consume_within")?,
             evaluation_ttl: r.duration("inbox.approvals", "evaluation_ttl")?,
             deny_cooldown: r.duration("inbox.approvals", "deny_cooldown")?,
+            max_command_bytes: r.size("inbox.approvals", "max_command_bytes")?,
+            max_explanation_chars: r.int("inbox.approvals", "max_explanation_chars")? as usize,
+            require_explanation: r.bool("inbox.approvals", "require_explanation")?,
+            max_comment_chars: r.int("inbox.approvals", "max_comment_chars")? as usize,
+            intent_ttl: r.duration("inbox.approvals", "intent_ttl")?,
+            max_requests_per_key_per_hour: r
+                .int("inbox.approvals", "max_requests_per_key_per_hour")?
+                as u32,
+            mute_after_refusals: r.int("inbox.approvals", "mute_after_refusals")? as u32,
+            mute_for: r.duration("inbox.approvals", "mute_for")?,
+            web_approval: r.bool("inbox.approvals", "web_approval")?,
         };
+        if approvals.require_explanation && approvals.max_explanation_chars == 0 {
+            return Err("inbox.approvals.require_explanation is true and inbox.approvals.max_explanation_chars is 0: no explanation can be given; expected require_explanation = false, or max_explanation_chars from 1 to 8000".into());
+        }
         if approvals.consume_within > items.max_lifetime {
             return Err(format!(
                 "inbox.approvals.consume_within must be at most inbox.items.max_lifetime: consume_within is {}, max_lifetime is {}",

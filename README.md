@@ -1724,6 +1724,15 @@ This block is optional and is inside the block `inbox`. Its presence starts the 
 | `consume_within` | duration, 5s to 1h | required | The time after the decision in which the approval can be used. It never limits the wait for the decision. The window that applies is the larger of this value and `lease_s` of the request. It must not be above `inbox.items.max_lifetime`. Recommended: `"5m"`. |
 | `evaluation_ttl` | duration, 10s to 1h | `"5m"` | The time in which an `evaluation_id` of the PDP is valid. A service submits its request before this time ends. |
 | `deny_cooldown` | duration, 0s to 1d | `"5m"` | The time after an explicit refusal in which the PDP answers `approval_denied` for the same key and the same effect. Another effect, and each other end of a request, start no such time. `0s`: the PDP never answers `approval_denied`. |
+| `max_command_bytes` | size, 1KiB to 32KiB | `"16KiB"` | The largest command (`op` and `view`, as compact JSON) that the approval API accepts. A larger command gets `413 command_too_large`, and the service refuses the action. It must not be above `pdp.max_body_bytes`. |
+| `max_explanation_chars` | number, 0 to 8000 | `2000` | The longest explanation of an agent, in characters. A longer text gets `422 explanation_too_long`, and the portal never cuts it. `0`: no explanation is accepted. |
+| `require_explanation` | `true` or `false` | `false` | `true`: a request without an explanation gets `422 explanation_required`. It must not be `true` with `max_explanation_chars = 0`. |
+| `max_comment_chars` | number, 1 to 8000 | `2000` | The longest text that a person joins to a refusal, in characters. |
+| `intent_ttl` | duration, 30s to 1h | `"10m"` | How long an `approval_ref` stays valid. A reference works once, for the key that made it. A service submits its request before this time ends. The PDP publishes the value as `procurauth_approval_ref_ttl_seconds`. |
+| `max_requests_per_key_per_hour` | number, 1 to 10000 | `20` | The most requests that one key creates in one hour. A request that replaces another counts too. A repeat of an open request counts never. A key over the limit gets `429 rate_limited` with `retry_after`. |
+| `mute_after_refusals` | number, 0 to 100 | `3` | The number of explicit refusals in a row after which the portal mutes the key for `mute_for` and sends an alert to its owner. A muted key gets `429 rate_limited`. `0`: a key is never muted. |
+| `mute_for` | duration, 1m to 7d | `"1h"` | How long a key stays muted after `mute_after_refusals` refusals. |
+| `web_approval` | `true` or `false` | `true` | `true`: a person can approve from the web page. `false`: the page lists the requests and does not decide them, so an owner with no phone cannot receive a request (`409 no_device`). |
 
 #### Block `user "<login>"`
 
