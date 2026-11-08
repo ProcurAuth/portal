@@ -753,6 +753,16 @@ async fn accept_loop(state: Arc<AppState>, listener: TcpListener) {
     }
 }
 
+/// The path of the MCP endpoint of the inbox (`inbox.mcp.path`), when the file has the block `inbox.mcp`.
+fn mcp_path(state: &AppState) -> Option<&str> {
+    state
+        .config
+        .inbox
+        .as_ref()
+        .and_then(|inbox| inbox.mcp.as_ref())
+        .map(|mcp| mcp.path.as_str())
+}
+
 async fn handle_request(
     state: Arc<AppState>,
     remote_addr: SocketAddr,
@@ -779,7 +789,7 @@ async fn handle_request(
     // The inbox owns `/v1/`, `/api/v1/`, `/readyz` and `/api/version` on this listener: the phones
     // (WebSocket), the API of the producers and the webhooks. No session and no other handler apply
     // to them. Without the block `inbox`, these paths are not found.
-    let inbox_app = if crate::inbox::owns(&path) {
+    let inbox_app = if crate::inbox::owns_at(&path, mcp_path(&state)) {
         state.inbox.app()
     } else {
         None
@@ -915,7 +925,7 @@ async fn handle_request(
     // used recovery code. The sign-in and the sign-out do not wait. Nothing to copy: no wait.
     if method == Method::POST
         && !starting
-        && !crate::inbox::owns(&path)
+        && !crate::inbox::owns_at(&path, mcp_path(&state))
         && path != LOGIN_PATH
         && path != LOGOUT_PATH
     {
@@ -4966,7 +4976,7 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         VERIFY_KEY_PATH => "verify_key",
         HEALTH_PATH => "health",
         READY_PATH => "ready",
-        _ if crate::inbox::owns(path) => "inbox_api",
+        _ if crate::inbox::owns_at(path, mcp_path(state)) => "inbox_api",
         STYLE_PATH | SETTINGS_STYLE_PATH | THEME_JS_PATH | SETTINGS_JS_PATH | NOTIFY_JS_PATH => {
             "assets"
         }
@@ -5071,7 +5081,7 @@ mod tests {
             "/readyz",
             "/api/version",
         ] {
-            assert!(crate::inbox::owns(inbox), "{inbox}");
+            assert!(crate::inbox::owns_at(inbox, None), "{inbox}");
         }
         let portal = [
             HOME_PATH,
@@ -5108,7 +5118,7 @@ mod tests {
             "/metrics",
         ];
         for path in portal {
-            assert!(!crate::inbox::owns(path), "{path}");
+            assert!(!crate::inbox::owns_at(path, None), "{path}");
         }
         // The prefix needs the slash: a path that only starts with the same letters is the portal's.
         for path in [
@@ -5120,7 +5130,7 @@ mod tests {
             "/readyz/x",
             "/api/v2/x",
         ] {
-            assert!(!crate::inbox::owns(path), "{path}");
+            assert!(!crate::inbox::owns_at(path, None), "{path}");
         }
     }
 

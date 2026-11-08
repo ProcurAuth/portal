@@ -54,6 +54,35 @@ pub enum KeyCheck {
     Valid { key_id: String },
 }
 
+/// The door of an agent: the endpoint `/mcp` takes the keys of the kind `mcp`, and the REST routes of the items take the
+/// keys of the kind `api`. A key never opens the other door.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Door {
+    Mcp,
+    Rest,
+}
+
+/// The facts about a key that the agent channel needs. The owner is the login of the account that holds the key: the
+/// superadmin has its current login.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentKey {
+    pub key_id: String,
+    pub owner: String,
+    pub interaction: inbox_core::proto::Interaction,
+}
+
+/// The result of the check of a bearer token for the door of an agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentCheck {
+    /// The text has not the form of a key of this door, or the portal turns this kind off.
+    NotAKey,
+    /// The key does not exist, is expired, or its owner cannot use keys.
+    Invalid,
+    /// The directory of the portal is not ready. The agent channel answers 503.
+    NotReady,
+    Valid(AgentKey),
+}
+
 /// The decision of the portal for one action of a key on one group.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -161,6 +190,12 @@ pub fn audience(app: &App, service: &str) -> BTreeSet<String> {
 pub trait Authorizer: Send + Sync {
     /// Checks the text of a key. It reads memory only.
     fn check_key(&self, token: &str) -> KeyCheck;
+
+    /// Checks the text of a key for the door of an agent, and gives the owner and the interaction of the key. It reads
+    /// memory only. The default answer is `NotAKey`.
+    fn check_agent_key(&self, _token: &str, _door: Door) -> AgentCheck {
+        AgentCheck::NotAKey
+    }
 
     /// Decides whether the key may do `action` on the group `group`. When `count_use` is true, a
     /// decision `Allowed` has taken one unit from each limit of the key and of its owner.

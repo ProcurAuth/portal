@@ -677,6 +677,38 @@ pub fn approval_key_hash(
     super::util::hex(&hash.finalize())
 }
 
+/// The sealed payload of a text of the owner: a `decline` with a comment or a change request. It is the compact JSON
+/// `{"text": ..., "intent": "comment" | "change_request"}`. The phone path and the web path build it with
+/// [`owner_text_payload`]. The agent channel reads it with [`read_owner_text`].
+pub fn owner_text_payload(
+    text: &str,
+    intent: inbox_core::proto::Intent,
+) -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({"text": text, "intent": intent}))
+            .unwrap_or_default(),
+    )
+}
+
+/// Reads the payload of a text of the owner. A payload that is not of this form is a plain text with the intent
+/// `comment`: the reader never fails on the text of a person.
+pub fn read_owner_text(payload: &[u8]) -> (String, inbox_core::proto::Intent) {
+    use inbox_core::proto::Intent;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Form {
+        text: String,
+        intent: Intent,
+    }
+    match serde_json::from_slice::<Form>(payload) {
+        Ok(form) => (form.text, form.intent),
+        Err(_) => (
+            String::from_utf8_lossy(payload).into_owned(),
+            Intent::Comment,
+        ),
+    }
+}
+
 /// The code of an approval: 4 characters that a person reads aloud without a doubt. It is not a secret.
 pub fn new_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -959,6 +991,23 @@ pub(crate) mod tests {
             can_revive(&row(ItemState::Pending), 1, &r),
             Err(NoRevive::NotAbandoned)
         );
+    }
+
+    #[test]
+    fn the_text_of_the_owner_goes_through_its_payload_and_a_plain_text_reads_as_a_comment() {
+        use inbox_core::proto::Intent;
+        let payload = owner_text_payload("Use \"staging\".\n", Intent::ChangeRequest);
+        assert_eq!(
+            read_owner_text(&payload),
+            ("Use \"staging\".\n".to_string(), Intent::ChangeRequest)
+        );
+        assert_eq!(
+            read_owner_text(b"no, not now"),
+            ("no, not now".to_string(), Intent::Comment)
+        );
+        // A JSON text with other members is a plain text: the form is closed.
+        let odd = br#"{"text":"a","intent":"comment","by":"x"}"#;
+        assert_eq!(read_owner_text(odd).0, String::from_utf8_lossy(odd));
     }
 
     #[test]
