@@ -1952,11 +1952,7 @@ fn require_explanation_and_the_default_keys_reach_the_metadata_and_the_gate() {
 fn frames_of(r: &Rig, device: &str) -> Vec<inbox_core::proto::ServerMsg> {
     use crate::inbox::testing::{Builder, Built};
     runtime().block_on(async {
-        let queue = r
-            .items()
-            .pending_item_deliveries(device, 50)
-            .await
-            .unwrap();
+        let queue = r.items().pending_item_deliveries(device, 50).await.unwrap();
         let mut builder = Builder::new(&r.app, OWNER, &queue).expect("the engine runs");
         let mut out = Vec::new();
         for d in &queue {
@@ -2046,7 +2042,11 @@ fn decline_with_comment_reaches_agent_never_pep() {
                 _ => None,
             })
             .expect("the second request reaches the phone");
-        assert_eq!(request.previous_id.as_deref(), Some(id.as_str()), "[{name}]");
+        assert_eq!(
+            request.previous_id.as_deref(),
+            Some(id.as_str()),
+            "[{name}]"
+        );
         let follows = request.approval.unwrap().follows.expect("follows");
         assert_eq!(
             (follows.code, follows.intent),
@@ -2067,7 +2067,11 @@ fn reply_moves_to_replied_and_agent_sees_user_message() {
     each_rig(true, "", |r, name| {
         r.device();
         // A second phone of the owner. The key of the row differs from the key of the first one.
-        let key_bytes = if name == "sqlite" { "x'01'" } else { "'\\x01'::bytea" };
+        let key_bytes = if name == "sqlite" {
+            "x'01'"
+        } else {
+            "'\\x01'::bytea"
+        };
         runtime()
             .block_on(r.items().test_exec(&format!(
                 "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip) \
@@ -2094,7 +2098,11 @@ fn reply_moves_to_replied_and_agent_sees_user_message() {
             panic!("[{name}] the reply was not stored: {out:?}");
         };
         assert_eq!(loaded.item.state, ItemState::Replied, "[{name}]");
-        assert_eq!(r.verdict(&id, &key), "pending", "[{name}] the service sees pending");
+        assert_eq!(
+            r.verdict(&id, &key),
+            "pending",
+            "[{name}] the service sees pending"
+        );
 
         // The agent reads the question of the owner in the thread.
         let turns = runtime().block_on(r.items().serve_turns(&id)).unwrap();
@@ -2102,7 +2110,11 @@ fn reply_moves_to_replied_and_agent_sees_user_message() {
             .iter()
             .find(|t| t.row.kind == "reply")
             .expect("the reply is in the thread");
-        assert_eq!(reply.text.as_deref().map(|t| &t[..]), Some(question.as_bytes()), "[{name}]");
+        assert_eq!(
+            reply.text.as_deref().map(|t| &t[..]),
+            Some(question.as_bytes()),
+            "[{name}]"
+        );
 
         // The other phone gets the text as a `message` of the user; the phone that asked gets none.
         let on_second = frames_of(r, SECOND);
