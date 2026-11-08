@@ -639,6 +639,9 @@ async fn deliver(
         offline_warning_after_ms: cfg.offline_warning_after.as_millis() as u64,
         server_time_ms: now_ms(),
         user_name: user_name.clone(),
+        // The preferences and the items come with later lots: the welcome says "none" for now.
+        prefs: Box::default(),
+        body_purge_after_ms: 0,
     };
     if let Err(e) = send_msg(socket, session, &welcome).await {
         return e;
@@ -697,7 +700,7 @@ async fn deliver(
                 deadline = Instant::now() + cfg.session_timeout;
                 last_seen.store(now_ms(), Ordering::Relaxed);
                 let Ok(plain) = session.decrypt(&frame) else { return End::Protocol("decrypt failed") };
-                let Ok(msg) = serde_json::from_slice::<ClientMsg>(&plain) else { return End::Protocol("malformed message") };
+                let Ok(msg) = ClientMsg::decode(&plain) else { return End::Protocol("malformed message") };
                 match handle(app, socket, session, device_id, &user_name, msg, &mut inflight).await {
                     Ok(f) => flush |= f,
                     Err(e) => return e,
@@ -726,7 +729,7 @@ async fn handle(
             Ok(false)
         }
         ClientMsg::Ack {
-            alert_id,
+            id: alert_id,
             stage: AckStage::Received,
         } => {
             if !is_hex_id(&alert_id) {
@@ -749,6 +752,23 @@ async fn handle(
                 inflight.remove(&o.seq);
             }
             Ok(true)
+        }
+        ClientMsg::Answer(_)
+        | ClientMsg::Reply(_)
+        | ClientMsg::Refresh { .. }
+        | ClientMsg::Sync { .. }
+        | ClientMsg::SetPrefs(_) => {
+            // Protocol 5 has these frames. The server does not handle them yet.
+            send_msg(
+                socket,
+                session,
+                &ServerMsg::Error {
+                    code: "not_enabled".into(),
+                    message: "items are not enabled on this server".into(),
+                },
+            )
+            .await?;
+            Ok(false)
         }
         ClientMsg::Subscribe { group } => {
             if !app.group_names.contains_key(&group) {

@@ -1260,7 +1260,7 @@ impl Conn {
 
     async fn ack(&mut self, id: &str, stage: AckStage) {
         self.send(&ClientMsg::Ack {
-            alert_id: id.into(),
+            id: id.into(),
             stage,
         })
         .await;
@@ -7875,5 +7875,46 @@ async fn a_deleted_account_stays_deleted_after_an_unclean_stop() {
     s.start();
     assert!(s.log().contains("\"kept_local\":\"false\""), "{}", s.log());
     assert_eq!(sign_in_request(s.port, "eve", ACCOUNT_PASSWORD).0, 401);
+    s.stop();
+}
+
+/// Protocol 5 breaks protocol 4. The hello of an app of version 4 ends with the close code 4426.
+/// The hello of version 5 gets its session, and the new client frames get `not_enabled` for now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_hello_protocol_4_gets_4426() {
+    let mut s = Server::setup();
+    s.start();
+    let phone = enroll_as(&s, "phone", SUPERADMIN).await.unwrap();
+    for protocol in [4u32, 6] {
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/v1/session", s.port))
+                .await
+                .unwrap();
+        let hello = serde_json::to_vec(&SessionHello {
+            protocol,
+            device_id: phone.device_id.clone(),
+            app_version: "e2e".into(),
+        })
+        .unwrap();
+        let (_, m1) =
+            Initiator::start(&phone.device_private_key, &phone.server_public_key, &hello).unwrap();
+        ws.send(Message::Binary(m1.into())).await.unwrap();
+        assert_eq!(close_code(&mut ws).await, Some(4426), "protocol {protocol}");
+    }
+    let (mut c, welcome) = Conn::open(s.port, &phone).await.unwrap();
+    assert!(
+        matches!(welcome, ServerMsg::Welcome { ref prefs, body_purge_after_ms: 0, .. } if **prefs == Default::default())
+    );
+    c.send(&ClientMsg::Refresh {
+        request_id: "a".repeat(32),
+    })
+    .await;
+    match c.recv(Duration::from_secs(5)).await {
+        Recv::Msg(ServerMsg::Error { code, .. }) => assert_eq!(code, "not_enabled"),
+        other => panic!(
+            "expected not_enabled, got {:?}",
+            matches!(other, Recv::Timeout)
+        ),
+    }
     s.stop();
 }

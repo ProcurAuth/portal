@@ -1650,8 +1650,7 @@ mod tests {
         let a = insert_device(&c, "a", "a", &[1; 32], "ip").unwrap();
         set_subscription(&c, &a, "infra").unwrap();
         insert_alert(&mut c, &alert("k"), None).unwrap();
-        c.execute("UPDATE alerts SET kind = 'question'", [])
-            .unwrap();
+        c.execute("UPDATE alerts SET kind = 'settled'", []).unwrap();
         assert!(pending_deliveries(&c, &a, 10, 0).is_err());
         assert!(recent_alerts(&c, 10, 0, 0).is_err());
     }
