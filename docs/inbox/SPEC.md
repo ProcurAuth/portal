@@ -88,7 +88,7 @@ The level of the alert is Ring. It MUST NOT be critical. The protocol of the pho
 
 ### 3.4 Page
 
-3.4.1 The page of the Inbox is the tab Inbox of the settings of the portal, at `/auth/settings/inbox`. It needs a session of the portal and the permissions of the portal features. It has no sub-page.
+3.4.1 The page of the Inbox is the tab Inbox of the settings of the portal, at `/auth/settings/inbox`. It needs a session of the portal and the permissions of the portal features. The pages of the requests are under it (3.7.26).
 
 3.4.2 The page MUST work without script. The script only gives the Copy button, the close of a popover and the count of the bulk action.
 
@@ -235,6 +235,12 @@ An approval asks the owner of a key to allow one exact action of an agent. The p
 3.7.26 **[5.1.0]** The page of the Inbox MUST show a panel "Open items" above the phones only when an item waits. It MUST have a zone "History" with filters. The matrix of the editor MUST have the columns Read and Cancel. It MUST have no column that decides. A lock icon MUST mark an action that has `approval: "optional"`.
 
 3.7.27 **[5.1.0]** The pages of the items MUST work without script. They MUST carry `Cache-Control: no-store`, and MUST check the CSRF token and the origin on an answer and on a reply. An owner MUST see only the items of the owner. With `web_approval` false, the page MUST list the items and MUST NOT let the owner decide.
+
+3.7.28 **[5.1.0]** The page of the Inbox MUST show the alerts first, then the panel "Open items", then the phones and the connections. A link to the History MUST be in the bar of the page. The tab MUST show the count of the requests that wait.
+
+3.7.29 **[5.1.0]** The page "Inbox limits" MUST show the value and the source of each key of the blocks `inbox.items`, `inbox.approvals` and `inbox.at_rest`. The source is `file`, `default`, `env:NAME` or `file:PATH`. The page MUST be read only. It MUST show a secret key by its id and its source, never by its value. It needs `approval.read`.
+
+3.7.30 **[5.1.0]** The copy button of the command MUST copy the exact bytes of the command. A code block of the explanation MUST use colors that are different from the colors of the command. The buttons that need script MUST be hidden when the script does not run.
 
 ### 3.8 Agent channel
 
@@ -420,7 +426,7 @@ The portal seals the body of an item before it writes it. This is not end-to-end
 
 The agent is not trusted. Its text is shown with care. Release: 5.1.0.
 
-5.12.1 **[5.1.0]** The screen MUST show the command first, in a fixed font, with a copy button, the age and the short hash. The explanation MUST come below it, in another style, with the label "Text of the agent, not verified". The explanation MUST NOT be copyable in one gesture, and MUST NOT hold an active link.
+5.12.1 **[5.1.0]** The screen MUST show the command first, in a fixed font, with a copy button, the age and the short hash. The explanation MUST come below it, in another style, with the label "Text of the agent, not verified". The text of the explanation MUST NOT be copyable in one gesture. A code block of the explanation MAY have its own copy button. The explanation MUST NOT hold an active link.
 
 5.12.2 **[5.1.0]** The screen MUST show a control character, a bidirectional control and a zero-width character as a visible mark, for example `<U+202E>`. It MUST show the count of non-ASCII characters. The portal MUST NOT remove such a character from the explanation, the comments, the turns or the command of an approval.
 
@@ -548,7 +554,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.9 | 5.1.0 | L7 | `approval_api_tests::a01_idempotent_repost_same_id_no_renewal_no_body_swap`, `approval_api_tests::idempotence_under_concurrency_one_open_request_for_each_effect`, `approval_api_tests::a_unique_index_on_the_hash_refuses_a_second_open_request_and_frees_it_at_the_end`. L7b: `pep_e2e::pep_end_to_end` (scenario S1: the real PEP resubmits while the request is pending and gets the same id and code) |
 | 3.7.10 | 5.1.0 | L8 | to fill |
 | 3.7.11 | 5.1.0 | L8 | `approval_api_tests::decline_with_comment_reaches_agent_never_pep`, `frames::tests::previous_and_follows_come_from_the_facts` |
-| 3.7.12 | 5.1.0 | L8, L10 | L8: `a_phone_of_another_account_gets_nothing_and_cannot_answer`, `revoked_device_answer_refused_4403_and_no_state_change`. L10: to fill |
+| 3.7.12 | 5.1.0 | L8, L10 | L8: `a_phone_of_another_account_gets_nothing_and_cannot_answer`, `revoked_device_answer_refused_4403_and_no_state_change`. L10: `items_web_e2e::impersonated_session_cannot_answer`, `owner_sees_only_own_items`, `web_approval_false_lists_only` |
 | 3.7.13 | 5.1.0 | L8 | `two_phones_race_one_accepted_other_settled`, `phone_enrolled_after_creation_receives_open_items`, `two_instances_each_flush_their_own_phone` |
 | 3.7.14 | 5.1.0 | L6 | Conformance D77, D78, D81, `pdp::approval_tests::consume_takes_one_unit_once`, `pdp::approval_tests::budget_exceeded_keeps_approval_usable_release_path`, `pdp::approval_tests::two_resume_calls_race_one_true`, `pdp::approval_tests::hundred_concurrent_resumes_one_true`, `items_tests::concurrent_consumes_use_an_approval_once_and_status_consumes_nothing` |
 | 3.7.15 | 5.1.0 | L6 | Conformance D80, `pdp::approval_tests::crash_between_consume_and_count_never_double_executes`, `pdp::approval_tests::abandoned_or_lapsed_reads_as_approval_expired`, `items_tests::an_approval_is_consumed_once_released_and_lapses` |
@@ -558,19 +564,22 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.19 | 5.1.0 | L7 | `approval_api_tests::the_verdict_follows_the_state_and_only_four_values_exist`, `approval_api_tests::a12_get_returns_only_verdict_fields` |
 | 3.7.20 | 5.1.0 | L7, L12 | L7: `approval_api_tests::pep_observation_unit`, `approval_api_tests::a12_get_returns_only_verdict_fields`, `approval_api_tests::the_routes_of_the_api_answer_the_methods_and_the_unknown_paths_as_17_4_says`. L12: to fill (the full canary of the release). L7b: `pep_e2e::pep_end_to_end` (ignored; run by `tools/dev/pep-e2e.sh` with the real reference PEP: the tap shows what the service received) |
 | 3.7.21 | 5.1.0 | L7 | `approval_api_tests::a03_renew_only_with_subject_of_requester` |
-| 3.7.22 | 5.1.0 | L10, A2 | to fill |
+| 3.7.22 | 5.1.0 | L10, A2 | L10: `items_web_e2e::stale_request_needs_checkbox`, `ui::items::tests::an_old_request_has_the_banner_and_the_required_box_and_a_new_one_has_neither`. A2: to fill |
 | 3.7.23 | 5.1.0 | A2 | to fill |
-| 3.7.24 | 5.1.0 | L10 | to fill |
-| 3.7.25 | 5.1.0 | L10 | to fill |
-| 3.7.26 | 5.1.0 | L10 | to fill |
-| 3.7.27 | 5.1.0 | L10 | to fill |
+| 3.7.24 | 5.1.0 | L10 | `portal_actions::tests::the_document_has_the_keys_and_the_inbox_in_one_scope`, `items_web_e2e::approval_read_right_shows_metadata_not_body`, `an_account_with_approval_cancel_cancels_an_open_request_and_nobody_else_does` |
+| 3.7.25 | 5.1.0 | L10 | `items_web_e2e::history_filters_chains_and_hides_the_open_items` (the side box says it from the hash), `ui::items::tests::the_command_is_first_and_the_copy_text_is_the_exact_bytes` |
+| 3.7.26 | 5.1.0 | L10 | `items_web_e2e::open_items_zone_renders_with_javascript_disabled`, `history_filters_chains_and_hides_the_open_items`; `tools/dev/ui-check-items.js` |
+| 3.7.27 | 5.1.0 | L10 | `items_web_e2e::no_store_header_on_pages_with_bodies`, `csrf_and_origin_required_on_answer_and_reply`, `owner_sees_only_own_items`, `web_approval_false_lists_only`, `web_and_phone_answer_race_one_accepted` |
+| 3.7.28 | 5.1.0 | L10 | `items_web_e2e::alerts_come_before_the_open_items_and_the_phones_after`; `tools/dev/ui-check-items.js` |
+| 3.7.29 | 5.1.0 | L10 | `items_web_e2e::the_limits_page_shows_the_values_the_sources_and_no_secret`, `ui::items::tests::the_limits_page_hides_a_secret_and_shows_the_source` |
+| 3.7.30 | 5.1.0 | L10 | `ui::items::tests::the_command_is_first_and_the_copy_text_is_the_exact_bytes`, `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`; `tools/dev/ui-check-items.js` (copy, colors) |
 | 3.8.1 | 5.1.0 | L9 | `mcp_contract::the_transport_cases_t01_to_t13` (T01 to T13: JSON only, no session, the versions), `agent_channel::the_endpoint_follows_the_path_of_the_file_and_the_block_gates_the_tools`, `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`keys.mcp = true`) |
 | 3.8.2 | 5.1.0 | L9 | `agent_channel::rest_door_serves_the_same_core_with_its_statuses`, `get_answer_renews_lease_without_budget_unit` (the read with `wait` renews, the read without it does not) |
 | 3.8.3 | 5.1.0 | L9 | `mcp_contract::the_transport_cases_t01_to_t13` (T09 to T12, the order of the checks), `the_key_and_tool_cases_k01_k02_k03_r01_to_r09` (K01, K02), `agent_channel::one_shot_key_tools_list_hides_say_and_supersede`, `unauthenticated_flood_limited_per_address`, `key_over_its_rate_gets_429_and_retry_after` |
 | 3.8.4 | 5.1.0 | L9 | `agent_channel::wait_never_exceeds_max_wait`, `supersede_cancels_old_approval_and_new_waits` (the wait wakes at once), `get_answer_returns_comment_in_untrusted_with_intent` (a pending read is short), `config::tests::a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` (`max_wait` against `wait_max`) |
 | 3.8.5 | 5.1.0 | L9 | `agent_channel::agent_cannot_read_or_speak_on_another_keys_item`, `api_key_cannot_use_mcp_and_mcp_key_cannot_use_rest_alerts`, `cancel_makes_pep_see_void` |
 | 3.8.6 | 5.1.0 | L9 | `agent_channel::get_answer_returns_comment_in_untrusted_with_intent` (the notice first, the intent, no approver and no device), `the_texts_of_the_agent_never_reach_the_service_through_the_channel`, `mcp_tools::tests::the_notice_is_the_first_member_of_a_result_with_untrusted_text` |
-| 3.8.7 | 5.1.0 | L8, L10, A2 | L8: `frames::tests::the_line_from_never_holds_text_of_an_agent`. L10, A2: to fill |
+| 3.8.7 | 5.1.0 | L8, L10, A2 | L8: `frames::tests::the_line_from_never_holds_text_of_an_agent`. L10: `items_web_e2e::command_above_explanation_and_explanation_labelled_unverified` (the line from has the name of the key and the owner). A2: to fill |
 | 3.8.8 | 5.1.0 | L9 | `agent_channel::get_answer_renews_lease_without_budget_unit` (an item that the service made with `lease_s` and no intent), `approval_api_tests::pep_observation_unit` (L7) |
 | 3.8.9 | 5.1.0 | L9 | `config::tests::the_block_mcp_has_the_documented_defaults_and_the_set_values_apply`, `a_bad_key_of_the_block_mcp_or_a_contradiction_stops_the_start_with_the_key_the_range_and_the_value` |
 | 3.9.1 | 5.1.0 | L11 | to fill |
@@ -584,7 +593,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.10.3 | 5.1.0 | L7 | L7: `approval_api_tests::no_phone_409`, `approval_api_tests::mute_after_three_refusals_alerts_owner` (the owner is the only recipient). L8 and L10 add the phone and the web screens |
 | 3.10.4 | 5.1.0 | L12 | to fill |
 | 3.10.5 | 5.1.0 | L4 | to fill |
-| 3.10.6 | 5.1.0 | L10 | to fill |
+| 3.10.6 | 5.1.0 | L10 | `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::markdown_html::tests` |
 | 4.9.2a | 5.1.0 | L5 | `degraded_storage_returns_storage_degraded_and_writes_nothing` |
 | 4.11.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
 | 4.11.2 | 5.1.0 | L8 | `phone_enrolled_after_creation_receives_open_items`, `offline_phone_receives_request_and_settled_on_reconnect`, `answer_after_abandon_gets_abandoned_and_settled` |
@@ -610,9 +619,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.11.12 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.13 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.14 | 5.1.0 | A2, L12 | to fill |
-| 5.11.15 | 5.1.0 | L10 | to fill |
-| 5.11.16 | 5.1.0 | L10 | to fill |
-| 5.11.17 | 5.1.0 | L10 | to fill |
+| 5.11.15 | 5.1.0 | L10 | `items_web_e2e::admin_body_route_404_when_switch_false` |
+| 5.11.16 | 5.1.0 | L10 | `items_web_e2e::admin_body_read_true_superadmin_only_writes_audit_and_counter_no_body`, `approval_read_right_shows_metadata_not_body`, `impersonated_session_cannot_answer` |
+| 5.11.17 | 5.1.0 | L10 | `items_web_e2e::admin_body_read_true_superadmin_only_writes_audit_and_counter_no_body` |
 | 3.6.26 | 5.1.0 | L3b | `frames::markdown_and_language_members_are_kept_and_plain_is_a_valid_spelling`, `frames::new_invalid_frames_fail_for_the_named_reason`, `frames::tests::a_markdown_turn_of_the_agent_keeps_its_format`, `agent_channel::the_format_and_the_language_of_an_intent_reach_the_frame_of_the_phone`, `agent_channel::a_turn_of_the_agent_can_be_markdown_and_the_message_frame_says_so`, `FramesTest.theMarkdownAndLanguageMembersReadToTheTypedValues` |
 | 3.6.27 | 5.1.0 | L3b | `render::markdown::tests::limits_make_the_text_plain`, `render::markdown::tests::autolinks_html_and_images_are_text`, `render::markdown::tests::tables_footnotes_and_rules_are_text`, `render::markdown::tests::entities_are_text`, `render::markdown::tests::random_markdown_never_panics_and_always_gives_a_tree`, `render::markdown::tests::nested_structures_keep_their_shape`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::bombs_and_long_texts_stay_inside_the_subset` |
 | 3.6.28 | 5.1.0 | L3b | `render::markdown::tests::links_show_the_host_and_never_act`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::no_class_comes_from_the_text`, `markdown_html::bidi_and_zero_width_characters_are_visible_marks` |
@@ -621,9 +630,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.31 | 5.2.0 | L3b | `form::tests::table_of_refusals`, `form::tests::a_complete_answer_passes`, `frames::tests::the_owner_answer_holds_the_answers_of_a_form`, `FramesTest.theGoldenAnswerOfAFormReadsAndWritesBack`. L13 wires the check into the engine. |
 | 3.6.32 | 5.2.0 | L3b | `agent_channel::get_answer_returns_the_answers_of_a_form_in_untrusted` |
 | 3.6.33 | 5.1.0 | L3b | `render::highlight::tests` (one test for each language, `unterminated_constructs_run_to_the_end`, `random_text_never_panics_and_spans_are_in_bounds`, `work_is_linear_on_hostile_input`), `markdown_html::a_command_keeps_its_characters_and_gets_spans`, `bridge::tests::markdown_and_highlight_bridges`, `lib::tests::each_native_function_of_the_app_has_its_jni_symbol` |
-| 5.12.1 | 5.1.0 | L10, A2 | to fill |
-| 5.12.2 | 5.1.0 | L10, A2 | to fill |
-| 5.12.3 | 5.1.0 | L10 | to fill |
+| 5.12.1 | 5.1.0 | L10, A2 | L10: `items_web_e2e::command_above_explanation_and_explanation_labelled_unverified`; `tools/dev/ui-check-items.js`. A2: to fill |
+| 5.12.2 | 5.1.0 | L10, A2 | L10: `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::markdown_html::tests::a_command_has_a_span_for_each_line_and_marks_the_hidden_and_look_alike_characters`. A2: to fill |
+| 5.12.3 | 5.1.0 | L10 | `items_web_e2e::xss_bidi_control_zero_width_rendered_visible`, `ui::items::tests::the_explanation_folds_after_400_characters_and_markdown_has_its_tag` |
 | 5.12.4 | 5.2.0 | L14, A4 | to fill |
 | 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
 | 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |

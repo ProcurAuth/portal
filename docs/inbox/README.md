@@ -189,7 +189,7 @@ To remove a phone, tick its box in the zone **My phones** and press **Revoke (N)
 
 ## The page of the tab Inbox
 
-The page is `/auth/settings/inbox`. It has no sub-page. The tab shows for an account that has a permission of the Inbox features. The launcher has no tile for the Inbox. The gear of the launcher opens the page. The page shows only the parts that the permissions of the account give.
+The page is `/auth/settings/inbox`. The pages of the requests are under it. The tab shows for an account that has a permission of the Inbox features. The launcher has no tile for the Inbox. The gear of the launcher opens the page. The page shows only the parts that the permissions of the account give.
 
 | Part | Needs | Use |
 |---|---|---|
@@ -197,12 +197,28 @@ The page is `/auth/settings/inbox`. It has no sub-page. The tab shows for an acc
 | Zone **Phones** | `phone.read` | All phones, with state, owner and pending alerts. **Revoke (N)** needs `phone.revoke`. |
 | Zone **My phones** | `inbox.receive` on one group | The phones of the account, the plus button and **Revoke (N)**. |
 | Zone **Connections** | `phone.log` | The connection log, with a search on the login. |
+| Panel **Open items** | A request that waits | The requests to answer. The panel shows above the phones and below the alerts. |
 | **Send alert** | `alert.send` on one group at least | The form of a manual alert. The field `to` has the value `group:<id>` or `user:<login>`. A target `user:<login>` needs `alert.send_user`. |
 | The book icon | `alert.send` or `alert.read` | The routes, the groups and the header of the key. |
 
 The zone **Sent** holds the 500 newest alerts of the period. The count shows `500+` when older alerts exist. The counts of the state chips come from these alerts. The graph counts every alert. The chips Question, Approval and Unanswered are dashed and do nothing. They show the place for a later step (see "Roadmap").
 
-A session that the superadmin opens with **Log in as** can read the page and make a code. It cannot send an alert and it cannot revoke a phone.
+A session that the superadmin opens with **Log in as** can read the page and make a code. It cannot send an alert and it cannot revoke a phone. It reads no request and answers no request.
+
+### Requests on the web
+
+The owner of an agent key answers the approvals on the web. The pages have no script. Each page with a content has `Cache-Control: no-store`.
+
+- The panel **Open items** lists the requests that wait. A row has the code, the title of the service, the agent, the age and the start of the command. The panel is absent when nothing waits. The tab has a second badge with the count.
+- The link **History** opens `/auth/settings/inbox/items`. It has filters for the state, the key, the service and the period.
+- A row opens the page of one request. The zone **Command** is first. It shows the exact text of the service. The zone **Agent explanation** is below it, with the label "Not checked".
+- A hidden character shows as a mark such as `<U+202E>`. The server never removes it.
+- **Approve** and **Decline** are buttons of one form. The web has no gate "read to the end". The page says so.
+- After `stale_after`, **Approve** needs the box "I know this request is N days old".
+- With `web_approval = false`, the page lists the requests and has no form that decides.
+- An account with `approval.read` sees the metadata of all requests. An account with `approval.cancel` can cancel an open request.
+- The page **Inbox limits** (`/auth/settings/inbox/limits`) shows the values of the file. It is read only. A secret key shows its id and its source.
+- With `inbox.at_rest.admin_body_read = true`, the superadmin can open `/auth/settings/inbox/items/{id}/body`. Each read writes one audit row. The row has no content.
 
 ## Notifications in the browser
 
