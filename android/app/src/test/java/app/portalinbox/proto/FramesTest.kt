@@ -465,4 +465,185 @@ class FramesTest {
         assertEquals("66666666666666666666666666666666", (Fixtures.server("digest.json") as DigestFrame).id)
         assertEquals("cccccccccccccccccccccccccccccccc", (Fixtures.server("alert.json") as ServerAlertFrame).alertId)
     }
+
+    // ------------------------------------------------------------ markdown, language, forms (lot L3b)
+
+    @Test
+    fun theMarkdownAndLanguageMembersReadToTheTypedValues() {
+        val q = (Fixtures.server("request-question-markdown.json") as RequestFrame).question!!
+        assertEquals(ExplanationFormat.MARKDOWN, q.explanationFormat)
+        assertEquals(Language.SQL, q.command!!.language)
+        assertTrue(q.explanation!!.contains("```sql"))
+        val a = (Fixtures.server("request-approval-markdown.json") as RequestFrame).approval!!
+        assertEquals(ExplanationFormat.MARKDOWN, a.explanationFormat)
+        assertEquals(Language.SQL, a.language)
+        val m = Fixtures.server("message-agent-markdown.json") as MessageFrame
+        assertEquals(ExplanationFormat.MARKDOWN, m.explanationFormat)
+        assertEquals(Language.BASH, m.command!!.language)
+        // Without the members, the format is plain.
+        assertNull((Fixtures.server("request-question-choice.json") as RequestFrame).question!!.explanationFormat)
+        // `plain` is a valid spelling. The frame writes back what it read.
+        val plain = Fixtures.golden("server", "request-question-markdown.json").json.put("explanation_format", "plain")
+        val frame = ServerFrames.decode(StrictJson.compact(plain)) as RequestFrame
+        assertEquals(ExplanationFormat.PLAIN, frame.question!!.explanationFormat)
+        same(plain, frame.toJson(), "plain format")
+    }
+
+    @Test
+    fun everyLanguageOfTheClosedListIsAValidHint() {
+        assertEquals(
+            listOf("plain", "sql", "json", "yaml", "toml", "bash", "python", "rust", "javascript", "typescript", "diff"),
+            Language.entries.map { it.wire },
+        )
+        val base = Fixtures.golden("server", "request-question-markdown.json").json
+        for (l in Language.entries) {
+            base.getJSONObject("command").put("language", l.wire)
+            ServerFrames.decode(StrictJson.compact(base))
+        }
+        for (bad in listOf("cobol", "SQL", "Rust", "", "sh", "html")) {
+            base.getJSONObject("command").put("language", bad)
+            refused { ServerFrames.decode(StrictJson.compact(base)) }
+        }
+    }
+
+    @Test
+    fun theGoldenFormReadsToTheTypedValues() {
+        val r = Fixtures.server("request-question-form.json") as RequestFrame
+        val input = r.question!!.input
+        assertEquals(InputType.FORM, input.type)
+        val questions = input.questions!!
+        assertEquals(listOf("target", "checks", "window", "note"), questions.map { it.id })
+        assertEquals(FormQuestionType.CHOICE, questions[0].type)
+        assertEquals(FormQuestionType.TEXT, questions[3].type)
+        assertEquals(3, questions[1].max)
+        assertTrue(questions[1].multiple)
+        assertEquals("Which checks do you run?\nTick all that apply.", questions[1].text)
+        assertEquals("Shared test cluster", questions[0].options[0].description)
+        assertEquals("No secret here", questions[3].placeholder)
+        assertTrue(r.allowCustom && r.allowAskBack)
+        // The other kinds of input have no questions.
+        assertNull((Fixtures.server("request-question-choice.json") as RequestFrame).question!!.input.questions)
+    }
+
+    @Test
+    fun theGoldenAnswerOfAFormReadsAndWritesBack() {
+        val a = ClientFrames.decode(Fixtures.golden("client", "answer-form.json").text) as AnswerFrame
+        assertEquals(
+            listOf(
+                FormAnswer("target", listOf("staging")),
+                FormAnswer("checks", listOf("unit", "e2e")),
+                FormAnswer("window", text = "Friday morning"),
+                FormAnswer("note", text = "Use the blue pipeline."),
+            ),
+            a.answers,
+        )
+        assertNull(a.choice)
+        assertNull(a.text)
+        assertEquals(a, ClientFrames.decode(ClientFrames.encode(a)))
+    }
+
+    @Test
+    fun theFormRulesAreRefusedWithTheNamedReason() {
+        // The same table as `new_invalid_frames_fail_for_the_named_reason` of `inbox-core/tests/frames.rs`.
+        val server = mapOf(
+            "form-zero-questions" to "input.questions",
+            "form-five-questions" to "input.questions",
+            "form-duplicate-ids" to "form.questions.id",
+            "form-one-option" to "form.questions.options",
+            "form-nine-options" to "form.questions.options",
+            "form-min-above-max" to "form.questions.options",
+            "form-single-with-max-two" to "form.questions.options",
+            "form-text-with-options" to "form.questions.options",
+            "form-header-17-chars" to "form.questions.header",
+            "form-header-newline" to "form.questions.header",
+            "form-text-601-chars" to "form.questions.text",
+            "form-question-id-uppercase" to "form.questions.id",
+            "form-unknown-question-type" to "type",
+            "form-with-top-level-options" to "input.options",
+            "form-without-questions" to "input.questions",
+            "questions-on-a-choice-input" to "input.questions",
+            "form-on-one-shot-key" to "request.form",
+            "form-allow-custom-with-text-only" to "request.allow_custom",
+            "explanation-format-html" to "explanation_format",
+            "explanation-format-uppercase" to "explanation_format",
+            "explanation-format-without-explanation" to "request.explanation_format",
+            "command-language-unknown" to "language",
+            "command-language-uppercase" to "language",
+            "approval-explanation-format-without-explanation" to "approval.explanation_format",
+            "approval-language-unknown" to "language",
+            "approval-with-top-level-explanation-format" to "request.approval",
+            "message-explanation-format-without-explanation" to "message.explanation_format",
+            "message-user-with-explanation-format" to "message.explanation",
+        )
+        for ((name, reason) in server) {
+            val e = assertThrows("$name was accepted", FrameException::class.java) {
+                ServerFrames.decode(Fixtures.golden("invalid/server", "$name.json").text)
+            }
+            assertTrue("$name: '${e.message}' does not name '$reason'", e.message!!.contains(reason))
+        }
+        val client = mapOf(
+            "answer-form-with-choice" to "answer.answers",
+            "answer-form-with-text" to "answer.answers",
+            "answer-form-with-decline" to "answer.answers",
+            "answer-form-with-intent" to "answer.intent",
+            "answer-form-empty-list" to "answer.answers",
+            "answer-form-five-entries" to "answer.answers",
+            "answer-form-duplicate-question-id" to "answer.answers.question_id",
+            "answer-form-entry-with-both" to "answer.answers",
+            "answer-form-entry-with-neither" to "answer.answers",
+            "answer-form-entry-empty-choice" to "answer.answers.choice",
+            "answer-form-entry-nine-choices" to "answer.answers.choice",
+            "answer-form-entry-repeated-choice" to "answer.answers.choice",
+            "answer-form-entry-text-8001-chars" to "answer.answers.text",
+            "answer-form-entry-bad-question-id" to "answer.answers.question_id",
+            "answer-form-entry-unknown-member" to "unknown member",
+        )
+        for ((name, reason) in client) {
+            val e = assertThrows("$name was accepted", FrameException::class.java) {
+                ClientFrames.decode(Fixtures.golden("invalid/client", "$name.json").text)
+            }
+            assertTrue("$name: '${e.message}' does not name '$reason'", e.message!!.contains(reason))
+        }
+    }
+
+    @Test
+    fun theWriterRefusesWhatTheReaderRefusesForAFormAnswer() {
+        val id = "a".repeat(32)
+        val ticks = FormAnswer("one", listOf("a"))
+        assertNotNull(ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(ticks, FormAnswer("two", text = "x")))))
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.DECLINE, answers = listOf(ticks))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = emptyList())) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, choice = listOf("a"), answers = listOf(ticks))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, text = "x", answers = listOf(ticks))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(ticks, ticks))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = List(5) { FormAnswer("q$it", text = "x") })) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(FormAnswer("one", listOf("a"), "x")))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(FormAnswer("one")))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(FormAnswer("one", listOf("a", "a"))))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(FormAnswer("One", listOf("a"))))) }
+        refused { ClientFrames.encode(AnswerFrame(id, "m-1", Action.ACCEPT, answers = listOf(FormAnswer("one", text = "x".repeat(8001))))) }
+    }
+
+    @Test
+    fun theLargestFormFitsOneNoiseMessage() {
+        val json = Fixtures.golden("server", "request-question-form.json").json
+        val question = json.getJSONObject("input").getJSONArray("questions")
+        val big = JSONArray()
+        for (n in 0 until 4) {
+            val q = JSONObject().put("id", "q$n").put("header", "h".repeat(16)).put("text", "t".repeat(600))
+                .put("type", "choice").put("multiple", true).put("min", 1).put("max", 8)
+            val options = JSONArray()
+            for (i in 0 until 8) {
+                options.put(JSONObject().put("id", "o$i").put("label", "L".repeat(48)).put("description", "D".repeat(160)))
+            }
+            big.put(q.put("options", options))
+        }
+        assertEquals(4, question.length())
+        json.getJSONObject("input").put("questions", big)
+        json.put("explanation", "e".repeat(MAX_EXPLANATION_CHARS)).put("explanation_format", "markdown")
+        json.put("command", JSONObject().put("text", "c".repeat(MAX_COMMAND_BYTES)).put("language", "sql"))
+        val bytes = StrictJson.compact(json).toByteArray()
+        assertTrue("${bytes.size} bytes", bytes.size <= MAX_PLAINTEXT)
+        ServerFrames.decode(bytes)
+    }
 }

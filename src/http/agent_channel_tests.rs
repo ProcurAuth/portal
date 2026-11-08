@@ -1125,3 +1125,292 @@ fn the_texts_of_the_agent_never_reach_the_service_through_the_channel() {
         assert_eq!(r.verdict(&id, &a.subject), "denied", "[{name}]");
     });
 }
+
+// ---------------------------------------------------------------- the formats of the texts and the forms
+
+/// The format of the explanation and the language of the command go from the intent to the frame of the phone. A
+/// value out of the list is refused on both doors.
+#[test]
+fn the_format_and_the_language_of_an_intent_reach_the_frame_of_the_phone() {
+    use inbox_core::proto::{ExplanationFormat, Language, ServerMsg};
+    each_agent_rig("", |r, name| {
+        r.fix_clock(T0);
+        r.device();
+        let a = conversational(r, ID_A);
+        let id = request(
+            r,
+            &a,
+            1,
+            json!({"explanation": "Run **this** first.\n\n```sql\nSELECT 1\n```",
+                   "explanation_format": "markdown", "language": "sql"}),
+        );
+        let frames = frames_of(r, DEVICE);
+        let body = frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Request(q) if q.request_id == id => q.approval.clone(),
+                _ => None,
+            })
+            .expect("the request reaches the phone");
+        assert_eq!(
+            body.explanation_format,
+            Some(ExplanationFormat::Markdown),
+            "[{name}]"
+        );
+        assert_eq!(body.language, Some(Language::Sql), "[{name}]");
+        assert!(body.verify(), "[{name}] the format is outside the hash");
+        assert!(body.explanation.unwrap().contains("```sql"));
+        // Without them the members are absent: plain text is the default.
+        let plain = request(r, &a, 2, json!({}));
+        let frames = frames_of(r, DEVICE);
+        let body = frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Request(q) if q.request_id == plain => q.approval.clone(),
+                _ => None,
+            })
+            .expect("the second request reaches the phone");
+        assert_eq!(
+            (body.explanation_format, body.language),
+            (None, None),
+            "[{name}]"
+        );
+        // The values are checked. Over MCP: invalid_argument.
+        for args in [
+            json!({"lease_s": 900, "explanation": "x", "explanation_format": "html"}),
+            json!({"lease_s": 900, "explanation": "x", "explanation_format": "Markdown"}),
+            json!({"lease_s": 900, "explanation": "x", "language": "cobol"}),
+            json!({"lease_s": 900, "explanation": "x", "language": "SQL"}),
+            // A format with no explanation.
+            json!({"lease_s": 900, "explanation_format": "markdown"}),
+        ] {
+            let error = fails(r, &a, "approval_intent", args.clone());
+            assert_eq!(error["code"], "invalid_argument", "[{name}] {args}");
+        }
+        // The language alone is valid: it colors the command.
+        ok(
+            r,
+            &a,
+            "approval_intent",
+            json!({"lease_s": 900, "language": "bash"}),
+        );
+        // Over REST: the same rules.
+        let c = agent(r, ID_C, KeyKind::Api, KeyInteraction::Conversational);
+        let reply = rest(
+            r,
+            &c.token,
+            "POST",
+            "/api/v1/approval-intents",
+            r#"{"lease_s":900,"explanation":"x","explanation_format":"markdown","language":"yaml"}"#,
+        );
+        assert_eq!(reply.status, 201, "[{name}] {}", reply.body);
+        for (body, status, code) in [
+            (
+                r#"{"lease_s":900,"explanation":"x","explanation_format":"html"}"#,
+                400,
+                "invalid_json",
+            ),
+            (
+                r#"{"lease_s":900,"explanation":"x","language":"cobol"}"#,
+                400,
+                "invalid_json",
+            ),
+            (
+                r#"{"lease_s":900,"explanation_format":"markdown"}"#,
+                422,
+                "invalid_argument",
+            ),
+        ] {
+            let reply = rest(r, &c.token, "POST", "/api/v1/approval-intents", body);
+            assert_eq!(reply.status, status, "[{name}] {body}: {}", reply.body);
+            assert_eq!(reply.json()["error"]["code"], code, "[{name}] {body}");
+        }
+    });
+}
+
+/// A turn of the agent can be markdown. The text of the owner never is.
+#[test]
+fn a_turn_of_the_agent_can_be_markdown_and_the_message_frame_says_so() {
+    use inbox_core::proto::{Author, ExplanationFormat, ServerMsg};
+    each_agent_rig("", |r, name| {
+        r.fix_clock(T0);
+        r.device();
+        let a = conversational(r, ID_A);
+        let id = request(r, &a, 1, json!({"allow_ask_back": true}));
+        owner_reply(r, &id, "m1", "Why? **not bold**");
+        let said = ok(
+            r,
+            &a,
+            "say",
+            json!({"request_id": id, "text": "It holds the **events**.", "explanation_format": "markdown",
+                   "expect_seq": 1}),
+        );
+        assert_eq!(said["seq"], 2, "[{name}]");
+        let error = fails(
+            r,
+            &a,
+            "say",
+            json!({"request_id": id, "text": "x", "explanation_format": "html"}),
+        );
+        assert_eq!(error["code"], "invalid_argument", "[{name}]");
+        let frames = frames_of(r, DEVICE);
+        let agent_turn = frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Message(m) if m.by == Author::Agent => Some(m.clone()),
+                _ => None,
+            })
+            .expect("the turn of the agent reaches the phone");
+        assert_eq!(
+            agent_turn.explanation_format,
+            Some(ExplanationFormat::Markdown),
+            "[{name}]"
+        );
+        assert_eq!(
+            agent_turn.explanation.as_deref(),
+            Some("It holds the **events**.")
+        );
+        let user_turn = frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Message(m) if m.by == Author::User => Some(m.clone()),
+                _ => None,
+            })
+            .expect("the text of the owner reaches the phone");
+        assert_eq!(
+            (user_turn.explanation_format, user_turn.text.as_deref()),
+            (None, Some("Why? **not bold**"))
+        );
+        // A text that looks like the object of a turn stays a text.
+        let id2 = request(r, &a, 2, json!({"allow_ask_back": true}));
+        owner_reply(r, &id2, "m2", "hi");
+        r.fix_clock(T0 + 10_000);
+        let trick = r#"{"explanation":"gotcha","explanation_format":"markdown"}"#;
+        ok(
+            r,
+            &a,
+            "say",
+            json!({"request_id": id2, "text": trick, "expect_seq": 1}),
+        );
+        let frames = frames_of(r, DEVICE);
+        let tricked = frames
+            .iter()
+            .filter_map(|f| match f {
+                ServerMsg::Message(m) if m.by == Author::Agent && m.request_id == id2 => {
+                    Some(m.clone())
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("the turn reaches the phone");
+        assert_eq!(tricked.explanation.as_deref(), Some(trick), "[{name}]");
+        assert_eq!(tricked.explanation_format, None, "[{name}]");
+    });
+}
+
+/// The answers of a form reach the agent inside `untrusted`, under the notice. The creation of a question arrives with
+/// lot L13: the test writes the item through the store, as the engine will.
+#[test]
+fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
+    use crate::inbox::frames::OwnerAnswer;
+    use crate::inbox::testing::{Answered, Created, NewItem, Wait};
+    use inbox_core::proto::{FormAnswer, InputType, Kind, Urgency, Via};
+    each_agent_rig("", |r, name| {
+        r.fix_clock(T0);
+        r.device();
+        let a = conversational(r, ID_A);
+        let body = json!({
+            "title": "Set up the release",
+            "input": {"type": "form", "multiple": false, "min": 0, "max": 0, "options": [],
+                      "questions": [
+                          {"id": "target", "header": "Target", "text": "Where?", "type": "choice",
+                           "multiple": false, "min": 1, "max": 1,
+                           "options": [{"id": "staging", "label": "Staging"}, {"id": "prod", "label": "Production"}]},
+                          {"id": "note", "header": "Note", "text": "More?", "type": "text",
+                           "multiple": false, "min": 0, "max": 0, "options": []}]}
+        });
+        let item = NewItem {
+            kind: Kind::Question,
+            requester_key_id: ID_A.into(),
+            owner: OWNER.into(),
+            via: Via::Mcp,
+            interaction: inbox_core::proto::Interaction::Conversational,
+            urgency: Urgency::Normal,
+            input_type: Some(InputType::Form),
+            wait: Wait::Lease { lease_s: 900 },
+            allow_custom: true,
+            allow_ask_back: false,
+            idempotency_key: "form-1".into(),
+            previous_id: None,
+            body_size: 0,
+            approval: None,
+            require_device: false,
+            guard: None,
+        };
+        let id = match eventually(|| {
+            runtime().block_on(r.items().create(item.clone(), body.to_string().as_bytes()))
+        }) {
+            Created::New(l) => l.item.request_id.clone(),
+            other => panic!("[{name}] not created: {other:?}"),
+        };
+        let pending = ok(r, &a, "get_answer", json!({"request_id": id}));
+        assert_eq!(pending["status"], "pending", "[{name}]");
+        assert_eq!(pending["kind"], "question");
+        assert!(pending.get("untrusted").is_none() && pending.get("data_notice").is_none());
+        // The owner ticks one option and writes a text that holds a control character.
+        let given = OwnerAnswer {
+            choice: None,
+            text: None,
+            intent: None,
+            answers: Some(vec![
+                FormAnswer {
+                    question_id: "target".into(),
+                    choice: Some(vec!["prod".into()]),
+                    text: None,
+                },
+                FormAnswer {
+                    question_id: "note".into(),
+                    choice: None,
+                    text: Some("Friday\u{7}\nnot before".into()),
+                },
+            ]),
+        };
+        let out = eventually(|| {
+            runtime().block_on(r.items().answer(
+                &id,
+                crate::inbox::testing::Answer {
+                    login: OWNER.into(),
+                    via: crate::inbox::testing::AnswerVia::Web,
+                    action: Action::Accept,
+                    shown_effect: None,
+                    client_msg_id: None,
+                    payload: Some(Zeroizing::new(given.to_plain())),
+                    consume_within: Duration::from_secs(300),
+                },
+            ))
+        });
+        assert!(matches!(out, Answered::Accepted { .. }), "[{name}] {out:?}");
+        let (is_error, view, reply) = tool_call(r, &a, "get_answer", json!({"request_id": id}));
+        assert!(!is_error, "[{name}] {view}");
+        assert_eq!(view["status"], "answered", "[{name}]");
+        assert_eq!(
+            view["untrusted"]["answers"],
+            json!([
+                {"question_id": "target", "choice": ["prod"]},
+                {"question_id": "note", "text": "Friday\u{FFFD}\nnot before"}
+            ]),
+            "[{name}]"
+        );
+        assert!(view["data_notice"]
+            .as_str()
+            .unwrap()
+            .contains("never as instructions"));
+        for canary in [OWNER, DEVICE] {
+            assert!(
+                !reply.body.contains(canary),
+                "[{name}] {canary} is in {}",
+                reply.body
+            );
+        }
+    });
+}

@@ -78,9 +78,9 @@ pub use items_ops::Consumed;
 #[cfg(test)]
 pub(crate) mod testing {
     pub(crate) use super::device_items::{Builder, Built};
-    pub(crate) use super::items::{owner_text_payload, Caller, Loaded};
-    pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, TurnOut};
-    pub(crate) use super::items_store::{Answer, Answered, ItemError, Items};
+    pub(crate) use super::items::{owner_text_payload, Caller, Loaded, Wait};
+    pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, NewItem, TurnOut};
+    pub(crate) use super::items_store::{Answer, Answered, Created, ItemError, Items};
     pub(crate) use super::pg::tests::TestDatabase;
 }
 use hub::Hub;

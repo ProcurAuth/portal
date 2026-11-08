@@ -252,7 +252,12 @@ fn max_question() -> RequestMsg {
         previous_id: Some("d".repeat(32)),
         title: Some("t".repeat(MAX_TITLE_CHARS)),
         explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
-        command: Some(Command { text: "c".repeat(MAX_COMMAND_BYTES), label: Some("l".repeat(32)) }),
+        explanation_format: Some(ExplanationFormat::Markdown),
+        command: Some(Command {
+            text: "c".repeat(MAX_COMMAND_BYTES),
+            label: Some("l".repeat(32)),
+            language: Some(Language::Typescript),
+        }),
         input: Some(Input {
             kind: InputType::Choice,
             multiple: true,
@@ -266,6 +271,7 @@ fn max_question() -> RequestMsg {
                 })
                 .collect(),
             placeholder: None,
+            questions: None,
         }),
         hint: Some(Hint {
             suggested: "s".repeat(32),
@@ -282,6 +288,7 @@ fn max_approval() -> RequestMsg {
     r.kind = Kind::Approval;
     r.title = None;
     r.explanation = None;
+    r.explanation_format = None;
     r.command = None;
     r.input = None;
     r.hint = None;
@@ -307,6 +314,8 @@ fn max_approval() -> RequestMsg {
         op: effect::Op::from_value(op).unwrap(),
         view,
         explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
+        explanation_format: Some(ExplanationFormat::Markdown),
+        language: Some(Language::Sql),
         hint: Some(Hint { suggested: "s".repeat(32), confidence: None, source: "x".repeat(32) }),
         previous: Some(Previous { approved_at_ms: i64::MAX, consumed: true }),
         follows: Some(Follows { code: "ABCDEFGH".into(), intent: Intent::ChangeRequest }),
@@ -334,9 +343,11 @@ fn request_fits_one_noise_message_at_max_sizes() {
             by: Author::Agent,
             created_at_ms: i64::MAX,
             explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
+            explanation_format: Some(ExplanationFormat::Markdown),
             command: Some(Command {
                 text: "c".repeat(MAX_COMMAND_BYTES),
                 label: Some("l".repeat(32)),
+                language: Some(Language::Bash),
             }),
             text: None,
         }),
@@ -370,6 +381,7 @@ fn request_fits_one_noise_message_at_max_sizes() {
         choice: None,
         text: Some("é".repeat(MAX_USER_TEXT_CHARS)),
         intent: Some(Intent::Comment),
+        answers: None,
     });
     assert!(answer.encode().unwrap().len() <= MAX_PLAINTEXT);
     // One more entry, one more character: refused.
@@ -383,7 +395,8 @@ fn encode_refuses_a_frame_above_one_noise_message() {
     // The limits are in characters and bytes of text. The JSON escaping can make a frame larger:
     // each control character of an explanation or a command costs 6 bytes. The sender checks.
     let mut r = max_question();
-    r.command = Some(Command { text: "\u{1}".repeat(MAX_COMMAND_BYTES), label: None });
+    r.command =
+        Some(Command { text: "\u{1}".repeat(MAX_COMMAND_BYTES), label: None, language: None });
     r.explanation = Some("\u{1}".repeat(MAX_EXPLANATION_CHARS));
     let frame = ServerMsg::Request(Box::new(r));
     assert!(frame.validate().is_ok(), "the rules of text allow it");
@@ -449,3 +462,261 @@ fn old_hello_and_old_ack_do_not_parse() {
 }
 
 const PROTOCOL_VERSION_IS_5: u32 = inbox_core::PROTOCOL_VERSION;
+
+#[test]
+fn new_invalid_frames_fail_for_the_named_reason() {
+    // (folder, file, the rule that the error names)
+    let table: &[(&str, &str, &str)] = &[
+        ("server", "form-zero-questions", "input.questions"),
+        ("server", "form-five-questions", "input.questions"),
+        ("server", "form-duplicate-ids", "form.questions.id"),
+        ("server", "form-one-option", "form.questions.options"),
+        ("server", "form-nine-options", "form.questions.options"),
+        ("server", "form-min-above-max", "form.questions.options"),
+        ("server", "form-single-with-max-two", "form.questions.options"),
+        ("server", "form-text-with-options", "form.questions.options"),
+        ("server", "form-header-17-chars", "form.questions.header"),
+        ("server", "form-header-newline", "form.questions.header"),
+        ("server", "form-text-601-chars", "form.questions.text"),
+        ("server", "form-question-id-uppercase", "form.questions.id"),
+        ("server", "form-unknown-question-type", "frame"),
+        ("server", "form-with-top-level-options", "input.options"),
+        ("server", "form-without-questions", "input.questions"),
+        ("server", "questions-on-a-choice-input", "input.questions"),
+        ("server", "form-on-one-shot-key", "request.form"),
+        ("server", "form-allow-custom-with-text-only", "request.allow_custom"),
+        ("server", "explanation-format-html", "frame"),
+        ("server", "explanation-format-uppercase", "frame"),
+        ("server", "explanation-format-without-explanation", "request.explanation_format"),
+        ("server", "command-language-unknown", "frame"),
+        ("server", "command-language-uppercase", "frame"),
+        (
+            "server",
+            "approval-explanation-format-without-explanation",
+            "approval.explanation_format",
+        ),
+        ("server", "approval-language-unknown", "frame"),
+        ("server", "approval-with-top-level-explanation-format", "request.approval"),
+        ("server", "message-explanation-format-without-explanation", "message.explanation_format"),
+        ("server", "message-user-with-explanation-format", "message.explanation"),
+        ("client", "answer-form-with-choice", "answer.answers"),
+        ("client", "answer-form-with-text", "answer.answers"),
+        ("client", "answer-form-with-decline", "answer.answers"),
+        ("client", "answer-form-with-intent", "answer.intent"),
+        ("client", "answer-form-empty-list", "answer.answers"),
+        ("client", "answer-form-five-entries", "answer.answers"),
+        ("client", "answer-form-duplicate-question-id", "answer.answers.question_id"),
+        ("client", "answer-form-entry-with-both", "answer.answers"),
+        ("client", "answer-form-entry-with-neither", "answer.answers"),
+        ("client", "answer-form-entry-empty-choice", "answer.answers.choice"),
+        ("client", "answer-form-entry-nine-choices", "answer.answers.choice"),
+        ("client", "answer-form-entry-repeated-choice", "answer.answers.choice"),
+        ("client", "answer-form-entry-text-8001-chars", "answer.answers.text"),
+        ("client", "answer-form-entry-bad-question-id", "answer.answers.question_id"),
+        ("client", "answer-form-entry-unknown-member", "frame"),
+    ];
+    for (side, name, rule) in table {
+        let path = dir(&format!("invalid/{side}/{name}.json"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let err = if *side == "server" {
+            ServerMsg::decode(&bytes).err()
+        } else {
+            ClientMsg::decode(&bytes).err()
+        }
+        .unwrap_or_else(|| panic!("{name} was accepted"))
+        .to_string();
+        assert!(err.contains(rule), "{name}: the error is '{err}', expected '{rule}'");
+    }
+}
+
+#[test]
+fn markdown_and_language_members_are_kept_and_plain_is_a_valid_spelling() {
+    // Every language of the closed list is a valid hint, in a command and in an approval.
+    let q =
+        files("server").into_iter().find(|f| f.0 == "request-question-markdown.json").unwrap().2;
+    let a =
+        files("server").into_iter().find(|f| f.0 == "request-approval-markdown.json").unwrap().2;
+    for l in inbox_core::render::highlight::Language::ALL {
+        let mut v = q.clone();
+        v["command"]["language"] = json!(l.as_str());
+        assert!(ServerMsg::decode(&serde_json::to_vec(&v).unwrap()).is_ok(), "{l:?}");
+        let mut v = a.clone();
+        v["approval"]["language"] = json!(l.as_str());
+        assert!(ServerMsg::decode(&serde_json::to_vec(&v).unwrap()).is_ok(), "{l:?}");
+    }
+    // `plain` is the default and a valid value. A frame that holds it comes back as it came.
+    let mut v = q.clone();
+    v["explanation_format"] = json!("plain");
+    let msg = ServerMsg::decode(&serde_json::to_vec(&v).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&msg).unwrap(), v);
+    let ServerMsg::Request(r) = msg else { panic!() };
+    assert_eq!(r.explanation_format, Some(ExplanationFormat::Plain));
+    // The markdown fixture holds a markdown member in each place.
+    let ServerMsg::Request(r) = ServerMsg::decode(&serde_json::to_vec(&q).unwrap()).unwrap() else {
+        panic!()
+    };
+    assert_eq!(r.explanation_format, Some(ExplanationFormat::Markdown));
+    assert_eq!(r.command.unwrap().language, Some(inbox_core::render::highlight::Language::Sql));
+}
+
+fn form_question(id: &str, kind: FormQuestionType) -> FormQuestion {
+    let choice = kind == FormQuestionType::Choice;
+    FormQuestion {
+        id: id.repeat(32).chars().take(32).collect(),
+        header: "h".repeat(MAX_FORM_HEADER_CHARS),
+        text: "q".repeat(MAX_FORM_TEXT_CHARS),
+        kind,
+        multiple: choice,
+        min: u8::from(choice),
+        max: if choice { 8 } else { 0 },
+        options: if choice {
+            (0..MAX_OPTIONS)
+                .map(|i| InputOption {
+                    id: format!("{i}").repeat(32).chars().take(32).collect(),
+                    label: "L".repeat(MAX_OPTION_LABEL_CHARS),
+                    description: Some("D".repeat(MAX_OPTION_DESCRIPTION_CHARS)),
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        placeholder: (!choice).then(|| "p".repeat(MAX_PLACEHOLDER_CHARS)),
+    }
+}
+
+fn max_form() -> RequestMsg {
+    let mut r = max_question();
+    r.command = Some(Command {
+        text: "c".repeat(MAX_COMMAND_BYTES),
+        label: Some("l".repeat(32)),
+        language: Some(Language::Sql),
+    });
+    r.input = Some(Input {
+        kind: InputType::Form,
+        multiple: false,
+        min: 0,
+        max: 0,
+        options: vec![],
+        placeholder: None,
+        questions: Some(vec![
+            form_question("a", FormQuestionType::Choice),
+            form_question("b", FormQuestionType::Choice),
+            form_question("c", FormQuestionType::Choice),
+            form_question("d", FormQuestionType::Choice),
+        ]),
+    });
+    r
+}
+
+#[test]
+fn the_largest_form_fits_one_noise_message() {
+    // 4 questions, each with 8 options at the maximum length, next to the largest explanation and the largest
+    // command. The form is the part that grows: report its own size too.
+    let frame = ServerMsg::Request(Box::new(max_form()));
+    let bytes = frame.encode().unwrap_or_else(|e| panic!("{e}"));
+    assert!(bytes.len() <= MAX_PLAINTEXT, "{} bytes", bytes.len());
+    let form_only = {
+        let mut r = max_form();
+        r.command = None;
+        r.explanation = None;
+        r.explanation_format = None;
+        serde_json::to_vec(&r).unwrap().len()
+    };
+    assert!(form_only < 16 * 1024, "the form alone is {form_only} bytes");
+    // A real Noise session carries it.
+    let device = noise::generate_keypair().unwrap();
+    let server = noise::generate_keypair().unwrap();
+    let (init, m1) = Initiator::start(&device.private, &server.public, b"{}").unwrap();
+    let (resp, _, _) = Responder::start(&server.private, &m1).unwrap();
+    let (mut srv, m2) = resp.finish(b"{}").unwrap();
+    let (mut phone, _) = init.finish(&m2).unwrap();
+    let sealed = srv.encrypt(&bytes).unwrap();
+    assert!(sealed.len() <= noise::MAX_MESSAGE);
+    assert_eq!(ServerMsg::decode(&phone.decrypt(&sealed).unwrap()).unwrap(), frame);
+    // The answer to the largest form: four answers with the longest text.
+    let answer = ClientMsg::Answer(AnswerMsg {
+        request_id: "a".repeat(32),
+        client_msg_id: "m".repeat(64),
+        action: Action::Accept,
+        shown_effect: None,
+        choice: None,
+        text: None,
+        intent: None,
+        answers: Some(
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|id| FormAnswer {
+                    question_id: id.repeat(32).chars().take(32).collect(),
+                    choice: None,
+                    text: Some("é".repeat(MAX_USER_TEXT_CHARS)),
+                })
+                .collect(),
+        ),
+    });
+    // Four texts of 8000 characters of two bytes each fit: 64000 bytes and the frame around them.
+    assert!(answer.encode().unwrap().len() <= MAX_PLAINTEXT);
+    // Four texts of 8000 characters of three bytes each do not: the sender refuses the frame. A phone limits the
+    // total of what the user types, as for a `reply`.
+    let ClientMsg::Answer(mut a) = answer else { unreachable!() };
+    for e in a.answers.as_mut().unwrap() {
+        e.text = Some("\u{20ac}".repeat(MAX_USER_TEXT_CHARS));
+    }
+    assert!(ClientMsg::Answer(a.clone()).validate().is_ok(), "the rules of the text allow it");
+    assert!(ClientMsg::Answer(a).encode().is_err(), "but it does not fit in one Noise message");
+}
+
+#[test]
+fn the_protocol_document_names_what_the_code_names() {
+    use inbox_core::render::highlight::{Class, Language};
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/inbox/protocol.md"),
+    )
+    .expect("protocol.md");
+    // The list of the languages, in the order of the code.
+    let list = Language::ALL.iter().map(|l| format!("`{}`", l.as_str())).collect::<Vec<_>>();
+    let line =
+        doc.lines().find(|l| l.contains("The value is one of")).expect("the list of the languages");
+    for name in &list {
+        assert!(line.contains(name.as_str()), "{name} is not in: {line}");
+    }
+    assert_eq!(
+        line.matches('`').count(),
+        list.len() * 2,
+        "the list of the document has another name: {line}"
+    );
+    // The classes of a token.
+    for class in [
+        Class::Keyword,
+        Class::String,
+        Class::Number,
+        Class::Comment,
+        Class::Function,
+        Class::Type,
+        Class::Operator,
+        Class::Punctuation,
+        Class::Plain,
+        Class::Add,
+        Class::Del,
+        Class::Hunk,
+        Class::Meta,
+    ] {
+        assert!(doc.contains(&format!("`{}`", class.as_str())), "{class:?}");
+    }
+    // The limits of a form.
+    for (text, n) in [
+        ("1 to 4 items", MAX_FORM_QUESTIONS),
+        ("line of 1 to 16 characters", MAX_FORM_HEADER_CHARS),
+        ("1 to 600 characters", MAX_FORM_TEXT_CHARS),
+    ] {
+        assert!(doc.contains(text), "{text}");
+        assert!(text.contains(&n.to_string()), "{text} against {n}");
+    }
+    assert!(
+        doc.contains("input of 8000 characters") || doc.contains("an input of 8000 characters")
+    );
+    assert_eq!(inbox_core::render::markdown::MAX_INPUT_CHARS, MAX_EXPLANATION_CHARS);
+    assert!(doc.contains("2000 nodes") && doc.contains("depth of 4"));
+    assert_eq!(inbox_core::render::markdown::MAX_NODES, 2000);
+    assert_eq!(inbox_core::render::markdown::MAX_DEPTH, 4);
+    assert_eq!(inbox_core::render::markdown::MAX_LIST_DEPTH, 3);
+}

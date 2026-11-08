@@ -470,6 +470,8 @@ fn descriptor(name: &str) -> Value {
                 "lease_s": {"type": "integer", "description": "The seconds between two renewals. The lease lasts three times this value. Give this or until."},
                 "until": {"type": "string", "format": "date-time", "description": "The time at which the request ends. Give this or lease_s."},
                 "explanation": {"type": "string", "description": "Why you ask. The owner reads it as text of the agent that is not verified."},
+                "explanation_format": {"type": "string", "enum": ["plain", "markdown"], "description": "How the owner reads explanation: plain (the default) or a safe subset of Markdown. A link is never active. Raw HTML and images stay text."},
+                "language": {"type": "string", "enum": ["plain", "sql", "json", "yaml", "toml", "bash", "python", "rust", "javascript", "typescript", "diff"], "description": "The language of the command of the service, to color it. It never changes the text."},
                 "allow_custom": {"type": "boolean", "description": "Let the owner join a comment or a change request to a refusal. A conversational key only."},
                 "allow_ask_back": {"type": "boolean", "description": "Let the owner ask you a question. A conversational key only."},
                 "hint": {"type": "object", "description": "A suggestion for the owner: suggested, source and optionally confidence.", "properties": {
@@ -500,7 +502,8 @@ fn descriptor(name: &str) -> Value {
             "Send a message to the owner in the thread of an item. The item must allow it (allow_ask_back). The key must be conversational.",
             json!({"type": "object", "additionalProperties": false, "required": ["request_id", "text"], "properties": {
                 "request_id": id_property(),
-                "text": {"type": "string", "description": "The message, as plain text."},
+                "text": {"type": "string", "description": "The message. Plain text unless explanation_format is markdown."},
+                "explanation_format": {"type": "string", "enum": ["plain", "markdown"], "description": "How the owner reads text: plain (the default) or a safe subset of Markdown."},
                 "expect_seq": {"type": "integer", "minimum": 0, "description": "The last_seq that you read. A newer turn gives stale_thread."}}}),
             false,
             true,
@@ -557,6 +560,8 @@ struct SayArgs {
     request_id: String,
     text: String,
     #[serde(default)]
+    explanation_format: Option<inbox_core::proto::ExplanationFormat>,
+    #[serde(default)]
     expect_seq: Option<u64>,
 }
 
@@ -594,7 +599,15 @@ async fn call_tool(
         "keepalive" => tools::keepalive(app, who, &arguments::<IdArgs>(args)?.request_id).await,
         "say" => {
             let a: SayArgs = arguments(args)?;
-            tools::say(app, who, &a.request_id, &a.text, a.expect_seq).await
+            tools::say(
+                app,
+                who,
+                &a.request_id,
+                &a.text,
+                a.explanation_format,
+                a.expect_seq,
+            )
+            .await
         }
         "supersede" => tools::supersede(app, who, &arguments::<IdArgs>(args)?.request_id).await,
         "cancel" => tools::cancel(app, who, &arguments::<IdArgs>(args)?.request_id).await,

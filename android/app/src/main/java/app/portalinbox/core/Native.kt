@@ -60,5 +60,20 @@ object Native {
      */
     @JvmStatic external fun viewResolve(opJson: String, viewJson: String): String
 
+    /**
+     * The tree of a Markdown text (the safe subset of `inbox_core::render::markdown`), as JSON text. It never
+     * fails. Blocks: `paragraph`, `heading` (`level`), `code` (`lang`, `text`), `quote`, `list` (`ordered`,
+     * `start`, `items`), `text`. Inline nodes: `text`, `code`, `em`, `strong`, `link` (`host`), `br`, `soft`.
+     * Over a limit the tree has one `text` block and `"fallback": true`.
+     */
+    @JvmStatic external fun markdownParse(text: String): String
+
+    /**
+     * The color of a code text: a JSON array `[[start, end, "class"], ...]`. The offsets are UTF-16 units, as
+     * Kotlin indexes a string. The tokens cover the whole text. A language that is not in the closed list gives
+     * one `plain` token.
+     */
+    @JvmStatic external fun highlightTokens(language: String, text: String): String
+
     @JvmStatic external fun protocolVersion(): Int
 }

@@ -21,7 +21,22 @@ enum class Via(override val wire: String) : Wire { MCP("mcp"), API("api") }
 enum class Interaction(override val wire: String) : Wire { CONVERSATIONAL("conversational"), ONE_SHOT("one_shot") }
 
 enum class InputType(override val wire: String) : Wire {
-    CHOICE("choice"), CONFIRM("confirm"), TEXT("text"), NONE("none")
+    CHOICE("choice"), CONFIRM("confirm"), TEXT("text"), NONE("none"), FORM("form")
+}
+
+/** The type of a question of a form. */
+enum class FormQuestionType(override val wire: String) : Wire { CHOICE("choice"), TEXT("text") }
+
+/**
+ * How a screen reads the `explanation` of an agent. A missing member means `PLAIN`. It applies to the
+ * explanation only: a command, an answer and a reply stay plain text.
+ */
+enum class ExplanationFormat(override val wire: String) : Wire { PLAIN("plain"), MARKDOWN("markdown") }
+
+/** The closed list of the languages of the color (`inbox_core::render::highlight::Language`). */
+enum class Language(override val wire: String) : Wire {
+    PLAIN("plain"), SQL("sql"), JSON("json"), YAML("yaml"), TOML("toml"), BASH("bash"), PYTHON("python"),
+    RUST("rust"), JAVASCRIPT("javascript"), TYPESCRIPT("typescript"), DIFF("diff");
 }
 
 enum class Intent(override val wire: String) : Wire { COMMENT("comment"), CHANGE_REQUEST("change_request") }
@@ -77,17 +92,21 @@ data class Sender(val label: String, val keyName: String, val owner: String, val
     }
 }
 
-/** The exact text to run or to confirm. Plain text, shown in a fixed font. */
-data class Command(val text: String, val label: String?) {
-    fun toJson(): JSONObject = JSONObject().put("text", text).putOpt("label", label)
+/**
+ * The exact text to run or to confirm. Plain text, shown in a fixed font. [language] is a hint for the
+ * color: it never changes the text.
+ */
+data class Command(val text: String, val label: String?, val language: Language? = null) {
+    fun toJson(): JSONObject = JSONObject().put("text", text).putOpt("label", label).putOpt("language", language?.wire)
 
     companion object {
         internal fun read(o: Obj): Command {
             val text = o.str("text")
             if (text.isEmpty() || Check.utf8Size(text) > MAX_COMMAND_BYTES) Check.bad("command.text")
             val label = o.optStr("label")?.let { Check.line(it, MAX_COMMAND_LABEL_CHARS, "command.label") }
+            val language = o.optEnum("language", Language.entries.toTypedArray())
             o.done()
-            return Command(text, label)
+            return Command(text, label, language)
         }
     }
 }
@@ -96,12 +115,76 @@ data class InputOption(val id: String, val label: String, val description: Strin
     fun toJson(): JSONObject = JSONObject().put("id", id).put("label", label).putOpt("description", description)
 }
 
+/** One question of a form. The rules of the options are those of a `choice` input. */
+data class FormQuestion(
+    val id: String,
+    val header: String,
+    val text: String,
+    val type: FormQuestionType,
+    val multiple: Boolean,
+    val min: Int,
+    val max: Int,
+    val options: List<InputOption>,
+    val placeholder: String?,
+) {
+    fun toJson(): JSONObject = JSONObject().put("id", id).put("header", header).put("text", text).put("type", type.wire)
+        .put("multiple", multiple).put("min", min).put("max", max)
+        .put("options", JSONArray(options.map { it.toJson() })).putOpt("placeholder", placeholder)
+
+    companion object {
+        internal fun read(o: Obj): FormQuestion {
+            val id = o.str("id")
+            val header = o.str("header")
+            val text = o.str("text")
+            val type = o.enum("type", FormQuestionType.entries.toTypedArray())
+            val multiple = o.bool("multiple")
+            val min = o.long("min")
+            val max = o.long("max")
+            if (min !in 0..255 || max !in 0..255) Check.bad("form.questions.options")
+            val options = readOptions(o.arr("options"), "form.questions.options")
+            val placeholder = o.optStr("placeholder")
+            o.done()
+            val q = FormQuestion(id, header, text, type, multiple, min.toInt(), max.toInt(), options, placeholder)
+            q.validate()
+            return q
+        }
+    }
+
+    internal fun validate() {
+        if (!Check.optionId(id)) Check.bad("form.questions.id")
+        Check.line(header, MAX_FORM_HEADER_CHARS, "form.questions.header")
+        Check.text(text, MAX_FORM_TEXT_CHARS, "form.questions.text")
+        when (type) {
+            FormQuestionType.CHOICE -> {
+                Check.choice(multiple, min, max, options, "form.questions.options")
+                if (placeholder != null) Check.bad("form.questions.placeholder")
+            }
+            FormQuestionType.TEXT -> {
+                if (options.isNotEmpty() || multiple || min != 0 || max != 0) Check.bad("form.questions.options")
+                placeholder?.let { Check.line(it, MAX_PLACEHOLDER_CHARS, "form.questions.placeholder") }
+            }
+        }
+    }
+}
+
+internal fun readOptions(array: JSONArray, where: String): List<InputOption> =
+    array.objects(where).map { json ->
+        val p = Obj(json, where)
+        InputOption(p.str("id"), p.str("label"), p.optStr("description")).also { p.done() }
+    }
+
+/**
+ * The input of a question. For a `form`, [questions] holds 1 to 4 questions and every other member is
+ * empty. Only a `form` has [questions].
+ */
 data class Input(
     val type: InputType, val multiple: Boolean, val min: Int, val max: Int,
     val options: List<InputOption>, val placeholder: String?,
+    val questions: List<FormQuestion>? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().put("type", type.wire).put("multiple", multiple).put("min", min).put("max", max)
         .put("options", JSONArray(options.map { it.toJson() })).putOpt("placeholder", placeholder)
+        .also { o -> questions?.let { o.put("questions", JSONArray(it.map { q -> q.toJson() })) } }
 
     companion object {
         internal fun read(o: Obj): Input {
@@ -110,35 +193,21 @@ data class Input(
             val min = o.long("min")
             val max = o.long("max")
             if (min !in 0..255 || max !in 0..255) Check.bad("input.min")
-            val options = o.arr("options").objects("input.options").map { json ->
-                val p = Obj(json, "input.options")
-                val opt = InputOption(
-                    p.str("id"), p.str("label"), p.optStr("description"),
-                )
-                p.done()
-                opt
-            }
+            val options = readOptions(o.arr("options"), "input.options")
             val placeholder = o.optStr("placeholder")
+            val questions = o.optArr("questions")?.objects("input.questions")?.map { FormQuestion.read(Obj(it, "form.questions")) }
             o.done()
-            val input = Input(type, multiple, min.toInt(), max.toInt(), options, placeholder)
+            val input = Input(type, multiple, min.toInt(), max.toInt(), options, placeholder, questions)
             input.validate()
             return input
         }
     }
 
     private fun validate() {
+        if (type != InputType.FORM && questions != null) Check.bad("input.questions")
         when (type) {
             InputType.CHOICE -> {
-                val n = options.size
-                if (n !in MIN_OPTIONS..MAX_OPTIONS) Check.bad("input.options")
-                if (min < 1 || min > max || max > n) Check.bad("input.min")
-                if (!multiple && (min != 1 || max != 1)) Check.bad("input.min")
-                val seen = HashSet<String>()
-                for (o in options) {
-                    if (!Check.optionId(o.id) || !seen.add(o.id)) Check.bad("input.options.id")
-                    Check.line(o.label, MAX_OPTION_LABEL_CHARS, "input.options.label")
-                    o.description?.let { Check.line(it, MAX_OPTION_DESCRIPTION_CHARS, "input.options.description") }
-                }
+                Check.choice(multiple, min, max, options, "input.options")
                 if (placeholder != null) Check.bad("input.placeholder")
             }
             InputType.CONFIRM, InputType.TEXT, InputType.NONE -> {
@@ -147,6 +216,13 @@ data class Input(
                     if (type != InputType.TEXT) Check.bad("input.placeholder")
                     Check.line(placeholder, MAX_PLACEHOLDER_CHARS, "input.placeholder")
                 }
+            }
+            InputType.FORM -> {
+                if (options.isNotEmpty() || multiple || min != 0 || max != 0 || placeholder != null) Check.bad("input.options")
+                val list = questions ?: Check.bad("input.questions")
+                if (list.size !in MIN_FORM_QUESTIONS..MAX_FORM_QUESTIONS) Check.bad("input.questions")
+                val seen = HashSet<String>()
+                for (q in list) if (!seen.add(q.id)) Check.bad("form.questions.id")
             }
         }
     }
@@ -229,6 +305,10 @@ data class ApprovalBody(
     val op: JSONObject,
     val view: ViewSpec,
     val explanation: String?,
+    /** How to read [explanation]. Null: plain. Only with [explanation]. */
+    val explanationFormat: ExplanationFormat? = null,
+    /** A hint for the color of the command. It never changes the text. */
+    val language: Language? = null,
     val hint: Hint?,
     val previous: Previous?,
     val follows: Follows?,
@@ -239,7 +319,9 @@ data class ApprovalBody(
 
     fun toJson(): JSONObject = JSONObject().put("code", code).put("service", service).put("action", action)
         .put("resource", resource).put("subject", subject).put("effect", effect).put("op", op)
-        .put("view", view.toJson()).putOpt("explanation", explanation).putOpt("hint", hint?.toJson())
+        .put("view", view.toJson()).putOpt("explanation", explanation)
+        .putOpt("explanation_format", explanationFormat?.wire).putOpt("language", language?.wire)
+        .putOpt("hint", hint?.toJson())
         .putOpt("previous", previous?.toJson()).putOpt("follows", follows?.toJson())
 
     companion object {
@@ -257,6 +339,9 @@ data class ApprovalBody(
             val op = Check.op(o.rawObj("op"))
             val view = ViewSpec.read(o.obj("view"))
             val explanation = o.optStr("explanation")?.let { Check.text(it, MAX_EXPLANATION_CHARS, "approval.explanation") }
+            val explanationFormat = o.optEnum("explanation_format", ExplanationFormat.entries.toTypedArray())
+            if (explanationFormat != null && explanation == null) Check.bad("approval.explanation_format")
+            val language = o.optEnum("language", Language.entries.toTypedArray())
             val hint = o.optObj("hint")?.let { Hint.read(it) }
             val previous = o.optObj("previous")?.let { p ->
                 Previous(Check.time(p.long("approved_at_ms"), "approval.previous"), p.bool("consumed")).also { p.done() }
@@ -265,7 +350,10 @@ data class ApprovalBody(
                 Follows(Check.code(f.str("code"), "approval.follows"), f.enum("intent", Intent.entries.toTypedArray())).also { f.done() }
             }
             o.done()
-            val body = ApprovalBody(code, service, action, resource, subject, effect, op, view, explanation, hint, previous, follows)
+            val body = ApprovalBody(
+                code, service, action, resource, subject, effect, op, view, explanation, explanationFormat, language,
+                hint, previous, follows,
+            )
             if (Check.utf8Size(body.opJson) + Check.utf8Size(body.viewJson) > MAX_COMMAND_BYTES) Check.bad("approval.op")
             return body
         }
@@ -276,6 +364,8 @@ data class ApprovalBody(
 data class QuestionBody(
     val title: String,
     val explanation: String?,
+    /** How to read [explanation]. Null: plain. Only with [explanation]. */
+    val explanationFormat: ExplanationFormat? = null,
     val command: Command?,
     val input: Input,
     val hint: Hint?,
@@ -415,7 +505,8 @@ data class RequestFrame(
             .putOpt("supersedes", supersedes).putOpt("previous_id", previousId)
         if (quiet) o.put("quiet", true)
         question?.let { q ->
-            o.put("title", q.title).putOpt("explanation", q.explanation).putOpt("command", q.command?.toJson())
+            o.put("title", q.title).putOpt("explanation", q.explanation)
+                .putOpt("explanation_format", q.explanationFormat?.wire).putOpt("command", q.command?.toJson())
                 .put("input", q.input.toJson()).putOpt("hint", q.hint?.toJson()).putOpt("as_of_ms", q.asOfMs)
         }
         approval?.let { o.put("approval", it.toJson()) }
@@ -431,12 +522,14 @@ data class MessageFrame(
     val by: Author,
     val createdAtMs: Long,
     val explanation: String?,
+    /** How to read [explanation]. Null: plain. Only with [explanation]. */
+    val explanationFormat: ExplanationFormat? = null,
     val command: Command?,
     val text: String?,
 ) : ServerFrame {
     override fun toJson(): JSONObject = JSONObject().put("t", "message").put("id", id).put("request_id", requestId)
         .put("seq", seq).put("by", by.wire).put("created_at_ms", createdAtMs).putOpt("explanation", explanation)
-        .putOpt("command", command?.toJson()).putOpt("text", text)
+        .putOpt("explanation_format", explanationFormat?.wire).putOpt("command", command?.toJson()).putOpt("text", text)
 }
 
 data class SettledBy(val via: Channel, val deviceName: String?) {
@@ -570,8 +663,8 @@ object ServerFrames {
         }
         if (from.interaction == Interaction.ONE_SHOT && (allowCustom || allowAskBack)) Check.bad("request.allow")
 
-        val hasQuestionMembers = o.has("title") || o.has("explanation") || o.has("command") || o.has("input") ||
-            o.has("hint") || o.has("as_of_ms")
+        val hasQuestionMembers = o.has("title") || o.has("explanation") || o.has("explanation_format") ||
+            o.has("command") || o.has("input") || o.has("hint") || o.has("as_of_ms")
         var question: QuestionBody? = null
         var approval: ApprovalBody? = null
         when (kind) {
@@ -580,13 +673,23 @@ object ServerFrames {
                 if (!o.has("title") || !o.has("input")) Check.bad("request.title")
                 val title = Check.title(o.str("title"), "title")
                 val explanation = o.optStr("explanation")?.let { Check.text(it, MAX_EXPLANATION_CHARS, "request.explanation") }
+                val explanationFormat = o.optEnum("explanation_format", ExplanationFormat.entries.toTypedArray())
+                if (explanationFormat != null && explanation == null) Check.bad("request.explanation_format")
                 val command = o.optObj("command")?.let { Command.read(it) }
                 val input = Input.read(o.obj("input"))
                 if (input.type == InputType.TEXT && allowCustom) Check.bad("request.allow_custom")
+                if (input.type == InputType.FORM) {
+                    // A closed automatic system gives one decision: it has no form.
+                    if (from.interaction == Interaction.ONE_SHOT) Check.bad("request.form")
+                    // `allow_custom` adds a row "Other" to each choice question: a form with none has no use for it.
+                    if (allowCustom && input.questions.orEmpty().none { it.type == FormQuestionType.CHOICE }) {
+                        Check.bad("request.allow_custom")
+                    }
+                }
                 if (input.type == InputType.NONE && (allowCustom || allowAskBack)) Check.bad("request.allow")
                 val hint = o.optObj("hint")?.let { Hint.read(it) }
                 val asOf = o.optLong("as_of_ms")?.let { Check.time(it, "request.as_of_ms") }
-                question = QuestionBody(title, explanation, command, input, hint, asOf)
+                question = QuestionBody(title, explanation, explanationFormat, command, input, hint, asOf)
             }
             RequestKind.APPROVAL -> {
                 if (!o.has("approval") || hasQuestionMembers) Check.bad("request.approval")
@@ -608,6 +711,7 @@ object ServerFrames {
         val by = o.enum("by", Author.entries.toTypedArray())
         val created = Check.time(o.long("created_at_ms"), "message.created_at_ms")
         val explanation = o.optStr("explanation")
+        val explanationFormat = o.optEnum("explanation_format", ExplanationFormat.entries.toTypedArray())
         val command = o.optObj("command")?.let { Command.read(it) }
         val text = o.optStr("text")
         o.done()
@@ -615,13 +719,14 @@ object ServerFrames {
             Author.AGENT -> {
                 if (text != null || (explanation == null && command == null)) Check.bad("message.text")
                 explanation?.let { Check.text(it, MAX_EXPLANATION_CHARS, "message.explanation") }
+                if (explanationFormat != null && explanation == null) Check.bad("message.explanation_format")
             }
             Author.USER -> {
-                if (explanation != null || command != null) Check.bad("message.explanation")
+                if (explanation != null || explanationFormat != null || command != null) Check.bad("message.explanation")
                 Check.text(text ?: Check.bad("message.text"), MAX_USER_TEXT_CHARS, "message.text")
             }
         }
-        return MessageFrame(id, requestId, seq, by, created, explanation, command, text)
+        return MessageFrame(id, requestId, seq, by, created, explanation, explanationFormat, command, text)
     }
 
     private fun settled(o: Obj): SettledFrame {
@@ -709,6 +814,39 @@ data class PingFrame(val nonce: Long) : ClientFrame {
 }
 
 /**
+ * The answer to one question of a form: [choice] (the ticked option ids) or [text], never both. For a choice
+ * question, [text] is the free answer "Other": it is exclusive of the ticks.
+ */
+data class FormAnswer(val questionId: String, val choice: List<String>? = null, val text: String? = null) {
+    fun toJson(): JSONObject = JSONObject().put("question_id", questionId)
+        .putOpt("choice", choice?.let { JSONArray(it) }).putOpt("text", text)
+
+    internal fun validate() {
+        if (!Check.optionId(questionId)) Check.bad("answer.answers.question_id")
+        when {
+            choice != null && text == null -> {
+                if (choice.isEmpty() || choice.size > MAX_OPTIONS) Check.bad("answer.answers.choice")
+                val seen = HashSet<String>()
+                if (!choice.all { Check.optionId(it) && seen.add(it) }) Check.bad("answer.answers.choice")
+            }
+            choice == null && text != null -> {
+                Check.text(text, MAX_USER_TEXT_CHARS, "answer.answers.text")
+                if (text.contains('\u0000')) Check.bad("answer.answers.text")
+            }
+            else -> Check.bad("answer.answers")
+        }
+    }
+
+    companion object {
+        internal fun read(o: Obj): FormAnswer {
+            val a = FormAnswer(o.str("question_id"), o.optArr("choice")?.strings("answer.answers.choice"), o.optStr("text"))
+            o.done()
+            return a
+        }
+    }
+}
+
+/**
  * The only answer of an item. It has no signature: the proof is the authenticated session and,
  * for an approval, the hash [shownEffect] that the phone computed from the `op` that it received.
  */
@@ -720,10 +858,13 @@ data class AnswerFrame(
     val choice: List<String>? = null,
     val text: String? = null,
     val intent: Intent? = null,
+    /** The answers to a form, one for each question, 1 to 4. Only with `accept`. It excludes the other members. */
+    val answers: List<FormAnswer>? = null,
 ) : ClientFrame {
     override fun toJson(): JSONObject = JSONObject().put("t", "answer").put("request_id", requestId)
         .put("client_msg_id", clientMsgId).put("action", action.wire).putOpt("shown_effect", shownEffect)
         .putOpt("choice", choice?.let { JSONArray(it) }).putOpt("text", text).putOpt("intent", intent?.wire)
+        .also { o -> answers?.let { o.put("answers", JSONArray(it.map { a -> a.toJson() })) } }
 
     override fun validate() {
         Check.id(requestId, "answer.request_id")
@@ -738,6 +879,17 @@ data class AnswerFrame(
             if (text.contains('\u0000')) Check.bad("answer.text")
         }
         if (intent != null && (text == null || action != Action.DECLINE)) Check.bad("answer.intent")
+        if (answers != null) {
+            if (action != Action.ACCEPT || choice != null || text != null || intent != null || shownEffect != null) {
+                Check.bad("answer.answers")
+            }
+            if (answers.size !in MIN_FORM_QUESTIONS..MAX_FORM_QUESTIONS) Check.bad("answer.answers")
+            val seen = HashSet<String>()
+            for (a in answers) {
+                a.validate()
+                if (!seen.add(a.questionId)) Check.bad("answer.answers.question_id")
+            }
+        }
     }
 }
 
@@ -802,6 +954,7 @@ object ClientFrames {
                 o.str("request_id"), o.str("client_msg_id"), o.enum("action", Action.entries.toTypedArray()),
                 o.optStr("shown_effect"), o.optArr("choice")?.strings("answer.choice"), o.optStr("text"),
                 o.optEnum("intent", Intent.entries.toTypedArray()),
+                o.optArr("answers")?.objects("answer.answers")?.map { FormAnswer.read(Obj(it, "answer.answers")) },
             )
             "reply" -> ReplyFrame(o.str("request_id"), o.str("client_msg_id"), o.str("text"))
             "refresh" -> RefreshFrame(o.str("request_id"))

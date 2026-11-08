@@ -18,7 +18,7 @@
 #![allow(dead_code)]
 
 use inbox_core::effect::{check_view, effect_hash, Op, View};
-use inbox_core::proto::{Hint, Interaction, ItemState, Kind, Via};
+use inbox_core::proto::{ExplanationFormat, Hint, Interaction, ItemState, Kind, Language, Via};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -231,7 +231,8 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
         Control::Reference(reference) => Some(ref_digest(reference)),
         _ => None,
     };
-    let (wait, allow_custom, allow_ask_back, previous_id, explanation, hint) = match &digest {
+    let (wait, allow_custom, allow_ask_back, previous_id, explanation, hint, shape) = match &digest
+    {
         Some(digest) => {
             let Some(intent) = items
                 .read_intent(digest, &who.key_id)
@@ -249,6 +250,11 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
                 intent.previous_id,
                 content.get("explanation").cloned().filter(|v| !v.is_null()),
                 content.get("hint").cloned().filter(|v| !v.is_null()),
+                // How to show the texts: the format of the explanation and the language of the command.
+                ["explanation_format", "language"]
+                    .into_iter()
+                    .filter_map(|k| content.get(k).cloned().map(|v| (k, v)))
+                    .collect::<Vec<_>>(),
             )
         }
         None => (
@@ -262,6 +268,7 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
             None,
             None,
             None,
+            Vec::new(),
         ),
     };
     if config.require_explanation && explanation.is_none() {
@@ -273,6 +280,9 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
     }
     if let Some(hint) = hint {
         body["hint"] = hint;
+    }
+    for (key, value) in shape {
+        body[key] = value;
     }
     let body = Zeroizing::new(serde_json::to_vec(&body).map_err(|_| INVALID_ARGUMENT)?);
     let new = NewItem {
@@ -483,6 +493,10 @@ pub struct IntentIn {
     pub lease_s: Option<i64>,
     pub until_ms: Option<i64>,
     pub explanation: Option<String>,
+    /// How to read the explanation. `None`: plain text.
+    pub explanation_format: Option<ExplanationFormat>,
+    /// A hint for the color of the command of the approval. It never changes the text.
+    pub language: Option<Language>,
     pub allow_custom: bool,
     pub allow_ask_back: bool,
     pub hint: Option<Value>,
@@ -527,6 +541,9 @@ pub async fn intent(
     };
     check_control(wait, &items)?;
     let explanation = input.explanation.filter(|t| !t.is_empty());
+    if input.explanation_format.is_some() && explanation.is_none() {
+        return Err(INVALID_ARGUMENT);
+    }
     match &explanation {
         Some(text) if text.chars().count() > config.max_explanation_chars => {
             return Err(ApprovalError::new(422, "explanation_too_long"));
@@ -566,6 +583,12 @@ pub async fn intent(
     let mut content = json!({});
     if let Some(text) = explanation {
         content["explanation"] = Value::String(text);
+    }
+    if let Some(format) = input.explanation_format {
+        content["explanation_format"] = json!(format);
+    }
+    if let Some(language) = input.language {
+        content["language"] = json!(language);
     }
     if let Some(hint) = input.hint {
         content["hint"] = hint;

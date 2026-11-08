@@ -16,6 +16,10 @@ const val MAX_OPTIONS = 8
 const val MAX_OPTION_LABEL_CHARS = 48
 const val MAX_OPTION_DESCRIPTION_CHARS = 160
 const val MAX_PLACEHOLDER_CHARS = 128
+const val MIN_FORM_QUESTIONS = 1
+const val MAX_FORM_QUESTIONS = 4
+const val MAX_FORM_HEADER_CHARS = 16
+const val MAX_FORM_TEXT_CHARS = 600
 const val MAX_SYNC_ENTRIES = 500
 const val MAX_DIGEST_IDS = 200
 const val MAX_VIEW_FIELDS = 12
@@ -127,6 +131,20 @@ internal object Check {
     /** An option id: 1 to 32 characters of `a-z 0-9 _ -`. */
     fun optionId(text: String): Boolean =
         text.length in 1..32 && text.all { (it in 'a'..'z') || (it in '0'..'9') || it == '_' || it == '-' }
+
+    /** The rules of a list of options with `multiple`, `min` and `max`. */
+    fun choice(multiple: Boolean, min: Int, max: Int, options: List<InputOption>, what: String) {
+        val n = options.size
+        if (n !in MIN_OPTIONS..MAX_OPTIONS) bad(what)
+        if (min < 1 || min > max || max > n) bad(what)
+        if (!multiple && (min != 1 || max != 1)) bad(what)
+        val seen = HashSet<String>()
+        for (o in options) {
+            if (!optionId(o.id) || !seen.add(o.id)) bad(what)
+            line(o.label, MAX_OPTION_LABEL_CHARS, what)
+            o.description?.let { line(it, MAX_OPTION_DESCRIPTION_CHARS, what) }
+        }
+    }
 
     /** The rules of `op`: objects, arrays, strings, booleans, null and integers of at most 2^53-1. */
     fun op(value: JSONObject): JSONObject {

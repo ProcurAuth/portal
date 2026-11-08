@@ -1,0 +1,1 @@
+{"t":"answer","request_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","client_msg_id":"m-0004","action":"accept","answers":[{"question_id":"target","choice":["staging"]},{"question_id":"checks","choice":["a0","a1","a2","a3","a4","a5","a6","a7","a8"]},{"question_id":"window","text":"Friday morning"},{"question_id":"note","text":"Use the blue pipeline."}]}

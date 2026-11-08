@@ -152,7 +152,7 @@ An item is a message that waits for an answer from a person. The portal has one 
 
 3.6.20 **[5.1.0]** The task of the server MUST write a heartbeat, `swept_at`. After an outage longer than `lease.grace`, it MUST extend each open lease by the length of the gap. No item MUST become `abandoned` because of an outage. When the database has no writable primary, the creation, the renewal and the answer MUST get `503 storage_degraded`.
 
-3.6.21 **[5.2.0]** A question has a title of one line and 128 characters at most. It MAY have an `explanation`, a `command`, a `command_label` and a `hint`. The input type is `choice`, `confirm`, `text` or `none`. A choice has 2 to 8 options.
+3.6.21 **[5.2.0]** A question has a title of one line and 128 characters at most. It MAY have an `explanation`, a `command`, a `command_label` and a `hint`. The input type is `choice`, `confirm`, `text`, `none` or `form`. A choice has 2 to 8 options. A `form` has several questions (3.6.29).
 
 3.6.22 **[5.2.0]** The flags of a question MUST follow these rules, or the Inbox MUST answer `422 invalid_flags`. `text` refuses `allow_custom`. `none` refuses both flags. `multiple` with `allow_custom` makes the free answer exclusive of the boxes. A closed question has no flag.
 
@@ -161,6 +161,22 @@ An item is a message that waits for an answer from a person. The portal has one 
 3.6.24 **[5.2.0]** The answer to the agent MUST have the action, the choice, the text of the owner in an `untrusted` object, and the times. A free text answer MUST arrive as an empty choice with the text. `ask` MUST wait at most `wait_s` and then MUST return a handle with the request id and the lease.
 
 3.6.25 **[5.2.0]** `ask`, `say` and `supersede` MUST each use one unit of the budget `questions`. A renewal MUST use none. The actions are `question.ask`, `question.read` and `question.cancel`. A question MUST NOT pass through a service. An `ask` to the owner is not a tool with an effect.
+
+3.6.26 **[5.1.0]** The explanation of an agent has a format in the member `explanation_format`: `plain` (the default) or `markdown`. It exists in the frames `request` and `message` and in the intent of an approval. It applies to the explanation only. Every other text MUST be plain text. A value that is not in the list, or a format without an explanation, MUST get `422`.
+
+3.6.27 **[5.1.0]** The Markdown of an explanation MUST be a closed subset. The subset has paragraphs, headings of level 1 to 3 and emphasis. It has code, block quotes, lists, task items, line breaks and links. Raw HTML, images, tables, footnotes, autolinks and thematic breaks MUST stay plain text. The server and the phone MUST use the same parser. A text over a limit (8000 characters, 2000 nodes, a depth of 4) MUST show as plain text, with no error.
+
+3.6.28 **[5.1.0]** A link MUST NOT be active. A screen MUST show the text of the link and, in parentheses, the host of an `http` or `https` address. The host is the part after the user information. A link with another scheme MUST show its text only. The HTML of the server MUST NOT have a `style` attribute, a script, an event attribute or an `href`. It MUST write only classes that start with `md-` or `tok-`.
+
+3.6.29 **[5.2.0]** A form is a question with `input.type` equal to `form`. It has 1 to 4 questions. Each question has a unique `id`, a `header` of 16 characters at most and a `text` of 600 characters at most. The `type` of a question is `choice` or `text`. A `choice` question has 2 to 8 options, `multiple`, `min` and `max`, with the rules of a `choice` input. A form that breaks one of these rules MUST NOT be a frame.
+
+3.6.30 **[5.2.0]** The flags of a form are the flags of its item. With `allow_custom`, each `choice` question MUST have a free answer "Other" that is exclusive of its ticks. A form with no `choice` question MUST NOT have `allow_custom`. With `allow_ask_back`, the owner MAY ask the agent, and the form stays open. A form on a `one_shot` key MUST be refused.
+
+3.6.31 **[5.2.0]** The `answer` to a form has `answers`: one entry for each question. An entry has `question_id` and exactly one of `choice` and `text`. The frame excludes `choice`, `text` and `intent`, and it needs the action `accept`. The parser MUST check the shape. The server MUST call `validate_form_answer` before it takes the answer. The call checks the ids and the ticks, and it checks that a free text has `allow_custom`.
+
+3.6.32 **[5.2.0]** The agent MUST read the answers of a form in the object `untrusted`, as `untrusted.answers`, under the member `data_notice`. Each entry has `question_id` and `choice` or `text`. The portal cleans the texts as it cleans a comment.
+
+3.6.33 **[5.1.0]** A command MAY have a `language` for the color. The values are `plain`, `sql`, `json`, `yaml`, `toml`, `bash`, `python`, `rust`, `javascript`, `typescript` and `diff`. A value that is not in the list MUST be refused. The language MUST NOT change the text. The tokenizers MUST be in the core crate, with no heavy dependency. They MUST run in linear time and MUST NOT panic on any text.
 
 ### 3.7 Approvals
 
@@ -272,7 +288,7 @@ Each decision below is final. It has a requirement that a test can check.
 
 3.10.5 **[5.1.0]** **Decision: no end-to-end encryption.** The portal reads each body. It seals the body at rest (5.11). The specification MUST say this plainly, in 5.11.1.
 
-3.10.6 **[5.1.0]** **Decision: plain text.** The explanation, the command, the comments and the turns are plain text. No screen MUST render Markdown, HTML or a link from them.
+3.10.6 **[5.1.0]** **Decision: plain text, and safe Markdown for the explanation.** The command, the comments of the owner and the turns of the owner are plain text. The explanation of an agent is plain text unless the agent sets `explanation_format` to `markdown` (3.6.26). No screen MUST render HTML, an image, an active link or a script from any text.
 
 ## 4. Delivery guarantee
 
@@ -404,11 +420,11 @@ The portal seals the body of an item before it writes it. This is not end-to-end
 
 The agent is not trusted. Its text is shown with care. Release: 5.1.0.
 
-5.12.1 **[5.1.0]** The screen MUST show the command first, in a fixed font, with a copy button, the age and the short hash. The explanation MUST come below it, in another style, with the label "Text of the agent, not verified". The explanation MUST NOT be copyable in one gesture, and MUST NOT hold a link.
+5.12.1 **[5.1.0]** The screen MUST show the command first, in a fixed font, with a copy button, the age and the short hash. The explanation MUST come below it, in another style, with the label "Text of the agent, not verified". The explanation MUST NOT be copyable in one gesture, and MUST NOT hold an active link.
 
 5.12.2 **[5.1.0]** The screen MUST show a control character, a bidirectional control and a zero-width character as a visible mark, for example `<U+202E>`. It MUST show the count of non-ASCII characters. The portal MUST NOT remove such a character from the explanation, the comments, the turns or the command of an approval.
 
-5.12.3 **[5.1.0]** The page and the phone MUST show the text as plain text. The web page MUST escape it. The explanation longer than 400 characters MUST fold, with an action "Show all". The screen MUST state that the explanation does not change what the service runs.
+5.12.3 **[5.1.0]** The page and the phone MUST show a text as plain text, except an explanation with the format `markdown` (3.6.27). The web page MUST escape every text, and it MUST write only the tags of the closed list of 3.6.28. The explanation longer than 400 characters MUST fold, with an action "Show all". The screen MUST state that the explanation does not change what the service runs.
 
 5.12.4 **[5.2.0]** A screen with a free text field MUST warn: "Do not enter a password or a secret. An agent reads this answer."
 
@@ -597,6 +613,14 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.11.15 | 5.1.0 | L10 | to fill |
 | 5.11.16 | 5.1.0 | L10 | to fill |
 | 5.11.17 | 5.1.0 | L10 | to fill |
+| 3.6.26 | 5.1.0 | L3b | `frames::markdown_and_language_members_are_kept_and_plain_is_a_valid_spelling`, `frames::new_invalid_frames_fail_for_the_named_reason`, `frames::tests::a_markdown_turn_of_the_agent_keeps_its_format`, `agent_channel::the_format_and_the_language_of_an_intent_reach_the_frame_of_the_phone`, `agent_channel::a_turn_of_the_agent_can_be_markdown_and_the_message_frame_says_so`, `FramesTest.theMarkdownAndLanguageMembersReadToTheTypedValues` |
+| 3.6.27 | 5.1.0 | L3b | `render::markdown::tests::limits_make_the_text_plain`, `render::markdown::tests::autolinks_html_and_images_are_text`, `render::markdown::tests::tables_footnotes_and_rules_are_text`, `render::markdown::tests::entities_are_text`, `render::markdown::tests::random_markdown_never_panics_and_always_gives_a_tree`, `render::markdown::tests::nested_structures_keep_their_shape`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::bombs_and_long_texts_stay_inside_the_subset` |
+| 3.6.28 | 5.1.0 | L3b | `render::markdown::tests::links_show_the_host_and_never_act`, `markdown_html::the_xss_corpus_gives_only_allowed_tags_and_shows_the_source_as_text`, `markdown_html::no_class_comes_from_the_text`, `markdown_html::bidi_and_zero_width_characters_are_visible_marks` |
+| 3.6.29 | 5.2.0 | L3b | `frames::new_invalid_frames_fail_for_the_named_reason`, `frames::the_largest_form_fits_one_noise_message`, `frames::tests::a_stored_body_that_breaks_a_rule_of_the_form_gives_no_frame`, `FramesTest.theFormRulesAreRefusedWithTheNamedReason`, `FramesTest.theLargestFormFitsOneNoiseMessage` |
+| 3.6.30 | 5.2.0 | L3b | `form::tests::custom_text_needs_allow_custom_and_is_exclusive`, `frames::tests::a_stored_body_that_breaks_a_rule_of_the_form_gives_no_frame` (a form on a `one_shot` key) |
+| 3.6.31 | 5.2.0 | L3b | `form::tests::table_of_refusals`, `form::tests::a_complete_answer_passes`, `frames::tests::the_owner_answer_holds_the_answers_of_a_form`, `FramesTest.theGoldenAnswerOfAFormReadsAndWritesBack`. L13 wires the check into the engine. |
+| 3.6.32 | 5.2.0 | L3b | `agent_channel::get_answer_returns_the_answers_of_a_form_in_untrusted` |
+| 3.6.33 | 5.1.0 | L3b | `render::highlight::tests` (one test for each language, `unterminated_constructs_run_to_the_end`, `random_text_never_panics_and_spans_are_in_bounds`, `work_is_linear_on_hostile_input`), `markdown_html::a_command_keeps_its_characters_and_gets_spans`, `bridge::tests::markdown_and_highlight_bridges`, `lib::tests::each_native_function_of_the_app_has_its_jni_symbol` |
 | 5.12.1 | 5.1.0 | L10, A2 | to fill |
 | 5.12.2 | 5.1.0 | L10, A2 | to fill |
 | 5.12.3 | 5.1.0 | L10 | to fill |
@@ -676,6 +700,6 @@ Release 5.1.0 has the approvals and the discussion. Release 5.2.0 has the questi
 
 8.4.2 **FUTURE.** The Inbox MAY offer parallel alternatives and a floor `approval: "required"` after the first use of 5.1.0.
 
-8.4.3 **FUTURE.** The explanation MAY use sanitized Markdown. The items MAY get attachments and images. The content keys MAY come from a KMS or an HSM. These points are not scheduled.
+8.4.3 **FUTURE.** The items MAY get attachments and images. The content keys MAY come from a KMS or an HSM. These points are not scheduled.
 
 8.4.4 **FUTURE.** Delegation, escalation, muted agents, a quorum and a vote need a new decision of the owner. So do a webhook to the agent and an adapter for the Claude Agent SDK.

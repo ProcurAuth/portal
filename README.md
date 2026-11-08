@@ -499,11 +499,11 @@ A read renews the lease only with `renew=true`, and only when `subject` is the r
 
 The `wait` is a whole number of seconds. The portal bounds it by `inbox.items.wait_max`, and a long `wait` is never an error. A wait ends when the owner answers. The wait holds a connection of the PDP listener, so keep `wait_max` small.
 
-An agent that has a channel to the portal makes an intent before the server submits. The intent has the wait (`lease_s` or `until`), an explanation, a `hint`, `allow_custom` and `allow_ask_back`. The portal returns an `approval_ref`: 32 random bytes in base64url. The agent gives it to the server, and the server sends it with the submission.
+An agent that has a channel to the portal makes an intent before the server submits. The intent has the wait (`lease_s` or `until`), an explanation, a `hint`, `allow_custom` and `allow_ask_back`. It can also have `explanation_format` (`plain` or `markdown`) and `language` (the language of the command, for the color). The portal returns an `approval_ref`: 32 random bytes in base64url. The agent gives it to the server, and the server sends it with the submission.
 
 The portal keeps only the digest of the reference, and it seals the explanation and the hint. The reference works one time, for the key that made it, until `inbox.approvals.intent_ttl` ends. The server cannot read it. An intent has these limits:
 
-- The explanation is at most `max_explanation_chars` characters. A longer text gets `422 explanation_too_long`, and the portal never cuts it. With `require_explanation`, a request without an explanation gets `422 explanation_required`. A submission with no `approval_ref` has no explanation.
+- The explanation is at most `max_explanation_chars` characters. The format `markdown` shows a safe subset: see [`docs/inbox/protocol.md`](docs/inbox/protocol.md), "Text format and code color". An `explanation_format` without an explanation gets `422 invalid_argument`. A longer text gets `422 explanation_too_long`, and the portal never cuts it. With `require_explanation`, a request without an explanation gets `422 explanation_required`. A submission with no `approval_ref` has no explanation.
 - `allow_custom` and `allow_ask_back` need a key with the interaction `conversational`. A key `one_shot` gets `422 interaction_not_allowed`.
 - A key has at most `max_requests_per_key_per_hour` intents that wait.
 - `previous_id` names an earlier request of the same key that ended. The new request follows it.
