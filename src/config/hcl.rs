@@ -99,6 +99,9 @@ const MAX_VALUE_DEPTH: usize = 6;
 /// the pairs `(parent, child)`: a block `parent` can hold blocks `child` with a label.
 /// `nested_plain` lists the pairs `(parent, child)`: a block `parent` can hold a block `child`
 /// without a label. The keys of such a block are in the block `parent.child` of the document.
+/// A `parent` can itself be a block `a.b` that a pair made: the nesting has no depth limit of its
+/// own. A block with a label inside a block `a.b` has the kind `a.b.<name>`; inside a block of
+/// the top level it has the kind `<name>`.
 pub fn parse(
     raw: &str,
     allowed_blocks: &[&str],
@@ -160,21 +163,15 @@ pub fn parse(
             Some(Token::LBrace) => i += 1,
             other => return Err(format!("expected '{{' after {path}, found {other:?}")),
         }
-        let nested: Vec<&str> = nested_blocks
-            .iter()
-            .filter(|(parent, _)| *parent == block)
-            .map(|(_, child)| *child)
-            .collect();
-        let plain: Vec<&str> = nested_plain
-            .iter()
-            .filter(|(parent, _)| *parent == block)
-            .map(|(_, child)| *child)
-            .collect();
+        let tables = Tables {
+            nested: nested_blocks,
+            plain: nested_plain,
+        };
         let Body {
             values,
             children,
             plain: plain_children,
-        } = body(&tokens, &mut i, &path, &nested, &plain)?;
+        } = body(&tokens, &mut i, &path, &block, &tables)?;
         match label {
             Some(label) => document.labeled.push(Labeled {
                 kind: block,
@@ -202,24 +199,42 @@ pub fn parse(
     Ok(document)
 }
 
+/// The closed lists of nested blocks.
+struct Tables<'a> {
+    nested: &'a [(&'a str, &'a str)],
+    plain: &'a [(&'a str, &'a str)],
+}
+
+impl Tables<'_> {
+    fn holds_labeled(&self, parent: &str, child: &str) -> bool {
+        self.nested.iter().any(|(p, c)| *p == parent && *c == child)
+    }
+
+    fn holds_plain(&self, parent: &str, child: &str) -> bool {
+        self.plain.iter().any(|(p, c)| *p == parent && *c == child)
+    }
+}
+
 /// What a block holds.
 struct Body {
     values: HashMap<String, Lit>,
-    /// The blocks with a label, in the order of the file.
+    /// The blocks with a label, in the order of the file. A block with a label inside a block
+    /// without a label is here too, with its kind.
     children: Vec<Labeled>,
-    /// The blocks without a label, with their keys, in the order of the file.
+    /// The blocks without a label, with their keys, in the order of the file. The name is the
+    /// path below this block: `items`, then `items.lease`.
     plain: Vec<(String, HashMap<String, Lit>)>,
 }
 
 /// The body of a block, after its `{` and up to its `}`: the `key = value` lines, the blocks
-/// with a label that the block can hold (`nested`) and the blocks without a label that it can
-/// hold (`nested_plain`).
+/// with a label that the block can hold and the blocks without a label that it can hold.
+/// `path` names the block for the messages. `kind` is its path in the tables, without labels.
 fn body(
     tokens: &[Token],
     i: &mut usize,
     path: &str,
-    nested: &[&str],
-    nested_plain: &[&str],
+    kind: &str,
+    tables: &Tables<'_>,
 ) -> Result<Body, String> {
     let mut values: HashMap<String, Lit> = HashMap::new();
     let mut children: Vec<Labeled> = Vec::new();
@@ -237,27 +252,38 @@ fn body(
             Some(Token::Ident(key)) => {
                 let key = key.clone();
                 *i += 1;
-                if matches!(tokens.get(*i), Some(Token::LBrace))
-                    && nested_plain.contains(&key.as_str())
-                {
+                if matches!(tokens.get(*i), Some(Token::LBrace)) && tables.holds_plain(kind, &key) {
                     // A block without a label inside the block.
                     if plain.iter().any(|(name, _)| *name == key) {
                         return Err(format!("duplicate configuration block: {path}.{key}"));
                     }
                     *i += 1;
                     let child_path = format!("{path}.{key}");
-                    let inner = body(tokens, i, &child_path, &[], &[])?;
-                    plain.push((key, inner.values));
+                    let child_kind = format!("{kind}.{key}");
+                    let inner = body(tokens, i, &child_path, &child_kind, tables)?;
+                    plain.push((key.clone(), inner.values));
+                    for (name, values) in inner.plain {
+                        plain.push((format!("{key}.{name}"), values));
+                    }
+                    children.extend(inner.children);
                     continue;
                 }
                 if let Some(Token::String(label)) = tokens.get(*i) {
                     // A block with a label inside the block.
-                    if !nested.contains(&key.as_str()) {
+                    if !tables.holds_labeled(kind, &key) {
                         return Err(format!("nested HCL blocks are not supported: {path}.{key}"));
                     }
                     let label = label.clone();
                     *i += 1;
-                    if children.iter().any(|c| c.kind == key && c.label == label) {
+                    let child_kind = if kind.contains('.') {
+                        format!("{kind}.{key}")
+                    } else {
+                        key.clone()
+                    };
+                    if children
+                        .iter()
+                        .any(|c| c.kind == child_kind && c.label == label)
+                    {
                         return Err(format!(
                             "duplicate configuration block: {path}.{key} {label:?}"
                         ));
@@ -271,10 +297,10 @@ fn body(
                             ))
                         }
                     }
-                    let inner = body(tokens, i, &child_path, &[], &[])?;
+                    let inner = body(tokens, i, &child_path, &format!("{kind}.{key}"), tables)?;
                     debug_assert!(inner.children.is_empty() && inner.plain.is_empty());
                     children.push(Labeled {
-                        kind: key,
+                        kind: child_kind,
                         label,
                         values: inner.values,
                         children: Vec::new(),
@@ -709,5 +735,59 @@ mod tests {
             BLOCKS
         )
         .is_ok());
+    }
+
+    #[test]
+    fn plain_blocks_nest_two_levels_and_a_labeled_block_inside_a_nested_block_has_a_dotted_kind() {
+        let blocks: &[&str] = &["inbox"];
+        let plain: &[(&str, &str)] = &[
+            ("inbox", "items"),
+            ("inbox", "at_rest"),
+            ("inbox.items", "lease"),
+        ];
+        let nested: &[(&str, &str)] = &[("inbox.at_rest", "key"), ("inbox", "group")];
+        let run = |raw: &str| super::parse(raw, blocks, &[], nested, plain);
+        let doc = run(
+            r#"inbox {
+                 name = "x"
+                 items { max = 1 lease { min = 2 } }
+                 at_rest { active_key = "a" key "a" { secret_env = "A" } key "b" { secret_env = "B" } }
+                 group "g" { n = 1 }
+               }"#,
+        )
+        .unwrap();
+        let get = |b: &str, k: &str| doc.values[&(b.to_string(), k.to_string())].clone();
+        assert_eq!(get("inbox", "name"), Lit::Str("x".into()));
+        assert_eq!(get("inbox.items", "max"), Lit::Int("1".into()));
+        assert_eq!(get("inbox.items.lease", "min"), Lit::Int("2".into()));
+        assert!(doc.blocks.contains("inbox.items") && doc.blocks.contains("inbox.items.lease"));
+        assert!(doc.blocks.contains("inbox.at_rest"));
+        let kinds: Vec<(&str, &str)> = doc
+            .labeled
+            .iter()
+            .map(|b| (b.kind.as_str(), b.label.as_str()))
+            .collect();
+        assert!(kinds.contains(&("inbox.at_rest.key", "a")), "{kinds:?}");
+        assert!(kinds.contains(&("inbox.at_rest.key", "b")), "{kinds:?}");
+        assert!(
+            kinds.contains(&("group", "g")),
+            "a block of the top level keeps its plain kind"
+        );
+        for bad in [
+            // A duplicate at the second level, in a plain block and in a labeled block.
+            r#"inbox { items { lease { } lease { } } }"#,
+            r#"inbox { at_rest { key "a" { } key "a" { } } }"#,
+            r#"inbox { items { lease { min = 1 min = 2 } } }"#,
+            // A block that no pair allows, at the second level.
+            r#"inbox { items { other { } } }"#,
+            r#"inbox { items { key "a" { } } }"#,
+            r#"inbox { at_rest { lease { } } }"#,
+            // A third level that no pair allows.
+            r#"inbox { items { lease { deeper { } } } }"#,
+            r#"inbox { at_rest { key "a" { key "b" { } } } }"#,
+            r#"inbox { items { lease { min = 1 }"#,
+        ] {
+            assert!(run(bad).is_err(), "{bad}");
+        }
     }
 }
