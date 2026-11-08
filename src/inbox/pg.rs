@@ -48,7 +48,7 @@ const STARTUP_RETRY: Duration = Duration::from_secs(60);
 /// A lost instance row is forgotten after this long.
 const INSTANCE_FORGET_MS: i64 = 3_600_000;
 /// Device ids per `inbox_wake` notification (a payload is limited to 8000 bytes).
-const WAKE_CHUNK: usize = 100;
+pub(super) const WAKE_CHUNK: usize = 100;
 /// No call to the database waits longer than this: a primary that does not answer (a lost node drops packets silently) must
 /// not hold an alert or a phone back. The next calls fail at once until the probe sees a writable primary again.
 const OP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -63,6 +63,7 @@ const LOCK_SCHEMA: i64 = 0x5041_4745_0001; // does not collide with the locks of
 const LOCK_ENROLL: i64 = 0x5041_4745_0002;
 const LOCK_PURGE: i64 = 0x5041_4745_0003;
 const LOCK_CODES: i64 = 0x5041_4745_0004;
+pub(super) const LOCK_ITEMS: i64 = 0x5041_4745_0005;
 
 const SCHEMA: &[&str] = &[
     r#"
@@ -98,9 +99,13 @@ CREATE TABLE alerts (
     -- The service that an alert of the portal names (`inbox.watch`). A reader sees the alert only
     -- when the reader may open the service. NULL for every other alert.
     service         TEXT,
+    -- 5.1.0, in place: the item that a delivery of an item names, and the number of its turn.
+    request_id      TEXT,
+    seq             BIGINT,
     UNIQUE (source, idempotency_key)
 );
 CREATE INDEX alerts_created ON alerts(created_at);
+CREATE INDEX alerts_request ON alerts(request_id) WHERE request_id IS NOT NULL;
 
 CREATE TABLE deliveries (
     seq           BIGSERIAL PRIMARY KEY,
@@ -142,6 +147,145 @@ CREATE INDEX connections_open ON connections(instance) WHERE disconnected_at IS 
 CREATE TABLE content_key_check (
     body_kid    TEXT PRIMARY KEY,
     check_value BYTEA NOT NULL
+);
+
+-- 5.1.0, in place: the items (approvals and questions). The body of an item is sealed (see
+-- `content_box.rs`); every other column is metadata. A delivery of an item is a row of `alerts` with
+-- the kind of the item and its `request_id`.
+CREATE TABLE items (
+    request_id        TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL CHECK (kind IN ('question', 'approval')),
+    chain_id          TEXT NOT NULL,
+    supersedes        TEXT,
+    superseded_by     TEXT,
+    previous_id       TEXT,
+    requester_key_id  TEXT NOT NULL,
+    requester_owner   TEXT NOT NULL,
+    source            TEXT NOT NULL CHECK (source IN ('mcp', 'api')),
+    interaction       TEXT NOT NULL CHECK (interaction IN ('conversational', 'one_shot')),
+    urgency           TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+    input_type        TEXT CHECK (input_type IN ('choice', 'confirm', 'text', 'none')),
+    state             TEXT NOT NULL CHECK (state IN ('pending', 'replied', 'answered', 'abandoned', 'expired', 'cancelled', 'superseded')),
+    settle_reason     TEXT,
+    body_kid          TEXT,
+    body_ct           BYTEA,
+    body_size         BIGINT NOT NULL,
+    body_purged_at    BIGINT,
+    created_at        BIGINT NOT NULL,
+    chain_created_at  BIGINT NOT NULL,
+    lease_s           BIGINT,
+    lease_until       BIGINT,
+    until_at          BIGINT,
+    agent_seen_at     BIGINT NOT NULL,
+    last_agent_turn_at BIGINT,
+    abandoned_at      BIGINT,
+    revivals          BIGINT NOT NULL DEFAULT 0,
+    last_seq          BIGINT NOT NULL DEFAULT 0,
+    allow_custom      BIGINT NOT NULL DEFAULT 0,
+    allow_ask_back    BIGINT NOT NULL DEFAULT 0,
+    answer_action     TEXT CHECK (answer_action IN ('accept', 'decline')),
+    answered_at       BIGINT,
+    answered_by       TEXT,
+    answered_via      TEXT,
+    final_at          BIGINT,
+    idempotency_key   TEXT NOT NULL,
+    CHECK ((lease_s IS NULL) <> (until_at IS NULL)),
+    UNIQUE (requester_key_id, idempotency_key)
+);
+CREATE INDEX items_open ON items(state, lease_until);
+CREATE INDEX items_owner ON items(requester_owner, state);
+CREATE INDEX items_key ON items(requester_key_id, state);
+CREATE INDEX items_chain ON items(chain_id);
+CREATE INDEX items_final ON items(final_at) WHERE final_at IS NOT NULL;
+CREATE INDEX items_kid ON items(body_kid) WHERE body_kid IS NOT NULL;
+
+CREATE TABLE turns (
+    request_id    TEXT NOT NULL REFERENCES items(request_id) ON DELETE CASCADE,
+    seq           BIGINT NOT NULL,
+    author        TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('say', 'reply', 'answer', 'decline', 'revive')),
+    payload_ct    BYTEA,
+    body_kid      TEXT,
+    client_msg_id TEXT,
+    device_id     TEXT,
+    via           TEXT CHECK (via IN ('phone', 'web')),
+    created_at    BIGINT NOT NULL,
+    PRIMARY KEY (request_id, seq),
+    UNIQUE (request_id, client_msg_id)
+);
+CREATE INDEX turns_kid ON turns(body_kid) WHERE body_kid IS NOT NULL;
+
+-- Metadata of an approval. The effect hash binds it to one action. `key_hash` is the hash of the service, the
+-- subject, the action, the resource and the effect: one open item for each value.
+CREATE TABLE approvals (
+    request_id     TEXT PRIMARY KEY REFERENCES items(request_id) ON DELETE CASCADE,
+    service        TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    resource_path  TEXT NOT NULL,
+    effect         TEXT NOT NULL,
+    key_hash       TEXT NOT NULL,
+    evaluation_id  TEXT,
+    code           TEXT NOT NULL,
+    decision       TEXT CHECK (decision IN ('approve', 'deny')),
+    shown_effect   TEXT,
+    consume_before BIGINT,
+    consumed_at    BIGINT,
+    lapsed_at      BIGINT
+);
+CREATE INDEX approvals_hash ON approvals(key_hash);
+
+-- One row for each transition, never for a renewal, and never with a body.
+CREATE TABLE item_events (
+    id         BIGSERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    at         BIGINT NOT NULL,
+    event      TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    detail     TEXT
+);
+CREATE INDEX item_events_request ON item_events(request_id, at);
+CREATE INDEX item_events_at ON item_events(at);
+
+-- The explanation of an agent for the next approval of its key. The reference is a random value, and only its
+-- digest is kept. The explanation is sealed.
+CREATE TABLE approval_intents (
+    ref_digest       TEXT PRIMARY KEY,
+    requester_key_id TEXT NOT NULL,
+    lease_s          BIGINT,
+    until_at         BIGINT,
+    allow_custom     BIGINT NOT NULL DEFAULT 0,
+    allow_ask_back   BIGINT NOT NULL DEFAULT 0,
+    body_kid         TEXT,
+    body_ct          BYTEA,
+    body_size        BIGINT NOT NULL,
+    expires_at       BIGINT NOT NULL,
+    used_at          BIGINT,
+    request_id       TEXT
+);
+CREATE INDEX approval_intents_kid ON approval_intents(body_kid) WHERE body_kid IS NOT NULL;
+CREATE INDEX approval_intents_expires ON approval_intents(expires_at);
+
+CREATE TABLE approval_mute (
+    subject     TEXT PRIMARY KEY,
+    muted_until BIGINT NOT NULL,
+    reason      TEXT NOT NULL
+);
+
+CREATE TABLE account_prefs (
+    login       TEXT PRIMARY KEY,
+    digest_mode TEXT,
+    digest_at   TEXT,
+    digest_tz   TEXT,
+    quiet_from  TEXT,
+    quiet_to    TEXT,
+    quiet_tz    TEXT
+);
+
+-- The time of the last pass of the sweeper. A gap longer than `lease.grace` extends each open lease.
+CREATE TABLE items_heartbeat (
+    id       BIGINT PRIMARY KEY CHECK (id = 1),
+    swept_at BIGINT NOT NULL
 );
 "#,
     r#"
@@ -218,11 +362,11 @@ const DB_NOW: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
 
 /// Turns a failure of the driver or of the pool into a [`DbError`]: `Unavailable` when the database cannot be used right now
 /// (no connection, a failover in progress, a standby that refuses writes), `Pg` for everything else.
-trait Failure {
+pub(super) trait Failure {
     fn into_db_error(self) -> DbError;
 }
 
-fn db_error(e: impl Failure) -> DbError {
+pub(super) fn db_error(e: impl Failure) -> DbError {
     e.into_db_error()
 }
 
@@ -356,12 +500,15 @@ pub enum Event {
     },
     /// The notification connection was lost and is back: anything may have been missed.
     Resync,
+    /// An item changed on another instance: the agents that wait for it read it again.
+    Items,
 }
 
 pub fn parse_notification(channel: &str, payload: &str) -> Option<Event> {
     let mut words = payload.split_whitespace();
     match channel {
         "inbox_wake" => Some(Event::Wake(words.map(str::to_string).collect())),
+        "inbox_item" => Some(Event::Items),
         "inbox_kick" => match words.next()? {
             "revoked" => Some(Event::Revoked(words.next()?.to_string())),
             "replaced" => Some(Event::Replaced {
@@ -479,7 +626,7 @@ impl PgStore {
         &self.instance
     }
 
-    async fn client(&self) -> Result<Object, DbError> {
+    pub(super) async fn client(&self) -> Result<Object, DbError> {
         if self.is_down() {
             return Err(DbError::Unavailable("the database is away".into()));
         }
@@ -1090,7 +1237,7 @@ impl PgStore {
         });
         let result = async {
             client
-                .batch_execute("LISTEN inbox_wake; LISTEN inbox_kick")
+                .batch_execute("LISTEN inbox_wake; LISTEN inbox_kick; LISTEN inbox_item")
                 .await
                 .map_err(|e| e.to_string())?;
             // Whatever happened while this connection was down is caught up by one full flush.
@@ -1689,7 +1836,7 @@ impl PgStore {
             .query(
                 "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind, a.service
                  FROM deliveries d JOIN alerts a ON a.id = d.alert_id
-                 WHERE d.device_id = $1 AND d.received_at IS NULL AND a.created_at >= $3
+                 WHERE d.device_id = $1 AND d.received_at IS NULL AND a.created_at >= $3 AND a.request_id IS NULL
                  ORDER BY d.seq LIMIT $2",
                 &[&id, &i64::from(limit), &cutoff],
             )
@@ -1877,7 +2024,7 @@ impl PgStore {
             .query(
                 "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
                  FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id
-                 WHERE a.created_at >= $2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
+                 WHERE a.created_at >= $2 AND a.request_id IS NULL GROUP BY a.id ORDER BY a.created_at DESC LIMIT $1",
                 &[&i64::from(limit), &since_ms],
             )
             .await
@@ -1969,7 +2116,7 @@ impl PgStore {
         };
         (
             format!(
-                "(({groups}) OR (target_kind = 'user' AND target_id = ${login})) AND ({services})"
+                "request_id IS NULL AND (({groups}) OR (target_kind = 'user' AND target_id = ${login})) AND ({services})"
             ),
             args,
         )
@@ -2097,7 +2244,7 @@ impl PgStore {
         let Some(row) = c
             .query_opt(
                 "SELECT a.id, a.target_kind, a.target_id, a.title, a.source, a.created_at, COUNT(d.seq), COUNT(d.received_at), a.kind, a.service
-                 FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id WHERE a.id = $1 GROUP BY a.id",
+                 FROM alerts a LEFT JOIN deliveries d ON d.alert_id = a.id WHERE a.id = $1 AND a.request_id IS NULL GROUP BY a.id",
                 &[&id],
             )
             .await
@@ -2304,6 +2451,21 @@ impl PgStore {
                 "{} has schema version {version}, this binary imports version {}: start the SQLite instance once with this binary to migrate it",
                 path.display(),
                 super::db::SCHEMA_VERSION
+            ));
+        }
+        // The items (sealed bodies, turns, approvals) are not carried: a file that holds one stays a SQLite file.
+        let items: i64 = lite
+            .query_row(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items')
+                        THEN (SELECT COUNT(*) FROM items) ELSE 0 END",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if items > 0 {
+            return Err(format!(
+                "{} holds {items} items: this import does not carry items",
+                path.display()
             ));
         }
         let mut c = self.client().await.map_err(|e| e.to_string())?;
@@ -2522,7 +2684,7 @@ impl PgStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -2605,16 +2767,16 @@ mod tests {
 
     /// A throwaway database on the server of `INBOX_TEST_PG=host:port:user:password`. The tests
     /// that need it end at once without the variable. The database goes away with the value.
-    struct TestDatabase {
+    pub(in crate::inbox) struct TestDatabase {
         host: String,
         port: u16,
         user: String,
         password: String,
-        name: String,
+        pub(in crate::inbox) name: String,
     }
 
     impl TestDatabase {
-        async fn admin(&self, database: &str) -> tokio_postgres::Client {
+        pub(in crate::inbox) async fn admin(&self, database: &str) -> tokio_postgres::Client {
             let mut config = tokio_postgres::Config::new();
             config
                 .host(&self.host)
@@ -2627,7 +2789,7 @@ mod tests {
             client
         }
 
-        async fn create() -> Option<TestDatabase> {
+        pub(in crate::inbox) async fn create() -> Option<TestDatabase> {
             let raw = std::env::var("INBOX_TEST_PG").ok()?;
             let mut parts = raw.splitn(4, ':');
             let mut db = TestDatabase {
@@ -2646,7 +2808,7 @@ mod tests {
             Some(db)
         }
 
-        async fn store(&self) -> PgStore {
+        pub(in crate::inbox) async fn store(&self) -> PgStore {
             PgStore::connect(&PgSettings {
                 host: self.host.clone(),
                 port: self.port,
@@ -2660,7 +2822,7 @@ mod tests {
             .unwrap()
         }
 
-        async fn sql(&self, sql: &str) {
+        pub(in crate::inbox) async fn sql(&self, sql: &str) {
             self.admin(&self.name)
                 .await
                 .batch_execute(sql)

@@ -494,26 +494,26 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 |---|---|---|---|
 | 3.1.5a | 5.1.0 | L3 | `proto::tests::the_kind_of_an_alert_is_alert_and_nothing_else`, `frames::the_golden_files_cover_every_frame_in_both_directions`, `old_hello_protocol_4_gets_4426` |
 | 3.3.8a | 5.1.0 | L9 | to fill |
-| 3.6.1 | 5.1.0 | L5 | to fill |
-| 3.6.2 | 5.1.0 | L5 | to fill |
-| 3.6.3 | 5.1.0 | L5 | to fill |
-| 3.6.4 | 5.1.0 | L5 | to fill |
-| 3.6.5 | 5.1.0 | L5 | to fill |
-| 3.6.6 | 5.1.0 | L5, L7 | to fill |
-| 3.6.7 | 5.1.0 | L5 | to fill |
-| 3.6.8 | 5.1.0 | L5, L9 | to fill |
-| 3.6.9 | 5.1.0 | L5 | to fill |
-| 3.6.10 | 5.1.0 | L5 | to fill |
-| 3.6.11 | 5.1.0 | L5 | to fill |
-| 3.6.12 | 5.1.0 | L5, L7 | to fill |
-| 3.6.13 | 5.1.0 | L5, L9 | to fill |
-| 3.6.14 | 5.1.0 | L5, L8 | to fill |
-| 3.6.15 | 5.1.0 | L5, L8, L9 | to fill |
+| 3.6.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked`, `create_idempotent_same_request_same_id` |
+| 3.6.2 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked`, `renewal_writes_at_most_once_per_lease_s_in_both_databases` |
+| 3.6.3 | 5.1.0 | L5 | `items::tests::state_machine_every_state_times_event_table` |
+| 3.6.4 | 5.1.0 | L5 | `cas_two_racers_one_answer`, `an_approval_is_consumed_once_released_and_lapses` |
+| 3.6.5 | 5.1.0 | L5 | `answer_after_abandon_returns_abandoned`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before`, `items::tests::abandon_after_lease_plus_grace_not_before` |
+| 3.6.6 | 5.1.0 | L5, L7 | L5: `items::tests::waits_are_checked_and_never_changed`, `until_expires_and_never_abandons`. L7: to fill |
+| 3.6.7 | 5.1.0 | L5 | `items::tests::lease_effective_is_three_times_lease_s`, `items::tests::max_lifetime_caps_lease_and_supersede_does_not_extend`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
+| 3.6.8 | 5.1.0 | L5, L9 | L5: `items::tests::renewal_write_at_most_once_per_lease_s`, `renewal_writes_at_most_once_per_lease_s_in_both_databases`, `events_one_row_per_transition_none_per_renewal`. L9: to fill |
+| 3.6.9 | 5.1.0 | L5 | `items::tests::abandon_after_lease_plus_grace_not_before`, `the_sweeper_abandons_after_lease_plus_grace_and_not_before` |
+| 3.6.10 | 5.1.0 | L5 | `items::tests::until_reached_is_expired_neutral`, `until_expires_and_never_abandons`, `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend` |
+| 3.6.11 | 5.1.0 | L5 | `revive_in_window_max_three_notifications_once`, `revive_after_window_refused_new_request_needs_previous_id`, `items::tests::revive_needs_the_window_the_count_and_the_body`. The `410` is in L9 |
+| 3.6.12 | 5.1.0 | L5, L7 | L5: `supersede_race_one_winner_old_approval_cancelled`. L7: to fill |
+| 3.6.13 | 5.1.0 | L5, L9 | L5: `the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items`. L9: to fill |
+| 3.6.14 | 5.1.0 | L5, L8 | L5: `cas_two_racers_one_answer`, `answer_effect_mismatch_state_unchanged`, `answer_after_abandon_returns_abandoned`. L8: to fill |
+| 3.6.15 | 5.1.0 | L5, L8, L9 | L5: `the_thread_follows_the_flags_the_limits_and_the_pace_of_the_agent`. L8, L9: to fill |
 | 3.6.16 | 5.1.0 | L2 | `key_interaction_default_by_kind`, `config_interaction_values_closed`, `the_interaction_field_is_closed_and_an_absent_field_changes_nothing`, `grant_roundtrip_confirm_both_backends` |
 | 3.6.17 | 5.1.0 | L7, L9 | to fill |
-| 3.6.18 | 5.1.0 | L5 | to fill |
-| 3.6.19 | 5.1.0 | L5 | to fill |
-| 3.6.20 | 5.1.0 | L5 | to fill |
+| 3.6.18 | 5.1.0 | L5 | `caps_per_key_owner_total` |
+| 3.6.19 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
+| 3.6.20 | 5.1.0 | L5 | `outage_extends_open_leases_by_the_gap_no_false_abandon`, `degraded_storage_returns_storage_degraded_and_writes_nothing` |
 | 3.6.21 | 5.2.0 | L13 | to fill |
 | 3.6.22 | 5.2.0 | L13 | to fill |
 | 3.6.23 | 5.2.0 | L13 | to fill |
@@ -567,8 +567,8 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.10.4 | 5.1.0 | L12 | to fill |
 | 3.10.5 | 5.1.0 | L4 | to fill |
 | 3.10.6 | 5.1.0 | L10 | to fill |
-| 4.9.2a | 5.1.0 | L5 | to fill |
-| 4.11.1 | 5.1.0 | L5 | to fill |
+| 4.9.2a | 5.1.0 | L5 | `degraded_storage_returns_storage_degraded_and_writes_nothing` |
+| 4.11.1 | 5.1.0 | L5 | `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
 | 4.11.2 | 5.1.0 | L8 | to fill |
 | 4.11.3 | 5.1.0 | L8 | to fill |
 | 4.11.4 | 5.1.0 | A1 | to fill |
@@ -579,15 +579,15 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 4.11.9 | 5.1.0 | L8 | to fill |
 | 4.11.10 | 5.1.0 | L8 | to fill |
 | 5.11.1 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
-| 5.11.2 | 5.1.0 | L5 | to fill |
+| 5.11.2 | 5.1.0 | L5 | `canary_absent_in_every_column_and_in_replica_snapshot` |
 | 5.11.3 | 5.1.0 | L4 | `seal_open_round_trip`, `aad_binds_request_field_seq_and_effect` |
-| 5.11.4 | 5.1.0 | L4, L5 | L4: `moved_sealed_value_does_not_open`; L5: to fill |
-| 5.11.5 | 5.1.0 | L5 | to fill |
+| 5.11.4 | 5.1.0 | L4, L5 | L4: `moved_sealed_value_does_not_open`; L5: `a_sealed_value_that_moves_does_not_open` |
+| 5.11.5 | 5.1.0 | L5 | `canary_absent_in_every_column_and_in_replica_snapshot`, `an_item_reaches_each_phone_of_its_owner_that_is_not_revoked` |
 | 5.11.6 | 5.1.0 | L4 | `plain_secret_in_file_stops_start`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `two_keys_active_writes_all_read`, `active_key_unknown_stops_start` |
-| 5.11.7 | 5.1.0 | L4, L5 | L4: `active_key_unknown_stops_start`, `duplicate_key_id_or_secret_stops_start`, `two_ids_with_one_key_stop_the_start`, `secret_not_32_bytes_or_all_equal_stops_start`, `wrong_key_same_id_fails_check_value`, `wrong_key_same_id_stops_the_start_and_the_log_names_the_keys`, `a_key_id_that_the_file_lost_is_reported_with_its_count`; L5: to fill |
-| 5.11.8 | 5.1.0 | L4, L5 | L4: `content_key_command_never_overwrites`; L5: to fill |
+| 5.11.7 | 5.1.0 | L4, L5 | L4: `active_key_unknown_stops_start`, `duplicate_key_id_or_secret_stops_start`, `two_ids_with_one_key_stop_the_start`, `secret_not_32_bytes_or_all_equal_stops_start`, `wrong_key_same_id_fails_check_value`, `wrong_key_same_id_stops_the_start_and_the_log_names_the_keys`, `a_key_id_that_the_file_lost_is_reported_with_its_count`; L5: `orphan_body_kid_stops_start_with_count` |
+| 5.11.8 | 5.1.0 | L4, L5 | L4: `content_key_command_never_overwrites`; L5: `orphan_body_kid_stops_start_with_count` (the function behind `content-purge`) |
 | 5.11.9 | 5.2.0 | L15 | to fill |
-| 5.11.10 | 5.1.0 | L5 | to fill |
+| 5.11.10 | 5.1.0 | L5 | `body_purge_keeps_metadata_effect_and_events` |
 | 5.11.11 | 5.1.0 | L12 | to fill |
 | 5.11.12 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.13 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
@@ -610,9 +610,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
 | 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected` |
 | 6.10.3 | 5.1.0 | L3 | `frames::request_fits_one_noise_message_at_max_sizes`, `frames::encode_refuses_a_frame_above_one_noise_message` |
-| 6.10.4 | 5.1.0 | L5 | to fill |
-| 6.11.1 | 5.1.0 | L5 | to fill |
-| 6.11.2 | 5.1.0 | L5 | to fill |
+| 6.10.4 | 5.1.0 | L5 | `old_inbox_schema_stops_start` |
+| 6.11.1 | 5.1.0 | L5 | `the_journal_and_the_metrics_follow_the_names_of_the_specification` |
+| 6.11.2 | 5.1.0 | L5 | `ninety_days_are_simulated_without_a_pause_and_supersede_does_not_extend`; each test of `items_tests.rs` runs on SQLite and on PostgreSQL |
 | 6.11.3 | 5.1.0 | L12 | to fill |
 | 6.11.4 | 5.1.0 | L12 | to fill |
 | 8.2.1 | 5.1.0 | L12 | to fill |

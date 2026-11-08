@@ -177,6 +177,10 @@ pub struct App {
     pub session_budget: SessionBudget,
     /// The handshakes of each client address (`inbox.devices.max_handshakes_per_address`).
     pub handshakes: Handshakes,
+    /// The clock of every time rule of the items.
+    pub clock: std::sync::Arc<dyn super::items::Clock>,
+    /// Wakes the agents that wait for an item when an item changes.
+    pub item_changed: tokio::sync::Notify,
     /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.
     pub authorizer: std::sync::OnceLock<std::sync::Arc<dyn super::rights::Authorizer>>,
 }
@@ -185,6 +189,26 @@ impl App {
     /// Alerts created before this Unix time (ms) have expired for delivery.
     pub fn delivery_cutoff(&self) -> i64 {
         super::util::now_ms() - self.config.storage.delivery_ttl.as_millis() as i64
+    }
+
+    /// The engine of the items. `None` without the blocks `inbox.items` and `inbox.at_rest`.
+    pub fn items(&self) -> Option<super::items_store::Items<'_>> {
+        let (config, content) = (self.config.items.as_ref()?, self.secrets.content.as_ref()?);
+        Some(super::items_store::Items {
+            store: &self.db,
+            content,
+            rules: super::items::Rules::from_config(config),
+            clock: &*self.clock,
+            hub: Some(&self.hub),
+            replica: Some(&self.replica),
+            metrics: Some(&self.metrics),
+            changed: Some(&self.item_changed),
+            admin_body_read: self
+                .config
+                .at_rest
+                .as_ref()
+                .is_some_and(|a| a.admin_body_read),
+        })
     }
 
     /// The authorizer of the portal. `None` before the portal gives it.
