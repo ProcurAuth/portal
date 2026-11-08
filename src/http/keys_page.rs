@@ -163,6 +163,19 @@ fn cover_of(owner: Option<&[Grant]>, grant: &Grant) -> Cover {
     }
 }
 
+/// Whether the side of the owner asks for the approval of the action of `grant`: a grant of the
+/// owner with `confirm` covers the node of the grant. The superadmin has no side.
+fn imposed_by_owner(owner: Option<&[Grant]>, grant: &Grant) -> bool {
+    owner.is_some_and(|held| {
+        held.iter().any(|g| {
+            g.confirm
+                && g.action == grant.action
+                && g.service == grant.service
+                && grant.path.starts_with(&g.path)
+        })
+    })
+}
+
 /// The editor of the grants of a form of a key of this kind. The owner can give what the owner
 /// holds, so each service where the owner holds a grant is in the editor. An API key holds the
 /// alert actions of the portal features and no service. An MCP key holds services. `ticked` are the
@@ -235,6 +248,7 @@ fn grant_lines(grants: &[Grant], owner: Option<&[Grant]>) -> Vec<GrantLine> {
         .map(|g| GrantLine {
             grant: g.clone(),
             cover: cover_of(owner, g),
+            imposed: imposed_by_owner(owner, g),
         })
         .collect()
 }
@@ -307,6 +321,7 @@ fn line_of_record(
         revoked_at: None,
         grants: grant_lines(&key.grants, holder.as_deref()),
         no_access: without_access(&key.grants),
+        interaction: Some(key.interaction),
         can_change: false,
     };
     line.can_change = can_edit && !key.is_from_file() && key_state == KeyState::Active;
@@ -354,6 +369,7 @@ fn line_of_item(state: &AppState, item: &KeyListItem, now: i64, can_edit: bool) 
         revoked_at: item.revoked_at,
         grants: grant_lines(&item.grants, holder.as_deref()),
         no_access: without_access(&item.grants),
+        interaction: item.interaction,
         can_change: false,
     }
 }
@@ -572,6 +588,7 @@ pub(super) struct Refused {
     pub service: String,
     pub name: String,
     pub expires_at: Option<String>,
+    pub interaction: Option<crate::keys::Interaction>,
     pub grants: Vec<Grant>,
 }
 
@@ -587,6 +604,10 @@ fn refused_for_access(
         service,
         name: raw.name.clone(),
         expires_at: raw.expires_at.clone(),
+        interaction: raw
+            .interaction
+            .as_deref()
+            .and_then(crate::keys::Interaction::from_name),
         grants,
     })
 }
@@ -665,6 +686,9 @@ async fn draw(
     }
     let mut copy_name = String::new();
     let mut ticked: Vec<Grant> = Vec::new();
+    // The interaction that the form shows: the key that the form copies or changes, or what the
+    // person typed. Without these, the default of the kind.
+    let mut interaction: Option<crate::keys::Interaction> = None;
     // The form that the server refused keeps what the person typed.
     let typed_expiry = refused.as_ref().and_then(|r| r.expires_at.clone());
     let mut edit: Option<EditTarget> = None;
@@ -685,6 +709,7 @@ async fn draw(
                 ticked = source.grants.clone();
                 copy_name = source.name.clone();
                 kind = Some(source.kind);
+                interaction = Some(source.interaction);
             }
         }
     }
@@ -696,6 +721,7 @@ async fn draw(
             Ok(key) => {
                 ticked = key.grants.clone();
                 kind = Some(key.kind);
+                interaction = Some(key.interaction);
                 edit = Some(EditTarget {
                     id: key.id.clone(),
                     name: key.name.clone(),
@@ -706,6 +732,7 @@ async fn draw(
     }
     if let Some(r) = &refused {
         ticked = r.grants.clone();
+        interaction = r.interaction.or(interaction);
         if let Some(target) = &mut edit {
             target.name = r.name.clone();
         } else {
@@ -755,6 +782,8 @@ async fn draw(
             }),
         max_lifetime,
         copy_name,
+        interaction: kind
+            .map(|kind| interaction.unwrap_or(crate::keys::Interaction::default_for(kind))),
         needs_access: refused.map(|r| r.service),
     };
     let frame = ui::Frame {
@@ -1000,6 +1029,9 @@ pub(super) async fn handle_keys_create(
         last_check_at: None,
         check_count: 0,
         kind,
+        interaction: form
+            .interaction
+            .unwrap_or(crate::keys::Interaction::default_for(kind)),
         grants: form.grants,
     };
     let caps = caps(state, now, owner.as_deref());
@@ -1029,9 +1061,6 @@ pub(super) async fn handle_keys_create(
         &[
             ("key", id),
             ("owner", viewer.login.clone()),
-        interaction: form
-            .interaction
-            .unwrap_or(crate::keys::Interaction::default_for(kind)),
             ("kind", kind.name().to_string()),
             (
                 "expires_at",
@@ -1136,6 +1165,7 @@ pub(super) async fn handle_keys_edit(
     let login = owner_login(&mine).map(str::to_string);
     let written = {
         let (id, name, grants) = (id.clone(), form.name.clone(), form.grants.clone());
+        let interaction = form.interaction.unwrap_or(key.interaction);
         tokio::task::spawn_blocking(move || {
             store.update_key(&id, login.as_deref(), &name, interaction, &grants, &caps)
         })
@@ -1165,7 +1195,6 @@ pub(super) async fn handle_keys_edit(
         &[("key", id), ("owner", viewer.login.clone())],
     );
     refusal_redirect("edited")
-        let interaction = form.interaction.unwrap_or(key.interaction);
 }
 
 /// `POST /auth/keys/revoke` (portal 5.8e).

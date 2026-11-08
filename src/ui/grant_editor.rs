@@ -30,6 +30,9 @@ pub struct EditorAction {
     /// The actions that this action needs (portal 6.3): it counts only when the account holds
     /// them. Only the actions of the service `portal` have any.
     pub needs: Vec<String>,
+    /// The document has `"approval": "optional"` for the action: the row of a ticked grant has a
+    /// lock that sets `confirm`.
+    pub approval: bool,
 }
 
 /// One node of the tree of a service.
@@ -84,7 +87,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/><use href="#i-settings"/><use href="#i-arrow-up-right"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-lock-open"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/><use href="#i-settings"/><use href="#i-arrow-up-right"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +132,8 @@ fn grant_json(grant: &Grant) -> serde_json::Value {
         grant.action,
         grant.service,
         crate::grants::path_text(&grant.path),
-        limits_json(&grant.limits)
+        limits_json(&grant.limits),
+        grant.confirm
     ])
 }
 
@@ -160,6 +164,7 @@ fn service_json(service: &EditorService) -> serde_json::Value {
                 "types": a.types,
                 "limits": a.limits.iter().map(input_json).collect::<Vec<_>>(),
                 "needs": a.needs,
+                "approval": a.approval,
             })
         })
         .collect();
@@ -227,7 +232,7 @@ fn json_block(data: &EditorData) -> String {
 }
 
 /// The hidden fields of the ticked grants, as the script writes them again after each change:
-/// `grant<n>` and `limit<n>.<name>[.<window>]`, the fields that the handlers read.
+/// `grant<n>`, `limit<n>.<name>[.<window>]` and `confirm<n>`, the fields that the handlers read.
 fn hidden_fields(out: &mut String, data: &EditorData, form: Option<&str>) {
     let form = form
         .map(|id| format!(r#" form="{id}""#))
@@ -236,8 +241,20 @@ fn hidden_fields(out: &mut String, data: &EditorData, form: Option<&str>) {
         let _ = write!(
             out,
             r#"<input type="hidden" name="grant{n}" value="{}"{form}>"#,
-            html_escape(&grant.clone().with_limits(Limits::new()).to_string())
+            html_escape(
+                &grant
+                    .clone()
+                    .with_limits(Limits::new())
+                    .with_confirm(false)
+                    .to_string()
+            )
         );
+        if grant.confirm {
+            let _ = write!(
+                out,
+                r#"<input type="hidden" name="confirm{n}" value="1"{form}>"#
+            );
+        }
         for (name, value) in grant.limits.iter() {
             match value {
                 Value::Ceiling(amount) => {
@@ -292,8 +309,13 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
         for grant in data.ticked.iter().chain(data.locked.iter()) {
             let _ = write!(
                 out,
-                "<li><code>{}</code></li>",
-                html_escape(&grant.to_string())
+                "<li><code>{}</code>{}</li>",
+                html_escape(&grant.to_string()),
+                if grant.confirm {
+                    " (asks for an approval)"
+                } else {
+                    ""
+                }
             );
         }
         out.push_str("</ul></noscript>");
@@ -339,6 +361,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
                 types: Vec::new(),
                 limits: Vec::new(),
                 needs: Vec::new(),
+                approval: false,
             }],
             external: true,
             ..bare_service(&service.id, &service.name)
@@ -359,6 +382,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             types: Vec::new(),
             limits: access_limits,
             needs: Vec::new(),
+            approval: false,
         });
     }
     let mut nodes = vec![EditorNode {
@@ -393,6 +417,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             } else {
                 Vec::new()
             },
+            approval: found.is_some_and(crate::actions::Action::approval_optional),
         });
     }
     for node in &service.document.resources {
@@ -515,6 +540,7 @@ impl EditorData {
                 types: Vec::new(),
                 limits: Vec::new(),
                 needs: Vec::new(),
+                approval: false,
             });
         }
         let path = grant.path_text();
@@ -641,6 +667,7 @@ mod tests {
                     types: vec!["host".into()],
                     limits: Vec::new(),
                     needs: Vec::new(),
+                    approval: false,
                 }],
                 nodes: vec![EditorNode {
                     path: "host:prod".into(),
@@ -1043,5 +1070,80 @@ mod tests {
             serde_json::to_value(service_json(&bare_service("db", "Db"))).unwrap()["external"],
             false
         );
+    }
+
+    #[test]
+    fn the_editor_data_marks_the_actions_with_approval_and_the_grants_with_confirm() {
+        let mut data = data();
+        data.services[0].actions[0].approval = true;
+        data.ticked = vec![grant("data.read on service:db/host:prod").with_confirm(true)];
+        data.owner = Some(vec![grant("data.read on service:db").with_confirm(true)]);
+        let mut out = String::new();
+        render(&mut out, &data, PLACE);
+        // The action says that it can ask. The script draws the lock from this.
+        assert!(out.contains(r#""approval":true"#), "{out}");
+        // A grant is `[action, service, path, limits, confirm]`, on the ticked side and on the owner side.
+        let row = r#"["data.read","db","host:prod",{},true]"#;
+        assert!(out.contains(row), "{out}");
+        assert!(out.contains(r#"["data.read","db","",{},true]"#), "{out}");
+        // The hidden fields carry the property, and the text of the grant does not.
+        assert!(out.contains(
+            r#"<input type="hidden" name="grant0" value="data.read on service:db/host:prod">"#
+        ));
+        assert!(out.contains(r#"<input type="hidden" name="confirm0" value="1">"#));
+        // The lock symbols are in the page.
+        assert!(
+            out.contains("#i-lock-open") && out.contains("#i-lock\""),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_grant_without_confirm_has_no_confirm_field() {
+        let data = data();
+        let mut out = String::new();
+        render(&mut out, &data, PLACE);
+        assert!(!out.contains(r#"name="confirm"#), "{out}");
+        assert!(out.contains(r#""approval":false"#));
+        assert!(
+            out.contains(r#"["data.read","db","host:prod",{},false]"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn only_an_action_of_the_document_with_approval_optional_gets_the_lock() {
+        let text = r#"{"server":"db","resource_types":[],"actions":[
+            {"name":"query.run.write","resource_types":["service"],"description":"Write.","approval":"optional"},
+            {"name":"query.run.read","resource_types":["service"],"description":"Read."}]}"#;
+        let document = crate::actions::parse("db", text.as_bytes()).unwrap();
+        let service = ServiceActions {
+            external: false,
+            id: "db".into(),
+            name: "Data".into(),
+            actions: document
+                .actions
+                .iter()
+                .map(|a| (a.name.clone(), a.description.clone()))
+                .collect(),
+            document: std::sync::Arc::new(document),
+            known: true,
+            fetch: false,
+            critical: Vec::new(),
+            source: Source::Fresh(std::time::Duration::from_secs(1)),
+        };
+        let editor = editor_service(&service);
+        let approval = |name: &str| {
+            editor
+                .actions
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap()
+                .approval
+        };
+        assert!(approval("query.run.write"));
+        assert!(!approval("query.run.read"));
+        // The action `access` never asks for an approval.
+        assert!(!approval("access"));
     }
 }

@@ -265,9 +265,11 @@ pub(super) fn key(id: &str, owner: Option<&str>, kind: KeyKind, grants: &[&str])
             .map(|text| GrantLine {
                 grant: Grant::parse(text).unwrap(),
                 cover: Cover::Full,
+                imposed: false,
             })
             .collect(),
         no_access: Vec::new(),
+        interaction: Some(crate::keys::Interaction::default_for(kind)),
         can_change: owner == Some("alice"),
     }
 }
