@@ -220,7 +220,7 @@ portal has no groups of users. Each user has their own grants.
 
 ### Approval of an action
 
-A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. This release stores and shows the property. The PDP does not use it yet: a later release makes the PDP answer with a reason that asks for an approval.
+A grant can ask for the approval of a person before each use of its action. The grant then has the property `confirm`. The PDP uses the property: see "The approval gate" in the section "AuthZEN PDP".
 
 - A service marks the actions that can ask. The document of the service has `"approval": "optional"` on the action. This is the only value of the member. Any other value, or a member of another type, makes the whole document bad.
 - The grant editor shows a lock button on the row of a ticked permission whose action has `"approval": "optional"`. The tooltip says "Asks for an approval". An open lock means no approval. A closed lock means that the permission asks for an approval. A grant of another action has no lock.
@@ -352,10 +352,10 @@ Rules:
 - A subject that the PDP does not know gets a reason: `{"decision": false, "context": {"reason": "unknown_subject"}}`. This applies to a login that no account has, and to a subject type that is not `user`. The batch gives the same answer in each item of this kind. A service can use it to tell an unknown user from a user without a grant.
 - An id with a colon is not a login: the id `key:<id>` names a key (protocol 3.2, see "Keys and limits"). Without the block `keys`, each key gets `unknown_subject`. A key that does not exist and an expired key get it too. A key older than the `max_key_lifetime` of its owner, or whose owner cannot use keys, also gets it. An id with another prefix gets the same answer.
 - The reasons `invalid_resource` and `invalid_request` tell that the request of the service is not correct. They do not show the grants of a user.
-- No other denial has a reason, except `budget_exceeded` (see "Keys and limits"). The answer is `{"decision": false}`, so that it does not show the grants of a user.
+- No other denial has a reason, except `budget_exceeded` (see "Keys and limits") and the four reasons of the approval gate (see "The approval gate"). The answer is `{"decision": false}`, so that it does not show the grants of a user.
 - The PDP fails closed. A request that the PDP cannot read gets status `400` and no decision.
 - The PDP returns the header `X-Request-ID` of the request.
-- The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`. The record also has the match: `node`, `subtree` or `invalid`.
+- The log records each decision (`pdp_decision`). The record has the server, the subject, the action, the resource, the effect, the decision and the reason. The resource is the chain in the text form of a grant path, with the ids encoded, for example `service:db/host:local/database:analytics`. The record also has the match: `node`, `subtree` or `invalid`.
 - The PDP has no TLS. The deployment must limit the network of the PDP to the services and portal. This differs from AuthZEN, which requires TLS.
 - In K3s, the NetworkPolicy `allow-portal-pdp` (`deploy/k3s/network-policy.yaml`) admits to the port 4182 only the pods with the label `portal-pdp-client: "true"`. These pods must be in the namespace `apps`, `observability` or `edge`. Give this label to the pod template of each server that asks the PDP. The policy `allow-portal-http` opens only the port 4181 of portal, and only to the Traefik pods and the Prometheus pod. portal trusts `X-Forwarded-For` from the pod network (`server.trusted_proxies`). No other pod may reach the port 4181.
 
@@ -372,6 +372,75 @@ A request about a database of the host `local`:
   }
 }
 ```
+
+#### The approval gate
+
+A grant with `confirm` makes an action need the approval of a person (see "Approval of an action"). The block `inbox.approvals` starts the gate. It needs `inbox.items`, `inbox.at_rest`, `pdp` and `keys.mcp = true`. A server also needs `approvals = true` in its block `pdp_client`. Without this flag, a grant with `confirm` gives the server a plain `{"decision": false}`.
+
+```hcl
+inbox {
+  approvals {
+    consume_within = "5m"   # required; evaluation_ttl and deny_cooldown default to "5m"
+  }
+}
+
+pdp_client "db" {
+  token_file = "/run/secrets/portal_pdp_token_db"
+  approvals  = true
+}
+```
+
+The server puts the effect of the operation in `context.approval.effect`. The effect is `sha256:` and 64 lower-case hexadecimal digits (protocol 17.3). A bad value gets status `400`. The question never holds the operation itself.
+
+The PDP first decides as for a question without an effect. The action `access` and a question with `context.match` equal to `"subtree"` ignore `confirm`. When the decision is true and the action needs an approval, the PDP reads the newest approval. It must have the same server, subject, action, resource and effect:
+
+| State of the approval | Question without `usage` | Question with `usage` (a use) |
+|---|---|---|
+| None, or already used | `approval_required` | `approval_required` |
+| Open (`pending` or `replied`) | `approval_pending` | `approval_pending` |
+| Declined, deny time not over | `approval_denied` | `approval_denied` |
+| Declined, deny time over | `approval_required` | `approval_required` |
+| Abandoned, expired, cancelled, superseded, or not used before `consume_before` | `approval_required` | `approval_expired` |
+| Approved and usable | `true`, nothing consumed | `true`, one approval consumed |
+
+A question with an effect, a spent approval and no `usage` gets `approval_required` so that the agent can ask again. A question with no effect for an action that needs an approval gets `approval_required` without an `evaluation_id`. A `false` answer of the gate takes no unit of a budget.
+
+The answers `approval_required` and `approval_pending` have `context.evaluation_id` when the question had an effect. The server sends this value back when it submits the request. It never reads it.
+
+The `evaluation_id` holds no state. It has the id of a content key, the time of issue and an HMAC-SHA-256. The HMAC covers the server, the subject, the action, the resource, the effect and the time. Each instance that has the content keys can check it.
+
+The `evaluation_id` is valid for `inbox.approvals.evaluation_ttl`.
+
+A use is a question with `context.usage` and the effect. The PDP then takes three steps:
+
+1. It consumes the approval with one compare-and-set in the inbox database.
+2. It counts the unit of each budget of the subject.
+3. If a budget refuses or the count fails, it gives the approval back.
+
+After a refusal by a budget, the answer is `budget_exceeded`, and the approval stays usable until `consume_before`. After a failed count, the status is `503` and the approval stays usable too. The counters and the items are in two stores that have no common transaction. A crash between step 1 and step 2 loses one approval. The agent asks again. A crash never gives two executions.
+
+The decision of the owner sets `consume_before` to the time of the answer plus the larger of `inbox.approvals.consume_within` and `lease_s` of the request. After this time the approval is `lapsed`. After an explicit refusal, the same effect gets `approval_denied` during `inbox.approvals.deny_cooldown`. A void or a used approval starts no deny time. An approval for another effect never depends on it.
+
+The PDP checks the subject and the grants before the approval. A key that is revoked, or a grant that is removed, never gets `true` again, also with an approval that can be used. A revoked key cancels its open requests. A question about another subject, another resource or another effect does not find the approval.
+
+An answer holds the reason and the `evaluation_id` and nothing else. It never shows the owner, the device, the comment or the time of the answer (protocol 17.12).
+
+With the block `inbox.approvals`, the metadata of the PDP has these members (protocol 17.4, 17.5). The values come from the file. A server that does not know them ignores them.
+
+| Member | Value |
+|---|---|
+| `procurauth_approval_lease_min_seconds`, `procurauth_approval_lease_max_seconds` | `inbox.items.lease.min`, `inbox.items.lease.max` |
+| `procurauth_approval_grace_seconds` | `inbox.items.lease.grace` |
+| `procurauth_approval_revive_seconds`, `procurauth_approval_max_revivals` | `inbox.items.lease.revive_window`, `inbox.items.lease.max_revivals` |
+| `procurauth_approval_max_life_seconds` | `inbox.items.max_lifetime` |
+| `procurauth_approval_wait_max_seconds` | `inbox.items.wait_max` |
+| `procurauth_approval_consume_seconds` | `inbox.approvals.consume_within` |
+| `procurauth_approval_deny_seconds` | `inbox.approvals.deny_cooldown` |
+| `procurauth_approval_evaluation_ttl_seconds` | `inbox.approvals.evaluation_ttl` |
+
+The members `procurauth_approval_ref_ttl_seconds` and `procurauth_approval_max_command_bytes` come with the submission API.
+
+The metric `portal_pdp_approval_total{reason}` counts the outcomes of the gate: `approval_required`, `approval_pending`, `approval_denied`, `approval_expired`, `consumed`, `released` and `not_enabled`. The metric `portal_pdp_decisions_total` has the four reasons too. The journal of the items has `approval_consumed` and `approval_released`. No line holds a command.
 
 ### Actions of the services
 
@@ -1111,7 +1180,7 @@ At start, the portal compares each key with a check value in the table `content_
 
 ### The engine of the items
 
-One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The engine has no route and no frame yet: the next lots of 5.1.0 add them.
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The engine has no route and no frame yet. The PDP uses `consume` and `release` (see "The approval gate"). The next lots of 5.1.0 add the routes and the frames.
 
 An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
 

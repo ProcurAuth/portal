@@ -38,6 +38,8 @@ The helpers of the end-to-end tests are in `tests/common/mod.rs`. They start the
 
 The tests of the inbox are in `tests/inbox_e2e.rs`. The tests of items are in `tests/items_e2e.rs`. The conformance series D and E are in `src/http/conformance_tests.rs`. They use the harness of `src/http/cluster_tests.rs`. Add a new helper to `tests/common/mod.rs`, not to a test file.
 
+The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals. It also writes approvals in any state.
+
 ## Pull requests
 
 Describe what changed, why, and how you checked it.

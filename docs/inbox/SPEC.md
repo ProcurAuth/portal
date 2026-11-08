@@ -520,8 +520,8 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.6.24 | 5.2.0 | L13 | to fill |
 | 3.6.25 | 5.2.0 | L13 | to fill |
 | 3.7.1 | 5.1.0 | L2 | `confirm_true_when_key_or_owner_grant_has_it`, `superadmin_owner_uses_key_confirm_only`, `config_confirm_on_portal_service_stops_start`, `config_confirm_on_access_stops_start` |
-| 3.7.2 | 5.1.0 | L6 | to fill |
-| 3.7.3 | 5.1.0 | L6 | to fill |
+| 3.7.2 | 5.1.0 | L6 | Conformance D76, D82, D86 to D88 (`conformance_d::the_cases_of_the_series_d_pass`), `pdp::approval_tests::confirm_with_client_without_approvals_flag_plain_false`, `pdp::approval_tests::answers_carry_only_listed_reasons`, `pdp::approval_tests::other_subject_resource_or_effect_not_applicable` |
+| 3.7.3 | 5.1.0 | L6, L7 | L6: `pdp::approval::tests::the_evaluation_id_is_stateless_valid_on_another_instance_for_the_ttl_and_binds_each_fact`, `pdp::approval::tests::an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file`, `pdp::approval_tests::the_evaluation_id_of_an_answer_binds_the_question_and_works_on_another_instance`. L7: the refusal of a submission, to fill |
 | 3.7.4 | 5.1.0 | L3, L7 | L3: `frames::golden_approval_verifies_and_a_changed_op_does_not`. L7: to fill |
 | 3.7.5 | 5.1.0 | L3, L7 | L3: `effect::tests::effect_vectors_match`, `effect::tests::view_pointer_must_exist`, `effect::tests::effect_changes_with_service_action_resource_op_each`. L7: to fill |
 | 3.7.6 | 5.1.0 | L3, L7 | L3: `effect::tests::jcs_rejects_float_and_integer_above_2_53`. L7: to fill |
@@ -532,9 +532,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.11 | 5.1.0 | L8 | to fill |
 | 3.7.12 | 5.1.0 | L8, L10 | to fill |
 | 3.7.13 | 5.1.0 | L8 | to fill |
-| 3.7.14 | 5.1.0 | L6 | to fill |
-| 3.7.15 | 5.1.0 | L6 | to fill |
-| 3.7.16 | 5.1.0 | L6 | to fill |
+| 3.7.14 | 5.1.0 | L6 | Conformance D77, D78, D81, `pdp::approval_tests::consume_takes_one_unit_once`, `pdp::approval_tests::budget_exceeded_keeps_approval_usable_release_path`, `pdp::approval_tests::two_resume_calls_race_one_true`, `pdp::approval_tests::hundred_concurrent_resumes_one_true`, `items_tests::concurrent_consumes_use_an_approval_once_and_status_consumes_nothing` |
+| 3.7.15 | 5.1.0 | L6 | Conformance D80, `pdp::approval_tests::crash_between_consume_and_count_never_double_executes`, `pdp::approval_tests::abandoned_or_lapsed_reads_as_approval_expired`, `items_tests::an_approval_is_consumed_once_released_and_lapses` |
+| 3.7.16 | 5.1.0 | L6 | Conformance D84, `pdp::approval_tests::revoked_key_or_removed_grant_after_approval_is_false`, `pdp::approval_tests::revoking_a_key_cancels_its_open_approvals` |
 | 3.7.17 | 5.1.0 | L7 | to fill |
 | 3.7.18 | 5.1.0 | L7 | to fill |
 | 3.7.19 | 5.1.0 | L7 | to fill |
@@ -601,10 +601,10 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.12.4 | 5.2.0 | L14, A4 | to fill |
 | 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
 | 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |
-| 6.9.3 | 5.1.0 | L6, L7 | to fill |
-| 6.9.4 | 5.1.0 | L2, L6 | L2: `config_confirm_is_a_member_of_a_grant_object_with_the_default_false`. L6: to fill |
-| 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: to fill (`consume_within`) |
-| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6, L7, L9: to fill |
+| 6.9.3 | 5.1.0 | L6, L7 | L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within`, `evaluation_ttl`, `deny_cooldown`, the blocks `pdp` and `keys.mcp`). L7: the other keys, to fill |
+| 6.9.4 | 5.1.0 | L2, L6 | L2: `config_confirm_is_a_member_of_a_grant_object_with_the_default_false`. L6: `the_block_approvals_gives_typed_values_with_documented_defaults_and_the_flag_of_a_client`, `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` |
+| 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: `a_contradiction_of_the_approvals_stops_the_start_with_the_key_the_range_and_the_value` (`consume_within` above `max_lifetime` cannot happen with today's ranges: 1 hour at most against 1 day at least) |
+| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6 has no contradiction in this list. L7, L9: to fill |
 | 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
 | 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
