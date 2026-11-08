@@ -51,12 +51,15 @@ data class Alert(
  * The `acked_at_ms` column holds the local "alarm stopped" time, `read_at_ms` the
  * local "marked read" time. Neither is ever sent.
  *
+ * The items of protocol 5 (questions and approvals), their turns and the outbox of answers are in
+ * the tables of [ItemSchema]. [SqlItemRepository] reads and writes them for the `ItemEngine`.
+ *
  * `subscriptions` holds this phone's own level per group (alarm / ring / notify,
  * or off). The server only knows which groups this phone subscribes to, never the
  * level.
  */
 class Store private constructor(private val appContext: Context) :
-    SQLiteOpenHelper(appContext, "inbox.db", null, 7) {
+    SQLiteOpenHelper(appContext, "inbox.db", null, 8) {
 
     companion object {
         @Volatile private var instance: Store? = null
@@ -95,6 +98,7 @@ class Store private constructor(private val appContext: Context) :
                 PRIMARY KEY (server_id, group_id))"""
         )
         createAlerts(db)
+        ItemSchema.create(db)
     }
 
     private fun createServers(db: SQLiteDatabase) {
@@ -153,6 +157,13 @@ class Store private constructor(private val appContext: Context) :
                 appContext.getSharedPreferences("inbox_ui", Context.MODE_PRIVATE)
                     .edit().putBoolean(PREF_ENROLL_AGAIN, true).apply()
             }
+        }
+        // v8: protocol 5. The tables of the items, the outbox and the preferences of the account.
+        // They are dropped and made again, as a stored item of an earlier build has no meaning.
+        // Servers, groups and alerts stay: the keys of a server do not change with the protocol.
+        if (oldVersion < 8) {
+            ItemSchema.drop(db)
+            ItemSchema.create(db)
         }
     }
 
