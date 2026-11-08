@@ -289,6 +289,10 @@ pub const BLOCKS: &[(&str, &str)] = &[
         "This block is optional and is inside the block `inbox`. The portal seals the contents of the items with a key of the server before it writes them. It never writes a content in clear text. The block has one block `key \"<id>\"` for each key. The block needs the block `inbox.items`, and the block `inbox.items` needs this block.",
     ),
     (
+        "inbox.mcp",
+        "This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them. The endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.",
+    ),
+    (
         "inbox.approvals",
         "This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.",
     ),
@@ -1654,6 +1658,73 @@ pub static KEYS: &[Key] = &[
         when: When::Always,
         doc: "`true`: a person can approve from the web page. `false`: the page lists the requests and does not decide them, so an owner with no phone cannot receive a request (`409 no_device`).",
     },
+    Key {
+        block: "inbox.mcp",
+        name: "path",
+        kind: Kind::Text {
+            expected: "an absolute URL path of at most 128 bytes, not `/`, not /healthz, /readyz or /api/version, and not under /auth/, /v1/ or /api/v1/",
+            check: check_mcp_path,
+        },
+        presence: Presence::Default("/mcp"),
+        when: When::Always,
+        doc: "The URL path of the MCP endpoint. The endpoint answers `POST` only. It must not be the path of the metrics endpoint.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "max_wait",
+        kind: Kind::Duration { min: secs(0), max: secs(60) },
+        presence: Presence::Default("25s"),
+        when: When::Always,
+        doc: "The longest time that one call of `get_answer` waits for an answer. A longer `wait_s` of the agent is cut to this value. A real client stops a call near 60 seconds, so keep the value lower. It must not be above `inbox.items.wait_max`. `0s`: a call never waits.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "allowed_origins",
+        kind: Kind::List {
+            expected: "origins such as \"https://app.example\": a scheme, a host and an optional port, with no path",
+            check: check_origin,
+            max_items: 32,
+        },
+        presence: Presence::Optional,
+        when: When::Always,
+        doc: "The values of the header `Origin` that the endpoint accepts. A request with no `Origin` header comes from a program and passes. A request with another `Origin` gets `403`. This stops a web page from calling the endpoint with the key of a visitor (DNS rebinding). Without this key, no browser origin passes.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "allowed_client_cidrs",
+        kind: Kind::List {
+            expected: "IP networks such as \"10.42.0.0/16\" or \"127.0.0.1/32\"; the address is the first address of the network",
+            check: check_cidr,
+            max_items: 64,
+        },
+        presence: Presence::Optional,
+        when: When::Always,
+        doc: "The client networks that the endpoint accepts. The client address is the address that `server.trusted_proxies` finds. A client in no network gets `403`. Without this key, each address passes.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "rate_limit_per_minute",
+        kind: Kind::Int { min: 1, max: 100_000 },
+        presence: Presence::Default("120"),
+        when: When::Always,
+        doc: "The most requests of one key in one minute on this instance. Each request counts, also `tools/list` and `ping`. A key over the limit gets `429` with `Retry-After`. The limit is a bucket in the memory of the instance: with N instances, a key can send N times this value.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "max_unauthenticated_per_minute",
+        kind: Kind::Int { min: 1, max: 10_000 },
+        presence: Presence::Default("10"),
+        when: When::Always,
+        doc: "The most requests with no valid key that one client address can send in one minute on this instance. An address over the limit gets `429` with `Retry-After` before the portal checks the key.",
+    },
+    Key {
+        block: "inbox.mcp",
+        name: "max_body_bytes",
+        kind: Kind::Size { min: 1024, max: 1024 * 1024 },
+        presence: Presence::Default("64KiB"),
+        when: When::Always,
+        doc: "The largest body of a request. A larger body gets `413`.",
+    },
 ];
 
 /// The blocks with a label, in the order of the reference. The label names a user or a server.
@@ -1902,6 +1973,7 @@ pub const NESTED_PLAIN_BLOCKS: &[(&str, &str)] = &[
     ("inbox", "items"),
     ("inbox", "at_rest"),
     ("inbox", "approvals"),
+    ("inbox", "mcp"),
     ("inbox.items", "lease"),
     ("inbox.items", "digest"),
 ];
@@ -1951,6 +2023,7 @@ pub fn gate(block: &str) -> Option<&'static str> {
         "inbox.items" | "inbox.items.lease" | "inbox.items.digest" => Some("inbox.items"),
         "inbox.at_rest" => Some("inbox.at_rest"),
         "inbox.approvals" => Some("inbox.approvals"),
+        "inbox.mcp" => Some("inbox.mcp"),
         _ => None,
     }
 }
@@ -2254,6 +2327,56 @@ fn check_cookie_name(value: &str) -> Result<(), String> {
     }
     if !value.starts_with("__Host-") {
         return Err("the name does not start with __Host-".into());
+    }
+    Ok(())
+}
+
+/// The path of the MCP endpoint: the rules of the metrics path, and not the root.
+fn check_mcp_path(path: &str) -> Result<(), String> {
+    if path == "/" || path.ends_with('/') {
+        return Err("the path is the root or ends with '/'".into());
+    }
+    check_metrics_path(path)
+}
+
+/// An origin of the header `Origin`: a scheme, a host and an optional port. It has no path, no query and no `*`.
+fn check_origin(value: &str) -> Result<(), String> {
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .ok_or("the scheme is not http or https")?;
+    if value.len() > 256 {
+        return Err("the origin is longer than 256 bytes".into());
+    }
+    let (host, port) = if let Some(inner) = rest.strip_prefix('[') {
+        // An IPv6 host: `[::1]` or `[::1]:8080`.
+        let (address, after) = inner
+            .split_once(']')
+            .ok_or("the host has no closing bracket")?;
+        let port = match after {
+            "" => None,
+            _ => Some(
+                after
+                    .strip_prefix(':')
+                    .ok_or("the text after the host is not a port")?,
+            ),
+        };
+        (address, port)
+    } else {
+        match rest.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        }
+    };
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'));
+    if !host_ok {
+        return Err("the host is empty or has a character that a host cannot have".into());
+    }
+    if port.is_some_and(|p| p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return Err("the port is not a number of at most 5 digits".into());
     }
     Ok(())
 }

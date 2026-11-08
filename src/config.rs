@@ -25,7 +25,7 @@ use crate::grants::{Grant, Mode};
 pub use inbox::{
     ApiKeyConfig, ApprovalsConfig, AtRestConfig, ClusterConfig, DevicesConfig, DigestConfig,
     GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig, ItemsConfig, LeaseConfig,
-    ReplicaConfig, WatchConfig,
+    McpConfig, ReplicaConfig, WatchConfig,
 };
 pub use resolve::{Effective, Secret};
 use resolve::{Env, Resolved};
@@ -714,6 +714,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         secrets.inbox = Some(inbox_secrets);
     }
     check_approvals(&config)?;
+    check_mcp(&config)?;
     // The grants of the accounts of the file on the service portal follow the document of the
     // features that the file turns on.
     let features = config.portal_features();
@@ -934,6 +935,23 @@ fn check_approvals(config: &Config) -> Result<(), String> {
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// The block `inbox.mcp` needs the keys of the kind `mcp`, and its path must not be the path of the metrics.
+fn check_mcp(config: &Config) -> Result<(), String> {
+    let Some(mcp) = config.inbox.as_ref().and_then(|i| i.mcp.as_ref()) else {
+        return Ok(());
+    };
+    if !config.keys.as_ref().is_some_and(|keys| keys.mcp) {
+        return Err("the block inbox.mcp needs keys.mcp = true: an agent holds a key of the kind mcp; set keys.mcp = true, or remove the block inbox.mcp".into());
+    }
+    if config.metrics.enabled && mcp.path == config.metrics.path {
+        return Err(format!(
+            "inbox.mcp.path must not be metrics.path: both are {:?}; expected another path for one of them",
+            mcp.path
+        ));
     }
     Ok(())
 }

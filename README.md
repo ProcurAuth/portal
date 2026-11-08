@@ -1797,6 +1797,20 @@ This block is optional and is inside the block `inbox`. The portal seals the con
 | `active_key` | text: the label of a block `key` of this block: 1 to 16 characters of a-z, 0-9, '-' and '_' | required | The key that seals the new contents. The other keys of the block stay readable: use them for a rotation. No switch turns the seal off. |
 | `admin_body_read` | `true` or `false` | `false` | `true`: the superadmin can read the contents of the items. The portal writes one audit event and counts each read, never the content. `false`: no route lets an administrator read a content. Only the owner reads it. |
 
+#### Block `inbox.mcp`
+
+This block is optional and is inside the block `inbox`. Its presence starts the MCP endpoint of the portal for the agents. The endpoint gives the tools `approval_intent`, `get_answer`, `keepalive`, `say`, `supersede` and `cancel`. The agent sends its explanation and its talk to the portal here, and the service never sees them. The endpoint takes the keys of the kind `mcp` only. The block needs the block `inbox.items` and `keys.mcp = true`. A call checks the origin, the client address, the key, the rate and the size of the body, in this order. Each instance keeps its own limits.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `path` | text: an absolute URL path of at most 128 bytes, not `/`, not /healthz, /readyz or /api/version, and not under /auth/, /v1/ or /api/v1/ | `"/mcp"` | The URL path of the MCP endpoint. The endpoint answers `POST` only. It must not be the path of the metrics endpoint. |
+| `max_wait` | duration, 0s to 1m | `"25s"` | The longest time that one call of `get_answer` waits for an answer. A longer `wait_s` of the agent is cut to this value. A real client stops a call near 60 seconds, so keep the value lower. It must not be above `inbox.items.wait_max`. `0s`: a call never waits. |
+| `allowed_origins` | list of at most 32 quoted strings: origins such as "https://app.example": a scheme, a host and an optional port, with no path | none | The values of the header `Origin` that the endpoint accepts. A request with no `Origin` header comes from a program and passes. A request with another `Origin` gets `403`. This stops a web page from calling the endpoint with the key of a visitor (DNS rebinding). Without this key, no browser origin passes. |
+| `allowed_client_cidrs` | list of at most 64 quoted strings: IP networks such as "10.42.0.0/16" or "127.0.0.1/32"; the address is the first address of the network | none | The client networks that the endpoint accepts. The client address is the address that `server.trusted_proxies` finds. A client in no network gets `403`. Without this key, each address passes. |
+| `rate_limit_per_minute` | number, 1 to 100000 | `120` | The most requests of one key in one minute on this instance. Each request counts, also `tools/list` and `ping`. A key over the limit gets `429` with `Retry-After`. The limit is a bucket in the memory of the instance: with N instances, a key can send N times this value. |
+| `max_unauthenticated_per_minute` | number, 1 to 10000 | `10` | The most requests with no valid key that one client address can send in one minute on this instance. An address over the limit gets `429` with `Retry-After` before the portal checks the key. |
+| `max_body_bytes` | size, 1KiB to 1MiB | `"64KiB"` | The largest body of a request. A larger body gets `413`. |
+
 #### Block `inbox.approvals`
 
 This block is optional and is inside the block `inbox`. Its presence starts the approval of an action: the PDP answers `approval_required` for a grant with `confirm`, and it consumes an approval once. The block needs the blocks `inbox.items` and `inbox.at_rest`, the block `pdp` and `keys.mcp = true`. A server gets approvals only with `approvals = true` in its block `pdp_client`.
