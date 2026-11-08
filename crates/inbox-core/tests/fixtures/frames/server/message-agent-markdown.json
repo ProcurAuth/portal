@@ -1,0 +1,15 @@
+{
+  "t": "message",
+  "id": "11111111111111111111111111111111",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 1,
+  "by": "agent",
+  "created_at_ms": 1788000100000,
+  "explanation": "Try this first:\n\n```bash\ndocker ps --filter name=db\n```",
+  "command": {
+    "text": "docker ps --filter name=db",
+    "label": "Shell",
+    "language": "bash"
+  },
+  "explanation_format": "markdown"
+}

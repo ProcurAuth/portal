@@ -15,6 +15,7 @@ use crate::b64::serde_bytes;
 use crate::effect::{Op, View, is_effect};
 use crate::error::{Error, Result};
 use crate::noise::MAX_PLAINTEXT;
+pub use crate::render::highlight::Language;
 
 /// Maximum length of a title, in characters. A title is one line.
 pub const MAX_TITLE_CHARS: usize = 128;
@@ -34,6 +35,11 @@ pub const MAX_OPTION_LABEL_CHARS: usize = 48;
 pub const MAX_OPTION_DESCRIPTION_CHARS: usize = 160;
 /// Maximum length of the placeholder of a text question, in characters.
 pub const MAX_PLACEHOLDER_CHARS: usize = 128;
+/// Number of questions of a form, and the limits of their texts, in characters.
+pub const MIN_FORM_QUESTIONS: usize = 1;
+pub const MAX_FORM_QUESTIONS: usize = 4;
+pub const MAX_FORM_HEADER_CHARS: usize = 16;
+pub const MAX_FORM_TEXT_CHARS: usize = 600;
 /// Maximum number of entries of a `sync` frame.
 pub const MAX_SYNC_ENTRIES: usize = 500;
 /// Maximum number of ids in a `digest` frame.
@@ -101,6 +107,18 @@ impl AckStage {
             AckStage::Received => "received",
         }
     }
+}
+
+/// How a screen reads the `explanation` of an agent. The default is `plain`.
+///
+/// `markdown` is a safe subset: see `render::markdown`. It applies to the explanation only. A command, an answer, a
+/// reply and every other text stay plain text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplanationFormat {
+    #[default]
+    Plain,
+    Markdown,
 }
 
 // ---------------------------------------------------------------- checks
@@ -175,6 +193,17 @@ fn check_token(text: &str, what: &'static str) -> Result<()> {
     let ok = (1..=32).contains(&text.len())
         && text.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
     if ok { Ok(()) } else { bad(what) }
+}
+
+/// A command: 1 to 32768 bytes of text, and a label of one line of at most 32 characters.
+fn check_command(c: &Command) -> Result<()> {
+    if c.text.is_empty() || c.text.len() > MAX_COMMAND_BYTES {
+        return bad("command.text");
+    }
+    if let Some(l) = &c.label {
+        check_line(l, MAX_COMMAND_LABEL_CHARS, "command.label")?;
+    }
+    Ok(())
 }
 
 fn is_false(v: &bool) -> bool {
@@ -340,6 +369,9 @@ pub struct Command {
     /// Name of the command ("SQL"), 1 to 32 characters, one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// A hint for the color, from the closed list of [`Language`]. It never changes the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -353,6 +385,8 @@ pub enum InputType {
     Text,
     /// A message with no answer. The owner can only decline.
     None,
+    /// Several questions in one request. The answer has `answers`. See [`FormQuestion`].
+    Form,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,7 +403,7 @@ pub struct InputOption {
 
 /// The input of a question. For a `choice`: 2 to 8 options, `1 <= min <= max <= options`, and
 /// `min = max = 1` when `multiple` is false. For the other types: no option, `multiple` false,
-/// `min = max = 0`.
+/// `min = max = 0`. For a `form`: the same, and `questions` holds 1 to 4 questions. Only a `form` has `questions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
@@ -382,6 +416,114 @@ pub struct Input {
     /// Hint in the field of a `text` question, 1 to 128 characters, one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    /// With `form` only: 1 to 4 questions. The ids are unique in the form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<Vec<FormQuestion>>,
+}
+
+/// The type of a question of a form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormQuestionType {
+    /// One or several options. The answer has `choice`.
+    Choice,
+    /// A free text. The answer has `text`.
+    Text,
+}
+
+/// One question of a form. The rules of `multiple`, `min`, `max` and `options` are those of a `choice` input. A `text`
+/// question has no option, `multiple` false and `min = max = 0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormQuestion {
+    /// 1 to 32 characters of `a-z 0-9 _ -`. It is unique in the form.
+    pub id: String,
+    /// A short label, 1 to 16 characters, one line.
+    pub header: String,
+    /// The question, 1 to 600 characters. It can have line breaks. It is plain text.
+    pub text: String,
+    #[serde(rename = "type")]
+    pub kind: FormQuestionType,
+    pub multiple: bool,
+    pub min: u8,
+    pub max: u8,
+    pub options: Vec<InputOption>,
+    /// Hint in the field of a `text` question, 1 to 128 characters, one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+/// An id of an option or of a question: 1 to 32 characters of `a-z 0-9 _ -`.
+pub fn is_option_id(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// The rules of a list of options, with `multiple`, `min` and `max`.
+fn check_choice(
+    multiple: bool,
+    min: u8,
+    max: u8,
+    options: &[InputOption],
+    what: &'static str,
+) -> Result<()> {
+    let n = options.len();
+    if !(MIN_OPTIONS..=MAX_OPTIONS).contains(&n) {
+        return bad(what);
+    }
+    let (min, max) = (min as usize, max as usize);
+    if min < 1 || min > max || max > n {
+        return bad(what);
+    }
+    if !multiple && (min != 1 || max != 1) {
+        return bad(what);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for o in options {
+        if !is_option_id(&o.id) || !seen.insert(o.id.as_str()) {
+            return bad(what);
+        }
+        check_line(&o.label, MAX_OPTION_LABEL_CHARS, what)?;
+        if let Some(d) = &o.description {
+            check_line(d, MAX_OPTION_DESCRIPTION_CHARS, what)?;
+        }
+    }
+    Ok(())
+}
+
+impl FormQuestion {
+    fn validate(&self) -> Result<()> {
+        if !is_option_id(&self.id) {
+            return bad("form.questions.id");
+        }
+        check_line(&self.header, MAX_FORM_HEADER_CHARS, "form.questions.header")?;
+        check_text(&self.text, MAX_FORM_TEXT_CHARS, "form.questions.text")?;
+        match self.kind {
+            FormQuestionType::Choice => {
+                check_choice(
+                    self.multiple,
+                    self.min,
+                    self.max,
+                    &self.options,
+                    "form.questions.options",
+                )?;
+                if self.placeholder.is_some() {
+                    return bad("form.questions.placeholder");
+                }
+            }
+            FormQuestionType::Text => {
+                if !self.options.is_empty() || self.multiple || self.min != 0 || self.max != 0 {
+                    return bad("form.questions.options");
+                }
+                if let Some(p) = &self.placeholder {
+                    check_line(p, MAX_PLACEHOLDER_CHARS, "form.questions.placeholder")?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A suggestion of the agent or of a system. The screen shows it as not verified.
@@ -451,6 +593,12 @@ pub struct ApprovalBody {
     /// Text of the agent, not verified, 1 to 8000 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// How to read `explanation`. Only with `explanation`. Absent: `plain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation_format: Option<ExplanationFormat>,
+    /// A hint for the color of the command (the value that `view.body` points to). It never changes the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<Language>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<Hint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -498,6 +646,9 @@ impl ApprovalBody {
         if let Some(e) = &self.explanation {
             check_text(e, MAX_EXPLANATION_CHARS, "approval.explanation")?;
         }
+        if self.explanation_format.is_some() && self.explanation.is_none() {
+            return bad("approval.explanation_format");
+        }
         if let Some(h) = &self.hint {
             h.validate()?;
         }
@@ -529,33 +680,12 @@ impl Hint {
 
 impl Input {
     fn validate(&self) -> Result<()> {
+        if self.kind != InputType::Form && self.questions.is_some() {
+            return bad("input.questions");
+        }
         match self.kind {
             InputType::Choice => {
-                let n = self.options.len();
-                if !(MIN_OPTIONS..=MAX_OPTIONS).contains(&n) {
-                    return bad("input.options");
-                }
-                let (min, max) = (self.min as usize, self.max as usize);
-                if min < 1 || min > max || max > n {
-                    return bad("input.min");
-                }
-                if !self.multiple && (min != 1 || max != 1) {
-                    return bad("input.min");
-                }
-                let mut seen = std::collections::HashSet::new();
-                for o in &self.options {
-                    let ok = (1..=32).contains(&o.id.len())
-                        && o.id.bytes().all(|b| {
-                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
-                        });
-                    if !ok || !seen.insert(o.id.as_str()) {
-                        return bad("input.options.id");
-                    }
-                    check_line(&o.label, MAX_OPTION_LABEL_CHARS, "input.options.label")?;
-                    if let Some(d) = &o.description {
-                        check_line(d, MAX_OPTION_DESCRIPTION_CHARS, "input.options.description")?;
-                    }
-                }
+                check_choice(self.multiple, self.min, self.max, &self.options, "input.options")?;
                 if self.placeholder.is_some() {
                     return bad("input.placeholder");
                 }
@@ -572,6 +702,29 @@ impl Input {
                     None => {}
                 }
             }
+            InputType::Form => {
+                if !self.options.is_empty()
+                    || self.multiple
+                    || self.min != 0
+                    || self.max != 0
+                    || self.placeholder.is_some()
+                {
+                    return bad("input.options");
+                }
+                let Some(questions) = &self.questions else {
+                    return bad("input.questions");
+                };
+                if !(MIN_FORM_QUESTIONS..=MAX_FORM_QUESTIONS).contains(&questions.len()) {
+                    return bad("input.questions");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for q in questions {
+                    q.validate()?;
+                    if !seen.insert(q.id.as_str()) {
+                        return bad("form.questions.id");
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -581,7 +734,7 @@ impl Input {
 ///
 /// The same `request_id` can come again with a higher `seq`: the frame is the new state of
 /// the item (a revival, a new turn). The device keeps one item for each `request_id`.
-/// The fields of a question are `title`, `explanation`, `command`, `input`, `hint` and `as_of_ms`.
+/// The fields of a question are `title`, `explanation`, `explanation_format`, `command`, `input`, `hint` and `as_of_ms`.
 /// The field of an approval is `approval`. A frame has the fields of its kind only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -623,6 +776,9 @@ pub struct RequestMsg {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// How to read `explanation`. Only with `explanation`. Absent: `plain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation_format: Option<ExplanationFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Command>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -672,17 +828,30 @@ impl RequestMsg {
                 if let Some(e) = &self.explanation {
                     check_text(e, MAX_EXPLANATION_CHARS, "request.explanation")?;
                 }
+                if self.explanation_format.is_some() && self.explanation.is_none() {
+                    return bad("request.explanation_format");
+                }
                 if let Some(c) = &self.command {
-                    if c.text.is_empty() || c.text.len() > MAX_COMMAND_BYTES {
-                        return bad("command.text");
-                    }
-                    if let Some(l) = &c.label {
-                        check_line(l, MAX_COMMAND_LABEL_CHARS, "command.label")?;
-                    }
+                    check_command(c)?;
                 }
                 input.validate()?;
                 if input.kind == InputType::Text && self.allow_custom {
                     return bad("request.allow_custom");
+                }
+                if input.kind == InputType::Form {
+                    // A closed automatic system gives one decision: it has no form.
+                    if self.from.interaction == Interaction::OneShot {
+                        return bad("request.form");
+                    }
+                    // `allow_custom` adds a row "Other" to each choice question: a form with none has no use for it.
+                    let has_choice = input
+                        .questions
+                        .iter()
+                        .flatten()
+                        .any(|q| q.kind == FormQuestionType::Choice);
+                    if self.allow_custom && !has_choice {
+                        return bad("request.allow_custom");
+                    }
                 }
                 if input.kind == InputType::None && (self.allow_custom || self.allow_ask_back) {
                     return bad("request.allow");
@@ -700,6 +869,7 @@ impl RequestMsg {
                 };
                 if self.title.is_some()
                     || self.explanation.is_some()
+                    || self.explanation_format.is_some()
                     || self.command.is_some()
                     || self.input.is_some()
                     || self.hint.is_some()
@@ -737,6 +907,9 @@ pub struct MessageMsg {
     pub created_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// How to read `explanation`. Only with `explanation`. Absent: `plain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation_format: Option<ExplanationFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Command>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -759,17 +932,18 @@ impl MessageMsg {
                 if let Some(e) = &self.explanation {
                     check_text(e, MAX_EXPLANATION_CHARS, "message.explanation")?;
                 }
+                if self.explanation_format.is_some() && self.explanation.is_none() {
+                    return bad("message.explanation_format");
+                }
                 if let Some(c) = &self.command {
-                    if c.text.is_empty() || c.text.len() > MAX_COMMAND_BYTES {
-                        return bad("command.text");
-                    }
-                    if let Some(l) = &c.label {
-                        check_line(l, MAX_COMMAND_LABEL_CHARS, "command.label")?;
-                    }
+                    check_command(c)?;
                 }
             }
             Author::User => {
-                if self.explanation.is_some() || self.command.is_some() {
+                if self.explanation.is_some()
+                    || self.explanation_format.is_some()
+                    || self.command.is_some()
+                {
                     return bad("message.explanation");
                 }
                 match &self.text {
@@ -1027,6 +1201,48 @@ pub enum Action {
     Decline,
 }
 
+/// The answer to one question of a form. It has `choice` (the ticked option ids) or `text`, never both. For a
+/// choice question, `text` is the free answer "Other": it is exclusive of the ticks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormAnswer {
+    /// The id of a question of the form.
+    pub question_id: String,
+    /// The ticked option ids, 1 to 8, with no duplicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Vec<String>>,
+    /// Text of the user, 1 to 8000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl FormAnswer {
+    fn validate(&self) -> Result<()> {
+        if !is_option_id(&self.question_id) {
+            return bad("answer.answers.question_id");
+        }
+        match (&self.choice, &self.text) {
+            (Some(c), None) => {
+                if c.is_empty() || c.len() > MAX_OPTIONS {
+                    return bad("answer.answers.choice");
+                }
+                let mut seen = std::collections::HashSet::new();
+                if !c.iter().all(|id| is_option_id(id) && seen.insert(id.as_str())) {
+                    return bad("answer.answers.choice");
+                }
+            }
+            (None, Some(t)) => {
+                check_text(t, MAX_USER_TEXT_CHARS, "answer.answers.text")?;
+                if t.contains('\0') {
+                    return bad("answer.answers.text");
+                }
+            }
+            _ => return bad("answer.answers"),
+        }
+        Ok(())
+    }
+}
+
 /// `answer`: the only answer of an item. There is no signature field: the proof is the
 /// authenticated session and the hash `shown_effect`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1050,6 +1266,11 @@ pub struct AnswerMsg {
     /// Only with `decline` of an approval, and only with `text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
+    /// The answers to a form: one entry for each question, 1 to 4 entries. Only with `accept`. It excludes `choice`,
+    /// `text` and `intent`. The parser checks the shape. The server checks the ids against the form of the item
+    /// (see `form::validate_form_answer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Vec<FormAnswer>>,
 }
 
 impl AnswerMsg {
@@ -1086,6 +1307,26 @@ impl AnswerMsg {
         }
         if self.action == Action::Decline && self.choice.is_some() {
             return bad("answer.choice");
+        }
+        if let Some(list) = &self.answers {
+            if self.action != Action::Accept
+                || self.choice.is_some()
+                || self.text.is_some()
+                || self.intent.is_some()
+                || self.shown_effect.is_some()
+            {
+                return bad("answer.answers");
+            }
+            if !(MIN_FORM_QUESTIONS..=MAX_FORM_QUESTIONS).contains(&list.len()) {
+                return bad("answer.answers");
+            }
+            let mut seen = std::collections::HashSet::new();
+            for a in list {
+                a.validate()?;
+                if !seen.insert(a.question_id.as_str()) {
+                    return bad("answer.answers.question_id");
+                }
+            }
         }
         Ok(())
     }

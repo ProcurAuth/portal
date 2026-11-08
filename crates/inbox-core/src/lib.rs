@@ -16,6 +16,7 @@ pub mod b64;
 pub mod effect;
 pub mod enroll;
 pub mod error;
+pub mod form;
 pub mod noise;
 pub mod proto;
 pub mod render;
