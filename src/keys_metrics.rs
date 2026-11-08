@@ -124,6 +124,7 @@ pub fn render(state: &AppState) -> String {
         .groups()
         .iter()
         .flat_map(|g| g.services.iter())
+        .filter(|s| !s.external)
         .map(|s| s.id.clone())
         .collect();
     out.push_str(&format!(

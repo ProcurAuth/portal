@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::decision::CounterOwner;
-use crate::grants::CounterId;
+use crate::grants::{CounterId, ACCESS};
 use crate::store::{DirectorySnapshot, Store};
 use crate::users::{Directory, KeyOwner, KeyRecord};
 
@@ -102,6 +102,45 @@ pub fn check_user_grants(config: &Config, snapshot: &DirectorySnapshot) -> Resul
         )),
         None => Ok(()),
     }
+}
+
+/// Refuses a file that gives a right on an external service that the database holds. An external service is a
+/// link: an account of the file may hold `access` on it, and nothing else. A key of the file never holds a right on
+/// it. A name of a block `pdp_client` is a service that asks the PDP: it is never an external service. Each error
+/// names the block, the attribute and the grant. A grant on an id that the database does not hold is not checked: the
+/// start cannot know that the id will name an external service.
+pub fn check_externals(
+    config: &Config,
+    snapshot: &DirectorySnapshot,
+    pdp_names: &[String],
+) -> Result<(), String> {
+    let external = |service: &str| snapshot.externals.iter().any(|e| e.id == service);
+    for (login, account) in &config.access.accounts {
+        if let Some(grant) = account
+            .grants
+            .iter()
+            .find(|g| external(&g.service) && (g.action != ACCESS || !g.path.is_empty()))
+        {
+            return Err(format!(
+                "user {login:?}, grants: \"{grant}\" names the external service {}: an external service is a link, and an account holds only \"access on service:{}\" on it",
+                grant.service, grant.service
+            ));
+        }
+        for key in &account.keys {
+            if let Some(grant) = key.grants.iter().find(|g| external(&g.service)) {
+                return Err(format!(
+                    "user {login:?}, key {:?}, grants: \"{grant}\" names the external service {}: a key holds no right on an external service",
+                    key.name, grant.service
+                ));
+            }
+        }
+    }
+    if let Some(name) = pdp_names.iter().find(|name| external(name)) {
+        return Err(format!(
+            "pdp_client {name:?}: the name is the id of an external service, and an external service is never a client of the PDP: delete the external service or rename the block"
+        ));
+    }
+    Ok(())
 }
 
 /// The counters that the grants of the directory and of the file need (portal 7.2a).

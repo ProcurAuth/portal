@@ -7,6 +7,7 @@
 //! Interface: [`parse_labels`] takes the labels of one workload and returns a [`Service`].
 //! [`Catalog::build`] takes services and returns ordered groups. Everything else is plain data.
 
+pub mod external;
 mod labels;
 
 use std::collections::HashMap;
@@ -48,7 +49,6 @@ pub struct Service {
     pub icon: Option<String>,
     /// A path on this host (`/grafana/`) or an absolute http(s) URL. The parser validates it.
     pub href: String,
-    pub new_tab: bool,
     pub weight: i32,
     pub health_url: Option<String>,
     /// Where the service publishes its actions (`/.well-known/procurauth/actions`). The value comes from
@@ -62,6 +62,9 @@ pub struct Service {
     /// The health check of the runtime. `None` when the runtime has no check for this service,
     /// or when discovery does not ask the runtime.
     pub runtime: Option<RuntimeHealth>,
+    /// The superadmin added the service by hand: it is a link and nothing else (see [`external`]). It has no
+    /// actions, no document, no health probe and no path in the gate.
+    pub external: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,15 +188,7 @@ impl Catalog {
             by_group[slot].services.push(service);
         }
 
-        for group in &mut by_group {
-            group
-                .services
-                .sort_by_cached_key(|s| (s.weight, s.name.to_lowercase(), s.id.clone()));
-        }
-        by_group.sort_by_cached_key(|g| {
-            let lightest = g.services.iter().map(|s| s.weight).min().unwrap_or(0);
-            (lightest, g.name.to_lowercase())
-        });
+        order(&mut by_group);
 
         let gate = build_gate(&by_group, closed);
         let gate_index = index_gate(&gate);
@@ -205,6 +200,31 @@ impl Catalog {
             gate_index,
             complete: true,
         }
+    }
+
+    /// The same catalogue with the external services of `entries` as one more source (see [`external`]). The
+    /// gate does not change: an external service owns no path, so it cannot hide, shadow or open the path of
+    /// another service. A discovered service with the same id wins, and the entry then gives a problem.
+    pub fn with_externals(&self, entries: &[external::ExternalEntry]) -> Catalog {
+        let mut next = self.clone();
+        if entries.is_empty() {
+            return next;
+        }
+        let mut sorted: Vec<&external::ExternalEntry> = entries.iter().collect();
+        sorted.sort_by(|a, b| a.id.cmp(&b.id));
+        let sorted: Vec<external::ExternalEntry> = sorted.into_iter().cloned().collect();
+        let problems = external::merge(&mut next.groups, &sorted);
+        next.problems.extend(problems);
+        order(&mut next.groups);
+        next
+    }
+
+    /// The service with this id.
+    pub fn service(&self, id: &str) -> Option<&Service> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.services.iter())
+            .find(|s| s.id == id)
     }
 
     /// Tells whether the snapshot holds every service of every source. The gate needs a complete
@@ -310,6 +330,20 @@ impl Catalog {
     }
 }
 
+/// Orders the services of each group by weight, then by name. Orders the groups by their lightest service, then
+/// by name.
+fn order(groups: &mut [Group]) {
+    for group in groups.iter_mut() {
+        group
+            .services
+            .sort_by_cached_key(|s| (s.weight, s.name.to_lowercase(), s.id.clone()));
+    }
+    groups.sort_by_cached_key(|g| {
+        let lightest = g.services.iter().map(|s| s.weight).min().unwrap_or(0);
+        (lightest, g.name.to_lowercase())
+    });
+}
+
 /// The position of each prefix in the gate, by its head and its last segment.
 fn index_gate(gate: &[GateEntry]) -> HashMap<Segments, Tails> {
     let mut index: HashMap<Segments, Tails> = HashMap::new();
@@ -334,6 +368,10 @@ fn build_gate(groups: &[Group], closed: Vec<Segments>) -> Vec<GateEntry> {
     // The position of each prefix in `entries`, so that the build looks at each prefix one time.
     let mut positions: HashMap<Segments, usize> = HashMap::new();
     for service in groups.iter().flat_map(|g| g.services.iter()) {
+        // An external service is a link. It never owns a path of the gate.
+        if service.external {
+            continue;
+        }
         let Some(prefix) = crate::access::href_prefix(&service.href) else {
             continue;
         };
@@ -388,13 +426,13 @@ mod tests {
             description: String::new(),
             icon: None,
             href: "/".into(),
-            new_tab: false,
             weight,
             health_url: None,
             actions_url: None,
             exclude: Vec::new(),
             health: Health::Unknown,
             runtime: None,
+            external: false,
         }
     }
 
@@ -652,5 +690,142 @@ mod tests {
             "a user does not see the problems"
         );
         assert_eq!(catalog.service_count(), 2, "the original is untouched");
+    }
+
+    fn entry(name: &str, href: &str) -> external::ExternalEntry {
+        let (name, id) = external::check_name(name).unwrap();
+        external::ExternalEntry {
+            id,
+            name,
+            href: href.into(),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn external_services_join_the_group_external_and_carry_the_flag() {
+        let base = Catalog::build(
+            vec![bound("Grafana", "/grafana/")],
+            vec!["a problem".into()],
+        );
+        let merged = base.with_externals(&[
+            entry("Wiki", "https://wiki.example.org/"),
+            entry("Docs", "https://docs.example.org/"),
+        ]);
+        assert_eq!(merged.service_count(), 3);
+        assert_eq!(base.service_count(), 1, "the original is untouched");
+        let group = merged
+            .groups()
+            .iter()
+            .find(|g| g.name == external::GROUP)
+            .expect("the group External");
+        assert_eq!(
+            group
+                .services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Docs", "Wiki"],
+            "sorted by name"
+        );
+        let wiki = merged.service("ext-wiki").unwrap();
+        assert!(wiki.external && wiki.href == "https://wiki.example.org/");
+        assert!(wiki.actions_url.is_none() && wiki.health_url.is_none());
+        assert!(wiki.exclude.is_empty() && wiki.icon.is_none() && wiki.description.is_empty());
+        assert!(!merged.service("infra-grafana").unwrap().external);
+        assert_eq!(merged.problems(), ["a problem"]);
+        assert!(merged.is_complete() == base.is_complete());
+        // No entry gives the same catalogue.
+        assert_eq!(base.with_externals(&[]), base);
+    }
+
+    #[test]
+    fn a_discovered_service_with_the_same_id_wins_and_the_entry_gives_a_problem() {
+        let found = Service {
+            id: "ext-wiki".into(),
+            ..bound("Wiki", "/wiki/")
+        };
+        let base = Catalog::build(vec![found], Vec::new());
+        let merged = base.with_externals(&[entry("Wiki", "https://wiki.example.org/")]);
+        assert_eq!(merged.service_count(), 1);
+        let kept = merged.service("ext-wiki").unwrap();
+        assert!(!kept.external, "the discovered service wins");
+        assert_eq!(kept.href, "/wiki/");
+        assert!(
+            merged.problems().iter().any(|p| p.starts_with("ext-wiki:")),
+            "{:?}",
+            merged.problems()
+        );
+        assert!(merged.groups().iter().all(|g| g.name != external::GROUP));
+    }
+
+    /// The security rule: an external service is a link. It owns no path of the gate, also when its link points to
+    /// the host of the portal, and it cannot hide, shadow or open the path of another service.
+    #[test]
+    fn an_external_service_never_owns_a_path_of_the_gate() {
+        let closed = vec![segments(&["closed"])];
+        let base = Catalog::build_with_closed(
+            vec![
+                bound("Grafana", "/grafana/"),
+                bound("Admin", "/grafana/admin/"),
+            ],
+            Vec::new(),
+            closed,
+        );
+        let merged = base.with_externals(&[
+            entry("Mirror", "https://portal.example.org/grafana/"),
+            entry("Deep", "https://portal.example.org/grafana/admin/x"),
+            entry("Verify", "https://portal.example.org/auth/verify"),
+            entry("Auth", "https://portal.example.org/auth/"),
+            entry("Closed", "https://portal.example.org/closed/"),
+            entry("Root", "https://portal.example.org/"),
+            entry("Same host", "http://localhost/notes/"),
+        ]);
+        assert_eq!(merged.service_count(), 9);
+        assert_eq!(
+            merged.gate(),
+            base.gate(),
+            "the gate is the gate of the discovered services"
+        );
+        let owner = |path: &[&str]| {
+            merged
+                .owner(&segments(path))
+                .map(|e| e.services.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
+        };
+        assert_eq!(owner(&["grafana", "d"]), Some(vec!["infra-grafana".into()]));
+        assert_eq!(
+            owner(&["grafana", "admin", "x"]),
+            Some(vec!["infra-admin".into()])
+        );
+        assert_eq!(owner(&["auth", "verify"]), None);
+        assert_eq!(owner(&["auth"]), None);
+        assert_eq!(owner(&["notes"]), None, "a link to a path owns nothing");
+        assert_eq!(
+            owner(&["closed", "x"]),
+            Some(Vec::new()),
+            "a closed prefix stays closed"
+        );
+        for service in merged.groups().iter().flat_map(|g| g.services.iter()) {
+            if service.external {
+                assert!(merged
+                    .gate()
+                    .iter()
+                    .all(|e| e.services.iter().all(|s| s.id != service.id)));
+            }
+        }
+        // Even a catalogue that is built with an external service in its input gives it no path.
+        let direct = Catalog::build(
+            vec![
+                bound("Grafana", "/grafana/"),
+                Service {
+                    href: "/shadow/".into(),
+                    external: true,
+                    ..bound("Shadow", "/shadow/")
+                },
+            ],
+            Vec::new(),
+        );
+        assert!(direct.owner(&segments(&["shadow", "x"])).is_none());
+        assert_eq!(direct.gate().len(), 1);
     }
 }

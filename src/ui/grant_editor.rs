@@ -62,6 +62,8 @@ pub struct EditorService {
     /// Where the document comes from and how old the copy is. The service `portal` is always
     /// `Absent`: its document is in the code, and the script says so.
     pub source: Source,
+    /// The service is an external service: a link with no action. The script draws its switch and nothing else.
+    pub external: bool,
 }
 
 /// What the form needs to draw the editor. It has two parts: the services, which are the workloads
@@ -82,7 +84,7 @@ pub struct EditorData {
 }
 
 /// The icons that the script draws. The page inlines the symbols that its text uses.
-const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/><use href="#i-settings"/></svg>"##;
+const ICONS: &str = r##"<svg class="icon" hidden aria-hidden="true"><use href="#i-chevron-down"/><use href="#i-chevron-right"/><use href="#i-x"/><use href="#i-check"/><use href="#i-alert-triangle"/><use href="#i-lock"/><use href="#i-key"/><use href="#i-inbox"/><use href="#i-device-mobile"/><use href="#i-webhook"/><use href="#i-robot"/><use href="#i-bell-ringing"/><use href="#i-circle-check"/><use href="#i-clock"/><use href="#i-ban"/><use href="#i-tags"/><use href="#i-user"/><use href="#i-shield-check"/><use href="#i-settings"/><use href="#i-arrow-up-right"/></svg>"##;
 
 /// How the editor sits in its page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +191,7 @@ fn service_json(service: &EditorService) -> serde_json::Value {
             .collect::<Vec<_>>(),
         "fetch": service.fetch,
         "source": source_json(service.source),
+        "external": service.external,
     })
 }
 
@@ -315,6 +318,10 @@ pub fn render(out: &mut String, data: &EditorData, place: Place) {
 
 // The data of an editor ------------------------------------------------------------------------
 
+/// The text of the grant `access` on an external service.
+const EXTERNAL_DESCRIPTION: &str =
+    "Show the tile of the link. This server does not protect the link itself.";
+
 /// The text of the grant `access`.
 const ACCESS_DESCRIPTION: &str = "Open the service. The gate lets the holder in.";
 
@@ -322,6 +329,21 @@ const ACCESS_DESCRIPTION: &str = "Open the service. The gate lets the holder in.
 /// features: its action `access` has no use but to carry a budget, so the editor offers it only when
 /// the document declares one.
 fn editor_service(service: &ServiceActions) -> EditorService {
+    // An external service is a link. Its only action is `access`, on the whole service, with no limit value.
+    if service.external {
+        return EditorService {
+            actions: vec![EditorAction {
+                name: ACCESS.to_string(),
+                description: EXTERNAL_DESCRIPTION.to_string(),
+                whole: true,
+                types: Vec::new(),
+                limits: Vec::new(),
+                needs: Vec::new(),
+            }],
+            external: true,
+            ..bare_service(&service.id, &service.name)
+        };
+    }
     let portal = service.id == crate::portal_actions::SERVICE;
     let access_limits = service.document.limit_inputs(ACCESS);
     let mut actions = Vec::new();
@@ -399,6 +421,7 @@ fn editor_service(service: &ServiceActions) -> EditorService {
             .collect(),
         fetch: service.fetch,
         source: service.source,
+        external: false,
     }
 }
 
@@ -434,6 +457,7 @@ fn bare_service(id: &str, name: &str) -> EditorService {
         types: Vec::new(),
         fetch: false,
         source: Source::Absent,
+        external: false,
     }
 }
 
@@ -629,6 +653,7 @@ mod tests {
                 types: Vec::new(),
                 fetch: false,
                 source: Source::Fresh(std::time::Duration::from_secs(120)),
+                external: false,
             }],
             features: None,
             ticked: vec![grant("data.read on service:db/host:prod")],
@@ -642,6 +667,7 @@ mod tests {
         let text = r#"{"server":"portal","resource_types":[{"name":"inbox_group","parent":"service","description":"A group."}],"actions":[{"name":"alert.send","resource_types":["inbox_group"],"description":"Send an alert to the group."},{"name":"alert.send_user","resource_types":["service"],"description":"Send an alert to one account."}]}"#;
         let document = crate::actions::parse("portal", text.as_bytes()).unwrap();
         ServiceActions {
+            external: false,
             id: "portal".into(),
             name: "Server permissions".into(),
             actions: document
@@ -667,6 +693,7 @@ mod tests {
         render(&mut out, &data, PLACE);
         assert!(out.contains(r#""name":"alert.send_user""#), "{out}");
         let without = ServiceActions {
+            external: false,
             actions: vec![("alert.send".into(), "Send.".into())],
             ..portal_with_direct_alerts()
         };
@@ -735,6 +762,7 @@ mod tests {
         };
         let document = crate::portal_actions::document(&features);
         ServiceActions {
+            external: false,
             id: crate::portal_actions::SERVICE.into(),
             name: "Server permissions".into(),
             actions: document
@@ -846,6 +874,7 @@ mod tests {
         let text = r#"{"server":"db","resource_types":[{"name":"host","parent":"service","description":"A host."}],"actions":[{"name":"data.read","resource_types":["service","host"],"description":"Read."}],"resources":[{"path":"host:prod","label":"Prod"}]}"#;
         let document = crate::actions::parse("db", text.as_bytes()).unwrap();
         ServiceActions {
+            external: false,
             id: "db".into(),
             name: "Data".into(),
             actions: vec![("data.read".into(), "Read.".into())],
@@ -948,5 +977,71 @@ mod tests {
         // budget of the portal, the "give access" link and the undo of "Access off".
         let writes = script.matches("ticked.set(").count();
         assert_eq!(writes, 7, "a new write must go through setGrant");
+    }
+
+    /// An external service is a link: the editor offers its switch and no other action, no node and no source.
+    #[test]
+    fn an_external_service_has_the_switch_and_no_action_list_in_the_editor() {
+        let link = ServiceActions {
+            external: true,
+            id: "ext-wiki".into(),
+            name: "Wiki".into(),
+            // Whatever the caller gives, the editor draws no action for a link.
+            actions: vec![("data.read".into(), "Read.".into())],
+            document: Default::default(),
+            known: true,
+            fetch: true,
+            critical: Vec::new(),
+            source: Source::Fresh(std::time::Duration::from_secs(1)),
+        };
+        let data = build(
+            std::slice::from_ref(&link),
+            None,
+            None,
+            |_| true,
+            vec![grant("access on service:ext-wiki")],
+            true,
+        );
+        let part = &data.services[0];
+        assert!(part.external);
+        assert_eq!(
+            part.actions
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            ["access"]
+        );
+        assert!(part.actions[0].limits.is_empty() && part.actions[0].whole);
+        assert_eq!(part.nodes.len(), 1, "the whole service only");
+        assert!(part.types.is_empty() && !part.fetch);
+        assert!(matches!(part.source, Source::Absent));
+        assert!(data.shows(&grant("access on service:ext-wiki")));
+        assert!(!data.shows(&grant("data.read on service:ext-wiki")));
+        let mut page = String::new();
+        render(
+            &mut page,
+            &data,
+            Place {
+                form: Some("grants"),
+                title: "Permissions",
+                blank_rows: 0,
+                groups: true,
+            },
+        );
+        let json: serde_json::Value = {
+            let start = page.find(r#"class="grantEditor__data">"#).unwrap()
+                + r#"class="grantEditor__data">"#.len();
+            let end = start + page[start..].find("</script>").unwrap();
+            serde_json::from_str(&page[start..end]).unwrap()
+        };
+        assert_eq!(json["services"][0]["external"], true);
+        assert_eq!(json["services"][0]["actions"].as_array().unwrap().len(), 1);
+        assert_eq!(json["services"][0]["actions"][0]["name"], "access");
+        assert!(page.contains(r##"<use href="#i-arrow-up-right"/>"##));
+        // A service of a workload says it is not external.
+        assert_eq!(
+            serde_json::to_value(service_json(&bare_service("db", "Db"))).unwrap()["external"],
+            false
+        );
     }
 }

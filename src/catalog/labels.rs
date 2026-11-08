@@ -104,13 +104,13 @@ pub fn parse(origin: &str, labels: &BTreeMap<String, String>) -> Result<Option<S
         description,
         icon: field(labels, "icon").map(str::to_string),
         href: href.to_string(),
-        new_tab: field(labels, "target") == Some("_blank"),
         weight,
         health_url,
         actions_url,
         exclude,
         health: Health::Unknown,
         runtime: None,
+        external: false,
     }))
 }
 
@@ -190,14 +190,14 @@ fn is_safe_href(value: &str) -> bool {
     is_http_url(value)
 }
 
-fn is_http_url(value: &str) -> bool {
+pub(super) fn is_http_url(value: &str) -> bool {
     !value.chars().any(|c| c.is_control() || c.is_whitespace())
         && (value.starts_with("http://") || value.starts_with("https://"))
         && value.len() > "https://".len()
 }
 
 /// The `scheme://host[:port]` part of an http(s) URL. The path is not included.
-fn url_origin(url: &str) -> Option<&str> {
+pub(super) fn url_origin(url: &str) -> Option<&str> {
     let scheme_end = url.find("://")? + 3;
     let end = url[scheme_end..]
         .find(['/', '?', '#'])
@@ -275,7 +275,6 @@ mod tests {
                 ("portal.description", "Workflow automation"),
                 ("portal.icon", "notes"),
                 ("portal.href", "/notes/"),
-                ("portal.target", "_blank"),
                 ("portal.weight", "40"),
                 (
                     "portal.health",
@@ -288,7 +287,6 @@ mod tests {
         assert_eq!(service.id, "infra-notes");
         assert_eq!(service.group, "Infra");
         assert_eq!(service.href, "/notes/");
-        assert!(service.new_tab);
         assert_eq!(service.weight, 40);
         assert_eq!(
             service.health_url.as_deref(),

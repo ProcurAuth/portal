@@ -42,13 +42,13 @@ fn the_tile_rules_give_the_state_of_a_service() {
         description: String::new(),
         icon: None,
         href: "/".into(),
-        new_tab: false,
         weight: 0,
         health_url: None,
         actions_url: None,
         exclude: Vec::new(),
         health: Health::Unknown,
         runtime: None,
+        external: false,
     };
     assert_eq!(seen(&service), Seen::Unknown);
     service.health = Health::Up;

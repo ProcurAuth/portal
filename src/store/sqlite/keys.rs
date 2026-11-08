@@ -468,10 +468,12 @@ impl Sqlite {
             .map_err(db)?;
         let users = Self::load_users_with(&conn)?;
         let keys = read_keys(&conn, true)?;
+        let externals = Self::load_externals_with(&conn)?;
         Ok(DirectorySnapshot {
             version,
             users,
             keys,
+            externals,
         })
     }
 

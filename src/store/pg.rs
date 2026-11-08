@@ -283,6 +283,16 @@ CREATE TABLE totp_key_check (
   id SMALLINT PRIMARY KEY CHECK (id = 1),
   value BYTEA NOT NULL
 );
+-- The external services (5.0.5) are part of this version too, for the same reason. external_services holds one row
+-- for each service that the superadmin added by hand: the id (ext- and the slug of the name), the name and the
+-- absolute link. The id is the resource id of the grants access on the service. A database that the version 8 made
+-- before the external services lacks the table: the check at the end of the migration refuses it.
+CREATE TABLE external_services (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  href TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
 ",
 ];
 
@@ -650,6 +660,15 @@ impl Pg {
                     SCHEMA.len()
                 )));
             }
+            let with_externals: bool = tx
+                .query_one("SELECT to_regclass('external_services') IS NOT NULL", &[])?
+                .get(0);
+            if !with_externals {
+                return Ok(Err(format!(
+                    "the database was made by schema version {} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see README, Upgrades, version 5.0.5)",
+                    SCHEMA.len()
+                )));
+            }
             tx.commit()?;
             Ok(Ok(()))
         })?
@@ -793,6 +812,67 @@ impl Pg {
             }
             Ok(removed)
         })
+    }
+
+    // External services -----------------------------------------------------------------------
+
+    pub fn insert_external(&self, entry: &ExternalEntry, max: usize) -> Result<(), ExternalError> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            // The row of the version is a lock: the writers of the directory go one after the other, so two
+            // instances cannot pass the limit together.
+            keys::bump(&mut tx)?;
+            let held: i64 = tx
+                .query_one("SELECT COUNT(*) FROM external_services", &[])?
+                .get(0);
+            if usize::try_from(held).unwrap_or(usize::MAX) >= max {
+                return Ok(Err(ExternalError::Full));
+            }
+            let inserted = tx.execute(
+                "INSERT INTO external_services (id, name, href, created_at) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (id) DO NOTHING",
+                &[&entry.id, &entry.name, &entry.href, &entry.created_at],
+            )?;
+            if inserted == 0 {
+                return Ok(Err(ExternalError::Exists));
+            }
+            tx.commit()?;
+            Ok(Ok(()))
+        })
+        .map_err(ExternalError::Db)?
+    }
+
+    pub fn remove_external(&self, id: &str) -> Result<bool, String> {
+        self.run(|c| {
+            let mut tx = c.transaction()?;
+            keys::bump(&mut tx)?;
+            let removed = tx.execute("DELETE FROM external_services WHERE id = $1", &[&id])? > 0;
+            if removed {
+                // The grants on the service, of the accounts and of the keys, go with it, and so do their counters.
+                tx.execute("DELETE FROM user_grants WHERE resource_id = $1", &[&id])?;
+                tx.execute("DELETE FROM key_grants WHERE resource_id = $1", &[&id])?;
+                tx.execute("DELETE FROM budget_counters WHERE service = $1", &[&id])?;
+                tx.commit()?;
+            }
+            Ok(removed)
+        })
+    }
+
+    fn externals_query<C: postgres::GenericClient>(
+        c: &mut C,
+    ) -> Result<Vec<ExternalEntry>, postgres::Error> {
+        Ok(c.query(
+            "SELECT id, name, href, created_at FROM external_services ORDER BY id COLLATE \"C\"",
+            &[],
+        )?
+        .into_iter()
+        .map(|row| ExternalEntry {
+            id: row.get(0),
+            name: row.get(1),
+            href: row.get(2),
+            created_at: row.get(3),
+        })
+        .collect())
     }
 
     // History: writes -------------------------------------------------------------------------
@@ -1273,7 +1353,7 @@ impl Pg {
             tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_APPLY])?;
             tx.batch_execute(
                 "LOCK TABLE users, user_grants, sessions_log, service_access, audit_events, login_attempts,
-                            totp_credentials, totp_recovery, totp_key_check
+                            totp_credentials, totp_recovery, totp_key_check, external_services
                    IN ACCESS EXCLUSIVE MODE",
             )?;
             for table in IMPORTED_TABLES {
@@ -1397,6 +1477,12 @@ impl Pg {
                     &[&row.id, &row.ts, &row.kind, &row.login, &row.actor, &row.ip, &row.user_agent],
                 )?;
             }
+            for entry in &dump.externals {
+                tx.execute(
+                    "INSERT INTO external_services (id, name, href, created_at) VALUES ($1, $2, $3, $4)",
+                    &[&entry.id, &entry.name, &entry.href, &entry.created_at],
+                )?;
+            }
             for row in &dump.totp {
                 tx.execute(
                     "INSERT INTO totp_credentials (login, secret, created_at, last_step)
@@ -1450,6 +1536,7 @@ impl Pg {
                 logins: dump.logins.len(),
                 keys: dump.keys.len(),
                 key_history: dump.key_history.len(),
+                externals: dump.externals.len(),
                 totp: dump.totp.len(),
             }))
         })?
@@ -1520,8 +1607,9 @@ impl Pg {
 }
 
 /// The tables that the import fills. All of them must be empty.
-const IMPORTED_TABLES: [&str; 8] = [
+const IMPORTED_TABLES: [&str; 9] = [
     "totp_credentials",
+    "external_services",
     "keys",
     "key_history",
     "users",
@@ -1706,7 +1794,7 @@ mod tests {
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
                  DROP TABLE keys; DROP TABLE directory_version;
                  ALTER TABLE user_grants DROP COLUMN limits;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 5;
                  INSERT INTO users (id, login, password_hash, created_at) VALUES (1, 'alice', 'h', 1);",
             )
@@ -1798,7 +1886,7 @@ mod tests {
         admin
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN mfa;
-                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;",
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;",
             )
             .unwrap();
         drop(fresh);
@@ -1807,6 +1895,31 @@ mod tests {
             .expect("the database is refused");
         assert!(
             error.contains("before the second factor") && error.contains("totp_credentials"),
+            "{error}"
+        );
+    }
+
+    /// The external services changed the base schema in place: a database of version 8 without the table is refused.
+    #[test]
+    fn a_database_made_before_the_external_services_is_refused_with_a_message_that_says_why() {
+        use crate::store::testing::{postgres, Backend};
+        let Some(Backend::Postgres(url)) = postgres() else {
+            return;
+        };
+        let Store::Pg(fresh) = Backend::Postgres(url).fresh() else {
+            unreachable!()
+        };
+        let config = fresh.pool.config.clone();
+        let mut admin = config.connect(NoTls).unwrap();
+        admin
+            .batch_execute("DROP TABLE external_services;")
+            .unwrap();
+        drop(fresh);
+        let error = Pg::start(config, 2, Duration::from_secs(5))
+            .err()
+            .expect("the database is refused");
+        assert!(
+            error.contains("before the external services") && error.contains("external_services"),
             "{error}"
         );
     }
@@ -1850,7 +1963,7 @@ mod tests {
             .batch_execute(&format!(
                 "ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa;
                  ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa;
-                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 7;
                  INSERT INTO sessions (digest, binding, sid, login, impersonated, created_at, expires_at, last_seen_at, credential)
                    VALUES (decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'), 1, 'alice', false, 10, {}, 10,
@@ -1897,7 +2010,7 @@ mod tests {
                  INSERT INTO keys (id, owner_id, name, digest, hint, created_at)
                    VALUES ('key1', 1, 'agent', decode(repeat('00', 32), 'hex'), 'ab12', 1);
                  ALTER TABLE keys DROP COLUMN kind;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 6;",
             )
             .unwrap();
@@ -1931,7 +2044,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 1;
                  CREATE TABLE user_roles (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1986,7 +2099,7 @@ mod tests {
                 "DROP TABLE user_grants;
                  ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 2;
                  CREATE TABLE user_grants (
                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2042,7 +2155,7 @@ mod tests {
             .batch_execute(
                 "ALTER TABLE sessions DROP COLUMN admin_generation;
                  DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 3;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (
@@ -2085,7 +2198,7 @@ mod tests {
         admin
             .batch_execute(&format!(
                 "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants; DROP TABLE keys; DROP TABLE directory_version;
-                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+                 ALTER TABLE sessions DROP COLUMN remembered, DROP COLUMN mfa; ALTER TABLE sessions_log DROP COLUMN remembered, DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
                  DELETE FROM schema_migrations WHERE version > 4;
                  DROP TABLE user_grants;
                  CREATE TABLE user_grants (

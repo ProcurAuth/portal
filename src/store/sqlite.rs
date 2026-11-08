@@ -212,6 +212,11 @@ ALTER TABLE keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'mcp' CHECK (kind IN ('mc
 /// a code of this step or an older step is refused. `failed`, `failed_since` and `locked_until` count the failed
 /// attempts. `totp_recovery` holds the keyed hashes of the recovery codes that nobody used. `totp_key_check` holds the
 /// check value of the key.
+///
+/// The external services (5.0.5) are part of this version too, for the same reason. `external_services` holds one row
+/// for each service that the superadmin added by hand: the id (`ext-` and the slug of the name), the name and the
+/// absolute link. The id is the resource id of the grants `access` on the service. A file that the version 8 made
+/// before the external services lacks the table: [`Sqlite::init`] refuses it.
 const SESSION_REMEMBERED_SCHEMA: &str = "
 ALTER TABLE sessions_log ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions_log ADD COLUMN mfa INTEGER NOT NULL DEFAULT 0;
@@ -232,6 +237,12 @@ CREATE TABLE totp_recovery (
 CREATE TABLE totp_key_check (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   value BLOB NOT NULL
+);
+CREATE TABLE external_services (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  href TEXT NOT NULL,
+  created_at INTEGER NOT NULL
 );
 ";
 
@@ -456,6 +467,11 @@ impl Sqlite {
                         "the database was made by schema version {SCHEMA_VERSION} before the second factor, and this portal has no migration for it: make a new database, or add the tables totp_credentials, totp_recovery and totp_key_check and the column sessions_log.mfa by hand (see docs/login-hardening.md)"
                     ));
                 }
+                if !has_table(&conn, "external_services")? {
+                    return Err(format!(
+                        "the database was made by schema version {SCHEMA_VERSION} before the external services, and this portal has no migration for it: make a new database, or add the table external_services by hand (see README, Upgrades, version 5.0.5)"
+                    ));
+                }
             }
             newer => {
                 return Err(format!(
@@ -589,6 +605,70 @@ impl Sqlite {
         }
         tx.commit().map_err(db)?;
         Ok(changed > 0)
+    }
+
+    // External services -----------------------------------------------------------------------
+
+    pub fn insert_external(&self, entry: &ExternalEntry, max: usize) -> Result<(), ExternalError> {
+        let db = |e| ExternalError::Db(db(e));
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(db)?;
+        let held: i64 = tx
+            .query_row("SELECT COUNT(*) FROM external_services", [], |r| r.get(0))
+            .map_err(db)?;
+        if usize::try_from(held).unwrap_or(usize::MAX) >= max {
+            return Err(ExternalError::Full);
+        }
+        match tx.execute(
+            "INSERT INTO external_services (id, name, href, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![entry.id, entry.name, entry.href, entry.created_at],
+        ) {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == ErrorCode::ConstraintViolation =>
+            {
+                return Err(ExternalError::Exists)
+            }
+            Err(e) => return Err(ExternalError::Db(self::db(e))),
+        }
+        keys::bump(&tx).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    pub fn remove_external(&self, id: &str) -> Result<bool, String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(db)?;
+        let removed = tx
+            .execute("DELETE FROM external_services WHERE id = ?1", [id])
+            .map_err(db)?;
+        if removed > 0 {
+            // The grants on the service, of the accounts and of the keys, go with it, and so do their counters.
+            tx.execute("DELETE FROM user_grants WHERE resource_id = ?1", [id])
+                .map_err(db)?;
+            tx.execute("DELETE FROM key_grants WHERE resource_id = ?1", [id])
+                .map_err(db)?;
+            tx.execute("DELETE FROM budget_counters WHERE service = ?1", [id])
+                .map_err(db)?;
+            keys::bump(&tx).map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
+        Ok(removed > 0)
+    }
+
+    pub(super) fn load_externals_with(conn: &Connection) -> Result<Vec<ExternalEntry>, String> {
+        conn.prepare("SELECT id, name, href, created_at FROM external_services ORDER BY id")
+            .map_err(db)?
+            .query_map([], |row| {
+                Ok(ExternalEntry {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    href: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)
     }
 
     // History: writes -------------------------------------------------------------------------
@@ -1138,6 +1218,11 @@ impl Sqlite {
             logins,
             keys,
             key_history,
+            externals: if has_table(conn, "external_services")? {
+                Self::load_externals_with(conn)?
+            } else {
+                Vec::new()
+            },
             totp,
             totp_check,
         })
@@ -1288,7 +1373,7 @@ mod tests {
         // This is the file of the portal before version 7: the column `kind` did not exist.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+            "ALTER TABLE keys DROP COLUMN kind; ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 6;",
         )
         .unwrap();
@@ -1323,7 +1408,7 @@ mod tests {
         // The file of version 8 as it was before the second factor: no table and no column.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;",
+            "ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;",
         )
         .unwrap();
         drop(conn);
@@ -1332,6 +1417,28 @@ mod tests {
             error.contains("before the second factor") && error.contains("totp_credentials"),
             "{error}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The external services changed the base schema in place: a file of version 8 without the table is refused.
+    #[test]
+    fn a_database_made_before_the_external_services_is_refused_with_a_message_that_says_why() {
+        let dir = std::env::temp_dir().join(format!("portal-v8-external-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        drop(Sqlite::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE external_services;").unwrap();
+        drop(conn);
+        let error = Sqlite::open(&path).err().expect("the file is refused");
+        assert!(
+            error.contains("before the external services") && error.contains("external_services"),
+            "{error}"
+        );
+        // A new file has the table, and the second start finds nothing to do.
+        std::fs::remove_file(&path).unwrap();
+        drop(Sqlite::open(&path).unwrap());
+        assert!(Sqlite::open(&path).is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1345,7 +1452,7 @@ mod tests {
         // This is the file of the portal before version 8: the column did not exist. The file has one open session.
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+            "ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              INSERT INTO sessions_log (sid, login, superadmin, impersonated, user_agent, started_at, last_seen_at)
                VALUES (1, 'alice', 0, 0, 'ua', 10, 10);
              PRAGMA user_version = 7;",
@@ -1378,7 +1485,7 @@ mod tests {
             "DROP TABLE budget_counters; DROP TABLE key_history; DROP TABLE key_grants;
              DROP TABLE keys; DROP TABLE directory_version;
              ALTER TABLE user_grants DROP COLUMN limits;
-             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check;
+             ALTER TABLE sessions_log DROP COLUMN remembered; ALTER TABLE sessions_log DROP COLUMN mfa; DROP TABLE totp_recovery; DROP TABLE totp_credentials; DROP TABLE totp_key_check; DROP TABLE external_services;
              PRAGMA user_version = 5;",
         )
         .unwrap();

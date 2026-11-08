@@ -84,6 +84,10 @@ pub enum AuditKind {
     RecoveryUsed,
     /// A second-factor code was wrong for an account that has a second factor.
     MfaFailed,
+    /// The superadmin added an external service. The login of the event is the id of the service.
+    ExternalAdded,
+    /// The superadmin deleted an external service. The login of the event is the id of the service.
+    ExternalDeleted,
 }
 
 impl AuditKind {
@@ -103,6 +107,8 @@ impl AuditKind {
             Self::RecoveryRegenerated => "recovery_regenerated",
             Self::RecoveryUsed => "recovery_used",
             Self::MfaFailed => "mfa_failed",
+            Self::ExternalAdded => "external_added",
+            Self::ExternalDeleted => "external_deleted",
         }
     }
 }

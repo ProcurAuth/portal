@@ -557,14 +557,21 @@
     // with sections of their own. Without it they are one more row, after the services, and the
     // pane of the services draws them.
     var groups = root.dataset.layout === "groups";
-    var paneList = data.services.slice();
+    // An external service is a link: it has a switch and nothing else, so it has no permissions pane. Its rows
+    // come last, so the index of a row in the pane stays the index of the row less the offset.
+    var paneList = data.services.filter(function (s) {
+      return !s.external;
+    });
+    var linkList = data.services.filter(function (s) {
+      return !!s.external;
+    });
     var featureSvc = null;
     if (data.features) {
       data.features.feature = true;
       if (groups) featureSvc = data.features;
       else paneList.push(data.features);
     }
-    var rowList = featureSvc ? [featureSvc].concat(paneList) : paneList;
+    var rowList = (featureSvc ? [featureSvc] : []).concat(paneList, linkList);
     // The pane has no row for the features, so its index is one less than the index of the row.
     var rowOffset = featureSvc ? 1 : 0;
     if (!rowList.length) {
@@ -645,8 +652,10 @@
     }
     // The service whose permissions are open under its row. -1: none.
     var expandedAt = -1;
-    if (rowList.length === 1) expandedAt = 0;
-    else if (wanted) expandedAt = serviceAt;
+    // A link has nothing to open: no row of a link starts open, and the pane starts on a service that has one.
+    if (rowList[serviceAt] && rowList[serviceAt].external) serviceAt = rowOffset;
+    if (rowList.length === 1) expandedAt = rowList[0].external ? -1 : 0;
+    else if (wanted) expandedAt = rowList[serviceAt] && !rowList[serviceAt].external ? serviceAt : -1;
     else if (paneList.length === 1) expandedAt = rowOffset;
 
     function owns(serviceId, action, path) {
@@ -1971,7 +1980,7 @@
     }
 
     // ---- the rows of the services: the switch of `access`, a short sentence, the button
-    var services = paneList.length ? makePane(paneList, Math.max(0, serviceAt - rowOffset), false) : null;
+    var services = paneList.length ? makePane(paneList, Math.min(Math.max(0, serviceAt - rowOffset), paneList.length - 1), false) : null;
     var features = featureSvc ? makeFeatures(featureSvc) : null;
     var strip = node("div", groups ? "ge__groups" : "ge__svcList");
     strip.setAttribute("role", "group");
@@ -2066,14 +2075,23 @@
           row.classList.add("is-orphan");
         }
         if (notes[svc.id]) info = notes[svc.id].text;
-        head.appendChild(node("span", "ge__svcInfo", info));
+        var infoCell = node("span", "ge__svcInfo" + (svc.external ? " ge__svcInfo--link" : ""), info);
+        if (svc.external) {
+          // The badge tells that the link is not under the protection of the portal.
+          var mark = node("span", "badge badge--external");
+          mark.title = "External link. This server does not protect it.";
+          mark.appendChild(icon("arrow-up-right"));
+          mark.appendChild(document.createTextNode("external"));
+          infoCell.insertBefore(mark, infoCell.firstChild);
+        }
+        head.appendChild(infoCell);
         if (notes[svc.id] && notes[svc.id].undo) {
           var undo = node("button", "ge__undo", "Undo");
           undo.type = "button";
           undo.dataset.undo = svc.id;
           head.appendChild(undo);
         }
-        if (data.owner !== null) {
+        if (data.owner !== null && !svc.external) {
           var same = node("button", "button button--small ge__same", "Same as mine");
           same.type = "button";
           same.dataset.same = svc.id;
@@ -2083,6 +2101,12 @@
             return g[1] !== svc.id || ticked.has(keyOf(svc.id, g[0], g[2]));
           });
           head.appendChild(same);
+        }
+        if (svc.external) {
+          // No toggle and no body: a link has no permission to show.
+          row.appendChild(head);
+          rowsEl.appendChild(row);
+          return;
         }
         var toggle = node("button", groups ? "ib ge__toggle" : "button button--small ge__toggle");
         toggle.type = "button";
@@ -2132,7 +2156,7 @@
           node("p", "uiBanner uiBanner--warn", "A key holds " + MAX_GRANTS + " permissions at most. Untick some.")
         );
       }
-      servicesCount.textContent = "Open " + openCount + "/" + paneList.length;
+      servicesCount.textContent = "Open " + openCount + "/" + (paneList.length + linkList.length);
     }
 
     // The row of a service holds the controls that the person reaches first: the switch, the button
@@ -2249,7 +2273,7 @@
       }
       if (event.target.closest("input") || event.target.closest(".ge__svcBody")) return;
       var head = event.target.closest(".ge__svcHead");
-      if (head) chooseService(Number(head.parentNode.dataset.at));
+      if (head && !rowList[Number(head.parentNode.dataset.at)].external) chooseService(Number(head.parentNode.dataset.at));
     });
     // "Give access" opens the page of the account with the service chosen. The grant `access` on the
     // whole service starts ticked. Nothing is saved until the person clicks Save.

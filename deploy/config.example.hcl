@@ -78,6 +78,10 @@ ui {
   # "none": no page after sign-in links an icon, and the icon route gives the answer of an unknown path. A page
   # before sign-in never has an icon: it has the empty icon.
   # favicon = "default"
+
+  # true (default): a tile of the launcher opens its service in a new browser tab. false: the same tab.
+  # The value applies to every service.
+  # services_new_tab = true
 }
 
 logging {

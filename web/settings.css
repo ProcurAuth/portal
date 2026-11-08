@@ -1827,6 +1827,53 @@ input.keyText {
   width: 15rem;
 }
 
+/* The badge of an external service, in a row of the table and in the editor of the permissions. The arrow says that
+   the link leaves the portal. */
+.badge--external {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding-left: 5px;
+  vertical-align: middle;
+}
+
+.badge--external .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* "Add external service": a small form in a popover. */
+.pop__menu--form {
+  width: min(340px, calc(100vw - 48px));
+  /* The head of a panel does not wrap its text. The form does. */
+  white-space: normal;
+}
+
+/* The info of a link: the badge and the word stand on one line. */
+.ge__svcInfo--link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ge__svcInfo--link .badge--external {
+  margin-right: 0;
+}
+
+.extForm {
+  display: grid;
+  gap: 10px;
+}
+
+.extForm .hint {
+  margin: 0;
+}
+
+.extForm .button {
+  justify-self: start;
+}
+
 .pwRow .uiInput {
   width: 17rem;
 }

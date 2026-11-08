@@ -404,7 +404,7 @@ impl Pg {
     /// The version, the users and the keys in one transaction with the isolation REPEATABLE READ
     /// (portal 10.7).
     pub fn load_directory(&self) -> Result<DirectorySnapshot, String> {
-        let (version, user_rows, key_rows, grant_rows) = self.run(|c| {
+        let (version, user_rows, key_rows, grant_rows, externals) = self.run(|c| {
             let mut tx = c
                 .build_transaction()
                 .isolation_level(IsolationLevel::RepeatableRead)
@@ -458,8 +458,9 @@ impl Pg {
                     )
                 })
                 .collect::<Vec<_>>();
+            let externals = Self::externals_query(&mut tx)?;
             tx.commit()?;
-            Ok((version, users, keys, grants))
+            Ok((version, users, keys, grants, externals))
         })?;
         let users = Self::assemble_users(user_rows)?;
         let mut by_key: std::collections::HashMap<String, Vec<[String; 5]>> =
@@ -504,6 +505,7 @@ impl Pg {
             version,
             users,
             keys,
+            externals,
         })
     }
 

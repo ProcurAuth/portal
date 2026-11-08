@@ -1025,6 +1025,14 @@ pub static KEYS: &[Key] = &[
         doc: "The icon of the browser tab. With `default`, the tab shows the built-in logo on the pages after sign-in only, and the server sends the icon to a signed-in browser only. With `none`, no page after sign-in links an icon, and the icon route gives the answer of an unknown path. A page before sign-in never has an icon: it has the empty icon.",
     },
     Key {
+        block: "ui",
+        name: "services_new_tab",
+        kind: Kind::Bool,
+        presence: Presence::Default("true"),
+        when: When::Always,
+        doc: "`true`: a tile of the launcher opens its service in a new browser tab. `false`: the tile opens the service in the same tab. The value applies to every service. A service cannot choose.",
+    },
+    Key {
         block: "logging",
         name: "level",
         kind: Kind::Enum(&["error", "warn", "info", "debug"]),

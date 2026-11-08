@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::catalog::external::ExternalEntry;
 use crate::decision::CounterOwner;
 use crate::grants::{counter_ids, CounterId, Grant};
 use crate::store::{DirectorySnapshot, KeyRow, Store, UserRow};
@@ -144,6 +145,8 @@ struct Inner {
     index: HashMap<String, GrantIndex>,
     keys: HashMap<String, Arc<KeyRecord>>,
     by_digest: HashMap<[u8; 32], String>,
+    /// The external services, sorted by id.
+    externals: Vec<ExternalEntry>,
     /// The version of the database directory that these accounts and keys come from.
     version: i64,
 }
@@ -167,6 +170,7 @@ impl Inner {
             users,
             by_digest: keys.values().map(|k| (k.digest, k.id.clone())).collect(),
             keys,
+            externals: snapshot.externals,
             version: snapshot.version,
         }
     }
@@ -202,6 +206,9 @@ pub struct Directory {
     version: AtomicI64,
     /// Counts each change of the content: a change made here and a new read of the database.
     generation: AtomicU64,
+    /// Counts each change of the list of the external services. The catalogue merges the list again when the
+    /// number changes.
+    externals_generation: AtomicU64,
 }
 
 impl Directory {
@@ -213,6 +220,7 @@ impl Directory {
                 version: 0,
                 users: rows,
                 keys: Vec::new(),
+                externals: Vec::new(),
             },
             max_users,
         )
@@ -236,6 +244,7 @@ impl Directory {
             refresh_errors: AtomicU64::new(0),
             version: AtomicI64::new(version),
             generation: AtomicU64::new(0),
+            externals_generation: AtomicU64::new(0),
         }
     }
 
@@ -359,7 +368,11 @@ impl Directory {
         if self.changes.load(Ordering::Acquire) != seen {
             return false;
         }
-        *inner = Inner::from_snapshot(snapshot);
+        let next = Inner::from_snapshot(snapshot);
+        if next.externals != inner.externals {
+            self.externals_generation.fetch_add(1, Ordering::AcqRel);
+        }
+        *inner = next;
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.version.store(inner.version, Ordering::Release);
         self.loaded_changes.store(seen, Ordering::Release);
@@ -487,6 +500,63 @@ impl Directory {
                 if let Some(key) = inner.keys.remove(&id) {
                     inner.by_digest.remove(&key.digest);
                 }
+            }
+        }
+        removed
+    }
+
+    // External services -----------------------------------------------------------------------
+
+    /// The external services, sorted by id.
+    pub fn externals(&self) -> Vec<ExternalEntry> {
+        self.read().externals.clone()
+    }
+
+    /// A number that grows each time the list of the external services changes, here or in the database.
+    pub fn externals_generation(&self) -> u64 {
+        self.externals_generation.load(Ordering::Acquire)
+    }
+
+    /// Adds an external service that the database already holds.
+    pub fn add_external(&self, entry: ExternalEntry) {
+        let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        self.changes.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.externals_generation.fetch_add(1, Ordering::AcqRel);
+        inner.externals.retain(|e| e.id != entry.id);
+        inner.externals.push(entry);
+        inner.externals.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
+    /// Removes an external service that the database already removed. Each grant on its id goes too, from the
+    /// accounts and from the keys, as the database did. Returns `false` when the directory had no such service.
+    pub fn remove_external(&self, id: &str) -> bool {
+        let mut inner = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        self.changes.fetch_add(1, Ordering::AcqRel);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.externals_generation.fetch_add(1, Ordering::AcqRel);
+        let before = inner.externals.len();
+        inner.externals.retain(|e| e.id != id);
+        let removed = inner.externals.len() != before;
+        let logins: Vec<String> = inner.users.keys().cloned().collect();
+        for login in logins {
+            if let Some(user) = inner.users.get_mut(&login) {
+                user.grants.retain(|g| g.service != id);
+                let index = index_of(&user.grants);
+                inner.index.insert(login, index);
+            }
+        }
+        let held: Vec<String> = inner
+            .keys
+            .values()
+            .filter(|k| k.grants.iter().any(|g| g.service == id))
+            .map(|k| k.id.clone())
+            .collect();
+        for key_id in held {
+            if let Some(key) = inner.keys.get(&key_id) {
+                let mut next = (**key).clone();
+                next.grants.retain(|g| g.service != id);
+                inner.keys.insert(key_id, Arc::new(next));
             }
         }
         removed
@@ -727,7 +797,8 @@ mod tests {
             crate::store::DirectorySnapshot {
                 version: 0,
                 users: read_before_the_insert,
-                keys: Vec::new()
+                keys: Vec::new(),
+                externals: Vec::new(),
             }
         ));
         assert!(dir.get("carol").is_some(), "the insert is still there");
@@ -910,6 +981,66 @@ mod tests {
                 &CounterOwner::File("carol".into()),
             ]
         );
+    }
+
+    fn external_entry(name: &str) -> ExternalEntry {
+        let (name, id) = crate::catalog::external::check_name(name).unwrap();
+        ExternalEntry {
+            id,
+            name,
+            href: "https://example.org/".into(),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn the_external_services_of_the_directory_follow_the_database_and_the_local_changes() {
+        crate::store::testing::each_backend(|backend| {
+            let store = backend.fresh();
+            let dir = Directory::from_snapshot(store.load_directory().unwrap(), 10);
+            assert!(dir.externals().is_empty());
+            let start = dir.externals_generation();
+
+            // A change made here changes the generation. The refresh that follows holds the same list.
+            let wiki = external_entry("Wiki");
+            store.insert_external(&wiki, 10).unwrap();
+            dir.add_external(wiki.clone());
+            assert_eq!(dir.externals(), std::slice::from_ref(&wiki));
+            let after_add = dir.externals_generation();
+            assert!(after_add > start);
+            assert!(dir.refresh(&store).unwrap());
+            assert_eq!(dir.externals(), std::slice::from_ref(&wiki));
+            assert_eq!(
+                dir.externals_generation(),
+                after_add,
+                "the same list is not a change"
+            );
+
+            // Another instance changes the database: the refresh reads the change.
+            let docs = external_entry("Docs");
+            store.insert_external(&docs, 10).unwrap();
+            assert!(dir.refresh(&store).unwrap());
+            assert_eq!(dir.externals(), [docs.clone(), wiki.clone()]);
+            assert!(dir.externals_generation() > after_add);
+        });
+    }
+
+    #[test]
+    fn removing_an_external_service_removes_its_grants_from_the_accounts_and_the_keys() {
+        let wiki = external_entry("Wiki");
+        let mut alice = row("alice", &["db", &wiki.id]);
+        alice.grants.sort();
+        let dir = Directory::new(vec![alice, row("bob", &["db"])], 10);
+        dir.add_external(wiki.clone());
+        assert!(dir.grants_on("alice", &wiki.id).unwrap().len() == 1);
+        let before = dir.externals_generation();
+        assert!(dir.remove_external(&wiki.id));
+        assert!(dir.externals().is_empty());
+        assert!(dir.externals_generation() > before);
+        assert!(dir.grants_on("alice", &wiki.id).unwrap().is_empty());
+        assert_eq!(dir.grants_of("alice").unwrap().len(), 1);
+        assert_eq!(dir.grants_of("bob").unwrap().len(), 1);
+        assert!(!dir.remove_external(&wiki.id), "it is gone");
     }
 
     #[test]

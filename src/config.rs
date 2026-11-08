@@ -209,6 +209,8 @@ pub struct UiConfig {
     pub icons_dir: PathBuf,
     /// The icon of the browser tab (`ui.favicon`).
     pub favicon: Favicon,
+    /// Each tile of the launcher opens its service in a new tab (`ui.services_new_tab`).
+    pub services_new_tab: bool,
 }
 
 /// The values of `ui.favicon`.
@@ -685,6 +687,7 @@ fn build(r: &mut Resolved, env: Env<'_>) -> Result<(Config, Secrets), String> {
         ui: UiConfig {
             icons_dir: PathBuf::from(r.text("ui", "icons_dir")?),
             favicon: Favicon::parse(&r.text("ui", "favicon")?)?,
+            services_new_tab: r.bool("ui", "services_new_tab")?,
         },
         logging: LoggingConfig {
             level: LogLevel::parse(&r.text("logging", "level")?)?,

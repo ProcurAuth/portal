@@ -5,7 +5,7 @@ members = [".", "crates/inbox-core", "crates/inbox-android"]
 default-members = [".", "crates/inbox-core"]
 
 [workspace.package]
-version = "5.0.4"
+version = "5.0.5"
 edition = "2024"
 rust-version = "1.88"
 license = "LicenseRef-Proprietary"
@@ -24,7 +24,7 @@ base64 = "0.22"
 
 [package]
 name = "portal"
-version = "5.0.4"
+version = "5.0.5"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"

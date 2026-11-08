@@ -412,6 +412,84 @@ mod tests {
         matches!(verdict(held, uri), Decision::Allow { .. })
     }
 
+    /// The security rule: with the external services in the catalogue, each decision of the gate is the same. An
+    /// external service cannot open a path of another service, hide it or shadow it, and the grant `access` on it
+    /// opens no path.
+    #[test]
+    fn an_external_service_changes_no_decision_of_the_gate() {
+        fn entry(name: &str, href: &str) -> crate::catalog::external::ExternalEntry {
+            let (name, id) = crate::catalog::external::check_name(name).unwrap();
+            crate::catalog::external::ExternalEntry {
+                id,
+                name,
+                href: href.into(),
+                created_at: 1,
+            }
+        }
+        let base = catalog();
+        let merged = base.with_externals(&[
+            entry("Grafana copy", "https://portal.example.org/grafana/"),
+            entry("Notes copy", "https://portal.example.org/notes/"),
+            entry("Verify", "https://portal.example.org/auth/verify"),
+            entry("Everything", "https://portal.example.org/"),
+        ]);
+        let external_grants = |held: &[&str]| -> Vec<Grant> {
+            let mut all = grants(held);
+            all.extend(
+                [
+                    "ext-grafana-copy",
+                    "ext-notes-copy",
+                    "ext-verify",
+                    "ext-everything",
+                ]
+                .iter()
+                .map(|id| Grant::new(ACCESS, id).unwrap()),
+            );
+            all
+        };
+        let uris = [
+            "/grafana/d/1",
+            "/grafana/admin/x",
+            "/grafana-evil",
+            "/clickhouse/",
+            "/notes/page",
+            "/unowned/",
+            "/auth/verify",
+            "/auth/settings",
+            "/",
+            "/%2e%2e/grafana/",
+        ];
+        let sets: [&[&str]; 4] = [&[], &["grafana"], &["notes", "nested"], &["clickhouse"]];
+        for held in sets {
+            let held = external_grants(held);
+            for uri in uris {
+                assert_eq!(
+                    decide(&base, Some(&held), uri),
+                    decide(&merged, Some(&held), uri),
+                    "{held:?} on {uri}"
+                );
+            }
+        }
+        // A person with only external grants opens none of the paths that a service owns.
+        let only = external_grants(&[]);
+        for uri in ["/grafana/d/1", "/notes/page", "/clickhouse/"] {
+            assert_eq!(decide(&merged, Some(&only), uri), Decision::Deny, "{uri}");
+        }
+        // The superadmin passes as before.
+        for uri in uris {
+            assert_eq!(
+                decide(&base, None, uri),
+                decide(&merged, None, uri),
+                "{uri}"
+            );
+        }
+        // The excluded paths are the same.
+        assert_eq!(
+            excluded(&base, Some("GET"), "/grafana/x"),
+            excluded(&merged, Some("GET"), "/grafana/x")
+        );
+    }
+
     #[test]
     fn prefixes_come_from_local_hrefs_only() {
         assert_eq!(href_prefix("/grafana/").unwrap(), ["grafana"]);

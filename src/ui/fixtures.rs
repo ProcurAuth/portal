@@ -90,6 +90,7 @@ pub(super) const GRAFANA: &str = r#"{"server":"infra-grafana","resource_types":[
 
 pub(super) fn services() -> Vec<ServiceActions> {
     let plain = |id: &str, name: &str| ServiceActions {
+        external: false,
         id: id.into(),
         name: name.into(),
         actions: Vec::new(),
@@ -102,6 +103,7 @@ pub(super) fn services() -> Vec<ServiceActions> {
     let grafana = crate::actions::parse("infra-grafana", GRAFANA.as_bytes()).unwrap();
     vec![
         ServiceActions {
+            external: false,
             id: "infra-grafana".into(),
             name: "Grafana".into(),
             actions: grafana
@@ -142,6 +144,7 @@ pub(super) fn features() -> ServiceActions {
         kinds: vec![KeyKind::Api, KeyKind::Mcp],
     });
     ServiceActions {
+        external: false,
         id: PORTAL.into(),
         name: "Server permissions".into(),
         actions: document
@@ -359,6 +362,9 @@ pub(super) fn services_view<'a>(
         selected: None,
         only_check: false,
         checks: false,
+        notice: None,
+        token: "demo",
+        can_add: false,
     }
 }
 

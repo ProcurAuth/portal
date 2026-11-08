@@ -1055,6 +1055,7 @@ mod tests {
                 settings: Some("/auth/settings/access"),
                 bell: Some(&bell),
                 tab: crate::ui::TabLook::DEFAULT,
+                services_new_tab: false,
             },
         )
     }

@@ -593,6 +593,20 @@ html[data-theme-mode="light"] .themeNow--light {
   color: var(--danger);
 }
 
+/* An external service has no health. The badge is calm: the muted text on the inset ground, with the arrow that
+   says the link leaves the portal. */
+.tile__state--external {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 7px 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--inset);
+  color: var(--muted);
+  font-weight: 500;
+}
+
 /* Empty and degraded states ---------------------------------------------- */
 
 /* No rule of this file uses a combinator of the structure (child, sibling, first-of-type): the

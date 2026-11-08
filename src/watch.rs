@@ -489,6 +489,8 @@ fn observed(services: &crate::catalog::Catalog) -> Vec<Observed> {
         .groups()
         .iter()
         .flat_map(|group| group.services.iter())
+        // An external service has no health: it gives no alert.
+        .filter(|service| !service.external)
         .map(|service| Observed {
             id: service.id.clone(),
             name: service.name.clone(),

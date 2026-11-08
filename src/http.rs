@@ -20,6 +20,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::access::{self, may_open, Decision};
 use crate::actions;
+use crate::catalog::external::ExternalEntry;
 use crate::catalog::Catalog;
 use crate::config::{Config, LogLevel, Secret};
 use crate::crypto::{
@@ -38,7 +39,9 @@ use crate::rate_limit::RateLimiter;
 use crate::session::{
     Binding, Credential, NewSession, Principal, Session, SessionIssueError, SessionStore,
 };
-use crate::store::{AccountActivity, InsertError, LoginPage, Snapshot, Store, UserRow};
+use crate::store::{
+    AccountActivity, ExternalError, InsertError, LoginPage, Snapshot, Store, UserRow,
+};
 use crate::tracking::{unix_now, AuditEvent, AuditKind, EndReason, Event, LoginAttempt, Tracker};
 use crate::transport;
 use crate::ui;
@@ -61,6 +64,8 @@ const DENIED_PATH: &str = "/auth/denied";
 const USERS_ADD_PATH: &str = "/auth/users/add";
 const USERS_DELETE_PATH: &str = "/auth/users/delete";
 const USERS_UPDATE_PATH: &str = "/auth/users/update";
+const EXTERNAL_ADD_PATH: &str = ui::settings::EXTERNAL_ADD_PATH;
+const EXTERNAL_DELETE_PATH: &str = ui::settings::EXTERNAL_DELETE_PATH;
 const IMPERSONATE_PATH: &str = "/auth/users/impersonate";
 const IMPERSONATE_END_PATH: &str = "/auth/users/impersonate-end";
 const END_SESSIONS_PATH: &str = "/auth/users/end-sessions";
@@ -123,6 +128,15 @@ pub struct SuperAdmin {
     pub generation: [u8; 32],
 }
 
+/// The catalogue with the external services, and the two values that it was made from: the snapshot of
+/// discovery and the generation of the list of the external services.
+#[derive(Default)]
+struct Merged {
+    base: Option<Arc<Catalog>>,
+    generation: u64,
+    catalog: Option<Arc<Catalog>>,
+}
+
 pub struct AppState {
     pub config: Config,
     pub superadmin_login: String,
@@ -154,8 +168,11 @@ pub struct AppState {
     pub key_body_gate: Arc<Semaphore>,
 
     pub metrics: Metrics,
-    /// The current service catalog. Discovery replaces the whole snapshot.
+    /// The services that discovery found. Discovery replaces the whole snapshot. The pages and the gate read
+    /// [`current_catalog`]: it adds the external services to this snapshot.
     pub catalog: RwLock<Arc<Catalog>>,
+    /// The snapshot of `catalog` with the external services merged in, and what it was made from.
+    merged: RwLock<Merged>,
     pub discovery: Arc<discovery::Stats>,
     pub icons: Icons,
     /// The source of the grants, and the grants of the configuration.
@@ -284,6 +301,8 @@ impl AppState {
         crate::bootstrap::check_superadmin_against_database(&superadmin.login, &snapshot)?;
         crate::bootstrap::check_file_against_database(&config, &snapshot)?;
         crate::bootstrap::check_user_grants(&config, &snapshot)?;
+        let pdp_names: Vec<String> = pdp_clients.values().map(|c| c.name.clone()).collect();
+        crate::bootstrap::check_externals(&config, &snapshot, &pdp_names)?;
         let users = Directory::from_snapshot(snapshot, config.users.max_users)
             .with_file_keys(crate::bootstrap::file_keys(&config))
             .with_file_accounts(
@@ -316,6 +335,7 @@ impl AppState {
             key_body_gate: Arc::new(Semaphore::new(4)),
             metrics: Metrics::new(),
             catalog: RwLock::new(Arc::new(Catalog::default())),
+            merged: RwLock::new(Merged::default()),
             discovery: Arc::new(discovery::Stats::default()),
             icons: Icons::load(&config.ui.icons_dir),
             policy,
@@ -848,6 +868,10 @@ async fn handle_request(
         handle_users_delete(&state, request, &client).await
     } else if method == Method::POST && path == USERS_UPDATE_PATH {
         handle_users_update(&state, request, &client).await
+    } else if method == Method::POST && path == EXTERNAL_ADD_PATH {
+        handle_external_add(&state, request, &client).await
+    } else if method == Method::POST && path == EXTERNAL_DELETE_PATH {
+        handle_external_delete(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_PATH {
         handle_impersonate(&state, request, &client).await
     } else if method == Method::POST && path == IMPERSONATE_END_PATH {
@@ -1286,6 +1310,7 @@ async fn handle_home(state: &Arc<AppState>, headers: &HeaderMap, client: &Client
             hidden_services: catalog.service_count() - shown.service_count(),
             settings: gear,
             tab: state.tab_look(),
+            services_new_tab: state.config.ui.services_new_tab,
         },
     );
     masked_response(state, StatusCode::OK, page)
@@ -1364,6 +1389,18 @@ async fn handle_settings(
         security: mfa_page::tab_visible(state, &viewer),
         tab: state.tab_look(),
     };
+    // A service that another instance added a moment ago is not in the directory yet: with a shared database,
+    // the page that selects it reads the directory again first.
+    if path == ui::settings::SERVICES_PATH && state.store.is_shared() {
+        let asked = query_value_up_to(uri, "svc", grants::MAX_SERVICE_CHARS * 4);
+        if asked.is_some_and(|id| {
+            id.starts_with(crate::catalog::external::ID_PREFIX)
+                && current_catalog(state).service(&id).is_none()
+        }) {
+            let since = crate::users::Directory::clock_millis();
+            blocking(|| state.users.refresh_since(&state.store, since));
+        }
+    }
     // The portal features are not in the catalogue: the pages of the services list the workloads
     // only.
     let workloads = current_catalog(state);
@@ -1382,6 +1419,9 @@ async fn handle_settings(
                     selected: query_value_up_to(uri, "svc", grants::MAX_SERVICE_CHARS * 4),
                     only_check: query_value(uri, "f").as_deref() == Some("check"),
                     checks: query_value(uri, "v").as_deref() == Some("checks"),
+                    notice: query_value(uri, "s").and_then(|code| ui::notice_for(&code)),
+                    token: &users_token,
+                    can_add: external_creation_allowed(state),
                 },
             )
         }
@@ -1621,10 +1661,25 @@ fn service_grants(state: &AppState, catalog: &Catalog) -> Vec<ui::ServiceActions
         .iter()
         .flat_map(|group| group.services.iter())
         .map(|service| {
+            // An external service is a link: it has no document, no action and no source to read.
+            if service.external {
+                return ui::ServiceActions {
+                    external: true,
+                    id: service.id.clone(),
+                    name: service.name.clone(),
+                    actions: Vec::new(),
+                    document: Default::default(),
+                    known: false,
+                    fetch: false,
+                    critical: Vec::new(),
+                    source: crate::actions::Source::Absent,
+                };
+            }
             let declared = state.actions.declared(&service.id);
             let known = declared.is_some();
             let document = declared.unwrap_or_default();
             ui::ServiceActions {
+                external: service.external,
                 id: service.id.clone(),
                 name: service.name.clone(),
                 actions: state
@@ -1963,6 +2018,7 @@ fn feature_actions(
         })
         .unwrap_or_default();
     ui::ServiceActions {
+        external: false,
         id: crate::portal_actions::SERVICE.to_string(),
         name: "Server permissions".to_string(),
         actions: document
@@ -2009,13 +2065,45 @@ pub fn current_catalog_of(state: &AppState) -> Arc<Catalog> {
     current_catalog(state)
 }
 
+/// The catalogue that the pages, the gate and the loops read: the services that discovery found, and the
+/// external services of the directory. The merge runs again when discovery publishes a new snapshot, and when the
+/// list of the external services changes, here or on another instance. Without an external service the
+/// catalogue is the snapshot of discovery.
 fn current_catalog(state: &AppState) -> Arc<Catalog> {
-    Arc::clone(
+    let base = Arc::clone(
         &state
             .catalog
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
+    );
+    // The generation comes first: a change after this read gives one more merge at the next call.
+    let generation = state.users.externals_generation();
+    {
+        let merged = state
+            .merged
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let (Some(from), Some(catalog)) = (&merged.base, &merged.catalog) {
+            if merged.generation == generation && Arc::ptr_eq(from, &base) {
+                return Arc::clone(catalog);
+            }
+        }
+    }
+    let externals = state.users.externals();
+    let catalog = if externals.is_empty() {
+        Arc::clone(&base)
+    } else {
+        Arc::new(base.with_externals(&externals))
+    };
+    *state
+        .merged
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Merged {
+        base: Some(base),
+        generation,
+        catalog: Some(Arc::clone(&catalog)),
+    };
+    catalog
 }
 
 /// A browser with a session. The data has the session that the cookie represents, and what that session can do.
@@ -3505,12 +3593,14 @@ fn account_context<R>(
         .collect();
     let lookup = |service: &str| state.actions.declared(service);
     let exists = |service: &str| known.contains(service);
+    let external = |service: &str| catalog.service(service).is_some_and(|s| s.external);
     let context = key_forms::Context {
         now: unix_now(),
         owner_grants: None,
         max_lifetime: None,
         document: &lookup,
         service_exists: &exists,
+        is_external: &external,
         old_grants,
     };
     run(&context)
@@ -3767,6 +3857,169 @@ async fn handle_users_delete(
     );
     state.metrics.user_admin("delete", "ok");
     settings_redirect("user-deleted")
+}
+
+// External services ---------------------------------------------------------------------------
+
+/// The superadmin can add an external service when the grants can change: an external service has no use without
+/// the grant `access` that shows its tile.
+fn external_creation_allowed(state: &AppState) -> bool {
+    state.policy.mode.editable()
+}
+
+/// The response returns to the Services page with the outcome of an action. `id` selects a service.
+fn services_redirect(code: &str, id: Option<&str>) -> HttpResponse {
+    let select = id.map_or(String::new(), |id| {
+        format!("&svc={}", percent_encode_query_component(id))
+    });
+    redirect_response(
+        StatusCode::SEE_OTHER,
+        &format!("{}?s={code}{select}", ui::settings::SERVICES_PATH),
+    )
+}
+
+/// Adds an external service: a name and a link. The portal never requests the link. The page and the route exist
+/// when the grants can change. Only the superadmin adds one.
+async fn handle_external_add(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    if !external_creation_allowed(state) {
+        return text_response(StatusCode::NOT_FOUND, "Not Found\n");
+    }
+    let headers = request.headers().clone();
+    let (viewer, mut form) = match admin_request(state, request, client, "external_add").await {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_superadmin(state, &viewer, "external_add") {
+        return response;
+    }
+    let name = form.remove("name").unwrap_or_default();
+    let href = form.remove("href").unwrap_or_default();
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    }
+    let rejected = |code: &str| {
+        state.metrics.user_admin("external_add", "rejected");
+        services_redirect(code, None)
+    };
+    let Ok((name, id)) = crate::catalog::external::check_name(&name) else {
+        return rejected("external-bad-name");
+    };
+    let Ok(href) = crate::catalog::external::check_href(&href) else {
+        return rejected("external-bad-link");
+    };
+    // A service that discovery lists with this id wins, and so does a server that asks the PDP under this name.
+    // The portal refuses the id at once: the entry would have no tile.
+    let discovered = current_catalog(state)
+        .service(&id)
+        .is_some_and(|service| !service.external);
+    let pdp_client = state.pdp_clients.values().any(|c| c.name == id);
+    if discovered || pdp_client {
+        return rejected("external-taken");
+    }
+    if state.users.externals().iter().any(|e| e.id == id) {
+        return rejected("external-exists");
+    }
+    let entry = ExternalEntry {
+        id: id.clone(),
+        name,
+        href,
+        created_at: unix_now(),
+    };
+    let store = Arc::clone(&state.store);
+    let row = entry.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.insert_external(&row, crate::catalog::external::MAX_SERVICES)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(ExternalError::Exists)) => return rejected("external-exists"),
+        Ok(Err(ExternalError::Full)) => return rejected("external-limit"),
+        Ok(Err(ExternalError::Db(error))) => {
+            log(
+                state,
+                LogLevel::Error,
+                "external_insert_failed",
+                &[("error", error)],
+            );
+            return rejected("error");
+        }
+        Err(_) => return rejected("error"),
+    }
+    state.users.add_external(entry);
+    audit(
+        state,
+        AuditKind::ExternalAdded,
+        Some(id.clone()),
+        Some(state.superadmin_login.clone()),
+        client,
+        &headers,
+    );
+    state.metrics.user_admin("external_add", "ok");
+    services_redirect("external-added", Some(&id))
+}
+
+/// Deletes an external service and every grant that names it, in one transaction.
+async fn handle_external_delete(
+    state: &Arc<AppState>,
+    request: Request<Incoming>,
+    client: &Client,
+) -> HttpResponse {
+    let headers = request.headers().clone();
+    let (viewer, mut form) = match admin_request(state, request, client, "external_delete").await {
+        Ok(v) => v,
+        Err(response) => return response,
+    };
+    if let Err(response) = require_superadmin(state, &viewer, "external_delete") {
+        return response;
+    }
+    let id = form.remove("id").unwrap_or_default();
+    if !form.is_empty() {
+        return text_response(StatusCode::BAD_REQUEST, "Bad Request\n");
+    }
+    let rejected = |code: &str| {
+        state.metrics.user_admin("external_delete", "rejected");
+        services_redirect(code, None)
+    };
+    // The entry can come from another instance a moment ago: with a shared database, the portal reads again first.
+    let known = |state: &AppState| state.users.externals().iter().any(|e| e.id == id);
+    if !known(state) && state.store.is_shared() {
+        let since = crate::users::Directory::clock_millis();
+        blocking(|| state.users.refresh_since(&state.store, since));
+    }
+    if !id.starts_with(crate::catalog::external::ID_PREFIX) || !known(state) {
+        return rejected("external-gone");
+    }
+    let store = Arc::clone(&state.store);
+    let target = id.clone();
+    match tokio::task::spawn_blocking(move || store.remove_external(&target)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            log(
+                state,
+                LogLevel::Error,
+                "external_delete_failed",
+                &[("error", error)],
+            );
+            return rejected("error");
+        }
+        Err(_) => return rejected("error"),
+    }
+    state.users.remove_external(&id);
+    audit(
+        state,
+        AuditKind::ExternalDeleted,
+        Some(id),
+        Some(state.superadmin_login.clone()),
+        client,
+        &headers,
+    );
+    state.metrics.user_admin("external_delete", "ok");
+    services_redirect("external-deleted", None)
 }
 
 /// Changes an account: its grants, and its password when a new password is given. The session of an
@@ -4720,6 +4973,8 @@ fn route_metric_label(state: &AppState, path: &str) -> &'static str {
         USERS_ADD_PATH => "users_add",
         USERS_DELETE_PATH => "users_delete",
         USERS_UPDATE_PATH => "users_update",
+        EXTERNAL_ADD_PATH => "external_add",
+        EXTERNAL_DELETE_PATH => "external_delete",
         IMPERSONATE_PATH => "impersonate",
         IMPERSONATE_END_PATH => "impersonate_end",
         _ if inbox_page::is_inbox_path(path) => "inbox_page",
@@ -4806,6 +5061,8 @@ mod tests {
             USERS_ADD_PATH,
             USERS_DELETE_PATH,
             USERS_UPDATE_PATH,
+            EXTERNAL_ADD_PATH,
+            EXTERNAL_DELETE_PATH,
             IMPERSONATE_PATH,
             IMPERSONATE_END_PATH,
             END_SESSIONS_PATH,

@@ -175,16 +175,27 @@ fn editor_for(
 ) -> EditorData {
     let catalog = current_catalog(state);
     let services = if kind == KeyKind::Mcp {
+        // An external service is a link: no key form offers it.
         service_grants(state, &catalog)
+            .into_iter()
+            .filter(|s| !s.external)
+            .collect()
     } else {
         Vec::new()
     };
     let features = portal::key_document(&state.config.portal_features(), kind)
         .map(|document| feature_actions(state, document));
+    // The rights of the owner on an external service are not for a key: the editor does not carry them.
+    let owner: Option<Vec<Grant>> = owner.map(|held| {
+        held.iter()
+            .filter(|g| catalog.service(&g.service).is_none_or(|s| !s.external))
+            .cloned()
+            .collect()
+    });
     grant_editor::build(
         &services,
         features.as_ref(),
-        owner,
+        owner.as_deref(),
         |grant| ui_keys::is_offered(kind, grant),
         ticked,
         true,
@@ -877,20 +888,24 @@ fn with_context<R>(
     use_context: impl FnOnce(&Context<'_>) -> R,
 ) -> R {
     let catalog = current_catalog(state);
+    // A key never holds a right on an external service: for a key, the service does not exist.
     let known: std::collections::HashSet<String> = catalog
         .groups()
         .iter()
         .flat_map(|g| g.services.iter())
+        .filter(|s| !s.external)
         .map(|s| s.id.clone())
         .collect();
     let lookup = |service: &str| state.actions.declared(service);
     let exists = |service: &str| known.contains(service);
+    let external = |service: &str| catalog.service(service).is_some_and(|s| s.external);
     let context = Context {
         now: unix_now(),
         owner_grants: owner,
         max_lifetime: owner.and_then(|grants| portal::max_key_lifetime(grants, kind)),
         document: &lookup,
         service_exists: &exists,
+        is_external: &external,
         old_grants,
     };
     use_context(&context)

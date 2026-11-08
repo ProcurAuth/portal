@@ -25,8 +25,8 @@ use std::fmt::Write as _;
 
 use super::access::Query;
 use super::components::{
-    ask, cancel_link, chips, icon, icon_link, icon_post, page_head, popover, split, tags, toolbar,
-    zone, Ask, Chip, PageHead, Side, Strength, Tag, Zone,
+    ask, cancel_link, chips, icon, icon_link, icon_post, page_head, popover, popover_with, split,
+    tags, toolbar, zone, Ask, Chip, PageHead, Side, Strength, Tag, Zone,
 };
 use super::grant_editor::{self, Place};
 use super::{document_class, sign_out_form_short, status_icon, theme_switch};
@@ -223,6 +223,29 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "grant-limit" => ("This account has the largest number of grants.", false),
         "no-user" => ("That account does not exist.", false),
+        "external-added" => ("External service added.", true),
+        "external-deleted" => (
+            "External service deleted. The permissions on it are deleted too.",
+            true,
+        ),
+        "external-bad-name" => (
+            "The name has 1 to 32 characters, with no control character and at least one letter or digit.",
+            false,
+        ),
+        "external-bad-link" => (
+            "The link is an http or https address with a host. It has no user name, no space and no control character. It has 2048 bytes at most.",
+            false,
+        ),
+        "external-exists" => (
+            "An external service with this name exists. Choose another name.",
+            false,
+        ),
+        "external-taken" => (
+            "A service of this server uses this id. Choose another name.",
+            false,
+        ),
+        "external-limit" => ("This server holds the largest number of external services.", false),
+        "external-gone" => ("That external service does not exist.", false),
         "mfa-enabled" => ("Two-factor is on.", true),
         "mfa-disabled" => ("Two-factor is off.", true),
         "mfa-reset" => (
@@ -420,6 +443,8 @@ pub struct UserCard {
 /// A service and the actions that the page offers for it. The fields are `access`, then `actions`.
 #[derive(Clone, Debug)]
 pub struct ServiceActions {
+    /// The service is an external service: a link with no action. The editor shows its switch and nothing else.
+    pub external: bool,
     pub id: String,
     pub name: String,
     /// The name and the description of each action that the service publishes.
@@ -1185,6 +1210,12 @@ pub struct ServicesView<'a> {
     /// The chip "To check" of the detail is on: the detail lists the grants to check, not the
     /// accounts that open the service.
     pub checks: bool,
+    /// The outcome of the last action of this page.
+    pub notice: Option<Notice>,
+    /// The anti-CSRF token of the forms of the external services.
+    pub token: &'a str,
+    /// The page offers "Add external service": the grants can change.
+    pub can_add: bool,
 }
 
 impl ServicesView<'_> {
@@ -1222,11 +1253,43 @@ impl ServicesView<'_> {
     }
 }
 
+/// The path of the form that adds an external service.
+pub const EXTERNAL_ADD_PATH: &str = "/auth/services/add";
+/// The path of the form that deletes an external service.
+pub const EXTERNAL_DELETE_PATH: &str = "/auth/services/delete";
+
+/// The words about a service that the portal does not protect. The launcher says the same in a tooltip.
+const EXTERNAL_LINE: &str = "External link. This server does not protect it.";
+
+/// "Add external service": a button that opens a small form with the name and the link.
+fn external_add(token: &str) -> String {
+    let token = html_escape(token);
+    let form = format!(
+        r#"<form class="extForm" method="post" action="{EXTERNAL_ADD_PATH}"><input type="hidden" name="csrf" value="{token}"><div class="field"><label class="field__label" for="ext-name">Name</label><input class="uiInput" id="ext-name" name="name" type="text" required maxlength="{}" autocomplete="off" spellcheck="false" placeholder="Team wiki"></div><div class="field"><label class="field__label" for="ext-href">Link</label><input class="uiInput" id="ext-href" name="href" type="url" required maxlength="{}" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://wiki.example.org/"></div><p class="hint">The tile opens the link. This server does not protect the link: anyone who knows it can open it. An account sees the tile only if it has the permission Open.</p><button class="button button--primary" type="submit">Add</button></form>"#,
+        crate::catalog::external::MAX_NAME_CHARS,
+        crate::catalog::external::MAX_HREF_BYTES,
+    );
+    popover_with(
+        "",
+        "button button--primary",
+        &format!("{}Add external service", icon("plus")),
+        Side::End,
+        " pop__menu--form",
+        &form,
+    )
+}
+
 pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
     let mut out = String::new();
+    notice_html(&mut out, view.notice);
+    let tools = if view.can_add {
+        external_add(view.token)
+    } else {
+        String::new()
+    };
     let count = view.catalog.service_count();
     if count == 0 {
-        out.push_str(&toolbar("Services", "", ""));
+        out.push_str(&toolbar("Services", "", &tools));
         out.push_str(r#"<p class="empty">No service in the catalogue yet. A service appears when a container or an IngressRoute has the catalogue labels.</p>"#);
         return fill_page(Tab::Services, frame, "Services", &out);
     }
@@ -1313,7 +1376,7 @@ pub fn services_page(frame: &Frame, view: &ServicesView) -> String {
             count: &count.to_string(),
             count_title: "",
             chips_html: &chip_list,
-            tools_html: "",
+            tools_html: &tools,
             class: "",
             above_html: "",
         },
@@ -1336,7 +1399,7 @@ fn service_row(
     let found = view.actions_of(&service.id);
     let _ = write!(
         out,
-        r#"<tr id="row-{index}"{}><th scope="row" title="{} ({})"><a class="rowLink" href="{}#row-{index}"{}>{}</a> <code class="muted">{}</code>"#,
+        r#"<tr id="row-{index}"{}><th scope="row" title="{} ({})"><a class="rowLink" href="{}#row-{index}"{}>{}</a>{} <code class="muted">{}</code>"#,
         if selected {
             r#" class="is-selected""#
         } else {
@@ -1351,6 +1414,12 @@ fn service_row(
             ""
         },
         html_escape(&service.name),
+        // The badge follows the name, so a long id never hides it.
+        if service.external {
+            external_badge()
+        } else {
+            String::new()
+        },
         html_escape(&service.id),
     );
     if problem.is_some() {
@@ -1373,13 +1442,22 @@ fn service_row(
             n.to_string()
         }
     };
+    let (actions, types, resources) = if service.external {
+        (0, 0, 0)
+    } else {
+        (
+            found.map_or(0, |f| f.actions.len()),
+            found.map_or(0, |f| f.document.types.len()),
+            found.map_or(0, |f| f.document.resources.len()),
+        )
+    };
     let _ = write!(
         out,
         r#"<td class="r num">{}</td><td class="r num">{}</td><td class="r num">{}</td><td class="r num">{}</td><td class="muted">{}"#,
         figure(opened),
-        figure(found.map_or(0, |f| f.actions.len())),
-        figure(found.map_or(0, |f| f.document.types.len())),
-        figure(found.map_or(0, |f| f.document.resources.len())),
+        figure(actions),
+        figure(types),
+        figure(resources),
         html_escape(&service.href)
     );
     if !service.exclude.is_empty() {
@@ -1396,6 +1474,47 @@ fn service_row(
         );
     }
     out.push_str("</td></tr>");
+}
+
+/// The badge of an external service.
+fn external_badge() -> String {
+    format!(
+        r#" <span class="badge badge--external" title="{EXTERNAL_LINE}">{}external</span>"#,
+        icon("arrow-up-right")
+    )
+}
+
+/// The trash icon of an external service, in the head of its detail. The confirmation opens in place. If `held`
+/// accounts open the service, they lose their permission with it: the person types the name first.
+fn external_delete(view: &ServicesView, service: &Service, held: usize) -> String {
+    ask(&Ask {
+        label: &format!("Delete {}", service.name),
+        icon: "trash",
+        question: &format!(
+            "Delete {}{}?",
+            service.name,
+            if held > 0 {
+                format!(" and {}", plural(held, "permission", "permissions"))
+            } else {
+                String::new()
+            }
+        ),
+        verb: "Delete",
+        action: EXTERNAL_DELETE_PATH,
+        fields_html: &format!(
+            r#"<input type="hidden" name="csrf" value="{}"><input type="hidden" name="id" value="{}">"#,
+            html_escape(view.token),
+            html_escape(&service.id)
+        ),
+        strength: if held > 0 {
+            Strength::Firm
+        } else {
+            Strength::Light
+        },
+        name: &service.name,
+        danger: true,
+        side: Side::End,
+    })
 }
 
 /// The accounts that open the selected service, then the accounts that do not, each with a link
@@ -1621,13 +1740,23 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
     } else {
         opened_by_body(view, id, name)
     };
+    let tools = match view.catalog.service(id) {
+        Some(service) if service.external => external_delete(view, service, opened),
+        _ => String::new(),
+    };
     let source = view.actions_of(id).map(|s| s.source);
     let problem = view
         .problems
         .iter()
         .find(|(own, _)| own == id)
         .map(|(_, text)| text.as_str());
+    let external = view.catalog.service(id).is_some_and(|s| s.external);
     let above = match source {
+        _ if external => format!(
+            r#"<div class="srcLine srcLine--none" title="{}">{}<span>{EXTERNAL_LINE}</span></div>"#,
+            html_escape(view.catalog.service(id).map_or("", |s| s.href.as_str())),
+            icon("arrow-up-right")
+        ),
         Some(source) => source_line(source, problem),
         None => String::new(),
     };
@@ -1638,7 +1767,7 @@ fn detail_zone(view: &ServicesView, selected: Option<&str>) -> String {
             count: "",
             count_title: "",
             chips_html: &chip_list,
-            tools_html: "",
+            tools_html: &tools,
             class: "",
             above_html: &above,
         },
@@ -2782,6 +2911,134 @@ mod tests {
         let html = services_page(&frame(), &services_view(&empty, &[], &[]));
         assert!(html.contains("No service in the catalogue yet."));
         assert!(!html.contains("detail-title"));
+    }
+
+    /// The catalogue of the tests with one external service, and the entry of the editor for it.
+    fn with_external() -> (Catalog, Vec<ServiceActions>) {
+        let (name, id) = crate::catalog::external::check_name("Team wiki").unwrap();
+        let cat = catalog().with_externals(&[crate::catalog::external::ExternalEntry {
+            id: id.clone(),
+            name: name.clone(),
+            href: "https://wiki.example.org/start?a=1&b=2".into(),
+            created_at: 1,
+        }]);
+        let mut actions = services();
+        actions.push(ServiceActions {
+            external: true,
+            id,
+            name,
+            actions: Vec::new(),
+            document: Default::default(),
+            known: false,
+            fetch: false,
+            critical: Vec::new(),
+            source: crate::actions::Source::Absent,
+        });
+        (cat, actions)
+    }
+
+    #[test]
+    fn the_services_page_lists_an_external_service_with_its_badge_and_no_action() {
+        let (cat, actions) = with_external();
+        let holders = vec![holder("alice", vec![grant(ACCESS, "ext-team-wiki")])];
+        let mut v = services_view(&cat, &actions, &holders);
+        v.selected = Some("ext-team-wiki".into());
+        let html = services_page(&frame(), &v);
+        let group = r#"<th scope="rowgroup" colspan="6">External</th>"#;
+        assert!(html.contains(group), "{html}");
+        let row = &html[html.find(r#"<tr id="row-5""#).unwrap()..];
+        let row = &row[..row.find("</tr>").unwrap()];
+        assert!(row.contains("Team wiki"), "{row}");
+        assert!(row.contains(r#"class="badge badge--external""#), "{row}");
+        assert!(
+            row.contains(r#"title="External link. This server does not protect it.""#),
+            "{row}"
+        );
+        assert!(
+            row.contains("https://wiki.example.org/start?a=1&amp;b=2"),
+            "the link is escaped"
+        );
+        // The opened count is a figure, and the columns of the actions, the types and the resources are a dash.
+        assert!(
+            row.contains(
+                r#"<td class="r num">1</td><td class="r num"><span class="muted">-</span></td><td class="r num"><span class="muted">-</span></td><td class="r num"><span class="muted">-</span></td>"#
+            ),
+            "{row}"
+        );
+        // The other services have no badge.
+        assert_eq!(html.matches("badge--external").count(), 1);
+        // The detail names the link, says that the server does not protect it and keeps "Opened by".
+        let panel = &html[html.find(r#"aria-labelledby="detail-title""#).unwrap()..];
+        let panel = &panel[..panel.find("</section>").unwrap()];
+        assert!(
+            panel.contains(r#"id="detail-title">Team wiki</h2>"#),
+            "{panel}"
+        );
+        assert!(
+            panel.contains("<span>External link. This server does not protect it.</span>"),
+            "{panel}"
+        );
+        assert!(!panel.contains("publishes") && !panel.contains("Last read"));
+        assert!(panel.contains("Opened by"));
+        assert!(panel.contains(r#"href="/auth/settings/users/alice?service=ext-team-wiki""#));
+        // Never "to check": an external service has no document.
+        assert!(!html.contains("Services to check"));
+    }
+
+    #[test]
+    fn the_form_that_adds_an_external_service_and_its_delete_follow_the_mode_and_the_holders() {
+        let (cat, actions) = with_external();
+        let mut v = services_view(&cat, &actions, &[]);
+        v.selected = Some("ext-team-wiki".into());
+        let off = services_page(&frame(), &v);
+        assert!(
+            !off.contains("extForm") && !off.contains("Add external service"),
+            "a page that cannot change grants offers no form"
+        );
+        v.can_add = true;
+        v.token = "tok<";
+        let on = services_page(&frame(), &v);
+        assert!(on.contains("Add external service"));
+        assert!(on.contains(r#"<form class="extForm" method="post" action="/auth/services/add">"#));
+        assert!(on.contains(r#"<input type="hidden" name="csrf" value="tok&lt;">"#));
+        assert!(on.contains(r#"name="name" type="text" required maxlength="32""#));
+        assert!(on.contains(r#"name="href" type="url" required maxlength="2048""#));
+        assert!(
+            on.contains("This server does not protect the link"),
+            "the form says it"
+        );
+        // The delete is on the external row only, with a light confirmation when nobody opens the service.
+        assert_eq!(on.matches(r#"action="/auth/services/delete""#).count(), 1);
+        assert!(on.contains(r#"<input type="hidden" name="id" value="ext-team-wiki">"#));
+        assert!(on.contains("Delete Team wiki?"));
+        assert!(!on.contains("ask__name"));
+        // Accounts that open it lose their permission: the person types the name first.
+        let holders = vec![
+            holder("alice", vec![grant(ACCESS, "ext-team-wiki")]),
+            holder("bob", vec![grant(ACCESS, "ext-team-wiki")]),
+        ];
+        let v = ServicesView {
+            holders: &holders,
+            ..v
+        };
+        let firm = services_page(&frame(), &v);
+        assert!(
+            firm.contains("Delete Team wiki and 2 permissions?"),
+            "{firm}"
+        );
+        assert!(firm.contains(r#"class="uiInput ask__name""#));
+        // The page without any service still offers the form.
+        let empty = Catalog::build(Vec::new(), Vec::new());
+        let page = services_page(
+            &frame(),
+            &ServicesView {
+                catalog: &empty,
+                ..v
+            },
+        );
+        assert!(
+            page.contains("Add external service") && page.contains("No service in the catalogue")
+        );
     }
 
     #[test]

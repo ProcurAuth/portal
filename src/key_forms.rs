@@ -131,6 +131,9 @@ pub struct Context<'a> {
     pub document: &'a dyn Fn(&str) -> Option<Arc<Document>>,
     /// Whether the catalogue holds the service.
     pub service_exists: &'a dyn Fn(&str) -> bool,
+    /// Whether the service is an external service: a link with no action. Its only grant is `access` on the whole
+    /// service, and only an account holds it.
+    pub is_external: &'a dyn Fn(&str) -> bool,
     /// The grants of the key before the change, for the form of a change.
     pub old_grants: Option<&'a [Grant]>,
 }
@@ -328,6 +331,16 @@ fn check_grants_apart(
             Some(fields) => limits_of(fields)?,
             None => Limits::new(),
         };
+        // An external service has no document and no action. A key never holds a right on it. An account holds
+        // `access` on the whole service and nothing else, whatever it held before.
+        if (ctx.is_external)(&grant.service)
+            && (holder != Holder::Account
+                || grant.action != ACCESS
+                || !grant.path.is_empty()
+                || !limits.is_empty())
+        {
+            return Err(BAD_GRANT);
+        }
         // An account keeps a grant that it holds and that the form does not change, also when the
         // document of the service does not name it now. A person can then remove it.
         if holder == Holder::Account
@@ -487,6 +500,7 @@ mod tests {
                 max_lifetime,
                 document: &lookup,
                 service_exists: &exists,
+                is_external: &|_| false,
                 old_grants: old,
             },
             KeyKind::Mcp,
@@ -516,6 +530,7 @@ mod tests {
                 max_lifetime: None,
                 document: &lookup,
                 service_exists: &exists,
+                is_external: &|_| false,
                 old_grants: None,
             },
             KeyKind::Api,
@@ -1048,6 +1063,7 @@ mod tests {
             max_lifetime: None,
             document: &lookup,
             service_exists: &exists,
+            is_external: &|_| false,
             old_grants: None,
         };
         let (grants, service) = grants_without_access(&raw, &ctx, Holder::Account).unwrap();
@@ -1107,6 +1123,7 @@ mod tests {
             max_lifetime: None,
             document: &lookup,
             service_exists: &exists,
+            is_external: &|_| false,
             old_grants: None,
         };
         assert_eq!(check_grants(&raw, &ctx, Holder::Account), Err(NEEDS_ACCESS));
@@ -1116,5 +1133,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(check_grants(&raw, &ctx, Holder::Account).unwrap().len(), 2);
+    }
+
+    /// An external service is a link. An account holds `access` on its whole service and nothing else. A key holds
+    /// no right on it.
+    #[test]
+    fn a_grant_on_an_external_service_is_only_access_on_the_whole_service_and_only_for_an_account()
+    {
+        let document = document();
+        let lookup = move |service: &str| (service == "datastore").then(|| Arc::clone(&document));
+        let exists = |service: &str| matches!(service, "datastore" | "ext-wiki");
+        let external = |service: &str| service == "ext-wiki";
+        let ctx = Context {
+            now: NOW,
+            owner_grants: None,
+            max_lifetime: None,
+            document: &lookup,
+            service_exists: &exists,
+            is_external: &external,
+            old_grants: None,
+        };
+        let account = |texts: &[(&str, &str)]| {
+            let raw = read(fields(texts), true).unwrap();
+            check_grants(&raw, &ctx, Holder::Account).map(|g| g.len())
+        };
+        assert_eq!(account(&[("grant0", "access on service:ext-wiki")]), Ok(1));
+        assert_eq!(
+            account(&[
+                ("grant0", "access on service:ext-wiki"),
+                ("grant1", "access on service:datastore"),
+                ("grant2", "data.read on service:datastore/host:prod"),
+            ]),
+            Ok(3),
+            "the other services are as before"
+        );
+        for refused in [
+            "data.read on service:ext-wiki",
+            "data.admin on service:ext-wiki",
+            "access on service:ext-wiki/host:prod",
+            "data.read on service:ext-wiki/host:prod",
+            "x.y on service:ext-wiki",
+        ] {
+            assert_eq!(
+                account(&[
+                    ("grant0", "access on service:ext-wiki"),
+                    ("grant1", refused)
+                ]),
+                Err(BAD_GRANT),
+                "{refused}"
+            );
+        }
+        // A limit value on `access` has no document to follow.
+        let raw = read(
+            fields(&[
+                ("grant0", "access on service:ext-wiki"),
+                ("limit0.requests.minute", "10"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(check_grants(&raw, &ctx, Holder::Account), Err(BAD_GRANT));
+        // A grant that the account holds and that the form does not change is no way round the rule.
+        let old = grants(&["data.read on service:ext-wiki"]);
+        let kept = Context {
+            old_grants: Some(&old),
+            ..ctx
+        };
+        let raw = read(
+            fields(&[
+                ("grant0", "access on service:ext-wiki"),
+                ("grant1", "data.read on service:ext-wiki"),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(check_grants(&raw, &kept, Holder::Account), Err(BAD_GRANT));
+        // A key never holds a right on it, `access` included.
+        for kind in [KeyKind::Mcp, KeyKind::Api] {
+            let raw = read(fields(&[("grant0", "access on service:ext-wiki")]), true).unwrap();
+            assert_eq!(
+                check_grants(&raw, &ctx, Holder::Key(kind)),
+                Err(BAD_GRANT),
+                "{kind:?}"
+            );
+        }
     }
 }

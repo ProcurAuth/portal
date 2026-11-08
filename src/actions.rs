@@ -959,6 +959,8 @@ fn wanted(catalog: &Catalog) -> HashMap<String, Option<String>> {
         .groups()
         .iter()
         .flat_map(|g| g.services.iter())
+        // An external service is a link. It has no document, and the portal never requests it.
+        .filter(|s| !s.external)
         .map(|s| (s.id.clone(), s.actions_url.clone()))
         .collect()
 }
@@ -1078,6 +1080,42 @@ mod tests {
         serde_json::json!({"server": server, "resource_types": declared, "actions": list})
             .to_string()
             .into_bytes()
+    }
+
+    /// An external service is a link: the portal never reads a document for it, and it never asks it anything.
+    #[test]
+    fn an_external_service_is_never_wanted_by_the_readers_of_the_documents() {
+        let found = crate::catalog::parse_labels(
+            "x",
+            &[
+                ("portal.name", "Db"),
+                ("portal.href", "/db/"),
+                ("portal.actions", "http://db/.well-known/procurauth/actions"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        )
+        .unwrap()
+        .unwrap();
+        let (name, id) = crate::catalog::external::check_name("Wiki").unwrap();
+        let catalog = Catalog::build(vec![found], Vec::new()).with_externals(&[
+            crate::catalog::external::ExternalEntry {
+                id: id.clone(),
+                name,
+                href: "https://wiki.example.org/".into(),
+                created_at: 1,
+            },
+        ]);
+        assert_eq!(catalog.service_count(), 2);
+        let wanted = wanted(&catalog);
+        assert_eq!(wanted.len(), 1);
+        assert!(!wanted.contains_key(&id));
+        let registry = Registry::new(Duration::from_secs(60));
+        registry.retain(&wanted);
+        assert!(registry.declared(&id).is_none());
+        assert!(registry.actions(&id).is_empty());
+        assert!(registry.first_reads_done(&Catalog::build(Vec::new(), Vec::new())));
     }
 
     #[test]

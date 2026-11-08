@@ -147,6 +147,8 @@ pub struct HomeContext<'a> {
     pub bell: Option<&'a notify::Bell<'a>>,
     /// What the tab of the browser shows.
     pub tab: TabLook<'a>,
+    /// Each tile opens its service in a new tab (`ui.services_new_tab`). One value for every service.
+    pub services_new_tab: bool,
 }
 
 /// What the tab of the browser shows on a page after sign-in. The name and the icon are in the head of the page. No
@@ -210,13 +212,20 @@ pub fn home_page(catalog: &Catalog, icons: &Icons, ctx: &HomeContext) -> String 
         body.push_str(r#"<main class="rows"><h1 class="visually-hidden">Services</h1>"#);
         let single = catalog.groups().len() == 1;
         for (index, group) in catalog.groups().iter().enumerate() {
-            group_row(&mut body, index, group, icons, single);
+            group_row(&mut body, index, group, icons, single, ctx.services_new_tab);
         }
         body.push_str("</main>");
     }
     let mut icons = vec!["i-device-desktop", "i-moon", "i-sun", "i-logout"];
     if ctx.settings.is_some() {
         icons.push("i-settings");
+    }
+    if catalog
+        .groups()
+        .iter()
+        .any(|g| g.services.iter().any(|s| s.external))
+    {
+        icons.push("i-arrow-up-right");
     }
     if let Some(bell) = ctx.bell {
         // The toasts and the script come after the page. The script loads once the page is read.
@@ -432,7 +441,14 @@ fn problems_notice(problems: &[String]) -> String {
 
 /// One row. `single` tells that the row is the only row of the page. A single row without a
 /// down or an unhealthy service has no head.
-fn group_row(out: &mut String, index: usize, group: &Group, icons: &Icons, single: bool) {
+fn group_row(
+    out: &mut String,
+    index: usize,
+    group: &Group,
+    icons: &Icons,
+    single: bool,
+    new_tab: bool,
+) {
     let count = group.services.len();
     let down = group.down_count();
     let unhealthy = group.unhealthy_count();
@@ -465,7 +481,7 @@ fn group_row(out: &mut String, index: usize, group: &Group, icons: &Icons, singl
     }
     out.push_str(r#"<ul class="tiles">"#);
     for service in &group.services {
-        tile(out, service, icons);
+        tile(out, service, icons, new_tab);
     }
     out.push_str("</ul></section>");
 }
@@ -485,8 +501,11 @@ fn tile_state(service: &Service) -> Option<(&'static str, &'static str)> {
     }
 }
 
-fn tile(out: &mut String, service: &Service, icons: &Icons) {
-    let target = if service.new_tab {
+/// The tooltip of the badge "external". The Services page says the same.
+const EXTERNAL_NOTE: &str = "External link. This server does not protect it.";
+
+fn tile(out: &mut String, service: &Service, icons: &Icons, new_tab: bool) {
+    let target = if new_tab {
         r#" target="_blank" rel="noopener noreferrer""#
     } else {
         ""
@@ -496,11 +515,20 @@ fn tile(out: &mut String, service: &Service, icons: &Icons) {
     } else {
         format!(r#" title="{}""#, html_escape(&service.description))
     };
-    let state = tile_state(service)
-        .map(|(modifier, word)| {
-            format!(r#"<span class="tile__state tile__state--{modifier}">{word}</span>"#)
-        })
-        .unwrap_or_default();
+    // An external service has no health. Its mark is the badge "external": it tells that the portal does not
+    // protect the link.
+    let state = if service.external {
+        format!(
+            r##"<span class="tile__state tile__state--external" title="{EXTERNAL_NOTE}">{}external</span>"##,
+            r##"<svg class="icon icon--sm" aria-hidden="true"><use href="#i-arrow-up-right"/></svg>"##
+        )
+    } else {
+        tile_state(service)
+            .map(|(modifier, word)| {
+                format!(r#"<span class="tile__state tile__state--{modifier}">{word}</span>"#)
+            })
+            .unwrap_or_default()
+    };
     let class = if service.health == Health::Down {
         "tile tile--down"
     } else {
@@ -739,6 +767,7 @@ fn demo_services(catalog: &Catalog) -> Vec<ServiceActions> {
                 crate::actions::Document::default()
             };
             ServiceActions {
+                external: false,
                 id: service.id.clone(),
                 name: service.name.clone(),
                 actions: document
@@ -788,6 +817,7 @@ fn demo_features() -> ServiceActions {
     };
     let document = document(&features);
     ServiceActions {
+        external: false,
         id: crate::portal_actions::SERVICE.into(),
         name: "Server permissions".into(),
         actions: document
@@ -1091,6 +1121,7 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                 settings: Some("/auth/settings"),
                 bell: None,
                 tab: TabLook::DEFAULT,
+                services_new_tab: false,
             },
         ),
         "access" | "access-panel-only" => access_page(
@@ -1191,6 +1222,9 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     selected: None,
                     only_check: false,
                     checks: false,
+                    notice: None,
+                    token: "demo",
+                    can_add: !panel_only,
                 },
             )
         }
@@ -1207,6 +1241,9 @@ pub fn demo_page(name: &str, icons: &Icons) -> Option<String> {
                     selected: None,
                     only_check: false,
                     checks: false,
+                    notice: None,
+                    token: "demo",
+                    can_add: false,
                 },
             )
         }
@@ -1331,6 +1368,7 @@ mod tests {
             settings: None,
             bell: None,
             tab: TabLook::DEFAULT,
+            services_new_tab: false,
         }
     }
 
@@ -1952,20 +1990,83 @@ mod tests {
         assert!(page.contains(r#"href="/a?b=1&amp;c=2""#));
     }
 
+    fn external_entry(name: &str, href: &str) -> crate::catalog::external::ExternalEntry {
+        let (name, id) = crate::catalog::external::check_name(name).unwrap();
+        crate::catalog::external::ExternalEntry {
+            id,
+            name,
+            href: href.into(),
+            created_at: 1,
+        }
+    }
+
     #[test]
-    fn external_links_open_in_a_new_tab_safely_and_local_ones_do_not() {
-        let mut external = service("Docs", "", "https://example.org/docs");
-        external.new_tab = true;
-        let page = home_page(
-            &Catalog::build(vec![external, service("Local", "", "/local/")], Vec::new()),
-            &Icons::empty(),
-            &ctx(),
+    fn a_tile_of_an_external_service_has_the_badge_the_link_and_no_health() {
+        let base = Catalog::build(vec![service("Local", "", "/local/")], Vec::new());
+        let plain = home_page(&base, &Icons::empty(), &ctx());
+        assert!(!plain.contains("tile__state--external") && !plain.contains("i-arrow-up-right"));
+        let catalog = base.with_externals(&[external_entry(
+            "Team wiki",
+            "https://wiki.example.org/start?a=1&b=2",
+        )]);
+        let page = home_page(&catalog, &Icons::empty(), &ctx());
+        // The badge: the word, the arrow and the note, once, on the tile of the external service.
+        assert_eq!(page.matches("tile__state--external").count(), 1, "{page}");
+        assert!(page.contains(
+            r##"<span class="tile__state tile__state--external" title="External link. This server does not protect it."><svg class="icon icon--sm" aria-hidden="true"><use href="#i-arrow-up-right"/></svg>external</span>"##
+        ));
+        assert!(
+            page.contains(r#"<symbol id="i-arrow-up-right""#),
+            "the sprite has the arrow"
         );
+        // The link is the absolute URL, escaped. The tile has the initial of the name.
+        assert!(page.contains(r#"href="https://wiki.example.org/start?a=1&amp;b=2""#));
+        assert!(page.contains(r#"<span class="tile__icon" aria-hidden="true">T</span>"#));
+        assert!(
+            page.contains(r#">External</h2>"#),
+            "the group External: {page}"
+        );
+        // No health chip, whatever the state of the other tiles.
+        let tile = &page[page.find("Team wiki").unwrap()..];
+        let tile = &tile[..tile.find("</a>").unwrap()];
+        assert!(!tile.contains("tile__state--up") && !tile.contains("tile__state--down"));
+        // The setting `ui.services_new_tab` applies to it as to the other tiles.
+        let on = HomeContext {
+            services_new_tab: true,
+            ..ctx()
+        };
+        let page = home_page(&catalog, &Icons::empty(), &on);
         assert_eq!(
             page.matches(r#"target="_blank" rel="noopener noreferrer""#)
                 .count(),
-            1
+            2
         );
+        let off = home_page(&catalog, &Icons::empty(), &ctx());
+        assert!(!off.contains("_blank"));
+    }
+
+    #[test]
+    fn the_setting_makes_every_tile_open_in_a_new_tab_safely_or_none() {
+        let catalog = Catalog::build(
+            vec![
+                service("Docs", "", "https://example.org/docs"),
+                service("Local", "", "/local/"),
+            ],
+            Vec::new(),
+        );
+        let on = HomeContext {
+            services_new_tab: true,
+            ..ctx()
+        };
+        let page = home_page(&catalog, &Icons::empty(), &on);
+        assert_eq!(
+            page.matches(r#"target="_blank" rel="noopener noreferrer""#)
+                .count(),
+            2,
+            "one value for each service"
+        );
+        let off = home_page(&catalog, &Icons::empty(), &ctx());
+        assert!(!off.contains("_blank"));
     }
 
     #[test]

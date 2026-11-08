@@ -11379,3 +11379,784 @@ mod credential_binding_tests {
         assert_eq!(attempt("mallory", "mallory-password-1"), 429);
     }
 }
+
+// External services -------------------------------------------------------------------------------
+
+fn add_external(node: &Node, session: &str, name: &str, href: &str) -> Reply {
+    post(
+        node,
+        session,
+        EXTERNAL_ADD_PATH,
+        USERS_TOKEN,
+        &format!(
+            "name={}&href={}",
+            percent_encode_query_component(name),
+            percent_encode_query_component(href)
+        ),
+    )
+}
+
+fn delete_external(node: &Node, session: &str, id: &str) -> Reply {
+    post(
+        node,
+        session,
+        EXTERNAL_DELETE_PATH,
+        USERS_TOKEN,
+        &format!("id={}", percent_encode_query_component(id)),
+    )
+}
+
+const WIKI_LINK: &str = "https://wiki.example.org/start?a=1&b=2";
+
+#[test]
+fn the_superadmin_adds_an_external_service_and_its_tile_follows_the_grant_access() {
+    each_backend(|backend| {
+        let node = start_with(
+            Arc::new(backend.fresh()),
+            Some(Duration::ZERO),
+            r#"identity { issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" token_ttl = "5m" }"#,
+        );
+        publish_catalog(&node, &["query.run.read"]);
+        let root = sign_in(&node, "root", PASSWORD);
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                "login=alice&password=a-long-password-1"
+            )
+            .status,
+            303
+        );
+        let added = add_external(&node, &root, "Team wiki", WIKI_LINK);
+        assert_eq!(added.status, 303, "{}", added.body);
+        assert_eq!(
+            added.location(),
+            Some("/auth/settings/services?s=external-added&svc=ext-team-wiki")
+        );
+        let stored = node.state.store.load_directory().unwrap().externals;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "ext-team-wiki");
+        assert_eq!(stored[0].href, WIKI_LINK);
+        assert_eq!(node.state.users.externals(), stored);
+
+        // The superadmin sees the tile with the badge. An account without a grant sees none.
+        let launcher = page(&node, &root, "/");
+        assert!(launcher.body.contains("Team wiki"), "{}", launcher.body);
+        assert!(launcher
+            .body
+            .contains("External link. This server does not protect it."));
+        assert!(launcher
+            .body
+            .contains(r#"href="https://wiki.example.org/start?a=1&amp;b=2""#));
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert!(page(&node, &alice, "/")
+            .body
+            .contains("No service available"));
+        // The Services page lists it with the badge and the words that say that the portal does not protect it.
+        let services = page(&node, &root, "/auth/settings/services?svc=ext-team-wiki");
+        assert_eq!(services.status, 200);
+        assert!(services.body.contains("badge badge--external"));
+        assert!(services
+            .body
+            .contains("External link. This server does not protect it."));
+        assert!(services.body.contains(r#"action="/auth/services/delete""#));
+        assert!(services.body.contains("Add external service"));
+
+        // The grant `access` shows the tile.
+        let give = |fields: &str| {
+            post(
+                &node,
+                &root,
+                USERS_UPDATE_PATH,
+                USERS_TOKEN,
+                &format!("grants=1&login=alice&{fields}"),
+            )
+            .location()
+            .map(str::to_string)
+        };
+        assert_eq!(
+            give("grant0=access+on+service%3Aext-team-wiki"),
+            Some("/auth/settings/users/alice?s=user-updated".into())
+        );
+        let launcher = page(&node, &alice, "/");
+        assert!(launcher.body.contains("Team wiki"), "{}", launcher.body);
+        assert!(launcher
+            .body
+            .contains("External link. This server does not protect it."));
+        assert!(!launcher.body.contains("No service available"));
+
+        // The account page draws the service with its switch and no other action.
+        let account = page(&node, &root, "/auth/settings/users/alice");
+        let editor = editor_json(&account.body);
+        let wiki = editor["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "ext-team-wiki")
+            .expect("the editor lists the external service");
+        assert_eq!(wiki["external"], true);
+        let actions: Vec<&str> = wiki["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, ["access"]);
+        assert_eq!(wiki["nodes"].as_array().unwrap().len(), 1);
+        let others: Vec<&serde_json::Value> = editor["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"] != "ext-team-wiki")
+            .collect();
+        assert!(others.iter().all(|s| s["external"] == false));
+
+        // A grant other than `access` on the whole service is refused, in the account editor and in the new user form.
+        for refused in [
+            "grant1=query.run.read+on+service%3Aext-team-wiki",
+            "grant1=access+on+service%3Aext-team-wiki%2Fhost%3Aprod",
+            "grant1=anything+on+service%3Aext-team-wiki",
+        ] {
+            assert_eq!(
+                give(&format!(
+                    "grant0=access+on+service%3Aext-team-wiki&{refused}"
+                )),
+                Some("/auth/settings/users/alice?s=edit-unknown-grant".into()),
+                "{refused}"
+            );
+            let reply = post(
+                &node,
+                &root,
+                USERS_ADD_PATH,
+                USERS_TOKEN,
+                &format!("password=a-long-password-1&login=bob&grants=1&grant0=access+on+service%3Aext-team-wiki&{refused}"),
+            );
+            assert_eq!(reply.status, 303, "{refused}");
+            assert_eq!(
+                reply.location(),
+                Some("/auth/settings/new-user?s=unknown-grant")
+            );
+        }
+        assert!(node.state.users.get("bob").is_none());
+        assert_eq!(
+            node.state.users.grants_of("alice").unwrap().len(),
+            1,
+            "a refused save changes no grant"
+        );
+        // The new user form still makes an account with `access` on the service and on another one.
+        let ok = post(
+            &node,
+            &root,
+            USERS_ADD_PATH,
+            USERS_TOKEN,
+            "password=a-long-password-1&login=carol&grants=1&grant0=access+on+service%3Aext-team-wiki&grant1=access+on+service%3Adb&grant2=query.run.read+on+service%3Adb",
+        );
+        assert_eq!(
+            ok.location(),
+            Some("/auth/settings/users/carol?s=user-added")
+        );
+        assert_eq!(node.state.users.grants_of("carol").unwrap().len(), 3);
+        // The form of the other services works as before.
+        assert_eq!(
+            give("grant0=access+on+service%3Aext-team-wiki&grant1=access+on+service%3Adb&grant2=query.run.read+on+service%3Adb"),
+            Some("/auth/settings/users/alice?s=user-updated".into())
+        );
+
+        // The service is never a client: no document, no action, no identity token and no path in the gate.
+        assert!(node.state.actions.declared("ext-team-wiki").is_none());
+        assert!(node.state.actions.actions("ext-team-wiki").is_empty());
+        let allowed = open(&node, &alice, "/db/query");
+        assert_eq!(allowed.status, 204);
+        assert_eq!(
+            claims(allowed.header("x-identity-token").unwrap())["aud"],
+            "db"
+        );
+        assert_eq!(
+            open(&node, &alice, "/grafana/d/1").status,
+            302,
+            "the grant on the link opens no path of another service"
+        );
+        for uri in ["/wiki/start", "/start", "/auth/verify"] {
+            assert!(
+                open(&node, &alice, uri)
+                    .header("x-identity-token")
+                    .is_none(),
+                "{uri}: no identity token for a link"
+            );
+        }
+        assert!(current_catalog(&node.state)
+            .gate()
+            .iter()
+            .all(|entry| entry.services.iter().all(|s| !s.id.starts_with("ext-"))));
+    });
+}
+
+#[test]
+fn a_link_to_the_host_of_the_portal_owns_no_path_of_the_gate() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        publish_catalog(&node, &[]);
+        let root = sign_in(&node, "root", PASSWORD);
+        insert_account(&node, "alice", "a-long-password-1");
+        insert_account(&node, "bob", "a-long-password-1");
+        let host = format!("http://127.0.0.1:{}", node.port);
+        for (name, path) in [
+            ("Mirror", "/grafana/"),
+            ("Verify", "/auth/verify"),
+            ("Everything", "/"),
+            ("Deep", "/db/admin/x"),
+        ] {
+            let reply = add_external(&node, &root, name, &format!("{host}{path}"));
+            assert_eq!(reply.status, 303, "{name}: {}", reply.body);
+            assert!(
+                reply.location().unwrap().contains("external-added"),
+                "{name}"
+            );
+        }
+        // Alice holds `access` on every link and on nothing else. Bob holds `access` on Grafana.
+        let links: Vec<Grant> = ["ext-mirror", "ext-verify", "ext-everything", "ext-deep"]
+            .iter()
+            .map(|id| Grant::new("access", id).unwrap())
+            .collect();
+        change_grants(&node, "alice", links);
+        change_grants(
+            &node,
+            "bob",
+            vec![Grant::new("access", "other-grafana").unwrap()],
+        );
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let bob = sign_in(&node, "bob", "a-long-password-1");
+        // A link cannot open the path of another service...
+        assert_eq!(open(&node, &alice, "/grafana/d/1").status, 302);
+        assert_eq!(open(&node, &alice, "/db/query").status, 302);
+        // ...and it cannot hide or shadow it: the owner of the path is the service of the workload.
+        assert_eq!(open(&node, &bob, "/grafana/d/1").status, 204);
+        assert_eq!(open(&node, &bob, "/db/query").status, 302);
+        // The gate of the portal has no entry for a link.
+        let catalog = current_catalog(&node.state);
+        assert!(catalog
+            .owner(&["grafana".to_string(), "d".to_string()])
+            .is_some());
+        assert!(catalog
+            .owner(&["auth".to_string(), "verify".to_string()])
+            .is_none());
+        assert_eq!(catalog.gate().len(), 2, "the gate of the two workloads");
+        // The pages of the portal answer as before.
+        assert_eq!(page(&node, &alice, "/").status, 200);
+        assert_eq!(page(&node, &root, "/auth/settings/services").status, 200);
+    });
+}
+
+#[test]
+fn deleting_an_external_service_removes_its_grants_in_one_step_and_is_audited() {
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        publish_catalog(&node, &[]);
+        let root = sign_in(&node, "root", PASSWORD);
+        insert_account(&node, "alice", "a-long-password-1");
+        insert_account(&node, "bob", "a-long-password-1");
+        assert_eq!(
+            add_external(&node, &root, "Team wiki", WIKI_LINK).status,
+            303
+        );
+        assert_eq!(
+            add_external(&node, &root, "Docs", "https://docs.example.org/").status,
+            303
+        );
+        let wiki = Grant::new("access", "ext-team-wiki").unwrap();
+        let docs = Grant::new("access", "ext-docs").unwrap();
+        let db = Grant::new("access", "db").unwrap();
+        change_grants(&node, "alice", vec![wiki.clone(), docs.clone(), db.clone()]);
+        change_grants(&node, "bob", vec![wiki.clone()]);
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        assert!(page(&node, &alice, "/").body.contains("Team wiki"));
+
+        let gone = delete_external(&node, &root, "ext-team-wiki");
+        assert_eq!(gone.status, 303);
+        assert_eq!(
+            gone.location(),
+            Some("/auth/settings/services?s=external-deleted")
+        );
+        // The entry and every grant that names it: in the directory and in the database.
+        assert_eq!(node.state.users.externals().len(), 1);
+        let directory = node.state.store.load_directory().unwrap();
+        assert_eq!(directory.externals.len(), 1);
+        assert_eq!(directory.externals[0].id, "ext-docs");
+        for user in &directory.users {
+            assert!(
+                user.grants.iter().all(|g| g.service != "ext-team-wiki"),
+                "{}",
+                user.login
+            );
+        }
+        assert_eq!(
+            node.state.users.grants_of("alice").unwrap(),
+            {
+                let mut kept = vec![docs.clone(), db.clone()];
+                kept.sort();
+                kept
+            },
+            "the other grants stay"
+        );
+        assert!(node.state.users.grants_of("bob").unwrap().is_empty());
+        let launcher = page(&node, &alice, "/");
+        assert!(!launcher.body.contains("Team wiki") && launcher.body.contains("Docs"));
+        // The same name makes a new entry with no old grant.
+        assert_eq!(
+            add_external(&node, &root, "Team wiki", WIKI_LINK).status,
+            303
+        );
+        assert!(!page(&node, &alice, "/").body.contains("Team wiki"));
+        // A service that does not exist, or an id that is not an external id.
+        for id in ["ext-nobody", "db", "other-grafana", "", "ext-"] {
+            let reply = delete_external(&node, &root, id);
+            assert_eq!(
+                reply.location(),
+                Some("/auth/settings/services?s=external-gone"),
+                "{id:?}"
+            );
+        }
+        assert_eq!(node.state.users.externals().len(), 2);
+        // The history has one event for each add and each delete, and the measures count them.
+        assert_eq!(
+            metric(
+                &node,
+                r#"portal_user_admin_total{action="external_add",result="ok"}"#
+            ),
+            3
+        );
+        assert_eq!(
+            metric(
+                &node,
+                r#"portal_user_admin_total{action="external_delete",result="ok"}"#
+            ),
+            1
+        );
+        wait_until(Duration::from_secs(10), || {
+            let changes = page(&node, &root, "/auth/settings/activity?v=changes").body;
+            changes.contains("External service deleted")
+                && changes.matches("External service added").count() == 3
+        });
+    });
+}
+
+#[test]
+fn the_add_form_refuses_a_bad_value_a_known_id_the_limit_and_a_request_that_is_not_the_superadmin()
+{
+    each_backend(|backend| {
+        let node = start_with(Arc::new(backend.fresh()), Some(Duration::ZERO), "");
+        // A service that discovery lists uses the id: it wins, and the form refuses the name.
+        let mut found = listed(&[("portal.name", "Wiki"), ("portal.href", "/wiki/")]);
+        found.id = "ext-wiki".into();
+        *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(vec![found], Vec::new()));
+        let root = sign_in(&node, "root", PASSWORD);
+        insert_account(&node, "alice", "a-long-password-1");
+        let alice = sign_in(&node, "alice", "a-long-password-1");
+        let code = |reply: Reply| reply.location().map(str::to_string);
+        let services = |code: &str| Some(format!("/auth/settings/services?s={code}"));
+        for (name, href, expected) in [
+            ("", "https://a.example.org/", "external-bad-name"),
+            ("---", "https://a.example.org/", "external-bad-name"),
+            ("A\nB", "https://a.example.org/", "external-bad-name"),
+            (
+                &"a".repeat(33),
+                "https://a.example.org/",
+                "external-bad-name",
+            ),
+            ("A", "", "external-bad-link"),
+            ("A", "/local/", "external-bad-link"),
+            ("A", "javascript:alert(1)", "external-bad-link"),
+            ("A", "https://user:pw@a.example.org/", "external-bad-link"),
+            ("A", "https://a.example.org/\u{7}", "external-bad-link"),
+            ("A", "ftp://a.example.org/", "external-bad-link"),
+            ("Wiki", "https://wiki.example.org/", "external-taken"),
+        ] {
+            assert_eq!(
+                code(add_external(&node, &root, name, href)),
+                services(expected),
+                "{name:?} {href:?}"
+            );
+        }
+        assert!(node.state.users.externals().is_empty());
+        assert_eq!(
+            node.state.store.load_directory().unwrap().externals.len(),
+            0
+        );
+        // A good value, then the same id again: the name "Team Wiki" and "team-wiki" have one id.
+        assert_eq!(
+            add_external(&node, &root, "Team Wiki", WIKI_LINK).status,
+            303
+        );
+        assert_eq!(
+            code(add_external(
+                &node,
+                &root,
+                "team-wiki",
+                "https://other.example.org/"
+            )),
+            services("external-exists")
+        );
+        // The limit: the store holds 256 entries at most.
+        for n in node.state.users.externals().len()..crate::catalog::external::MAX_SERVICES {
+            let entry = crate::catalog::external::ExternalEntry {
+                id: format!("ext-bulk-{n}"),
+                name: format!("Bulk {n}"),
+                href: "https://bulk.example.org/".into(),
+                created_at: 1,
+            };
+            node.state
+                .store
+                .insert_external(&entry, crate::catalog::external::MAX_SERVICES)
+                .unwrap();
+            node.state.users.add_external(entry);
+        }
+        assert_eq!(
+            code(add_external(&node, &root, "One more", WIKI_LINK)),
+            services("external-limit")
+        );
+        // An account that is not the superadmin cannot add, delete or open the page.
+        assert_eq!(add_external(&node, &alice, "Mine", WIKI_LINK).status, 403);
+        assert_eq!(delete_external(&node, &alice, "ext-team-wiki").status, 403);
+        assert_eq!(
+            page(&node, &alice, "/auth/settings/services").status,
+            404,
+            "the page does not exist for an account"
+        );
+        assert_eq!(node.state.users.externals().len(), 256);
+        // A field that the form does not have, a bad token, a bad origin and a bad type.
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                EXTERNAL_ADD_PATH,
+                USERS_TOKEN,
+                "name=A&href=https%3A%2F%2Fa.example.org%2F&grant0=x",
+            )
+            .status,
+            400
+        );
+        assert_eq!(
+            post(
+                &node,
+                &root,
+                EXTERNAL_ADD_PATH,
+                "other-purpose",
+                "name=A&href=https%3A%2F%2Fa.example.org%2F",
+            )
+            .status,
+            403,
+            "the token of another form"
+        );
+        let cookie = format!("{}={root}", session_cookie_name(&node));
+        let csrf = sign_action_token(&node.state.signing_secret, USERS_TOKEN, &root).unwrap();
+        let body = format!("csrf={csrf}&name=A&href=https%3A%2F%2Fa.example.org%2F");
+        assert_eq!(
+            send(
+                node.port,
+                "POST",
+                EXTERNAL_ADD_PATH,
+                &[
+                    ("Origin", "https://evil.example"),
+                    ("Content-Type", "application/x-www-form-urlencoded"),
+                    ("Cookie", &cookie),
+                ],
+                &body,
+            )
+            .status,
+            403
+        );
+        assert_eq!(
+            send(
+                node.port,
+                "POST",
+                EXTERNAL_ADD_PATH,
+                &[
+                    ("Origin", &format!("http://127.0.0.1:{}", node.port)),
+                    ("Content-Type", "text/plain"),
+                    ("Cookie", &cookie),
+                ],
+                &body,
+            )
+            .status,
+            415
+        );
+        assert_eq!(
+            send(
+                node.port,
+                "POST",
+                EXTERNAL_ADD_PATH,
+                &[
+                    ("Origin", &format!("http://127.0.0.1:{}", node.port)),
+                    ("Content-Type", "application/x-www-form-urlencoded"),
+                ],
+                &body,
+            )
+            .location(),
+            Some(LOGIN_PATH),
+            "no session"
+        );
+        // A GET is not a route of the form.
+        assert_eq!(
+            send(
+                node.port,
+                "GET",
+                EXTERNAL_ADD_PATH,
+                &[("Cookie", &cookie)],
+                ""
+            )
+            .status,
+            404
+        );
+    });
+}
+
+#[test]
+fn an_external_service_that_discovery_lists_later_wins_and_the_page_says_so() {
+    let node = start_with(Arc::new(Backend::Sqlite.fresh()), Some(Duration::ZERO), "");
+    publish_catalog(&node, &[]);
+    let root = sign_in(&node, "root", PASSWORD);
+    assert_eq!(add_external(&node, &root, "Wiki", WIKI_LINK).status, 303);
+    assert!(page(&node, &root, "/")
+        .body
+        .contains("External link. This server does not protect it."));
+    let mut found = listed(&[("portal.name", "Wiki"), ("portal.href", "/wiki/")]);
+    found.id = "ext-wiki".into();
+    *node.state.catalog.write().unwrap() = Arc::new(Catalog::build(vec![found], Vec::new()));
+    let launcher = page(&node, &root, "/");
+    assert!(!launcher
+        .body
+        .contains("External link. This server does not protect it."));
+    assert!(launcher.body.contains(r#"href="/wiki/""#));
+    assert!(
+        launcher.body.contains("a discovered service has this id"),
+        "the superadmin sees the problem: {}",
+        launcher.body
+    );
+}
+
+#[test]
+fn the_other_instance_sees_an_external_service_that_was_added_or_deleted_here() {
+    each_backend(|backend| {
+        let (a, b) = cluster(backend, Some(Duration::ZERO));
+        publish_catalog(&a, &[]);
+        publish_catalog(&b, &[]);
+        let root = sign_in(&a, "root", PASSWORD);
+        insert_account(&a, "alice", "a-long-password-1");
+        crate::sync::run_round(&b.state, 1);
+        assert_eq!(add_external(&a, &root, "Team wiki", WIKI_LINK).status, 303);
+        change_grants(
+            &a,
+            "alice",
+            vec![Grant::new("access", "ext-team-wiki").unwrap()],
+        );
+        let alice = sign_in(&a, "alice", "a-long-password-1");
+        // The periodic round of the other instance reads the directory. The catalogue merges the new entry at once.
+        crate::sync::run_round(&b.state, 2);
+        let launcher = page(&b, &alice, "/");
+        assert!(launcher.body.contains("Team wiki"), "{}", launcher.body);
+        assert!(launcher
+            .body
+            .contains("External link. This server does not protect it."));
+        assert!(launcher
+            .body
+            .contains(r#"href="https://wiki.example.org/start?a=1&amp;b=2""#));
+        let root_on_b = sign_in(&b, "root", PASSWORD);
+        assert!(page(&b, &root_on_b, "/auth/settings/services")
+            .body
+            .contains("badge badge--external"));
+        // The page that the redirect after "Add" selects opens at once on the other instance.
+        let fresh = add_external(&a, &root, "Docs", "https://docs.example.org/");
+        assert_eq!(fresh.status, 303);
+        let selected = page(&b, &root_on_b, fresh.location().unwrap());
+        assert_eq!(selected.status, 200);
+        assert!(selected.body.contains(r#"id="detail-title">Docs</h2>"#));
+
+        // A delete on the other instance reaches this one, with the grants.
+        assert_eq!(delete_external(&b, &root_on_b, "ext-team-wiki").status, 303);
+        crate::sync::run_round(&a.state, 3);
+        assert!(page(&a, &alice, "/").body.contains("No service available"));
+        assert!(a.state.users.grants_of("alice").unwrap().is_empty());
+        assert_eq!(
+            a.state.users.externals().len(),
+            1,
+            "only Docs is left on the first instance"
+        );
+        // A delete of an entry that this instance has not read yet finds it in the shared database.
+        let later = add_external(&a, &root, "Later", "https://later.example.org/");
+        assert_eq!(later.status, 303);
+        let gone = delete_external(&b, &root_on_b, "ext-later");
+        assert_eq!(
+            gone.location(),
+            Some("/auth/settings/services?s=external-deleted")
+        );
+    });
+}
+
+#[test]
+fn a_node_that_cannot_change_grants_has_no_form_that_adds_an_external_service() {
+    let node = start_custom(
+        Arc::new(Backend::Sqlite.fresh()),
+        None,
+        Custom {
+            allow_creation: false,
+            ..Custom::default()
+        },
+        r#"access { grants_mode = "static" }"#,
+    );
+    publish_catalog(&node, &[]);
+    let root = sign_in(&node, "root", PASSWORD);
+    assert_eq!(
+        add_external(&node, &root, "Team wiki", WIKI_LINK).status,
+        404,
+        "the route does not exist, as the route that adds an account"
+    );
+    assert!(node.state.users.externals().is_empty());
+    let services = page(&node, &root, "/auth/settings/services");
+    assert_eq!(services.status, 200);
+    assert!(!services.body.contains("Add external service") && !services.body.contains("extForm"));
+}
+
+#[test]
+fn a_key_never_holds_a_right_on_an_external_service() {
+    each_backend(|backend| {
+        let (node, _pdp, alice) = keys_user(backend, "");
+        let entry = crate::catalog::external::ExternalEntry {
+            id: "ext-wiki".into(),
+            name: "Wiki".into(),
+            href: "https://wiki.example.org/".into(),
+            created_at: 1,
+        };
+        node.state.store.insert_external(&entry, 10).unwrap();
+        node.state.users.add_external(entry);
+        // Even an account that holds `access` on the service does not see it in a form of a key.
+        let mut grants = node.state.users.grants_of("alice").unwrap();
+        grants.push(Grant::new("access", "ext-wiki").unwrap());
+        change_grants(&node, "alice", grants);
+        let form = get_new_key(&node, &alice, "");
+        assert_eq!(form.status, 200, "{}", form.body);
+        assert!(!form.body.contains("ext-wiki"), "no editor line of a link");
+        let created = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=link&expires_at=&grant0=access+on+service%3Aext-wiki",
+        );
+        assert!(
+            key_text_in(&created.body).is_none(),
+            "no key is made: {}",
+            created.body
+        );
+        assert!(node.state.users.keys().is_empty());
+        // The same for a form that mixes a good grant and a link.
+        let mixed = keys_post(
+            &node,
+            &alice,
+            "create",
+            "name=link&expires_at=&grant0=access+on+service%3Adb&grant1=access+on+service%3Aext-wiki",
+        );
+        assert!(key_text_in(&mixed.body).is_none());
+        assert!(node.state.users.keys().is_empty());
+        // The same service as the account sees it: the editor of the account has it.
+        let root = sign_in(&node, "root", PASSWORD);
+        let account = page(&node, &root, "/auth/settings/users/alice");
+        assert!(account.body.contains(r#""id":"ext-wiki""#));
+    });
+}
+
+#[test]
+fn the_start_refuses_a_file_that_gives_a_right_other_than_access_on_an_external_service() {
+    let key_text = crate::keys::generate(crate::keys::KeyKind::Mcp)
+        .unwrap()
+        .to_string();
+    let config_with = |user: &str, pdp: &str| {
+        let identity = crate::identity::testing::new_key_pem();
+        let text = format!(
+            r#"server {{ listen_address = "127.0.0.1:{}" trusted_proxies = [] }}
+            authentication {{ superadmin_login_env = "L" superadmin_password_env = "P" mfa = "off" }}
+            session {{ secret_mode = "provided" secret_env = "S" }}
+            access {{ grants_mode = "hybrid" }}
+            identity {{ issuer = "i" signing_key_env = "IDENTITY" }}
+            pdp {{ listen_address = "127.0.0.1:{}" url = "https://pdp" }}
+            keys {{}}
+            {pdp}
+            {user}"#,
+            free_port(),
+            free_port()
+        );
+        let identity = identity.clone();
+        let key_text = key_text.clone();
+        Config::parse(&text, &move |name| match name {
+            "L" => Some("root".into()),
+            "P" => Some(PASSWORD.into()),
+            "S" => Some("0123456789abcdef0123456789abcdef".into()),
+            "IDENTITY" => Some(identity.clone()),
+            "K" => Some(key_text.clone()),
+            "PDP_TOKEN" => Some(PDP_DB_TOKEN.into()),
+            _ => None,
+        })
+        .unwrap()
+        .0
+    };
+    let store = Backend::Sqlite.fresh();
+    let snapshot = |store: &Store| store.load_directory().unwrap();
+    let access = config_with(
+        r#"user "carol" { grants = ["access on service:ext-wiki"] }"#,
+        "",
+    );
+    let data = config_with(
+        r#"user "carol" { grants = ["access on service:ext-wiki", "data.read on service:ext-wiki"] }"#,
+        "",
+    );
+    let path = config_with(
+        r#"user "carol" { grants = ["access on service:ext-wiki", "data.read on service:ext-wiki/host:prod"] }"#,
+        "",
+    );
+    let key = config_with(
+        r#"user "carol" { grants = [] key "agent" { key_env = "K" grants = ["access on service:ext-wiki"] } }"#,
+        "",
+    );
+    let client = config_with("", r#"pdp_client "ext-wiki" { token_env = "PDP_TOKEN" }"#);
+    // No external service in the database: the start cannot know the id, and it accepts the files.
+    for config in [&access, &data, &path, &key, &client] {
+        assert!(crate::bootstrap::check_externals(
+            config,
+            &snapshot(&store),
+            &["ext-wiki".to_string()]
+        )
+        .is_ok());
+    }
+    let entry = crate::catalog::external::ExternalEntry {
+        id: "ext-wiki".into(),
+        name: "Wiki".into(),
+        href: "https://wiki.example.org/".into(),
+        created_at: 1,
+    };
+    store.insert_external(&entry, 10).unwrap();
+    let names: Vec<String> = Vec::new();
+    // `access` on the whole service is the one right that a file account holds on a link.
+    assert!(crate::bootstrap::check_externals(&access, &snapshot(&store), &names).is_ok());
+    for (config, words) in [
+        (&data, ["carol", "grants", "data.read on service:ext-wiki"]),
+        (
+            &path,
+            ["carol", "grants", "data.read on service:ext-wiki/host:prod"],
+        ),
+        (&key, ["carol", "agent", "no right on an external service"]),
+    ] {
+        let error =
+            crate::bootstrap::check_externals(config, &snapshot(&store), &names).unwrap_err();
+        for word in words {
+            assert!(error.contains(word), "{word}: {error}");
+        }
+        assert!(error.contains("ext-wiki"), "{error}");
+    }
+    let error =
+        crate::bootstrap::check_externals(&client, &snapshot(&store), &["ext-wiki".to_string()])
+            .unwrap_err();
+    assert!(
+        error.contains("pdp_client") && error.contains("ext-wiki"),
+        "{error}"
+    );
+}

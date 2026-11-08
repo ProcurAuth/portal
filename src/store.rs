@@ -12,6 +12,7 @@ mod sqlite;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::catalog::external::ExternalEntry;
 use crate::config::PostgresConfig;
 use crate::grants::Grant;
 use crate::tracking::{AuditEvent, AuditKind, Batch, EndReason, Event, SessionStart};
@@ -138,6 +139,8 @@ pub struct DirectorySnapshot {
     pub version: i64,
     pub users: Vec<UserRow>,
     pub keys: Vec<KeyRow>,
+    /// The external services, sorted by id.
+    pub externals: Vec<ExternalEntry>,
 }
 
 /// The result of the count of one use (portal 7.2b).
@@ -232,6 +235,16 @@ pub enum KeyWriteError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum InsertError {
     Exists,
+    Db(String),
+}
+
+/// Why the store refuses a new external service.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExternalError {
+    /// An external service has this id.
+    Exists,
+    /// The store holds the largest number of external services.
+    Full,
     Db(String),
 }
 
@@ -508,6 +521,8 @@ pub struct Dump {
     /// The keys with their grants, and the summary rows of the revoked keys (schema 6).
     pub keys: Vec<KeyRow>,
     pub key_history: Vec<KeyHistoryRow>,
+    /// The external services.
+    pub externals: Vec<ExternalEntry>,
     /// The second factor of the accounts, with its recovery codes, and the check value of its key.
     pub totp: Vec<TotpDump>,
     pub totp_check: Option<Vec<u8>>,
@@ -533,6 +548,7 @@ pub struct ImportReport {
     pub logins: usize,
     pub keys: usize,
     pub key_history: usize,
+    pub externals: usize,
     pub totp: usize,
 }
 
@@ -653,10 +669,24 @@ impl Store {
         backend!(self.remove_user(login))
     }
 
+    // External services -------------------------------------------------------------------------
+
+    /// Adds an external service. The write adds 1 to the version of the directory. It fails with `Exists` when
+    /// the id is in use, and with `Full` when the store holds `max` entries.
+    pub fn insert_external(&self, entry: &ExternalEntry, max: usize) -> Result<(), ExternalError> {
+        backend!(self.insert_external(entry, max))
+    }
+
+    /// Removes an external service and every grant that names its id, of the accounts and of the keys, with
+    /// their counters. The change runs in one transaction. `false`: no such service.
+    pub fn remove_external(&self, id: &str) -> Result<bool, String> {
+        backend!(self.remove_external(id))
+    }
+
     // Directory and keys ------------------------------------------------------------------------
 
-    /// The version of the directory: it grows with each write to the users, the grants and the
-    /// keys (portal 10.7).
+    /// The version of the directory: it grows with each write to the users, the grants, the keys and the
+    /// external services (portal 10.7).
     pub fn directory_version(&self) -> Result<i64, String> {
         backend!(self.directory_version())
     }
@@ -1214,6 +1244,123 @@ mod tests {
                 .unwrap();
             assert_eq!(version(&store), before);
         });
+    }
+
+    fn external(name: &str, href: &str) -> ExternalEntry {
+        let (name, id) = crate::catalog::external::check_name(name).unwrap();
+        ExternalEntry {
+            id,
+            name,
+            href: href.into(),
+            created_at: NOW,
+        }
+    }
+
+    #[test]
+    fn an_external_service_is_stored_listed_and_removed_with_every_grant_that_names_it() {
+        each_backend(|backend| {
+            let store = backend.fresh();
+            let wiki = external("Team wiki", "https://wiki.example.org/");
+            let docs = external("Docs", "https://docs.example.org/x?y=1#z");
+            assert_eq!(wiki.id, "ext-team-wiki");
+            assert!(store.load_directory().unwrap().externals.is_empty());
+            let before = version(&store);
+            store.insert_external(&wiki, 2).unwrap();
+            assert_eq!(version(&store), before + 1, "a write adds 1 to the version");
+            store.insert_external(&docs, 2).unwrap();
+            assert_eq!(
+                store.insert_external(&wiki, 5),
+                Err(ExternalError::Exists),
+                "the id is the key"
+            );
+            let third = external("Third", "https://third.example.org/");
+            assert_eq!(
+                store.insert_external(&third, 2),
+                Err(ExternalError::Full),
+                "the store holds the most that the caller allows"
+            );
+            assert_eq!(
+                version(&store),
+                before + 2,
+                "a refused write adds nothing to the version"
+            );
+            let directory = store.load_directory().unwrap();
+            assert_eq!(directory.version, version(&store));
+            assert_eq!(
+                directory.externals,
+                [docs.clone(), wiki.clone()],
+                "sorted by id, as written"
+            );
+
+            // The grants that name the service: an account, a key and the counters of a budget.
+            let budget = crate::limits::Limits::from_json(
+                r#"{"requests":[{"amount":10,"window":"minute"}]}"#,
+            )
+            .unwrap();
+            let mut alice = user("alice", &["db", &wiki.id, &docs.id]);
+            alice.grants[1] = alice.grants[1].clone().with_limits(budget);
+            alice.grants.sort();
+            store.insert_user(&alice).unwrap();
+            let mut agent = key("k1", Some("alice"), 1);
+            agent.grants.push(Grant::new("access", &wiki.id).unwrap());
+            agent.grants.sort();
+            store.insert_key(&agent, &caps()).unwrap();
+            let counters = store.count("budget_counters");
+            assert!(counters > 0);
+
+            let before = version(&store);
+            assert!(store.remove_external(&wiki.id).unwrap());
+            assert_eq!(version(&store), before + 1);
+            let directory = store.load_directory().unwrap();
+            assert_eq!(directory.externals, std::slice::from_ref(&docs));
+            let grants: Vec<String> = directory.users[0]
+                .grants
+                .iter()
+                .map(|g| g.service.clone())
+                .collect();
+            assert_eq!(grants, ["db", "ext-docs"], "the grants of the service go");
+            let key_services: Vec<&str> = directory.keys[0]
+                .grants
+                .iter()
+                .map(|g| g.service.as_str())
+                .collect();
+            assert!(!key_services.contains(&"ext-team-wiki"));
+            assert!(key_services.contains(&"db"));
+            assert!(
+                store.count("budget_counters") < counters,
+                "the counters of the budget go too"
+            );
+
+            assert!(!store.remove_external(&wiki.id).unwrap());
+            assert_eq!(version(&store), before + 1, "nothing to remove, no change");
+            // The id is free again.
+            store.insert_external(&wiki, 2).unwrap();
+            assert_eq!(store.load_directory().unwrap().externals.len(), 2);
+            // The accounts and their other grants stay.
+            assert_eq!(store.load_users().unwrap()[0].grants.len(), 2);
+        });
+    }
+
+    #[test]
+    fn the_import_of_a_sqlite_file_keeps_the_external_services() {
+        let Some(pg) = postgres() else { return };
+        let dir = std::env::temp_dir().join(format!("portal-import-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("portal.db");
+        {
+            let source = Store::open(&path).unwrap();
+            source
+                .insert_external(&external("Wiki", "https://wiki.example.org/"), 5)
+                .unwrap();
+        }
+        let target = pg.fresh();
+        let report = target.import_sqlite(&path).unwrap();
+        assert_eq!(report.externals, 1);
+        assert_eq!(
+            target.load_directory().unwrap().externals,
+            [external("Wiki", "https://wiki.example.org/")]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3012,6 +3159,7 @@ mod tests {
                 logins: 2,
                 keys: 2,
                 key_history: 1,
+                externals: 0,
                 totp: 2,
             }
         );

@@ -258,6 +258,8 @@ fn audit_label(kind: &str) -> &'static str {
         "recovery_regenerated" => "Recovery codes renewed",
         "recovery_used" => "Recovery code used",
         "mfa_failed" => "Refused second factor",
+        "external_added" => "External service added",
+        "external_deleted" => "External service deleted",
         _ => "Event",
     }
 }

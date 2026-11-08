@@ -181,10 +181,11 @@ fn real_main() -> Result<(), String> {
             let store = open_store(&config, &secrets)?;
             let report = store.import_sqlite(&from)?;
             println!(
-                "imported {} accounts, {} keys, {} revoked keys, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
+                "imported {} accounts, {} keys, {} revoked keys, {} external services, {} sessions, {} service accesses, {} audit events, {} sign-in attempts",
                 report.users,
                 report.keys,
                 report.key_history,
+                report.externals,
                 report.sessions,
                 report.accesses,
                 report.audit,
