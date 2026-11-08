@@ -43,4 +43,39 @@
 
     <!-- The one soft blue light on the page (alpha applied when painted) -->
     <color name="backdrop_glow">#7D98FF</color>
+
+    <!-- Code (command zone, the colors of the review): AA contrast on the code background and on the card -->
+    <color name="code_bg">#F3F5F9</color>
+    <color name="code_keyword">#6D28D9</color>
+    <color name="code_string">#166534</color>
+    <color name="code_number">#9A3412</color>
+    <color name="code_comment">#596579</color>
+    <color name="code_function">#1D4ED8</color>
+    <color name="code_type">#0E7490</color>
+    <color name="code_operator">#BE123C</color>
+    <color name="code_punct">#4B5563</color>
+    <color name="code_add">#14632F</color>
+    <color name="code_add_bg">#1F137333</color>
+    <color name="code_del">#B42318</color>
+    <color name="code_del_bg">#1AB91C1C</color>
+    <color name="code_hunk">#1D4ED8</color>
+    <color name="code_hunk_bg">#121D4ED8</color>
+    <color name="code_meta">#4B5563</color>
+
+    <!-- Code of an agent: a muted palette, so it never looks like the command -->
+    <color name="agent_keyword">#5D4D8C</color>
+    <color name="agent_string">#2F5F3B</color>
+    <color name="agent_number">#7E4A2B</color>
+    <color name="agent_comment">#596579</color>
+    <color name="agent_function">#35508F</color>
+    <color name="agent_type">#2C6272</color>
+    <color name="agent_operator">#8E3B50</color>
+    <color name="agent_punct">#4B5563</color>
+    <color name="agent_add">#2A6040</color>
+    <color name="agent_add_bg">#0F137333</color>
+    <color name="agent_del">#8F3434</color>
+    <color name="agent_del_bg">#0DB91C1C</color>
+    <color name="agent_hunk">#35508F</color>
+    <color name="agent_hunk_bg">#0A1D4ED8</color>
+    <color name="agent_meta">#4B5563</color>
 </resources>

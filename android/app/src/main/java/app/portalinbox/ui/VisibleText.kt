@@ -121,6 +121,16 @@ object VisibleText {
         return Marked(StyledText(out.toString(), spans), marks.values.toList(), hidden, letters)
     }
 
+    /**
+     * The marks of several texts as one report: the command and the field values of its view. The text of the
+     * result is empty. The banner above the command names every mark of every part.
+     */
+    fun combine(parts: List<Marked>): Marked {
+        val marks = LinkedHashMap<Int, Mark>()
+        for (p in parts) for (m in p.marks) marks.putIfAbsent(m.codePoint, m)
+        return Marked(StyledText.EMPTY, marks.values.toList(), parts.sumOf { it.hiddenCount }, parts.sumOf { it.nonAsciiCount })
+    }
+
     // ------------------------------------------------------------ facts about a command
 
     /** The numbers under the command: statements, lines, bytes and the marks. */

@@ -210,4 +210,66 @@
         <item quantity="one">%d other alarm ringing</item>
         <item quantity="other">%d other alarms ringing</item>
     </plurals>
+
+    <!-- Items: channels -->
+    <string name="ch_requests_name">Approvals and questions</string>
+    <string name="ch_requests_desc">A request that waits for you. The text never shows the command.</string>
+    <string name="ch_requests_quiet_name">Approvals and questions, quiet</string>
+    <string name="ch_requests_quiet_desc">The same requests in quiet hours, with no sound.</string>
+    <string name="ch_digest_name">Daily summary</string>
+    <string name="ch_digest_desc">The number of requests that wait for you. No sound.</string>
+    <string name="ch_replies_name">Replies from agents</string>
+    <string name="ch_replies_desc">An agent answered you in a discussion.</string>
+
+    <!-- Items: home list -->
+    <string name="section_alerts">Alerts</string>
+    <string name="section_to_answer">To answer</string>
+    <string name="done_title">Done</string>
+    <string name="done_link">Done (%1$d)</string>
+    <string name="done_empty">Nothing finished yet.</string>
+    <string name="question_later">Questions open in a later version of the app.</string>
+    <string name="chip_approval">Approval</string>
+    <string name="chip_question">Question</string>
+    <string name="chip_decision">Decision</string>
+    <string name="chip_old">Old</string>
+    <string name="chip_invalid">Invalid</string>
+
+    <!-- Items: approval screen -->
+    <string name="approval_command">Command</string>
+    <string name="approval_from_service">From the service</string>
+    <string name="approval_copy">Copy</string>
+    <string name="approval_copy_description">Copy the command</string>
+    <string name="approval_copied">Command copied</string>
+    <string name="approval_code_copied">Copied</string>
+    <string name="approval_explanation">Agent explanation</string>
+    <string name="approval_not_checked">Not checked</string>
+    <string name="approval_markdown">Markdown</string>
+    <string name="approval_decline">Decline</string>
+    <string name="approval_approve">Approve</string>
+    <string name="approval_decline_comment">Decline with a comment</string>
+    <string name="approval_ask">Ask the agent a question</string>
+    <string name="approval_show_all">Show all</string>
+    <string name="approval_show_plain">Show plain text</string>
+    <string name="approval_show_markdown">Show formatted text</string>
+    <string name="approval_markdown_foot">Links do not open. No images.</string>
+    <string name="approval_comment_hint">Say why, or what to change</string>
+    <string name="approval_propose_change">Propose a change</string>
+    <string name="approval_cannot_edit">You cannot edit the command. The agent can send a new request.</string>
+    <string name="approval_send_decline">Send the decline</string>
+    <string name="approval_read_to_unlock">Read to the end to unlock Approve.</string>
+    <string name="approval_read_done">You read the whole command.</string>
+    <string name="approval_end_of_text">(end of text)</string>
+    <string name="approval_gone">This request is not on this phone any more.</string>
+    <string name="approval_changed">The request changed while you were checking. Read it again.</string>
+    <string name="approval_no_lock">This phone has no screen lock or fingerprint. Set one to approve.</string>
+    <string name="approval_effect">Effect</string>
+    <string name="approval_invalid_title">Invalid request</string>
+
+    <!-- Items: settings -->
+    <string name="settings_local_copy">Finished requests on this phone</string>
+    <string name="settings_local_copy_help">The phone erases its copy of a finished request after this time.</string>
+
+    <!-- Items: notifications -->
+    <string name="notification_decline">Decline</string>
+    <string name="notification_open">Open</string>
 </resources>

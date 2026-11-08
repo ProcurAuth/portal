@@ -39,6 +39,14 @@ object Prefs {
 
     fun setTheme(c: Context, v: ThemeMode) = prefs(c).edit().putString("theme", v.name).apply()
 
+    /** How long the phone keeps the local copy of a finished request, in days (an option of `LocalRetention`). */
+    fun localRetentionDays(c: Context): Int =
+        app.portalinbox.data.LocalRetention.daysOrDefault(prefs(c).getInt("local_retention_days", app.portalinbox.data.LocalRetention.DEFAULT_DAYS))
+
+    fun setLocalRetentionDays(c: Context, days: Int) {
+        if (app.portalinbox.data.LocalRetention.isOption(days)) prefs(c).edit().putInt("local_retention_days", days).apply()
+    }
+
     /** True once after an update removed servers of an older protocol (see `Store.onUpgrade`). */
     fun takeEnrollAgain(c: Context): Boolean {
         val set = prefs(c).getBoolean(app.portalinbox.data.Store.PREF_ENROLL_AGAIN, false)
@@ -54,47 +62,15 @@ object Prefs {
  */
 abstract class BaseActivity : Activity() {
     override fun attachBaseContext(newBase: Context) {
-        val mode = Prefs.theme(newBase)
-        if (mode == Prefs.ThemeMode.SYSTEM) {
-            super.attachBaseContext(newBase)
-            return
-        }
-        val config = Configuration(newBase.resources.configuration)
-        val night = if (mode == Prefs.ThemeMode.DARK) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
-        config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
-        super.attachBaseContext(newBase.createConfigurationContext(config))
+        super.attachBaseContext(themedContext(newBase))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        styleSystemBars()
+        styleSystemBars(this)
     }
 
-    val isNight: Boolean
-        get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
-
-    /** Transparent system bars over the coloured backdrop (edge to edge on every version). */
-    @Suppress("DEPRECATION")
-    private fun styleSystemBars() {
-        window.statusBarColor = 0x00000000
-        window.navigationBarColor = 0x00000000
-        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
-        val light = !isNight
-        var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-        if (Build.VERSION.SDK_INT < 30) {
-            if (light) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-            if (light && Build.VERSION.SDK_INT >= 27) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-        }
-        window.decorView.systemUiVisibility = flags
-        if (Build.VERSION.SDK_INT >= 30) {
-            val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-            window.decorView.post {
-                window.insetsController?.setSystemBarsAppearance(if (light) mask else 0, mask)
-            }
-        }
-    }
+    val isNight: Boolean get() = isNightMode(this)
 
     /** Bottom snackbar over this screen (see [android.widget.FrameLayout.snackbar]). */
     fun snackbar(text: String, action: String? = null, onAction: () -> Unit = {}) =
@@ -104,6 +80,68 @@ abstract class BaseActivity : Activity() {
     fun setScreen(root: View) {
         setContentView(withBackdrop(root))
         applyInsets(root)
+    }
+}
+
+/**
+ * The same base for a screen that needs a `FragmentActivity`: the biometric prompt of the approval screen. The look
+ * and the helpers are those of [BaseActivity].
+ */
+abstract class BaseFragmentActivity : androidx.fragment.app.FragmentActivity() {
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(themedContext(newBase))
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        styleSystemBars(this)
+    }
+
+    val isNight: Boolean get() = isNightMode(this)
+
+    fun snackbar(text: String, action: String? = null, onAction: () -> Unit = {}) =
+        findViewById<android.widget.FrameLayout>(android.R.id.content).snackbar(text, action, onAction = onAction)
+
+    fun setScreen(root: View) {
+        setContentView(withBackdrop(root))
+        applyInsets(root)
+    }
+}
+
+/** The context with the theme that the owner chose (light, dark or the system one). */
+fun themedContext(newBase: Context): Context {
+    val mode = Prefs.theme(newBase)
+    if (mode == Prefs.ThemeMode.SYSTEM) return newBase
+    val config = Configuration(newBase.resources.configuration)
+    val night = if (mode == Prefs.ThemeMode.DARK) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
+    config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or night
+    return newBase.createConfigurationContext(config)
+}
+
+fun isNightMode(activity: Activity): Boolean =
+    (activity.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+/** Transparent system bars over the coloured backdrop (edge to edge on every version). */
+@Suppress("DEPRECATION")
+fun styleSystemBars(activity: Activity) {
+    val window = activity.window
+    window.statusBarColor = 0x00000000
+    window.navigationBarColor = 0x00000000
+    if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+    val light = !isNightMode(activity)
+    var flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+        View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+    if (Build.VERSION.SDK_INT < 30) {
+        if (light) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        if (light && Build.VERSION.SDK_INT >= 27) flags = flags or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+    }
+    window.decorView.systemUiVisibility = flags
+    if (Build.VERSION.SDK_INT >= 30) {
+        val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+            WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.decorView.post {
+            window.insetsController?.setSystemBarsAppearance(if (light) mask else 0, mask)
+        }
     }
 }
 

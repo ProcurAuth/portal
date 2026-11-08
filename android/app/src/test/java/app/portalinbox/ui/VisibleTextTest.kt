@@ -193,6 +193,20 @@ class VisibleTextTest {
     }
 
     @Test
+    fun theMarksOfTheCommandAndOfItsFieldsMakeOneReport() {
+        val command = shown("DELETE \u200B x")
+        val field = shown("pr\u043Ed")
+        val both = VisibleText.combine(listOf(command, field))
+        assertEquals(1, both.hiddenCount)
+        assertEquals(1, both.nonAsciiCount)
+        assertEquals(listOf(0x200B, 0x043E), both.marks.map { it.codePoint })
+        assertEquals(
+            "Hidden or look-alike characters. 2 marks: U+200B (hidden) and U+043E (not ASCII). Check each mark.",
+            VisibleText.banner(both),
+        )
+    }
+
+    @Test
     fun escapeLineMarksHiddenCharactersOfAShortText() {
         assertEquals("ops<U+202E>agent", VisibleText.escapeLine("ops‮agent"))
         assertEquals("café", VisibleText.escapeLine("café"))

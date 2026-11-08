@@ -26,6 +26,7 @@ import app.portalinbox.data.Kind
 import app.portalinbox.data.Levels
 import app.portalinbox.data.Store
 import app.portalinbox.service.Registry
+import app.portalinbox.service.ServerClock
 import app.portalinbox.ui.AlarmActivity
 import app.portalinbox.ui.MainActivity
 
@@ -84,7 +85,31 @@ object Alerter {
         val warning = NotificationChannel(CH_WARNING, context.getString(R.string.ch_warning_name), NotificationManager.IMPORTANCE_HIGH).apply {
             description = context.getString(R.string.ch_warning_desc)
         }
-        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning))
+        // The items. The channel of a request rings once like the level Ring, and its notifications are private.
+        val requests = NotificationChannel(NotificationPlan.CH_REQUESTS, context.getString(R.string.ch_requests_name), NotificationManager.IMPORTANCE_HIGH).apply {
+            description = context.getString(R.string.ch_requests_desc)
+            setSound(null, null) // played by ItemAlerter on the alarm stream
+            enableVibration(false)
+            setBypassDnd(true)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val requestsQuiet = NotificationChannel(NotificationPlan.CH_REQUESTS_QUIET, context.getString(R.string.ch_requests_quiet_name), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.ch_requests_quiet_desc)
+            setSound(null, null)
+            enableVibration(false)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val digest = NotificationChannel(NotificationPlan.CH_DIGEST, context.getString(R.string.ch_digest_name), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.ch_digest_desc)
+            setSound(null, null)
+            enableVibration(false)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        val replies = NotificationChannel(NotificationPlan.CH_REPLIES, context.getString(R.string.ch_replies_name), NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = context.getString(R.string.ch_replies_desc)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning, requests, requestsQuiet, digest, replies))
     }
 
     /** Notification tag/id: unique per alert, so re-posting replaces instead of duplicating. */
@@ -255,6 +280,8 @@ object Alerter {
 
     /** Before a server is deleted: silences its alarms and removes its notifications. */
     fun forgetServer(context: Context, serverId: Long) {
+        ItemAlerter.forgetServer(context, serverId)
+        ServerClock.forget(context, serverId)
         val nm = context.getSystemService(NotificationManager::class.java)
         for (a in Store.get(context).serverAlerts(serverId)) {
             if (a.action == "alarm" && a.stoppedAtMs == null) AlarmPlayer.stop(context, serverId, a.alertId)
@@ -287,7 +314,7 @@ object Alerter {
 
     // ------------------------------------------------------------ ring
 
-    private fun playOnce(context: Context) {
+    internal fun playOnce(context: Context) {
         val audio = context.getSystemService(AudioManager::class.java)
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_ALARM)
         val previous = audio.getStreamVolume(AudioManager.STREAM_ALARM)

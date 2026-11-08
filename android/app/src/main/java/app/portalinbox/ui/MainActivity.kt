@@ -25,11 +25,15 @@ import app.portalinbox.BuildConfig
 import app.portalinbox.R
 import app.portalinbox.alert.Alerter
 import app.portalinbox.data.Alert
+import app.portalinbox.data.Item
+import app.portalinbox.data.LocalRetention
 import app.portalinbox.data.Server
 import app.portalinbox.data.Store
 import app.portalinbox.service.LinkState
 import app.portalinbox.service.InboxService
+import app.portalinbox.service.Items
 import app.portalinbox.service.Registry
+import app.portalinbox.service.ServerClock
 
 /** Home: latest alerts, plus the Servers and Settings screens behind the menu. */
 class MainActivity : BaseActivity() {
@@ -46,6 +50,10 @@ class MainActivity : BaseActivity() {
                 .putExtra(EXTRA_ALERT, alertId)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
+        /** Opens the home screen. */
+        fun home(context: android.content.Context): Intent =
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+
         /** Back to the home screen with a snackbar, e.g. "Server deleted". */
         fun notice(context: android.content.Context, text: String): Intent =
             Intent(context, MainActivity::class.java)
@@ -53,7 +61,7 @@ class MainActivity : BaseActivity() {
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     }
 
-    private enum class Screen { ALERTS, SERVERS, SETTINGS }
+    private enum class Screen { ALERTS, DONE, SERVERS, SETTINGS }
 
     private var screen = Screen.ALERTS
     /** Older alerts loaded with "See more", beyond the configured count and window. */
@@ -141,8 +149,17 @@ class MainActivity : BaseActivity() {
         outState.putString("screen", screen.name)
     }
 
+    /** Erases the local copy of the finished requests that are older than the retention. */
+    private fun purgeLocalCopies() {
+        val repo = Items.repository(this)
+        val days = Prefs.localRetentionDays(this)
+        val now = System.currentTimeMillis()
+        for (server in Store.get(this).servers()) LocalRetention.purge(repo, server.id, now, days)
+    }
+
     override fun onResume() {
         super.onResume()
+        purgeLocalCopies()
         Registry.addListener(onChange)
         handler.post(tick)
         InboxService.start(this)
@@ -244,6 +261,7 @@ class MainActivity : BaseActivity() {
         val o = overall(servers)
         title = when (screen) {
             Screen.ALERTS -> getString(R.string.nav_inbox)
+            Screen.DONE -> getString(R.string.done_title)
             Screen.SERVERS -> getString(R.string.servers_title)
             Screen.SETTINGS -> getString(R.string.settings_title)
         }
@@ -255,6 +273,7 @@ class MainActivity : BaseActivity() {
         body.removeAllViews()
         when (screen) {
             Screen.ALERTS -> renderAlerts(servers)
+            Screen.DONE -> renderDone(servers)
             Screen.SERVERS -> renderServers(servers)
             Screen.SETTINGS -> renderSettings()
         }
@@ -262,8 +281,21 @@ class MainActivity : BaseActivity() {
         // "Show read" stays pinned under the alerts list, never inside it.
         footer.removeAllViews()
         if (screen == Screen.ALERTS && servers.isNotEmpty()) {
-            footer.addView(showReadToggle(Prefs.showRead(this)),
-                FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(8) })
+            val doneCount = allItems(servers).count { !it.isOpen }
+            val row = lin(vertical = false).apply { gravity = Gravity.CENTER_VERTICAL }
+            row.addView(showReadToggle(Prefs.showRead(this)))
+            if (doneCount > 0) {
+                row.addView(label(getString(R.string.done_link, doneCount), SP_M, color(R.color.primary), MEDIUM).apply {
+                    gravity = Gravity.CENTER
+                    minHeight = dp(48)
+                    setPadding(dp(16), 0, dp(12), 0)
+                    isClickable = true
+                    isFocusable = true
+                    background = rowRipple()
+                    setOnClickListener { go(Screen.DONE) }
+                })
+            }
+            footer.addView(row, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(8) })
         }
         syncBack()
     }
@@ -379,11 +411,37 @@ class MainActivity : BaseActivity() {
         val base = store.recentAlerts(now - window, limit, showRead)
         val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
         val names = servers.associate { it.id to it.serverName }
-        if (alerts.isEmpty()) {
+        val toAnswer = ItemListOrder.toAnswer(allItems(servers))
+        // Alice's rule: the alerts come first, then the items to answer. A section with no row does not show.
+        val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = toAnswer.isNotEmpty())
+        if (sections.isEmpty()) {
             body.addView(allClear(overall(servers)), lp(MATCH, 0, 1f))
             return
         }
-        // One card per alert, the severity bar on its left edge. Swipe right: read.
+        val titled = ItemListOrder.Section.TO_ANSWER in sections
+        for (section in sections) {
+            when (section) {
+                ItemListOrder.Section.ALERTS -> {
+                    if (titled) body.addView(sectionTitle(getString(R.string.section_alerts)))
+                    renderAlertCards(alerts, names, showRead, now)
+                    if (store.alertCount(showRead) > alerts.size) {
+                        body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
+                    }
+                }
+                ItemListOrder.Section.TO_ANSWER -> {
+                    val serverNow = HashMap<Long, Long>()
+                    body.addView(sectionTitle(getString(R.string.section_to_answer), toAnswer.size.toString()))
+                    toAnswer.forEachIndexed { i, item ->
+                        val at = serverNow.getOrPut(item.serverId) { ServerClock.now(this, item.serverId) }
+                        body.addView(itemCard(item, ItemListOrder.row(item, at)), lp().margins(this, t = if (i == 0) 0 else 8))
+                    }
+                }
+            }
+        }
+    }
+
+    /** One card per alert, the severity bar on its left edge. Swipe right: read. */
+    private fun renderAlertCards(alerts: List<Alert>, names: Map<Long, String>, showRead: Boolean, now: Long) {
         alerts.forEachIndexed { i, a ->
             val card = lin().apply {
                 background = solidCard()
@@ -398,8 +456,115 @@ class MainActivity : BaseActivity() {
             }
             body.addView(swipe, lp().margins(this, t = if (i == 0) 4 else 8))
         }
-        if (store.alertCount(showRead) > alerts.size) {
-            body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
+    }
+
+    private fun allItems(servers: List<Server>): List<Item> {
+        val repo = Items.repository(this)
+        return servers.flatMap { repo.items(it.id) }
+    }
+
+    /** The color of the bar and the chip of an item card: approval in the primary color, question in info, decision grey. */
+    private fun chipStyle(chip: ItemListOrder.Chip): Triple<String, Int, Int> = when (chip) {
+        ItemListOrder.Chip.APPROVAL -> Triple(getString(R.string.chip_approval), color(R.color.primary), color(R.color.primary_soft))
+        ItemListOrder.Chip.QUESTION -> Triple(getString(R.string.chip_question), color(R.color.info), color(R.color.info_soft))
+        ItemListOrder.Chip.DECISION -> Triple(getString(R.string.chip_decision), color(R.color.text_muted), color(R.color.bg_hover))
+    }
+
+    /** A card of the list "To answer": age and code | title, sender, ages | kind and state chips. */
+    private fun itemCard(item: Item, r: ItemListOrder.Row): View {
+        val (chipText, fg, bg) = chipStyle(r.chip)
+        val card = lin().apply {
+            background = solidCard()
+            clipToOutline = true
+            outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+        }
+        val row = lin(vertical = false).apply {
+            minimumHeight = dp(54)
+            background = rowRipple()
+            isClickable = true
+            contentDescription = listOfNotNull(chipText, r.title, r.subtitle, r.detail).joinToString(". ")
+            setOnClickListener { openItem(item, r) }
+        }
+        row.addView(View(this).apply { setBackgroundColor(fg) }, lp(dp(3), MATCH))
+        val time = lin().apply { setPadding(dp(10), dp(9), 0, dp(9)) }
+        time.addView(mono(r.age, SP_S, color(R.color.text_strong), bold = true))
+        r.code?.let { time.addView(mono(it, SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 3)) }
+        row.addView(time, lp(dp(74), WRAP))
+        val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
+        val titleRow = lin(vertical = false)
+        titleRow.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
+        titleRow.addView(label(r.title, SP_M, color(R.color.text_strong), BOLD, lines = 1), lp(0, WRAP, 1f))
+        content.addView(titleRow)
+        content.addView(label(r.subtitle, SP_S, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
+        content.addView(label(r.detail, SP_S, color(R.color.text_subtle), lines = 1), lp().margins(this, t = 2))
+        row.addView(content, lp(0, WRAP, 1f))
+        val tags = lin().apply {
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), dp(10), dp(8))
+        }
+        tags.addView(chip(chipText, fg, bg))
+        if (r.old) tags.addView(chip(getString(R.string.chip_old), color(R.color.warning), color(R.color.warning_soft)), lp(WRAP, WRAP).margins(this, t = 4))
+        if (r.invalid) tags.addView(chip(getString(R.string.chip_invalid), color(R.color.danger), color(R.color.danger_soft)), lp(WRAP, WRAP).margins(this, t = 4))
+        row.addView(tags, lp(WRAP, MATCH))
+        card.addView(row)
+        return card
+    }
+
+    private fun openItem(item: Item, r: ItemListOrder.Row) {
+        if (r.openable) {
+            startActivity(ApprovalActivity.intent(this, item.serverId, item.requestId))
+        } else {
+            // The screens of the questions come with the questions of version 5.2.0.
+            root.snackbar(getString(R.string.question_later))
+        }
+    }
+
+    // ------------------------------------------------------------ done
+
+    private fun renderDone(servers: List<Server>) {
+        val done = ItemListOrder.done(allItems(servers))
+        body.addView(sectionTitle(getString(R.string.done_title), if (done.isEmpty()) null else done.size.toString()))
+        if (done.isEmpty()) {
+            body.addView(label(getString(R.string.done_empty), SP_M, color(R.color.text_muted)), lp().margins(this, t = 8, l = 4))
+            return
+        }
+        done.forEachIndexed { i, item ->
+            val r = ItemListOrder.doneRow(item)
+            val (chipText, fg, _) = chipStyle(r.chip)
+            val (stateFg, stateBg) = when (r.word) {
+                "approved", "answered" -> color(R.color.info) to color(R.color.info_soft)
+                "declined" -> color(R.color.danger) to color(R.color.danger_soft)
+                "abandoned" -> color(R.color.warning) to color(R.color.warning_soft)
+                else -> color(R.color.text_muted) to color(R.color.bg_hover)
+            }
+            val card = lin().apply {
+                background = solidCard()
+                clipToOutline = true
+                outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            }
+            val row = lin(vertical = false).apply {
+                minimumHeight = dp(54)
+                background = rowRipple()
+                isClickable = true
+                contentDescription = listOf(chipText, r.title, r.word, r.detail).joinToString(". ")
+                setOnClickListener { if (r.openable) startActivity(ApprovalActivity.intent(this@MainActivity, r.serverId, r.requestId)) else root.snackbar(getString(R.string.question_later)) }
+            }
+            row.addView(View(this).apply { setBackgroundColor(stateFg) }, lp(dp(3), MATCH))
+            val time = lin().apply { setPadding(dp(10), dp(9), 0, dp(9)) }
+            time.addView(mono(clockTime(r.whenMs), SP_S, color(R.color.text_strong), bold = true))
+            row.addView(time, lp(dp(84), WRAP))
+            val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
+            content.addView(label(r.title, SP_M, color(R.color.text), REGULAR, lines = 1))
+            content.addView(label(r.detail, SP_S, color(R.color.text_muted), lines = 2), lp().margins(this, t = 3))
+            row.addView(content, lp(0, WRAP, 1f))
+            val tags = lin().apply {
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setPadding(0, dp(8), dp(10), dp(8))
+            }
+            tags.addView(chip(r.word, stateFg, stateBg))
+            row.addView(tags, lp(WRAP, MATCH))
+            card.addView(row)
+            body.addView(card, lp().margins(this, t = if (i == 0) 4 else 8))
         }
     }
 
@@ -668,6 +833,20 @@ class MainActivity : BaseActivity() {
             recreate()
         }, lp().margins(this, t = 8))
         body.addView(t, lp().margins(this, t = 10))
+
+        // Local copy of the finished requests
+        val keep = lin(padH = 14, padV = 10).apply { background = solidCard() }
+        keep.addView(label(getString(R.string.settings_local_copy), SP_M, color(R.color.text), MEDIUM))
+        keep.addView(label(getString(R.string.settings_local_copy_help), SP_S, color(R.color.text_muted)), lp().margins(this, t = 2))
+        val days = LocalRetention.OPTIONS_DAYS
+        val chosen = Prefs.localRetentionDays(this)
+        keep.addView(segmented(days.map { LocalRetention.label(it) }, days.indexOf(chosen).coerceAtLeast(0),
+            describe = { i -> getString(R.string.settings_local_copy) + ": " + LocalRetention.label(days[i]) }) { i ->
+            Prefs.setLocalRetentionDays(this, days[i])
+            purgeLocalCopies()
+            render()
+        }, lp().margins(this, t = 8))
+        body.addView(keep, lp().margins(this, t = 10))
 
         // Permissions
         val perms = Permissions.all(this)

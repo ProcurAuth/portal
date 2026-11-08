@@ -8,6 +8,7 @@ import app.portalinbox.alert.Alerter
 import app.portalinbox.core.Native
 import app.portalinbox.data.Alert
 import app.portalinbox.data.Group
+import app.portalinbox.alert.ItemAlerter
 import app.portalinbox.data.ItemEvent
 import app.portalinbox.data.Kind
 import app.portalinbox.data.KeyVault
@@ -296,6 +297,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 for (g in reconcile.subscribe) send(SubscribeFrame(g))
                                 for (g in reconcile.unsubscribe) send(UnsubscribeFrame(g))
                                 // The items: tell the server which ones are open, then send the outbox again.
+                                ServerClock.update(context, serverId, frame.serverTimeMs)
                                 val start = engine.onWelcome(serverId, frame)
                                 itemsEnabled = frame.itemsEnabled
                                 start.sync?.let { send(it) }
@@ -517,10 +519,13 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         if (outcome.events.isNotEmpty()) Registry.changed()
     }
 
-    /** The place where the screens and the notifications of the items hook in (lot A2). */
-    @Suppress("UNUSED_PARAMETER")
+    /**
+     * The place where the notifications of the items hook in. A new request notifies and the phone then marks the item as
+     * notified. A settled item withdraws its notification. Messages and digests belong to lot A3.
+     */
     private fun present(event: ItemEvent) {
         Log.d(TAG, "item event ${event.javaClass.simpleName}")
+        ItemAlerter.onEvent(context, event)
     }
 
     private fun onPong(n: Long) {

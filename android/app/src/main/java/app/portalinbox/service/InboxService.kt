@@ -20,6 +20,9 @@ import android.util.Log
 import app.portalinbox.R
 import app.portalinbox.alert.AlarmPlayer
 import app.portalinbox.alert.Alerter
+import app.portalinbox.alert.ItemAlerter
+import app.portalinbox.data.LocalRetention
+import app.portalinbox.ui.Prefs
 import app.portalinbox.data.Store
 import app.portalinbox.ui.MainActivity
 import app.portalinbox.ui.formatSince
@@ -112,6 +115,11 @@ class InboxService : Service() {
             if (a.receivedAtMs >= cutoff && !AlarmPlayer.isRinging()) Alerter.present(this, a)
         }
         store.prune(System.currentTimeMillis() - LOCAL_HISTORY_MS)
+        // The items: notify the open ones that the process never showed, and erase the old local copies.
+        ItemAlerter.recover(this)
+        val repo = Items.repository(this)
+        val days = Prefs.localRetentionDays(this)
+        for (s in store.servers()) LocalRetention.purge(repo, s.id, System.currentTimeMillis(), days)
     }
 
     private fun syncConnections() {
