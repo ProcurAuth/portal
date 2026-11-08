@@ -18,6 +18,7 @@ pub mod enroll;
 pub mod error;
 pub mod noise;
 pub mod proto;
+pub mod render;
 pub mod rng;
 pub mod server_key;
 

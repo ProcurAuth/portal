@@ -21,6 +21,9 @@ sha2 = "0.10"
 rand_core = "0.6"
 zeroize = "1.9.0"
 base64 = "0.22"
+# The Markdown of the text of an agent, parsed by the server and by the phone. The default features pull the HTML writer and
+# the command line: the renderers of the portal are its own.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 [package]
 name = "portal"
