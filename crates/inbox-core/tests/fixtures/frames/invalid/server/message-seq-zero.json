@@ -1,0 +1,9 @@
+{
+  "t": "message",
+  "id": "11111111111111111111111111111111",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 0,
+  "by": "user",
+  "created_at_ms": 1,
+  "text": "x"
+}

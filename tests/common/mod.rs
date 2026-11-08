@@ -1257,7 +1257,7 @@ impl Conn {
 
     pub async fn ack(&mut self, id: &str, stage: AckStage) {
         self.send(&ClientMsg::Ack {
-            alert_id: id.into(),
+            id: id.into(),
             stage,
         })
         .await;

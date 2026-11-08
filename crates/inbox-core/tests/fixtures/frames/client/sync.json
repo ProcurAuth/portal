@@ -1,0 +1,13 @@
+{
+  "t": "sync",
+  "open": [
+    {
+      "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "seq": 2
+    },
+    {
+      "request_id": "dddddddddddddddddddddddddddddddd",
+      "seq": 0
+    }
+  ]
+}

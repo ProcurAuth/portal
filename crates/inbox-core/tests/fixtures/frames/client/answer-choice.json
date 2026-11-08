@@ -1,0 +1,9 @@
+{
+  "t": "answer",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "client_msg_id": "m-0003",
+  "action": "accept",
+  "choice": [
+    "go"
+  ]
+}

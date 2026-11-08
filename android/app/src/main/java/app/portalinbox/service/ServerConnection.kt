@@ -427,7 +427,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
         // 1. Durable before acknowledging: if we die after this, it is shown at restart.
         val isNew = store.insertAlertIfNew(alert)
         // 2. Stop server retransmission (also for duplicates whose first ack was lost).
-        send(JSONObject().put("t", "ack").put("alert_id", alert.alertId).put("stage", "received"))
+        send(JSONObject().put("t", "ack").put("id", alert.alertId).put("stage", "received"))
         if (!isNew) return
         // 3. Show it exactly once.
         Alerter.present(context, alert)

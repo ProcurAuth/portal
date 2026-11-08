@@ -1,0 +1,9 @@
+{
+  "t": "alert",
+  "alert_id": "cccccccccccccccccccccccccccccccc",
+  "kind": "alert",
+  "group": "infra",
+  "group_name": "Infra",
+  "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "created_at_ms": 1
+}

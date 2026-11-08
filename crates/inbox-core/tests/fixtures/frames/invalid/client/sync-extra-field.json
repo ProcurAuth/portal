@@ -1,0 +1,10 @@
+{
+  "t": "sync",
+  "open": [
+    {
+      "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "seq": 1,
+      "state": "pending"
+    }
+  ]
+}

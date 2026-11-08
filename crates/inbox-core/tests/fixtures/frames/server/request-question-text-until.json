@@ -1,0 +1,34 @@
+{
+  "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "chain_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 0,
+  "from": {
+    "label": "claude-laptop",
+    "key_name": "claude-laptop",
+    "owner": "alice",
+    "via": "mcp",
+    "interaction": "conversational"
+  },
+  "urgency": "high",
+  "created_at_ms": 1788000000000,
+  "chain_created_at_ms": 1788000000000,
+  "agent_seen_at_ms": 1788000001000,
+  "lease_mode": "until",
+  "allow_custom": false,
+  "allow_ask_back": true,
+  "t": "request",
+  "kind": "question",
+  "quiet": true,
+  "title": "Which branch do I release?",
+  "input": {
+    "type": "text",
+    "multiple": false,
+    "min": 0,
+    "max": 0,
+    "options": [],
+    "placeholder": "branch name"
+  },
+  "supersedes": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "until_at_ms": 1788600000000
+}

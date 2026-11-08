@@ -13,6 +13,7 @@
 //!   pinned server key. The server can revoke each device alone.
 
 pub mod b64;
+pub mod effect;
 pub mod enroll;
 pub mod error;
 pub mod noise;
@@ -25,4 +26,8 @@ pub use error::{Error, Result};
 /// Version of the device protocol. Change it on any incompatible wire change.
 /// 4: enrollment with a one-time code and Noise IK (no OPAQUE, no shared password).
 ///    The login of the account is the user name of the device. It is read-only.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// 5: items with an answer (`request`, `message`, `settled`, `digest`, `answer_result` and the
+///    client frames `answer`, `reply`, `refresh`, `sync`, `set_prefs`), the receipt `ack` by `id`,
+///    the effect hash of an approval, `prefs` and `body_purge_after_ms` in `welcome`.
+///    No compatibility with 4.
+pub const PROTOCOL_VERSION: u32 = 5;

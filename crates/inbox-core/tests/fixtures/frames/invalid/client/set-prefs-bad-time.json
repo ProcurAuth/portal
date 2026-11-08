@@ -1,0 +1,9 @@
+{
+  "t": "set_prefs",
+  "quiet": {
+    "from": "24:00",
+    "to": "07:00",
+    "tz": "UTC",
+    "high_rings": false
+  }
+}

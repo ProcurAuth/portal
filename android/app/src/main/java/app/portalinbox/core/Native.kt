@@ -46,5 +46,19 @@ object Native {
 
     @JvmStatic external fun sessionFree(handle: Long)
 
+    /**
+     * The effect hash of an operation (ProcurAuth 17.3). `opJson` is the JSON text of `op`.
+     * Returns `{"effect": "sha256:..."}` or `{"error": {"code": "invalid_op", "message"}}`.
+     * The parser refuses a float, an integer above 2^53-1 and a duplicate member name.
+     */
+    @JvmStatic external fun effectCompute(service: String, action: String, resource: String, opJson: String): String
+
+    /**
+     * The view of an approval with the values of `op`. Returns `{"view": {"title",
+     * "fields": [{"label", "value"}], "body", "body_label"?}}` or
+     * `{"error": {"code": "invalid_op" | "invalid_view", "message"}}`.
+     */
+    @JvmStatic external fun viewResolve(opJson: String, viewJson: String): String
+
     @JvmStatic external fun protocolVersion(): Int
 }

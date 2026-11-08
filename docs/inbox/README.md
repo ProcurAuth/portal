@@ -181,7 +181,7 @@ If the enrollment fails, the app shows one of these texts:
 | Text in the app | Cause |
 |---|---|
 | The code is not valid. Ask for a new one. | The code is unknown, used or expired. The account was deleted. The limit `inbox.devices.max_devices` or `inbox.devices.max_per_account` is reached. |
-| Update the app. | The app does not speak protocol 4. |
+| Update the app. | The app does not speak protocol 5. |
 | Too many attempts. | The client address sent too many attempts. Wait. |
 
 To remove a phone, tick its box in the zone **My phones** and press **Revoke (N)**. A question "Revoke N phones?" opens in the same place. An account revokes its own phones only. An account with `phone.revoke` and `phone.read` can revoke any phone of the zone **Phones**. The phone gets the close code 4403. It must enroll again.
@@ -326,7 +326,7 @@ At step 2, an agent first sends alerts through the same REST route with an `api_
 |---|---|
 | The app says the server is unreachable. | Open the address of `inbox.devices.public_address` from the phone. Check the port, the firewall and the proxy. The proxy must send `/v1/` to the portal without ForwardAuth. The answer `503` means that the budget of sessions is full. Run `portal inbox healthcheck --config FILE` on the server. |
 | The app says "The code is not valid". | The code is used or expired. Make a new code. Check `inbox.devices.max_devices` and `inbox.devices.max_per_account`. The log has the event `enroll_refused` with a reason. |
-| The app says "Update the app". | The app is older than protocol 4. Install the current APK. |
+| The app says "Update the app". | The app is older than protocol 5. Install the current APK. |
 | A phone is `unreachable`. | The app is stopped, the phone is off, or the battery saver blocks the app. Check the permissions of the app. |
 | An alert does not come. | Open the alert in the zone **Sent**. Check that the phone subscribed to the group and that the account has `inbox.receive`. |
 | A sender gets `401`. | The key is not an `api_` key, or it has a bad form, or it is revoked or expired. Check that `keys.api` is `true`. |

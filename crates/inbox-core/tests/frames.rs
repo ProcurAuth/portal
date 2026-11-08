@@ -1,0 +1,451 @@
+//! Golden frames of protocol 5. The files under `fixtures/frames` are the contract between the
+//! server, the Android app and the tests: the Kotlin side reads the same files.
+//!
+//! `server/` and `client/` hold valid frames, one file for each shape. `invalid/server/` and
+//! `invalid/client/` hold frames that a parser MUST refuse.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use inbox_core::effect;
+use inbox_core::noise::{self, Initiator, MAX_PLAINTEXT, Responder};
+use inbox_core::proto::*;
+use serde_json::{Value, json};
+
+fn dir(sub: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/frames").join(sub)
+}
+
+/// `(file name, bytes, value)` of every `.json` file of a folder, sorted by name.
+fn files(sub: &str) -> Vec<(String, Vec<u8>, Value)> {
+    let mut out: Vec<_> = std::fs::read_dir(dir(sub))
+        .unwrap_or_else(|e| panic!("{sub}: {e}"))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .map(|p| {
+            let bytes = std::fs::read(&p).unwrap();
+            let value = serde_json::from_slice(&bytes).unwrap();
+            (p.file_name().unwrap().to_string_lossy().into_owned(), bytes, value)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn tags(sub: &str) -> BTreeSet<String> {
+    files(sub).iter().map(|f| f.2["t"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn frames_round_trip_golden() {
+    let server = files("server");
+    let client = files("client");
+    assert!(server.len() >= 15 && client.len() >= 12);
+    for (name, bytes, value) in &server {
+        let msg = ServerMsg::decode(bytes).unwrap_or_else(|e| panic!("server/{name}: {e}"));
+        let again = serde_json::to_value(&msg).unwrap();
+        assert_eq!(&again, value, "server/{name}: the frame does not round trip");
+        // Encode, then decode the bytes that the server would send.
+        let wire = msg.encode().unwrap();
+        assert_eq!(ServerMsg::decode(&wire).unwrap(), msg, "server/{name}");
+    }
+    for (name, bytes, value) in &client {
+        let msg = ClientMsg::decode(bytes).unwrap_or_else(|e| panic!("client/{name}: {e}"));
+        assert_eq!(&serde_json::to_value(&msg).unwrap(), value, "client/{name}");
+        let wire = msg.encode().unwrap();
+        assert_eq!(ClientMsg::decode(&wire).unwrap(), msg, "client/{name}");
+    }
+}
+
+#[test]
+fn the_golden_files_cover_every_frame_in_both_directions() {
+    let server: BTreeSet<String> = [
+        "welcome",
+        "alert",
+        "request",
+        "message",
+        "settled",
+        "digest",
+        "answer_result",
+        "subscriptions",
+        "pong",
+        "error",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let client: BTreeSet<String> = [
+        "ready",
+        "ack",
+        "subscribe",
+        "unsubscribe",
+        "ping",
+        "answer",
+        "reply",
+        "refresh",
+        "sync",
+        "set_prefs",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(tags("server"), server);
+    assert_eq!(tags("client"), client);
+    // Both kinds of `request`, and both lease modes.
+    let kinds: BTreeSet<String> = files("server")
+        .iter()
+        .filter(|f| f.2["t"] == "request")
+        .map(|f| f.2["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds.len(), 2);
+    // An invalid frame exists for most frames, in each direction.
+    assert!(tags("invalid/server").len() >= 7);
+    assert!(tags("invalid/client").len() >= 5);
+}
+
+#[test]
+fn invalid_frames_are_refused() {
+    for (name, bytes, _) in files("invalid/server") {
+        assert!(ServerMsg::decode(&bytes).is_err(), "invalid/server/{name} was accepted");
+    }
+    for (name, bytes, _) in files("invalid/client") {
+        assert!(ClientMsg::decode(&bytes).is_err(), "invalid/client/{name} was accepted");
+    }
+}
+
+/// Adds an unknown member to every object of a frame, one object at a time. The free form
+/// `op` of an approval is the only object that takes any member.
+fn with_extra_member(
+    v: &Value,
+    path: &mut Vec<String>,
+    out: &mut Vec<(String, Value)>,
+    root: &Value,
+) {
+    match v {
+        Value::Object(map) => {
+            if path.last().is_none_or(|p| p != "op") {
+                let mut copy = root.clone();
+                let mut cur = &mut copy;
+                for p in path.iter() {
+                    cur = match cur {
+                        Value::Array(a) => &mut a[p.parse::<usize>().unwrap()],
+                        other => other.get_mut(p.as_str()).unwrap(),
+                    };
+                }
+                cur.as_object_mut().unwrap().insert("zz".into(), json!(1));
+                out.push((path.join("/"), copy));
+            }
+            for (k, child) in map {
+                path.push(k.clone());
+                with_extra_member(child, path, out, root);
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                path.push(i.to_string());
+                with_extra_member(child, path, out, root);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_frame_rejects_unknown_field() {
+    let mut tried = 0;
+    for (name, _, value) in files("server") {
+        // A tuple of a view (`["Host","/host"]`) is an array: it has no member to add.
+        let mut cases = Vec::new();
+        with_extra_member(&value, &mut vec![], &mut cases, &value);
+        for (path, frame) in cases {
+            tried += 1;
+            let bytes = serde_json::to_vec(&frame).unwrap();
+            assert!(
+                ServerMsg::decode(&bytes).is_err(),
+                "server/{name} accepts an unknown member at '{path}'"
+            );
+        }
+    }
+    for (name, _, value) in files("client") {
+        let mut cases = Vec::new();
+        with_extra_member(&value, &mut vec![], &mut cases, &value);
+        for (path, frame) in cases {
+            tried += 1;
+            let bytes = serde_json::to_vec(&frame).unwrap();
+            assert!(
+                ClientMsg::decode(&bytes).is_err(),
+                "client/{name} accepts an unknown member at '{path}'"
+            );
+        }
+    }
+    assert!(tried > 60, "{tried}");
+    // A duplicate member is refused too, in a frame and in `op`.
+    let dup = r#"{"t":"ack","id":"00000000000000000000000000000000","stage":"received","stage":"received"}"#;
+    assert!(ClientMsg::decode(dup.as_bytes()).is_err());
+    let approval = std::fs::read_to_string(dir("server/request-approval.json")).unwrap();
+    let dup_op = approval.replace("\"host\": \"prod\",", "\"host\": \"prod\", \"host\": \"prod\",");
+    assert_ne!(dup_op, approval);
+    assert!(ServerMsg::decode(dup_op.as_bytes()).is_err());
+}
+
+#[test]
+fn title_with_newline_or_control_rejected() {
+    let question =
+        files("server").into_iter().find(|f| f.0 == "request-question-choice.json").unwrap().2;
+    let alert = files("server").into_iter().find(|f| f.0 == "alert.json").unwrap().2;
+    for bad in ["a\nb", "a\rb", "a\u{7}b", "a\u{0}b", "a\u{7f}b", "a\u{85}b", "a\u{2028}b", "\t"] {
+        let mut q = question.clone();
+        q["title"] = json!(bad);
+        assert!(ServerMsg::decode(&serde_json::to_vec(&q).unwrap()).is_err(), "question {bad:?}");
+        let mut a = alert.clone();
+        a["title"] = json!(bad);
+        // U+2028 is not a control character of Unicode (category Zl). The alert keeps the old rule
+        // (`char::is_control`). The title of a question refuses it, as it breaks a line.
+        let expect_err = bad != "a\u{2028}b";
+        assert_eq!(
+            ServerMsg::decode(&serde_json::to_vec(&a).unwrap()).is_err(),
+            expect_err,
+            "alert {bad:?}"
+        );
+    }
+    // The title of a question has no bidi control either.
+    for bidi in ['\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}'] {
+        let mut q = question.clone();
+        q["title"] = json!(format!("a{bidi}b"));
+        assert!(ServerMsg::decode(&serde_json::to_vec(&q).unwrap()).is_err(), "{bidi:?}");
+    }
+    // 128 characters pass, 129 do not. A character counts once, whatever its size in bytes.
+    let mut q = question.clone();
+    q["title"] = json!("é".repeat(128));
+    assert!(ServerMsg::decode(&serde_json::to_vec(&q).unwrap()).is_ok());
+    q["title"] = json!("é".repeat(129));
+    assert!(ServerMsg::decode(&serde_json::to_vec(&q).unwrap()).is_err());
+}
+
+fn max_question() -> RequestMsg {
+    RequestMsg {
+        id: "a".repeat(32),
+        request_id: "b".repeat(32),
+        kind: Kind::Question,
+        chain_id: "b".repeat(32),
+        seq: u64::from(u32::MAX),
+        from: Sender {
+            label: "l".repeat(64),
+            key_name: "k".repeat(64),
+            owner: "o".repeat(64),
+            via: Via::Mcp,
+            interaction: Interaction::Conversational,
+        },
+        urgency: Urgency::High,
+        quiet: true,
+        created_at_ms: i64::MAX,
+        chain_created_at_ms: i64::MAX,
+        agent_seen_at_ms: i64::MAX,
+        lease_mode: LeaseMode::Lease,
+        lease_until_ms: Some(i64::MAX),
+        until_at_ms: None,
+        allow_custom: true,
+        allow_ask_back: true,
+        supersedes: Some("c".repeat(32)),
+        previous_id: Some("d".repeat(32)),
+        title: Some("t".repeat(MAX_TITLE_CHARS)),
+        explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
+        command: Some(Command { text: "c".repeat(MAX_COMMAND_BYTES), label: Some("l".repeat(32)) }),
+        input: Some(Input {
+            kind: InputType::Choice,
+            multiple: true,
+            min: 1,
+            max: 8,
+            options: (0..MAX_OPTIONS)
+                .map(|i| InputOption {
+                    id: format!("{i}").repeat(32).chars().take(32).collect(),
+                    label: "L".repeat(MAX_OPTION_LABEL_CHARS),
+                    description: Some("D".repeat(MAX_OPTION_DESCRIPTION_CHARS)),
+                })
+                .collect(),
+            placeholder: None,
+        }),
+        hint: Some(Hint {
+            suggested: "s".repeat(32),
+            confidence: Some(0.62),
+            source: "x".repeat(32),
+        }),
+        as_of_ms: Some(i64::MAX),
+        approval: None,
+    }
+}
+
+fn max_approval() -> RequestMsg {
+    let mut r = max_question();
+    r.kind = Kind::Approval;
+    r.title = None;
+    r.explanation = None;
+    r.command = None;
+    r.input = None;
+    r.hint = None;
+    r.as_of_ms = None;
+    // `op` and `view` together are at most 32 KiB.
+    let op = json!({"sql": "q".repeat(MAX_COMMAND_BYTES - 2000), "host": "prod"});
+    let view = effect::View {
+        title: "t".repeat(128),
+        fields: (0..12)
+            .map(|i| (format!("{i}").repeat(48).chars().take(48).collect(), "/host".to_string()))
+            .collect(),
+        body: "/sql".into(),
+        body_label: Some("b".repeat(48)),
+    };
+    let effect = effect::effect_hash("s".repeat(64).as_str(), "a", "r", &op).unwrap();
+    r.approval = Some(ApprovalBody {
+        code: "ABCDEFGH".into(),
+        service: "s".repeat(64),
+        action: "a".into(),
+        resource: "r".into(),
+        subject: "u".repeat(128),
+        effect,
+        op: effect::Op::from_value(op).unwrap(),
+        view,
+        explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
+        hint: Some(Hint { suggested: "s".repeat(32), confidence: None, source: "x".repeat(32) }),
+        previous: Some(Previous { approved_at_ms: i64::MAX, consumed: true }),
+        follows: Some(Follows { code: "ABCDEFGH".into(), intent: Intent::ChangeRequest }),
+    });
+    r
+}
+
+#[test]
+fn request_fits_one_noise_message_at_max_sizes() {
+    // A real Noise session, to prove that the encrypted frame fits too.
+    let device = noise::generate_keypair().unwrap();
+    let server = noise::generate_keypair().unwrap();
+    let (init, m1) = Initiator::start(&device.private, &server.public, b"{}").unwrap();
+    let (resp, _, _) = Responder::start(&server.private, &m1).unwrap();
+    let (mut srv, m2) = resp.finish(b"{}").unwrap();
+    let (mut phone, _) = init.finish(&m2).unwrap();
+
+    let frames = [
+        ServerMsg::Request(Box::new(max_question())),
+        ServerMsg::Request(Box::new(max_approval())),
+        ServerMsg::Message(MessageMsg {
+            id: "a".repeat(32),
+            request_id: "b".repeat(32),
+            seq: u64::MAX >> 11,
+            by: Author::Agent,
+            created_at_ms: i64::MAX,
+            explanation: Some("e".repeat(MAX_EXPLANATION_CHARS)),
+            command: Some(Command {
+                text: "c".repeat(MAX_COMMAND_BYTES),
+                label: Some("l".repeat(32)),
+            }),
+            text: None,
+        }),
+        ServerMsg::Digest(DigestMsg {
+            id: "a".repeat(32),
+            count: u32::MAX,
+            oldest_created_at_ms: i64::MAX,
+            ids: vec!["f".repeat(32); MAX_DIGEST_IDS],
+        }),
+    ];
+    for frame in frames {
+        let bytes = frame.encode().unwrap_or_else(|e| panic!("{e}"));
+        assert!(bytes.len() <= MAX_PLAINTEXT, "{} bytes", bytes.len());
+        let sealed = srv.encrypt(&bytes).unwrap();
+        assert!(sealed.len() <= noise::MAX_MESSAGE);
+        let opened = phone.decrypt(&sealed).unwrap();
+        assert_eq!(ServerMsg::decode(&opened).unwrap(), frame);
+    }
+    // The client side: a `sync` of 500 entries and an answer with a text of the maximum length.
+    let sync = ClientMsg::Sync {
+        open: (0..MAX_SYNC_ENTRIES)
+            .map(|_| OpenRef { request_id: "a".repeat(32), seq: u64::MAX >> 11 })
+            .collect(),
+    };
+    assert!(sync.encode().unwrap().len() <= MAX_PLAINTEXT);
+    let answer = ClientMsg::Answer(AnswerMsg {
+        request_id: "a".repeat(32),
+        client_msg_id: "m".repeat(64),
+        action: Action::Decline,
+        shown_effect: None,
+        choice: None,
+        text: Some("é".repeat(MAX_USER_TEXT_CHARS)),
+        intent: Some(Intent::Comment),
+    });
+    assert!(answer.encode().unwrap().len() <= MAX_PLAINTEXT);
+    // One more entry, one more character: refused.
+    let ClientMsg::Sync { mut open } = sync else { unreachable!() };
+    open.push(OpenRef { request_id: "a".repeat(32), seq: 0 });
+    assert!(ClientMsg::Sync { open }.encode().is_err());
+}
+
+#[test]
+fn encode_refuses_a_frame_above_one_noise_message() {
+    // The limits are in characters and bytes of text. The JSON escaping can make a frame larger:
+    // each control character of an explanation or a command costs 6 bytes. The sender checks.
+    let mut r = max_question();
+    r.command = Some(Command { text: "\u{1}".repeat(MAX_COMMAND_BYTES), label: None });
+    r.explanation = Some("\u{1}".repeat(MAX_EXPLANATION_CHARS));
+    let frame = ServerMsg::Request(Box::new(r));
+    assert!(frame.validate().is_ok(), "the rules of text allow it");
+    assert!(frame.encode().is_err(), "but it does not fit in one Noise message");
+}
+
+#[test]
+fn text_limits_are_exact() {
+    let base =
+        files("server").into_iter().find(|f| f.0 == "request-question-choice.json").unwrap().2;
+    let try_with = |f: &dyn Fn(&mut Value)| {
+        let mut v = base.clone();
+        f(&mut v);
+        ServerMsg::decode(&serde_json::to_vec(&v).unwrap()).is_ok()
+    };
+    assert!(try_with(&|v| v["explanation"] = json!("x".repeat(8000))));
+    assert!(!try_with(&|v| v["explanation"] = json!("x".repeat(8001))));
+    assert!(!try_with(&|v| v["explanation"] = json!("")));
+    assert!(try_with(&|v| v["command"]["text"] = json!("x".repeat(32768))));
+    assert!(!try_with(&|v| v["command"]["text"] = json!("x".repeat(32769))));
+    assert!(try_with(&|v| v["command"]["label"] = json!("x".repeat(32))));
+    assert!(!try_with(&|v| v["command"]["label"] = json!("x".repeat(33))));
+    assert!(try_with(&|v| v["input"]["options"][0]["description"] = json!("x".repeat(160))));
+    assert!(!try_with(&|v| v["input"]["options"][0]["description"] = json!("x".repeat(161))));
+    assert!(!try_with(&|v| v["input"]["options"][0]["label"] = json!("x".repeat(49))));
+    assert!(!try_with(&|v| v["input"]["options"][0]["id"] = json!("A")));
+    assert!(!try_with(&|v| v["from"]["label"] = json!("x".repeat(65))));
+    assert!(!try_with(&|v| v["from"]["via"] = json!("web")));
+    assert!(!try_with(&|v| v["urgency"] = json!("urgent")));
+    assert!(!try_with(&|v| v["created_at_ms"] = json!(-1)));
+}
+
+#[test]
+fn golden_approval_verifies_and_a_changed_op_does_not() {
+    let frame = files("server").into_iter().find(|f| f.0 == "request-approval.json").unwrap();
+    let ServerMsg::Request(req) = ServerMsg::decode(&frame.1).unwrap() else { panic!() };
+    let body = req.approval.unwrap();
+    assert!(body.verify());
+    assert_eq!(body.computed_effect().unwrap(), body.effect);
+    assert_eq!(effect::short(&body.effect).unwrap().len(), 8);
+    let resolved = effect::resolve_view(body.op.as_value(), &body.view).unwrap();
+    assert_eq!(resolved.body, "INSERT INTO analytics.events SELECT 1");
+    assert_eq!(resolved.fields[0].value, "prod");
+    // The server keeps the frame valid but the phone sees the mismatch.
+    let mut changed = body.clone();
+    changed.service = "other".into();
+    assert!(!changed.verify());
+    let mut changed = body.clone();
+    changed.view.body = "/missing".into();
+    assert!(!changed.verify());
+    // The explanation is outside the hash.
+    let mut changed = body;
+    changed.explanation = Some("another text".into());
+    assert!(changed.verify());
+}
+
+#[test]
+fn old_hello_and_old_ack_do_not_parse() {
+    // Protocol 4 sent `alert_id` in the receipt. Protocol 5 has `id` only. No alias.
+    let old = br#"{"t":"ack","alert_id":"00000000000000000000000000000000","stage":"received"}"#;
+    assert!(ClientMsg::decode(old).is_err());
+    assert_eq!(PROTOCOL_VERSION_IS_5, 5);
+}
+
+const PROTOCOL_VERSION_IS_5: u32 = inbox_core::PROTOCOL_VERSION;

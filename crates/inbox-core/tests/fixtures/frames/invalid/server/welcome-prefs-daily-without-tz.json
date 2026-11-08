@@ -1,0 +1,17 @@
+{
+  "t": "welcome",
+  "server_name": "Prod",
+  "groups": [],
+  "subscriptions": [],
+  "heartbeat_interval_ms": 1,
+  "offline_warning_after_ms": 2,
+  "server_time_ms": 3,
+  "user_name": "alice",
+  "prefs": {
+    "digest": {
+      "mode": "daily",
+      "at": "09:00"
+    }
+  },
+  "body_purge_after_ms": 0
+}

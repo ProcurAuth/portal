@@ -1,0 +1,13 @@
+{
+  "t": "settled",
+  "id": "33333333333333333333333333333333",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "state": "answered",
+  "reason": "answered",
+  "by": {
+    "via": "phone",
+    "device_name": "Pixel 9"
+  },
+  "decision": "approve",
+  "at_ms": 1788000300000
+}

@@ -1,0 +1,31 @@
+{
+  "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "chain_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 0,
+  "from": {
+    "label": "claude-laptop",
+    "key_name": "claude-laptop",
+    "owner": "alice",
+    "via": "api",
+    "interaction": "one_shot"
+  },
+  "urgency": "normal",
+  "created_at_ms": 1788000000000,
+  "chain_created_at_ms": 1788000000000,
+  "agent_seen_at_ms": 1788000001000,
+  "lease_mode": "lease",
+  "lease_until_ms": 1788000180000,
+  "allow_custom": false,
+  "allow_ask_back": true,
+  "t": "request",
+  "kind": "question",
+  "title": "Restart the worker?",
+  "input": {
+    "type": "confirm",
+    "multiple": false,
+    "min": 0,
+    "max": 0,
+    "options": []
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "t": "error",
+  "code": "not_enabled",
+  "message": "items are not enabled on this server"
+}

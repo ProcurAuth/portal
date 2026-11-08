@@ -1,0 +1,13 @@
+{
+  "t": "message",
+  "id": "11111111111111111111111111111111",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "seq": 1,
+  "by": "agent",
+  "created_at_ms": 1788000100000,
+  "explanation": "The table has 3 rows with this id.",
+  "command": {
+    "text": "SELECT * FROM analytics.events WHERE id = 7",
+    "label": "SQL"
+  }
+}

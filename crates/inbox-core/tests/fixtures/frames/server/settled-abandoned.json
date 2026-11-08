@@ -1,0 +1,8 @@
+{
+  "t": "settled",
+  "id": "55555555555555555555555555555555",
+  "request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "state": "abandoned",
+  "reason": "lease_lapsed",
+  "at_ms": 1788000300000
+}

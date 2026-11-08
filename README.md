@@ -793,7 +793,7 @@ The command `portal import-sqlite --config FILE --from SQLITE_FILE` copies data 
 
 The portal can run the Inbox. The Inbox sends alerts to phones. It makes sure that each phone shows each alert one time. The Inbox starts when the file has a block `inbox`. Without this block, the portal has no Inbox and opens no route for it.
 
-The Inbox is a feature of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a key of the file do not need a session of the portal. The Inbox delivers alerts when the rest of the portal is not ready. The rights come from the directory of the portal. The wire protocol of the phones is protocol 4: enrollment with a one-time code, and the Noise IK session. The chapter [`docs/inbox/`](docs/inbox/README.md) is the full guide. [`docs/inbox/SPEC.md`](docs/inbox/SPEC.md) has the numbered requirements.
+The Inbox is a feature of the portal. It runs in the same process and in the same Tokio runtime. It starts and stops with the portal. A phone and a key of the file do not need a session of the portal. The Inbox delivers alerts when the rest of the portal is not ready. The rights come from the directory of the portal. The wire protocol of the phones is protocol 5: enrollment with a one-time code, the Noise IK session, and items that the owner answers. The chapter [`docs/inbox/`](docs/inbox/README.md) is the full guide. [`docs/inbox/SPEC.md`](docs/inbox/SPEC.md) has the numbered requirements.
 
 ### The Inbox in a nutshell
 

@@ -155,6 +155,41 @@ pub fn session_decrypt(conn: &Conn, frame: &[u8]) -> Result<Vec<u8>, Error> {
     result
 }
 
+// ---------------------------------------------------------------- effect and view
+
+fn effect_error_json(e: &inbox_core::effect::EffectError) -> Value {
+    json!({ "error": { "code": e.code(), "message": e.reason() } })
+}
+
+/// The effect of an operation (protocol 17.3). `op_json` is the JSON text of `op`, read with the
+/// strict rules (no float, no duplicate member name). Returns `{"effect": "sha256:..."}` or
+/// `{"error": {"code": "invalid_op", ...}}`.
+pub fn effect_compute(service: &str, action: &str, resource: &str, op_json: &str) -> Value {
+    match inbox_core::effect::effect_hash_text(service, action, resource, op_json) {
+        Ok(effect) => json!({ "effect": effect }),
+        Err(e) => effect_error_json(&e),
+    }
+}
+
+/// The view of an approval with the values of `op`. Returns
+/// `{"view": {"title", "fields": [{"label", "value"}], "body", "body_label"?}}` or
+/// `{"error": {"code": "invalid_op" | "invalid_view", ...}}`.
+pub fn view_resolve(op_json: &str, view_json: &str) -> Value {
+    use inbox_core::effect::{Op, parse_view, resolve_view};
+    let op = match Op::parse(op_json) {
+        Ok(op) => op,
+        Err(e) => return effect_error_json(&e),
+    };
+    let view = match parse_view(view_json) {
+        Ok(v) => v,
+        Err(e) => return effect_error_json(&e),
+    };
+    match resolve_view(op.as_value(), &view) {
+        Ok(v) => json!({ "view": v }),
+        Err(e) => effect_error_json(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +325,31 @@ mod tests {
             .unwrap();
         assert_eq!(enroll_finish(&h, &m2)["error"]["code"], "auth_failed");
         assert_eq!(enroll_finish(&h2, &m2)["done"]["server_name"], "Evil");
+    }
+
+    #[test]
+    fn effect_and_view_reach_kotlin_as_json() {
+        let op = r#"{"sql":"DELETE 1","host":"prod","n":2}"#;
+        let r = effect_compute("datastore", "data.write", "host:prod", op);
+        let effect = r["effect"].as_str().unwrap();
+        assert!(inbox_core::effect::is_effect(effect), "{r}");
+        // Same hash for the other order of the members.
+        let reordered = r#"{"n":2,"host":"prod","sql":"DELETE 1"}"#;
+        assert_eq!(effect_compute("datastore", "data.write", "host:prod", reordered), r);
+        // A float and a duplicate member are refused.
+        assert_eq!(effect_compute("s", "a", "r", r#"{"x":1.5}"#)["error"]["code"], "invalid_op");
+        assert_eq!(
+            effect_compute("s", "a", "r", r#"{"x":1,"x":2}"#)["error"]["code"],
+            "invalid_op"
+        );
+        let view = r#"{"title":"Write","fields":[["Host","/host"],["N","/n"]],"body":"/sql","body_label":"SQL"}"#;
+        let v = view_resolve(op, view);
+        assert_eq!(v["view"]["body"], "DELETE 1");
+        assert_eq!(v["view"]["fields"][0], json!({"label": "Host", "value": "prod"}));
+        assert_eq!(v["view"]["fields"][1]["value"], "2");
+        let missing = r#"{"title":"Write","fields":[],"body":"/nope"}"#;
+        assert_eq!(view_resolve(op, missing)["error"]["code"], "invalid_view");
+        assert_eq!(view_resolve(op, "not json")["error"]["code"], "invalid_view");
+        assert_eq!(view_resolve("[1]", view)["error"]["code"], "invalid_op");
     }
 }
