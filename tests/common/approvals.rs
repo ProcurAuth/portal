@@ -58,6 +58,7 @@ const ITEMS: &str = r#"
     mute_after_refusals = 0
     max_requests_per_key_per_hour = 500
   }
+  mcp {}
 "#;
 
 /// A command of the service: the operation, its view and its effect.
@@ -94,6 +95,8 @@ pub struct Pep {
     pub s: Server,
     pub pdp_port: u16,
     pub key_id: String,
+    /// The text of the agent key, shown once when the owner made it.
+    pub key_text: String,
 }
 
 fn serve_unix(path: std::path::PathBuf, body: String) {
@@ -210,6 +213,7 @@ discovery {{
             s,
             pdp_port,
             key_id: String::new(),
+            key_text: String::new(),
         };
         pep.make_owner_and_key();
         pep
@@ -290,6 +294,9 @@ discovery {{
             &body,
         );
         assert_eq!(st, 200, "the key is not made: {page}");
+        let marker = "id=\"key-text\" type=\"text\" readonly value=\"";
+        let at = page.find(marker).expect("the text of the key") + marker.len();
+        self.key_text = page[at..].split('"').next().unwrap().to_string();
         // The id of the key is in the title of its row on the page Keys.
         let (_, _, list) = http_full(
             s.port,
@@ -364,6 +371,54 @@ discovery {{
     /// A request with a lease of `lease_s` seconds. The result is the id and the code.
     pub fn submit(&self, c: &Command, lease_s: u64) -> (String, String) {
         let reply = self.submit_with(c, json!({"lease_s": lease_s}));
+        assert!(
+            reply.status == 201 || reply.status == 200,
+            "{}: {}",
+            reply.status,
+            reply.body
+        );
+        let v = reply.json();
+        (
+            v["request_id"].as_str().unwrap().to_string(),
+            v["code"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// A tool of the agent channel (`/mcp`), with the key of the owner. The result is the structured content.
+    pub fn tool(&self, name: &str, args: Value) -> Value {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": args}})
+        .to_string();
+        let host = format!("127.0.0.1:{}", self.s.port);
+        let (status, _, text) = http_full(
+            self.s.port,
+            &host,
+            "POST",
+            "/mcp",
+            &[
+                ("Authorization", format!("Bearer {}", self.key_text)),
+                ("Content-Type", "application/json".into()),
+            ],
+            &body,
+        );
+        assert_eq!(status, 200, "{text}");
+        let reply: Value = serde_json::from_str(&text).expect("JSON");
+        assert_ne!(reply["result"]["isError"], true, "{text}");
+        reply["result"]["structuredContent"].clone()
+    }
+
+    /// A request with an intent: the agent gives the texts to the portal, the service gives the command. The result is
+    /// the id and the code.
+    pub fn submit_intent(&self, c: &Command, intent: Value, lease_s: u64) -> (String, String) {
+        let mut args = json!({"lease_s": lease_s});
+        for (k, v) in intent.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        let reference = self.tool("approval_intent", args)["approval_ref"]
+            .as_str()
+            .expect("an approval_ref")
+            .to_string();
+        let reply = self.submit_with(c, json!({"approval_ref": reference}));
         assert!(
             reply.status == 201 || reply.status == 200,
             "{}: {}",
@@ -604,4 +659,130 @@ impl Server {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- the web pages of the items
+
+/// The value of the header `name` in the head of an answer.
+pub fn header_of(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (n, v) = l.split_once(':')?;
+        n.eq_ignore_ascii_case(name).then(|| v.trim().to_string())
+    })
+}
+
+/// The value of the hidden field `name` in the form whose action is `action`.
+pub fn hidden_in(page: &str, action: &str, name: &str) -> String {
+    let form = page
+        .find(&format!("action=\"{action}\""))
+        .unwrap_or_else(|| panic!("no form {action} in {page}"));
+    let end = page[form..]
+        .find("</form>")
+        .map_or(page.len(), |e| form + e);
+    let marker = format!("name=\"{name}\" value=\"");
+    let at = page[form..end]
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no field {name} in the form {action}"))
+        + form
+        + marker.len();
+    super::unescape(page[at..].split('"').next().unwrap())
+}
+
+pub const INBOX: &str = "/auth/settings/inbox";
+
+pub fn item_path(id: &str) -> String {
+    format!("{INBOX}/items/{id}")
+}
+
+impl Pep {
+    /// The session cookie of an account that the rig made.
+    pub fn cookie(&self, login: &str) -> String {
+        self.s.account(login).cookie.clone()
+    }
+
+    /// A page with the session of an account: the status, the head and the body.
+    pub fn page(&self, cookie: &str, path: &str) -> (u16, String, String) {
+        let host = format!("127.0.0.1:{}", self.s.port);
+        http_full(
+            self.s.port,
+            &host,
+            "GET",
+            path,
+            &[("Cookie", cookie.to_string())],
+            "",
+        )
+    }
+
+    /// A form with the session of an account. `fields` has no `csrf`: the call adds `csrf`. `origin` is the header
+    /// `Origin`: `None` sends the right one, `Some("")` sends none.
+    pub fn post(
+        &self,
+        cookie: &str,
+        path: &str,
+        csrf: &str,
+        fields: &str,
+        origin: Option<&str>,
+    ) -> (u16, String, String) {
+        let host = format!("127.0.0.1:{}", self.s.port);
+        let body = if csrf.is_empty() {
+            fields.to_string()
+        } else {
+            format!("csrf={}&{fields}", form_value(csrf))
+        };
+        let mut headers = vec![
+            (
+                "Content-Type",
+                "application/x-www-form-urlencoded".to_string(),
+            ),
+            ("Cookie", cookie.to_string()),
+        ];
+        match origin {
+            None => headers.push(("Origin", format!("http://{host}"))),
+            Some("") => {}
+            Some(o) => headers.push(("Origin", o.to_string())),
+        }
+        http_full(self.s.port, &host, "POST", path, &headers, &body)
+    }
+
+    /// The answer form of a request, as the owner uses it: the page gives the token and the effect, the call sends
+    /// `action` and `extra`. The result is the status, the head and the body.
+    pub fn answer_form(
+        &self,
+        cookie: &str,
+        id: &str,
+        action: &str,
+        extra: &str,
+    ) -> (u16, String, String) {
+        let (st, _, page) = self.page(cookie, &item_path(id));
+        assert_eq!(st, 200, "{page}");
+        let answer = format!("{INBOX}/items/answer");
+        let csrf = hidden_in(&page, &answer, "csrf");
+        let shown = hidden_in(&page, &answer, "shown_effect");
+        let mut fields = format!(
+            "request_id={id}&action={action}&shown_effect={}",
+            form_value(&shown)
+        );
+        if !extra.is_empty() {
+            fields.push('&');
+            fields.push_str(extra);
+        }
+        self.post(cookie, &answer, &csrf, &fields, None)
+    }
+
+    /// The text of the page that a person reads, in lower case: the part of `main`.
+    pub fn text_of(page: &str) -> String {
+        let start = page.find("<main").unwrap_or(0);
+        page[start..].to_lowercase()
+    }
+}
+
+/// A command of the service with the text of the SQL and the title that the test chooses.
+pub fn command_with(sql: &str, title: &str) -> Command {
+    let op =
+        json!({"tool": "run_write_query", "host": "prod", "database": "analytics", "sql": sql});
+    let view = json!({"title": title,
+                      "fields": [["Host", "/host"], ["Database", "/database"]],
+                      "body": "/sql", "body_label": "SQL"});
+    let effect = effect_hash("db", "data.write", RESOURCE, &op).unwrap();
+    Command { op, view, effect }
 }
