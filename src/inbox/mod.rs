@@ -20,6 +20,8 @@
 
 pub mod admin;
 mod api;
+pub mod approvals;
+
 pub mod cli;
 pub mod content_box;
 mod db;
@@ -71,6 +73,9 @@ pub use items_ops::Consumed;
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
+    pub(crate) use super::items::{Caller, Loaded};
+    pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled};
+    pub(crate) use super::items_store::{Answer, Answered, ItemError, Items};
     pub(crate) use super::pg::tests::TestDatabase;
 }
 use hub::Hub;

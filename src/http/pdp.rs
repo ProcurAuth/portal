@@ -63,6 +63,7 @@ mod approval;
 #[cfg(test)]
 mod approval_tests;
 
+pub(super) use self::approval::open_evaluation_id;
 use self::approval::{Ask, Held};
 use super::*;
 use crate::counting::{Outcome as CountOutcome, Unavailable};
@@ -356,6 +357,10 @@ async fn handle(
         (Method::POST, EVALUATION_PATH | EVALUATIONS_PATH | SEARCH_ACTION_PATH) => {
             decide_request(state, &path, request, request_id.as_deref()).await
         }
+        (_, p) if super::approval_api::owns(p) => {
+            let client = client(state, request.headers());
+            super::approval_api::handle(state, client, request, &path).await
+        }
         (_, METADATA_PATH | EVALUATION_PATH | EVALUATIONS_PATH | SEARCH_ACTION_PATH) => {
             json_response(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -406,7 +411,7 @@ fn metadata(state: &AppState) -> HttpResponse {
 }
 
 /// The server that sent the request, from its bearer token.
-fn client<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a Client> {
+pub(super) fn client<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a Client> {
     let value = unique_header_str_name(headers, hyper::header::AUTHORIZATION).ok()??;
     // The scheme is case-insensitive (RFC 9110); the token is exact.
     let (scheme, token) = value.split_at_checked(7)?;
@@ -422,6 +427,17 @@ fn client<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a Client> {
     state.pdp_clients.get(&digest)
 }
 
+/// The answer to a request without a valid token of a server.
+pub(super) fn unauthorized(state: &AppState) -> HttpResponse {
+    state.pdp_stats.unauthorized.fetch_add(1, Ordering::Relaxed);
+    let mut response = json_response(StatusCode::UNAUTHORIZED, &json!({"error": "unauthorized"}));
+    response.headers_mut().insert(
+        hyper::header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"portal-pdp\""),
+    );
+    response
+}
+
 async fn decide_request(
     state: &AppState,
     path: &str,
@@ -429,14 +445,7 @@ async fn decide_request(
     request_id: Option<&str>,
 ) -> HttpResponse {
     let Some(client) = client(state, request.headers()) else {
-        state.pdp_stats.unauthorized.fetch_add(1, Ordering::Relaxed);
-        let mut response =
-            json_response(StatusCode::UNAUTHORIZED, &json!({"error": "unauthorized"}));
-        response.headers_mut().insert(
-            hyper::header::WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer realm=\"portal-pdp\""),
-        );
-        return response;
+        return unauthorized(state);
     };
     let max = state.config.pdp.as_ref().map_or(0, |p| p.max_body_bytes);
     let body = match read_limited_body(
@@ -1428,7 +1437,7 @@ fn search_action(
     Ok(json!({ "results": results, "page": { "next_token": "" } }))
 }
 
-fn json_response(status: StatusCode, value: &Value) -> HttpResponse {
+pub(super) fn json_response(status: StatusCode, value: &Value) -> HttpResponse {
     let mut response = response_with_body(status, Bytes::from(value.to_string()));
     response
         .headers_mut()

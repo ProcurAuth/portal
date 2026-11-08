@@ -38,6 +38,11 @@ impl InboxRig {
     /// `consume_within` is the text of the key of the block `inbox.approvals`. `None` when PostgreSQL is the backend
     /// and `INBOX_TEST_PG` is not set: the PostgreSQL side of the test is skipped.
     pub(super) fn new(backend: &Backend, consume_within: &str) -> Option<InboxRig> {
+        Self::with_approvals(backend, &format!("consume_within = \"{consume_within}\""))
+    }
+
+    /// `approvals` is the text inside the block `inbox.approvals`.
+    pub(super) fn with_approvals(backend: &Backend, approvals: &str) -> Option<InboxRig> {
         let dir = std::env::temp_dir().join(format!(
             "portal-pdp-rig-{}-{}",
             std::process::id(),
@@ -102,7 +107,7 @@ impl InboxRig {
                 active_key = "k1"
                 key "k1" {{ secret_env = "TEST_CONTENT_KEY" }}
               }}
-              approvals {{ consume_within = "{consume_within}" }}
+              approvals {{ {approvals} }}
               group "infra" {{ name = "Infra" }}
             }}"#
         );
@@ -116,7 +121,7 @@ impl InboxRig {
 }
 
 /// A runtime for the calls of the test thread to the engine of the items.
-fn runtime() -> tokio::runtime::Runtime {
+pub(super) fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

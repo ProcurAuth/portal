@@ -54,8 +54,7 @@ const RELEASED: usize = 5;
 const NOT_ENABLED: usize = 6;
 
 /// The members `procurauth_approval_*` of the metadata: the values that protocol 17 says the PDP publishes (the names
-/// are those of the reference PDP of the protocol). `None` without the block `inbox.approvals`. The members
-/// `procurauth_approval_ref_ttl_seconds` and `procurauth_approval_max_command_bytes` come with the submission API.
+/// are those of the reference PDP of the protocol). `None` without the block `inbox.approvals`.
 pub(super) fn metadata(config: &Config) -> Option<Value> {
     let inbox = config.inbox.as_ref()?;
     let (items, approvals) = (inbox.items.as_ref()?, inbox.approvals.as_ref()?);
@@ -70,6 +69,8 @@ pub(super) fn metadata(config: &Config) -> Option<Value> {
         "procurauth_approval_consume_seconds": approvals.consume_within.as_secs(),
         "procurauth_approval_deny_seconds": approvals.deny_cooldown.as_secs(),
         "procurauth_approval_evaluation_ttl_seconds": approvals.evaluation_ttl.as_secs(),
+        "procurauth_approval_ref_ttl_seconds": approvals.intent_ttl.as_secs(),
+        "procurauth_approval_max_command_bytes": approvals.max_command_bytes,
     }))
 }
 
@@ -230,7 +231,7 @@ pub(super) fn gate(
         app.secrets
             .content
             .as_ref()
-            .map(|content| evaluation_id(content, now, &bound))
+            .and_then(|content| evaluation_id(content, now, &bound).ok())
     };
     let cooldown_ms = app
         .config
@@ -334,35 +335,107 @@ fn mac_of(key: &[u8; 32], bound: &Bound<'_>, issued_at: u64) -> Hmac<sha2::Sha25
     mac
 }
 
+/// The facts of a question that an `evaluation_id` carries, sealed. The submission API has the service of the token
+/// and the effect, but not the subject, the action and the resource: it reads them from the id.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Facts {
+    pub subject: String,
+    pub action: String,
+    pub resource: String,
+}
+
+/// The text that the seal of the facts covers besides the facts: the version and the tag of the HMAC, so the sealed
+/// block cannot move to another id.
+fn facts_aad(tag: &[u8]) -> Vec<u8> {
+    let mut aad = ID_CONTEXT.to_vec();
+    aad.extend_from_slice(b"/facts");
+    aad.extend_from_slice(tag);
+    aad
+}
+
 /// Makes the `evaluation_id` of a question: base64url of the key id (with its length byte), the time of issue in
-/// seconds (8 bytes) and the HMAC (32 bytes).
-pub(super) fn evaluation_id(content: &ContentBox, now_ms: i64, bound: &Bound<'_>) -> String {
+/// seconds (8 bytes), the HMAC (32 bytes) and the facts of the question (subject, action, resource), sealed with the
+/// content key. The id shows no fact to the service that holds it.
+pub(super) fn evaluation_id(
+    content: &ContentBox,
+    now_ms: i64,
+    bound: &Bound<'_>,
+) -> Result<String, String> {
     let (kid, key) = content.evaluation_key();
     let issued_at = (now_ms / 1000).max(0) as u64;
     let tag = mac_of(key, bound, issued_at).finalize().into_bytes();
-    let mut raw = Vec::with_capacity(1 + kid.len() + 8 + MAC_LEN);
+    let facts = json!([bound.subject, bound.action, bound.resource]).to_string();
+    let sealed = content.seal(facts.as_bytes(), &facts_aad(&tag))?;
+    let mut raw = Vec::with_capacity(1 + kid.len() + 8 + MAC_LEN + sealed.len());
     raw.push(kid.len() as u8);
     raw.extend_from_slice(kid.as_bytes());
     raw.extend_from_slice(&issued_at.to_be_bytes());
     raw.extend_from_slice(&tag);
-    Base64UrlUnpadded::encode_string(&raw)
+    raw.extend_from_slice(&sealed);
+    Ok(Base64UrlUnpadded::encode_string(&raw))
 }
 
 /// Why an `evaluation_id` is not valid. The submission API answers `invalid_evaluation` for each cause.
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)] // the submission API of lot L7 reads it
-pub(super) enum InvalidId {
+pub(crate) enum InvalidId {
     Malformed,
     UnknownKey,
-    /// The HMAC does not match: another service, subject, action, resource or effect, or a forged value.
+    /// The HMAC does not match: another service or effect, or a forged value.
     Mismatch,
     /// The time of issue is in the future, or older than `evaluation_ttl`.
     Late,
 }
 
-/// Checks an `evaluation_id` against the facts of a submission and the time. The check is constant-time on the
-/// HMAC.
-#[allow(dead_code)] // the submission API of lot L7 calls it
+/// The parts of an `evaluation_id`: the key id, the time of issue, the HMAC and the sealed facts.
+struct Parts<'a> {
+    kid: &'a str,
+    issued_at: u64,
+    tag: &'a [u8],
+    sealed: &'a [u8],
+}
+
+fn split<'a>(raw: &'a [u8]) -> Result<Parts<'a>, InvalidId> {
+    let (&kid_len, rest) = raw.split_first().ok_or(InvalidId::Malformed)?;
+    let kid_len = kid_len as usize;
+    if rest.len() <= kid_len + 8 + MAC_LEN {
+        return Err(InvalidId::Malformed);
+    }
+    let (kid, rest) = rest.split_at(kid_len);
+    let (issued, rest) = rest.split_at(8);
+    let (tag, sealed) = rest.split_at(MAC_LEN);
+    Ok(Parts {
+        kid: std::str::from_utf8(kid).map_err(|_| InvalidId::Malformed)?,
+        issued_at: u64::from_be_bytes(issued.try_into().map_err(|_| InvalidId::Malformed)?),
+        tag,
+        sealed,
+    })
+}
+
+/// Checks the HMAC of an `evaluation_id` against the facts of a submission, and the time. The check is
+/// constant-time on the HMAC.
+fn check_mac(
+    content: &ContentBox,
+    now_ms: i64,
+    ttl_s: u64,
+    parts: &Parts<'_>,
+    bound: &Bound<'_>,
+) -> Result<(), InvalidId> {
+    let key = content
+        .evaluation_key_of(parts.kid)
+        .ok_or(InvalidId::UnknownKey)?;
+    mac_of(key, bound, parts.issued_at)
+        .verify_slice(parts.tag)
+        .map_err(|_| InvalidId::Mismatch)?;
+    let now = (now_ms / 1000).max(0) as u64;
+    if parts.issued_at > now + 1 || now > parts.issued_at.saturating_add(ttl_s) {
+        return Err(InvalidId::Late);
+    }
+    Ok(())
+}
+
+/// Checks the HMAC and the time of an `evaluation_id` against all the facts of a question, without a read of the
+/// sealed facts.
+#[cfg(test)]
 pub(super) fn check_evaluation_id(
     content: &ContentBox,
     now_ms: i64,
@@ -371,26 +444,40 @@ pub(super) fn check_evaluation_id(
     bound: &Bound<'_>,
 ) -> Result<(), InvalidId> {
     let raw = Base64UrlUnpadded::decode_vec(id).map_err(|_| InvalidId::Malformed)?;
-    let (&kid_len, rest) = raw.split_first().ok_or(InvalidId::Malformed)?;
-    let kid_len = kid_len as usize;
-    if rest.len() != kid_len + 8 + MAC_LEN {
-        return Err(InvalidId::Malformed);
-    }
-    let (kid, rest) = rest.split_at(kid_len);
-    let (issued, tag) = rest.split_at(8);
-    let kid = std::str::from_utf8(kid).map_err(|_| InvalidId::Malformed)?;
-    let issued_at = u64::from_be_bytes(issued.try_into().map_err(|_| InvalidId::Malformed)?);
-    let key = content
-        .evaluation_key_of(kid)
-        .ok_or(InvalidId::UnknownKey)?;
-    mac_of(key, bound, issued_at)
-        .verify_slice(tag)
-        .map_err(|_| InvalidId::Mismatch)?;
-    let now = (now_ms / 1000).max(0) as u64;
-    if issued_at > now + 1 || now > issued_at.saturating_add(ttl_s) {
-        return Err(InvalidId::Late);
-    }
-    Ok(())
+    check_mac(content, now_ms, ttl_s, &split(&raw)?, bound)
+}
+
+/// Opens an `evaluation_id` for a submission: the service is the one of the token and the effect is the one of the
+/// body. The result holds the subject, the action and the resource that the PDP saw in the question. Every other
+/// cause is [`InvalidId`].
+pub(crate) fn open_evaluation_id(
+    content: &ContentBox,
+    now_ms: i64,
+    ttl_s: u64,
+    id: &str,
+    service: &str,
+    effect: &str,
+) -> Result<Facts, InvalidId> {
+    let raw = Base64UrlUnpadded::decode_vec(id).map_err(|_| InvalidId::Malformed)?;
+    let parts = split(&raw)?;
+    let plain = content
+        .open(parts.sealed, &facts_aad(parts.tag))
+        .ok_or(InvalidId::Mismatch)?;
+    let [subject, action, resource]: [String; 3] =
+        serde_json::from_slice(&plain).map_err(|_| InvalidId::Malformed)?;
+    let bound = Bound {
+        service,
+        subject: &subject,
+        action: &action,
+        resource: &resource,
+        effect,
+    };
+    check_mac(content, now_ms, ttl_s, &parts, &bound)?;
+    Ok(Facts {
+        subject,
+        action,
+        resource,
+    })
 }
 
 #[cfg(test)]
@@ -453,7 +540,7 @@ mod tests {
     fn the_evaluation_id_is_stateless_valid_on_another_instance_for_the_ttl_and_binds_each_fact() {
         let first = content(&[("k1", 1)], "k1");
         let second = content(&[("k1", 1)], "k1");
-        let id = evaluation_id(&first, T, &bound());
+        let id = evaluation_id(&first, T, &bound()).unwrap();
         assert!(
             !id.contains("conf0001") && !id.contains("analytics"),
             "no clear fact in the id"
@@ -516,7 +603,7 @@ mod tests {
             Err(InvalidId::Mismatch),
             "the same id with another secret"
         );
-        for bad in ["", "AA", "not base64 !", &id[..id.len() - 4]] {
+        for bad in ["", "AA", "not base64 !"] {
             assert_eq!(
                 check_evaluation_id(&second, T, 300, bad, &bound()),
                 Err(InvalidId::Malformed),
@@ -524,8 +611,9 @@ mod tests {
             );
         }
         let mut raw = Base64UrlUnpadded::decode_vec(&id).unwrap();
-        let last = raw.len() - 1;
-        raw[last] ^= 1;
+        // One changed bit in the HMAC (after the key id, its length byte and the time of issue).
+        let in_mac = 1 + "k1".len() + 8 + 3;
+        raw[in_mac] ^= 1;
         assert_eq!(
             check_evaluation_id(
                 &second,
@@ -541,10 +629,10 @@ mod tests {
     #[test]
     fn an_evaluation_id_survives_a_rotation_of_the_content_key_while_the_old_key_is_in_the_file() {
         let old = content(&[("old", 1)], "old");
-        let id = evaluation_id(&old, T, &bound());
+        let id = evaluation_id(&old, T, &bound()).unwrap();
         let rotated = content(&[("old", 1), ("new", 2)], "new");
         assert_eq!(check_evaluation_id(&rotated, T, 300, &id, &bound()), Ok(()));
-        let fresh = evaluation_id(&rotated, T, &bound());
+        let fresh = evaluation_id(&rotated, T, &bound()).unwrap();
         assert_ne!(fresh, id, "the new key signs");
         let dropped = content(&[("new", 2)], "new");
         assert_eq!(
@@ -554,6 +642,68 @@ mod tests {
         assert_eq!(
             check_evaluation_id(&dropped, T, 300, &fresh, &bound()),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn a_submission_opens_the_id_with_the_service_and_the_effect_and_gets_the_sealed_facts() {
+        let cb = content(&[("k1", 1)], "k1");
+        let id = evaluation_id(&cb, T, &bound()).unwrap();
+        let b = bound();
+        let opened = open_evaluation_id(&cb, T, 300, &id, b.service, b.effect).unwrap();
+        assert_eq!(
+            opened,
+            Facts {
+                subject: b.subject.into(),
+                action: b.action.into(),
+                resource: b.resource.into()
+            }
+        );
+        // Another service or another effect: the HMAC does not match.
+        assert_eq!(
+            open_evaluation_id(&cb, T, 300, &id, "other", b.effect),
+            Err(InvalidId::Mismatch)
+        );
+        let other = EFFECT.replace("2e7b", "2e7c");
+        assert_eq!(
+            open_evaluation_id(&cb, T, 300, &id, b.service, &other),
+            Err(InvalidId::Mismatch)
+        );
+        assert_eq!(
+            open_evaluation_id(&cb, T + 301_000, 300, &id, b.service, b.effect),
+            Err(InvalidId::Late)
+        );
+        // A change of the sealed facts, or a cut of them, does not open.
+        let mut raw = Base64UrlUnpadded::decode_vec(&id).unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 1;
+        assert_eq!(
+            open_evaluation_id(
+                &cb,
+                T,
+                300,
+                &Base64UrlUnpadded::encode_string(&raw),
+                b.service,
+                b.effect
+            ),
+            Err(InvalidId::Mismatch)
+        );
+        assert_eq!(
+            open_evaluation_id(&cb, T, 300, &id[..id.len() - 4], b.service, b.effect),
+            Err(InvalidId::Mismatch)
+        );
+        for bad in ["", "AA", "not base64 !"] {
+            assert_eq!(
+                open_evaluation_id(&cb, T, 300, bad, b.service, b.effect),
+                Err(InvalidId::Malformed),
+                "{bad}"
+            );
+        }
+        // A key that the file does not hold cannot open the facts.
+        let stranger = content(&[("k9", 1)], "k9");
+        assert_eq!(
+            open_evaluation_id(&stranger, T, 300, &id, b.service, b.effect),
+            Err(InvalidId::Mismatch)
         );
     }
 

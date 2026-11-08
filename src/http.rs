@@ -5034,6 +5034,9 @@ fn log(state: &AppState, level: LogLevel, event: &str, fields: &[(&str, String)]
     eprintln!("{line}");
 }
 
+mod approval_api;
+#[cfg(test)]
+mod approval_api_tests;
 mod edge;
 mod inbox_page;
 mod inbox_rights;
