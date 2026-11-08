@@ -22,6 +22,7 @@ mod fixtures;
 pub mod grant_editor;
 pub mod inbox;
 pub mod keys;
+pub mod markdown_html;
 pub mod mask;
 pub mod mfa;
 pub mod minify;
