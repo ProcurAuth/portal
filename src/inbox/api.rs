@@ -939,6 +939,8 @@ async fn delete_item_inner(
 struct TurnRequest {
     text: String,
     #[serde(default)]
+    explanation_format: Option<inbox_core::proto::ExplanationFormat>,
+    #[serde(default)]
     expect_seq: Option<u64>,
 }
 
@@ -969,7 +971,15 @@ async fn item_action_inner(
             let turn: TurnRequest = parse_object(&body)?;
             agent_reply(
                 StatusCode::CREATED,
-                super::mcp_tools::say(app, &who, id, &turn.text, turn.expect_seq).await,
+                super::mcp_tools::say(
+                    app,
+                    &who,
+                    id,
+                    &turn.text,
+                    turn.explanation_format,
+                    turn.expect_seq,
+                )
+                .await,
             )
         }
         "supersede" => agent_reply(

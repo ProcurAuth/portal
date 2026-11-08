@@ -262,7 +262,11 @@ async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
     // The texts of the owner: the comment of a refusal, and the messages that ask the agent.
     let wants_comment = item.state == ItemState::Answered
         && item.answer_action == Some(inbox_core::proto::Action::Decline);
-    if item.last_seq > 0 && (wants_comment || item.last_seq > after_seq) {
+    // The answers of a form: the owner accepted, and the answer holds `answers`.
+    let wants_answers = item.state == ItemState::Answered
+        && item.answer_action == Some(inbox_core::proto::Action::Accept)
+        && l.approval.is_none();
+    if item.last_seq > 0 && (wants_comment || wants_answers || item.last_seq > after_seq) {
         let turns = items.serve_turns(&item.request_id).await?;
         let mut untrusted = Map::new();
         let mut messages = Vec::new();
@@ -280,6 +284,28 @@ async fn view(items: &Items<'_>, l: &Loaded, after_seq: u64) -> Reply {
                         Intent::ChangeRequest => "change_request",
                     };
                     untrusted.insert("comment".into(), json!({"text": plain, "intent": word}));
+                }
+                "answer" if wants_answers => {
+                    let given = super::frames::OwnerAnswer::from_plain(text);
+                    if let Some(list) = given.answers {
+                        let rows: Vec<Value> = list
+                            .into_iter()
+                            .map(|a| {
+                                let mut row = Map::new();
+                                row.insert("question_id".into(), json!(a.question_id));
+                                if let Some(choice) = a.choice {
+                                    row.insert("choice".into(), json!(choice));
+                                }
+                                if let Some(free) = a.text {
+                                    let (plain, was_cut) = clean_text(&free, MAX_TEXT_CHARS);
+                                    cut |= was_cut;
+                                    row.insert("text".into(), json!(plain));
+                                }
+                                Value::Object(row)
+                            })
+                            .collect();
+                        untrusted.insert("answers".into(), Value::Array(rows));
+                    }
                 }
                 "reply" if turn.row.seq > after_seq => {
                     if messages.len() == MAX_MESSAGES {
@@ -418,6 +444,7 @@ pub async fn say(
     who: &Requester,
     id: &str,
     text: &str,
+    format: Option<inbox_core::proto::ExplanationFormat>,
     expect_seq: Option<u64>,
 ) -> Reply {
     check_id(id)?;
@@ -458,7 +485,15 @@ pub async fn say(
             ));
         }
     }
-    match items.say(id, &who.key_id, text.as_bytes()).await? {
+    // The turn is sealed as the object of a turn, so that the format travels with the text and a text that looks like
+    // such an object stays text.
+    let sealed = super::frames::AgentTurn {
+        explanation: Some(text.to_string()),
+        explanation_format: format,
+        command: None,
+    }
+    .to_plain();
+    match items.say(id, &who.key_id, &sealed).await? {
         TurnOut::NotFound => Err(AgentError::not_found()),
         TurnOut::Stored { loaded, seq } => Ok(json!({
             "request_id": loaded.item.request_id,
@@ -567,6 +602,12 @@ pub struct IntentArgs {
     pub until: Option<String>,
     #[serde(default)]
     pub explanation: Option<String>,
+    /// `plain` (the default) or `markdown`. It applies to `explanation` only.
+    #[serde(default)]
+    pub explanation_format: Option<inbox_core::proto::ExplanationFormat>,
+    /// A hint for the color of the command of the approval, from the closed list of languages.
+    #[serde(default)]
+    pub language: Option<inbox_core::proto::Language>,
     #[serde(default)]
     pub allow_custom: bool,
     #[serde(default)]
@@ -596,6 +637,8 @@ pub async fn approval_intent(app: &App, who: &Requester, args: IntentArgs) -> Re
             lease_s: args.lease_s,
             until_ms,
             explanation: args.explanation,
+            explanation_format: args.explanation_format,
+            language: args.language,
             allow_custom: args.allow_custom,
             allow_ask_back: args.allow_ask_back,
             hint: args.hint,

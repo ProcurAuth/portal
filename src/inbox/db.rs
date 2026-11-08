@@ -164,7 +164,7 @@ CREATE TABLE items (
     source            TEXT NOT NULL CHECK (source IN ('mcp', 'api')),
     interaction       TEXT NOT NULL CHECK (interaction IN ('conversational', 'one_shot')),
     urgency           TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
-    input_type        TEXT CHECK (input_type IN ('choice', 'confirm', 'text', 'none')),
+    input_type        TEXT CHECK (input_type IN ('choice', 'confirm', 'text', 'none', 'form')),
     state             TEXT NOT NULL CHECK (state IN ('pending', 'replied', 'answered', 'abandoned', 'expired', 'cancelled', 'superseded')),
     settle_reason     TEXT,
     body_kid          TEXT,

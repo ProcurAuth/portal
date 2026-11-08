@@ -171,6 +171,7 @@ fn answer(
         choice: None,
         text: None,
         intent: None,
+        answers: None,
     })
 }
 
@@ -260,6 +261,7 @@ async fn custom_and_ask_back_are_refused_without_the_flags() {
         choice: None,
         text: Some("use staging".into()),
         intent: Some(inbox_core::proto::Intent::ChangeRequest),
+        answers: None,
     }))
     .await;
     let result = next_result(&mut conn, WAIT).await;

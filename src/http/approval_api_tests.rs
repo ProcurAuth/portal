@@ -1993,6 +1993,7 @@ fn decline_with_comment_reaches_agent_never_pep() {
             action: Action::Decline,
             shown_effect: None,
             choice: None,
+            answers: None,
             text: Some(COMMENT.into()),
             intent: Some(Intent::ChangeRequest),
         };
@@ -2143,6 +2144,7 @@ fn reply_moves_to_replied_and_agent_sees_user_message() {
         // The agent answers: the item is `pending` again and the phones get the explanation.
         let said = AgentTurn {
             explanation: Some("The migration needs this row.".into()),
+            explanation_format: None,
             command: None,
         };
         let spoken = eventually(|| {
