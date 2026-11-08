@@ -15,6 +15,8 @@ use inbox_core::proto::{AckStage, AlertMsg, ClientMsg, ServerMsg, SessionHello};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
+pub mod approvals;
+
 pub const BIN: &str = env!("CARGO_BIN_EXE_portal");
 
 pub type Ws =
