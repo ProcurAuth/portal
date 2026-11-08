@@ -304,6 +304,19 @@ class SqlItemRepository(private val store: Store) : ItemRepository {
         )
     }
 
+    // ------------------------------------------------------------ local retention
+
+    override fun deleteItem(serverId: Long, requestId: String) {
+        val args = arrayOf(serverId.toString(), requestId)
+        for (table in listOf("items", "item_turns", "item_settled_early", "outbox")) {
+            db.delete(table, "server_id = ? AND request_id = ?", args)
+        }
+    }
+
+    override fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long) {
+        db.delete("deliveries", "server_id = ? AND received_at_ms < ?", arrayOf(serverId.toString(), beforeMs.toString()))
+    }
+
     // ------------------------------------------------------------ preferences
 
     override fun prefs(serverId: Long): StoredPrefs? = db.rawQuery(

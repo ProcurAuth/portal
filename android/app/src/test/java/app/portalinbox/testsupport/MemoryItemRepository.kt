@@ -13,7 +13,7 @@ class MemoryItemRepository : ItemRepository {
     private data class Key(val serverId: Long, val id: String)
 
     private var items = LinkedHashMap<Key, Item>()
-    private var deliveries = HashSet<Key>()
+    private var deliveries = HashMap<Key, Long>()
     private var turns = ArrayList<Turn>()
     private var early = HashMap<Key, SettledFrame>()
     private var outbox = LinkedHashMap<Key, OutboxEntry>()
@@ -25,12 +25,12 @@ class MemoryItemRepository : ItemRepository {
     @Suppress("UNCHECKED_CAST")
     override fun <T> transaction(block: () -> T): T {
         transactions++
-        val saved = listOf(LinkedHashMap(items), HashSet(deliveries), ArrayList(turns), HashMap(early), LinkedHashMap(outbox), HashMap(prefs))
+        val saved = listOf(LinkedHashMap(items), HashMap(deliveries), ArrayList(turns), HashMap(early), LinkedHashMap(outbox), HashMap(prefs))
         try {
             return block()
         } catch (e: Throwable) {
             items = saved[0] as LinkedHashMap<Key, Item>
-            deliveries = saved[1] as HashSet<Key>
+            deliveries = saved[1] as HashMap<Key, Long>
             turns = saved[2] as ArrayList<Turn>
             early = saved[3] as HashMap<Key, SettledFrame>
             outbox = saved[4] as LinkedHashMap<Key, OutboxEntry>
@@ -58,7 +58,7 @@ class MemoryItemRepository : ItemRepository {
     override fun hasDelivery(serverId: Long, deliveryId: String) = Key(serverId, deliveryId) in deliveries
 
     override fun addDelivery(serverId: Long, deliveryId: String, atMs: Long) {
-        deliveries += Key(serverId, deliveryId)
+        deliveries[Key(serverId, deliveryId)] = atMs
     }
 
     override fun putTurn(turn: Turn): Boolean {
@@ -103,6 +103,19 @@ class MemoryItemRepository : ItemRepository {
             if (e.serverId == serverId && e.requestId == requestId && e.isPending) outbox[k] = e.copy(result = result, closedAtMs = atMs)
         }
     }
+
+    override fun deleteItem(serverId: Long, requestId: String) {
+        items.remove(Key(serverId, requestId))
+        turns.removeAll { it.serverId == serverId && it.requestId == requestId }
+        early.remove(Key(serverId, requestId))
+        outbox.entries.removeAll { it.value.serverId == serverId && it.value.requestId == requestId }
+    }
+
+    override fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long) {
+        deliveries.entries.removeAll { it.key.serverId == serverId && it.value < beforeMs }
+    }
+
+    fun deliveryCount(serverId: Long): Int = deliveries.keys.count { it.serverId == serverId }
 
     override fun prefs(serverId: Long): StoredPrefs? = prefs[serverId]
 

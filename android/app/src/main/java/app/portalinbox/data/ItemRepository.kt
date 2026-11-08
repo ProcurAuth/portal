@@ -44,6 +44,12 @@ interface ItemRepository {
     fun closeOutbox(serverId: Long, clientMsgId: String, result: String, atMs: Long)
     fun closeOutboxOf(serverId: Long, requestId: String, result: String, atMs: Long)
 
+    /** Erases an item and what belongs to it: its turns, its outbox rows and an early settlement. Lot A2, local retention. */
+    fun deleteItem(serverId: Long, requestId: String)
+
+    /** Forgets the deliveries that arrived before [beforeMs]. The server stopped sending these rows long ago. */
+    fun deleteDeliveriesBefore(serverId: Long, beforeMs: Long)
+
     fun prefs(serverId: Long): StoredPrefs?
     fun putPrefs(serverId: Long, prefs: StoredPrefs, atMs: Long)
 }
