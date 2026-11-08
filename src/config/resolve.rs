@@ -272,6 +272,12 @@ impl Resolved {
             When::PdpBlock => self.has_block("pdp"),
             When::KeysBlock => self.has_block("keys"),
             When::LabeledBlock => true,
+            When::DigestDaily => self
+                .text("inbox.items.digest", "mode")
+                .is_ok_and(|m| m == "daily"),
+            When::DigestEvery => self
+                .text("inbox.items.digest", "mode")
+                .is_ok_and(|m| m == "every"),
         }
     }
 }

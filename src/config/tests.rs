@@ -3461,3 +3461,564 @@ fn the_key_of_the_second_factor_is_checked_at_start_and_never_shown() {
         "{message}"
     );
 }
+
+// ---------------------------------------------------------------- inbox.items and inbox.at_rest
+
+/// The block `inbox.items` with the values of the examples of the design (all mandatory keys).
+const ITEMS: &str = r#"
+  items {
+    max_lifetime = "90d"
+    max_open_per_key = 5
+    max_open_per_owner = 20
+    max_open_total = 1000
+    retention = "180d"
+    body_purge_after = "30d"
+    audit_retention = "365d"
+    lease {
+      min = "30s"
+      max = "7d"
+      grace = "2m"
+      revive_window = "7d"
+    }
+    digest { mode = "daily" at = "08:30" timezone = "Europe/Paris" }
+  }
+"#;
+
+/// The block `inbox.at_rest`: the key `k2` seals and the key `k1` only reads.
+const AT_REST: &str = r#"
+  at_rest {
+    active_key = "k2"
+    key "k1" { secret_env = "CONTENT_K1" }
+    key "k2" { secret_file = "/run/secrets/content_k2" }
+  }
+"#;
+
+/// The text of a content key made of `seed` and the position.
+fn content_text(seed: u8) -> String {
+    let bytes: Vec<u8> = (0..32u8)
+        .map(|i| seed.wrapping_add(i.wrapping_mul(7)))
+        .collect();
+    inbox_core::b64::encode(&bytes)
+}
+
+/// The test file of the second key. It lives in the temporary directory, so the block that names it
+/// is rewritten to its path.
+fn content_file() -> PathBuf {
+    temp_file(format!("{}\n", content_text(90)).as_bytes())
+}
+
+/// The configuration of the inbox with `items` and `at_rest` inside the block `inbox`.
+fn items_config(items: &str, at_rest: &str) -> (String, PathBuf) {
+    let file = content_file();
+    let at_rest = at_rest.replace("/run/secrets/content_k2", &file.display().to_string());
+    let inbox = INBOX.replacen(
+        "  group \"infra\"",
+        &format!("{items}{at_rest}  group \"infra\""),
+        1,
+    );
+    (with_inbox(&inbox), file)
+}
+
+fn items_parse(raw: &str) -> Result<(Config, Secrets), String> {
+    let text = content_text(10);
+    let texts = api_texts();
+    let vars: Vec<(&str, &str)> = VARS
+        .iter()
+        .chain(INBOX_VARS)
+        .copied()
+        .chain([
+            ("INBOX_TOKEN", texts[0].as_str()),
+            ("INBOX_TOKEN_2", texts[1].as_str()),
+            ("CONTENT_K1", text.as_str()),
+        ])
+        .collect();
+    parse_with(raw, &vars)
+}
+
+fn items_ok(items: &str, at_rest: &str) -> (Config, Secrets) {
+    let (raw, file) = items_config(items, at_rest);
+    let result = items_parse(&raw).unwrap_or_else(|e| panic!("{e}\n{raw}"));
+    fs::remove_file(file).ok();
+    result
+}
+
+fn items_err(items: &str, at_rest: &str) -> String {
+    let (raw, file) = items_config(items, at_rest);
+    let result = items_parse(&raw);
+    fs::remove_file(file).ok();
+    match result {
+        Ok(_) => panic!("must be rejected:\n{raw}"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults() {
+    let (config, secrets) = items_ok(ITEMS, AT_REST);
+    let inbox = config.inbox.as_ref().unwrap();
+    let items = inbox.items.as_ref().unwrap();
+    let day = |n: u64| Duration::from_secs(n * 86_400);
+    assert_eq!(items.max_lifetime, day(90));
+    assert_eq!(
+        (
+            items.max_open_per_key,
+            items.max_open_per_owner,
+            items.max_open_total
+        ),
+        (5, 20, 1000)
+    );
+    assert_eq!(
+        (
+            items.retention,
+            items.body_purge_after,
+            items.audit_retention
+        ),
+        (day(180), day(30), day(365))
+    );
+    assert_eq!(items.lease.min, Duration::from_secs(30));
+    assert_eq!(items.lease.max, day(7));
+    assert_eq!(items.lease.grace, Duration::from_secs(120));
+    assert_eq!(items.lease.revive_window, day(7));
+    // The documented defaults.
+    assert_eq!(items.lease.max_revivals, 3);
+    assert_eq!((items.max_chain, items.max_turns), (10, 40));
+    assert_eq!(items.stale_after, Duration::from_secs(24 * 3600));
+    assert_eq!(items.max_body_bytes, 16 * 1024);
+    assert_eq!(items.wait_max, Duration::from_secs(25));
+    assert_eq!(
+        items.digest,
+        DigestConfig::Daily {
+            hour: 8,
+            minute: 30,
+            timezone: "Europe/Paris".into()
+        }
+    );
+    let at_rest = inbox.at_rest.as_ref().unwrap();
+    assert_eq!(at_rest.active_key, "k2");
+    assert_eq!(at_rest.keys, ["k1", "k2"]);
+    assert!(!at_rest.admin_body_read, "the default is false");
+    let secrets = secrets.inbox.as_ref().unwrap();
+    assert_eq!(secrets.content_keys.len(), 2);
+    assert_eq!(secrets.content_keys[0].0, "k1");
+    assert_eq!(
+        secrets.content_keys[0].1.as_bytes(),
+        content_text(10).as_bytes()
+    );
+    // The other modes of the digest.
+    let off = ITEMS.replace(
+        r#"digest { mode = "daily" at = "08:30" timezone = "Europe/Paris" }"#,
+        r#"digest { mode = "off" }"#,
+    );
+    let (config, _) = items_ok(&off, AT_REST);
+    assert_eq!(
+        config.inbox.unwrap().items.unwrap().digest,
+        DigestConfig::Off
+    );
+    let every = ITEMS.replace(
+        r#"digest { mode = "daily" at = "08:30" timezone = "Europe/Paris" }"#,
+        r#"digest { mode = "every" every = "6h" }"#,
+    );
+    let (config, _) = items_ok(&every, AT_REST);
+    assert_eq!(
+        config.inbox.unwrap().items.unwrap().digest,
+        DigestConfig::Every(Duration::from_secs(6 * 3600))
+    );
+}
+
+#[test]
+fn print_config_masks_secret_shows_kid_and_source() {
+    let (config, _) = items_ok(ITEMS, AT_REST);
+    let shown = config.render_effective();
+    let file_line = shown
+        .lines()
+        .find(|l| l.starts_with("inbox.at_rest.key.k2.secret"))
+        .unwrap();
+    assert!(
+        file_line.contains("<hidden>") && file_line.contains("# file:/"),
+        "{file_line}"
+    );
+    let env_line = shown
+        .lines()
+        .find(|l| l.starts_with("inbox.at_rest.key.k1.secret"))
+        .unwrap();
+    assert!(
+        env_line.contains("<hidden>") && env_line.contains("# env:CONTENT_K1"),
+        "{env_line}"
+    );
+    assert!(
+        shown.contains("inbox.at_rest.key.k2.use = \"active\""),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("inbox.at_rest.key.k1.use = \"read-only\""),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("inbox.at_rest.active_key = \"k2\"  # file"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("inbox.items.lease.max_revivals = 3  # default"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("inbox.items.digest.at = \"08:30\"  # file"),
+        "{shown}"
+    );
+    // No line holds the text of a key.
+    for seed in [10u8, 90] {
+        assert!(!shown.contains(&content_text(seed)), "the secret is hidden");
+    }
+}
+
+#[test]
+fn no_default_for_mandatory_keys_message_names_key_range_value() {
+    // Each mandatory key of the two blocks stops the start when it is missing.
+    for (line, key, range) in [
+        (
+            "    max_lifetime = \"90d\"\n",
+            "inbox.items.max_lifetime",
+            "from 1d to 365d",
+        ),
+        (
+            "    max_open_per_key = 5\n",
+            "inbox.items.max_open_per_key",
+            "from 1 to 1000",
+        ),
+        (
+            "    max_open_per_owner = 20\n",
+            "inbox.items.max_open_per_owner",
+            "from 1 to 10000",
+        ),
+        (
+            "    max_open_total = 1000\n",
+            "inbox.items.max_open_total",
+            "from 1 to 1000000",
+        ),
+        (
+            "    retention = \"180d\"\n",
+            "inbox.items.retention",
+            "from 1d to 3650d",
+        ),
+        (
+            "    body_purge_after = \"30d\"\n",
+            "inbox.items.body_purge_after",
+            "from 0s to 3650d",
+        ),
+        (
+            "    audit_retention = \"365d\"\n",
+            "inbox.items.audit_retention",
+            "from 1d to 3650d",
+        ),
+        (
+            "      min = \"30s\"\n",
+            "inbox.items.lease.min",
+            "from 5s to 1h",
+        ),
+        (
+            "      max = \"7d\"\n",
+            "inbox.items.lease.max",
+            "from 5s to 30d",
+        ),
+        (
+            "      grace = \"2m\"\n",
+            "inbox.items.lease.grace",
+            "from 0s to 1h",
+        ),
+        (
+            "      revive_window = \"7d\"\n",
+            "inbox.items.lease.revive_window",
+            "from 0s to 365d",
+        ),
+    ] {
+        assert!(ITEMS.contains(line), "{line}");
+        let message = items_err(&ITEMS.replacen(line, "", 1), AT_REST);
+        assert!(
+            message.contains("missing required configuration key")
+                && message.contains(key)
+                && message.contains(range),
+            "{key}: {message}"
+        );
+    }
+    let message = items_err(
+        &ITEMS.replace(
+            r#"digest { mode = "daily" at = "08:30" timezone = "Europe/Paris" }"#,
+            "",
+        ),
+        AT_REST,
+    );
+    assert!(message.contains("inbox.items.digest.mode"), "{message}");
+    let message = items_err(ITEMS, &AT_REST.replace("    active_key = \"k2\"\n", ""));
+    assert!(
+        message.contains("missing required configuration key: inbox.at_rest.active_key")
+            && message.contains("1 to 16 characters"),
+        "{message}"
+    );
+    // A written value outside the range names the key, the range and the value.
+    let message = items_err(
+        &ITEMS.replace("max_open_per_key = 5", "max_open_per_key = 1001"),
+        AT_REST,
+    );
+    assert!(
+        message.contains("inbox.items.max_open_per_key")
+            && message.contains("from 1 to 1000")
+            && message.contains("1001"),
+        "{message}"
+    );
+    // A value is never changed to fit: a number in quotes, a duration without unit.
+    for (from, to, key) in [
+        (
+            "max_open_per_key = 5",
+            "max_open_per_key = \"5\"",
+            "inbox.items.max_open_per_key",
+        ),
+        (
+            "retention = \"180d\"",
+            "retention = \"180\"",
+            "inbox.items.retention",
+        ),
+        (
+            "max_lifetime = \"90d\"",
+            "max_lifetime = \"400d\"",
+            "inbox.items.max_lifetime",
+        ),
+    ] {
+        let message = items_err(&ITEMS.replacen(from, to, 1), AT_REST);
+        assert!(
+            message.contains(key) && message.contains(to.split(" = ").nth(1).unwrap()),
+            "{message}"
+        );
+    }
+    // The optional keys have their range too.
+    for (extra, key) in [
+        ("max_chain = 0", "inbox.items.max_chain"),
+        ("max_chain = 51", "inbox.items.max_chain"),
+        ("max_turns = 1", "inbox.items.max_turns"),
+        ("stale_after = \"30s\"", "inbox.items.stale_after"),
+        ("max_body_bytes = \"512B\"", "inbox.items.max_body_bytes"),
+        ("max_body_bytes = \"33KiB\"", "inbox.items.max_body_bytes"),
+        ("wait_max = \"61s\"", "inbox.items.wait_max"),
+    ] {
+        let message = items_err(
+            &ITEMS.replacen("  items {", &format!("  items {{\n    {extra}"), 1),
+            AT_REST,
+        );
+        assert!(
+            message.contains(key) && message.contains("expected"),
+            "{extra}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values() {
+    for (from, to, expected) in [
+        // lease.min > lease.max
+        ("max = \"7d\"", "max = \"20s\"", "inbox.items.lease.min must be at most inbox.items.lease.max: min is 30s, max is 20s"),
+        // revive_window > max_lifetime
+        ("revive_window = \"7d\"", "revive_window = \"100d\"", "inbox.items.lease.revive_window must be at most inbox.items.max_lifetime: revive_window is 100d, max_lifetime is 90d"),
+        // retention < max_lifetime + revive_window
+        ("retention = \"180d\"", "retention = \"96d\"", "inbox.items.retention must be at least inbox.items.max_lifetime plus inbox.items.lease.revive_window: retention is 96d, max_lifetime is 90d, revive_window is 7d"),
+        // audit_retention < retention
+        ("audit_retention = \"365d\"", "audit_retention = \"179d\"", "inbox.items.audit_retention must be at least inbox.items.retention: audit_retention is 179d, retention is 180d"),
+        // body_purge_after > retention
+        ("body_purge_after = \"30d\"", "body_purge_after = \"181d\"", "inbox.items.body_purge_after must be at most inbox.items.retention: body_purge_after is 181d, retention is 180d"),
+    ] {
+        let message = items_err(&ITEMS.replacen(from, to, 1), AT_REST);
+        assert!(message.contains(expected), "{to}: {message}");
+    }
+    // lease.max > max_lifetime: the table allows 30d for the lease, so lower max_lifetime.
+    let short_life = ITEMS
+        .replacen("max_lifetime = \"90d\"", "max_lifetime = \"20d\"", 1)
+        .replacen("max = \"7d\"", "max = \"30d\"", 1);
+    let message = items_err(&short_life, AT_REST);
+    assert!(
+        message.contains("inbox.items.lease.max must be at most inbox.items.max_lifetime: lease.max is 30d, max_lifetime is 20d"),
+        "{message}"
+    );
+    // A limit at the border is valid.
+    items_ok(
+        &ITEMS.replacen("retention = \"180d\"", "retention = \"97d\"", 1),
+        AT_REST,
+    );
+    items_ok(
+        &ITEMS.replacen(
+            "body_purge_after = \"30d\"",
+            "body_purge_after = \"180d\"",
+            1,
+        ),
+        AT_REST,
+    );
+    items_ok(&ITEMS.replacen("min = \"30s\"", "min = \"1h\"", 1), AT_REST);
+    items_ok(&ITEMS.replacen("max = \"7d\"", "max = \"30s\"", 1), AT_REST);
+}
+
+#[test]
+fn the_digest_mode_decides_which_keys_apply() {
+    let daily = r#"digest { mode = "daily" at = "08:30" timezone = "Europe/Paris" }"#;
+    for (digest, expected) in [
+        (r#"digest { mode = "daily" timezone = "UTC" }"#, "inbox.items.digest.at"),
+        (r#"digest { mode = "daily" at = "08:30" }"#, "inbox.items.digest.timezone"),
+        (r#"digest { mode = "every" }"#, "inbox.items.digest.every"),
+        (r#"digest { mode = "off" at = "08:30" }"#, "inbox.items.digest.at must not be set when inbox.items.digest.mode is not \"daily\""),
+        (r#"digest { mode = "every" every = "6h" timezone = "UTC" }"#, "inbox.items.digest.timezone must not be set"),
+        (r#"digest { mode = "daily" at = "08:30" timezone = "UTC" every = "6h" }"#, "inbox.items.digest.every must not be set when inbox.items.digest.mode is not \"every\""),
+        (r#"digest { mode = "daily" at = "24:00" timezone = "UTC" }"#, "inbox.items.digest.at"),
+        (r#"digest { mode = "daily" at = "8:30" timezone = "UTC" }"#, "HH:MM"),
+        (r#"digest { mode = "daily" at = "08:30" timezone = "Paris time" }"#, "inbox.items.digest.timezone"),
+        (r#"digest { mode = "every" every = "30m" }"#, "from 1h to 7d"),
+        (r#"digest { mode = "weekly" }"#, "inbox.items.digest.mode"),
+    ] {
+        let message = items_err(&ITEMS.replacen(daily, digest, 1), AT_REST);
+        assert!(message.contains(expected), "{digest}: {message}");
+    }
+}
+
+#[test]
+fn the_blocks_items_and_at_rest_need_each_other() {
+    let message = items_err(ITEMS, "");
+    assert!(
+        message.contains("the block inbox.items needs the block inbox.at_rest"),
+        "{message}"
+    );
+    let message = items_err("", AT_REST);
+    assert!(
+        message.contains("the block inbox.at_rest needs the block inbox.items"),
+        "{message}"
+    );
+    // Without both blocks, the inbox runs as before.
+    let (config, secrets) = inbox_ok(&with_inbox(INBOX));
+    let inbox = config.inbox.unwrap();
+    assert!(inbox.items.is_none() && inbox.at_rest.is_none());
+    assert!(secrets.inbox.unwrap().content_keys.is_empty());
+}
+
+#[test]
+fn plain_secret_in_file_stops_start() {
+    let plain = AT_REST.replace(
+        r#"key "k1" { secret_env = "CONTENT_K1" }"#,
+        &format!(r#"key "k1" {{ secret = "{}" }}"#, content_text(10)),
+    );
+    let message = items_err(ITEMS, &plain);
+    assert!(
+        message.contains("inbox.at_rest.key.k1.secret must not be written in the file")
+            && message.contains("secret_env")
+            && message.contains("secret_file"),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&content_text(10)),
+        "the error never shows the secret"
+    );
+    // Two forms, and no form, stop the start too.
+    let two = AT_REST.replace(
+        r#"key "k1" { secret_env = "CONTENT_K1" }"#,
+        r#"key "k1" { secret_env = "CONTENT_K1" secret_file = "/run/secrets/x" }"#,
+    );
+    assert!(items_err(ITEMS, &two).contains("exactly one of inbox.at_rest.key.k1.secret_env"));
+    let none = AT_REST.replace(
+        r#"key "k1" { secret_env = "CONTENT_K1" }"#,
+        r#"key "k1" { }"#,
+    );
+    let message = items_err(ITEMS, &none);
+    assert!(
+        message.contains("missing required configuration key")
+            && message.contains("inbox.at_rest.key.k1.secret"),
+        "{message}"
+    );
+    // A variable that does not exist, an empty variable and a file that does not exist.
+    let missing = AT_REST.replace("CONTENT_K1", "CONTENT_NOT_SET");
+    let message = items_err(ITEMS, &missing);
+    assert!(
+        message.contains("inbox.at_rest.key.k1.secret_env") && message.contains("CONTENT_NOT_SET"),
+        "{message}"
+    );
+    let nofile = AT_REST.replace("/run/secrets/content_k2", "/nonexistent/content_k2");
+    let (raw, file) = items_config(ITEMS, &nofile);
+    let message = items_parse(&raw).err().unwrap();
+    fs::remove_file(file).ok();
+    assert!(
+        message.contains("inbox.at_rest.key.k2.secret_file")
+            && message.contains("/nonexistent/content_k2"),
+        "{message}"
+    );
+}
+
+#[test]
+fn active_key_unknown_stops_start() {
+    let message = items_err(
+        ITEMS,
+        &AT_REST.replace("active_key = \"k2\"", "active_key = \"k9\""),
+    );
+    assert!(
+        message.contains("inbox.at_rest.active_key")
+            && message.contains("\"k9\"")
+            && message.contains("\"k1\", \"k2\""),
+        "{message}"
+    );
+    // The form of the id: 1 to 16 characters of a-z, 0-9, '-' and '_'.
+    for bad in ["", "K1", "a-very-long-key-id-of-more-than-16", "k 1", "é"] {
+        let message = items_err(
+            ITEMS,
+            &AT_REST.replace("active_key = \"k2\"", &format!("active_key = {bad:?}")),
+        );
+        assert!(
+            message.contains("inbox.at_rest.active_key"),
+            "{bad:?}: {message}"
+        );
+        let label = AT_REST.replace(r#"key "k1""#, &format!("key {bad:?}"));
+        let message = items_err(ITEMS, &label);
+        assert!(
+            message.contains("key id") || message.contains("inbox.at_rest.key"),
+            "{bad:?}: {message}"
+        );
+    }
+    // At least one and at most eight keys.
+    let none = r#"
+  at_rest {
+    active_key = "k1"
+  }
+"#;
+    assert!(items_err(ITEMS, none).contains("1 to 8 blocks key"));
+    let many: String = (1..=9)
+        .map(|i| format!("    key \"k{i}\" {{ secret_env = \"CONTENT_K1\" }}\n"))
+        .collect();
+    let nine = format!("  at_rest {{\n    active_key = \"k1\"\n{many}  }}\n");
+    assert!(items_err(ITEMS, &nine).contains("1 to 8 blocks key"));
+}
+
+#[test]
+fn duplicate_key_id_or_secret_stops_start() {
+    // The reader refuses a second block with the same id.
+    let two = AT_REST.replace(
+        r#"key "k2" { secret_file = "/run/secrets/content_k2" }"#,
+        r#"key "k1" { secret_file = "/run/secrets/content_k2" }"#,
+    );
+    let message = items_err(ITEMS, &two);
+    assert!(
+        message.contains("duplicate configuration block") && message.contains("k1"),
+        "{message}"
+    );
+    // The schema of the block key is closed.
+    let other = AT_REST.replace(
+        r#"{ secret_env = "CONTENT_K1" }"#,
+        r#"{ secret_env = "CONTENT_K1" label = "x" }"#,
+    );
+    assert!(
+        items_err(ITEMS, &other).contains("unknown configuration key: inbox.at_rest.key.k1.label")
+    );
+    // A key block outside the block at_rest, and a block in a block that does not hold it.
+    let outside = INBOX.replacen(
+        "  group \"infra\"",
+        "  key \"k1\" { secret_env = \"CONTENT_K1\" }\n  group \"infra\"",
+        1,
+    );
+    assert!(items_parse(&with_inbox(&outside)).is_err());
+    let nested = ITEMS.replacen(
+        "  items {",
+        "  items {\n    key \"k1\" { secret_env = \"CONTENT_K1\" }",
+        1,
+    );
+    assert!(items_err(&nested, AT_REST).contains("nested HCL blocks are not supported"));
+    // Two keys with the same text are refused where the program decodes them (see the module state).
+}
