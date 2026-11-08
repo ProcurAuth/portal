@@ -1941,3 +1941,6 @@ fn require_explanation_and_the_default_keys_reach_the_metadata_and_the_gate() {
         assert_eq!(members, 12, "[{name}] the twelve members of the metadata");
     });
 }
+
+#[path = "agent_channel_tests.rs"]
+mod agent_channel;
