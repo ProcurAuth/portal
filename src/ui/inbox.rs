@@ -68,12 +68,19 @@ pub struct Rights {
     pub send: Vec<GroupChoice>,
     /// `alert.send_user`: the account may send an alert to any account.
     pub send_user: bool,
+    /// The account sees the pages of the items: it can own requests, or it holds `approval.read`.
+    pub items: bool,
 }
 
 impl Rights {
     /// Whether the account has any right in the tab.
     pub fn any(&self) -> bool {
-        self.sent || self.phones || self.connections || self.own_phones || self.can_send()
+        self.sent
+            || self.phones
+            || self.connections
+            || self.own_phones
+            || self.can_send()
+            || self.items
     }
 
     /// The account may send an alert, to a group or to an account: the tab has "New alert".
@@ -113,7 +120,7 @@ pub fn notice_for(code: &str) -> Option<Notice> {
             false,
         ),
         "failed" => ("The inbox could not do this. Try again.", false),
-        _ => return None,
+        _ => return super::items::notice_for(code),
     };
     Some(Notice { text, ok })
 }
@@ -537,6 +544,10 @@ pub struct InboxView<'a> {
     pub send_error: Option<SendError<'a>>,
     /// The level of the toasts of the account. `None`: the page has no control of it.
     pub notify_level: Option<crate::inbox::notify::Level>,
+    /// The panel "Open items" (see `items::open_items`). Empty: nothing waits, so the page has no panel.
+    pub open_items_html: &'a str,
+    /// The bar has the link to the History of the requests.
+    pub items_link: bool,
 }
 
 // Small parts ----------------------------------------------------------------------------------
@@ -895,6 +906,13 @@ fn bar(view: &InboxView) -> String {
                 super::notify::BACK_INBOX,
             ));
         }
+    }
+    if view.items_link {
+        let _ = write!(
+            out,
+            r#"<a class="button button--small" href="{}">History</a>"#,
+            super::items::ITEMS
+        );
     }
     if let Some(docs) = &view.docs {
         out.push_str(&docs_popover(view, docs));
@@ -1797,6 +1815,7 @@ pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     let mut out = String::new();
     notice_html(&mut out, view.notice);
     let has_bar = view.sent.is_some()
+        || view.items_link
         || view.docs.is_some()
         || view.rights.can_send()
         || view.notify_level.is_some();
@@ -1811,12 +1830,25 @@ pub fn inbox_page(frame: &Frame, view: &InboxView) -> String {
     if let Some(connections) = &view.connections {
         right.push_str(&connections_zone(view, connections));
     }
-    let solo = left.is_none() && view.connections.is_none();
-    out.push_str(&split_zones(
-        if solo { "solo" } else { "inbox" },
-        left.as_deref(),
-        &right,
-    ));
+    if view.open_items_html.is_empty() {
+        let solo = left.is_none() && view.connections.is_none();
+        out.push_str(&split_zones(
+            if solo { "solo" } else { "inbox" },
+            left.as_deref(),
+            &right,
+        ));
+    } else {
+        // The alerts come first, then the items to answer, then the rest. The page scrolls.
+        out.push_str(r#"<div class="itemsPage">"#);
+        if let Some(left) = &left {
+            let _ = write!(out, r#"<div class="alertsRow">{left}</div>"#);
+        }
+        out.push_str(view.open_items_html);
+        if !right.is_empty() {
+            out.push_str(&split_zones("inbox", None, &right));
+        }
+        out.push_str("</div>");
+    }
     super::settings::fill_page(Tab::Inbox, frame, "Inbox", &out)
 }
 
@@ -1857,6 +1889,7 @@ mod tests {
             own_phones: true,
             send: vec![choice("infra", "Infra <b>"), choice("crit", "Critical")],
             send_user: false,
+            items: false,
         }
     }
 
@@ -2018,6 +2051,8 @@ mod tests {
             impersonated: false,
             send_error: None,
             notify_level: None,
+            open_items_html: "",
+            items_link: false,
         }
     }
 

@@ -12,7 +12,9 @@
 //! - **Inbox** (the block `inbox`): `inbox.receive`, `alert.send` and `alert.read` apply to the
 //!   resource type `inbox_group`. The nodes are the groups of the block `inbox`. `alert.send_user`,
 //!   `phone.read`, `phone.revoke` and `phone.log` apply to the service. The actions `alert.send`
-//!   and `alert.send_user` list the budget `alerts`. The value of a budget is on the grant `access`
+//!   and `alert.send_user` list the budget `alerts`. `approval.read` and `approval.cancel` apply to
+//!   the service: the first shows the metadata of the requests of all the accounts, the second
+//!   cancels an open request. No action reads a content, and no action decides. The value of a budget is on the grant `access`
 //!   of the service, as for each other service. The PDP counts it as a use of the key or of the
 //!   account. A group with `critical = true` never counts a use, so it never has a limit. An
 //!   alert to an account is never critical: it always counts.
@@ -54,6 +56,8 @@ pub const ALERT_READ: &str = "alert.read";
 pub const PHONE_READ: &str = "phone.read";
 pub const PHONE_REVOKE: &str = "phone.revoke";
 pub const PHONE_LOG: &str = "phone.log";
+pub const APPROVAL_READ: &str = "approval.read";
+pub const APPROVAL_CANCEL: &str = "approval.cancel";
 
 /// The name of the ceiling of `keys.own.use`: the longest lifetime of a key, in seconds.
 pub const MAX_KEY_LIFETIME: &str = "max_key_lifetime";
@@ -73,7 +77,7 @@ const KEY_GROUP: [&str; 8] = [
 ];
 
 /// The actions of the inbox, in the order of the document.
-const INBOX_GROUP_ACTIONS: [&str; 7] = [
+const INBOX_GROUP_ACTIONS: [&str; 9] = [
     INBOX_RECEIVE,
     ALERT_SEND,
     ALERT_SEND_USER,
@@ -81,6 +85,8 @@ const INBOX_GROUP_ACTIONS: [&str; 7] = [
     PHONE_READ,
     PHONE_REVOKE,
     PHONE_LOG,
+    APPROVAL_READ,
+    APPROVAL_CANCEL,
 ];
 
 /// The actions of the service `portal` that a key can hold, other than `access`. A key never holds
@@ -186,6 +192,12 @@ fn action_json(name: &str) -> serde_json::Value {
             &[],
         ),
         PHONE_LOG => (&["service"], "See the connection log of the phones.", &[]),
+        APPROVAL_READ => (
+            &["service"],
+            "See the requests of all the accounts: state, key, service and times. The content stays hidden.",
+            &[],
+        ),
+        APPROVAL_CANCEL => (&["service"], "Cancel an open request of any account.", &[]),
         other => unreachable!("the action {other} is not an action of the service portal"),
     };
     serde_json::json!({ "name": name, "resource_types": types, "description": description,
@@ -301,6 +313,7 @@ pub fn needs(action: &str) -> &'static [&'static str] {
         KEYS_ALL_REVOKE => &[KEYS_ALL_READ, USERS_READ],
         KEYS_ALL_READ => &[USERS_READ],
         PHONE_REVOKE => &[PHONE_READ],
+        APPROVAL_CANCEL => &[APPROVAL_READ],
         _ => &[],
     }
 }
@@ -555,7 +568,13 @@ mod tests {
         let document = document(&all_features());
         let names: Vec<&str> = document.actions.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, action_names(&all_features()));
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 17);
+        assert!(names.contains(&APPROVAL_READ) && names.contains(&APPROVAL_CANCEL));
+        // No action reads a content, and no action decides.
+        assert!(!names
+            .iter()
+            .any(|n| n.contains("decide") || n.contains("read_body")));
+        assert_eq!(needs(APPROVAL_CANCEL), [APPROVAL_READ]);
         let types: Vec<&str> = document.types.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(types, [KEY_KIND, INBOX_GROUP]);
         assert!(document.types.iter().all(|t| t.parent == "service"));

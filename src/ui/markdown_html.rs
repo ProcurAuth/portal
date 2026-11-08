@@ -1,8 +1,7 @@
 //! HTML for the text of an agent: the safe subset of Markdown and the color of code.
 //!
 //! The phone and the server read the same tree (`inbox_core::render::markdown`) and the same tokens
-//! (`inbox_core::render::highlight`). This module writes the HTML of the server. The web pages of the inbox (lot L10)
-//! call it.
+//! (`inbox_core::render::highlight`). This module writes the HTML of the server. The web pages of the items call it.
 //!
 //! The rules of the output:
 //!
@@ -12,9 +11,6 @@
 //!   attributes are `class` and, on `ol`, `start` (a number). There is no `style`, no script, no event attribute and
 //!   no `href`. The classes start with `md-` or `tok-` and come from fixed lists, never from the text.
 //! - A link is not active. It shows its text, then the host in parentheses. See `inbox_core::render::markdown`.
-
-// The web pages of the inbox (lot L10) call this module. Until then only the tests do.
-#![allow(dead_code)]
 
 use std::fmt::Write as _;
 
@@ -43,15 +39,101 @@ pub fn document(doc: &Doc) -> String {
     out
 }
 
-/// A command with the color of its language. The text is the same characters: only the spans differ.
+/// A command with the color of its language, one `md-ln` span for each line. The text is the same characters: only the
+/// spans differ, and the text keeps its line breaks. A hidden character has a red mark. A letter of a script that looks
+/// like ASCII (Cyrillic, Greek, full-width Latin) has an amber mark with its code.
 pub fn command(text: &str, lang: Language) -> String {
-    let mut out = String::new();
-    code_block(&mut out, lang, text);
+    let mut lines: Vec<String> = vec![String::new()];
+    for t in highlight::tokens(lang, text) {
+        let piece = &text[t.start..t.end];
+        for (n, part) in piece.split('\n').enumerate() {
+            if n > 0 {
+                lines.push(String::new());
+            }
+            let html = escape_marked(part, true);
+            let line = lines.last_mut().expect("a line exists");
+            if t.class == Class::Plain || part.is_empty() {
+                line.push_str(&html);
+            } else {
+                let _ = write!(
+                    line,
+                    "<span class=\"tok-{}\">{html}</span>",
+                    t.class.as_str()
+                );
+            }
+        }
+    }
+    // The line break at the end of the text ends the last line: it does not start another one.
+    let ends = text.ends_with('\n');
+    if text.is_empty() || ends {
+        lines.pop();
+    }
+    let mut out = format!(
+        "<pre class=\"md-code md-cmd md-lang-{}\"><code>",
+        lang.as_str()
+    );
+    for (n, line) in lines.iter().enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "<span class=\"md-ln\">{line}</span>");
+    }
+    if ends {
+        out.push('\n');
+    }
+    out.push_str("</code></pre>");
     out
+}
+
+/// What the marks of a text count.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Marks {
+    /// The hidden characters (bidi, zero-width, control): the code points, each one once, in order.
+    pub hidden: Vec<u32>,
+    /// The look-alike letters: the code points, each one once, in order.
+    pub lookalike: Vec<u32>,
+    /// All the characters that are not ASCII.
+    pub non_ascii: usize,
+    /// The characters that carry a mark, with repeats.
+    pub marked: usize,
+}
+
+/// Counts the marks that the text shows: see [`escape`] and [`command`].
+pub fn marks(text: &str) -> Marks {
+    let mut m = Marks::default();
+    for c in text.chars() {
+        if !c.is_ascii() {
+            m.non_ascii += 1;
+        }
+        let list = if is_misleading(c) {
+            &mut m.hidden
+        } else if is_lookalike(c) {
+            &mut m.lookalike
+        } else {
+            continue;
+        };
+        m.marked += 1;
+        if !list.contains(&(c as u32)) {
+            list.push(c as u32);
+        }
+    }
+    m
+}
+
+/// A letter from a script that a reader takes for ASCII. A French or a German letter is not here.
+fn is_lookalike(c: char) -> bool {
+    matches!(c,
+        '\u{0370}'..='\u{03FF}' | '\u{0400}'..='\u{052F}' | '\u{0530}'..='\u{058F}'
+        | '\u{FF01}'..='\u{FF5E}' | '\u{1D400}'..='\u{1D7FF}' | '\u{2100}'..='\u{214F}')
 }
 
 /// A text as HTML: escaped, with a visible mark for each character that can mislead.
 pub fn escape(text: &str) -> String {
+    escape_marked(text, false)
+}
+
+/// The same. With `lookalike`, a letter of a script that looks like ASCII has a mark with its code.
+fn escape_marked(text: &str, lookalike: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -62,6 +144,13 @@ pub fn escape(text: &str) -> String {
             '\'' => out.push_str("&#39;"),
             c if is_misleading(c) => {
                 let _ = write!(out, "<span class=\"md-ctl\">U+{:04X}</span>", c as u32);
+            }
+            c if lookalike && is_lookalike(c) => {
+                let _ = write!(
+                    out,
+                    "<span class=\"md-ctl md-na\">{c} U+{:04X}</span>",
+                    c as u32
+                );
             }
             c => out.push(c),
         }
@@ -555,7 +644,9 @@ mod tests {
         let sql = "SELECT 1 -- <script>\nFROM \"t\" WHERE x = 'a<b'";
         let html = command(sql, Language::Sql);
         check_html(&html);
-        assert!(html.starts_with("<pre class=\"md-code md-lang-sql\"><code>"));
+        assert!(html
+            .starts_with("<pre class=\"md-code md-cmd md-lang-sql\"><code><span class=\"md-ln\">"));
+        assert_eq!(html.matches("md-ln").count(), 2);
         // The spans change nothing in the text.
         assert_eq!(visible(&html), sql);
         assert!(html.contains("<span class=\"tok-keyword\">SELECT</span>"));
@@ -570,6 +661,28 @@ mod tests {
         }
         let html = command("+a\n-b\n@@ c", Language::Diff);
         assert!(html.contains("tok-add") && html.contains("tok-del") && html.contains("tok-hunk"));
+    }
+
+    #[test]
+    fn a_command_has_a_span_for_each_line_and_marks_the_hidden_and_look_alike_characters() {
+        // The line break at the end does not make a line. An empty line in the middle is a line.
+        let html = command("a\n\nb\n", Language::Plain);
+        assert_eq!(html.matches("<span class=\"md-ln\">").count(), 3, "{html}");
+        assert_eq!(visible(&html), "a\n\nb\n");
+        assert_eq!(command("", Language::Sql).matches("md-ln").count(), 0);
+        let text = "DELETE FROM p\u{430}y\u{200B}ments -- \u{202E}x \u{e9}";
+        let html = command(text, Language::Sql);
+        check_html(&html);
+        assert!(html.contains("<span class=\"md-ctl md-na\">\u{430} U+0430</span>"));
+        assert!(html.contains("<span class=\"md-ctl\">U+200B</span>"));
+        assert!(html.contains("<span class=\"md-ctl\">U+202E</span>"));
+        // A French letter is not a look-alike: it has no mark, but it counts as non-ASCII.
+        assert_eq!(html.matches("md-ctl").count(), 3, "{html}");
+        let m = marks(text);
+        assert_eq!(
+            (m.hidden, m.lookalike, m.non_ascii, m.marked),
+            (vec![0x200B, 0x202E], vec![0x430], 4, 3)
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ pub struct Header {
     pub unread: u32,
     /// The time of the page, in milliseconds: the script asks for the alerts after it.
     pub cursor_ms: i64,
+    /// The requests that wait for an answer of the account.
+    pub to_answer: u32,
 }
 
 /// One alert in the list of the popover.
@@ -98,8 +100,17 @@ pub fn badge(header: &Header) -> String {
     } else {
         ""
     };
+    // The badge of the requests to answer does not follow the level of the alerts: a request waits for a person.
+    let ask = if header.to_answer == 0 {
+        String::new()
+    } else {
+        format!(
+            r#"<span class="nbadge nbadge--ask" title="Requests to answer">{}<span class="visually-hidden"> requests to answer</span></span>"#,
+            count_text(header.to_answer)
+        )
+    };
     format!(
-        r#"<span class="nbadge" data-notify-badge{hidden}><span data-notify-n>{}</span><span class="visually-hidden"> unread</span></span>"#,
+        r#"<span class="nbadge" data-notify-badge{hidden}><span data-notify-n>{}</span><span class="visually-hidden"> unread</span></span>{ask}"#,
         count_text(header.unread)
     )
 }
@@ -258,6 +269,7 @@ mod tests {
             level,
             unread,
             cursor_ms: 1_700_000_000_000,
+            to_answer: 0,
         }
     }
 

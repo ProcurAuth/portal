@@ -21,6 +21,7 @@ pub mod components;
 mod fixtures;
 pub mod grant_editor;
 pub mod inbox;
+pub mod items;
 pub mod keys;
 pub mod markdown_html;
 pub mod mask;
@@ -1495,6 +1496,7 @@ mod tests {
                 level: Level::All,
                 unread: 1,
                 cursor_ms: 0,
+                to_answer: 0,
             },
             rows: &rows,
             now_ms: 0,
@@ -1620,6 +1622,7 @@ mod tests {
                 level: Level::All,
                 unread: 1,
                 cursor_ms: 0,
+                to_answer: 0,
             },
             rows: &rows,
             now_ms: 0,

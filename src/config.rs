@@ -27,7 +27,7 @@ pub use inbox::{
     GroupConfig, InboxConfig, InboxSecrets, InboxStorageConfig, ItemsConfig, LeaseConfig,
     McpConfig, ReplicaConfig, WatchConfig,
 };
-pub use resolve::{Effective, Secret};
+pub use resolve::{Effective, Secret, HIDDEN};
 use resolve::{Env, Resolved};
 
 pub struct Config {
