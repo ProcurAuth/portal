@@ -23,7 +23,7 @@ import java.util.Date
 import java.util.Locale
 
 /*
- * Programmatic view toolkit (the app ships without AndroidX nor XML layouts).
+ * Programmatic view toolkit (no XML layouts; the only AndroidX library is androidx.biometric, for the local gate of an approval).
  * Visual language, compact industrial: dense rows like an observability event
  * viewer (monospace for data only, hairlines, severity bars) on solid cards over
  * a graphite page with one soft blue light.

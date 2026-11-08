@@ -178,6 +178,17 @@ class ApprovalActivity : BaseFragmentActivity() {
         commentText = commentForm?.findViewWithTag<EditText>("comment")?.text?.toString() ?: commentText
     }
 
+    private var leaving = false
+
+    /** Back from a notification: the task holds only this screen, so Back goes to the home list, not out of the app. */
+    override fun finish() {
+        if (isTaskRoot && !leaving) {
+            leaving = true
+            startActivity(MainActivity.home(this))
+        }
+        super.finish()
+    }
+
     // ------------------------------------------------------------ bottom bar
 
     private fun bottomBar(): View {
@@ -315,6 +326,9 @@ class ApprovalActivity : BaseFragmentActivity() {
     private fun buildContent(i: Item) {
         val approval = i.request.approval
         content.removeAllViews()
+        headerLine = null; notice = null; gateRow = null; gateText = null; gatePercent = null; gateBar = null; gateIcon = null
+        contextBox = null; staleBox = null; staleCheck = null; askButton = null; commentToggle = null; commentForm = null
+        explanationHolder = null
         val now = now()
         val zone = ZoneId.systemDefault()
 
@@ -708,7 +722,6 @@ class ApprovalActivity : BaseFragmentActivity() {
             .setTitle(BiometricPolicy.title(approval.code))
             .setSubtitle(BiometricPolicy.subtitle(approval.service, ShownEffect.short(i.computedEffect ?: "")))
             .setAllowedAuthenticators(authenticators())
-            .setConfirmationRequired(false)
             .build()
         prompt.authenticate(info)
     }
