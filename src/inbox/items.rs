@@ -28,11 +28,34 @@ pub trait Clock: Send + Sync {
     fn now_ms(&self) -> i64;
 }
 
-/// The clock of the machine.
-pub struct SystemClock;
+/// The clock of the machine. A test of the whole server can fix it (the conformance harness does).
+#[derive(Default)]
+pub struct SystemClock {
+    #[cfg(test)]
+    fixed: AtomicI64,
+}
+
+impl SystemClock {
+    pub fn new() -> SystemClock {
+        SystemClock::default()
+    }
+
+    /// Stops the clock at `ms`, or lets it run again with `None`.
+    #[cfg(test)]
+    pub fn fix(&self, ms: Option<i64>) {
+        self.fixed.store(ms.unwrap_or(0), Ordering::SeqCst);
+    }
+}
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> i64 {
+        #[cfg(test)]
+        {
+            let fixed = self.fixed.load(Ordering::SeqCst);
+            if fixed != 0 {
+                return fixed;
+            }
+        }
         super::util::now_ms()
     }
 }
@@ -608,6 +631,25 @@ pub fn settle_due(l: &mut Loaded, now: i64, rules: &Rules, fx: &mut Effects) -> 
         }
     }
     changed
+}
+
+/// The key of the requests of an approval: the hash of the service, the subject, the action, the path of the
+/// resource and the effect. Each part ends with a zero byte, so two different parts never give the same text. One
+/// non-final item exists for each value (CONF 3.10). The PDP and the submission API compute it the same way.
+pub fn approval_key_hash(
+    service: &str,
+    subject: &str,
+    action: &str,
+    resource_path: &str,
+    effect: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for part in [service, subject, action, resource_path, effect] {
+        hash.update(part.as_bytes());
+        hash.update([0u8]);
+    }
+    super::util::hex(&hash.finalize())
 }
 
 /// The code of an approval: 4 characters that a person reads aloud without a doubt. It is not a secret.

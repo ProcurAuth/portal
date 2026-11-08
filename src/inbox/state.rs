@@ -178,7 +178,7 @@ pub struct App {
     /// The handshakes of each client address (`inbox.devices.max_handshakes_per_address`).
     pub handshakes: Handshakes,
     /// The clock of every time rule of the items.
-    pub clock: std::sync::Arc<dyn super::items::Clock>,
+    pub clock: std::sync::Arc<super::items::SystemClock>,
     /// Wakes the agents that wait for an item when an item changes.
     pub item_changed: tokio::sync::Notify,
     /// What the portal gives for the rights (see `rights.rs`). Empty until the portal sets it.

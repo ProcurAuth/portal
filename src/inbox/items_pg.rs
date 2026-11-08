@@ -76,7 +76,19 @@ fn one(v: impl ToSql + Sync + Send + 'static) -> Vec<Arg> {
 
 impl ItemTx for PgTx<'_> {
     async fn load(&mut self, id: &str) -> Result<Option<Loaded>, DbError> {
-        let sql = format!("{} WHERE i.request_id = $1 FOR UPDATE OF i", select_sql());
+        // The lock comes first and alone. The read comes after it, in a new statement, so it sees what the transaction
+        // that held the lock committed. One statement with `FOR UPDATE OF i` would lock the item and would read the
+        // approval of the snapshot of the start: two uses of one approval could both see it unused.
+        let locked = self
+            .rows(
+                "SELECT request_id FROM items WHERE request_id = $1 FOR UPDATE",
+                &one(id.to_string()),
+            )
+            .await?;
+        if locked.is_empty() {
+            return Ok(None);
+        }
+        let sql = format!("{} WHERE i.request_id = $1", select_sql());
         let rows = self.rows(&sql, &one(id.to_string())).await?;
         rows.first().map(decode).transpose()
     }

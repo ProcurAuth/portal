@@ -2767,7 +2767,7 @@ pub(super) mod tests {
 
     /// A throwaway database on the server of `INBOX_TEST_PG=host:port:user:password`. The tests
     /// that need it end at once without the variable. The database goes away with the value.
-    pub(in crate::inbox) struct TestDatabase {
+    pub(crate) struct TestDatabase {
         host: String,
         port: u16,
         user: String,
@@ -2787,6 +2787,28 @@ pub(super) mod tests {
             let (client, connection) = config.connect(NoTls).await.unwrap();
             tokio::spawn(connection);
             client
+        }
+
+        /// The block `postgres` of a configuration file that names this database. The password is in the variable
+        /// `TEST_PG_PASSWORD`: [`TestDatabase::password`].
+        pub(crate) fn config_block(&self) -> String {
+            format!(
+                "postgres {{ host = \"{}\" port = {} database = \"{}\" user = \"{}\" password_env = \"TEST_PG_PASSWORD\" }}",
+                self.host, self.port, self.name, self.user
+            )
+        }
+
+        pub(crate) fn password(&self) -> String {
+            self.password.clone()
+        }
+
+        /// A database for a test outside the inbox, made on a runtime of its own. `None` without `INBOX_TEST_PG`.
+        pub(crate) fn create_blocking() -> Option<TestDatabase> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(TestDatabase::create())
         }
 
         pub(in crate::inbox) async fn create() -> Option<TestDatabase> {

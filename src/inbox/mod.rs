@@ -66,7 +66,16 @@ use crate::config::{Config, InboxConfig, Secrets as PortalSecrets, StorageBacken
 pub use api::ApiError;
 use db::Db;
 pub use http::{owns, serve};
+pub use items::{approval_key_hash, Clock};
+pub use items_ops::Consumed;
+/// What the tests of the portal take from the inbox.
+#[cfg(test)]
+pub(crate) mod testing {
+    pub(crate) use super::pg::tests::TestDatabase;
+}
 use hub::Hub;
+#[cfg(test)]
+pub use items_store::SeedApproval;
 use peer::Cluster;
 use pg::{PgSettings, PgStore};
 use ratelimit::AuthLimiter;
@@ -149,6 +158,17 @@ pub struct Init {
     http: HttpLimits,
     /// The name of the instance (`server.name`). The phones show it as the name of the server.
     server_name: String,
+    /// A test stops the clock of the items at this time (ms) from the start, so the sweeper never sees another time.
+    #[cfg(test)]
+    fixed_clock: Option<i64>,
+}
+
+#[cfg(test)]
+impl Init {
+    pub fn with_fixed_clock(mut self, ms: i64) -> Init {
+        self.fixed_clock = Some(ms);
+        self
+    }
 }
 
 enum StoreInit {
@@ -228,6 +248,8 @@ impl Booted {
             replica_stats,
             http,
             server_name: config.server.name.clone(),
+            #[cfg(test)]
+            fixed_clock: None,
         };
         Ok((
             init,
@@ -346,6 +368,26 @@ impl Slot {
         }
     }
 
+    /// Withdraws the open items of a key that was just revoked (reason `key_revoked`). The key is the local id of the
+    /// key, as the page of the keys gives it. Without the block `inbox.items` there is nothing to do. The result is
+    /// the number of items that the call cancelled.
+    pub async fn cancel_key_items(&self, key_id: &str) -> usize {
+        let Some(app) = self.app() else { return 0 };
+        let Some(items) = app.items() else { return 0 };
+        match items.cancel_where(Some(key_id), None, "key_revoked").await {
+            Ok(n) => {
+                if n > 0 {
+                    log::info!(event = "items_cancelled", key.id = %key_id, count = n);
+                }
+                n
+            }
+            Err(e) => {
+                log::warn!(event = "items_cancel_failed", key.id = %key_id, error = %e);
+                0
+            }
+        }
+    }
+
     /// Waits until the copy of the replica holds every write that the database committed. The
     /// portal calls it after a change, before the answer: a takeover or a restart must not bring
     /// back a deleted account, a revoked key or a used recovery code. Without the block
@@ -403,6 +445,8 @@ impl Slot {
             replica_stats,
             http,
             server_name,
+            #[cfg(test)]
+            fixed_clock,
         } = init;
         let db = match store {
             StoreInit::Sqlite(db) => Store::Sqlite(db),
@@ -460,6 +504,9 @@ impl Slot {
             .map(|(id, g)| (id.clone(), g.name.clone()))
             .collect();
         let session_budget = state::SessionBudget::new(http.max_sessions);
+        let clock = Arc::new(items::SystemClock::new());
+        #[cfg(test)]
+        clock.fix(fixed_clock);
         let app = Arc::new(App {
             limiter: AuthLimiter::new(
                 config.devices.max_auth_failures,
@@ -483,7 +530,7 @@ impl Slot {
             session_budget,
             handshakes: state::Handshakes::new(config.devices.max_handshakes_per_address),
             authorizer: std::sync::OnceLock::new(),
-            clock: Arc::new(items::SystemClock),
+            clock,
             item_changed: tokio::sync::Notify::new(),
             server_name,
             config,

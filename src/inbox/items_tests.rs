@@ -1026,6 +1026,48 @@ async fn an_approval_is_consumed_once_released_and_lapses() {
     }
 }
 
+/// Many callers use one approval at the same time: one gets it. On PostgreSQL the lock of the item and the read of the
+/// approval must not come in one statement: the read would see the approval of the snapshot of the start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_consumes_use_an_approval_once_and_status_consumes_nothing() {
+    for env in envs().await {
+        let items = env.items();
+        env.device("d1", "alice").await;
+        let id = created(&items, 1).await;
+        let effect = effect_of(&items, &id).await;
+        items
+            .answer(&id, answer("d1", &effect, Action::Accept))
+            .await
+            .unwrap();
+        // A read of the status never consumes.
+        for _ in 0..3 {
+            assert!(
+                matches!(
+                    items.status_for_pdp("hash-1").await.unwrap(),
+                    Consumed::Usable(_)
+                ),
+                "{}",
+                env.name
+            );
+        }
+        let calls = (0..24).map(|_| items.consume("hash-1"));
+        let results = futures_util::future::join_all(calls).await;
+        let used = results
+            .iter()
+            .filter(|r| matches!(r, Ok(Consumed::Used(_))))
+            .count();
+        let gone = results
+            .iter()
+            .filter(|r| matches!(r, Ok(Consumed::Gone(l)) if l.approval.as_ref().is_some_and(|a| a.consumed_at.is_some())))
+            .count();
+        assert_eq!((used, gone), (1, 23), "{}", env.name);
+        assert!(matches!(
+            items.status_for_pdp("hash-1").await.unwrap(),
+            Consumed::Gone(_)
+        ));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_cancel_of_a_key_and_of_an_owner_withdraws_the_open_items() {
     for env in envs().await {

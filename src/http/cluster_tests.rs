@@ -18,7 +18,7 @@ const SECRET: [u8; 32] = [b'k'; 32];
 const AGENT: &str = "ClusterTest/1.0";
 /// The key of the second factor of the harness: 32 bytes as 64 hexadecimal characters.
 const TOTP_KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-const PDP_DB_TOKEN: &str = "the PDP token of the server db, 32 bytes or more";
+pub(super) const PDP_DB_TOKEN: &str = "the PDP token of the server db, 32 bytes or more";
 const PDP_CHAT_TOKEN: &str = "the PDP token of the server chat, 32 bytes or more";
 
 pub(super) struct Reply {
@@ -35,7 +35,7 @@ impl Reply {
             .map(|(_, value)| value.as_str())
     }
 
-    fn json(&self) -> serde_json::Value {
+    pub(super) fn json(&self) -> serde_json::Value {
         serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("{e}: {}", self.body))
     }
 
@@ -217,6 +217,11 @@ pub(super) struct Custom {
     pub(super) env: Vec<(String, String)>,
     /// The stop of the server, in place of SIGTERM. The server stops when it gets a value.
     pub(super) stop: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Start the inbox of the configuration (the block `inbox`) in the process, on a database of its own. Most tests
+    /// have a block `inbox` for its rights only and leave the inbox off.
+    pub(super) boot_inbox: bool,
+    /// The clock of the items of the inbox stops at this time (ms) from the start.
+    pub(super) inbox_clock_ms: Option<i64>,
 }
 
 impl Default for Custom {
@@ -236,6 +241,8 @@ impl Default for Custom {
             mfa: "off",
             env: Vec::new(),
             stop: None,
+            boot_inbox: false,
+            inbox_clock_ms: None,
         }
     }
 }
@@ -261,6 +268,8 @@ pub(super) fn start_custom(
         mfa,
         env,
         stop,
+        boot_inbox,
+        inbox_clock_ms,
     } = custom;
     let totp_key = if mfa == "off" {
         ""
@@ -298,6 +307,24 @@ pub(super) fn start_custom(
         },
     )
     .unwrap();
+    // A configuration with the block `inbox` starts the inbox on a database of its own: the file of the block
+    // `storage`, or the database of the block `postgres`. The tests of the approvals use it (see `pdp_rig`).
+    let inbox_start = (boot_inbox && config.inbox.is_some()).then(|| {
+        let booted = match crate::inbox::boot(&config, &mut secrets, &|| false).unwrap() {
+            crate::inbox::Boot::Ready(booted) => booted,
+            _ => panic!("the inbox of the harness must boot"),
+        };
+        let password = secrets
+            .postgres_password
+            .as_ref()
+            .map(|p| Zeroizing::new(std::str::from_utf8(p.as_bytes()).unwrap().to_string()));
+        let (init, lifecycle) = booted.start(&config, password).unwrap();
+        let init = match inbox_clock_ms {
+            Some(ms) => init.with_fixed_clock(ms),
+            None => init,
+        };
+        (init, lifecycle)
+    });
     let tracker = Tracker::start(Arc::clone(&store), Duration::from_millis(200), 90).unwrap();
     // The signing secret of the tests is SECRET. A test that rotates it gives another session secret.
     let signing_secret = if session_secret == Custom::default().session_secret {
@@ -324,6 +351,11 @@ pub(super) fn start_custom(
         AppState::new(config, superadmin, signing_secret, store, tracker, access).unwrap();
     if let Some(ttl) = cache_ttl {
         state.sessions.set_cache_ttl(ttl);
+    }
+    if let Some((init, lifecycle)) = inbox_start {
+        state.inbox.prepare(init);
+        // The threads of the inbox database stay until the end of the process.
+        std::mem::forget(lifecycle);
     }
     let state = Arc::new(state);
     let serving = Arc::clone(&state);
@@ -820,7 +852,7 @@ pub(super) fn listed(labels: &[(&str, &str)]) -> crate::catalog::Service {
 pub(super) const DB_ACTIONS_URL: &str = "http://test/.well-known/procurauth/actions";
 
 /// The catalogue has two services. Grafana (`other-grafana`, only `access`) and Db (`db`, with actions).
-fn publish_catalog(node: &Node, db_actions: &[&str]) {
+pub(super) fn publish_catalog(node: &Node, db_actions: &[&str]) {
     let catalog = Catalog::build(
         vec![
             listed(&[("portal.name", "Grafana"), ("portal.href", "/grafana/")]),
@@ -1122,7 +1154,13 @@ fn in_the_static_mode_only_the_configuration_gives_grants() {
 }
 
 /// A request to the PDP listener.
-fn pdp(port: u16, path: &str, token: Option<&str>, body: &str, request_id: Option<&str>) -> Reply {
+pub(super) fn pdp(
+    port: u16,
+    path: &str,
+    token: Option<&str>,
+    body: &str,
+    request_id: Option<&str>,
+) -> Reply {
     let authorization = token.map(|t| format!("Bearer {t}"));
     let mut headers: Vec<(&str, &str)> = vec![("Content-Type", "application/json")];
     if let Some(value) = &authorization {
@@ -3646,7 +3684,7 @@ fn the_superadmin_ends_all_sessions_after_a_confirmation_and_the_action_is_audit
 // Keys at the PDP --------------------------------------------------------------------------------
 
 /// The service `db` of the tests of the keys: hosts and databases, a budget and two ceilings.
-const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
+pub(super) const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
   "resource_types":[{"name":"host","parent":"service","description":"A host."},
                     {"name":"database","parent":"host","description":"A database."}],
   "actions":[
@@ -3662,14 +3700,14 @@ const KEY_TEST_DOCUMENT: &str = r#"{"server":"db",
 /// The budgets count in windows that start at a multiple of their length of the clock. A test that counts several
 /// uses of a budget of one minute must not see the end of the window in the middle: the count starts again and a
 /// use that must be refused is good. The test waits for the next window when the end is near.
-fn stay_in_a_minute() {
+pub(super) fn stay_in_a_minute() {
     let left = 60 - unix_now().rem_euclid(60);
     if left < 12 {
         std::thread::sleep(Duration::from_secs(left as u64 + 1));
     }
 }
 
-fn limits(text: &str) -> crate::limits::Limits {
+pub(super) fn limits(text: &str) -> crate::limits::Limits {
     crate::limits::Limits::from_json(text).unwrap()
 }
 
@@ -3708,7 +3746,7 @@ fn key_node(backend: &Backend) -> (Node, u16) {
 }
 
 /// Alice reads `host:prod` with `max_rows` 5000 and a budget of 3 each minute. She can use keys.
-fn add_alice(node: &Node, extra: &[Grant]) {
+pub(super) fn add_alice(node: &Node, extra: &[Grant]) {
     stay_in_a_minute();
     let mut grants = vec![
         Grant::new("access", "db")
@@ -3734,7 +3772,7 @@ fn add_alice(node: &Node, extra: &[Grant]) {
     node.state.users.refresh(&node.state.store).unwrap();
 }
 
-fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, grants: Vec<Grant>) {
+pub(super) fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, grants: Vec<Grant>) {
     let mut grants = grants;
     grants.sort();
     node.state
@@ -3760,7 +3798,7 @@ fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, grants: Vec<Gra
     node.state.users.refresh(&node.state.store).unwrap();
 }
 
-fn read_body(subject: &str, database: &str, context: serde_json::Value) -> String {
+pub(super) fn read_body(subject: &str, database: &str, context: serde_json::Value) -> String {
     serde_json::json!({
         "subject": {"type": "user", "id": subject},
         "action": {"name": "data.read"},

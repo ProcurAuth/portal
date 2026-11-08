@@ -1040,13 +1040,16 @@ pub async fn supersede<T: ItemTx>(
 pub enum Consumed {
     /// The approval is used. The value `consumed_at` goes back to `release`.
     Used(Box<Loaded>),
+    /// The approval can be used. Only `status` gives this value: it consumes nothing.
+    Usable(Box<Loaded>),
     /// No approval has this `key_hash`.
     NoApproval,
     /// The owner has not decided yet.
     Pending(Box<Loaded>),
     /// The owner declined.
     Denied(Box<Loaded>),
-    /// The approval is expired, lapsed, abandoned, cancelled or superseded.
+    /// The approval is consumed, expired, lapsed, abandoned, cancelled or superseded. A consumed approval has
+    /// `consumed_at`.
     Gone(Box<Loaded>),
 }
 
@@ -1056,6 +1059,24 @@ pub async fn consume<T: ItemTx>(
     tx: &mut T,
     cx: &Cx,
     key_hash: &str,
+) -> Result<Done<Consumed>, DbError> {
+    gate(tx, cx, key_hash, true).await
+}
+
+/// Reads what `consume` would find and consumes nothing. The clock still settles the items that are due.
+pub async fn status<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    key_hash: &str,
+) -> Result<Done<Consumed>, DbError> {
+    gate(tx, cx, key_hash, false).await
+}
+
+async fn gate<T: ItemTx>(
+    tx: &mut T,
+    cx: &Cx,
+    key_hash: &str,
+    take: bool,
 ) -> Result<Done<Consumed>, DbError> {
     let mut fx = Effects::default();
     let ids = tx.approvals_by_hash(key_hash, 8).await?;
@@ -1075,12 +1096,16 @@ pub async fn consume<T: ItemTx>(
     };
     let value = if let Some(pos) = all.iter().position(usable) {
         let mut l = all.swap_remove(pos);
-        if let Some(a) = l.approval.as_mut() {
-            a.consumed_at = Some(cx.now);
+        if take {
+            if let Some(a) = l.approval.as_mut() {
+                a.consumed_at = Some(cx.now);
+            }
+            tx.save(&l).await?;
+            fx.event(&l.item, cx.now, "consumed", "server", None);
+            Consumed::Used(Box::new(l))
+        } else {
+            Consumed::Usable(Box::new(l))
         }
-        tx.save(&l).await?;
-        fx.event(&l.item, cx.now, "consumed", "server", None);
-        Consumed::Used(Box::new(l))
     } else if let Some(pos) = all.iter().position(|l| l.item.is_open()) {
         Consumed::Pending(Box::new(all.swap_remove(pos)))
     } else if all.is_empty() {

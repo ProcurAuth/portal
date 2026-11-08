@@ -6,7 +6,8 @@
 //! seal. The clock, the box and the limits come from the caller, so a test builds the engine without a server.
 //! An item never uses the spool: when PostgreSQL has no primary, a write gets [`ItemError::Degraded`].
 
-// The approval API, the agent channel, the phones and the web call this API in the next lots.
+// The PDP calls `consume`, `release` and `status_for_pdp`. The approval API, the agent channel, the phones and the web
+// call the rest of this API in the next lots.
 #![allow(dead_code)]
 
 use inbox_core::proto::{Action, AnswerStatus, Kind};
@@ -553,6 +554,16 @@ impl Items<'_> {
         Ok(done.value)
     }
 
+    /// What the PDP finds for an effect, without consuming it (see `ops::status`). A question without `usage` asks
+    /// this. The result is `Consumed::Usable` when the approval can be used.
+    pub async fn status_for_pdp(&self, key_hash: &str) -> Result<Consumed, ItemError> {
+        let cx = self.cx();
+        let key_hash = key_hash.to_string();
+        let done = in_tx!(self, [cx, key_hash], tx, ops::status(tx, &cx, &key_hash))?;
+        self.after(&done.fx);
+        Ok(done.value)
+    }
+
     /// Gives back a consumed approval (see `ops::release`).
     pub async fn release(&self, id: &str, consumed_at: i64) -> Result<bool, ItemError> {
         self.writable()?;
@@ -700,4 +711,111 @@ pub async fn purge_key(store: &Store, kid: &str) -> Result<(u64, u64, u64), Stri
     let at = StoreRef { store };
     let (kid, now) = (kid.to_string(), super::util::now_ms());
     in_tx!(at, [kid, now], tx, tx.purge_key(&kid, now)).map_err(|e| format!("inbox storage: {e}"))
+}
+
+// ---------------------------------------------------------------- seeds for the tests of the PDP
+
+/// An approval in any state, for the tests of the PDP: the row is written as it is, without the rules of the
+/// operations. The conformance data of the protocol gives approvals in each state.
+#[cfg(test)]
+pub struct SeedApproval {
+    pub key_id: String,
+    pub owner: String,
+    pub service: String,
+    /// The subject of the question, such as `key:conf0001`.
+    pub subject: String,
+    pub action: String,
+    pub resource_path: String,
+    pub effect: String,
+    pub state: inbox_core::proto::ItemState,
+    pub decision: Option<inbox_core::proto::Decision>,
+    pub answered_at: Option<i64>,
+    pub consume_before: Option<i64>,
+    pub consumed_at: Option<i64>,
+    pub lease_s: i64,
+}
+
+#[cfg(test)]
+impl Items<'_> {
+    /// Writes one approval and returns its request id.
+    pub async fn seed_approval(&self, s: SeedApproval) -> Result<String, ItemError> {
+        use super::items::{approval_key_hash, ItemRow};
+        use inbox_core::proto::{Decision, Interaction, ItemState, Urgency, Via};
+        let now = self.clock.now_ms();
+        let request_id = random_id();
+        let answered = s.state == ItemState::Answered;
+        let open = matches!(s.state, ItemState::Pending | ItemState::Replied);
+        let item = ItemRow {
+            request_id: request_id.clone(),
+            kind: Kind::Approval,
+            chain_id: request_id.clone(),
+            supersedes: None,
+            superseded_by: None,
+            previous_id: None,
+            requester_key_id: s.key_id.clone(),
+            requester_owner: s.owner.clone(),
+            via: Via::Mcp,
+            interaction: Interaction::Conversational,
+            urgency: Urgency::Normal,
+            input_type: None,
+            state: s.state,
+            settle_reason: (!open).then(|| "seeded".to_string()),
+            body_kid: None,
+            body_size: 0,
+            body_purged_at: None,
+            created_at: now,
+            chain_created_at: now,
+            lease_s: Some(s.lease_s),
+            lease_until: Some(now + 3 * s.lease_s * 1000),
+            until_at: None,
+            agent_seen_at: now,
+            last_agent_turn_at: None,
+            abandoned_at: (s.state == ItemState::Abandoned).then_some(now),
+            revivals: 0,
+            last_seq: 0,
+            allow_custom: false,
+            allow_ask_back: false,
+            answer_action: s.decision.map(|d| {
+                if d == Decision::Approve {
+                    Action::Accept
+                } else {
+                    Action::Decline
+                }
+            }),
+            answered_at: answered.then(|| s.answered_at.unwrap_or(now)),
+            answered_by: answered.then(|| s.owner.clone()),
+            answered_via: answered.then(|| "device:seeded-device".to_string()),
+            final_at: (!open).then_some(now),
+            idempotency_key: random_id(),
+        };
+        let approval = super::items::ApprovalRow {
+            request_id: request_id.clone(),
+            service: s.service.clone(),
+            subject: s.subject.clone(),
+            action: s.action.clone(),
+            resource_path: s.resource_path.clone(),
+            effect: s.effect.clone(),
+            key_hash: approval_key_hash(
+                &s.service,
+                &s.subject,
+                &s.action,
+                &s.resource_path,
+                &s.effect,
+            ),
+            evaluation_id: None,
+            code: super::items::new_code(),
+            decision: s.decision,
+            shown_effect: answered.then(|| s.effect.clone()),
+            consume_before: s.consume_before,
+            consumed_at: s.consumed_at,
+            lapsed_at: None,
+        };
+        let l = Loaded {
+            item,
+            approval: Some(approval),
+        };
+        let sealed = self.seal_body(&request_id, Some(&s.effect), b"{\"op\":{},\"view\":{}}")?;
+        in_tx!(self, [l, sealed], tx, tx.insert(&l, Some(&sealed)))?;
+        Ok(request_id)
+    }
 }

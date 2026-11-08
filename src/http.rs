@@ -186,6 +186,9 @@ pub struct AppState {
     /// The servers that can ask the PDP. Each server has the hash of its token.
     pub pdp_clients: pdp::Clients,
     pub pdp_stats: pdp::Stats,
+    /// A fault that a test asks the approval gate to play (see `pdp::approval`).
+    #[cfg(test)]
+    pub pdp_fault: std::sync::atomic::AtomicU8,
     /// The key checks that passed, not yet written to the database (portal 5.5a).
     pub key_checks: crate::keyauth::KeyChecks,
     /// The count of the key checks of the edge, by result (portal 10.5).
@@ -253,7 +256,10 @@ impl AppState {
             access
                 .pdp_tokens
                 .iter()
-                .map(|(name, token)| pdp::Client::new(name.clone(), token.as_bytes()))
+                .map(|(name, token)| {
+                    pdp::Client::new(name.clone(), token.as_bytes())
+                        .with_approvals(config.pdp_approvals.contains(name))
+                })
                 .collect(),
         )?;
         let mfa = match (config.authentication.mfa.is_on(), &access.totp_key) {
@@ -348,6 +354,8 @@ impl AppState {
             options: crate::options::Options::new(config.access.actions_timeout)?,
             pdp_clients,
             pdp_stats: pdp::Stats::default(),
+            #[cfg(test)]
+            pdp_fault: std::sync::atomic::AtomicU8::new(0),
             key_checks: crate::keyauth::KeyChecks::default(),
             key_stats: crate::keyauth::CheckStats::default(),
             key_failure_log: crate::keyauth::FailureLog::default(),
@@ -5038,6 +5046,8 @@ mod pdp;
 mod cluster_tests;
 #[cfg(test)]
 mod conformance_tests;
+#[cfg(test)]
+mod pdp_rig;
 
 #[cfg(test)]
 mod tests {

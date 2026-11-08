@@ -7,18 +7,11 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use super::cluster_tests::*;
+use super::pdp_rig::{app_of, seed_directory, InboxRig};
 use super::*;
 use crate::store::testing::{each_backend, Backend};
 
 // The conformance cases of the series D (a PDP) --------------------------------------------------
-
-/// A case that the portal cannot run yet: it lists a condition of `skip_if` that the portal does not
-/// meet. The portal has no approval support until lot L6 of the plan; that lot removes this condition.
-fn not_run_yet(case: &serde_json::Value) -> bool {
-    case["skip_if"]
-        .as_array()
-        .is_some_and(|list| list.iter().any(|c| c == "no_approval_support"))
-}
 
 /// The cases of the public repository of the protocol (`conformance/`). Each case loads its
 /// directory in the portal, sends its steps to the PDP and checks the answers. The test reads the
@@ -98,6 +91,7 @@ mod conformance_d {
                 );
                 Grant::parse(&text)
                     .unwrap_or_else(|e| panic!("the grant {text:?} of the directory: {e}"))
+                    .with_confirm(g.get("confirm").and_then(Value::as_bool).unwrap_or(false))
                     .with_limits(
                         crate::limits::Limits::from_json(&limits_text(g.get("limits")))
                             .unwrap_or_else(|e| panic!("the limits of {text:?}: {e}")),
@@ -237,11 +231,25 @@ mod conformance_d {
             .filter(|s| !s["id"].as_str().unwrap().contains(':'))
             .count();
         let pdp_port = free_port();
+        // A directory with approvals needs the inbox with its items and the block `inbox.approvals`, and each
+        // server has `approvals = true`. The cases without approvals run as before, with no inbox.
+        let with_approvals = directory.get("approvals").is_some();
+        let rig = if with_approvals {
+            match InboxRig::new(backend, "5m") {
+                Some(rig) => Some(rig),
+                None => {
+                    eprintln!("INBOX_TEST_PG is not set: {id} is skipped on PostgreSQL");
+                    return Vec::new();
+                }
+            }
+        } else {
+            None
+        };
         let mut clients = String::new();
         let mut env = Vec::new();
         for (index, service) in services.iter().enumerate() {
             clients.push_str(&format!(
-                "pdp_client \"{}\" {{ token_env = \"CONFORMANCE_TOKEN_{index}\" }}\n",
+                "pdp_client \"{}\" {{ token_env = \"CONFORMANCE_TOKEN_{index}\" approvals = {with_approvals} }}\n",
                 service.id
             ));
             env.push((
@@ -249,19 +257,26 @@ mod conformance_d {
                 service.credential.clone(),
             ));
         }
+        if let Some(rig) = &rig {
+            env.extend(rig.env.iter().cloned());
+        }
+        let inbox_blocks = rig.as_ref().map_or("", |rig| rig.config.as_str());
         let node = start_custom(
             Arc::new(backend.fresh()),
             None,
             Custom {
                 max_users: persons.max(1),
                 env,
+                boot_inbox: with_approvals,
+                inbox_clock_ms: with_approvals.then_some(now * 1000),
                 ..Custom::default()
             },
             &format!(
                 r#"identity {{ issuer = "https://portal.test" signing_key_env = "TEST_IDENTITY_KEY" }}
                 pdp {{ listen_address = "127.0.0.1:{pdp_port}" url = "http://pdp.test:{pdp_port}" plain_http = true max_evaluations = 64 max_body_bytes = "1MiB" }}
                 keys {{}}
-                {clients}"#
+                {clients}
+                {inbox_blocks}"#
             ),
         );
         // The catalogue holds each service, so the registry keeps its document.
@@ -304,6 +319,11 @@ mod conformance_d {
             .or_else(|| directory.get("counters").and_then(Value::as_array).cloned())
             .unwrap_or_default();
         load(&node, &directory, &counters, now);
+        if with_approvals {
+            // The clock of the inbox stops at the clock of the data, so the times of the approvals mean the same.
+            let app = app_of(&node, None);
+            seed_directory(&app, &directory, 300);
+        }
         wait_until(Duration::from_secs(10), || {
             TcpStream::connect(("127.0.0.1", pdp_port)).is_ok()
         });
@@ -406,6 +426,11 @@ mod conformance_d {
             failures.push(format!("{label}: {what} is {value}, expected it absent"));
         } else if matcher.get("present").is_some() {
             // The value is there.
+        } else if let Some(pattern) = matcher.get("not_regex").and_then(Value::as_str) {
+            let text = value.as_str().unwrap_or("");
+            if super::conformance_e::regex::is_match(pattern, text) {
+                failures.push(format!("{label}: {what} matches {pattern}: {text}"));
+            }
         } else {
             failures.push(format!(
                 "{label}: the matcher {matcher} is not read by the harness"
@@ -435,9 +460,6 @@ mod conformance_d {
             for path in &paths {
                 let case = read_json(path);
                 let id = case["id"].as_str().unwrap().to_string();
-                if not_run_yet(&case) {
-                    continue;
-                }
                 if only
                     .as_ref()
                     .is_some_and(|only| !only.split(',').any(|o| o == id))
@@ -479,7 +501,7 @@ mod conformance_e {
 
     /// A small matcher of regular expressions for the patterns of the cases: anchors, literals,
     /// escapes, classes, groups, `?`, `*`, `+` and `{n,m}`.
-    mod regex {
+    pub(super) mod regex {
         #[derive(Debug, Clone)]
         enum Node {
             Char(char),
@@ -917,6 +939,14 @@ mod conformance_e {
             vec![Grant::parse("access on service:probe").unwrap()],
         );
         let no_access = make("4d2e8f6a10b37c95", 2, Vec::new());
+        // The grant of `access` has `confirm`: an edge asks only `access`, so it ignores `confirm` (protocol 17.8).
+        let confirm_access = make(
+            "6e5a1c3f9b2d7048",
+            3,
+            vec![Grant::parse("access on service:probe")
+                .unwrap()
+                .with_confirm(true)],
+        );
         node.state.users.refresh(&node.state.store).unwrap();
         let unknown = crate::keys::generate(crate::keys::KeyKind::Mcp)
             .unwrap()
@@ -926,6 +956,7 @@ mod conformance_e {
             ("valid_key_text".into(), valid),
             ("unknown_key_text".into(), unknown),
             ("no_access_key_text".into(), no_access),
+            ("confirm_access_key_text".into(), confirm_access),
             ("valid_key_subject".into(), "key:9b1c04e2aa71f0c3".into()),
             ("valid_key_owner".into(), "ana".into()),
             ("token_header".into(), token_header.clone()),
@@ -1051,9 +1082,6 @@ mod conformance_e {
             for path in &paths {
                 let case: Value =
                     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-                if not_run_yet(&case) {
-                    continue;
-                }
                 run += 1;
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_case(&backend, &case)

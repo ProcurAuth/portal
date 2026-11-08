@@ -59,6 +59,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+mod approval;
+#[cfg(test)]
+mod approval_tests;
+
+use self::approval::{Ask, Held};
 use super::*;
 use crate::counting::{Outcome as CountOutcome, Unavailable};
 use crate::decision::{self, Counter, CounterOwner, Matching, Owner, Question, Verdict};
@@ -153,6 +158,8 @@ pub fn clients(list: Vec<Client>) -> Result<Clients, String> {
 pub struct Client {
     pub name: String,
     digest: [u8; 32],
+    /// The block `pdp_client` has `approvals = true`: the server can ask for the approval of an action.
+    pub approvals: bool,
 }
 
 impl Client {
@@ -160,24 +167,37 @@ impl Client {
         Self {
             name,
             digest: Sha256::digest(token).into(),
+            approvals: false,
         }
+    }
+
+    /// The same client with the flag `approvals` set to this value.
+    pub fn with_approvals(mut self, approvals: bool) -> Self {
+        self.approvals = approvals;
+        self
     }
 }
 
 /// The decisions of the PDP by result and reason, in the order of [`DECISIONS`].
-const DECISIONS: [(bool, Option<&str>); 6] = [
+const DECISIONS: [(bool, Option<&str>); 10] = [
     (true, None),
     (false, None),
     (false, Some(UNKNOWN_SUBJECT)),
     (false, Some(INVALID_RESOURCE)),
     (false, Some(INVALID_REQUEST)),
     (false, Some(BUDGET_EXCEEDED)),
+    (false, Some(approval::APPROVAL_REQUIRED)),
+    (false, Some(approval::APPROVAL_PENDING)),
+    (false, Some(approval::APPROVAL_DENIED)),
+    (false, Some(approval::APPROVAL_EXPIRED)),
 ];
 
 /// Counters for `/metrics`.
 #[derive(Default)]
 pub struct Stats {
-    decisions: [AtomicU64; 6],
+    decisions: [AtomicU64; 10],
+    /// The outcomes of the approval gate, in the order of `approval::GATE_REASONS`.
+    approvals: [AtomicU64; 7],
     unauthorized: AtomicU64,
     bad_request: AtomicU64,
     /// The questions that got HTTP 503, by cause (portal 10.5). The wait that took more than 500
@@ -199,6 +219,11 @@ impl Stats {
         }
     }
 
+    /// Counts one outcome of the approval gate.
+    fn approval(&self, which: usize) {
+        self.approvals[which].fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn render(&self) -> String {
         let read = |c: &AtomicU64| c.load(Ordering::Relaxed);
         let mut out = String::from(
@@ -208,6 +233,13 @@ impl Stats {
             out.push_str(&format!(
                 "portal_pdp_decisions_total{{decision=\"{decision}\",reason=\"{}\"}} {}\n",
                 reason.unwrap_or("none"),
+                read(count)
+            ));
+        }
+        out.push_str("# HELP portal_pdp_approval_total Outcomes of the approval gate: the four reasons, consumed (a use took an approval), released (the budget refused and the approval was given back) and not_enabled (the server has no approvals).\n# TYPE portal_pdp_approval_total counter\n");
+        for (reason, count) in approval::GATE_REASONS.iter().zip(&self.approvals) {
+            out.push_str(&format!(
+                "portal_pdp_approval_total{{reason=\"{reason}\"}} {}\n",
                 read(count)
             ));
         }
@@ -359,15 +391,18 @@ fn metadata(state: &AppState) -> HttpResponse {
         .as_ref()
         .map(|p| p.url.as_str())
         .unwrap_or("");
-    json_response(
-        StatusCode::OK,
-        &json!({
-            "policy_decision_point": base,
-            "access_evaluation_endpoint": format!("{base}{EVALUATION_PATH}"),
-            "access_evaluations_endpoint": format!("{base}{EVALUATIONS_PATH}"),
-            "search_action_endpoint": format!("{base}{SEARCH_ACTION_PATH}"),
-        }),
-    )
+    let mut document = json!({
+        "policy_decision_point": base,
+        "access_evaluation_endpoint": format!("{base}{EVALUATION_PATH}"),
+        "access_evaluations_endpoint": format!("{base}{EVALUATIONS_PATH}"),
+        "search_action_endpoint": format!("{base}{SEARCH_ACTION_PATH}"),
+    });
+    if let Some(Value::Object(members)) = approval::metadata(&state.config) {
+        if let Value::Object(document) = &mut document {
+            document.extend(members);
+        }
+    }
+    json_response(StatusCode::OK, &document)
 }
 
 /// The server that sent the request, from its bearer token.
@@ -746,6 +781,8 @@ struct Outcome {
     retry_after: Option<u64>,
     /// The count of the use did not work: the request gets HTTP 503.
     unavailable: Option<Unavailable>,
+    /// The `evaluation_id` of an answer with `approval_required` or `approval_pending` (protocol 17.1).
+    evaluation_id: Option<String>,
 }
 
 impl Outcome {
@@ -758,6 +795,7 @@ impl Outcome {
             units: None,
             retry_after: None,
             unavailable: None,
+            evaluation_id: None,
         }
     }
 
@@ -793,6 +831,9 @@ impl Outcome {
             if let Some(retry_after) = self.retry_after {
                 context.insert("retry_after".into(), json!(retry_after));
             }
+            if let Some(id) = &self.evaluation_id {
+                context.insert("evaluation_id".into(), json!(id));
+            }
         }
         if context.is_empty() {
             json!({ "decision": self.decision })
@@ -820,7 +861,8 @@ fn question<'a>(
 }
 
 /// The decision for one subject, action and resource, asked by `client`. `usage` is true when the
-/// question has `context.usage`: the question is a use. Fails closed.
+/// question has `context.usage`: the question is a use. `effect` is `context.approval.effect`. Fails closed.
+#[allow(clippy::too_many_arguments)]
 fn decide(
     state: &AppState,
     client: &Client,
@@ -829,6 +871,7 @@ fn decide(
     resource: &Resource,
     matching: Match,
     usage: bool,
+    effect: Option<&str>,
 ) -> Outcome {
     if matching == Match::Invalid {
         return Outcome::deny(
@@ -860,21 +903,27 @@ fn decide(
         return Outcome::deny("the document of the service is not known", None);
     }
     let q = question(client, action, &chain, matching, document.as_deref());
+    let ask = Ask {
+        usage,
+        effect,
+        enabled: client.approvals,
+        subject: &subject.id,
+    };
     match SubjectId::parse(&subject.id) {
-        SubjectId::User(login) => decide_person(state, login, &q, usage),
-        SubjectId::Key(id) => decide_key(state, id, &q, usage),
+        SubjectId::User(login) => decide_person(state, login, &q, &ask),
+        SubjectId::Key(id) => decide_key(state, id, &q, &ask),
         SubjectId::Unknown => Outcome::deny(NO_SUCH_USER, Some(UNKNOWN_SUBJECT)),
     }
 }
 
 /// The decision for a person: the superadmin, an account of the file or an account of the
 /// database.
-fn decide_person(state: &AppState, login: &str, q: &Question<'_>, usage: bool) -> Outcome {
+fn decide_person(state: &AppState, login: &str, q: &Question<'_>, ask: &Ask<'_>) -> Outcome {
     // The superadmin has every right and no limit. The PDP counts no use of the superadmin
     // (portal 9.1).
     if constant_time_eq(login.as_bytes(), state.superadmin_login.as_bytes()) {
         let mut outcome = Outcome::allow("superadmin");
-        if usage {
+        if ask.usage {
             outcome.units = Some(0);
         }
         return outcome;
@@ -887,7 +936,7 @@ fn decide_person(state: &AppState, login: &str, q: &Question<'_>, usage: bool) -
     } else {
         decision::person(login, &grants, q)
     };
-    finish(state, q, verdict, usage)
+    finish(state, q, verdict, ask)
 }
 
 /// The grants of a person on one service and whether the account comes from the file. When the
@@ -906,7 +955,7 @@ fn known_person_grants(
 }
 
 /// The decision for a key (protocol 3.5).
-fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outcome {
+fn decide_key(state: &AppState, id: &str, q: &Question<'_>, ask: &Ask<'_>) -> Outcome {
     if state.config.keys.is_none() {
         return Outcome::deny("keys are not enabled", Some(UNKNOWN_SUBJECT));
     }
@@ -958,7 +1007,7 @@ fn decide_key(state: &AppState, id: &str, q: &Question<'_>, usage: bool) -> Outc
         }
     };
     let verdict = decision::key(&key.counter_owner(), &key_grants, owner, &owner_counters, q);
-    finish(state, q, verdict, usage)
+    finish(state, q, verdict, ask)
 }
 
 /// The answer of the portal to the inbox for a key or an account (see `inbox_rights.rs` and
@@ -1011,7 +1060,7 @@ pub(super) fn decide_key_for(
         matching: Matching::Node,
         document: document.as_deref(),
     };
-    use_verdict(&decide_key(state, id, &q, usage))
+    use_verdict(&decide_key(state, id, &q, &Ask::internal(usage)))
 }
 
 /// The same for an account: the superadmin, an account of the file or an account of the database.
@@ -1031,27 +1080,58 @@ pub(super) fn decide_person_for(
         matching: Matching::Node,
         document: document.as_deref(),
     };
-    use_verdict(&decide_person(state, login, &q, usage))
+    use_verdict(&decide_person(state, login, &q, &Ask::internal(usage)))
 }
 
-/// The answer from a verdict: for a use, the count of the units.
-fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, usage: bool) -> Outcome {
+/// The answer from a verdict: the approval gate, then for a use the count of the units.
+///
+/// An action that needs an approval and is a use takes three steps (portal P7): consume the approval, count the
+/// units, and give the approval back when the count refuses or fails. The two stores have no common transaction, so
+/// a crash between the steps loses one approval and never gives two executions.
+fn finish(state: &AppState, q: &Question<'_>, verdict: Verdict, ask: &Ask<'_>) -> Outcome {
     if !verdict.allowed {
         return Outcome::deny("no grant", None);
     }
     let mut outcome = Outcome::allow("grant");
     outcome.ceilings = verdict.ceilings;
-    if !usage {
+    // `confirm` has no effect on `access` (protocol 17.8), and a question about a subtree never asks for an approval.
+    let mut held: Option<Held> = None;
+    if verdict.approval && q.action != ACCESS {
+        match approval::gate(state, q, ask) {
+            Err(refusal) => return refusal,
+            Ok(taken) => held = taken,
+        }
+    }
+    if !ask.usage {
         return outcome;
     }
     debug_assert!(q.matching == Matching::Node);
-    match count(state, &verdict.counters) {
+    if held.is_some() && approval::fault(state) == approval::Fault::CrashAfterConsume {
+        // The process "dies" here: nothing counts, nothing is given back.
+        let mut crashed = Outcome::deny("fault: crash after the consumption", None);
+        crashed.unavailable = Some(Unavailable::StoreError);
+        return crashed;
+    }
+    let counted = if approval::fault(state) == approval::Fault::CountFails {
+        CountOutcome::Unavailable(Unavailable::StoreError)
+    } else {
+        count(state, &verdict.counters)
+    };
+    match counted {
         CountOutcome::Counted { units } => outcome.units = Some(units),
         CountOutcome::Exceeded { retry_after } => {
+            if let Some(held) = &held {
+                approval::release(state, held);
+            }
             outcome = Outcome::deny("budget exceeded", Some(BUDGET_EXCEEDED));
             outcome.retry_after = Some(retry_after);
         }
-        CountOutcome::Unavailable(cause) => outcome.unavailable = Some(cause),
+        CountOutcome::Unavailable(cause) => {
+            if let Some(held) = &held {
+                approval::release(state, held);
+            }
+            outcome.unavailable = Some(cause);
+        }
     }
     outcome
 }
@@ -1071,9 +1151,12 @@ fn decide_and_log(
     resource: &Resource,
     matching: Match,
     usage: bool,
+    effect: Option<&str>,
     request_id: Option<&str>,
 ) -> Outcome {
-    let outcome = decide(state, client, subject, action, resource, matching, usage);
+    let outcome = decide(
+        state, client, subject, action, resource, matching, usage, effect,
+    );
     if outcome.reason == Some(INVALID_RESOURCE) {
         read_document_soon(state, client, request_id);
     }
@@ -1091,6 +1174,7 @@ fn decide_and_log(
             ("resource", resource.log_text()),
             ("match", matching.as_str().to_string()),
             ("usage", usage.to_string()),
+            ("effect", effect.unwrap_or("").to_string()),
             ("decision", outcome.decision.to_string()),
             ("reason", outcome.why.to_string()),
             ("request_id", request_id.unwrap_or("").to_string()),
@@ -1171,8 +1255,17 @@ fn evaluation(
             "context.usage and context.match subtree cannot be in one request".into(),
         ));
     }
+    let effect = approval::read_effect(request.get("context"))?;
     let outcome = decide_and_log(
-        state, client, &subject, &action, &resource, matching, usage, request_id,
+        state,
+        client,
+        &subject,
+        &action,
+        &resource,
+        matching,
+        usage,
+        effect.as_deref(),
+        request_id,
     );
     if let Some(cause) = outcome.unavailable {
         return Err(PdpError::Unavailable(cause));
@@ -1244,12 +1337,22 @@ fn evaluations(
         }
         // The context of an item replaces the default context of the request (AuthZEN 1.0).
         let matching = Match::of(pick("context"));
-        parsed.push((subject, action, resource, matching));
+        let effect = approval::read_effect(pick("context"))
+            .map_err(|e| format!("evaluations[{index}]: {e}"))?;
+        parsed.push((subject, action, resource, matching, effect));
     }
     let mut out = Vec::with_capacity(parsed.len());
-    for (subject, action, resource, matching) in &parsed {
+    for (subject, action, resource, matching, effect) in &parsed {
         let outcome = decide_and_log(
-            state, client, subject, action, resource, *matching, false, request_id,
+            state,
+            client,
+            subject,
+            action,
+            resource,
+            *matching,
+            false,
+            effect.as_deref(),
+            request_id,
         );
         let decision = outcome.decision;
         out.push(outcome.json());
@@ -1316,7 +1419,7 @@ fn search_action(
         .into_iter()
         .filter(|name| {
             decide_and_log(
-                state, client, &subject, name, &resource, matching, false, request_id,
+                state, client, &subject, name, &resource, matching, false, None, request_id,
             )
             .decision
         })

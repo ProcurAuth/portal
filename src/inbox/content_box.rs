@@ -253,14 +253,13 @@ impl ContentBox {
     }
 
     /// The key of the `evaluation_id` of the active key, with its id. The PDP signs with it.
-    #[allow(dead_code)] // the PDP of lot L6 reads it
     pub fn evaluation_key(&self) -> (&str, &[u8; 32]) {
         let key = &self.keys[self.active];
         (&key.id, &key.evaluation)
     }
 
     /// The key of the `evaluation_id` of the key `kid`. `None` when the id is not in the file.
-    #[allow(dead_code)] // the PDP of lot L6 reads it
+    #[allow(dead_code)] // the submission API of lot L7 checks the `evaluation_id` with it
     pub fn evaluation_key_of(&self, kid: &str) -> Option<&[u8; 32]> {
         self.keys
             .iter()

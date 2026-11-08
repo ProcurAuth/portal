@@ -1282,6 +1282,8 @@ pub(super) async fn handle_keys_revoke(
             _ => return text_response(StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable\n"),
         }
         refresh_after_write(state);
+        // The approvals that wait for this key can never be used: the key is gone (portal 3.7.16).
+        state.inbox.cancel_key_items(&id).await;
         log(
             state,
             LogLevel::Info,
