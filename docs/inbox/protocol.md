@@ -282,12 +282,13 @@ Members of a question:
 |---|---|---|
 | `title` | string | One line, 1 to 128 characters, no control character, no bidi control, no line separator. |
 | `explanation` | string, optional | Text of the agent, 1 to 8000 characters. |
-| `command` | `{text, label?}`, optional | `text` has 1 to 32768 bytes. `label` is one line of 1 to 32 characters. |
+| `explanation_format` | string, optional | `plain` (the default) or `markdown`. Only with `explanation`. See "Text format and code color". |
+| `command` | `{text, label?, language?}`, optional | `text` has 1 to 32768 bytes. `label` is one line of 1 to 32 characters. `language` is a hint for the color. See "Text format and code color". |
 | `input` | object | See below. |
 | `hint` | object, optional | `{suggested, confidence?, source}`. `suggested` and `source` are lines of 1 to 32 characters. `confidence` is from 0 to 1. |
 | `as_of_ms` | time, optional | The time of the data in the question. |
 
-`input` holds `type` (`choice`, `confirm`, `text` or `none`), `multiple` (bool), `min` and `max` (0 to 255), `options[]` and `placeholder?`.
+`input` holds `type` (`choice`, `confirm`, `text`, `none` or `form`), `multiple` (bool), `min` and `max` (0 to 255), `options[]`, `placeholder?` and `questions[]?`.
 A `choice` has 2 to 8 options.
 Each option is `{id, label, description?}`.
 `id` has 1 to 32 characters of `a-z 0-9 _ -` and is unique.
@@ -302,6 +303,7 @@ The other types have no option, `multiple` false and `min` and `max` 0.
 Only `text` can have a `placeholder` of 1 to 128 characters.
 A `text` question has `allow_custom` false.
 A `none` question has both flags false.
+Only a `form` has `questions`. See "Forms".
 
 Members of an approval: the member `approval` only.
 
@@ -316,6 +318,8 @@ Members of an approval: the member `approval` only.
 | `op` | object | The operation. Strict rules of the effect. `op` and `view` together have at most 32768 bytes. |
 | `view` | object | `{title, fields[], body, body_label?}`. See "Effect". |
 | `explanation` | string, optional | Text of the agent, not verified. 1 to 8000 characters. It is not part of the effect. |
+| `explanation_format` | string, optional | `plain` (the default) or `markdown`. Only with `explanation`. |
+| `language` | string, optional | A hint for the color of the command. It is not part of the effect. See "Text format and code color". |
 | `hint` | object, optional | As for a question. |
 | `previous` | `{approved_at_ms, consumed}`, optional | The same service, subject, action, resource and effect were approved earlier. `consumed` tells whether the service used it. |
 | `follows` | `{code, intent}`, optional | The item follows an earlier item that the owner declined with a text. The server reads it from `previous_id`. |
@@ -350,8 +354,9 @@ A turn in the thread of an item.
 | `by` | string | `agent` or `user`. |
 | `created_at_ms` | time | |
 | `explanation` | string, optional | With `agent`. 1 to 8000 characters. |
-| `command` | `{text, label?}`, optional | With `agent`. As in a question. |
-| `text` | string | With `user` only. 1 to 8000 characters. |
+| `explanation_format` | string, optional | With `agent` and `explanation`. `plain` (the default) or `markdown`. |
+| `command` | `{text, label?, language?}`, optional | With `agent`. As in a question. |
+| `text` | string | With `user` only. 1 to 8000 characters. It is always plain text. |
 
 An agent turn has `explanation`, `command` or both. A user turn has `text` and nothing else.
 
@@ -434,6 +439,7 @@ A frame that the server cannot handle now (the storage is away) gets the `error`
 | `choice[]` | strings, optional | 0 to 8 option ids. With `accept` of a question. An answer by free text has an empty list. |
 | `text` | string, optional | 1 to 8000 characters, no NUL. Never with `accept` of an approval. |
 | `intent` | string, optional | `comment` or `change_request`. With `decline` and `text` only. |
+| `answers[]` | objects, optional | The answers to a form: 1 to 4 entries. With `accept` only. It excludes `choice`, `text`, `intent` and `shown_effect`. See "Forms". |
 
 For a `confirm` question the choice is `["yes"]` or `["no"]`.
 A decline of an approval is the only refusal. A decline of a question means: no answer.
@@ -478,6 +484,131 @@ The server applies no preference in version 5.1.0. The digest and the flag `quie
 | `digest.every_h` | u16 | 1 to 168. With `every` only. |
 
 `off` has no other member.
+
+## Text format and code color
+
+The `explanation` of an agent is a text that the portal does not trust.
+It can be plain text or Markdown.
+The member `explanation_format` tells which one: `plain` (the default) or `markdown`.
+The member exists in the frames `request` (a question and an approval) and `message` (a turn of the agent).
+
+No other text has a format.
+A `command`, an answer, a `reply` and a comment of the user are always plain text.
+
+The device and the server read Markdown with one implementation in the core crate (`render::markdown`).
+The result is a closed tree.
+A construct that is not in the list below stays plain text, as the author wrote it.
+A parser never fails: a text over a limit becomes one block of plain text.
+
+| Kept | Plain text |
+|---|---|
+| Paragraphs, soft and hard line breaks. | Raw HTML. |
+| Headings of level 1 to 3, shown as bold lines. | Images, tables and footnotes. |
+| Emphasis, strong text and inline code. | Autolinks, thematic breaks and headings of level 4 to 6. |
+| Fenced and indented code blocks, with a language from the info string. | |
+| Block quotes. | |
+| Ordered and unordered lists, with a depth of 3 or less. | |
+| Task items (`- [ ]` and `- [x]`), shown as a read-only box. | |
+| Links, shown as text with the host in parentheses. | |
+
+A link is never active. The screen shows its text and, in parentheses, the host of the address.
+Only the schemes `http` and `https` have a host.
+A link with another scheme (for example `javascript:` or `data:`) shows its text only.
+
+The host is the part after the user information, so `https://good.example@bad.example/` shows `bad.example`.
+A host with a character other than a letter, a digit, a dot, a dash or a port number gives no host.
+
+The limits are an input of 8000 characters (the limit of an explanation), 2000 nodes and a depth of 4 levels.
+A quote, a list item, an emphasis or a link is one level.
+A list can have 3 levels of lists at most.
+A text over one of these limits is shown as plain text.
+The server checks the length at creation. It does not check the other limits.
+
+A screen shows a character that can hide text (a bidi control, a zero-width character, a control character) as a visible mark such as `U+202E`.
+The screen never removes it.
+
+The member `language` is a hint for the color of a command.
+It exists in `command` (frames `request` and `message`) and in `approval`.
+The value is one of `plain`, `sql`, `json`, `yaml`, `toml`, `bash`, `python`, `rust`, `javascript`, `typescript` and `diff`.
+Any other value, in any other case, is an error.
+The language never changes the text: it only gives color.
+
+The core crate colors code with hand-written tokenizers (`render::highlight`).
+The result is a list of tokens that covers the text with no gap.
+A token has a start, an end and a class.
+The classes are `keyword`, `string`, `number`, `comment`, `function`, `type`, `operator`, `punctuation` and `plain`.
+The language `diff` adds the classes `add`, `del`, `hunk` and `meta`.
+
+A string or a comment that is not closed runs to the end of the line.
+Where the language lets a string span lines, it runs to the end of the text.
+
+The JNI functions `markdownParse(text)` and `highlightTokens(language, text)` give these results to the app.
+`markdownParse` returns the JSON of the tree.
+`highlightTokens` returns a JSON array of `[start, end, "class"]`.
+The offsets are in UTF-16 code units, as Kotlin counts a string.
+
+A Markdown explanation that the owner reads on the phone:
+
+```json
+{"t":"request","kind":"question","title":"Purge the staging data?",
+ "explanation":"The purge frees **40 GB**.\n\n```sql\nSELECT count(*) FROM staging.events;\n```",
+ "explanation_format":"markdown",
+ "command":{"text":"DELETE FROM staging.events WHERE ts < '2026-11-01';","label":"SQL","language":"sql"}}
+```
+
+The complete frames are `request-question-markdown.json`, `request-approval-markdown.json` and `message-agent-markdown.json`.
+
+## Forms
+
+A form is a question with several questions in one request.
+Its `input.type` is `form`.
+The member `input.questions[]` has 1 to 4 items.
+The members `multiple`, `min`, `max`, `options` and `placeholder` of `input` are empty (false, 0, 0, an empty list, absent).
+
+| Member of a question | Type | Rule |
+|---|---|---|
+| `id` | string | 1 to 32 characters of `a-z 0-9 _ -`. It is unique in the form. |
+| `header` | string | A short label. One line of 1 to 16 characters. |
+| `text` | string | The question. 1 to 600 characters. It can have line breaks. It is plain text. |
+| `type` | string | `choice` or `text`. |
+| `multiple`, `min`, `max`, `options[]` | | The rules of a `choice` input, for a `choice` question. A `text` question has no option, `multiple` false and `min` and `max` 0. |
+| `placeholder` | string, optional | With `text` only. 1 to 128 characters, one line. |
+
+The flags of the item apply to the whole form.
+With `allow_custom`, each `choice` question has a row "Other" with a free text.
+The free text is exclusive of the ticks of the same question.
+A form that has no `choice` question cannot have `allow_custom`.
+
+With `allow_ask_back`, the owner can ask the agent a question. The form stays open.
+A form on a `one_shot` key is an error: a closed automatic system gives one decision.
+A form is a question, so it never has an approval.
+
+The `answer` of a form has `answers[]` and `action` `accept`.
+It has one entry for each question and no other entry.
+An entry is `{question_id, choice[]?, text?}` with exactly one of `choice` and `text`.
+`choice` has 1 to 8 option ids with no repeat.
+`text` has 1 to 8000 characters, no NUL.
+For a `choice` question, `text` is the free answer.
+
+The parser checks only the shape: 1 to 4 entries, unique `question_id`, and the rules of the entry.
+The server checks the ids, the number of ticks and the free text against the form of the item.
+It uses `validate_form_answer(questions, allow_custom, answers)` of the core crate.
+A device can call the same function before it sends the answer.
+
+```json
+{"t":"answer","request_id":"bbbb...","client_msg_id":"m-0004","action":"accept","answers":[
+ {"question_id":"target","choice":["staging"]},
+ {"question_id":"checks","choice":["unit","e2e"]},
+ {"question_id":"window","text":"Friday morning"},
+ {"question_id":"note","text":"Use the blue pipeline."}]}
+```
+
+The complete frames are `request-question-form.json` and `answer-form.json`.
+
+The largest form (4 questions with 8 options at the maximum length) fits in one Noise message.
+The sender still checks the size of each frame.
+The `answer` of a form can be larger than one message when each text has the maximum length in a script with 3-byte characters.
+The sender refuses such a frame.
 
 ## Effect
 

@@ -411,7 +411,7 @@ A warning mark "no access permission" ignores the service `portal`. Any other se
 - **Deliveries of items.** The delivery of an item has no age limit. The query `pending_item_deliveries` ignores `delivery_ttl`, because the lease and `max_lifetime` decide. A delivery that the server cannot build is withdrawn. So is a `settled` for an item that is open again, and the deliveries of an `abandoned` item for a phone that never got it.
 - **Catch-up.** At each session, `catch_up_device` gives the phone one delivery for the newest request of each open item of its owner, and one for each turn. It skips an item that the phone already has. A second instance that runs the same statement adds nothing, because the pair of alert and device is unique.
 - **Frames of `sync` and `refresh`.** They are answers and not deliveries. They have a new random id that is in no queue, because the phone ignores an id that it already holds. A lost answer is asked again at the next session.
-- **Sealed texts of the thread.** A turn of the agent is the JSON object `{explanation?, command?}`. A `reply` of the owner is the text. The text of an answer is the JSON object `{choice?, text?, intent?}`. A text that is not such an object reads as the text or the explanation. The module `frames.rs` has the writers and the readers, so the agent channel and the phone read the same format.
+- **Sealed texts of the thread.** A turn of the agent is the JSON object `{explanation?, explanation_format?, command?: {text, label?, language?}}`. A `reply` of the owner is the text. The text of an answer is the JSON object `{choice?, text?, intent?, answers?}`. A text that is not such an object reads as the text or the explanation. The module `frames.rs` has the writers and the readers, so the agent channel and the phone read the same format.
 - **The line "from".** The portal writes it from the name that the owner gave to the key, read through the trait `Authorizer`. A key that the portal does not find gets the name `key` and the first 8 characters of its id.
 
 ## 11. Configuration and switches
@@ -596,7 +596,7 @@ The papers of 2026-11-08 settled step 3. The owner accepted them as final produc
 
 The decision of 2026-10-02 says that alerts are one way, with no human acknowledgement. This stays true for the kind `alert`. It ends for the new kinds, which need an answer from a person. The owner agreed. Protocol 5 carries them, and a phone of protocol 4 gets the close code 4426.
 
-- **Decisions.** No signature of the phone. No risk class. The owner of the key is the only recipient and the only approver. The service learns only the verdict. The portal seals the bodies at rest, and the text is plain text.
+- **Decisions.** No signature of the phone. No risk class. The owner of the key is the only recipient and the only approver. The service learns only the verdict. The portal seals the bodies at rest, and the text is plain text or, for the explanation, safe Markdown.
 - **No other recipient.** The earlier sketch had `inbox_user`, `approval.decide` and `question.ask_user`. They do not exist. An item has no named account, no group, no delegation and no escalation.
 - **Gate.** The portal decides. A grant with `confirm` makes the PDP answer `approval_required`. The agent calls the tool again with the same arguments, and the PDP consumes the approval one time.
 - **Two parts.** A message has a command and an explanation. The command comes from the service and is bound to the effect hash. The explanation comes from the agent and is not verified.
