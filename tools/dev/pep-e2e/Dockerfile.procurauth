@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+# The programs of the ProcurAuth repository that tools/dev/pep-e2e.sh needs: the reference service (a real PEP)
+# and the conformance runner. The build context is a checkout of the procurauth repository. The build only reads it.
+# The image stays on this machine. No tool of this repository pushes it to a registry.
+FROM rust:1.98 AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p reference-service -p access-conformance
+
+FROM debian:trixie-slim
+COPY --from=build /src/target/release/reference-service /src/target/release/access-conformance /usr/local/bin/
+# The profiles of the runner read the test keys at relative paths: keep the layout of the repository.
+COPY --from=build /src/crates/access-conformance/examples /pa/crates/access-conformance/examples
+COPY --from=build /src/crates/reference-service/examples /pa/crates/reference-service/examples
+RUN useradd --uid 10001 --no-create-home pa
+USER 10001:10001
