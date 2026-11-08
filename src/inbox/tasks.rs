@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::items_store::ItemError;
 use super::log;
 use super::pg::Event;
 use super::state::App;
@@ -77,6 +78,7 @@ fn spawn_cluster(app: Arc<App>) {
                         app.hub.kick_older(&device, connected_at, close::REPLACED);
                     }
                 }
+                Event::Items => app.item_changed.notify_waiters(),
                 Event::Resync => {
                     // A notification of a revocation can be lost with the connection: the copy is
                     // read again, and a session of a device that it shows revoked ends.
@@ -166,8 +168,51 @@ fn spawn_resilience(app: Arc<App>) {
     });
 }
 
+/// The sweeper of the items: the clock decides an abandon, an expiry and a lapse every 2 seconds, and the retention
+/// runs every minute. It is safe with several instances: PostgreSQL locks the rows with `SKIP LOCKED`.
+fn spawn_items(app: Arc<App>) {
+    if app.items().is_none() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut n: u64 = 0;
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = app.shutdown.wait() => return,
+            }
+            n += 1;
+            let Some(items) = app.items() else { return };
+            match items.sweep().await {
+                Ok(_) => {}
+                // Without a primary the items wait: the leases are extended when it comes back.
+                Err(ItemError::Degraded) => continue,
+                Err(e) => log::warn!(event = "items_sweep_failed", error = %e),
+            }
+            if n.is_multiple_of(30) {
+                match items.maintain().await {
+                    Ok(r) if r.bodies_purged + r.items_deleted + r.events_deleted > 0 => {
+                        log::info!(
+                            event = "items_retention",
+                            bodies_purged = r.bodies_purged,
+                            items_deleted = r.items_deleted,
+                            events_deleted = r.events_deleted
+                        )
+                    }
+                    Ok(_) => {}
+                    Err(ItemError::Degraded) => {}
+                    Err(e) => log::warn!(event = "items_retention_failed", error = %e),
+                }
+            }
+        }
+    });
+}
+
 pub fn spawn_background(app: Arc<App>) {
     spawn_cluster(app.clone());
+    spawn_items(app.clone());
     spawn_resilience(app.clone());
     // Gauges and last-seen persistence.
     let a = app.clone();

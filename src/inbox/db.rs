@@ -106,9 +106,13 @@ CREATE TABLE alerts (
     -- The service that an alert of the portal names (`inbox.watch`). A reader sees the alert only
     -- when the reader may open the service. NULL for every other alert.
     service         TEXT,
+    -- 5.1.0, in place: the item that a delivery of an item names, and the number of its turn.
+    request_id      TEXT,
+    seq             INTEGER,
     UNIQUE (source, idempotency_key)
 ) STRICT;
 CREATE INDEX alerts_created ON alerts(created_at);
+CREATE INDEX alerts_request ON alerts(request_id) WHERE request_id IS NOT NULL;
 
 CREATE TABLE deliveries (
     seq             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +147,145 @@ CREATE INDEX connections_time ON connections(connected_at);
 CREATE TABLE content_key_check (
     body_kid    TEXT PRIMARY KEY,
     check_value BLOB NOT NULL
+) STRICT;
+
+-- 5.1.0, in place: the items (approvals and questions). The body of an item is sealed (see
+-- `content_box.rs`); every other column is metadata. A delivery of an item is a row of `alerts` with
+-- the kind of the item and its `request_id`.
+CREATE TABLE items (
+    request_id        TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL CHECK (kind IN ('question', 'approval')),
+    chain_id          TEXT NOT NULL,
+    supersedes        TEXT,
+    superseded_by     TEXT,
+    previous_id       TEXT,
+    requester_key_id  TEXT NOT NULL,
+    requester_owner   TEXT NOT NULL,
+    source            TEXT NOT NULL CHECK (source IN ('mcp', 'api')),
+    interaction       TEXT NOT NULL CHECK (interaction IN ('conversational', 'one_shot')),
+    urgency           TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+    input_type        TEXT CHECK (input_type IN ('choice', 'confirm', 'text', 'none')),
+    state             TEXT NOT NULL CHECK (state IN ('pending', 'replied', 'answered', 'abandoned', 'expired', 'cancelled', 'superseded')),
+    settle_reason     TEXT,
+    body_kid          TEXT,
+    body_ct           BLOB,
+    body_size         INTEGER NOT NULL,
+    body_purged_at    INTEGER,
+    created_at        INTEGER NOT NULL,
+    chain_created_at  INTEGER NOT NULL,
+    lease_s           INTEGER,
+    lease_until       INTEGER,
+    until_at          INTEGER,
+    agent_seen_at     INTEGER NOT NULL,
+    last_agent_turn_at INTEGER,
+    abandoned_at      INTEGER,
+    revivals          INTEGER NOT NULL DEFAULT 0,
+    last_seq          INTEGER NOT NULL DEFAULT 0,
+    allow_custom      INTEGER NOT NULL DEFAULT 0,
+    allow_ask_back    INTEGER NOT NULL DEFAULT 0,
+    answer_action     TEXT CHECK (answer_action IN ('accept', 'decline')),
+    answered_at       INTEGER,
+    answered_by       TEXT,
+    answered_via      TEXT,
+    final_at          INTEGER,
+    idempotency_key   TEXT NOT NULL,
+    CHECK ((lease_s IS NULL) <> (until_at IS NULL)),
+    UNIQUE (requester_key_id, idempotency_key)
+) STRICT;
+CREATE INDEX items_open ON items(state, lease_until);
+CREATE INDEX items_owner ON items(requester_owner, state);
+CREATE INDEX items_key ON items(requester_key_id, state);
+CREATE INDEX items_chain ON items(chain_id);
+CREATE INDEX items_final ON items(final_at) WHERE final_at IS NOT NULL;
+CREATE INDEX items_kid ON items(body_kid) WHERE body_kid IS NOT NULL;
+
+CREATE TABLE turns (
+    request_id    TEXT NOT NULL REFERENCES items(request_id) ON DELETE CASCADE,
+    seq           INTEGER NOT NULL,
+    author        TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('say', 'reply', 'answer', 'decline', 'revive')),
+    payload_ct    BLOB,
+    body_kid      TEXT,
+    client_msg_id TEXT,
+    device_id     TEXT,
+    via           TEXT CHECK (via IN ('phone', 'web')),
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (request_id, seq),
+    UNIQUE (request_id, client_msg_id)
+) STRICT;
+CREATE INDEX turns_kid ON turns(body_kid) WHERE body_kid IS NOT NULL;
+
+-- Metadata of an approval. The effect hash binds it to one action. `key_hash` is the hash of the service, the
+-- subject, the action, the resource and the effect: one open item for each value.
+CREATE TABLE approvals (
+    request_id     TEXT PRIMARY KEY REFERENCES items(request_id) ON DELETE CASCADE,
+    service        TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    resource_path  TEXT NOT NULL,
+    effect         TEXT NOT NULL,
+    key_hash       TEXT NOT NULL,
+    evaluation_id  TEXT,
+    code           TEXT NOT NULL,
+    decision       TEXT CHECK (decision IN ('approve', 'deny')),
+    shown_effect   TEXT,
+    consume_before INTEGER,
+    consumed_at    INTEGER,
+    lapsed_at      INTEGER
+) STRICT;
+CREATE INDEX approvals_hash ON approvals(key_hash);
+
+-- One row for each transition, never for a renewal, and never with a body.
+CREATE TABLE item_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    at         INTEGER NOT NULL,
+    event      TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    detail     TEXT
+) STRICT;
+CREATE INDEX item_events_request ON item_events(request_id, at);
+CREATE INDEX item_events_at ON item_events(at);
+
+-- The explanation of an agent for the next approval of its key. The reference is a random value, and only its
+-- digest is kept. The explanation is sealed.
+CREATE TABLE approval_intents (
+    ref_digest       TEXT PRIMARY KEY,
+    requester_key_id TEXT NOT NULL,
+    lease_s          INTEGER,
+    until_at         INTEGER,
+    allow_custom     INTEGER NOT NULL DEFAULT 0,
+    allow_ask_back   INTEGER NOT NULL DEFAULT 0,
+    body_kid         TEXT,
+    body_ct          BLOB,
+    body_size        INTEGER NOT NULL,
+    expires_at       INTEGER NOT NULL,
+    used_at          INTEGER,
+    request_id       TEXT
+) STRICT;
+CREATE INDEX approval_intents_kid ON approval_intents(body_kid) WHERE body_kid IS NOT NULL;
+CREATE INDEX approval_intents_expires ON approval_intents(expires_at);
+
+CREATE TABLE approval_mute (
+    subject     TEXT PRIMARY KEY,
+    muted_until INTEGER NOT NULL,
+    reason      TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE account_prefs (
+    login       TEXT PRIMARY KEY,
+    digest_mode TEXT,
+    digest_at   TEXT,
+    digest_tz   TEXT,
+    quiet_from  TEXT,
+    quiet_to    TEXT,
+    quiet_tz    TEXT
+) STRICT;
+
+-- The time of the last pass of the sweeper. A gap longer than `lease.grace` extends each open lease.
+CREATE TABLE items_heartbeat (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    swept_at INTEGER NOT NULL
 ) STRICT;
 "#,
     r#"
@@ -918,7 +1061,8 @@ pub struct PendingDelivery {
     pub service: Option<String>,
 }
 
-/// Oldest deliveries of `device_id` whose receipt the device has not sent yet,
+/// Oldest deliveries of `device_id` whose receipt the device has not sent yet, for the messages that are not items
+/// (a row of an item names its `request_id`, and the frames of the items come with the phone side of protocol 5),
 /// among alerts created at or after `cutoff` (older ones have expired).
 pub fn pending_deliveries(
     conn: &Connection,
@@ -929,7 +1073,7 @@ pub fn pending_deliveries(
     let mut stmt = conn.prepare_cached(
         "SELECT d.seq, a.id, a.target_kind, a.target_id, a.title, a.created_at, a.kind, a.service
          FROM deliveries d JOIN alerts a ON a.id = d.alert_id
-         WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3
+         WHERE d.device_id = ?1 AND d.received_at IS NULL AND a.created_at >= ?3 AND a.request_id IS NULL
          ORDER BY d.seq LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![device_id, limit, cutoff], |r| {
@@ -1143,7 +1287,7 @@ pub fn recent_alerts(
     cutoff: i64,
 ) -> rusqlite::Result<Vec<AlertSummary>> {
     let sql = format!(
-        "{ALERT_SUMMARY} WHERE a.created_at >= ?2 GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?1"
+        "{ALERT_SUMMARY} WHERE a.created_at >= ?2 AND a.request_id IS NULL GROUP BY a.id ORDER BY a.created_at DESC LIMIT ?1"
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![limit, since_ms], alert_summary)?;
@@ -1237,7 +1381,7 @@ pub fn alert_detail(
     id: &str,
     cutoff: i64,
 ) -> rusqlite::Result<Option<AlertDetail>> {
-    let sql = format!("{ALERT_SUMMARY} WHERE a.id = ?1 GROUP BY a.id");
+    let sql = format!("{ALERT_SUMMARY} WHERE a.id = ?1 AND a.request_id IS NULL GROUP BY a.id");
     let Some(summary) = conn
         .query_row(&sql, params![id], alert_summary)
         .optional()?
@@ -1366,7 +1510,8 @@ fn scope_sql(scope: &Scope) -> (String, Vec<String>) {
         }
     };
     (
-        format!("(({groups}) OR (target_kind = 'user' AND target_id = ?)) AND ({services})"),
+        // The web shows the alerts. The items have their own page, and a row of an item names its `request_id`.
+        format!("request_id IS NULL AND (({groups}) OR (target_kind = 'user' AND target_id = ?)) AND ({services})"),
         values,
     )
 }

@@ -132,6 +132,14 @@ pub async fn end_account(app: &App, login: &str) -> Result<usize, String> {
     for id in &ids {
         app.hub.kick(id, close::REVOKED);
     }
+    // The open items of a deleted owner are withdrawn.
+    if let Some(items) = app.items() {
+        match items.cancel_where(None, Some(login), "owner_deleted").await {
+            Ok(n) if n > 0 => log::info!(event = "items_cancelled", user.name = %login, count = n),
+            Ok(_) => {}
+            Err(e) => log::warn!(event = "items_cancel_failed", user.name = %login, error = %e),
+        }
+    }
     if let Err(e) = app.replica.sync().await {
         app.metrics.replica_sync_failure();
         log::warn!(event = "replica_sync_failed", error = %e);

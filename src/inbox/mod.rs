@@ -5,6 +5,8 @@
 //! deliver an alert when the rest of the portal is not ready.
 //!
 //! - `content_box`: the seal of the contents of the items at rest.
+//! - `items`, `items_ops`, `items_store`: the engine of the items (states, lease, answer, sweeper), with the SQL
+//!   of both databases in `items_db`, `items_pg` and `items_sql`.
 //! - `device`: enrollment and sessions of the phones (WebSocket, protocol 4).
 //! - `enrollment`: the enrollment codes that the accounts make, and the devices of an account.
 //! - `api`: the API of the producers and the webhooks.
@@ -26,6 +28,12 @@ mod enrollment;
 mod http;
 mod hub;
 mod internal;
+mod items;
+mod items_db;
+mod items_ops;
+mod items_pg;
+mod items_sql;
+mod items_store;
 pub mod log;
 pub mod metrics;
 pub mod notify;
@@ -404,6 +412,8 @@ impl Slot {
         // nothing, when the file holds another key under the same id.
         if let Some(content) = &secrets.content {
             bind_content_keys(&db, content).await?;
+            // A database of a version 5.0 has no table of the items, and a sealed content needs its key.
+            items_store::start_checks(&db, content).await?;
         }
         let group_ids: Vec<String> = config.groups.keys().cloned().collect();
         let pruned = db
@@ -471,6 +481,8 @@ impl Slot {
             session_budget,
             handshakes: state::Handshakes::new(config.devices.max_handshakes_per_address),
             authorizer: std::sync::OnceLock::new(),
+            clock: Arc::new(items::SystemClock),
+            item_changed: tokio::sync::Notify::new(),
             server_name,
             config,
         });

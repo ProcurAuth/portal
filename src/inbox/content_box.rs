@@ -21,9 +21,6 @@
 //! fewer than 2^32 values with one key. The associated data names the row, the field, the sequence number
 //! and the effect (see [`aad`]): a sealed value does not open on another row, another field or another effect.
 
-// The item engine reads the box. Until it exists, the start uses only the check values.
-#![allow(dead_code)]
-
 use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -245,6 +242,7 @@ impl ContentBox {
 
     /// The value that the database keeps to tell whether a key is the key of its contents. It reveals nothing
     /// about the key. `None` when the id is not in the file.
+    #[allow(dead_code)] // the PDP of lot L6 reads it
     pub fn check_value(&self, kid: &str) -> Option<[u8; 32]> {
         self.keys.iter().find(|k| k.id == kid).map(|k| k.check)
     }
@@ -255,12 +253,14 @@ impl ContentBox {
     }
 
     /// The key of the `evaluation_id` of the active key, with its id. The PDP signs with it.
+    #[allow(dead_code)] // the PDP of lot L6 reads it
     pub fn evaluation_key(&self) -> (&str, &[u8; 32]) {
         let key = &self.keys[self.active];
         (&key.id, &key.evaluation)
     }
 
     /// The key of the `evaluation_id` of the key `kid`. `None` when the id is not in the file.
+    #[allow(dead_code)] // the PDP of lot L6 reads it
     pub fn evaluation_key_of(&self, kid: &str) -> Option<&[u8; 32]> {
         self.keys
             .iter()

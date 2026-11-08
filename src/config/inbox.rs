@@ -26,7 +26,6 @@ pub struct InboxConfig {
     /// `None` without the block `inbox.watch`.
     pub watch: Option<WatchConfig>,
     /// `None` without the block `inbox.items`. The block comes with `inbox.at_rest`, never alone.
-    #[allow(dead_code)] // the item engine reads the limits
     pub items: Option<ItemsConfig>,
     /// `None` without the block `inbox.at_rest`.
     pub at_rest: Option<AtRestConfig>,
@@ -110,7 +109,6 @@ pub struct WatchConfig {
 /// The block `inbox.items`: the limits of the approvals and of the questions. Each limit is the
 /// value of the file or the documented default.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // the item engine reads the values
 pub struct ItemsConfig {
     pub max_lifetime: Duration,
     pub max_open_per_key: u32,
@@ -119,18 +117,21 @@ pub struct ItemsConfig {
     pub lease: LeaseConfig,
     pub max_chain: u32,
     pub max_turns: u32,
+    #[allow(dead_code)] // the screens of lots L8 and L10 read it
     pub stale_after: Duration,
     pub retention: Duration,
     pub body_purge_after: Duration,
     pub audit_retention: Duration,
+    #[allow(dead_code)] // lot L11 reads it
     pub digest: DigestConfig,
+    #[allow(dead_code)] // lot L13 reads it
     pub max_body_bytes: usize,
+    #[allow(dead_code)] // lots L7 and L9 read it
     pub wait_max: Duration,
 }
 
 /// The block `inbox.items.lease`.
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // the item engine reads the values
 pub struct LeaseConfig {
     pub min: Duration,
     pub max: Duration,
@@ -157,7 +158,6 @@ pub enum DigestConfig {
 /// The block `inbox.at_rest`: the keys that seal the contents. The secrets are in
 /// [`InboxSecrets::content_keys`].
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // the item engine reads the values
 pub struct AtRestConfig {
     /// The id of the key that seals the new contents.
     pub active_key: String,

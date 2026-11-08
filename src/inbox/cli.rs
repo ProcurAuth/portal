@@ -5,6 +5,8 @@
 //! - `token --out FILE`: makes the text of an API key, for a block `api_key` of the file.
 //! - `content-key --out FILE`: makes a key that seals the contents of the items, for a block
 //!   `inbox.at_rest.key` of the file.
+//! - `content-purge --config FILE --key ID`: erases the sealed contents of a key that the file lost, and keeps the
+//!   metadata of the items.
 //! - `import-sqlite --config FILE --from FILE`: copies the data of a SQLite file of the inbox into
 //!   the empty PostgreSQL database of the portal.
 //! - `healthcheck --config FILE`: asks `/readyz` of the listener of the portal.
@@ -57,6 +59,7 @@ pub const USAGE: &str = "\
   portal inbox keygen --out FILE
   portal inbox token --out FILE
   portal inbox content-key --out FILE
+  portal inbox content-purge --config FILE --key ID
   portal inbox import-sqlite --config FILE --from SQLITE_FILE
   portal inbox healthcheck --config FILE";
 
@@ -98,6 +101,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "content-purge" => {
+            let f = Flags::parse(rest, &["--config", "--key"])?;
+            content_purge(
+                &PathBuf::from(f.required("--config")?),
+                &f.required("--key")?,
+            )
+        }
         "import-sqlite" => {
             let f = Flags::parse(rest, &["--config", "--from"])?;
             let config_path = PathBuf::from(f.required("--config")?);
@@ -114,6 +124,56 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
         other => Err(format!("unknown inbox command {other:?}\n{USAGE}")),
     }
+}
+
+/// Erases the sealed contents of the key `kid`. The key must not be in the file: the command is for a key that is lost.
+fn content_purge(config_path: &std::path::Path, kid: &str) -> Result<(), String> {
+    let (config, mut secrets) = Config::load(config_path)?;
+    let at_rest = config
+        .inbox
+        .as_ref()
+        .and_then(|i| i.at_rest.as_ref())
+        .ok_or("--config must contain the block inbox.at_rest")?;
+    if at_rest.keys.iter().any(|k| k == kid) {
+        return Err(format!(
+            "inbox.at_rest.key {kid:?} is in the file: its contents are not lost, and this command does not erase them (it erases the contents of a key that the file lost)"
+        ));
+    }
+    let (items, turns, intents) = match &config.storage.backend {
+        StorageBackend::Sqlite(path) => super::items_db::purge_key_file(path, kid)?,
+        StorageBackend::Postgres(pg) => {
+            let password = secrets
+                .postgres_password
+                .take()
+                .ok_or("internal error: the postgres block has no password")?;
+            let password = std::str::from_utf8(password.as_bytes())
+                .map(|p| Zeroizing::new(p.to_string()))
+                .map_err(|_| "postgres.password is not valid UTF-8".to_string())?;
+            let settings = PgSettings {
+                host: pg.host.clone(),
+                port: pg.port,
+                database: pg.database.clone(),
+                user: pg.user.clone(),
+                password,
+                pool_size: 1,
+                connect_timeout: pg.connect_timeout,
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("cannot start runtime: {e}"))?;
+            runtime.block_on(async {
+                let store = super::store::Store::Pg(std::sync::Arc::new(
+                    PgStore::connect(&settings).await?,
+                ));
+                super::items_store::purge_key(&store, kid).await
+            })?
+        }
+    };
+    println!(
+        "erased the sealed contents of the key {kid:?}: {items} items, {turns} turns, {intents} intents (the metadata stays)"
+    );
+    Ok(())
 }
 
 fn import_sqlite(config_path: &std::path::Path, from: &std::path::Path) -> Result<(), String> {

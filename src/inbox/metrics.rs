@@ -92,6 +92,12 @@ pub struct InboxMetrics {
     replica_sync_failures: AtomicU64,
     spool_rejected: AtomicU64,
     latency: Mutex<Histogram>,
+    item_events: Labeled,
+    item_answers: Labeled,
+    item_renewals_written: AtomicU64,
+    item_body_served: AtomicU64,
+    item_body_reads: AtomicU64,
+    item_body_mismatches: AtomicU64,
     /// The open sessions of this instance.
     sessions: AtomicI64,
     // The gauges that the task of the statistics sets.
@@ -156,6 +162,34 @@ impl InboxMetrics {
         self.spool_rejected.fetch_add(1, Relaxed);
     }
 
+    /// One transition of an item, by event name (`requested`, `answered`, `abandoned`, ...).
+    pub fn item_event(&self, event: &'static str) {
+        self.item_events.add(event, 1);
+    }
+
+    /// One answer, by the status that the owner got.
+    pub fn item_answer(&self, status: &'static str) {
+        self.item_answers.add(status, 1);
+    }
+
+    /// One write of a lease. A renewal writes at most once in `lease_s`.
+    pub fn item_renewal_written(&self) {
+        self.item_renewals_written.fetch_add(1, Relaxed);
+    }
+
+    pub fn item_body_served(&self) {
+        self.item_body_served.fetch_add(1, Relaxed);
+    }
+
+    /// One read of a body by the superadmin (`inbox.at_rest.admin_body_read`).
+    pub fn item_body_read(&self) {
+        self.item_body_reads.fetch_add(1, Relaxed);
+    }
+
+    pub fn item_body_effect_mismatch(&self) {
+        self.item_body_mismatches.fetch_add(1, Relaxed);
+    }
+
     pub fn session_opened(&self) {
         self.sessions.fetch_add(1, Relaxed);
     }
@@ -207,6 +241,42 @@ impl InboxMetrics {
             self.receipts.load(Relaxed),
         );
         self.render_latency(&mut out);
+        self.item_events.render(
+            &mut out,
+            "portal_item_events_total",
+            "Transitions of items, by event",
+            "event",
+        );
+        self.item_answers.render(
+            &mut out,
+            "portal_item_answers_total",
+            "Answers of owners to items, by status",
+            "status",
+        );
+        counter(
+            &mut out,
+            "portal_item_lease_writes_total",
+            "Writes of a lease by a renewal",
+            self.item_renewals_written.load(Relaxed),
+        );
+        counter(
+            &mut out,
+            "portal_item_body_served_total",
+            "Bodies of items served to their owner",
+            self.item_body_served.load(Relaxed),
+        );
+        counter(
+            &mut out,
+            "portal_item_body_reads_total",
+            "Bodies of items read by the superadmin",
+            self.item_body_reads.load(Relaxed),
+        );
+        counter(
+            &mut out,
+            "portal_item_body_effect_mismatch_total",
+            "Bodies not served because the effect of the opened command differs from the stored effect",
+            self.item_body_mismatches.load(Relaxed),
+        );
         self.auth_failures.render(
             &mut out,
             "portal_inbox_auth_failures_total",
