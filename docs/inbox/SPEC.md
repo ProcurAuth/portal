@@ -492,7 +492,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 
 | Requirement | Release | Lot | Test |
 |---|---|---|---|
-| 3.1.5a | 5.1.0 | L3 | to fill |
+| 3.1.5a | 5.1.0 | L3 | `proto::tests::the_kind_of_an_alert_is_alert_and_nothing_else`, `frames::the_golden_files_cover_every_frame_in_both_directions`, `old_hello_protocol_4_gets_4426` |
 | 3.3.8a | 5.1.0 | L9 | to fill |
 | 3.6.1 | 5.1.0 | L5 | to fill |
 | 3.6.2 | 5.1.0 | L5 | to fill |
@@ -522,9 +522,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.7.1 | 5.1.0 | L2 | to fill |
 | 3.7.2 | 5.1.0 | L6 | to fill |
 | 3.7.3 | 5.1.0 | L6 | to fill |
-| 3.7.4 | 5.1.0 | L3, L7 | to fill |
-| 3.7.5 | 5.1.0 | L3, L7 | to fill |
-| 3.7.6 | 5.1.0 | L3, L7 | to fill |
+| 3.7.4 | 5.1.0 | L3, L7 | L3: `frames::golden_approval_verifies_and_a_changed_op_does_not`. L7: to fill |
+| 3.7.5 | 5.1.0 | L3, L7 | L3: `effect::tests::effect_vectors_match`, `effect::tests::view_pointer_must_exist`, `effect::tests::effect_changes_with_service_action_resource_op_each`. L7: to fill |
+| 3.7.6 | 5.1.0 | L3, L7 | L3: `effect::tests::jcs_rejects_float_and_integer_above_2_53`. L7: to fill |
 | 3.7.7 | 5.1.0 | L7 | to fill |
 | 3.7.8 | 5.1.0 | L7 | to fill |
 | 3.7.9 | 5.1.0 | L7 | to fill |
@@ -561,7 +561,7 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 3.9.4 | 5.1.0 | L11 | to fill |
 | 3.9.5 | 5.1.0 | A3 | to fill |
 | 3.9.6 | 5.1.0 | L11 | to fill |
-| 3.10.1 | 5.1.0 | L3 | to fill |
+| 3.10.1 | 5.1.0 | L3 | `frames::every_frame_rejects_unknown_field`, `invalid/client/answer-with-signature.json` in `frames::invalid_frames_are_refused` |
 | 3.10.2 | 5.1.0 | L2 | to fill |
 | 3.10.3 | 5.1.0 | L7 | to fill |
 | 3.10.4 | 5.1.0 | L12 | to fill |
@@ -607,9 +607,9 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 6.9.6 | 5.1.0 | L4, L6, L7, L9 | to fill |
 | 6.9.7 | 5.1.0 | L4 | to fill |
 | 6.9.8 | 5.2.0 | L13 | to fill |
-| 6.10.1 | 5.1.0 | L3 | to fill |
-| 6.10.2 | 5.1.0 | L3 | to fill |
-| 6.10.3 | 5.1.0 | L3 | to fill |
+| 6.10.1 | 5.1.0 | L3 | `old_hello_protocol_4_gets_4426`, `frames::old_hello_and_old_ack_do_not_parse` |
+| 6.10.2 | 5.1.0 | L3 | `frames::frames_round_trip_golden`, `frames::every_frame_rejects_unknown_field`, `frames::title_with_newline_or_control_rejected` |
+| 6.10.3 | 5.1.0 | L3 | `frames::request_fits_one_noise_message_at_max_sizes`, `frames::encode_refuses_a_frame_above_one_noise_message` |
 | 6.10.4 | 5.1.0 | L5 | to fill |
 | 6.11.1 | 5.1.0 | L5 | to fill |
 | 6.11.2 | 5.1.0 | L5 | to fill |
