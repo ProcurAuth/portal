@@ -32,6 +32,12 @@ All commands run in Docker. The host needs only Docker.
 
 Set `PORTAL_SLOT=<name>` to keep the build output of a worktree apart from the others. To regenerate the configuration reference, run `portal config-reference` and put the output between the markers of the root `README.md`. A test fails when the text is not the generated text.
 
+## Test layout
+
+The helpers of the end-to-end tests are in `tests/common/mod.rs`. They start the test server, open the sessions of the accounts, make the HTTP calls and play the phone side of protocol 4. Each file of `tests/` that needs them declares `mod common;`.
+
+The tests of the inbox are in `tests/inbox_e2e.rs`. The tests of items are in `tests/items_e2e.rs`. The conformance series D and E are in `src/http/conformance_tests.rs`. They use the harness of `src/http/cluster_tests.rs`. Add a new helper to `tests/common/mod.rs`, not to a test file.
+
 ## Pull requests
 
 Describe what changed, why, and how you checked it.

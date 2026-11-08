@@ -5027,6 +5027,8 @@ mod pdp;
 
 #[cfg(test)]
 mod cluster_tests;
+#[cfg(test)]
+mod conformance_tests;
 
 #[cfg(test)]
 mod tests {
