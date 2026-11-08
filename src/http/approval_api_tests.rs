@@ -1944,3 +1944,229 @@ fn require_explanation_and_the_default_keys_reach_the_metadata_and_the_gate() {
 
 #[path = "agent_channel_tests.rs"]
 mod agent_channel;
+
+// ---------------------------------------------------------------- the phone side of the thread (lot L8)
+//
+// These two tests run in the process: a comment of the owner and a question of the owner exist only for an item that
+// the agent made with an intent (`allow_custom`, `allow_ask_back`), and the agent channel is lot L9. The engine and the
+// frames are the real ones. The end-to-end tests of the phone are in `tests/items_e2e.rs`.
+
+/// The frames that the phone of `device` gets from its queue, as the server builds them.
+fn frames_of(r: &Rig, device: &str) -> Vec<inbox_core::proto::ServerMsg> {
+    use crate::inbox::testing::{Builder, Built};
+    runtime().block_on(async {
+        let queue = r.items().pending_item_deliveries(device, 50).await.unwrap();
+        let mut builder = Builder::new(&r.app, OWNER, &queue).expect("the engine runs");
+        let mut out = Vec::new();
+        for d in &queue {
+            match builder.delivery(d).await.unwrap() {
+                Built::Frame(bytes) => {
+                    out.push(inbox_core::proto::ServerMsg::decode(&bytes).unwrap())
+                }
+                Built::Withdraw(_) | Built::Keep => {}
+            }
+        }
+        out
+    })
+}
+
+/// A decline with a text and an intent: the agent reads the text and the intent, the service reads `denied` only, and the
+/// next request of the agent follows the declined one.
+#[test]
+fn decline_with_comment_reaches_agent_never_pep() {
+    use crate::inbox::frames::OwnerAnswer;
+    use crate::inbox::testing::{Answer, AnswerVia, Answered};
+    use inbox_core::proto::{AnswerMsg, Intent, ServerMsg};
+    each_rig(true, "", |r, name| {
+        r.device();
+        let key = r.key_a();
+        let who = r.requester(&key, Interaction::Conversational);
+        let reference = r.intent(&who, explained()).unwrap();
+        let first = r.post(&r.body(&key, &command(1), json!({ "approval_ref": reference })));
+        let id = first.id();
+        let code = first.json()["code"].as_str().unwrap().to_string();
+
+        // The frame `answer` of the phone, as the session turns it into the sealed text of the turn.
+        let frame = AnswerMsg {
+            request_id: id.clone(),
+            client_msg_id: "m-1".into(),
+            action: Action::Decline,
+            shown_effect: None,
+            choice: None,
+            text: Some(COMMENT.into()),
+            intent: Some(Intent::ChangeRequest),
+        };
+        let out = eventually(|| {
+            runtime().block_on(r.items().answer(
+                &id,
+                Answer {
+                    login: OWNER.into(),
+                    via: AnswerVia::Device(DEVICE.into()),
+                    action: Action::Decline,
+                    shown_effect: None,
+                    client_msg_id: Some("m-1".into()),
+                    payload: Some(Zeroizing::new(OwnerAnswer::from_msg(&frame).to_plain())),
+                    consume_within: Duration::from_secs(300),
+                },
+            ))
+        });
+        assert!(matches!(out, Answered::Accepted { .. }), "[{name}] {out:?}");
+
+        // The agent side: the thread holds the text and the intent, unsealed for the agent only.
+        let turns = runtime().block_on(r.items().serve_turns(&id)).unwrap();
+        let decline = turns
+            .iter()
+            .find(|t| t.row.kind == "decline")
+            .expect("the decline is in the thread");
+        let said = OwnerAnswer::from_plain(decline.text.as_ref().expect("the text opens"));
+        assert_eq!(
+            (said.text.as_deref(), said.intent),
+            (Some(COMMENT), Some(Intent::ChangeRequest)),
+            "[{name}]"
+        );
+        // The service side: the verdict, and nothing of the text.
+        assert_eq!(r.verdict(&id, &key), "denied", "[{name}]");
+        check_what_the_service_learned(r, name);
+
+        // The next request of the agent links to the declined one: the phone shows what the owner asked for.
+        let again = IntentIn {
+            previous_id: Some(id.clone()),
+            lease_s: Some(900),
+            ..IntentIn::default()
+        };
+        let reference = r.intent(&who, again).unwrap();
+        let second = r.post(&r.body(&key, &command(2), json!({ "approval_ref": reference })));
+        let second_id = second.id();
+        let frames = frames_of(r, DEVICE);
+        let request = frames
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Request(q) if q.request_id == second_id => Some(q.clone()),
+                _ => None,
+            })
+            .expect("the second request reaches the phone");
+        assert_eq!(
+            request.previous_id.as_deref(),
+            Some(id.as_str()),
+            "[{name}]"
+        );
+        let follows = request.approval.unwrap().follows.expect("follows");
+        assert_eq!(
+            (follows.code, follows.intent),
+            (code, Intent::ChangeRequest),
+            "[{name}]"
+        );
+    });
+}
+
+/// A `reply` of the owner moves the item to `replied` and reaches the agent. The service still reads `pending`. A
+/// `say` of the agent moves it back, and the other phone gets both texts as `message` frames.
+#[test]
+fn reply_moves_to_replied_and_agent_sees_user_message() {
+    use crate::inbox::frames::AgentTurn;
+    use crate::inbox::testing::Caller;
+    use inbox_core::proto::{Author, ItemState, ServerMsg};
+    const SECOND: &str = "device-canary-9932";
+    each_rig(true, "", |r, name| {
+        r.device();
+        // A second phone of the owner. The key of the row differs from the key of the first one.
+        let key_bytes = if name == "sqlite" {
+            "x'01'"
+        } else {
+            "'\\x01'::bytea"
+        };
+        runtime()
+            .block_on(r.items().test_exec(&format!(
+                "INSERT INTO devices (id, name, user_name, public_key, enrolled_at, enrolled_ip) \
+                 VALUES ('{SECOND}', 'second', '{OWNER}', {key_bytes}, 1, 'ip')"
+            )))
+            .unwrap();
+        let key = r.key_a();
+        let who = r.requester(&key, Interaction::Conversational);
+        let reference = r.intent(&who, explained()).unwrap();
+        let id = r
+            .post(&r.body(&key, &command(1), json!({ "approval_ref": reference })))
+            .id();
+        let question = "Why this database?";
+        let out = eventually(|| {
+            runtime().block_on(r.items().reply(
+                &id,
+                OWNER,
+                Some(DEVICE.into()),
+                "m-1".into(),
+                question.as_bytes(),
+            ))
+        });
+        let crate::inbox::testing::TurnOut::Stored { loaded, .. } = out else {
+            panic!("[{name}] the reply was not stored: {out:?}");
+        };
+        assert_eq!(loaded.item.state, ItemState::Replied, "[{name}]");
+        assert_eq!(
+            r.verdict(&id, &key),
+            "pending",
+            "[{name}] the service sees pending"
+        );
+
+        // The agent reads the question of the owner in the thread.
+        let turns = runtime().block_on(r.items().serve_turns(&id)).unwrap();
+        let reply = turns
+            .iter()
+            .find(|t| t.row.kind == "reply")
+            .expect("the reply is in the thread");
+        assert_eq!(
+            reply.text.as_deref().map(|t| &t[..]),
+            Some(question.as_bytes()),
+            "[{name}]"
+        );
+
+        // The other phone gets the text as a `message` of the user; the phone that asked gets none.
+        let on_second = frames_of(r, SECOND);
+        let message = on_second
+            .iter()
+            .find_map(|f| match f {
+                ServerMsg::Message(m) => Some(m.clone()),
+                _ => None,
+            })
+            .expect("the second phone gets the question");
+        assert_eq!(
+            (message.by, message.text.as_deref(), message.seq),
+            (Author::User, Some(question), 1),
+            "[{name}]"
+        );
+        assert!(
+            frames_of(r, DEVICE)
+                .iter()
+                .all(|f| !matches!(f, ServerMsg::Message(_))),
+            "[{name}] the phone that asked gets no copy of its own text"
+        );
+
+        // The agent answers: the item is `pending` again and the phones get the explanation.
+        let said = AgentTurn {
+            explanation: Some("The migration needs this row.".into()),
+            command: None,
+        };
+        let spoken = eventually(|| {
+            runtime().block_on(r.items().say(&id, &key["key:".len()..], &said.to_plain()))
+        });
+        assert!(
+            matches!(spoken, crate::inbox::testing::TurnOut::Stored { .. }),
+            "[{name}] {spoken:?}"
+        );
+        let state = runtime()
+            .block_on(r.items().get(&id, &Caller::Owner(OWNER.into())))
+            .map(|l| l.unwrap().item.state);
+        assert!(matches!(state, Ok(ItemState::Pending)), "[{name}]");
+        let agent_says = frames_of(r, DEVICE)
+            .into_iter()
+            .find_map(|f| match f {
+                ServerMsg::Message(m) if m.by == Author::Agent => Some(m),
+                _ => None,
+            })
+            .expect("the phone gets the text of the agent");
+        assert_eq!(
+            agent_says.explanation.as_deref(),
+            Some("The migration needs this row."),
+            "[{name}]"
+        );
+    });
+}

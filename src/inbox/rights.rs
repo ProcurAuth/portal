@@ -229,6 +229,12 @@ pub trait Authorizer: Send + Sync {
     /// does not exist.
     fn key_services(&self, key_id: &str) -> Option<Services>;
 
+    /// The name that the owner gave to a key of the database. `None`: the key does not exist, or the portal cannot
+    /// tell. The portal itself writes the line "from" of an item with it: the text of an agent never does.
+    fn key_name(&self, _key_id: &str) -> Option<String> {
+        None
+    }
+
     /// The logins that may see the alerts about `service`: each person whose [`Authorizer::services`]
     /// sees it. A person that the portal cannot judge is not in the set. It reads memory only.
     fn audience(&self, service: &str) -> BTreeSet<String>;

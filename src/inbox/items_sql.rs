@@ -354,3 +354,71 @@ mod tests {
         assert_eq!(from_text::<ItemState>("nope"), None);
     }
 }
+
+/// The columns of a row of `account_prefs`. The two databases read and write the same values.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrefsRow {
+    pub digest_mode: Option<String>,
+    pub digest_at: Option<String>,
+    pub digest_tz: Option<String>,
+    pub digest_every_h: Option<i64>,
+    pub quiet_from: Option<String>,
+    pub quiet_to: Option<String>,
+    pub quiet_tz: Option<String>,
+    pub quiet_high_rings: Option<i64>,
+}
+
+impl PrefsRow {
+    /// The columns of the preferences of a phone. An absent block gives null columns.
+    pub fn from_prefs(p: &inbox_core::proto::Prefs) -> PrefsRow {
+        use inbox_core::proto::DigestMode;
+        let mut r = PrefsRow::default();
+        if let Some(q) = &p.quiet {
+            r.quiet_from = Some(q.from.clone());
+            r.quiet_to = Some(q.to.clone());
+            r.quiet_tz = Some(q.tz.clone());
+            r.quiet_high_rings = Some(i64::from(q.high_rings));
+        }
+        if let Some(d) = &p.digest {
+            r.digest_mode = Some(
+                match d.mode {
+                    DigestMode::Off => "off",
+                    DigestMode::Daily => "daily",
+                    DigestMode::Every => "every",
+                }
+                .to_string(),
+            );
+            r.digest_at = d.at.clone();
+            r.digest_tz = d.tz.clone();
+            r.digest_every_h = d.every_h.map(i64::from);
+        }
+        r
+    }
+
+    /// The preferences of the columns. A row that no longer holds a valid block gives no block.
+    pub fn into_prefs(self) -> inbox_core::proto::Prefs {
+        use inbox_core::proto::{DigestMode, DigestPrefs, Prefs, QuietPrefs};
+        let quiet = match (self.quiet_from, self.quiet_to, self.quiet_tz) {
+            (Some(from), Some(to), Some(tz)) => Some(QuietPrefs {
+                from,
+                to,
+                tz,
+                high_rings: self.quiet_high_rings.unwrap_or(0) != 0,
+            }),
+            _ => None,
+        };
+        let mode = match self.digest_mode.as_deref() {
+            Some("off") => Some(DigestMode::Off),
+            Some("daily") => Some(DigestMode::Daily),
+            Some("every") => Some(DigestMode::Every),
+            _ => None,
+        };
+        let digest = mode.map(|mode| DigestPrefs {
+            mode,
+            at: self.digest_at,
+            tz: self.digest_tz,
+            every_h: self.digest_every_h.and_then(|h| u16::try_from(h).ok()),
+        });
+        Prefs { quiet, digest }
+    }
+}

@@ -10,7 +10,7 @@
 // call the rest of this API in the next lots.
 #![allow(dead_code)]
 
-use inbox_core::proto::{Action, AnswerStatus, Kind};
+use inbox_core::proto::{Action, AnswerStatus, Kind, Prefs};
 use zeroize::Zeroizing;
 
 use super::content_box::{self, ContentBox, FIELD_BODY, FIELD_INTENT, FIELD_TURN};
@@ -20,8 +20,8 @@ use super::items::{Caller, Clock, Effects, Loaded, NewEvent, Rules, Wait};
 use super::items_db;
 use super::items_ops::{
     self as ops, AnswerIn, AnswerOut, AnswerVia, CancelBy, Cancelled, Consumed, CreateOutcome, Cx,
-    IntentRow, ItemTx, ListFilter, MaintainReport, NewItem, Refused, Renewed, Sealed, Speaker,
-    SupersedeOut, SweepReport, TurnIn, TurnOut, TurnRow,
+    IntentRow, ItemDelivery, ItemTx, ListFilter, MaintainReport, NewItem, Refused, Renewed, Sealed,
+    Speaker, SupersedeOut, SweepReport, TurnIn, TurnOut, TurnRow,
 };
 use super::items_pg::PgTx;
 use super::log;
@@ -750,6 +750,60 @@ impl Items<'_> {
                 TurnPlain { row, text }
             })
             .collect())
+    }
+
+    // ------------------------------------------------------------ the phones
+
+    /// The deliveries of items that the device has not received, oldest first.
+    pub async fn pending_item_deliveries(
+        &self,
+        device_id: &str,
+        limit: u32,
+    ) -> Result<Vec<ItemDelivery>, ItemError> {
+        let device_id = device_id.to_string();
+        in_tx!(
+            self,
+            [device_id],
+            tx,
+            tx.pending_item_deliveries(&device_id, limit)
+        )
+    }
+
+    /// Gives a phone the open items of its owner that it never got (see `ItemTx::catch_up_device`). The result is the
+    /// number of new deliveries.
+    pub async fn catch_up_device(&self, device_id: &str, owner: &str) -> Result<u64, ItemError> {
+        self.writable()?;
+        let (device_id, owner) = (device_id.to_string(), owner.to_string());
+        in_tx!(
+            self,
+            [device_id, owner],
+            tx,
+            tx.catch_up_device(&device_id, &owner)
+        )
+    }
+
+    /// The newest earlier approval of the same effect that the owner accepted: the time of the answer and whether the
+    /// service used it.
+    pub async fn previous_approval(&self, l: &Loaded) -> Result<Option<(i64, bool)>, ItemError> {
+        let Some(a) = &l.approval else {
+            return Ok(None);
+        };
+        let (hash, id) = (a.key_hash.clone(), l.item.request_id.clone());
+        in_tx!(self, [hash, id], tx, tx.previous_approval(&hash, &id))
+    }
+
+    /// The preferences of an account.
+    pub async fn prefs(&self, login: &str) -> Result<Prefs, ItemError> {
+        let login = login.to_string();
+        in_tx!(self, [login], tx, tx.prefs(&login))
+    }
+
+    /// Replaces the preferences of an account. The server stores them and applies nothing here.
+    pub async fn set_prefs(&self, login: &str, prefs: &Prefs) -> Result<(), ItemError> {
+        self.writable()?;
+        let (login, prefs) = (login.to_string(), prefs.clone());
+        in_tx!(self, [login, prefs], tx, tx.put_prefs(&login, &prefs))?;
+        self.replicate().await
     }
 
     /// Writes the event `body_read`: a superadmin read a body (`inbox.at_rest.admin_body_read`). It holds the login, the

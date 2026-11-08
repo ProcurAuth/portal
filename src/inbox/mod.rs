@@ -26,7 +26,9 @@ pub mod cli;
 pub mod content_box;
 mod db;
 mod device;
+mod device_items;
 mod enrollment;
+pub mod frames;
 mod http;
 mod hub;
 mod internal;
@@ -75,6 +77,7 @@ pub use items_ops::Consumed;
 /// What the tests of the portal take from the inbox.
 #[cfg(test)]
 pub(crate) mod testing {
+    pub(crate) use super::device_items::{Builder, Built};
     pub(crate) use super::items::{owner_text_payload, Caller, Loaded};
     pub(crate) use super::items_ops::{AnswerVia, CancelBy, Cancelled, TurnOut};
     pub(crate) use super::items_store::{Answer, Answered, ItemError, Items};

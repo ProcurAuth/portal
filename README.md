@@ -1280,7 +1280,7 @@ At start, the portal compares each key with a check value in the table `content_
 
 ### The engine of the items
 
-One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The agent channel reads and writes the items (see "Agents and senders"). The next lots of 5.1.0 add the frames of the phone and the web pages.
+One engine runs the approvals and the questions. It lives in the Inbox and needs the blocks `inbox.items` and `inbox.at_rest`. The PDP uses `consume` and `release` (see "The approval gate"). The approval API of a service creates the approvals (see "The approval API for a service"). The agent channel reads and writes the items (see "Agents and senders"). The phones read and answer the items (see "Items on the phone"). The next lots of 5.1.0 add the web pages.
 
 An item has one of seven states: `pending`, `replied`, `answered`, `abandoned`, `expired`, `cancelled` and `superseded`. The states `pending` and `replied` are open. The server decides `abandoned` and `expired` with its own clock. It checks them at each read, at each answer and in a task that runs every 2 seconds. A clock of a phone changes nothing.
 
@@ -1303,6 +1303,24 @@ The table `approval_mute` has the end of the mute of a subject. The column `appr
 The task erases the sealed body after `inbox.items.body_purge_after`. It deletes a final item after `inbox.items.retention` and its events after `audit_retention`. The effect hash stays with the metadata until the item goes.
 
 The metrics `portal_item_*` count the events, the answers, the lease writes and the bodies that the portal served. The journal has the lines `approval_requested`, `approval_answered`, `approval_consumed`, `approval_abandoned`, `approval_revived`, `approval_superseded`, `approval_expired`, `body_served`, `body_read` and `body_effect_mismatch`. No line holds a body.
+
+### Items on the phone
+
+A phone gets the items of its owner in the same queue as the alerts. Each delivery has an id, and the phone confirms it with `ack`. The portal sends it again until the confirmation arrives. The frames are in [`docs/inbox/protocol.md`](docs/inbox/protocol.md).
+
+The row of the table `alerts` for an item holds metadata only. The portal builds the frame when it sends the delivery. It unseals the body or the turn at that time, and it keeps no clear copy. The frame `request` shows the state of the item when the portal sends it. A revival or a new turn changes what a late phone sees.
+
+The line "from" of a request comes from the portal. It has the name of the key, the login of the owner and the interaction of the key. A label that the agent gives never enters it. The field `follows` comes from `previous_id`. It names the declined request, and the intent of the text of the owner.
+
+A new phone gets the open items of its owner at its first session. A phone that reconnects gets the items that it lacks. `storage.delivery_ttl` does not apply to an item. The lease and `max_lifetime` end it. An item that is `abandoned` is not sent to a phone that never got it. A revival sends the item again.
+
+The frames of one item arrive in the order of the queue. The `request` comes before its `settled` and its `message`. A phone that is offline gets both at its next session. A `settled` for an item that is open again is not sent.
+
+An `answer` goes to the engine. The server checks the effect that the phone showed. The answer of a revoked phone gets `device_revoked`, changes nothing and ends the session with the code 4403. The phone that wins gets `answer_result`. The other phones of the owner get `settled`.
+
+The frame `sync` lists the items that a phone holds open. The portal sends the open items that the phone lacks and the `settled` frame of each item that is final. The frame `refresh` gives one item. These frames have new delivery ids, so the phone does not take them for old deliveries.
+
+The frame `set_prefs` stores the quiet hours and the digest of the account. The next `welcome` sends them again. The server applies none of them yet. The frame `welcome` says `body_purge_after_ms`. The value 0 says that the server has no items.
 
 ### Stop
 
