@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use hyper::body::Incoming;
 use hyper::header::{
-    HeaderMap, HeaderValue, ALLOW, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, RETRY_AFTER,
+    HeaderMap, HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, RETRY_AFTER,
     WWW_AUTHENTICATE,
 };
 use hyper::{Method, Request, StatusCode};
@@ -243,12 +243,7 @@ enum KeyRefusal {
 /// The key of the request: `Authorization: Bearer mcp_...`. Another kind, a bad form, an unknown key and an expired key
 /// give the same refusal.
 fn find_key(app: &App, headers: &HeaderMap) -> Result<Requester, KeyRefusal> {
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .ok_or(KeyRefusal::Unauthorized)?;
+    let token = http::bearer_token(headers).ok_or(KeyRefusal::Unauthorized)?;
     let authorizer = app.authorizer().ok_or(KeyRefusal::NotReady)?;
     match authorizer.check_agent_key(token, Door::Mcp) {
         AgentCheck::Valid(key) => Ok(Requester {

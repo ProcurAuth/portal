@@ -462,6 +462,11 @@ fn the_transport_cases_t01_to_t13() {
         200,
         "T11"
     );
+    // The scheme of the header has no case, and two headers are no key.
+    let lower = ("Authorization", format!("bearer {key}"));
+    assert_eq!(request(&s, "POST", &[lower], &ping).status, 200);
+    let two = [bearer(&key), bearer(&key)];
+    assert_eq!(request(&s, "POST", &two, &ping).status, 401);
     let a = request(
         &s,
         "POST",

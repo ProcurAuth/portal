@@ -804,12 +804,7 @@ fn agent_key(app: &App, headers: &HeaderMap) -> Result<super::approvals::Request
             "no such route",
         ));
     }
-    let token = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .ok_or_else(unauthorized)?;
+    let token = super::http::bearer_token(headers).ok_or_else(unauthorized)?;
     let not_ready = || {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

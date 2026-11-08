@@ -162,6 +162,18 @@ pub async fn accept_cluster(app: Arc<App>, listener: TcpListener) {
     }
 }
 
+/// The key of an agent in the header `Authorization`: the scheme `Bearer`, a space and the text. The scheme has no case. A
+/// request with two headers has no key.
+pub fn bearer_token(headers: &hyper::header::HeaderMap) -> Option<&str> {
+    let mut all = headers.get_all(hyper::header::AUTHORIZATION).iter();
+    let value = all.next()?;
+    if all.next().is_some() {
+        return None;
+    }
+    let (scheme, rest) = value.to_str().ok()?.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
+}
+
 /// The path after `prefix`, when it is one segment that is not empty.
 fn segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     path.strip_prefix(prefix)
