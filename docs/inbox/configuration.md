@@ -11,6 +11,7 @@ Check a file with `portal check-config --config FILE`. The command prints the va
 - The block `inbox` is optional. Without it, the portal has no Inbox and opens no route for it. With it, the senders, the webhooks and the phones use `server.listen_address`, the port of the pages. The Inbox has no listener for them.
 - `inbox.devices.public_address` is the public base URL of the portal as the phones reach it. The portal has no base path. A proxy under a prefix removes the prefix.
 - Inside `inbox`, the blocks `devices` and `storage` are mandatory. The blocks `enrollment`, `replica`, `cluster` and `watch` are optional.
+- The blocks `items` and `at_rest` are optional, but they go together. Each one needs the other. The block `items` holds the blocks `lease` and `digest`. The block `at_rest` holds one block `key "<id>"` for each content key.
 - The blocks `group "<id>"` and `api_key "<name>"` can occur more than once. The block `inbox` needs one group at least.
 - The Inbox has no `postgres` block. It uses the block `postgres` of the portal. With no `postgres` block, it uses the SQLite file of the block `storage` of the portal.
 
@@ -32,6 +33,7 @@ Two keys that contradict each other stop the program at start. The message names
 - `inbox.replica` needs SQLite. It must not be present with the block `postgres`. Its `dir` must not be the directory of `storage.database`.
 - `inbox.cluster` needs the block `postgres`. Its `listen` must not use the port of `server.listen_address` or of `pdp.listen_address`.
 - `inbox.watch.group` must be the label of a block `group`. The block must send at least one kind of alert.
+- `inbox.items` needs `inbox.at_rest`, and `inbox.at_rest` needs `inbox.items`. See "Items" and "Content keys".
 
 ## Keys of the senders
 
@@ -44,6 +46,49 @@ A block `api_key "<name>"` is an API key of the file. These rules apply. The err
 - `groups` lists one group at least, except when `direct_alerts` is `true`. Each group is a block `group`.
 - `direct_alerts` is `false` by default. With `true`, the key can send an alert to any account (`POST /api/v1/alerts` with the field `user`).
 - `webhook_send_resolved` is `false` by default. With `true`, the notifications "resolved" of Alertmanager and Grafana become alerts.
+
+## Items
+
+The block `inbox.items` sets the limits of the items. An item is an approval or a question that an agent sends to a person. The block has no default for a limit that could hide an item or keep it too long. The program stops at start when one of these keys is absent.
+
+- `max_lifetime`, `max_open_per_key`, `max_open_per_owner` and `max_open_total`.
+- `retention`, `body_purge_after` and `audit_retention`.
+- `lease.min`, `lease.max`, `lease.grace` and `lease.revive_window`.
+- `digest.mode`, and `digest.at` and `digest.timezone` with the mode `daily`, or `digest.every` with the mode `every`.
+
+The examples use these values: `"90d"`, 5, 20, 1000, `"180d"`, `"30d"`, `"365d"`, `"30s"`, `"7d"`, `"2m"`, `"7d"` and `"daily"`. The other keys have a default: `lease.max_revivals` is 3, `max_chain` is 10, `max_turns` is 40, `stale_after` is `"24h"`, `max_body_bytes` is `"16KiB"` and `wait_max` is `"25s"`.
+
+These limits contradict each other, and the program stops at start. The message names the two keys and their values.
+
+- `lease.min` is above `lease.max`.
+- `lease.max` or `lease.revive_window` is above `max_lifetime`.
+- `retention` is below `max_lifetime` plus `lease.revive_window`.
+- `audit_retention` is below `retention`.
+- `body_purge_after` is above `retention`.
+- `digest.at` or `digest.timezone` is present and the mode is not `daily`.
+- `digest.every` is present and the mode is not `every`.
+
+The program checks only the form of `digest.timezone`. A later release checks the name against a time zone database. No key of this block is editable from the web.
+
+## Content keys
+
+The block `inbox.at_rest` holds the keys that seal the contents of the items. The portal never writes a content in clear text. A copy of the database, a backup or a copy of the replica holds no readable content.
+
+- `active_key` is the id of the key that seals the new contents. It is mandatory. It must be the label of a block `key`.
+- The block has 1 to 8 blocks `key "<id>"`. An id has 1 to 16 characters from `a-z`, `0-9`, `-` and `_`.
+- A key that is not the `active_key` stays readable and seals nothing. Use this for a rotation.
+- Each block `key` has exactly one of `secret_env` and `secret_file`. A `secret` in clear text stops the start.
+- A secret is the base64 text of 32 random bytes. It has 44 characters. A secret with all bytes equal stops the start.
+- Two keys must not have the same bytes. All instances of the portal must hold the same keys.
+- `admin_body_read` is `false` by default. With `true`, the superadmin can read the contents. The portal then writes one audit event for each read, never the content.
+
+Make a key with `portal inbox content-key --out FILE`. The command writes one line. It never overwrites a file. 
+
+Keep the key file outside the data volume and outside the backups of the database. Keep a copy of it in a separate place. A lost key makes the sealed contents unreadable. The metadata stays readable.
+
+At start, the portal compares each key with the check value that the database keeps. A key that changed under the same id stops the start. The message names the id. To change a key, add a new key with a new id, make it the `active_key`, and restart each instance. A database from a version before 5.1.0 has no table for the check values. The portal stops at start and says so (see the README, "Upgrades").
+
+`portal check-config` shows for each key its id, whether it is `active` or `read-only`, and its source as `env:VAR` or `file:/path`. It never shows the secret.
 
 ## Switches that touch the Inbox
 
@@ -58,6 +103,8 @@ A block `api_key "<name>"` is an API key of the file. These rules apply. The err
 `portal inbox keygen --out FILE` makes the key file. It holds one line: the Noise key pair of the server. The command never overwrites a file. The program removes the final line end when it reads the file. A new key makes every phone and every code invalid.
 
 `portal inbox token --out FILE` makes the text of an API key.
+
+The `secret` of each block `inbox.at_rest.key` accepts only `_env` and `_file`, like the other secrets. `portal inbox content-key --out FILE` makes the key file.
 
 ## Default values of the optional keys
 

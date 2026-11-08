@@ -578,19 +578,19 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 4.11.8 | 5.1.0 | L8 | to fill |
 | 4.11.9 | 5.1.0 | L8 | to fill |
 | 4.11.10 | 5.1.0 | L8 | to fill |
-| 5.11.1 | 5.1.0 | L4 | to fill |
+| 5.11.1 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.2 | 5.1.0 | L5 | to fill |
-| 5.11.3 | 5.1.0 | L4 | to fill |
-| 5.11.4 | 5.1.0 | L4, L5 | to fill |
+| 5.11.3 | 5.1.0 | L4 | `seal_open_round_trip`, `aad_binds_request_field_seq_and_effect` |
+| 5.11.4 | 5.1.0 | L4, L5 | L4: `moved_sealed_value_does_not_open`; L5: to fill |
 | 5.11.5 | 5.1.0 | L5 | to fill |
-| 5.11.6 | 5.1.0 | L4 | to fill |
-| 5.11.7 | 5.1.0 | L4, L5 | to fill |
-| 5.11.8 | 5.1.0 | L4, L5 | to fill |
+| 5.11.6 | 5.1.0 | L4 | `plain_secret_in_file_stops_start`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `two_keys_active_writes_all_read`, `active_key_unknown_stops_start` |
+| 5.11.7 | 5.1.0 | L4, L5 | L4: `active_key_unknown_stops_start`, `duplicate_key_id_or_secret_stops_start`, `two_ids_with_one_key_stop_the_start`, `secret_not_32_bytes_or_all_equal_stops_start`, `wrong_key_same_id_fails_check_value`, `wrong_key_same_id_stops_the_start_and_the_log_names_the_keys`, `a_key_id_that_the_file_lost_is_reported_with_its_count`; L5: to fill |
+| 5.11.8 | 5.1.0 | L4, L5 | L4: `content_key_command_never_overwrites`; L5: to fill |
 | 5.11.9 | 5.2.0 | L15 | to fill |
 | 5.11.10 | 5.1.0 | L5 | to fill |
 | 5.11.11 | 5.1.0 | L12 | to fill |
-| 5.11.12 | 5.1.0 | L4 | to fill |
-| 5.11.13 | 5.1.0 | L4 | to fill |
+| 5.11.12 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
+| 5.11.13 | 5.1.0 | L4 | `the_documents_say_what_the_seal_covers_and_does_not_cover` |
 | 5.11.14 | 5.1.0 | A2, L12 | to fill |
 | 5.11.15 | 5.1.0 | L10 | to fill |
 | 5.11.16 | 5.1.0 | L10 | to fill |
@@ -599,13 +599,13 @@ Each row maps a requirement of the releases 5.1.0 and 5.2.0 to its lot and its t
 | 5.12.2 | 5.1.0 | L10, A2 | to fill |
 | 5.12.3 | 5.1.0 | L10 | to fill |
 | 5.12.4 | 5.2.0 | L14, A4 | to fill |
-| 6.9.1 | 5.1.0 | L4 | to fill |
-| 6.9.2 | 5.1.0 | L4 | to fill |
+| 6.9.1 | 5.1.0 | L4 | `no_default_for_mandatory_keys_message_names_key_range_value`, `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults` |
+| 6.9.2 | 5.1.0 | L4 | `the_blocks_items_and_at_rest_give_typed_values_with_documented_defaults`, `no_default_for_mandatory_keys_message_names_key_range_value` |
 | 6.9.3 | 5.1.0 | L6, L7 | to fill |
 | 6.9.4 | 5.1.0 | L2, L6 | to fill |
-| 6.9.5 | 5.1.0 | L4, L6 | to fill |
-| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | to fill |
-| 6.9.7 | 5.1.0 | L4 | to fill |
+| 6.9.5 | 5.1.0 | L4, L6 | L4: `a_contradiction_of_the_items_stops_the_start_with_the_two_keys_and_values`; L6: to fill (`consume_within`) |
+| 6.9.6 | 5.1.0 | L4, L6, L7, L9 | L4: `the_digest_mode_decides_which_keys_apply`, `the_blocks_items_and_at_rest_need_each_other`; L6, L7, L9: to fill |
+| 6.9.7 | 5.1.0 | L4 | `print_config_masks_secret_shows_kid_and_source`, `plain_secret_in_file_stops_start` |
 | 6.9.8 | 5.2.0 | L13 | to fill |
 | 6.10.1 | 5.1.0 | L3 | to fill |
 | 6.10.2 | 5.1.0 | L3 | to fill |
