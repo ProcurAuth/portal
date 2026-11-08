@@ -282,9 +282,11 @@ CREATE TABLE account_prefs (
     digest_mode TEXT,
     digest_at   TEXT,
     digest_tz   TEXT,
+    digest_every_h BIGINT,
     quiet_from  TEXT,
     quiet_to    TEXT,
-    quiet_tz    TEXT
+    quiet_tz    TEXT,
+    quiet_high_rings BIGINT
 );
 
 -- The time of the last pass of the sweeper. A gap longer than `lease.grace` extends each open lease.

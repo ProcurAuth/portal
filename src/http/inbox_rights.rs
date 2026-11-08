@@ -228,6 +228,11 @@ impl Authorizer for PortalAuthorizer {
         }
     }
 
+    fn key_name(&self, key_id: &str) -> Option<String> {
+        let state = self.state.upgrade()?;
+        state.users.key_by_id(key_id).map(|k| k.name.clone())
+    }
+
     fn audience(&self, service: &str) -> BTreeSet<String> {
         let Some(state) = self.state.upgrade() else {
             return BTreeSet::new();

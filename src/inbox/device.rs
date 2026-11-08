@@ -7,6 +7,7 @@
 //! - The phone stores the alert before it confirms `received`. It ignores a repeated
 //!   `alert_id`. A retransmission therefore never shows twice.
 //! - The inbox never drops an alert. A phone that is offline gets its backlog when it connects.
+//! - The frames of items (protocol 5) come from the same queue. `device_items.rs` builds them.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -19,7 +20,8 @@ use hyper::Request;
 use inbox_core::enroll::EnrollResponder;
 use inbox_core::noise::{self, Responder, Session};
 use inbox_core::proto::{
-    close, AckStage, AlertMsg, ClientMsg, EnrollAccept, ServerMsg, SessionAccept, SessionHello,
+    close, AckStage, AlertMsg, ClientMsg, EnrollAccept, Kind, ServerMsg, SessionAccept,
+    SessionHello,
 };
 use inbox_core::{Error as CoreError, PROTOCOL_VERSION};
 use sha2::{Digest, Sha256};
@@ -27,10 +29,13 @@ use tokio::sync::{watch, Notify};
 use tokio::time::{timeout_at, Instant};
 use zeroize::Zeroize;
 
-use super::db::{DbError, DeviceKey, DeviceLimits, Redeem};
+use super::db::{DbError, DeviceKey, DeviceLimits, PendingDelivery, Redeem};
+use super::device_items;
 use super::enrollment;
 use super::http::Resp;
 use super::hub::Live;
+use super::items_ops::ItemDelivery;
+use super::items_store::ItemError;
 use super::log;
 use super::rights::{self, Standing};
 use super::state::{App, SocketGuard};
@@ -263,7 +268,7 @@ async fn run_enroll(app: Arc<App>, mut socket: Socket, ip: IpAddr, guard: &Socke
 
 // ---------------------------------------------------------------- sessions
 
-enum End {
+pub(super) enum End {
     Code(u16, &'static str),
     PeerClosed,
     Timeout,
@@ -285,10 +290,23 @@ impl End {
     }
 }
 
-async fn send_msg(socket: &mut Socket, session: &mut Session, msg: &ServerMsg) -> Result<(), End> {
+pub(super) async fn send_msg(
+    socket: &mut Socket,
+    session: &mut Session,
+    msg: &ServerMsg,
+) -> Result<(), End> {
     let json = serde_json::to_vec(msg).expect("protocol messages serialize");
+    send_encoded(socket, session, &json).await
+}
+
+/// Sends a frame that is already encoded (and, for an item, already checked by the core crate).
+pub(super) async fn send_encoded(
+    socket: &mut Socket,
+    session: &mut Session,
+    json: &[u8],
+) -> Result<(), End> {
     let frame = session
-        .encrypt(&json)
+        .encrypt(json)
         .map_err(|_| End::Protocol("frame too large"))?;
     socket
         .send(Message::Binary(frame.into()))
@@ -631,6 +649,8 @@ async fn deliver(
             }
         }
     }
+    // The preferences of the account and the age at which a body is erased. Without items both are empty.
+    let (prefs, body_purge_after_ms) = device_items::welcome_parts(app, &user_name).await;
     let welcome = ServerMsg::Welcome {
         server_name: app.server_name.clone(),
         groups,
@@ -639,13 +659,15 @@ async fn deliver(
         offline_warning_after_ms: cfg.offline_warning_after.as_millis() as u64,
         server_time_ms: now_ms(),
         user_name: user_name.clone(),
-        // The preferences and the items come with later lots: the welcome says "none" for now.
-        prefs: Box::default(),
-        body_purge_after_ms: 0,
+        prefs,
+        body_purge_after_ms,
     };
     if let Err(e) = send_msg(socket, session, &welcome).await {
         return e;
     }
+
+    // A phone that enrolled after an item came, or that was away, gets the open items of its owner.
+    device_items::catch_up(app, device_id, &user_name).await;
 
     let mut inflight: HashMap<i64, Instant> = HashMap::new();
     let mut resend = tokio::time::interval(cfg.resend_after.min(Duration::from_secs(5)));
@@ -753,22 +775,16 @@ async fn handle(
             }
             Ok(true)
         }
-        ClientMsg::Answer(_)
-        | ClientMsg::Reply(_)
-        | ClientMsg::Refresh { .. }
-        | ClientMsg::Sync { .. }
-        | ClientMsg::SetPrefs(_) => {
-            // Protocol 5 has these frames. The server does not handle them yet.
-            send_msg(
-                socket,
-                session,
-                &ServerMsg::Error {
-                    code: "not_enabled".into(),
-                    message: "items are not enabled on this server".into(),
-                },
-            )
-            .await?;
-            Ok(false)
+        ClientMsg::Answer(a) => {
+            device_items::answer(app, socket, session, device_id, login, a).await
+        }
+        ClientMsg::Reply(r) => device_items::reply(app, socket, session, device_id, login, r).await,
+        ClientMsg::Refresh { request_id } => {
+            device_items::refresh(app, socket, session, login, &request_id).await
+        }
+        ClientMsg::Sync { open } => device_items::sync(app, socket, session, login, open).await,
+        ClientMsg::SetPrefs(prefs) => {
+            device_items::set_prefs(app, socket, session, login, prefs).await
         }
         ClientMsg::Subscribe { group } => {
             if !app.group_names.contains_key(&group) {
@@ -859,10 +875,28 @@ async fn unavailable(socket: &mut Socket, session: &mut Session) -> Result<bool,
     Ok(false)
 }
 
+/// A delivery of the queue of a device: a message about an alert, or a frame of an item.
+enum Row {
+    Plain(PendingDelivery),
+    Item(ItemDelivery),
+}
+
+impl Row {
+    fn seq(&self) -> i64 {
+        match self {
+            Row::Plain(p) => p.seq,
+            Row::Item(i) => i.seq,
+        }
+    }
+}
+
 /// Sends the deliveries that wait for the phone. An alert about a service goes to the phone only
 /// while its account `login` may see the service: the rights can change after the fan-out. A
 /// loaded directory that says no withdraws the delivery, so the phone never gets the alert. When
 /// the portal cannot tell, the delivery waits. An alert that the phone received stays on it.
+///
+/// The frames of items are in the same queue, in the order of their numbers. The server builds each of them from the
+/// item when it sends it (see `device_items.rs`).
 async fn flush_deliveries(
     app: &App,
     socket: &mut Socket,
@@ -872,13 +906,30 @@ async fn flush_deliveries(
     inflight: &mut HashMap<i64, Instant>,
 ) -> Result<(), End> {
     let limit = app.config.devices.max_inflight;
-    let pending = app
+    let plain = app
         .db
         .pending_deliveries(device_id, limit, app.delivery_cutoff())
         .await
         .map_err(End::Storage)?;
-    let still_pending: HashSet<i64> = pending.iter().map(|p| p.seq).collect();
+    let queue = device_items::pending(app, device_id, limit).await?;
+    // One queue: the numbers of the database give the order. The deliveries of the spool (negative numbers) come last.
+    let mut pending: Vec<Row> = plain
+        .into_iter()
+        .map(Row::Plain)
+        .chain(queue.iter().cloned().map(Row::Item))
+        .collect();
+    pending.sort_by_key(|r| (r.seq() < 0, r.seq()));
+    pending.truncate(limit as usize);
+    let still_pending: HashSet<i64> = pending.iter().map(Row::seq).collect();
     inflight.retain(|seq, _| still_pending.contains(seq));
+    let sent_queue: Vec<ItemDelivery> = pending
+        .iter()
+        .filter_map(|r| match r {
+            Row::Item(i) => Some(i.clone()),
+            Row::Plain(_) => None,
+        })
+        .collect();
+    let mut builder = device_items::Builder::new(app, login, &sent_queue);
 
     let now = Instant::now();
     let resend_after = app.config.devices.resend_after;
@@ -886,39 +937,103 @@ async fn flush_deliveries(
     // The services of the account, read once, and only for an alert about a service.
     let mut services: Option<Option<rights::Services>> = None;
     let mut withdrawn = Vec::new();
-    for p in pending {
-        if let Some(service) = p.service.as_deref() {
-            match services.get_or_insert_with(|| rights::services_of(app, login)) {
-                Some(seen) if seen.sees(Some(service)) => {}
-                Some(_) => {
-                    withdrawn.push(p.seq);
+    // The deliveries of items that the server withdrew: each one has its own log line.
+    let mut withdrawn_items = Vec::new();
+    for row in pending {
+        let seq = row.seq();
+        let due = !inflight
+            .get(&seq)
+            .is_some_and(|at| now.duration_since(*at) < resend_after);
+        match row {
+            Row::Plain(p) => {
+                if let Some(service) = p.service.as_deref() {
+                    match services.get_or_insert_with(|| rights::services_of(app, login)) {
+                        Some(seen) if seen.sees(Some(service)) => {}
+                        Some(_) => {
+                            withdrawn.push(p.seq);
+                            continue;
+                        }
+                        None => continue,
+                    }
+                }
+                if !due {
                     continue;
                 }
-                None => continue,
+                let msg = if p.kind == Kind::Digest {
+                    // The row holds no number: the digest counts the open items now.
+                    match device_items::digest(app, login, &p.alert_id).await? {
+                        device_items::Built::Frame(bytes) => {
+                            send_encoded(socket, session, &bytes).await?;
+                            inflight.insert(p.seq, now);
+                            sent.push(p.seq);
+                            continue;
+                        }
+                        device_items::Built::Withdraw(_) => {
+                            withdrawn.push(p.seq);
+                            continue;
+                        }
+                        device_items::Built::Keep => continue,
+                    }
+                } else {
+                    let (group, group_name) = p.target.frame(|id| app.group_name(id));
+                    ServerMsg::Alert(AlertMsg {
+                        alert_id: p.alert_id,
+                        kind: p.kind,
+                        group_name,
+                        group,
+                        title: p.title,
+                        created_at_ms: p.created_at,
+                    })
+                };
+                send_msg(socket, session, &msg).await?;
+                inflight.insert(p.seq, now);
+                sent.push(p.seq);
+            }
+            Row::Item(d) => {
+                if !due {
+                    continue;
+                }
+                let Some(builder) = builder.as_mut() else {
+                    // The engine is off, so the row cannot be built. It cannot exist without the engine.
+                    withdrawn_items.push(d.seq);
+                    continue;
+                };
+                match builder.delivery(&d).await {
+                    Ok(device_items::Built::Frame(bytes)) => {
+                        send_encoded(socket, session, &bytes).await?;
+                        inflight.insert(d.seq, now);
+                        sent.push(d.seq);
+                    }
+                    Ok(device_items::Built::Withdraw(why)) => {
+                        log::info!(
+                            event = "item_delivery_withdrawn",
+                            device.id = %device_id,
+                            request.id = %d.request_id,
+                            kind = %d.kind,
+                            reason = why
+                        );
+                        withdrawn_items.push(d.seq);
+                    }
+                    Ok(device_items::Built::Keep)
+                    | Err(ItemError::Degraded | ItemError::Replica) => {}
+                    Err(ItemError::Storage(e)) => return Err(End::Storage(e)),
+                    Err(e) => {
+                        // The seal failed: the row stays and the next flush tries again.
+                        log::error!(event = "item_frame_failed", request.id = %d.request_id, error = %e);
+                    }
+                }
             }
         }
-        if inflight
-            .get(&p.seq)
-            .is_some_and(|at| now.duration_since(*at) < resend_after)
-        {
-            continue;
-        }
-        let (group, group_name) = p.target.frame(|id| app.group_name(id));
-        let msg = ServerMsg::Alert(AlertMsg {
-            alert_id: p.alert_id,
-            kind: p.kind,
-            group_name,
-            group,
-            title: p.title,
-            created_at_ms: p.created_at,
-        });
-        send_msg(socket, session, &msg).await?;
-        inflight.insert(p.seq, now);
-        sent.push(p.seq);
     }
     if !sent.is_empty() {
         app.metrics.deliveries_sent(sent.len() as u64);
         app.db.mark_sent(sent).await.map_err(End::Storage)?;
+    }
+    if !withdrawn_items.is_empty() {
+        app.db
+            .withdraw(withdrawn_items)
+            .await
+            .map_err(End::Storage)?;
     }
     if !withdrawn.is_empty() {
         let count = withdrawn.len();

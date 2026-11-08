@@ -16,7 +16,7 @@
 use std::future::Future;
 
 use inbox_core::proto::{
-    Action, AnswerStatus, Decision, InputType, Interaction, ItemState, Kind, Urgency, Via,
+    Action, AnswerStatus, Decision, InputType, Interaction, ItemState, Kind, Prefs, Urgency, Via,
 };
 
 use super::db::DbError;
@@ -65,6 +65,22 @@ pub struct TurnRow {
     pub device_id: Option<String>,
     /// `phone` or `web`.
     pub via: Option<String>,
+    pub created_at: i64,
+}
+
+/// A delivery of an item that a device has not confirmed. The row holds metadata only: the frame is built from the
+/// item when the server sends it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemDelivery {
+    /// The order of the queue of the device.
+    pub seq: i64,
+    /// The id of the delivery. The frame carries it as `id`, and the receipt of the phone names it.
+    pub alert_id: String,
+    /// `question`, `approval`, `turn` or `settled`.
+    pub kind: String,
+    pub request_id: String,
+    /// The number of the turn that the row names.
+    pub item_seq: u64,
     pub created_at: i64,
 }
 
@@ -130,6 +146,36 @@ pub trait ItemTx {
     ) -> impl Future<Output = Result<bool, DbError>>;
     fn owner_devices(&mut self, owner: &str) -> impl Future<Output = Result<Vec<String>, DbError>>;
     fn insert_event(&mut self, e: &NewEvent) -> impl Future<Output = Result<(), DbError>>;
+    // The phones: the queue of the deliveries of items, the catch-up of a device, the preferences.
+    /// The deliveries of items that the device has not received, oldest first. A row of an item has no age limit: the
+    /// lease and `max_lifetime` decide, not `delivery_ttl`.
+    fn pending_item_deliveries(
+        &mut self,
+        device_id: &str,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<ItemDelivery>, DbError>>;
+    /// Gives a device the open items of its owner that it never got: one delivery for the newest request message of
+    /// each item and one for each turn. The result is the number of new deliveries. Idempotent.
+    fn catch_up_device(
+        &mut self,
+        device_id: &str,
+        owner: &str,
+    ) -> impl Future<Output = Result<u64, DbError>>;
+    /// The newest earlier approval with the same `key_hash` that the owner accepted: the time of the answer, and whether
+    /// it was consumed.
+    fn previous_approval(
+        &mut self,
+        key_hash: &str,
+        except_id: &str,
+    ) -> impl Future<Output = Result<Option<(i64, bool)>, DbError>>;
+    /// The preferences of an account. Empty when the account has none.
+    fn prefs(&mut self, login: &str) -> impl Future<Output = Result<Prefs, DbError>>;
+    /// Replaces the preferences of an account. Nothing here applies them.
+    fn put_prefs(
+        &mut self,
+        login: &str,
+        prefs: &Prefs,
+    ) -> impl Future<Output = Result<(), DbError>>;
     /// Writes a row of `alerts` and a delivery for each device of the owner that is not revoked. The result is the
     /// devices of the deliveries.
     fn insert_notice(

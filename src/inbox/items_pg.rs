@@ -8,12 +8,13 @@ use tokio_postgres::types::ToSql;
 
 use super::db::DbError;
 use super::items::{Loaded, NewEvent, Notice, OwnerAlert, Rules};
-use super::items_ops::{IntentRow, ItemTx, ListFilter, Scope, Sealed, TurnRow};
+use super::items_ops::{IntentRow, ItemDelivery, ItemTx, ListFilter, Scope, Sealed, TurnRow};
 use super::items_sql::{
-    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols,
+    approval_write_values, decode, insert_sql, item_values, select_sql, update_sql, Cols, PrefsRow,
     APPROVAL_WRITE_COLUMNS, ITEM_COLUMNS, V,
 };
 use super::pg::{db_error, LOCK_ITEMS, WAKE_CHUNK};
+use inbox_core::proto::Prefs;
 
 /// An open transaction of the inbox.
 pub struct PgTx<'a>(pub Transaction<'a>);
@@ -304,6 +305,118 @@ impl ItemTx for PgTx<'_> {
         ];
         self.run("INSERT INTO item_events (request_id, at, event, actor, detail) VALUES ($1, $2, $3, $4, $5)", &a)
             .await?;
+        Ok(())
+    }
+
+    async fn pending_item_deliveries(
+        &mut self,
+        device_id: &str,
+        limit: u32,
+    ) -> Result<Vec<ItemDelivery>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT d.seq, a.id, a.kind, a.request_id, COALESCE(a.seq, 0), a.created_at
+                 FROM deliveries d JOIN alerts a ON a.id = d.alert_id
+                 WHERE d.device_id = $1 AND d.received_at IS NULL AND a.request_id IS NOT NULL
+                 ORDER BY d.seq LIMIT $2",
+                &[Box::new(device_id.to_string()), Box::new(i64::from(limit))],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ItemDelivery {
+                seq: r.get(0),
+                alert_id: r.get(1),
+                kind: r.get(2),
+                request_id: r.get(3),
+                item_seq: r.get::<_, i64>(4) as u64,
+                created_at: r.get(5),
+            })
+            .collect())
+    }
+
+    async fn catch_up_device(&mut self, device_id: &str, owner: &str) -> Result<u64, DbError> {
+        self.run(
+            "INSERT INTO deliveries (alert_id, device_id)
+             SELECT a.id, $1 FROM alerts a JOIN items i ON i.request_id = a.request_id
+             WHERE i.requester_owner = $2 AND i.state IN ('pending', 'replied')
+               AND (a.kind = 'turn'
+                    OR (a.kind IN ('question', 'approval')
+                        AND a.seq = (SELECT MAX(a2.seq) FROM alerts a2
+                                     WHERE a2.request_id = a.request_id AND a2.kind IN ('question', 'approval'))))
+               AND NOT EXISTS (SELECT 1 FROM deliveries d JOIN alerts a3 ON a3.id = d.alert_id
+                               WHERE d.device_id = $1 AND a3.request_id = a.request_id
+                                 AND a3.kind IN ('question', 'approval'))
+             ORDER BY a.created_at, a.seq
+             ON CONFLICT (alert_id, device_id) DO NOTHING",
+            &[Box::new(device_id.to_string()), Box::new(owner.to_string())],
+        )
+        .await
+    }
+
+    async fn previous_approval(
+        &mut self,
+        key_hash: &str,
+        except_id: &str,
+    ) -> Result<Option<(i64, bool)>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT i.answered_at, a.consumed_at IS NOT NULL
+                 FROM approvals a JOIN items i ON i.request_id = a.request_id
+                 WHERE a.key_hash = $1 AND a.request_id <> $2 AND a.decision = 'approve' AND i.answered_at IS NOT NULL
+                 ORDER BY i.answered_at DESC LIMIT 1",
+                &[Box::new(key_hash.to_string()), Box::new(except_id.to_string())],
+            )
+            .await?;
+        Ok(rows.first().map(|r| (r.get(0), r.get(1))))
+    }
+
+    async fn prefs(&mut self, login: &str) -> Result<Prefs, DbError> {
+        let rows = self
+            .rows(
+                "SELECT digest_mode, digest_at, digest_tz, digest_every_h, quiet_from, quiet_to, quiet_tz, quiet_high_rings
+                 FROM account_prefs WHERE login = $1",
+                &one(login.to_string()),
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .map(|r| PrefsRow {
+                digest_mode: r.get(0),
+                digest_at: r.get(1),
+                digest_tz: r.get(2),
+                digest_every_h: r.get(3),
+                quiet_from: r.get(4),
+                quiet_to: r.get(5),
+                quiet_tz: r.get(6),
+                quiet_high_rings: r.get(7),
+            })
+            .map(PrefsRow::into_prefs)
+            .unwrap_or_default())
+    }
+
+    async fn put_prefs(&mut self, login: &str, prefs: &Prefs) -> Result<(), DbError> {
+        let r = PrefsRow::from_prefs(prefs);
+        let a: Vec<Arg> = vec![
+            Box::new(login.to_string()),
+            Box::new(r.digest_mode),
+            Box::new(r.digest_at),
+            Box::new(r.digest_tz),
+            Box::new(r.digest_every_h),
+            Box::new(r.quiet_from),
+            Box::new(r.quiet_to),
+            Box::new(r.quiet_tz),
+            Box::new(r.quiet_high_rings),
+        ];
+        self.run(
+            "INSERT INTO account_prefs (login, digest_mode, digest_at, digest_tz, digest_every_h, quiet_from, quiet_to, quiet_tz, quiet_high_rings)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (login) DO UPDATE SET digest_mode = excluded.digest_mode, digest_at = excluded.digest_at,
+               digest_tz = excluded.digest_tz, digest_every_h = excluded.digest_every_h, quiet_from = excluded.quiet_from,
+               quiet_to = excluded.quiet_to, quiet_tz = excluded.quiet_tz, quiet_high_rings = excluded.quiet_high_rings",
+            &a,
+        )
+        .await?;
         Ok(())
     }
 
