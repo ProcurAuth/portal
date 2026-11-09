@@ -1182,6 +1182,17 @@ fn agents_demo_for_the_eyes() {
             .0,
         303
     );
+    // The ids of the agents are in `ids` too: `tools/dev/ui-check.sh` passes one object to the script.
+    for (name, id) in [
+        ("agent_billing", A1),
+        ("agent_new", A2),
+        ("agent_night", b),
+        ("agent_report", c),
+        ("agent_blocked", d),
+        ("agent_copy", e),
+    ] {
+        ids.insert(name.into(), json!(id));
+    }
     let ids = serde_json::Value::Object(ids);
     let ann = "ann";
     pep.s.account_with(
@@ -1195,8 +1206,7 @@ fn agents_demo_for_the_eyes() {
     std::fs::write(
         out.join("demo.json"),
         json!({"port": pep.s.port, "owner": OWNER, "password": common::ACCOUNT_PASSWORD,
-               "root_password": common::SUPERADMIN_PASSWORD, "admin": ann, "lock": lock, "ids": ids,
-               "agents": {"billing": A1, "new": A2, "night": b, "report": c, "blocked": d, "copy": e}})
+               "root_password": common::SUPERADMIN_PASSWORD, "admin": ann, "lock": lock, "ids": ids})
         .to_string(),
     )
     .unwrap();
