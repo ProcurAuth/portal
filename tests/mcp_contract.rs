@@ -769,7 +769,7 @@ fn intent(s: &Server, key: &str, headers: &[(&str, String)], args: Value) -> (bo
 const SENTENCE: &str = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service.";
 
 #[test]
-fn the_agent_cases_a01_to_a09() {
+fn the_agent_cases_a01_to_a10() {
     let s = start_server_with(
         "agents { max_per_key = 2 new_per_hour = 10 }",
         r#"max_unauthenticated_per_minute = 100"#,
