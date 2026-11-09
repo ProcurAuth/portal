@@ -680,6 +680,8 @@ async fn pep_end_to_end() {
             common::Recv::Timeout => break,
         }
     }
+    // The bucket of the key is a frame too: it holds the requests that no agent claims. It is not an agent.
+    frames.retain(|_, f| f.kind == inbox_core::proto::AgentKind::Agent);
     assert_eq!(frames.len(), 2, "two agents, no more: {frames:?}");
     let says = |f: &inbox_core::proto::AgentMsg| f.observed.as_ref().and_then(|o| o.says.clone());
     let a2 = frames
