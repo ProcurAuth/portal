@@ -126,6 +126,56 @@ impl Interaction {
     }
 }
 
+/// What the portal does with the agents that share one key (lot G1b, proposal 4.1). The owner sets it when the key is made,
+/// and the form of the key can change it. The agent never sets it. It has an effect only when the file has the block
+/// `inbox.agents`: without the block, each key acts as `key`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AgentsMode {
+    /// One agent for the key: its bucket. No token, no notice.
+    Key,
+    /// A call that makes an item and has no token makes an agent, and the result gives its token.
+    Discover,
+    /// The owner makes the agents. A call that makes an item and has no valid token is refused.
+    Enrolled,
+}
+
+impl AgentsMode {
+    /// Every value, in the order of the pages.
+    pub const ALL: [AgentsMode; 3] = [AgentsMode::Key, AgentsMode::Discover, AgentsMode::Enrolled];
+
+    /// The default of a key of this kind: `discover` for an `mcp_` key, `key` for an `api_` key. A script that has one
+    /// process stays as it was.
+    pub const fn default_for(kind: KeyKind) -> AgentsMode {
+        match kind {
+            KeyKind::Mcp => AgentsMode::Discover,
+            KeyKind::Api => AgentsMode::Key,
+        }
+    }
+
+    /// The name: the value of the column `agents` and of the field of the form.
+    pub const fn name(self) -> &'static str {
+        match self {
+            AgentsMode::Key => "key",
+            AgentsMode::Discover => "discover",
+            AgentsMode::Enrolled => "enrolled",
+        }
+    }
+
+    /// The label that the pages show.
+    pub const fn label(self) -> &'static str {
+        match self {
+            AgentsMode::Key => "One agent",
+            AgentsMode::Discover => "Discover",
+            AgentsMode::Enrolled => "Enrolled",
+        }
+    }
+
+    /// The value with this name. `None`: no such value.
+    pub fn from_name(name: &str) -> Option<AgentsMode> {
+        AgentsMode::ALL.into_iter().find(|m| m.name() == name)
+    }
+}
+
 /// The number of characters of a hint.
 pub const HINT_CHARS: usize = 4;
 /// The number of characters of the id of a key of the database.
@@ -376,6 +426,22 @@ mod tests {
         assert_eq!(check_format(&bad_sum), Err(FormatError::Checksum));
         // A multi-byte character does not pass for a character of the text.
         assert!(check_format(&format!("mcp_{}é", "a".repeat(51))).is_err());
+    }
+
+    #[test]
+    fn the_mode_of_the_agents_has_one_name_each_and_a_default_by_kind() {
+        for mode in AgentsMode::ALL {
+            assert_eq!(AgentsMode::from_name(mode.name()), Some(mode));
+        }
+        assert_eq!(
+            AgentsMode::ALL.map(AgentsMode::name),
+            ["key", "discover", "enrolled"]
+        );
+        assert_eq!(AgentsMode::from_name("Key"), None);
+        assert_eq!(AgentsMode::from_name("auto"), None);
+        assert_eq!(AgentsMode::from_name(""), None);
+        assert_eq!(AgentsMode::default_for(KeyKind::Mcp), AgentsMode::Discover);
+        assert_eq!(AgentsMode::default_for(KeyKind::Api), AgentsMode::Key);
     }
 
     #[test]

@@ -3781,6 +3781,7 @@ pub(super) fn add_key(node: &Node, id: &str, owner: Option<&str>, byte: u8, gran
             &crate::store::KeyRow {
                 kind: crate::keys::KeyKind::Mcp,
                 interaction: crate::keys::Interaction::Conversational,
+                agents: crate::keys::AgentsMode::Discover,
                 id: id.into(),
                 owner: owner.map(Into::into),
                 name: format!("key {id}"),
@@ -4307,6 +4308,7 @@ fn the_rounds_write_the_key_checks_prune_the_old_keys_and_make_the_rows_of_a_new
                 &crate::store::KeyRow {
                     kind: crate::keys::KeyKind::Mcp,
                     interaction: crate::keys::Interaction::Conversational,
+                    agents: crate::keys::AgentsMode::Discover,
                     id: "c0ffee0000000001".into(),
                     owner: Some("alice".into()),
                     name: "checked".into(),
@@ -5422,6 +5424,7 @@ fn the_start_refuses_a_login_a_key_id_or_a_digest_that_the_file_and_the_database
     let mut row = crate::store::KeyRow {
         kind: crate::keys::KeyKind::Mcp,
         interaction: crate::keys::Interaction::Conversational,
+        agents: crate::keys::AgentsMode::Discover,
         id: id.clone(),
         owner: Some("erin".into()),
         name: "other".into(),
@@ -5815,6 +5818,7 @@ mod inbox_rights_tests {
                 &KeyRow {
                     kind,
                     interaction: crate::keys::Interaction::default_for(kind),
+                    agents: crate::keys::AgentsMode::default_for(kind),
                     id: id.clone(),
                     owner: owner.map(Into::into),
                     name: format!("key {id}"),

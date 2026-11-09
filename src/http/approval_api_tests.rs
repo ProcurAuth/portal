@@ -234,6 +234,7 @@ impl Rig {
                 &crate::store::KeyRow {
                     kind: crate::keys::KeyKind::Mcp,
                     interaction,
+                    agents: crate::keys::AgentsMode::Discover,
                     id: id.into(),
                     owner: Some(OWNER.into()),
                     name: format!("key {id}"),

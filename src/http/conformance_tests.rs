@@ -159,6 +159,7 @@ mod conformance_d {
                     &crate::store::KeyRow {
                         kind: crate::keys::KeyKind::Mcp,
                         interaction: crate::keys::Interaction::Conversational,
+                        agents: crate::keys::AgentsMode::Discover,
                         id: local.to_string(),
                         owner: Some(owner.to_string()),
                         name: local.to_string(),
@@ -917,6 +918,7 @@ mod conformance_e {
                     &crate::store::KeyRow {
                         kind: crate::keys::KeyKind::Mcp,
                         interaction: crate::keys::Interaction::Conversational,
+                        agents: crate::keys::AgentsMode::Discover,
                         id: key_id.into(),
                         owner: Some("ana".into()),
                         name: key_id.into(),

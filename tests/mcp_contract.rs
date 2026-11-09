@@ -36,6 +36,11 @@ fn enable_mcp(s: &Server) {
 
 /// A server with the items, the approvals and the block `inbox.mcp` with `mcp` inside it. The kind `mcp` is on.
 fn start_server(mcp: &str) -> Server {
+    start_server_with("", mcp)
+}
+
+/// The same, with more blocks of `inbox` before the block `mcp` (for example `agents { max_per_key = 2 }`).
+fn start_server_with(blocks: &str, mcp: &str) -> Server {
     let mut s = Server::setup();
     let key = s.dir.join("content_key");
     portal_ok(&["inbox", "content-key", "--out", &key.to_string_lossy()]);
@@ -57,6 +62,7 @@ fn start_server(mcp: &str) -> Server {
     key "k1" {{ secret_file = "{}" }}
   }}
   approvals {{ consume_within = "5m" }}
+  {blocks}
   mcp {{ {mcp} }}
 "#,
         key.display()
@@ -66,8 +72,8 @@ fn start_server(mcp: &str) -> Server {
     s
 }
 
-/// A key that the superadmin makes on the page Keys. The answer is the text of the key, shown one time.
-fn make_key(s: &Server, kind: &str, name: &str, interaction: &str) -> String {
+/// The page of a new key, and the token of its form.
+fn new_key_page(s: &Server, kind: &str) -> (String, String) {
     let cookie = s.session().cookie.clone();
     let host = format!("127.0.0.1:{}", s.port);
     let (st, _, page) = http_full(
@@ -75,7 +81,7 @@ fn make_key(s: &Server, kind: &str, name: &str, interaction: &str) -> String {
         &host,
         "GET",
         &format!("/auth/keys/new?kind={kind}"),
-        &[("Cookie", cookie.clone())],
+        &[("Cookie", cookie)],
         "",
     );
     assert_eq!(st, 200, "{page}");
@@ -83,11 +89,15 @@ fn make_key(s: &Server, kind: &str, name: &str, interaction: &str) -> String {
     let marker = "name=\"csrf\" value=\"";
     let start = form + page[form..].find(marker).unwrap() + marker.len();
     let csrf = page[start..].split('"').next().unwrap().to_string();
-    let body = format!(
-        "csrf={csrf}&kind={kind}&name={}&expires_at=&interaction={interaction}",
-        form_value(name)
-    );
-    let (st, _, page) = http_full(
+    (csrf, page)
+}
+
+/// A form of a new key, with these fields after the token. The answer is the status, the head and the page.
+fn post_new_key(s: &Server, fields: &str) -> (u16, String, String) {
+    let (csrf, _) = new_key_page(s, "mcp");
+    let cookie = s.session().cookie.clone();
+    let host = format!("127.0.0.1:{}", s.port);
+    http_full(
         s.port,
         &host,
         "POST",
@@ -97,8 +107,31 @@ fn make_key(s: &Server, kind: &str, name: &str, interaction: &str) -> String {
             ("Origin", format!("http://{host}")),
             ("Cookie", cookie),
         ],
-        &body,
+        &format!("csrf={csrf}&{fields}"),
+    )
+}
+
+/// A key that the superadmin makes on the page Keys. The answer is the text of the key, shown one time.
+fn make_key(s: &Server, kind: &str, name: &str, interaction: &str) -> String {
+    make_key_with(s, kind, name, interaction, None)
+}
+
+/// The same, with the mode of the agents of the key. The field exists only when the file has the block `inbox.agents`.
+fn make_key_with(
+    s: &Server,
+    kind: &str,
+    name: &str,
+    interaction: &str,
+    agents: Option<&str>,
+) -> String {
+    let mut fields = format!(
+        "kind={kind}&name={}&expires_at=&interaction={interaction}",
+        form_value(name)
     );
+    if let Some(mode) = agents {
+        fields.push_str(&format!("&agents={mode}"));
+    }
+    let (st, _, page) = post_new_key(s, &fields);
     assert_eq!(st, 200, "the key is not made: {page}");
     let marker = "id=\"key-text\" type=\"text\" readonly value=\"";
     let start = page.find(marker).expect("the text of the key") + marker.len();
@@ -720,4 +753,276 @@ fn the_rate_cases_k07_and_k08() {
     );
     // A request that fails a check before the key (a bad method) is not counted.
     assert_eq!(request(&s, "GET", &[], "").status, 405);
+}
+
+// ---------------------------------------------------------------- the agents of a key (lot G1b)
+
+/// The result of `approval_intent` of a key, with the extra headers.
+fn intent(s: &Server, key: &str, headers: &[(&str, String)], args: Value) -> (bool, Value) {
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "approval_intent", "arguments": args}});
+    let mut all = vec![bearer(key)];
+    all.extend(headers.iter().cloned());
+    tool_result(&request(s, "POST", &all, &body.to_string()))
+}
+
+const SENTENCE: &str = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service.";
+
+#[test]
+fn the_agent_cases_a01_to_a10() {
+    let s = start_server_with(
+        "agents { max_per_key = 2 new_per_hour = 10 }",
+        r#"max_unauthenticated_per_minute = 100"#,
+    );
+    // A01: the form of a new key has the field `agents` because the file has the block. The default is `discover` for an
+    // `mcp_` key and `key` for an `api_` key. A value that is not one of the three is refused.
+    let checked = |page: &str| -> Vec<String> {
+        page.match_indices("name=\"agents\" value=\"")
+            .filter_map(|(at, _)| {
+                let rest = &page[at + "name=\"agents\" value=\"".len()..];
+                let tag = &rest[..rest.find('>').unwrap()];
+                tag.contains("checked")
+                    .then(|| rest[..rest.find('"').unwrap()].to_string())
+            })
+            .collect()
+    };
+    assert_eq!(checked(&new_key_page(&s, "mcp").1), ["discover"], "A01");
+    assert_eq!(checked(&new_key_page(&s, "api").1), ["key"], "A01");
+    let (status, head, _) = post_new_key(
+        &s,
+        "kind=mcp&name=x&expires_at=&interaction=conversational&agents=auto",
+    );
+    assert_eq!(status, 303, "A01");
+    assert!(head.contains("s=bad_agents"), "A01: {head}");
+
+    let discover = make_key_with(&s, "mcp", "agent", "conversational", Some("discover"));
+    let ignore = make_key_with(&s, "mcp", "single", "conversational", Some("key"));
+    let enrolled = make_key_with(&s, "mcp", "enrolled", "conversational", Some("enrolled"));
+    let default = make_key(&s, "mcp", "default", "conversational");
+
+    // A02: each tool takes `agent_token` and has the fixed sentence. The instructions have it too.
+    let list = legacy(&s, &discover, "tools/list", json!({})).json();
+    for tool in list["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(
+            tool["inputSchema"]["properties"]["agent_token"]["type"], "string",
+            "A02 {name}"
+        );
+        assert!(
+            tool["description"].as_str().unwrap().contains(SENTENCE),
+            "A02 {name}"
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]
+                .get("agent_label")
+                .is_some(),
+            name == "approval_intent",
+            "A02 {name}"
+        );
+    }
+    let init = legacy(
+        &s,
+        &discover,
+        "initialize",
+        json!({"protocolVersion": "2025-11-25"}),
+    )
+    .json();
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains(SENTENCE),
+        "A02"
+    );
+
+    // A03: a call with no token makes an agent, and the result gives the token one time. The status is `new`.
+    let (is_error, first) = intent(&s, &discover, &[], json!({"lease_s": 900}));
+    assert!(!is_error, "{first}");
+    assert_eq!(first["agent_status"], "new", "A03");
+    let token = first["agent_token"].as_str().unwrap().to_string();
+    assert!(
+        token.starts_with("agt_") && token.len() == 47,
+        "A03 {token}"
+    );
+    // A04: the token in the header, or in the argument: the same agent, and no new token. A different token in each
+    // place is a conflict. A token that nobody has is unknown, and it makes no agent.
+    for (headers, args) in [
+        (
+            vec![("Agent-Token", token.clone())],
+            json!({"lease_s": 900}),
+        ),
+        (vec![], json!({"lease_s": 900, "agent_token": token})),
+        (
+            vec![("Agent-Token", token.clone())],
+            json!({"lease_s": 900, "agent_token": token}),
+        ),
+    ] {
+        let (is_error, again) = intent(&s, &discover, &headers, args);
+        assert!(!is_error, "A04 {again}");
+        assert!(again.get("agent_token").is_none(), "A04 {again}");
+        assert_eq!(again["agent_status"], "new", "A04");
+    }
+    let other = format!("agt_{}", "B".repeat(43));
+    let (is_error, e) = intent(
+        &s,
+        &discover,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900, "agent_token": other}),
+    );
+    assert!(is_error, "A04");
+    assert_eq!(
+        e["error"],
+        json!({"code": "agent_token_conflict", "message": e["error"]["message"], "retryable": false}),
+        "A04"
+    );
+    let (is_error, e) = intent(
+        &s,
+        &discover,
+        &[],
+        json!({"lease_s": 900, "agent_token": other}),
+    );
+    assert!(is_error && e["error"]["code"] == "agent_unknown", "A04 {e}");
+    assert!(
+        e["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("approval_intent"),
+        "A04"
+    );
+
+    // A05: a label that has a hidden character or a bad length is refused, and it makes no agent. A good one is kept.
+    for label in ["", "a\nb", "a\u{202E}b", "a\u{200B}", &"x".repeat(65)] {
+        let (is_error, e) = intent(
+            &s,
+            &discover,
+            &[],
+            json!({"lease_s": 900, "agent_label": label}),
+        );
+        assert!(
+            is_error && e["error"]["code"] == "invalid_agent_label",
+            "A05 {label:?} {e}"
+        );
+    }
+    // A06: the cap of the key is two agents: the next call is not an error. It goes to the bucket with no token.
+    let (is_error, second) = intent(
+        &s,
+        &discover,
+        &[],
+        json!({"lease_s": 900, "agent_label": "billing-bot"}),
+    );
+    assert!(
+        !is_error && second["agent_status"] == "new" && second.get("agent_token").is_some(),
+        "A06 {second}"
+    );
+    let (is_error, flood) = intent(&s, &discover, &[], json!({"lease_s": 900}));
+    assert!(!is_error, "A06 {flood}");
+    assert_eq!(flood["agent_status"], "unattributed", "A06");
+    assert!(flood.get("agent_token").is_none(), "A06");
+    assert_eq!(flood["approval_ref"].as_str().unwrap().len(), 43, "A06");
+
+    // A07: a call of the new line has `clientInfo` in `_meta`. The call works the same.
+    let params = json!({"name": "approval_intent", "arguments": {"lease_s": 900, "agent_token": token},
+        "_meta": {META: MODERN, "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.0"}}});
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params});
+    let answer = request(
+        &s,
+        "POST",
+        &[
+            bearer(&discover),
+            ("MCP-Protocol-Version", MODERN.to_string()),
+            ("Mcp-Method", "tools/call".to_string()),
+            ("Mcp-Name", "approval_intent".to_string()),
+        ],
+        &body.to_string(),
+    );
+    let (is_error, value) = tool_result(&answer);
+    assert!(!is_error && value["agent_status"] == "new", "A07 {value}");
+
+    // A08: a key of the mode `key` has one agent: the status is `key` and there is no token. The token is ignored. A key
+    // that has the default of its kind (`mcp_`) is in the mode `discover`.
+    let (is_error, one) = intent(&s, &ignore, &[], json!({"lease_s": 900}));
+    assert!(!is_error, "{one}");
+    assert_eq!(one["agent_status"], "key", "A08");
+    assert!(one.get("agent_token").is_none(), "A08");
+    let (is_error, still) = intent(
+        &s,
+        &ignore,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900}),
+    );
+    assert!(!is_error && still["agent_status"] == "key", "A08 {still}");
+    let (_, made) = intent(&s, &default, &[], json!({"lease_s": 900}));
+    assert_eq!(made["agent_status"], "new", "A08");
+
+    // A09: a key of the mode `enrolled` refuses a call that makes an item and has no token.
+    let (is_error, e) = intent(&s, &enrolled, &[], json!({"lease_s": 900}));
+    assert!(
+        is_error && e["error"]["code"] == "agent_token_required",
+        "A09 {e}"
+    );
+    let (is_error, e) = intent(
+        &s,
+        &enrolled,
+        &[("Agent-Token", token.clone())],
+        json!({"lease_s": 900}),
+    );
+    assert!(
+        is_error && e["error"]["code"] == "agent_unknown",
+        "A09 {e}: the token of another key is unknown"
+    );
+
+    // A10: the log line of a call has the field `agent` with the id of the agent, and no log line holds a token.
+    let log = s.log();
+    let calls: Vec<&str> = log
+        .lines()
+        .filter(|l| {
+            l.contains("\"event\":\"mcp_call\"") && l.contains("\"tool\":\"approval_intent\"")
+        })
+        .collect();
+    assert!(!calls.is_empty(), "A10");
+    let id_of = |line: &str| -> Option<String> {
+        let rest = line.split("\"agent\":\"").nth(1)?;
+        Some(rest.split('"').next()?.to_string())
+    };
+    let first_call = id_of(calls[0]).expect("A10: the field agent");
+    assert!(
+        first_call.len() == 32 && first_call.bytes().all(|b| b.is_ascii_hexdigit()),
+        "A10 {first_call}"
+    );
+    // A call with the token of the agent, and a call that its header makes, log the same id.
+    assert!(
+        calls
+            .iter()
+            .filter(|l| id_of(l).as_deref() == Some(first_call.as_str()))
+            .count()
+            >= 4,
+        "A10"
+    );
+    // A call that is refused before it has an agent logs `-`.
+    assert!(
+        calls.iter().any(|l| id_of(l).as_deref() == Some("-")),
+        "A10"
+    );
+    assert!(
+        !log.contains(&token[4..]),
+        "A10: a log line holds the token"
+    );
+}
+
+#[test]
+fn a_file_without_the_block_agents_has_no_field_and_refuses_it() {
+    let s = start_server(r#"max_unauthenticated_per_minute = 100"#);
+    // The form has no field, and a form that sends it is a bad request.
+    assert!(!new_key_page(&s, "mcp").1.contains("name=\"agents\""));
+    let (status, _, _) = post_new_key(
+        &s,
+        "kind=mcp&name=x&expires_at=&interaction=conversational&agents=key",
+    );
+    assert_eq!(status, 400);
+    // Every key is one agent: the status is `key`, whatever the key and the token.
+    let key = make_key(&s, "mcp", "agent", "conversational");
+    let (is_error, v) = intent(&s, &key, &[], json!({"lease_s": 900}));
+    assert!(!is_error, "{v}");
+    assert_eq!(v["agent_status"], "key");
+    assert!(v.get("agent_token").is_none());
 }

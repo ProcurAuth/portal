@@ -424,6 +424,7 @@ mod tests {
         KeyRecord {
             kind: crate::keys::KeyKind::Mcp,
             interaction: crate::keys::Interaction::Conversational,
+            agents: crate::keys::AgentsMode::Discover,
             id: id.into(),
             owner: if file {
                 KeyOwner::File("carol".into())

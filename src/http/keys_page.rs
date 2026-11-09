@@ -589,7 +589,17 @@ pub(super) struct Refused {
     pub name: String,
     pub expires_at: Option<String>,
     pub interaction: Option<crate::keys::Interaction>,
+    pub agents: Option<crate::keys::AgentsMode>,
     pub grants: Vec<Grant>,
+}
+
+/// Whether the file has the block `inbox.agents`: only then the form of a key has the field `agents`.
+fn agents_enabled(state: &AppState) -> bool {
+    state
+        .config
+        .inbox
+        .as_ref()
+        .is_some_and(|inbox| inbox.agents.is_some())
 }
 
 /// The form that `raw` holds, when the check refuses it for `access`.
@@ -608,6 +618,10 @@ fn refused_for_access(
             .interaction
             .as_deref()
             .and_then(crate::keys::Interaction::from_name),
+        agents: raw
+            .agents
+            .as_deref()
+            .and_then(crate::keys::AgentsMode::from_name),
         grants,
     })
 }
@@ -689,6 +703,8 @@ async fn draw(
     // The interaction that the form shows: the key that the form copies or changes, or what the
     // person typed. Without these, the default of the kind.
     let mut interaction: Option<crate::keys::Interaction> = None;
+    // The mode of the agents, in the same way. The form has the field only when the file has the block `inbox.agents`.
+    let mut agents: Option<crate::keys::AgentsMode> = None;
     // The form that the server refused keeps what the person typed.
     let typed_expiry = refused.as_ref().and_then(|r| r.expires_at.clone());
     let mut edit: Option<EditTarget> = None;
@@ -710,6 +726,7 @@ async fn draw(
                 copy_name = source.name.clone();
                 kind = Some(source.kind);
                 interaction = Some(source.interaction);
+                agents = Some(source.agents);
             }
         }
     }
@@ -722,6 +739,7 @@ async fn draw(
                 ticked = key.grants.clone();
                 kind = Some(key.kind);
                 interaction = Some(key.interaction);
+                agents = Some(key.agents);
                 edit = Some(EditTarget {
                     id: key.id.clone(),
                     name: key.name.clone(),
@@ -733,6 +751,7 @@ async fn draw(
     if let Some(r) = &refused {
         ticked = r.grants.clone();
         interaction = r.interaction.or(interaction);
+        agents = r.agents.or(agents);
         if let Some(target) = &mut edit {
             target.name = r.name.clone();
         } else {
@@ -784,6 +803,9 @@ async fn draw(
         copy_name,
         interaction: kind
             .map(|kind| interaction.unwrap_or(crate::keys::Interaction::default_for(kind))),
+        agents: kind
+            .filter(|_| agents_enabled(state))
+            .map(|kind| agents.unwrap_or(crate::keys::AgentsMode::default_for(kind))),
         needs_access: refused.map(|r| r.service),
     };
     let frame = ui::Frame {
@@ -992,6 +1014,10 @@ pub(super) async fn handle_keys_create(
     let Ok(raw) = key_forms::read(form, false) else {
         return bad_request();
     };
+    // The page sends the field `agents` only when the file has the block `inbox.agents`.
+    if raw.agents.is_some() && !agents_enabled(state) {
+        return bad_request();
+    }
     let mine = me(state, &viewer);
     let owner = owner_grants(state, owner_login(&mine));
     let checked = with_context(state, owner.as_deref(), None, kind, |ctx| {
@@ -1032,6 +1058,9 @@ pub(super) async fn handle_keys_create(
         interaction: form
             .interaction
             .unwrap_or(crate::keys::Interaction::default_for(kind)),
+        agents: form
+            .agents
+            .unwrap_or(crate::keys::AgentsMode::default_for(kind)),
         grants: form.grants,
     };
     let caps = caps(state, now, owner.as_deref());
@@ -1135,6 +1164,9 @@ pub(super) async fn handle_keys_edit(
     let Ok(raw) = key_forms::read(form, true) else {
         return bad_request();
     };
+    if raw.agents.is_some() && !agents_enabled(state) {
+        return bad_request();
+    }
     let mine = me(state, &viewer);
     let now = unix_now();
     let key = match editable_key(state, &id, &mine, now) {
@@ -1165,9 +1197,12 @@ pub(super) async fn handle_keys_edit(
     let login = owner_login(&mine).map(str::to_string);
     let written = {
         let (id, name, grants) = (id.clone(), form.name.clone(), form.grants.clone());
-        let interaction = form.interaction.unwrap_or(key.interaction);
+        let modes = crate::store::KeyModes {
+            interaction: form.interaction.unwrap_or(key.interaction),
+            agents: form.agents.unwrap_or(key.agents),
+        };
         tokio::task::spawn_blocking(move || {
-            store.update_key(&id, login.as_deref(), &name, interaction, &grants, &caps)
+            store.update_key(&id, login.as_deref(), &name, modes, &grants, &caps)
         })
         .await
     };

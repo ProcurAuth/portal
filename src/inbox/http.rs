@@ -221,16 +221,16 @@ pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Res
     }
     if path == "/api/v1/approval-intents" {
         return if post {
-            api::post_intent(&app, request).await
+            api::post_intent(&app, ip, request).await
         } else {
             empty(StatusCode::METHOD_NOT_ALLOWED)
         };
     }
     if let Some(id) = segment(&path, "/api/v1/items/") {
         return if get {
-            api::get_item(&app, request, id).await
+            api::get_item(&app, ip, request, id).await
         } else if method == Method::DELETE {
-            api::delete_item(&app, request, id).await
+            api::delete_item(&app, ip, request, id).await
         } else {
             empty(StatusCode::METHOD_NOT_ALLOWED)
         };
@@ -242,7 +242,7 @@ pub async fn serve(app: Arc<App>, ip: IpAddr, request: Request<Incoming>) -> Res
         .filter(|(_, action)| matches!(*action, "keepalive" | "turns" | "supersede"))
     {
         return if post {
-            api::item_action(&app, request, id, action).await
+            api::item_action(&app, ip, request, id, action).await
         } else {
             empty(StatusCode::METHOD_NOT_ALLOWED)
         };

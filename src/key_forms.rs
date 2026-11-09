@@ -12,7 +12,9 @@
 //! - `limit<n>.<name>.<window>`: the amount of one window of a budget of the grant `<n>`;
 //! - `confirm<n>`: the value `1` when the grant `<n>` has `confirm`. The field is absent otherwise;
 //! - `interaction`: `conversational` or `one_shot`, the interaction of the key (only in the form of
-//!   a key).
+//!   a key);
+//! - `agents`: `key`, `discover` or `enrolled`, what the portal does with the agents that share the key. The page sends
+//!   the field only when the file has the block `inbox.agents`.
 //!
 //! A field that is unknown, or a field name that has none of these forms, is a bad request (HTTP
 //! 400). The caller reads the fields with `parse_form`, which refuses a repeated field.
@@ -24,7 +26,7 @@ use std::sync::Arc;
 
 use crate::actions::Document;
 use crate::grants::{Grant, Segment, ACCESS};
-use crate::keys::{Interaction, KeyKind};
+use crate::keys::{AgentsMode, Interaction, KeyKind};
 use crate::limits::{Budget, Item, Limits, Value, Window};
 use crate::portal_actions;
 
@@ -57,6 +59,8 @@ pub struct RawForm {
     pub confirm: BTreeSet<usize>,
     /// The text of the field `interaction`. `None` when the form has no such field.
     pub interaction: Option<String>,
+    /// The text of the field `agents`. `None` when the form has no such field.
+    pub agents: Option<String>,
 }
 
 /// A form that the rules accept.
@@ -68,6 +72,9 @@ pub struct KeyForm {
     /// The interaction of the form. `None`: the form has no such field, so a new key gets the
     /// default of its kind and a key that exists keeps its value.
     pub interaction: Option<Interaction>,
+    /// The mode of the agents of the form. `None`: the form has no such field, so a new key gets the default of its kind
+    /// and a key that exists keeps its value.
+    pub agents: Option<AgentsMode>,
     /// Sorted.
     pub grants: Vec<Grant>,
 }
@@ -95,6 +102,7 @@ pub fn read(mut fields: HashMap<String, String>, edit: bool) -> Result<RawForm, 
         form.expires_at = fields.remove("expires_at");
     }
     form.interaction = fields.remove("interaction");
+    form.agents = fields.remove("agents");
     for (field, value) in fields {
         if let Some(rest) = field.strip_prefix("confirm") {
             let n = number(rest).ok_or_else(|| format!("the field {field:?} is not known"))?;
@@ -163,6 +171,8 @@ pub const NOT_COVERED: &str = "not_covered";
 pub const BAD_LIMITS: &str = "bad_limits";
 /// The field `interaction` has a value that is not known.
 pub const BAD_INTERACTION: &str = "bad_interaction";
+/// The field `agents` has a value that is not known.
+pub const BAD_AGENTS: &str = "bad_agents";
 /// A right on a service, and no grant `access` on this service.
 pub const NEEDS_ACCESS: &str = "needs_access";
 
@@ -480,10 +490,15 @@ pub fn check(raw: &RawForm, ctx: &Context<'_>, kind: KeyKind) -> Result<KeyForm,
         None => None,
         Some(text) => Some(Interaction::from_name(text).ok_or(BAD_INTERACTION)?),
     };
+    let agents = match raw.agents.as_deref() {
+        None => None,
+        Some(text) => Some(AgentsMode::from_name(text).ok_or(BAD_AGENTS)?),
+    };
     Ok(KeyForm {
         name: raw.name.clone(),
         expires_at,
         interaction,
+        agents,
         grants,
     })
 }
@@ -1347,6 +1362,32 @@ mod tests {
         for bad in ["", "oneshot", "One_Shot", "chat", " one_shot"] {
             assert_eq!(run_with(Some(bad)), Err(BAD_INTERACTION), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn key_form_agents_field_is_closed_and_an_absent_field_changes_nothing() {
+        let owner = grants(&["access on service:datastore"]);
+        let run_with = |value: Option<&str>| {
+            let mut pairs = vec![("name", "n"), ("grant0", "access on service:datastore")];
+            if let Some(value) = value {
+                pairs.push(("agents", value));
+            }
+            run(&pairs, Some(&owner), None, None)
+        };
+        assert_eq!(run_with(None).unwrap().agents, None);
+        for (text, mode) in [
+            ("key", AgentsMode::Key),
+            ("discover", AgentsMode::Discover),
+            ("enrolled", AgentsMode::Enrolled),
+        ] {
+            assert_eq!(run_with(Some(text)).unwrap().agents, Some(mode), "{text}");
+        }
+        for bad in ["", "auto", "Discover", "enroll", " key", "key "] {
+            assert_eq!(run_with(Some(bad)), Err(BAD_AGENTS), "{bad:?}");
+        }
+        // The field is read with the others, one time: a repeated field is a bad request of the caller.
+        let raw = read(fields(&[("name", "n"), ("agents", "key")]), true).unwrap();
+        assert_eq!(raw.agents.as_deref(), Some("key"));
     }
 
     #[test]

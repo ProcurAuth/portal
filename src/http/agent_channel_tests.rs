@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::inbox::testing::{Answer, AnswerVia};
-use crate::keys::{Interaction as KeyInteraction, KeyKind};
+use crate::keys::{AgentsMode, Interaction as KeyInteraction, KeyKind};
 
 /// A key of the owner, with its text.
 struct Agent {
@@ -16,9 +16,13 @@ struct Agent {
 
 /// A server like the rig of the series A, with the kind `api` on and the block `inbox.mcp`. `mcp` holds the keys of the
 /// block.
-fn agent_rig(backend: &Backend, mcp: &str) -> Option<Rig> {
-    let inbox =
-        InboxRig::with_approvals(backend, &format!("consume_within = \"5m\" }} mcp {{ {mcp}"))?;
+///
+/// `blocks` holds more blocks of `inbox` after the block `approvals` (for example `agents { ... }`).
+fn agent_rig_with(backend: &Backend, blocks: &str, mcp: &str) -> Option<Rig> {
+    let inbox = InboxRig::with_approvals(
+        backend,
+        &format!("consume_within = \"5m\" }} {blocks} mcp {{ {mcp}"),
+    )?;
     let port = free_port();
     let mut env = inbox.env.clone();
     env.push(("TEST_PDP_DB".into(), PDP_DB_TOKEN.into()));
@@ -80,9 +84,13 @@ fn agent_rig(backend: &Backend, mcp: &str) -> Option<Rig> {
 }
 
 fn each_agent_rig(mcp: &str, test: impl Fn(&Rig, &str)) {
+    each_agent_rig_with("", mcp, test);
+}
+
+fn each_agent_rig_with(blocks: &str, mcp: &str, test: impl Fn(&Rig, &str)) {
     stay_in_a_minute();
     for backend in backends() {
-        let Some(r) = agent_rig(&backend, mcp) else {
+        let Some(r) = agent_rig_with(&backend, blocks, mcp) else {
             eprintln!("INBOX_TEST_PG is not set: skipped on PostgreSQL");
             continue;
         };
@@ -90,8 +98,19 @@ fn each_agent_rig(mcp: &str, test: impl Fn(&Rig, &str)) {
     }
 }
 
-/// A key of the owner with a real text. It can use `data.write` on analytics with `confirm`, as the keys of the rig.
+/// A key of the owner with a real text. It can use `data.write` on analytics with `confirm`, as the keys of the rig. The
+/// mode of the agents is the default of the kind.
 fn agent(r: &Rig, id: &str, kind: KeyKind, interaction: KeyInteraction) -> Agent {
+    agent_in(r, id, kind, interaction, AgentsMode::default_for(kind))
+}
+
+fn agent_in(
+    r: &Rig,
+    id: &str,
+    kind: KeyKind,
+    interaction: KeyInteraction,
+    agents: AgentsMode,
+) -> Agent {
     let token = crate::keys::generate(kind).unwrap().to_string();
     let write = Grant::from_path_text("data.write", "db", ANALYTICS)
         .unwrap()
@@ -105,6 +124,7 @@ fn agent(r: &Rig, id: &str, kind: KeyKind, interaction: KeyInteraction) -> Agent
             &crate::store::KeyRow {
                 kind,
                 interaction,
+                agents,
                 id: id.into(),
                 owner: Some(OWNER.into()),
                 name: format!("key {id}"),
@@ -1415,3 +1435,7 @@ fn get_answer_returns_the_answers_of_a_form_in_untrusted() {
         }
     });
 }
+
+// The tests of lot G1b: the agent of a call.
+#[path = "agent_who_tests.rs"]
+mod who;

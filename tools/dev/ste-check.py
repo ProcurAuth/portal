@@ -29,6 +29,8 @@ ING_OK = {
     "during", "string", "thing", "things", "nothing", "something", "anything", "everything",
     "morning", "ring", "bring", "spring", "ping", "king", "wing", "sing", "evening", "ceiling",
     "pending", "sibling", "bearing", "building", "warning", "binding", "bing", "sling", "swing", "sting",
+    # The noun of the feature "agents": the grouping of the items by agent.
+    "grouping",
 }
 
 # First words of a procedural sentence (imperative mood).

@@ -587,6 +587,8 @@ The external services (5.0.5) changed the schema version 8 in place, as the seco
 
 The approvals (5.1.0) change the schema version 8 in place, as the external services did. They add the column `confirm` to `user_grants` and to `key_grants`, and the column `interaction` to `keys`. A database that an earlier 5.0 made lacks the columns, and the portal stops at start and says so. A database of schema version 7 or less gets the columns from the migration. A key of kind `api` then gets `one_shot`, and the other keys get `conversational`. See "Upgrades".
 
+The agents (5.1.0) change the schema version 8 in place in the same way. They add the column `agents` to `keys`. The values are `key`, `discover` and `enrolled`. A key of kind `api` gets `key`, and the other keys get `discover`.
+
 ### Paths open without a session (`portal.exclude`)
 
 A caller that cannot sign in (for example, a webhook or a probe) needs a path that portal does not authenticate. The service declares this path with `portal.exclude`. This is an annotation in K3s. Write **one rule per line**. portal ignores blank lines and `#` comments:
@@ -637,6 +639,7 @@ A verifier refuses an unknown prefix, a bad length, a bad character and a bad ch
 - **A key holds what its kind lists.** An MCP key holds grants on services. It holds no action of the portal. An API key holds `alert.send` and `alert.read` on groups of the Inbox, and `alert.send_user` on the service. It holds the grant `access on service:portal` for the budget `alerts`. An API key holds no grant on another service.
 - **A key never goes beyond its owner.** The account can tick only the rights that the owner holds. A right that the owner lost has a warning mark in the pane.
 - **A key has an interaction.** The value is `conversational` or `one_shot`. A `conversational` key is for an agent that discusses with a person in free text. A `one_shot` key is for a system that decides with no free text, and it gets closed questions only. The owner sets the value with two radio buttons in the form of the key, and the agent cannot set it. The default is `conversational` for an `mcp_` key and `one_shot` for an `api_` key. This release stores the value, and a later release uses it.
+- **A key has a mode of the agents.** The value is `key`, `discover` or `enrolled`. It says what the portal does with the agents that share the key. The form of the key has the field only when the file has the block `inbox.agents`. The default is `discover` for an `mcp_` key and `key` for an `api_` key. See "Block `inbox.agents`" and `docs/inbox/agents.md`.
 
 ### Switches
 
@@ -1159,6 +1162,8 @@ A client address that sends too many requests with no valid key gets `429` befor
 The REST routes are the twin of the tools. They use an `api_` key. They are `POST /api/v1/approval-intents`, `GET` and `DELETE /api/v1/items/{id}`, and `POST` to `/api/v1/items/{id}/keepalive`, `/turns` and `/supersede`. A `GET` with `?wait=N` renews the lease and waits at most `inbox.items.wait_max` seconds. An `mcp_` key does not open the REST door, and an `api_` key does not open the endpoint.
 
 A key reads and speaks only on the items that it made. An item of another key gives `not_found`. Each text of the person is in an `untrusted` object after a `data_notice`. A result never shows the approver or the device. A renewal makes no row and takes no unit of a budget. `docs/inbox/agents.md` tells how an agent uses the tools.
+
+An agent sends its token in the header `Agent-Token` or in the argument `agent_token`. The guide tells which value to send and where.
 
 ### The tab Inbox
 
@@ -2254,6 +2259,7 @@ Version 5.1.0 adds approvals to grants and the interaction of a key. Read these 
 Version 5.1.0 adds the agents of a key. Read these points before you upgrade from an earlier build of 5.1.0:
 
 - The block `inbox.agents` is new and optional. It needs the blocks `inbox.items` and `inbox.at_rest`. Without it, each key is one agent, and nothing changes for the agents. With it, a key can have the mode `discover`, and the portal gives each agent a token.
+- The column `keys.agents` is new. It has the values `key`, `discover` and `enrolled`. A database that an earlier build made lacks it, and the portal stops at start and names the column. Add `agents TEXT NOT NULL DEFAULT 'discover' CHECK (agents IN ('key', 'discover', 'enrolled'))` to `keys`, then run `UPDATE keys SET agents = 'key' WHERE kind = 'api';`.
 - The tables `agents` and `agent_events` are new. The columns `items.agent_id` and `approval_intents.agent_id` are new. Each of these two columns has a foreign key to `agents`. The key covers the agent and the key, so an item cannot name an agent of another key.
 - This changed the base schema of the Inbox in place: the schema version did not change, and there is no migration. A database that an earlier build made lacks the table `agents`. With the block `inbox.at_rest`, the portal stops at start and names the table. Make a new inbox database.
 - The default of `inbox.agents.lock_new` is `false`: a new agent is allowed at once, and its owner gets a notice. Set it to `true` to lock the approval of a new agent until its owner allows it.

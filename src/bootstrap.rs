@@ -32,6 +32,8 @@ pub fn file_keys(config: &Config) -> Vec<KeyRecord> {
                 expires_at: None,
                 kind: crate::keys::KeyKind::Mcp,
                 interaction: key.interaction,
+                // A key of the file is an MCP key. The file has no attribute for the mode of the agents.
+                agents: crate::keys::AgentsMode::default_for(crate::keys::KeyKind::Mcp),
                 grants: key.grants.clone(),
             });
         }

@@ -173,6 +173,9 @@ pub struct KeysView<'a> {
     pub copy_name: String,
     /// The interaction that the form of a key shows.
     pub interaction: Option<crate::keys::Interaction>,
+    /// The mode of the agents that the form of a key shows. `None`: the file has no block `inbox.agents`, and the form
+    /// has no such field.
+    pub agents: Option<crate::keys::AgentsMode>,
     /// The id of the service that has a right and no `access`, when the server refused the form
     /// for this reason. The form shows again with the values that the person typed.
     pub needs_access: Option<String>,
@@ -209,6 +212,10 @@ pub fn notice_for(code: &str) -> Option<Notice> {
         ),
         "bad_interaction" => (
             "The interaction of a key is conversational or one shot.",
+            false,
+        ),
+        "bad_agents" => (
+            "The agents of a key are one agent, discover or enrolled.",
             false,
         ),
         "needs_access" => (
@@ -774,6 +781,34 @@ fn interaction_field(view: &KeysView<'_>) -> String {
     )
 }
 
+/// The choice of the mode of the agents of a key. Three radio buttons in the same control as the interaction. The field
+/// exists only when the file has the block `inbox.agents`. A new key gets the default of its kind.
+fn agents_field(view: &KeysView<'_>) -> String {
+    let Some(current) = view.agents.filter(|_| view.kind.is_some()) else {
+        return String::new();
+    };
+    let mut options = String::new();
+    for each in crate::keys::AgentsMode::ALL {
+        let _ = write!(
+            options,
+            r#"<label class="choiceGroup__option" title="{}"><input class="visually-hidden" type="radio" name="agents" value="{}"{}>{}</label>"#,
+            match each {
+                crate::keys::AgentsMode::Key => "All items of the key are one agent. No token",
+                crate::keys::AgentsMode::Discover =>
+                    "A call that makes an item and has no token makes an agent, and gets its token",
+                crate::keys::AgentsMode::Enrolled =>
+                    "You make the agents. A call that makes an item and has no valid token is refused",
+            },
+            each.name(),
+            if each == current { " checked" } else { "" },
+            each.label()
+        );
+    }
+    format!(
+        r#"<div class="field field--agents"><span class="field__label" id="key-agents-label">Agents</span><div class="choiceGroup" role="radiogroup" aria-labelledby="key-agents-label">{options}</div><p class="uiField__hint">The agents of one key share the key. The grouping is not a sandbox.</p></div>"#
+    )
+}
+
 /// The message under a field that a refused form names, and the attributes that tie it to it.
 fn field_error(id: &str, view: &KeysView<'_>, field: Field) -> (&'static str, String) {
     match view.notice.filter(|n| !n.ok && view.field == Some(field)) {
@@ -905,6 +940,7 @@ fn form_page(view: &KeysView<'_>) -> String {
             html_escape(&hint)
         );
     }
+    out.push_str(&agents_field(view));
     out.push_str("</div></form>");
     if let Some(editor) = &view.editor {
         let mut grants = String::new();
@@ -1014,6 +1050,7 @@ mod tests {
             max_lifetime: None,
             copy_name: String::new(),
             interaction: None,
+            agents: None,
             needs_access: None,
         }
     }
@@ -1271,6 +1308,54 @@ mod tests {
         let form = &html[html.find(r#"id="key-form""#).unwrap()..];
         let form = &form[..form.find("</form>").unwrap()];
         assert!(form.contains(r#"name="interaction""#));
+    }
+
+    #[test]
+    fn the_form_of_a_key_has_the_choice_of_the_agents_only_when_the_file_has_the_block() {
+        let checked = |html: &str| -> Vec<String> {
+            html.match_indices(r#"name="agents" value=""#)
+                .filter_map(|(at, _)| {
+                    let rest = &html[at + r#"name="agents" value=""#.len()..];
+                    let value = &rest[..rest.find('"').unwrap()];
+                    let tag = &rest[..rest.find('>').unwrap()];
+                    tag.contains("checked").then(|| value.to_string())
+                })
+                .collect()
+        };
+        // Without the block the page has no field: the view has no mode.
+        let mut v = view(Pane::New, &BOTH);
+        v.kind = Some(KeyKind::Mcp);
+        assert!(!page(&v).contains(r#"name="agents""#));
+        // With the block: three radio buttons of one group, with the value of the view checked.
+        for (mode, expected) in [
+            (crate::keys::AgentsMode::Key, "key"),
+            (crate::keys::AgentsMode::Discover, "discover"),
+            (crate::keys::AgentsMode::Enrolled, "enrolled"),
+        ] {
+            v.agents = Some(mode);
+            let html = page(&v);
+            assert_eq!(checked(&html), [expected]);
+            assert_eq!(html.matches(r#"type="radio" name="agents""#).count(), 3);
+            assert!(html.contains(r#"role="radiogroup" aria-labelledby="key-agents-label""#));
+            assert!(html.contains(">One agent</label>") && html.contains(">Discover</label>"));
+            assert!(html.contains(">Enrolled</label>"));
+            // The field posts with the other fields, and it says that the grouping is not a sandbox.
+            let form = &html[html.find(r#"id="key-form""#).unwrap()..];
+            let form = &form[..form.find("</form>").unwrap()];
+            assert!(form.contains(r#"name="agents""#));
+            assert!(form.contains("The grouping is not a sandbox."));
+            // The interaction field stays as it was.
+            assert!(html.contains(r#"name="interaction""#));
+        }
+        // A page without a kind has no field, whatever the view says.
+        let mut none = view(Pane::New, &[]);
+        none.kind = None;
+        none.agents = Some(crate::keys::AgentsMode::Discover);
+        assert!(!page(&none).contains(r#"name="agents""#));
+        // The refusal of a form has its text, under the title of the page and not under a field.
+        let notice = notice_for("bad_agents").unwrap();
+        assert!(!notice.ok && notice.text.contains("discover"));
+        assert_eq!(field_of("bad_agents"), None);
     }
 
     #[test]

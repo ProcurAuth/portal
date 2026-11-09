@@ -3355,6 +3355,11 @@ input.keyText {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
 }
 
+/* The mode of the agents of a key has its own line below the other fields of the form. */
+.field--agents {
+  grid-column: 1 / -1;
+}
+
 /* A narrow screen shows one field on each line. A field never leaves the screen. */
 @media (max-width: 640px) {
   .fgrid--user,

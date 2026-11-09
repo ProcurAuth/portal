@@ -293,8 +293,9 @@ pub async fn submit(app: &App, who: &Requester, s: Submission) -> Result<Submitt
                     intent.previous_id,
                     content.get("explanation").cloned().filter(|v| !v.is_null()),
                     content.get("hint").cloned().filter(|v| !v.is_null()),
-                    // How to show the texts: the format of the explanation and the language of the command.
-                    ["explanation_format", "language"]
+                    // How to show the texts: the format of the explanation and the language of the command. The
+                    // text that the agent says about itself goes with them: the screens show it as not verified.
+                    ["explanation_format", "language", "agent_label"]
                         .into_iter()
                         .filter_map(|k| content.get(k).cloned().map(|v| (k, v)))
                         .collect::<Vec<_>>(),
@@ -552,6 +553,9 @@ pub struct IntentIn {
     pub hint: Option<Value>,
     /// The id of an earlier request of the same key that the new one follows.
     pub previous_id: Option<String>,
+    /// What the agent says about itself, checked by the channel with `agents::check_says`. It is sealed with the
+    /// explanation, and the item keeps it as text that is not verified.
+    pub agent_label: Option<String>,
 }
 
 /// The `approval_ref` that the agent passes to the service, and the time at which it expires.
@@ -663,6 +667,9 @@ pub async fn intent(
     }
     if let Some(hint) = input.hint {
         content["hint"] = hint;
+    }
+    if let Some(label) = input.agent_label {
+        content["agent_label"] = Value::String(label);
     }
     let content = Zeroizing::new(serde_json::to_vec(&content).map_err(|_| INVALID_ARGUMENT)?);
     let expires_at_ms = items

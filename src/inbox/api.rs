@@ -787,8 +787,14 @@ async fn post_alert_inner(app: &App, request: Request<Incoming>) -> Result<Resp,
 
 /// The key of an agent on the REST door: `Authorization: Bearer api_...`, a key of the directory. A key of the kind `mcp`
 /// gets the same `401` as a text with a bad form. The routes of the items need the block `inbox.items`: without it the
-/// routes do not exist.
-fn agent_key(app: &App, headers: &HeaderMap) -> Result<super::approvals::Requester, ApiError> {
+/// routes do not exist. The result holds what the transport shows about the agent: the header `Agent-Token` and the hints
+/// (lot G1b). A token in the query string is refused, because a query goes to the logs of the proxies.
+fn agent_key(
+    app: &App,
+    uri: &Uri,
+    headers: &HeaderMap,
+    ip: std::net::IpAddr,
+) -> Result<super::approvals::Requester, ApiError> {
     use super::rights::{AgentCheck, Door};
     let unauthorized = || {
         ApiError::new(
@@ -813,19 +819,59 @@ fn agent_key(app: &App, headers: &HeaderMap) -> Result<super::approvals::Request
         )
     };
     let authorizer = app.authorizer().ok_or_else(not_ready)?;
-    match authorizer.check_agent_key(token, Door::Rest) {
-        AgentCheck::Valid(key) => Ok(super::approvals::Requester {
+    let who = match authorizer.check_agent_key(token, Door::Rest) {
+        AgentCheck::Valid(key) => super::approvals::Requester {
             key_id: key.key_id,
             owner: key.owner,
             interaction: key.interaction,
-            // The token and the hints come with the channel arguments (lot G1b).
-            agent: Default::default(),
-        }),
-        AgentCheck::NotReady => Err(not_ready()),
+            agent: super::agents::AgentCall {
+                mode: key.agents,
+                ..Default::default()
+            },
+        },
+        AgentCheck::NotReady => return Err(not_ready()),
         AgentCheck::NotAKey | AgentCheck::Invalid => {
             app.metrics.auth_failure("agent_key");
-            Err(unauthorized())
+            return Err(unauthorized());
         }
+    };
+    if token_in_query(uri) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "send the agent token in the header Agent-Token or in the body, never in the query string",
+        ));
+    }
+    super::mcp_tools::with_transport(&who, headers, ip, None).map_err(agent_error)
+}
+
+/// Whether the query string has a parameter that looks like the token of an agent.
+fn token_in_query(uri: &Uri) -> bool {
+    uri.query().unwrap_or_default().split('&').any(|pair| {
+        let name = pair
+            .split('=')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        matches!(name.as_str(), "agent_token" | "agent-token")
+    })
+}
+
+/// The member `agent_token` of the body of a `POST` that has no other member that the portal reads (`keepalive` and
+/// `supersede`). An empty body has none. A body that is not a JSON object has none either: the portal read no body for
+/// these routes before. A member that is not a text is refused.
+fn body_token(body: &[u8]) -> Result<Option<String>, ApiError> {
+    let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(body) else {
+        return Ok(None);
+    };
+    match map.get("agent_token") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(token)) => Ok(Some(token.clone())),
+        Some(_) => Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_argument",
+            "agent_token must be a text",
+        )),
     }
 }
 
@@ -876,12 +922,16 @@ fn query_number(uri: &Uri, name: &str) -> Result<Option<u64>, ApiError> {
 }
 
 /// `POST /api/v1/approval-intents`
-pub async fn post_intent(app: &App, request: Request<Incoming>) -> Resp {
-    respond(post_intent_inner(app, request).await)
+pub async fn post_intent(app: &App, ip: std::net::IpAddr, request: Request<Incoming>) -> Resp {
+    respond(post_intent_inner(app, ip, request).await)
 }
 
-async fn post_intent_inner(app: &App, request: Request<Incoming>) -> Result<Resp, ApiError> {
-    let who = agent_key(app, request.headers())?;
+async fn post_intent_inner(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.uri(), request.headers(), ip)?;
     let body = read_body(
         request,
         app.config.devices.max_request_bytes,
@@ -897,12 +947,22 @@ async fn post_intent_inner(app: &App, request: Request<Incoming>) -> Result<Resp
 
 /// `GET /api/v1/items/{id}`: the answer of an item of the key. With `wait` the call renews the lease and waits at most
 /// `wait` seconds, and never more than `inbox.items.wait_max`. Without `wait` it renews nothing.
-pub async fn get_item(app: &App, request: Request<Incoming>, id: &str) -> Resp {
-    respond(get_item_inner(app, request, id).await)
+pub async fn get_item(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+    id: &str,
+) -> Resp {
+    respond(get_item_inner(app, ip, request, id).await)
 }
 
-async fn get_item_inner(app: &App, request: Request<Incoming>, id: &str) -> Result<Resp, ApiError> {
-    let who = agent_key(app, request.headers())?;
+async fn get_item_inner(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+    id: &str,
+) -> Result<Resp, ApiError> {
+    let who = agent_key(app, request.uri(), request.headers(), ip)?;
     let wait = query_number(request.uri(), "wait")?.map(|seconds| {
         let bound = app
             .config
@@ -914,24 +974,30 @@ async fn get_item_inner(app: &App, request: Request<Incoming>, id: &str) -> Resu
     let after_seq = query_number(request.uri(), "after_seq")?.unwrap_or(0);
     agent_reply(
         StatusCode::OK,
-        super::mcp_tools::get_answer(app, &who, id, wait, after_seq).await,
+        super::mcp_tools::get_answer(app, &who, None, id, wait, after_seq).await,
     )
 }
 
 /// `DELETE /api/v1/items/{id}`: the agent withdraws its item.
-pub async fn delete_item(app: &App, request: Request<Incoming>, id: &str) -> Resp {
-    respond(delete_item_inner(app, request, id).await)
+pub async fn delete_item(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+    id: &str,
+) -> Resp {
+    respond(delete_item_inner(app, ip, request, id).await)
 }
 
 async fn delete_item_inner(
     app: &App,
+    ip: std::net::IpAddr,
     request: Request<Incoming>,
     id: &str,
 ) -> Result<Resp, ApiError> {
-    let who = agent_key(app, request.headers())?;
+    let who = agent_key(app, request.uri(), request.headers(), ip)?;
     agent_reply(
         StatusCode::OK,
-        super::mcp_tools::cancel(app, &who, id).await,
+        super::mcp_tools::cancel(app, &who, None, id).await,
     )
 }
 
@@ -944,20 +1010,29 @@ struct TurnRequest {
     explanation_format: Option<inbox_core::proto::ExplanationFormat>,
     #[serde(default)]
     expect_seq: Option<u64>,
+    #[serde(default)]
+    agent_token: Option<String>,
 }
 
 /// `POST /api/v1/items/{id}/keepalive`, `/turns` and `/supersede`.
-pub async fn item_action(app: &App, request: Request<Incoming>, id: &str, action: &str) -> Resp {
-    respond(item_action_inner(app, request, id, action).await)
+pub async fn item_action(
+    app: &App,
+    ip: std::net::IpAddr,
+    request: Request<Incoming>,
+    id: &str,
+    action: &str,
+) -> Resp {
+    respond(item_action_inner(app, ip, request, id, action).await)
 }
 
 async fn item_action_inner(
     app: &App,
+    ip: std::net::IpAddr,
     request: Request<Incoming>,
     id: &str,
     action: &str,
 ) -> Result<Resp, ApiError> {
-    let who = agent_key(app, request.headers())?;
+    let who = agent_key(app, request.uri(), request.headers(), ip)?;
     let body = read_body(
         request,
         app.config.devices.max_request_bytes,
@@ -967,7 +1042,7 @@ async fn item_action_inner(
     match action {
         "keepalive" => agent_reply(
             StatusCode::OK,
-            super::mcp_tools::keepalive(app, &who, id).await,
+            super::mcp_tools::keepalive(app, &who, body_token(&body)?.as_deref(), id).await,
         ),
         "turns" => {
             let turn: TurnRequest = parse_object(&body)?;
@@ -976,6 +1051,7 @@ async fn item_action_inner(
                 super::mcp_tools::say(
                     app,
                     &who,
+                    turn.agent_token.as_deref(),
                     id,
                     &turn.text,
                     turn.explanation_format,
@@ -986,7 +1062,7 @@ async fn item_action_inner(
         }
         "supersede" => agent_reply(
             StatusCode::OK,
-            super::mcp_tools::supersede(app, &who, id).await,
+            super::mcp_tools::supersede(app, &who, body_token(&body)?.as_deref(), id).await,
         ),
         _ => Err(ApiError::new(
             StatusCode::NOT_FOUND,
