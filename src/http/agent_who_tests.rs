@@ -1528,7 +1528,7 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
         assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
         let tools = reply.json()["result"]["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 6, "[{name}]");
-        let sentence = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service.";
+        let sentence = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service. The portal refuses a text that holds a token.";
         for tool in &tools {
             let tool_name = tool["name"].as_str().unwrap();
             let properties = &tool["inputSchema"]["properties"];
@@ -1566,4 +1566,402 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
             "[{name}] the instructions"
         );
     });
+}
+
+// ---------------------------------------------------------------- a token in a text
+
+/// An agent must not leak its token into a text that a person or a phone reads (lot G5). The portal refuses an
+/// explanation, a label or a message that holds a live token of an agent of the same owner, with the prefix or bare.
+#[test]
+fn explanation_with_a_live_token_is_refused() {
+    each(|r, name| {
+        r.fix_clock(T0);
+        r.device();
+        let k = conversational(r, ID_A);
+        let made = ok_h(r, &k, &[], "approval_intent", intent_args());
+        let token = token_of(&made);
+        let bare = &token[4..];
+        let items_before = r.count("SELECT COUNT(*) FROM items");
+        let intents_before = r.count("SELECT COUNT(*) FROM approval_intents");
+        let agents_before = agent_rows(r);
+        // The token with its prefix, bare, and glued to other characters of the alphabet: each one is refused, with the
+        // code of the table and a message that names no value.
+        for text in [
+            format!("please use {token} for the next call"),
+            format!("token: {bare}"),
+            format!("x{bare}y"),
+            format!("{token}{token}"),
+            format!("line one\n{token}"),
+        ] {
+            let e = err_h(
+                r,
+                &k,
+                &[],
+                "approval_intent",
+                with(intent_args(), "explanation", json!(text)),
+            );
+            assert_eq!(e["code"], "agent_token_in_text", "[{name}] {text}");
+            assert_eq!(e["retryable"], false, "[{name}]");
+            assert!(!e["message"].to_string().contains(bare), "[{name}] {e}");
+        }
+        // The label is a text too. It is short, but a token fits in it.
+        let e = err_h(
+            r,
+            &k,
+            &[],
+            "approval_intent",
+            with(intent_args(), "agent_label", json!(token)),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // The refusal comes before any write: no item, no intent, no agent.
+        assert_eq!(
+            r.count("SELECT COUNT(*) FROM items"),
+            items_before,
+            "[{name}]"
+        );
+        assert_eq!(
+            r.count("SELECT COUNT(*) FROM approval_intents"),
+            intents_before,
+            "[{name}]"
+        );
+        assert_eq!(agent_rows(r), agents_before, "[{name}]");
+        // A second agent of the same key cannot carry the first token in its text either.
+        let second = ok_h(r, &k, &[], "approval_intent", intent_args());
+        assert_eq!(second["agent_status"], "new", "[{name}]");
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token_of(&second).as_str())],
+            "approval_intent",
+            with(intent_args(), "explanation", json!(format!("copy {bare}"))),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // A text that only looks like a token is fine: 43 characters that are no token, a prefix alone, a short text.
+        for text in [
+            "a".repeat(43),
+            format!("agt_{}", "b".repeat(43)),
+            "agt_".to_string(),
+            format!("{} and more", &bare[..42]),
+            "Run the migration on the staging table.".to_string(),
+        ] {
+            let ok = ok_h(
+                r,
+                &k,
+                &[("Agent-Token", token.as_str())],
+                "approval_intent",
+                with(intent_args(), "explanation", json!(text)),
+            );
+            assert!(ok.get("approval_ref").is_some(), "[{name}] {text}: {ok}");
+        }
+        // A message of the thread (`say`) is checked too. The item allows the talk and the owner asked.
+        let open = {
+            let intent = ok_h(
+                r,
+                &k,
+                &[("Agent-Token", token.as_str())],
+                "approval_intent",
+                with(intent_args(), "allow_ask_back", json!(true)),
+            );
+            item_of(r, &k, 7, &intent)
+        };
+        owner_reply(r, &open, "m1", "Why this table?");
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token.as_str())],
+            "say",
+            json!({"request_id": open, "text": format!("my token is {token}")}),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        let said = ok_h(
+            r,
+            &k,
+            &[("Agent-Token", token.as_str())],
+            "say",
+            json!({"request_id": open, "text": "Because the dry run passed."}),
+        );
+        assert_eq!(said["seq"], 2, "[{name}] {said}");
+        // A token that is blocked or merged is still a stored digest: a text that holds it is refused.
+        let blocked = agent_of(r, &open);
+        owner_op(r, &blocked, AgentOp::Block);
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token_of(&second).as_str())],
+            "approval_intent",
+            with(intent_args(), "explanation", json!(format!("old {token}"))),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // The REST door has the same rule and the same code.
+        let c = agent_in(
+            r,
+            ID_C,
+            KeyKind::Api,
+            KeyInteraction::Conversational,
+            AgentsMode::Discover,
+        );
+        let first = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
+        assert_eq!(first.status, 201, "[{name}] {}", first.body);
+        let rest_token = first.json()["agent_token"].as_str().unwrap().to_string();
+        let leak = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", rest_token.as_str())],
+            "POST",
+            "/api/v1/approval-intents",
+            &with(
+                intent_args(),
+                "explanation",
+                json!(format!("t={rest_token}")),
+            )
+            .to_string(),
+        );
+        assert_eq!(leak.status, 422, "[{name}] {}", leak.body);
+        assert_eq!(
+            leak.json()["error"]["code"],
+            "agent_token_in_text",
+            "[{name}]"
+        );
+        assert!(!leak.body.contains(&rest_token[4..]), "[{name}]");
+    });
+}
+
+// ---------------------------------------------------------------- a flood
+
+/// The number of rows of a flood that the tests count: a flood must not make the tables or the phones grow without a bound.
+struct Tables {
+    agents: i64,
+    events: i64,
+    agent_messages: i64,
+    agent_deliveries: i64,
+    flood_alerts: i64,
+}
+
+fn tables(r: &Rig) -> Tables {
+    Tables {
+        agents: agent_rows(r),
+        events: r.count("SELECT COUNT(*) FROM agent_events"),
+        agent_messages: r.count("SELECT COUNT(*) FROM alerts WHERE kind = 'agent'"),
+        agent_deliveries: r.count(
+            "SELECT COUNT(*) FROM deliveries d JOIN alerts a ON a.id = d.alert_id WHERE a.kind = 'agent'",
+        ),
+        flood_alerts: r.count(
+            "SELECT COUNT(*) FROM alerts WHERE idempotency_key LIKE 'agents-flood:%'",
+        ),
+    }
+}
+
+/// The value of a line of the metrics of the portal, or 0 when the line is not there.
+fn metric(r: &Rig, line: &str) -> u64 {
+    r.app
+        .metrics
+        .render(None)
+        .lines()
+        .find_map(|l| l.strip_prefix(line)?.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// One key makes many calls with no token (the mode `discover`). The cap of the key holds (`max_per_key`), the other calls
+/// go to the bucket with no error and no token, the owner gets one alert in the hour and not one for each call, and the
+/// rows of the agents, the events and the frames of the phones stay bounded (SPEC 3.8.13). In the next hour the flood
+/// makes one more alert, and nothing grows.
+#[test]
+fn flood_of_calls_with_no_token_keeps_the_cap_one_alert_each_hour_and_the_rows_bounded() {
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
+        "agents { max_per_key = 3 new_per_hour = 100 }",
+        r#"rate_limit_per_minute = 10000"#,
+        |r, name| {
+            r.fix_clock(T0);
+            r.device();
+            let k = conversational(r, ID_A);
+            let flood = |calls: u32| -> (u32, u32) {
+                let (mut made, mut bucket) = (0, 0);
+                for _ in 0..calls {
+                    let v = ok_h(r, &k, &[], "approval_intent", intent_args());
+                    match v["agent_status"].as_str() {
+                        Some("new") => {
+                            assert!(v.get("agent_token").is_some(), "[{name}] {v}");
+                            made += 1;
+                        }
+                        Some("unattributed") => {
+                            // No error, and no token: the call has the bucket.
+                            assert!(v.get("agent_token").is_none(), "[{name}] {v}");
+                            bucket += 1;
+                        }
+                        other => {
+                            panic!("[{name}] a status that a flood never gives: {other:?} {v}")
+                        }
+                    }
+                }
+                (made, bucket)
+            };
+            assert_eq!(flood(40), (3, 37), "[{name}]");
+            let t = tables(r);
+            assert_eq!(t.agents, 3, "[{name}] the cap of the key holds");
+            // The events: one `created` for each agent, and ONE `refused_cap` for the hour, not one for each call.
+            assert_eq!(t.events, 4, "[{name}]");
+            assert_eq!(
+                r.count("SELECT COUNT(*) FROM agent_events WHERE event = 'refused_cap'"),
+                1,
+                "[{name}]"
+            );
+            assert_eq!(t.flood_alerts, 1, "[{name}] one alert for the hour");
+            // The phone gets one frame for each agent and no frame for a refused call.
+            assert_eq!((t.agent_messages, t.agent_deliveries), (3, 3), "[{name}]");
+            // The counters count the calls: 3 agents made, 37 calls sent to the bucket by the cap.
+            assert_eq!(
+                metric(r, "portal_agents_created_total{origin=\"call\"}"),
+                3,
+                "[{name}]"
+            );
+            assert_eq!(
+                metric(r, "portal_agent_refused_total{reason=\"cap\"}"),
+                37,
+                "[{name}]"
+            );
+            // The next hour: the same flood makes ONE more alert and ONE more event. No agent, no frame.
+            r.fix_clock(T0 + 3_700_000);
+            assert_eq!(flood(40), (0, 40), "[{name}]");
+            let t = tables(r);
+            assert_eq!((t.agents, t.events, t.flood_alerts), (3, 5, 2), "[{name}]");
+            assert_eq!((t.agent_messages, t.agent_deliveries), (3, 3), "[{name}]");
+            assert_eq!(
+                metric(r, "portal_agent_refused_total{reason=\"cap\"}"),
+                77,
+                "[{name}]"
+            );
+        },
+    );
+}
+
+/// The same flood against `new_per_hour`: the cap of the rate holds, the next hour lets the key make agents again up to its
+/// cap, and the alert and the events stay one each hour.
+#[test]
+fn flood_against_new_per_hour_goes_to_the_bucket_and_the_next_hour_makes_at_most_the_rate() {
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
+        "agents { max_per_key = 50 new_per_hour = 4 }",
+        r#"rate_limit_per_minute = 10000"#,
+        |r, name| {
+            r.fix_clock(T0);
+            r.device();
+            let k = conversational(r, ID_A);
+            let statuses = |calls: u32| -> Vec<String> {
+                (0..calls)
+                    .map(|_| {
+                        ok_h(r, &k, &[], "approval_intent", intent_args())["agent_status"]
+                            .as_str()
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect()
+            };
+            let first = statuses(30);
+            assert_eq!(first.iter().filter(|s| *s == "new").count(), 4, "[{name}]");
+            assert!(first[4..].iter().all(|s| s == "unattributed"), "[{name}]");
+            let t = tables(r);
+            assert_eq!((t.agents, t.events, t.flood_alerts), (4, 5, 1), "[{name}]");
+            assert_eq!(
+                r.count("SELECT COUNT(*) FROM agent_events WHERE event = 'refused_rate'"),
+                1,
+                "[{name}]"
+            );
+            assert_eq!(
+                metric(r, "portal_agent_refused_total{reason=\"rate\"}"),
+                26,
+                "[{name}]"
+            );
+            // The next hour: four more agents at most, and one more alert.
+            r.fix_clock(T0 + 3_700_000);
+            let second = statuses(30);
+            assert_eq!(second.iter().filter(|s| *s == "new").count(), 4, "[{name}]");
+            let t = tables(r);
+            assert_eq!((t.agents, t.flood_alerts), (8, 2), "[{name}]");
+            assert_eq!((t.agent_messages, t.agent_deliveries), (8, 8), "[{name}]");
+        },
+    );
+}
+
+/// Many calls with the token of a blocked agent, and many calls with tokens that do not exist: each call fails with its
+/// code, and no row, no event and no frame grows. A token that does not exist makes no agent: a flood of tokens is not a
+/// flood of agents.
+#[test]
+fn flood_of_tokens_of_a_blocked_agent_and_of_unknown_tokens_writes_nothing() {
+    each_agent_rig_full(
+        "max_requests_per_key_per_hour = 1000",
+        "agents { max_per_key = 3 new_per_hour = 10 }",
+        r#"rate_limit_per_minute = 10000"#,
+        |r, name| {
+            r.fix_clock(T0);
+            r.device();
+            let k = conversational(r, ID_A);
+            let made = ok_h(r, &k, &[], "approval_intent", intent_args());
+            let token = token_of(&made);
+            let id = item_of(r, &k, 1, &made);
+            owner_op(r, &agent_of(r, &id), AgentOp::Block);
+            let before = tables(r);
+            let blocked_before = metric(r, "portal_agent_refused_total{reason=\"blocked\"}");
+            let unknown_before = metric(r, "portal_agent_refused_total{reason=\"unknown\"}");
+            for _ in 0..60 {
+                let e = err_h(
+                    r,
+                    &k,
+                    &[("Agent-Token", token.as_str())],
+                    "approval_intent",
+                    intent_args(),
+                );
+                assert_eq!(e["code"], "agent_blocked", "[{name}] {e}");
+            }
+            for n in 0..60u32 {
+                // A well formed token that no agent has: another form of token every time.
+                let fake = format!("agt_{n:043}");
+                let e = err_h(
+                    r,
+                    &k,
+                    &[("Agent-Token", fake.as_str())],
+                    "approval_intent",
+                    intent_args(),
+                );
+                assert_eq!(e["code"], "agent_unknown", "[{name}] {e}");
+            }
+            let after = tables(r);
+            assert_eq!(
+                (
+                    after.agents,
+                    after.events,
+                    after.agent_messages,
+                    after.agent_deliveries
+                ),
+                (
+                    before.agents,
+                    before.events,
+                    before.agent_messages,
+                    before.agent_deliveries
+                ),
+                "[{name}] a refused token writes no agent, no event and no frame"
+            );
+            assert_eq!(
+                after.flood_alerts, 0,
+                "[{name}] these calls are no flood of agents"
+            );
+            assert_eq!(
+                metric(r, "portal_agent_refused_total{reason=\"blocked\"}") - blocked_before,
+                60,
+                "[{name}]"
+            );
+            assert_eq!(
+                metric(r, "portal_agent_refused_total{reason=\"unknown\"}") - unknown_before,
+                60,
+                "[{name}]"
+            );
+        },
+    );
 }

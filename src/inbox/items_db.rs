@@ -269,6 +269,18 @@ impl ItemTx for SqliteTx<'_, '_> {
         Ok(())
     }
 
+    async fn event_details(
+        &mut self,
+        request_id: &str,
+        event: &str,
+    ) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.0.prepare_cached(
+            "SELECT detail FROM item_events WHERE request_id = ?1 AND event = ?2 AND detail IS NOT NULL ORDER BY at, id",
+        )?;
+        let rows = stmt.query_map(params![request_id, event], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     async fn event_exists(
         &mut self,
         request_id: &str,

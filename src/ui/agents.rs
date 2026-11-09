@@ -198,6 +198,33 @@ impl Lookalike {
     }
 }
 
+/// A known agent that a new agent looks like (lot G5): the hint "similar". It is help for the owner. The portal never
+/// merges by itself, and the hints can be copied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Similar {
+    pub agent_id: String,
+    /// The name of the known agent: text of the server.
+    pub label: String,
+    /// Why: it says the same text, or it has the same client and the same address range.
+    pub why: crate::inbox::agents::SimilarWhy,
+}
+
+impl Similar {
+    /// The line of the first-use notice. The name is text of the server, so it is escaped as such.
+    fn line(&self) -> String {
+        use crate::inbox::agents::SimilarWhy;
+        let why = match self.why {
+            SimilarWhy::Says => "it says the same text",
+            SimilarWhy::ClientAndNet => "it has the same client and the same address range",
+        };
+        format!(
+            r#"<p class="note similar">Looks like your agent <a href="{AGENTS}/{}">{}</a>: {why}. Hints can be copied. Nothing merges by itself.</p>"#,
+            html_escape(&self.agent_id),
+            html::escape(&self.label)
+        )
+    }
+}
+
 // The first-use notice -----------------------------------------------------------------------------
 
 /// The notice for one `new` agent: what is known of it, and the forms to name it, allow it, block it or merge it.
@@ -207,6 +234,8 @@ pub struct FirstUse<'a> {
     /// `inbox.agents.lock_new`: the server refuses `accept` for the items of this agent until the owner allows it.
     pub lock: bool,
     pub lookalike: Option<Lookalike>,
+    /// A known agent of the same key that this agent looks like: a hint, never a merge.
+    pub similar: Option<Similar>,
     /// The known agents of the same key: the choices of the merge. Empty: the merge form is absent.
     pub targets: Vec<(String, String)>,
     pub csrf: &'a str,
@@ -263,6 +292,10 @@ pub fn first_use(n: &FirstUse) -> String {
         ),
         _ => String::new(),
     };
+    let warn = format!(
+        "{warn}{}",
+        n.similar.as_ref().map(Similar::line).unwrap_or_default()
+    );
     let merge = if n.targets.is_empty() {
         String::new()
     } else {
@@ -896,6 +929,7 @@ mod tests {
                 same_client: true,
                 same_net: true,
             }),
+            similar: None,
             targets: vec![
                 ("g1".into(), "Billing <bot>".into()),
                 ("g2".into(), "Night ETL".into()),
@@ -989,6 +1023,39 @@ mod tests {
         assert!(html.contains("is the same as the name of your agent <b>Billing &lt;bot&gt;</b>. Same client and same address range too."));
         assert!(html.contains("The server cannot tell."));
         assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn the_notice_names_a_similar_agent_with_the_sentence_that_hints_can_be_copied() {
+        use crate::inbox::agents::SimilarWhy;
+        let a = view("a1", "ops-key #4", AgentState::New);
+        let mut n = notice(a, false);
+        assert!(
+            !first_use(&n).contains("Looks like your agent"),
+            "no hint, no line"
+        );
+        for (why, text) in [
+            (SimilarWhy::Says, "it says the same text"),
+            (
+                SimilarWhy::ClientAndNet,
+                "it has the same client and the same address range",
+            ),
+        ] {
+            n.similar = Some(Similar {
+                agent_id: "g1".into(),
+                label: "Billing <bot>".into(),
+                why,
+            });
+            let html = first_use(&n);
+            assert!(
+                html.contains(&format!(
+                    r#"Looks like your agent <a href="{AGENTS}/g1">Billing &lt;bot&gt;</a>: {text}. Hints can be copied. Nothing merges by itself."#
+                )),
+                "{html}"
+            );
+            // The line is a note in the box "Observed, not verified", with no form of its own: nothing merges by itself.
+            assert_eq!(forms(&html).len(), 4, "the hint adds no form");
+        }
     }
 
     #[test]

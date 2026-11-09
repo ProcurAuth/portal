@@ -184,13 +184,14 @@ pub(super) fn seed(app: &crate::inbox::App, s: &Seed<'_>) -> String {
         consumed_at: s.consumed_at,
         lease_s: 900,
     };
-    // A loaded machine can make the shared PostgreSQL answer late: the engine then says `Degraded` at once. The
-    // seed tries again a few times before it fails the test.
-    for attempt in 0..6 {
+    // A loaded machine can make the shared PostgreSQL answer late: the engine then says `Degraded` at once, and it can stay
+    // so for several seconds (another build of the machine fills the disk and the CPU). The seed tries again for about
+    // twenty seconds before it fails the test.
+    for attempt in 0..21 {
         match runtime().block_on(items.seed_approval(make())) {
             Ok(id) => return id,
-            Err(crate::inbox::testing::ItemError::Degraded) if attempt < 5 => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+            Err(crate::inbox::testing::ItemError::Degraded) if attempt < 20 => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
             Err(e) => panic!("seed: {e:?}"),
         }

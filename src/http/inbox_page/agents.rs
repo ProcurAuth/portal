@@ -16,11 +16,13 @@ use std::collections::{HashMap, HashSet};
 
 use super::items::{allowed, body_of, id_ok, key_text, no_store};
 use super::*;
-use crate::inbox::agents::{AgentKind, AgentMode, AgentRow, AgentState, AgentSummary, Observed};
+use crate::inbox::agents::{
+    find_similar, AgentKind, AgentMode, AgentRow, AgentState, AgentSummary, Observed,
+};
 use crate::inbox::page_items::{AgentOp, ItemError, Items, ListFilter, Loaded, OpDone, OpError};
 use crate::ui::agents::{
     self as ui_agents, AgentPage, AgentView, AgentsList, FirstUse, KeyCounts, ListRow, Lookalike,
-    Sender,
+    Sender, Similar,
 };
 use crate::ui::items::{Body, Line, StateFilter, Title};
 use inbox_core::proto::Kind;
@@ -181,6 +183,29 @@ async fn lookalike_of(
     })
 }
 
+/// A known agent of the same key that the new agent `row` looks like: it says the same text, or it has the same client and
+/// the same address range. The roster holds the agents of the owner. The hint is never a merge.
+fn similar_of(
+    state: &AppState,
+    items: &Items<'_>,
+    roster: &Roster,
+    row: &AgentRow,
+    seen: &Option<Observed>,
+) -> Option<Similar> {
+    let others = roster
+        .rows
+        .iter()
+        .filter(|s| s.agent.key_id == row.key_id)
+        .map(|s| (&s.agent, items.observed(&s.agent)));
+    let (other, why) = find_similar(row, seen.as_ref(), others)?;
+    let key_name = key_text(state, &other.key_id);
+    Some(Similar {
+        agent_id: other.agent_id.clone(),
+        label: other.label(&key_name, key_mode(state, &other.key_id)),
+        why,
+    })
+}
+
 /// The notices for the new agents of the owner: one for each, even when it has no open request.
 pub(super) async fn notices<'a>(
     state: &AppState,
@@ -198,6 +223,7 @@ pub(super) async fn notices<'a>(
         }
         let view = roster.view(state, items, a, true);
         let lookalike = lookalike_of(items, a, &view.observed).await;
+        let similar = similar_of(state, items, roster, a, &view.observed);
         let targets = roster
             .targets(state, &a.key_id, &a.agent_id, true)
             .into_iter()
@@ -208,6 +234,7 @@ pub(super) async fn notices<'a>(
             open: s.open.max(0) as usize,
             lock,
             lookalike,
+            similar,
             targets,
             csrf: &ctx.inbox_token,
             typed: "",

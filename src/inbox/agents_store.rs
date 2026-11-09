@@ -222,7 +222,57 @@ impl Items<'_> {
         result
     }
 
+    /// Whether one of the texts holds a token of an agent of this owner, with the prefix `agt_` or bare. A token that is
+    /// in a text that the owner, or another person, reads is not secret any more: the portal refuses the text. The
+    /// check compares digests with the agents of the owner, so a text of 43 characters that is not a token passes.
+    /// It reads the database only when a text has a run of 43 characters of the token alphabet.
+    pub async fn text_holds_live_token(
+        &self,
+        owner: &str,
+        texts: &[&str],
+    ) -> Result<bool, ItemError> {
+        let mut digests = std::collections::HashSet::new();
+        for text in texts {
+            for candidate in super::agents::token_candidates(text) {
+                digests.insert(token_digest(&candidate));
+            }
+        }
+        if digests.is_empty() {
+            return Ok(false);
+        }
+        let agents = self.list_agents(owner, None).await?;
+        Ok(agents.iter().any(|s| {
+            s.agent
+                .token_digest
+                .as_ref()
+                .is_some_and(|d| digests.contains(d))
+        }))
+    }
+
     // ------------------------------------------------------------ the reads
+
+    /// The other agents that asked for the effect of an open request and got that request (the event `also_requested`),
+    /// in the order of the events. The item keeps its first agent: these are the ones that asked after it. The page of the
+    /// request reads this for the line "Also asked by". An agent that the sweeper erased is left out.
+    pub async fn also_requested_by(&self, request_id: &str) -> Result<Vec<AgentRow>, ItemError> {
+        let id = request_id.to_string();
+        let details = in_tx!(
+            self,
+            [id],
+            tx,
+            super::items_ops::ItemTx::event_details(tx, &id, "also_requested")
+        )?;
+        let mut out = Vec::new();
+        for detail in details {
+            let Some(agent_id) = detail.strip_prefix("agent=") else {
+                continue;
+            };
+            if let Some(row) = self.agent(agent_id).await? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
 
     /// The bucket of a key: the pseudo agent "Unattributed". It is made when it does not exist.
     pub async fn bucket(&self, key_id: &str, owner: &str) -> Result<AgentRow, ItemError> {

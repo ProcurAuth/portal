@@ -300,6 +300,21 @@ fn same_effect_by_a_second_agent_returns_the_first_item_and_records_also_request
             0,
             "[{name}] the first agent is not 'also'"
         );
+        // The page of the request reads the event: the agents that asked after the first one, once each, oldest first.
+        let also: Vec<String> = eventually(|| runtime().block_on(r.items().also_requested_by(&id)))
+            .into_iter()
+            .map(|a| a.agent_id)
+            .collect();
+        assert_eq!(
+            also,
+            [b.agent.agent_id.clone(), bucket_id.clone()],
+            "[{name}]"
+        );
+        assert!(
+            eventually(|| runtime().block_on(r.items().also_requested_by(&"0".repeat(32))))
+                .is_empty(),
+            "[{name}] an item that does not exist has none"
+        );
         // The service sees the same answer as for a repeat of its own request: the id and the code.
         check_what_the_service_learned(r, name);
     });

@@ -90,6 +90,17 @@ impl Reply {
     }
 }
 
+/// What a request of a real agent gave: the request, and what the channel gave back.
+#[derive(Debug)]
+pub struct AgentRequest {
+    pub request_id: String,
+    pub code: String,
+    /// The token of the agent. Only the call that made the agent has it.
+    pub token: Option<String>,
+    /// `agent_status` of the intent: `new`, `known`, `unattributed` or `key`.
+    pub status: String,
+}
+
 /// The server, the service, the owner and its agent key.
 pub struct Pep {
     pub s: Server,
@@ -407,6 +418,72 @@ discovery {{
         reply["result"]["structuredContent"].clone()
     }
 
+    /// A tool of the agent channel with the agent token and the headers of a real client, as an agent calls it. `token`
+    /// goes in the header `Agent-Token`. The result is the flag `isError` and the structured content.
+    pub fn tool_as(
+        &self,
+        token: Option<&str>,
+        user_agent: &str,
+        name: &str,
+        args: Value,
+    ) -> (bool, Value) {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": args}})
+        .to_string();
+        let host = format!("127.0.0.1:{}", self.s.port);
+        let mut headers = vec![
+            ("Authorization", format!("Bearer {}", self.key_text)),
+            ("Content-Type", "application/json".to_string()),
+            ("User-Agent", user_agent.to_string()),
+        ];
+        if let Some(t) = token {
+            headers.push(("Agent-Token", t.to_string()));
+        }
+        let (status, _, text) = http_full(self.s.port, &host, "POST", "/mcp", &headers, &body);
+        assert_eq!(status, 200, "{text}");
+        let reply: Value = serde_json::from_str(&text).expect("JSON");
+        (
+            reply["result"]["isError"] == true,
+            reply["result"]["structuredContent"].clone(),
+        )
+    }
+
+    /// A request of a real agent through the real channel: the call of `approval_intent` (with the token, or with none:
+    /// then the portal makes the agent), then the submission of the service with the `approval_ref`. `extra` holds the
+    /// more arguments of the intent, such as `agent_label`. No SQL: the agent is what the channel made.
+    pub fn agent_request(
+        &self,
+        token: Option<&str>,
+        user_agent: &str,
+        c: &Command,
+        extra: Value,
+    ) -> AgentRequest {
+        let mut args = json!({"lease_s": 600});
+        for (k, v) in extra.as_object().unwrap() {
+            args[k] = v.clone();
+        }
+        let (is_error, intent) = self.tool_as(token, user_agent, "approval_intent", args);
+        assert!(!is_error, "{intent}");
+        let reference = intent["approval_ref"].as_str().expect("an approval_ref");
+        let reply = self.submit_with(c, json!({"approval_ref": reference}));
+        assert!(
+            reply.status == 201 || reply.status == 200,
+            "{}: {}",
+            reply.status,
+            reply.body
+        );
+        let v = reply.json();
+        AgentRequest {
+            request_id: v["request_id"].as_str().unwrap().to_string(),
+            code: v["code"].as_str().unwrap().to_string(),
+            token: intent["agent_token"].as_str().map(str::to_string),
+            status: intent["agent_status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+
     /// A request with an intent: the agent gives the texts to the portal, the service gives the command. The result is
     /// the id and the code.
     pub fn submit_intent(&self, c: &Command, intent: Value, lease_s: u64) -> (String, String) {
@@ -480,7 +557,10 @@ pub async fn next_request(c: &mut Conn, wait: Duration) -> RequestMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Request(r)) => return *r,
+            Recv::Msg(ServerMsg::Request(r)) => {
+                c.seen.insert(r.id.clone());
+                return *r;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for a request: {code:?}"),
             Recv::Timeout => panic!("no request within {wait:?}"),
@@ -495,7 +575,10 @@ pub async fn next_settled(c: &mut Conn, wait: Duration) -> SettledMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Settled(s)) => return s,
+            Recv::Msg(ServerMsg::Settled(s)) => {
+                c.seen.insert(s.id.clone());
+                return s;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for settled: {code:?}"),
             Recv::Timeout => panic!("no settled within {wait:?}"),
@@ -510,7 +593,10 @@ pub async fn next_message(c: &mut Conn, wait: Duration) -> MessageMsg {
             .recv(deadline.saturating_duration_since(Instant::now()))
             .await
         {
-            Recv::Msg(ServerMsg::Message(m)) => return m,
+            Recv::Msg(ServerMsg::Message(m)) => {
+                c.seen.insert(m.id.clone());
+                return m;
+            }
             Recv::Msg(_) => continue,
             Recv::Closed(code) => panic!("closed while the phone waits for a message: {code:?}"),
             Recv::Timeout => panic!("no message within {wait:?}"),
@@ -534,7 +620,8 @@ pub async fn next_result(c: &mut Conn, wait: Duration) -> inbox_core::proto::Ans
     }
 }
 
-/// Nothing of this kind arrives within `wait`. A frame of another kind is skipped.
+/// Nothing of this kind arrives within `wait`. A frame of another kind is skipped. This is strict: a copy of a frame that
+/// the test read is a failure. A test of the receipts uses it (a frame must not come again after its receipt).
 pub async fn nothing_arrives(c: &mut Conn, wait: Duration) {
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
@@ -551,7 +638,34 @@ pub async fn nothing_arrives(c: &mut Conn, wait: Duration) {
     }
 }
 
+/// Nothing new arrives within `wait`. A frame that the test read already (`Conn::seen`) is not new: it is a copy that the
+/// server sent again because the receipt of the last frame of a dropped session was lost. The copy gets its receipt. A
+/// frame with another delivery id is a failure.
+pub async fn nothing_new_arrives(c: &mut Conn, wait: Duration) {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        match c
+            .recv(deadline.saturating_duration_since(Instant::now()))
+            .await
+        {
+            Recv::Msg(ServerMsg::Request(r)) if c.seen.contains(&r.id) => c.receipt(&r.id).await,
+            Recv::Msg(ServerMsg::Settled(s)) if c.seen.contains(&s.id) => c.receipt(&s.id).await,
+            Recv::Msg(ServerMsg::Message(m)) if c.seen.contains(&m.id) => c.receipt(&m.id).await,
+            Recv::Msg(ServerMsg::Request(r)) => panic!("unexpected request {r:?}"),
+            Recv::Msg(ServerMsg::Settled(s)) => panic!("unexpected settled {s:?}"),
+            Recv::Msg(ServerMsg::Message(m)) => panic!("unexpected message {m:?}"),
+            Recv::Closed(code) => panic!("closed: {code:?}"),
+            _ => {}
+        }
+    }
+}
+
 impl Conn {
+    /// Takes the delivery ids that the old session of the same phone read (see `Conn::seen`).
+    pub fn adopt_seen(&mut self, old: &std::collections::HashSet<String>) {
+        self.seen.extend(old.iter().cloned());
+    }
+
     /// Sends the receipt of a frame by its delivery id.
     pub async fn receipt(&mut self, id: &str) {
         self.send(&ClientMsg::Ack {
@@ -565,6 +679,39 @@ impl Conn {
 // ---------------------------------------------------------------- the database, read and changed directly
 
 impl PgAdmin {
+    /// The first column of the first row of a query, cast to text. `None` for no row or a NULL.
+    pub fn scalar(&self, database: &str, sql: &str) -> Option<String> {
+        let (host, port, user, password, database) = (
+            self.host.clone(),
+            self.port,
+            self.user.clone(),
+            self.password.clone(),
+            database.to_string(),
+        );
+        let sql = format!("SELECT ({sql})::text");
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut config = tokio_postgres::Config::new();
+                config
+                    .host(&host)
+                    .port(port)
+                    .user(&user)
+                    .password(&password)
+                    .dbname(&database);
+                let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                let rows = client.query(&sql, &[]).await.ok()?;
+                rows.first()?.get::<_, Option<String>>(0)
+            })
+        })
+        .join()
+        .unwrap()
+    }
+
     /// Every row of the tables as JSON text. The tests read the database directly: they check what the server keeps.
     pub fn dump(&self, database: &str, tables: &[&str]) -> String {
         let (host, port, user, password, database) = (
@@ -610,6 +757,28 @@ impl PgAdmin {
 }
 
 impl Server {
+    /// The first column of the first row of a query, as text. `None` for no row or a NULL. The tests read what the server
+    /// keeps: they never write the rows of the agents (the agents come from the channel).
+    pub fn scalar(&self, sql: &str) -> Option<String> {
+        match &self.pg {
+            Some((admin, database)) => admin.scalar(database, sql),
+            None => {
+                let c = rusqlite::Connection::open(self.dir.join("portal.db")).unwrap();
+                c.busy_timeout(Duration::from_secs(10)).unwrap();
+                c.query_row(sql, [], |row| {
+                    row.get::<_, rusqlite::types::Value>(0).map(|v| match v {
+                        rusqlite::types::Value::Null => None,
+                        rusqlite::types::Value::Integer(i) => Some(i.to_string()),
+                        rusqlite::types::Value::Text(t) => Some(t),
+                        other => Some(format!("{other:?}")),
+                    })
+                })
+                .ok()
+                .flatten()
+            }
+        }
+    }
+
     /// Everything that the database of the server holds, as text that a plain value would show in: the file of
     /// SQLite with its log, or the rows of the tables of PostgreSQL (a `bytea` column shows its hexadecimal text).
     pub fn database_text(&self) -> String {

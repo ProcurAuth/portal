@@ -43,7 +43,7 @@ The tests of the preferences are in three places. The file `tests/prefs_e2e.rs` 
 
 The tests of the agents are in two places. The file `src/inbox/agents_tests.rs` tests the resolution, the limits, the actions of the owner, the lock and the purge for both databases. It uses the rig of `src/inbox/items_tests.rs`. The file `src/http/agent_binding_tests.rs` tests the path of the PEP: the intent gives the agent, and a submission with no intent goes to the bucket. The pure rules (the token, the names, the hints and the binding of a call to an item) are in `src/inbox/agents.rs`.
 
-The tests of the agent channel are in `src/http/agent_who_tests.rs`. They run on both databases with the rig of `src/http/agent_channel_tests.rs`. They test the token, the header, the label, the hints and the six codes of the agents. The black-box cases A01 to A10 are in `tests/mcp_contract.rs`.
+The tests of the agent channel are in `src/http/agent_who_tests.rs`. They run on both databases with the rig of `src/http/agent_channel_tests.rs`. They test the token, the header, the label, the hints, the text that holds a token, the flood and the codes of the agents. The black-box cases A01 to A10 are in `tests/mcp_contract.rs`.
 
 The tests of the approval API of the services are in `src/http/approval_api_tests.rs`. They have a recorder that keeps each answer that the service gets. Add a new answer to the check of `check_what_the_service_learned`, not a new way to read it. The tests of the approval gate of the PDP are in `src/http/pdp/approval_tests.rs`. The file `src/http/pdp_rig.rs` starts the Inbox for them and for the cases with approvals. It also writes approvals in any state.
 
@@ -76,9 +76,10 @@ The test `tests/pep_e2e.rs` is `#[ignore]`. The script sets the variables that i
 | S3 | `get_action_status` renews the lease. When the reads stop, the request is `abandoned`. A late answer of the phone is refused. A read inside the revive window revives the request. |
 | S4 | A message of the agent in the thread goes to the portal only. |
 | S5 | The tool ran one time for each approval, and no more. A used `approval_ref` is refused. A call with `wait_s` runs the tool in the same call. |
-| S6 | The tap shows that the service received only `request_id`, `code`, `verdict`, `evaluation_id` and the reasons of the PDP. The canary strings of the explanation, the hint, the comment and the thread are in no exchange and in no log. |
+| SA | A second agent of the same key asks for the same effect while the request is open. It gets the request of the first agent, and the phone gets no second request. The two agents have two tokens, and the phone gets two frames `agent`. |
+| S6 | The tap shows that the service received only `request_id`, `code`, `verdict`, `evaluation_id` and the reasons of the PDP. The canary strings of the explanation, the hint, the comment and the thread are in no exchange and in no log. The same holds for the token, the label, the client and the id of each agent, in the replies of the service and in the identity token too. |
 
-After the scenarios, the script reads the logs of each container for the canary strings. It then runs the series U of the ProcurAuth runner against the same `reference-service` binary.
+After the scenarios, the script reads the logs of each container for the canary strings. The log of the portal holds the id of an agent. So the script looks for this id in the logs of the service, the tap and the Docker socket only. It then runs the series U of the ProcurAuth runner against the same `reference-service` binary.
 
 ### The series U and the portal
 
