@@ -340,6 +340,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                             is ErrorFrame -> {
                                 Log.w(TAG, "server error ${frame.code}: ${frame.message}")
                                 if (frame.isNotEnabled) itemsEnabled = false
+                                onPrefsError(frame)
                             }
                             is RequestFrame, is MessageFrame, is SettledFrame, is DigestFrame, is AnswerResultFrame -> onItemFrame(frame)
                         }
@@ -569,6 +570,15 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private fun present(event: ItemEvent) {
         Log.d(TAG, "item event ${event.javaClass.simpleName}")
         ItemAlerter.onEvent(context, event)
+    }
+
+    /**
+     * The portal refused the last `set_prefs` (`invalid_prefs`): it stored nothing. The pending edit goes away, so it is not
+     * sent again at each `welcome`, and the screen of the settings says that the portal refused it.
+     */
+    private fun onPrefsError(frame: ErrorFrame) {
+        val refusal = PrefsSync.onError(PendingPrefsStore.get(context), serverId, frame.code, frame.message) ?: return
+        Registry.setRefusal(serverId, refusal.message)
     }
 
     private fun onPong(n: Long) {

@@ -122,10 +122,20 @@ class TalkBackLabelTest {
     @Test
     fun everyButtonOfTheScreenHasATouchTargetOf48dpOrMore() {
         // The sizes are constants of the Activities: the check reads the source of the two new screens.
-        val sources = listOf("ThreadActivity.kt", "PrefsActivity.kt").map { java.io.File("src/main/java/app/portalinbox/ui/$it").readText() }
+        val sources = listOf("ThreadActivity.kt", "PortalPrefsActivity.kt").map { java.io.File("src/main/java/app/portalinbox/ui/$it").readText() }
         for (src in sources) {
             for (m in Regex("""minHeight = dp\((\d+)\)""").findAll(src)) assertTrue(m.value, m.groupValues[1].toInt() >= 48)
         }
         assertTrue(sources[0].contains("dp(52), dp(52)"))
+    }
+
+    @Test
+    fun everyRowOfTheSettingsOfAPortalHasATouchTargetOf48dpOrMore() {
+        // The settings screen and its views (lot MP5): rows, switches and the lines of the apply-to-all sheet.
+        val sources = listOf("PortalPrefsActivity.kt", "PortalPrefsViews.kt").map { java.io.File("src/main/java/app/portalinbox/ui/$it").readText() }
+        for (src in sources) {
+            for (m in Regex("""minimumHeight = dp\((\d+)\)""").findAll(src)) assertTrue(m.value, m.groupValues[1].toInt() >= 48)
+        }
+        assertTrue(sources.sumOf { Regex("""minimumHeight = dp\(""").findAll(it).count() } >= 5)
     }
 }

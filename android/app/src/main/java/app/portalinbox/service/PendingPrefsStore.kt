@@ -2,37 +2,33 @@ package app.portalinbox.service
 
 import android.content.Context
 import app.portalinbox.data.PendingPrefs
+import app.portalinbox.data.Store
 import app.portalinbox.proto.Prefs
 import app.portalinbox.proto.StrictJson
 
 /**
- * The edits of the preferences that the server did not confirm yet ([app.portalinbox.data.PrefsSync]). One small file of the
- * app, one JSON text for each server. A text that does not read back is dropped: the next `welcome` brings the values of the server.
+ * The edits of the preferences that the portal did not confirm yet ([app.portalinbox.data.PrefsSync]). They live in the column
+ * `pending_prefs` of the row of the portal, one JSON text for each portal: removing the portal removes its edit. A text that does not
+ * read back is dropped: the next `welcome` brings the values of the portal.
  */
-class PendingPrefsStore private constructor(context: Context) : PendingPrefs {
-    private val file = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-
-    private fun key(serverId: Long) = "server:$serverId"
-
+class PendingPrefsStore private constructor(private val store: Store) : PendingPrefs {
     override fun get(serverId: Long): Prefs? {
-        val text = file.getString(key(serverId), null) ?: return null
+        val text = store.pendingPrefs(serverId) ?: return null
         return runCatching { Prefs.fromJson(StrictJson.parseObject(text)) }.getOrNull()
     }
 
     override fun set(serverId: Long, prefs: Prefs) {
-        file.edit().putString(key(serverId), StrictJson.compact(prefs.toJson())).apply()
+        store.setPendingPrefs(serverId, StrictJson.compact(prefs.toJson()))
     }
 
     override fun clear(serverId: Long) {
-        file.edit().remove(key(serverId)).apply()
+        store.setPendingPrefs(serverId, null)
     }
 
     companion object {
-        private const val FILE = "inbox_prefs_pending"
-
         @Volatile private var instance: PendingPrefsStore? = null
 
         fun get(context: Context): PendingPrefsStore =
-            instance ?: synchronized(this) { instance ?: PendingPrefsStore(context).also { instance = it } }
+            instance ?: synchronized(this) { instance ?: PendingPrefsStore(Store.get(context)).also { instance = it } }
     }
 }

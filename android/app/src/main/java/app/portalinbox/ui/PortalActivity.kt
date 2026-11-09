@@ -4,7 +4,6 @@ import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
-import android.widget.CheckBox
 import android.widget.LinearLayout
 import app.portalinbox.R
 import app.portalinbox.data.Levels
@@ -25,8 +24,8 @@ import app.portalinbox.service.Registry
 
 /**
  * One portal: its identity on this phone (name, color, monogram, fingerprint), its state, the key-changed block, the groups, the
- * account login, the connection details, and the actions: rename, color, change address, enroll again, hide the name on the lock
- * screen and remove. The name and the color are set here and nowhere else (proposal 3.4).
+ * account login, the connection details, and the actions: rename, color, change address, enroll again and remove. The settings
+ * (mute, lock screen, quiet hours, summary, retention) are on their own screen: [PortalPrefsActivity]. The name and the color are set here and nowhere else (proposal 3.4).
  */
 class PortalActivity : BaseActivity() {
     companion object {
@@ -141,8 +140,8 @@ class PortalActivity : BaseActivity() {
         KeyChangedModel.of(server)?.let { renderKeyChanged(it, server) }
         renderIdentity(server, portalRow)
 
+        renderSettingsRow()
         renderGroups(store)
-        renderPrefsRow()
 
         // Login of the account: assigned by the server, read-only.
         body.addView(sectionTitle(getString(R.string.server_account)))
@@ -271,7 +270,7 @@ class PortalActivity : BaseActivity() {
         body.addView(p)
     }
 
-    /** Change address, enroll again, and the lock screen switch. */
+    /** Change address and enroll again. */
     private fun renderActions(server: Server) {
         body.addView(sectionTitle(getString(R.string.portal_connection)))
         val p = panel()
@@ -281,22 +280,6 @@ class PortalActivity : BaseActivity() {
         p.addView(row(getString(R.string.portal_reenroll), getString(R.string.portal_reenroll_help),
             icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) { reenroll(server.id) }.apply { minimumHeight = dp(48) })
         body.addView(p, lp().margins(this, t = 0))
-
-        body.addView(sectionTitle(getString(R.string.portal_privacy)))
-        val q = panel()
-        val box = CheckBox(this).apply {
-            text = getString(R.string.portal_hide_name)
-            textSize = SP_M
-            minHeight = dp(48)
-            isChecked = server.hideNameOnLock
-            setTextColor(color(R.color.text))
-            buttonTintList = android.content.res.ColorStateList.valueOf(color(R.color.primary))
-            setPadding(dp(10), 0, dp(14), 0)
-            setOnCheckedChangeListener { _, on -> Store.get(this@PortalActivity).setHideNameOnLock(server.id, on) }
-        }
-        q.addView(box)
-        q.addView(label(getString(R.string.portal_hide_name_help), SP_S, color(R.color.text_muted)).apply { setPadding(dp(14), 0, dp(14), dp(10)) })
-        body.addView(q)
     }
 
     // ------------------------------------------------------------ sheets
@@ -404,21 +387,15 @@ class PortalActivity : BaseActivity() {
         startActivity(Intent(this, ReenrollActivity::class.java).putExtra(ReenrollActivity.EXTRA_PORTAL, id))
     }
 
-    /** The row that opens the preferences (quiet hours, summary). It shows only for a server that has items. */
-    private fun renderPrefsRow() {
-        val stored = app.portalinbox.service.Items.repository(this).prefs(serverId)
-        if (stored == null || stored.bodyPurgeAfterMs <= 0) return
-        val effective = app.portalinbox.data.PrefsSync.effective(
-            stored.prefs, app.portalinbox.service.PendingPrefsStore.get(this).get(serverId),
-        )
-        body.addView(sectionTitle(getString(R.string.prefs_title)))
+    /** The row that opens the settings of this portal: mute, lock screen, quiet hours, summary, retention (lot MP5). */
+    private fun renderSettingsRow() {
         val p = panel()
         p.addView(
-            row(getString(R.string.prefs_title), PrefsForm.summary(effective), icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) {
-                startActivity(PrefsActivity.intent(this, serverId))
+            row(getString(R.string.portal_settings), getString(R.string.portal_settings_help), icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) {
+                startActivity(PortalPrefsActivity.intent(this, serverId))
             }.apply { minimumHeight = dp(48) },
         )
-        body.addView(p)
+        body.addView(p, lp().margins(this, t = 16))
     }
 
     /** One compact row per group: name and description, then the level for this phone. */

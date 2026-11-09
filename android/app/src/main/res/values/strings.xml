@@ -245,7 +245,7 @@
 
     <!-- Items: settings -->
     <string name="settings_local_copy">Finished requests on this phone</string>
-    <string name="settings_local_copy_help">The phone erases its copy of a finished request after this time.</string>
+    <string name="settings_local_copy_help">The phone erases its copy of a finished request after this time. A portal can have its own time in its settings.</string>
 
     <!-- Items: discussion screen -->
     <string name="thread_you">You</string>
@@ -261,18 +261,13 @@
     <string name="thread_code_copied">Copied</string>
 
     <!-- Items: preferences screen -->
-    <string name="prefs_title">Inbox preferences</string>
-    <string name="prefs_row_help">Quiet hours and the daily summary of waiting requests.</string>
     <string name="prefs_quiet">Quiet hours</string>
-    <string name="prefs_quiet_help">In this time a new request arrives with no sound. It stays in the list.</string>
-    <string name="prefs_quiet_on">Use quiet hours</string>
     <string name="prefs_from">From</string>
     <string name="prefs_to">To</string>
     <string name="prefs_zone">Time zone</string>
     <string name="prefs_zone_phone">Use the zone of this phone</string>
-    <string name="prefs_high_rings">An urgent request can still ring</string>
     <string name="prefs_digest">Summary of waiting requests</string>
-    <string name="prefs_digest_help">A quiet notification with the number of requests and the age of the oldest. It has no text of a request.</string>
+    <string name="prefs_digest_help">The portal sends the number of waiting requests and the age of the oldest. It shows in the one notification, with no sound and no text of a request.</string>
     <string name="prefs_digest_daily">Daily</string>
     <string name="prefs_digest_every">Every few hours</string>
     <string name="prefs_digest_off">None</string>
@@ -282,7 +277,6 @@
     <string name="prefs_every_less">Fewer hours</string>
     <string name="prefs_every_more">More hours</string>
     <string name="prefs_pending">Saved on this phone. The portal did not confirm it yet.</string>
-    <string name="prefs_confirmed">The portal has these values.</string>
     <string name="prefs_offline_note">The phone sends the change when it is online.</string>
     <string name="prefs_not_enabled">This portal has no requests and no preferences.</string>
 

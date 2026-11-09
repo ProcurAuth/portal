@@ -380,17 +380,26 @@ class Store private constructor(private val appContext: Context) :
         writableDatabase.update("servers", ContentValues().apply { put("hide_name_on_lock", if (hide) 1 else 0) }, "id = ?", arrayOf(id.toString()))
     }
 
-    /** Sets the retention of finished items of this portal, in days. Null means "same as all". */
-    fun setRetentionDays(id: Long, days: Int?) {
+    /**
+     * Sets the retention of finished items of this portal, in days. Null means "same as all". Only null or an option of
+     * [LocalRetention] is written: another value is refused (returns false) and nothing changes.
+     */
+    fun setRetentionDays(id: Long, days: Int?): Boolean {
+        if (!LocalRetention.validOverride(days)) return false
         val v = ContentValues().apply { if (days == null) putNull("retention_days") else put("retention_days", days) }
-        writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
+        return writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString())) > 0
     }
 
-    /** The JSON of the preferences that wait for the next `welcome`. Null clears it. Nothing sends it in lot MP1. */
+    /** The JSON of the preferences that wait for the next `welcome` ([app.portalinbox.service.PendingPrefsStore] reads and writes it). Null clears it. */
     fun setPendingPrefs(id: Long, json: String?) {
         val v = ContentValues().apply { if (json == null) putNull("pending_prefs") else put("pending_prefs", json) }
         writableDatabase.update("servers", v, "id = ?", arrayOf(id.toString()))
     }
+
+    /** The JSON of the preferences that wait for the next `welcome`, or null. A cheap read: one column of one row. */
+    fun pendingPrefs(id: Long): String? = readableDatabase.rawQuery(
+        "SELECT pending_prefs FROM servers WHERE id = ?", arrayOf(id.toString()),
+    ).use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null }
 
     private val lastSyncWritten = ConcurrentHashMap<Long, Long>()
 

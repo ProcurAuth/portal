@@ -165,12 +165,12 @@ class MainActivity : BaseActivity() {
         outState.putString("screen", screen.name)
     }
 
-    /** Erases the local copy of the finished requests that are older than the retention. */
+    /** Erases the local copy of the finished requests that are older than the retention of their portal: its own value, else the global one. */
     private fun purgeLocalCopies() {
         val repo = Items.repository(this)
-        val days = Prefs.localRetentionDays(this)
+        val global = Prefs.localRetentionDays(this)
         val now = System.currentTimeMillis()
-        for (server in Store.get(this).servers()) LocalRetention.purge(repo, server.id, now, days)
+        for (server in Store.get(this).servers()) LocalRetention.purge(repo, server.id, now, LocalRetention.daysFor(global, server.retentionDays))
     }
 
     override fun onResume() {

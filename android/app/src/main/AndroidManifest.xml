@@ -75,9 +75,9 @@
             android:name=".ui.ThreadActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
-        <!-- The preferences of one server: quiet hours and the summary. -->
+        <!-- The settings of one portal: mute, lock screen, quiet hours, summary, retention, apply to all. -->
         <activity
-            android:name=".ui.PrefsActivity"
+            android:name=".ui.PortalPrefsActivity"
             android:exported="false" />
         <activity
             android:name=".ui.AlarmActivity"
