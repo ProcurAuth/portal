@@ -492,8 +492,12 @@ fn sync_brings_the_agents_that_the_phone_lacks() {
             (WireState::Known, false, false, true),
             "[{name}]"
         );
-        // Until the key store gives the mode of the key, the key is in the mode `key`: the bucket is the key name.
-        assert_eq!(bucket.label, "key 2b7c91d0e4a853f6", "[{name}]");
+        // The key store gives the mode of the key (lot G1b). A key of the kind `mcp` is in the mode `discover`: the bucket
+        // is "Unattributed" and not the key name.
+        assert_eq!(
+            bucket.label, "Unattributed · key 2b7c91d0e4a853f6",
+            "[{name}]"
+        );
         let one = all.iter().find(|a| a.agent_id == a1).unwrap();
         assert_eq!(
             (one.state, one.lock_accept, one.open),
