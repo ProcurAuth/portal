@@ -16,6 +16,15 @@ use crate::inbox::rights::{
 use crate::keyauth::{self, Cause};
 use crate::portal_actions as actions;
 
+/// The mode of the agents of a key, as the engine of the agents reads it.
+fn agent_mode(mode: crate::keys::AgentsMode) -> AgentMode {
+    match mode {
+        crate::keys::AgentsMode::Key => AgentMode::Key,
+        crate::keys::AgentsMode::Discover => AgentMode::Discover,
+        crate::keys::AgentsMode::Enrolled => AgentMode::Enrolled,
+    }
+}
+
 /// The age after which the inbox does not trust the directory of a shared database, when the
 /// file has no block `keys` to say it.
 const FALLBACK_MAX_AGE: Duration = Duration::from_secs(60);
@@ -151,11 +160,7 @@ impl Authorizer for PortalAuthorizer {
                             inbox_core::proto::Interaction::OneShot
                         }
                     },
-                    agents: match key.agents {
-                        crate::keys::AgentsMode::Key => AgentMode::Key,
-                        crate::keys::AgentsMode::Discover => AgentMode::Discover,
-                        crate::keys::AgentsMode::Enrolled => AgentMode::Enrolled,
-                    },
+                    agents: agent_mode(key.agents),
                 })
             }
             Err(Cause::DirectoryTooOld) => {
@@ -305,6 +310,11 @@ impl Authorizer for PortalAuthorizer {
     fn key_name(&self, key_id: &str) -> Option<String> {
         let state = self.state.upgrade()?;
         state.users.key_by_id(key_id).map(|k| k.name.clone())
+    }
+
+    fn key_agent_mode(&self, key_id: &str) -> Option<AgentMode> {
+        let state = self.state.upgrade()?;
+        state.users.key_by_id(key_id).map(|k| agent_mode(k.agents))
     }
 
     fn audience(&self, service: &str) -> BTreeSet<String> {

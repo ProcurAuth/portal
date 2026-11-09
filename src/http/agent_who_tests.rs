@@ -733,6 +733,31 @@ fn a_key_of_the_mode_key_and_a_file_without_the_block_give_the_bucket() {
     });
 }
 
+#[test]
+fn the_authorizer_gives_the_mode_of_a_key_to_the_frames() {
+    use crate::inbox::agents::AgentMode;
+    each(|r, name| {
+        let k = conversational(r, ID_A);
+        let c = agent(r, ID_C, KeyKind::Api, KeyInteraction::OneShot);
+        let authorizer = r.app.authorizer().expect("the authorizer");
+        let mode = |key: &str| authorizer.key_agent_mode(key);
+        assert_eq!(
+            mode(ID_A),
+            Some(AgentMode::Discover),
+            "[{name}] {}",
+            k.subject
+        );
+        assert_eq!(mode(ID_C), Some(AgentMode::Key), "[{name}] {}", c.subject);
+        // A key that does not exist has none: the frames then treat it as the mode `key`.
+        assert_eq!(mode(ID_B), None, "[{name}]");
+        // The owner changes the mode: the portal reads it at once.
+        set_mode(r, ID_A, AgentsMode::Enrolled);
+        assert_eq!(mode(ID_A), Some(AgentMode::Enrolled), "[{name}]");
+        set_mode(r, ID_C, AgentsMode::Discover);
+        assert_eq!(mode(ID_C), Some(AgentMode::Discover), "[{name}]");
+    });
+}
+
 // ---------------------------------------------------------------- reads by the key, writes by the agent
 
 #[test]
