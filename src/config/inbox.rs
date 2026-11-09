@@ -31,6 +31,8 @@ pub struct InboxConfig {
     pub at_rest: Option<AtRestConfig>,
     /// `None` without the block `inbox.approvals`. The block comes with `inbox.items`.
     pub approvals: Option<ApprovalsConfig>,
+    /// `None` without the block `inbox.agents`. The block needs `inbox.items` and `inbox.at_rest`.
+    pub agents: Option<AgentsConfig>,
     /// `None` without the block `inbox.mcp`. The block needs `inbox.items` and `keys.mcp = true`.
     pub mcp: Option<McpConfig>,
     /// The blocks `group`, by id.
@@ -190,6 +192,21 @@ pub struct ApprovalsConfig {
     pub mute_after_refusals: u32,
     pub mute_for: Duration,
     pub web_approval: bool,
+}
+
+/// The block `inbox.agents`: the limits and the lock of the agents of one key.
+#[derive(Clone, Debug)]
+pub struct AgentsConfig {
+    /// The most agents of one key that are `new`, `known` or `blocked`.
+    pub max_per_key: u32,
+    /// The most agents that the calls of one key make in one hour.
+    pub new_per_hour: u32,
+    /// A `new` agent cannot get an approval accepted until the owner allows it.
+    pub lock_new: bool,
+    /// An agent with no open item and no call for this time leaves the active views.
+    pub idle_after: Duration,
+    /// The sweeper erases an agent that is idle for this time and has no item.
+    pub purge_after: Duration,
 }
 
 /// The block `inbox.mcp`: the MCP endpoint of the portal for the agents.
@@ -387,6 +404,30 @@ pub fn build(
         None
     };
 
+    let agents = if r.has_block("inbox.agents") {
+        // `items` and `at_rest` come together (checked above): the block needs both.
+        if items.is_none() {
+            return Err("the block inbox.agents needs the blocks inbox.items and inbox.at_rest: the hints of an agent are sealed at rest; add the blocks, or remove the block inbox.agents".into());
+        }
+        let agents = AgentsConfig {
+            max_per_key: r.int("inbox.agents", "max_per_key")? as u32,
+            new_per_hour: r.int("inbox.agents", "new_per_hour")? as u32,
+            lock_new: r.bool("inbox.agents", "lock_new")?,
+            idle_after: r.duration("inbox.agents", "idle_after")?,
+            purge_after: r.duration("inbox.agents", "purge_after")?,
+        };
+        if agents.idle_after > agents.purge_after {
+            return Err(format!(
+                "inbox.agents.idle_after must be at most inbox.agents.purge_after: idle_after is {}, purge_after is {}",
+                show_duration(agents.idle_after),
+                show_duration(agents.purge_after)
+            ));
+        }
+        Some(agents)
+    } else {
+        None
+    };
+
     let mcp = if r.has_block("inbox.mcp") {
         let items = items
             .as_ref()
@@ -543,6 +584,7 @@ pub fn build(
         items,
         at_rest,
         approvals,
+        agents,
         mcp,
         groups,
         api_keys,
