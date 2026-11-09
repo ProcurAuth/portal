@@ -1945,6 +1945,9 @@ fn require_explanation_and_the_default_keys_reach_the_metadata_and_the_gate() {
 #[path = "agent_channel_tests.rs"]
 mod agent_channel;
 
+#[path = "prefs_tests.rs"]
+mod prefs;
+
 // ---------------------------------------------------------------- the phone side of the thread (lot L8)
 //
 // These two tests run in the process: a comment of the owner and a question of the owner exist only for an item that

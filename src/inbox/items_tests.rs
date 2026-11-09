@@ -18,7 +18,7 @@ use super::items_ops::{
     SupersedeOut, TurnOut,
 };
 use super::items_store::{
-    start_checks, Answer, Answered, Created, ItemError, Items, Limit, Served,
+    start_checks, Answer, Answered, Created, DigestMemo, ItemError, Items, Limit, Served,
 };
 use super::pg::tests::TestDatabase;
 use super::store::Store;
@@ -1569,5 +1569,387 @@ fn the_journal_and_the_metrics_follow_the_names_of_the_specification() {
         "portal_item_body_effect_mismatch_total 1",
     ] {
         assert!(text.contains(name), "{name}");
+    }
+}
+
+// ---------------------------------------------------------------- preferences and digest (lot L11)
+
+/// Unix time in milliseconds of an RFC 3339 text.
+fn at(text: &str) -> i64 {
+    text.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+}
+
+fn paris_daily() -> crate::config::DigestConfig {
+    crate::config::DigestConfig::Daily {
+        hour: 9,
+        minute: 0,
+        timezone: "Europe/Paris".into(),
+    }
+}
+
+fn digest_off() -> crate::config::DigestConfig {
+    crate::config::DigestConfig::Off
+}
+
+fn every_prefs(hours: u16) -> inbox_core::proto::Prefs {
+    inbox_core::proto::Prefs {
+        quiet: None,
+        digest: Some(inbox_core::proto::DigestPrefs {
+            mode: inbox_core::proto::DigestMode::Every,
+            at: None,
+            tz: None,
+            every_h: Some(hours),
+        }),
+    }
+}
+
+impl Env {
+    /// The creation times of the rows of the digest of `owner`, oldest first.
+    async fn digest_times(&self, owner: &str) -> Vec<i64> {
+        let sql = format!(
+            "SELECT created_at FROM alerts WHERE kind = 'digest' AND target_id = '{owner}' ORDER BY created_at"
+        );
+        match (&self.store, &self.pg) {
+            (Store::Sqlite(db), _) => db
+                .call(move |c| {
+                    let mut stmt = c.prepare(&sql)?;
+                    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+                })
+                .await
+                .unwrap(),
+            (_, Some(pg)) => pg
+                .admin(&pg.name)
+                .await
+                .query(&sql, &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get::<_, i64>(0))
+                .collect(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Runs the digest pass of one instance every `step` from `from` to `to` (both included). The result is the number
+    /// of rows written.
+    async fn digest_passes(
+        &self,
+        items: &Items<'_>,
+        file: &crate::config::DigestConfig,
+        memo: &mut DigestMemo,
+        from: &str,
+        to: &str,
+        step: Duration,
+    ) -> u32 {
+        let (mut now, end) = (at(from), at(to));
+        let mut written = 0;
+        while now <= end {
+            self.clock.set(now);
+            written += items.digest_pass(file, memo).await.unwrap();
+            now += step.as_millis() as i64;
+        }
+        written
+    }
+}
+
+const FIVE_MIN: Duration = Duration::from_secs(300);
+
+/// The digest of 09:00 in Paris is due once for each local day, at 08:00 UTC before the change to summer time and at 07:00
+/// UTC after it (2026-03-29).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daily_digest_once_at_local_time_across_dst_change() {
+    for env in envs().await {
+        env.device("phone-a", "alice").await;
+        env.clock.set(at("2026-03-27T10:00:00Z"));
+        let items = env.items();
+        created(&items, 1).await;
+        let mut memo = DigestMemo::default();
+        let written = env
+            .digest_passes(
+                &items,
+                &paris_daily(),
+                &mut memo,
+                "2026-03-28T00:00:00Z",
+                "2026-03-30T12:00:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(written, 3, "{}", env.name);
+        assert_eq!(
+            env.digest_times("alice").await,
+            vec![
+                at("2026-03-28T08:00:00Z"),
+                at("2026-03-29T07:00:00Z"),
+                at("2026-03-30T07:00:00Z")
+            ],
+            "{}",
+            env.name
+        );
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM deliveries d JOIN alerts a ON a.id = d.alert_id WHERE a.kind = 'digest'")
+                .await,
+            3,
+            "one delivery for the one phone, each day"
+        );
+        // An instance that has no memory (a restart) writes nothing more for a due time that has its row.
+        let mut fresh = DigestMemo::default();
+        env.clock.set(at("2026-03-30T07:05:00Z"));
+        assert_eq!(
+            items.digest_pass(&paris_daily(), &mut fresh).await.unwrap(),
+            0
+        );
+        assert_eq!(env.digest_times("alice").await.len(), 3);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn digest_every_n_hours() {
+    for env in envs().await {
+        env.device("phone-a", "alice").await;
+        env.clock.set(at("2026-06-09T23:00:00Z"));
+        let items = env.items();
+        created(&items, 1).await;
+        items.set_prefs("alice", &every_prefs(6)).await.unwrap();
+        let mut memo = DigestMemo::default();
+        // The file says off: the account decides.
+        let written = env
+            .digest_passes(
+                &items,
+                &digest_off(),
+                &mut memo,
+                "2026-06-10T00:00:00Z",
+                "2026-06-11T00:00:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(written, 5, "{}", env.name);
+        assert_eq!(
+            env.digest_times("alice").await,
+            vec![
+                at("2026-06-10T00:00:00Z"),
+                at("2026-06-10T06:00:00Z"),
+                at("2026-06-10T12:00:00Z"),
+                at("2026-06-10T18:00:00Z"),
+                at("2026-06-11T00:00:00Z")
+            ],
+            "{}",
+            env.name
+        );
+    }
+}
+
+/// No row is written when no item is open at the due time. An item that comes after the due time waits for the next one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn digest_empty_not_sent() {
+    for mut env in envs().await {
+        env.rules.max_open_per_key = 100;
+        env.device("phone-a", "alice").await;
+        let items = env.items();
+        let mut memo = DigestMemo::default();
+        let file = paris_daily();
+        // Nothing is open: the due time of 2026-06-10 (07:00 UTC) passes without a row.
+        env.clock.set(at("2026-06-09T12:00:00Z"));
+        let n = env
+            .digest_passes(
+                &items,
+                &file,
+                &mut memo,
+                "2026-06-10T06:00:00Z",
+                "2026-06-10T08:00:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(n, 0, "{}", env.name);
+        // An item that comes 5 minutes after the due time is not in this digest.
+        env.clock.set(at("2026-06-10T07:05:00Z"));
+        created(&items, 1).await;
+        let n = env
+            .digest_passes(
+                &items,
+                &file,
+                &mut memo,
+                "2026-06-10T07:05:00Z",
+                "2026-06-10T07:15:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(n, 0, "{}", env.name);
+        // The item is closed before the next due time: nothing is open, nothing is sent.
+        assert_eq!(
+            items
+                .cancel_where(Some("key1"), None, "key_revoked")
+                .await
+                .unwrap(),
+            1
+        );
+        let n = env
+            .digest_passes(
+                &items,
+                &file,
+                &mut memo,
+                "2026-06-11T06:00:00Z",
+                "2026-06-11T08:00:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(n, 0, "{}", env.name);
+        assert!(env.digest_times("alice").await.is_empty());
+        // With an open item, the same due time gives one row.
+        env.clock.set(at("2026-06-12T05:00:00Z"));
+        created(&items, 2).await;
+        let n = env
+            .digest_passes(
+                &items,
+                &file,
+                &mut memo,
+                "2026-06-12T06:00:00Z",
+                "2026-06-12T08:00:00Z",
+                FIVE_MIN,
+            )
+            .await;
+        assert_eq!(n, 1, "{}", env.name);
+        assert_eq!(
+            env.digest_times("alice").await,
+            vec![at("2026-06-12T07:00:00Z")]
+        );
+    }
+}
+
+/// Two instances, with their own memory, write one row for each owner and due time, also when they run together.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn digest_two_instances_one_frame() {
+    for mut env in envs().await {
+        env.rules.max_open_per_key = 100;
+        env.device("phone-a", "alice").await;
+        env.device("phone-b", "bob").await;
+        env.clock.set(at("2026-06-10T00:00:00Z"));
+        let items = env.items();
+        created(&items, 1).await;
+        let (mut item, body) = approval(2);
+        item.owner = "bob".into();
+        item.requester_key_id = "key2".into();
+        assert!(matches!(
+            items.create(item, &body).await.unwrap(),
+            Created::New(_)
+        ));
+        let second = match (&env.store, &env.pg) {
+            (Store::Pg(_), Some(pg)) => Some(Store::Pg(Arc::new(pg.store().await))),
+            _ => None,
+        };
+        let other = Items {
+            store: second.as_ref().unwrap_or(&env.store),
+            ..env.items()
+        };
+        let file = paris_daily();
+        for pass in 0..3 {
+            env.clock.set(at("2026-06-10T07:00:00Z") + pass * 60_000);
+            let (mut a, mut b) = (DigestMemo::default(), DigestMemo::default());
+            let (x, y) = tokio::join!(
+                items.digest_pass(&file, &mut a),
+                other.digest_pass(&file, &mut b)
+            );
+            let written = x.unwrap() + y.unwrap();
+            assert_eq!(
+                written,
+                if pass == 0 { 2 } else { 0 },
+                "{} pass {pass}",
+                env.name
+            );
+        }
+        assert_eq!(env.digest_times("alice").await.len(), 1, "{}", env.name);
+        assert_eq!(env.digest_times("bob").await.len(), 1, "{}", env.name);
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM deliveries d JOIN alerts a ON a.id = d.alert_id WHERE a.kind = 'digest'")
+                .await,
+            2,
+            "one delivery for each phone"
+        );
+    }
+}
+
+/// The values of the account replace the default of the file, and no value goes past a limit of the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prefs_override_file_defaults_never_a_cap() {
+    use inbox_core::proto::{DigestMode, DigestPrefs, Prefs};
+    for env in envs().await {
+        env.device("phone-a", "alice").await;
+        env.clock.set(at("2026-06-09T12:00:00Z"));
+        let items = env.items();
+        created(&items, 1).await;
+        let file = paris_daily();
+        let mut memo = DigestMemo::default();
+        macro_rules! passes {
+            ($from:expr, $to:expr) => {
+                env.digest_passes(&items, &file, &mut memo, $from, $to, FIVE_MIN)
+            };
+        }
+        // a) No preference: the file applies (09:00 Paris, 07:00 UTC in summer).
+        assert_eq!(
+            passes!("2026-06-10T00:00:00Z", "2026-06-10T12:00:00Z").await,
+            1,
+            "{}",
+            env.name
+        );
+        // b) The account turns the digest off: the default of the file is replaced.
+        let off = Prefs {
+            quiet: None,
+            digest: Some(DigestPrefs {
+                mode: DigestMode::Off,
+                at: None,
+                tz: None,
+                every_h: None,
+            }),
+        };
+        items.set_prefs("alice", &off).await.unwrap();
+        assert_eq!(
+            passes!("2026-06-11T00:00:00Z", "2026-06-11T12:00:00Z").await,
+            0,
+            "{}",
+            env.name
+        );
+        // c) The account asks for a digest every 2 hours: rows at even hours, none at the 07:00 of the file.
+        items.set_prefs("alice", &every_prefs(2)).await.unwrap();
+        assert_eq!(
+            passes!("2026-06-12T00:00:00Z", "2026-06-12T08:00:00Z").await,
+            5,
+            "{}",
+            env.name
+        );
+        let times = env.digest_times("alice").await;
+        assert!(!times.contains(&at("2026-06-12T07:00:00Z")), "{times:?}");
+        assert!(
+            times.contains(&at("2026-06-12T06:00:00Z"))
+                && times.contains(&at("2026-06-12T08:00:00Z"))
+        );
+        // d) The account removes its values: the file applies again.
+        items.set_prefs("alice", &Prefs::default()).await.unwrap();
+        assert_eq!(
+            passes!("2026-06-13T00:00:00Z", "2026-06-13T12:00:00Z").await,
+            1,
+            "{}",
+            env.name
+        );
+        assert!(env
+            .digest_times("alice")
+            .await
+            .contains(&at("2026-06-13T07:00:00Z")));
+
+        // The cap: the period of the account stays in the range of the key `inbox.items.digest.every` (1 hour to 7
+        // days). A value outside the range is refused and nothing is stored.
+        items.set_prefs("alice", &every_prefs(6)).await.unwrap();
+        for bad in [0u16, 169] {
+            match items.set_prefs("alice", &every_prefs(bad)).await {
+                Err(ItemError::Prefs(e)) => assert_eq!(e.field, "digest.every_h", "{}", env.name),
+                other => panic!("{}: {other:?}", env.name),
+            }
+        }
+        assert_eq!(
+            items.prefs("alice").await.unwrap(),
+            every_prefs(6),
+            "the refused value changed nothing"
+        );
+        items.set_prefs("alice", &every_prefs(1)).await.unwrap();
+        items.set_prefs("alice", &every_prefs(168)).await.unwrap();
     }
 }

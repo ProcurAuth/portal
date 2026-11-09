@@ -61,6 +61,8 @@ pub(crate) struct Builder<'a> {
     turns: HashMap<String, Vec<TurnPlain>>,
     /// The items whose first request is still in the queue: the phone never got them.
     unseen: HashSet<String>,
+    /// The preferences of the owner, read once for the flush.
+    prefs: Option<Prefs>,
 }
 
 fn encode(msg: &ServerMsg) -> Built {
@@ -87,7 +89,18 @@ impl<'a> Builder<'a> {
                 .filter(|d| d.kind == "question" || d.kind == "approval")
                 .map(|d| d.request_id.clone())
                 .collect(),
+            prefs: None,
         })
+    }
+
+    /// The preferences of the owner: the quiet hours decide the flag `quiet` of a request.
+    async fn prefs(&mut self) -> Result<Prefs, ItemError> {
+        if let Some(prefs) = &self.prefs {
+            return Ok(prefs.clone());
+        }
+        let prefs = self.items.prefs(self.login).await?;
+        self.prefs = Some(prefs.clone());
+        Ok(prefs)
     }
 
     async fn load(&mut self, request_id: &str) -> Result<Option<Loaded>, ItemError> {
@@ -137,8 +150,12 @@ impl<'a> Builder<'a> {
             .authorizer()
             .and_then(|a| a.key_name(&l.item.requester_key_id));
         let from = frames::sender(&l.item, key_name.as_deref());
+        let quiet = frames::arrived_quiet(&self.prefs().await?, l.item.created_at);
         match frames::request_frame(id, l, &plain, from, &facts) {
-            Ok(frame) => Ok(encode(&ServerMsg::Request(Box::new(frame)))),
+            Ok(mut frame) => {
+                frame.quiet = quiet;
+                Ok(encode(&ServerMsg::Request(Box::new(frame))))
+            }
             Err(e) => {
                 log::error!(event = "item_frame_refused", request.id = %l.item.request_id, error = %e);
                 Ok(Built::Withdraw("frame_not_built"))
@@ -290,6 +307,15 @@ pub(super) async fn digest(app: &App, login: &str, id: &str) -> Result<Built, En
         }),
         Err(ItemError::Degraded | ItemError::Replica) => Ok(Built::Keep),
         Err(e) => Err(storage(e)),
+    }
+}
+
+/// The encoded `digest` frame of an owner, or `None` when the session would not send it. For the tests of the portal.
+#[cfg(test)]
+pub(crate) async fn digest_for_test(app: &App, login: &str, id: &str) -> Option<Vec<u8>> {
+    match digest(app, login, id).await {
+        Ok(Built::Frame(bytes)) => Some(bytes),
+        _ => None,
     }
 }
 
@@ -578,7 +604,9 @@ pub(super) async fn sync(
     Ok(false)
 }
 
-/// `set_prefs`: the server stores the preferences of the account. It applies none of them here (lot L11).
+/// `set_prefs`: the server stores the preferences of the account, after it checked them against the time zone database
+/// and the limits of the file. A bad value gets the error `invalid_prefs` that names the field, and nothing is stored.
+/// The page "Preferences" of the owner reads the same row.
 pub(super) async fn set_prefs(
     app: &App,
     socket: &mut Socket,
@@ -592,6 +620,18 @@ pub(super) async fn set_prefs(
     match items.set_prefs(login, &prefs).await {
         Ok(()) => Ok(false),
         Err(ItemError::Degraded | ItemError::Replica) => unavailable(socket, session).await,
+        Err(ItemError::Prefs(e)) => {
+            send_msg(
+                socket,
+                session,
+                &ServerMsg::Error {
+                    code: "invalid_prefs".into(),
+                    message: e.to_string(),
+                },
+            )
+            .await?;
+            Ok(false)
+        }
         Err(e) => Err(storage(e)),
     }
 }

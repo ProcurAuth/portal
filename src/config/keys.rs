@@ -1533,7 +1533,7 @@ pub static KEYS: &[Key] = &[
         },
         presence: Presence::Required,
         when: When::DigestDaily,
-        doc: "The time zone of `at`, as an IANA name. The start checks the form of the name. A later release checks the name in a time zone database.",
+        doc: "The time zone of `at`, as an IANA name. The start checks the name in the time zone database that the binary embeds. A name with other capital letters is refused.",
     },
     Key {
         block: "inbox.items.digest",
@@ -2250,8 +2250,8 @@ fn check_digest_time(value: &str) -> Result<(), String> {
     }
 }
 
-/// The form of an IANA time zone name: segments of letters, digits, '_', '+' and '-' that '/'
-/// separates. This check does not look in a time zone database.
+/// An IANA time zone name that the database of the binary holds, with its exact capital letters. The form is checked
+/// first, so the error says which of the two checks failed. The binary embeds the database: the host has none to read.
 fn check_time_zone_name(value: &str) -> Result<(), String> {
     let segment = |s: &str| {
         !s.is_empty()
@@ -2259,10 +2259,13 @@ fn check_time_zone_name(value: &str) -> Result<(), String> {
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-'))
     };
-    if value.len() <= 64 && value.split('/').count() <= 3 && value.split('/').all(segment) {
+    if !(value.len() <= 64 && value.split('/').count() <= 3 && value.split('/').all(segment)) {
+        return Err("not an IANA name: segments of letters, digits, '_', '+' and '-' that '/' separates, up to 64 bytes".into());
+    }
+    if crate::inbox::prefs::is_zone(value) {
         Ok(())
     } else {
-        Err("not an IANA name: segments of letters, digits, '_', '+' and '-' that '/' separates, up to 64 bytes".into())
+        Err("the name has the form of an IANA name, but the time zone database of this binary has no zone with exactly this name (the capital letters count)".into())
     }
 }
 

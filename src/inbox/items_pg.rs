@@ -420,6 +420,17 @@ impl ItemTx for PgTx<'_> {
         Ok(())
     }
 
+    async fn open_owners(&mut self) -> Result<Vec<(String, i64)>, DbError> {
+        let rows = self
+            .rows(
+                "SELECT requester_owner, MIN(created_at) FROM items WHERE state IN ('pending', 'replied')
+                 GROUP BY requester_owner ORDER BY requester_owner",
+                &[],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     async fn insert_notice(&mut self, n: &Notice, now: i64) -> Result<Vec<String>, DbError> {
         let id = super::util::random_id();
         let key = format!("{}:{}:{}", n.request_id, n.kind, n.seq);
@@ -673,7 +684,7 @@ impl ItemTx for PgTx<'_> {
         let created = self
             .run(
                 "INSERT INTO alerts (id, kind, target_kind, target_id, title, source, idempotency_key, created_at)
-                 VALUES ($1, 'alert', 'user', $2, $3, 'portal', $4, $5)
+                 VALUES ($1, $6, 'user', $2, $3, 'portal', $4, $5)
                  ON CONFLICT (source, idempotency_key) DO NOTHING",
                 &[
                     Box::new(id.clone()),
@@ -681,6 +692,7 @@ impl ItemTx for PgTx<'_> {
                     Box::new(a.title.clone()),
                     Box::new(a.key.clone()),
                     Box::new(now),
+                    Box::new(if a.digest { "digest" } else { "alert" }.to_string()),
                 ],
             )
             .await?;
