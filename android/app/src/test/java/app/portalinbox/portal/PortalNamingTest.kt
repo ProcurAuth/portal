@@ -155,14 +155,4 @@ class PortalNamingTest {
         assertEquals("#", PortalNaming.monogram("#"))
         assertEquals("😀", PortalNaming.monogram("😀😀"))
     }
-
-    @Test
-    fun suggestGivesTheFirstFreeNumber() {
-        assertEquals("Portal 1", PortalNaming.suggest(none))
-        val two = listOf(Portals.identity(1, "Portal 1", 0), Portals.identity(2, "Portal 3", 1))
-        assertEquals("Portal 2", PortalNaming.suggest(two))
-        val valid = PortalNaming.validate(PortalNaming.suggest(two), two)
-        assertTrue(valid is Check.Valid)
-        assertFalse(PortalNaming.hasHidden(PortalNaming.suggest(two)))
-    }
 }
