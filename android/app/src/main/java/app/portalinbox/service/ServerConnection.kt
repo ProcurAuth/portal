@@ -10,6 +10,7 @@ import app.portalinbox.data.Alert
 import app.portalinbox.data.Group
 import app.portalinbox.alert.ItemAlerter
 import app.portalinbox.data.ItemEvent
+import app.portalinbox.data.PrefsSync
 import app.portalinbox.data.Kind
 import app.portalinbox.data.KeyVault
 import app.portalinbox.data.Levels
@@ -23,6 +24,7 @@ import app.portalinbox.proto.AnswerResultFrame
 import app.portalinbox.proto.ClientFrame
 import app.portalinbox.proto.ClientFrames
 import app.portalinbox.proto.DigestFrame
+import app.portalinbox.proto.SetPrefsFrame
 import app.portalinbox.proto.ErrorFrame
 import app.portalinbox.proto.FrameException
 import app.portalinbox.proto.MessageFrame
@@ -101,7 +103,7 @@ class ServerConnection(private val context: Context, val serverId: Long) {
     private val pingSentAt = sortedMapOf<Long, Long>()
 
     /** True while the server of this session handles items (`welcome` with a purge age, no `not_enabled`). */
-    private var itemsEnabled = false
+    @Volatile private var itemsEnabled = false
 
     /** The outbox entries that this session already sent. */
     private val outboxSent = HashSet<String>()
@@ -130,6 +132,14 @@ class ServerConnection(private val context: Context, val serverId: Long) {
      */
     fun flushOutbox() {
         events.offer(Event.Flush)
+    }
+
+    /**
+     * Sends the preferences of the account (`set_prefs`). The caller saved them as pending ([PrefsSync.edit]). Offline, the
+     * next `welcome` sends them. The server sends no answer: it confirms with the next `welcome`.
+     */
+    fun sendPrefs(frame: SetPrefsFrame) {
+        if (itemsEnabled) events.offer(Event.Command(frame))
     }
 
     /**
@@ -302,6 +312,11 @@ class ServerConnection(private val context: Context, val serverId: Long) {
                                 itemsEnabled = frame.itemsEnabled
                                 start.sync?.let { send(it) }
                                 flush(start.outbox)
+                                // The preferences: the values of the server, or the edit of the owner that it lacks.
+                                when (val action = PrefsSync.onWelcome(PendingPrefsStore.get(context), serverId, frame)) {
+                                    is PrefsSync.Action.Send -> send(action.frame)
+                                    PrefsSync.Action.None -> {}
+                                }
                                 Registry.changed()
                                 ping()
                             }
@@ -521,7 +536,8 @@ class ServerConnection(private val context: Context, val serverId: Long) {
 
     /**
      * The place where the notifications of the items hook in. A new request notifies and the phone then marks the item as
-     * notified. A settled item withdraws its notification. Messages and digests belong to lot A3.
+     * notified. A settled item withdraws its notification. A turn of the agent notifies on the channel of the replies. A
+     * digest makes the quiet summary. A request that comes back says "The agent is back".
      */
     private fun present(event: ItemEvent) {
         Log.d(TAG, "item event ${event.javaClass.simpleName}")

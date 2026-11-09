@@ -109,7 +109,13 @@ object Alerter {
             description = context.getString(R.string.ch_replies_desc)
             lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         }
-        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning, requests, requestsQuiet, digest, replies))
+        val repliesQuiet = NotificationChannel(NotificationPlan.CH_REPLIES_QUIET, context.getString(R.string.ch_replies_quiet_name), NotificationManager.IMPORTANCE_LOW).apply {
+            description = context.getString(R.string.ch_replies_quiet_desc)
+            setSound(null, null)
+            enableVibration(false)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        nm.createNotificationChannels(listOf(alarm, active, ring, notify, status, warning, requests, requestsQuiet, digest, replies, repliesQuiet))
     }
 
     /** Notification tag/id: unique per alert, so re-posting replaces instead of duplicating. */

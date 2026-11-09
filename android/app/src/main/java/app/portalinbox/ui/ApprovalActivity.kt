@@ -295,6 +295,10 @@ class ApprovalActivity : BaseFragmentActivity() {
         staleBox?.visibility = if (s.staleBoxShown) View.VISIBLE else View.GONE
         staleCheck?.let { if (s.staleBoxText != null) it.text = s.staleBoxText }
         askButton?.visibility = if (s.askShown) View.VISIBLE else View.GONE
+        // With a discussion going on, the button opens it: the owner sees the turns and the state of the question.
+        (askButton as? TextView)?.text = getString(
+            if (i.state == app.portalinbox.proto.ItemState.REPLIED || repo.turns(serverId, requestId).isNotEmpty()) R.string.approval_discussion else R.string.approval_ask,
+        )
         commentToggle?.visibility = if (s.declineWithComment) View.VISIBLE else View.GONE
         commentForm?.visibility = if (s.declineWithComment && commentOpen) View.VISIBLE else View.GONE
 

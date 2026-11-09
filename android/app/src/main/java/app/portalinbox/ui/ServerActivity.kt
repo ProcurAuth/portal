@@ -109,6 +109,7 @@ class ServerActivity : BaseActivity() {
         body.addView(where)
 
         renderGroups(store)
+        renderPrefsRow()
 
         // Login of the account: assigned by the server, read-only.
         body.addView(sectionTitle(getString(R.string.server_account)))
@@ -164,6 +165,23 @@ class ServerActivity : BaseActivity() {
 
         body.addView(button(getString(R.string.server_remove), ButtonKind.DANGER) { confirmRemove(server.serverName) },
             lp().margins(this, t = 16, b = 20))
+    }
+
+    /** The row that opens the preferences (quiet hours, summary). It shows only for a server that has items. */
+    private fun renderPrefsRow() {
+        val stored = app.portalinbox.service.Items.repository(this).prefs(serverId)
+        if (stored == null || stored.bodyPurgeAfterMs <= 0) return
+        val effective = app.portalinbox.data.PrefsSync.effective(
+            stored.prefs, app.portalinbox.service.PendingPrefsStore.get(this).get(serverId),
+        )
+        body.addView(sectionTitle(getString(R.string.prefs_title)))
+        val p = panel()
+        p.addView(
+            row(getString(R.string.prefs_title), PrefsForm.summary(effective), icon(R.drawable.ic_chevron_right, color(R.color.text_muted), 18)) {
+                startActivity(PrefsActivity.intent(this, serverId))
+            }.apply { minimumHeight = dp(48) },
+        )
+        body.addView(p)
     }
 
     /** One compact row per group: name and description, then the level for this phone. */
