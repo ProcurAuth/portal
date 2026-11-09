@@ -7,7 +7,7 @@ import app.portalinbox.proto.RequestKind
  * The order of the home list. Pure Kotlin.
  *
  * Alice's rule (checkpoint C3): the alerts come first. The section "To answer" comes below them. Inside "To answer",
- * the oldest request comes first: the one that waits longest is the first to read.
+ * the oldest request comes first: the one that waits longest is the first to read. [app.portalinbox.portal.ItemSort] sorts the rows.
  */
 object ItemListOrder {
     enum class Section { ALERTS, TO_ANSWER }
@@ -18,15 +18,7 @@ object ItemListOrder {
         if (hasItems) add(Section.TO_ANSWER)
     }
 
-    /** The open items, the oldest first. A tie goes to the server, then to the request id: the order never jumps. */
-    fun toAnswer(items: List<Item>): List<Item> =
-        items.filter { it.isOpen }
-            .sortedWith(compareBy<Item> { it.request.createdAtMs }.thenBy { it.serverId }.thenBy { it.requestId })
-
-    /** The final items, the most recent end first. */
-    fun done(items: List<Item>): List<Item> =
-        items.filter { !it.isOpen }
-            .sortedWith(compareByDescending<Item> { it.settled?.atMs ?: it.updatedAtMs }.thenBy { it.serverId }.thenBy { it.requestId })
+    // The order of the items across portals is in [app.portalinbox.portal.ItemSort]: it limits the time that a portal claims.
 
     enum class Chip { APPROVAL, QUESTION, DECISION }
 

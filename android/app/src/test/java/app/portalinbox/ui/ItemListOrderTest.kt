@@ -2,6 +2,7 @@ package app.portalinbox.ui
 
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemEngine
+import app.portalinbox.portal.ItemSort
 import app.portalinbox.proto.ItemState
 import app.portalinbox.testsupport.Make
 import app.portalinbox.testsupport.MemoryItemRepository
@@ -62,7 +63,7 @@ class ItemListOrderTest {
         val young = approval(1, t0 + 5 * 86_400_000L)
         val old = approval(2, t0)
         val mid = question(1, t0 + 86_400_000L)
-        assertEquals(listOf(old.requestId, mid.requestId, young.requestId), ItemListOrder.toAnswer(listOf(young, mid, old)).map { it.requestId })
+        assertEquals(listOf(old.requestId, mid.requestId, young.requestId), ItemSort.toAnswer(listOf(young, mid, old), emptyMap()).map { it.requestId })
     }
 
     @Test
@@ -70,7 +71,7 @@ class ItemListOrderTest {
         val a = approval(1, t0, serverId = 2)
         val b = approval(2, t0, serverId = 1)
         val c = approval(3, t0, serverId = 1)
-        assertEquals(listOf(b, c, a).map { it.requestId }, ItemListOrder.toAnswer(listOf(a, c, b)).map { it.requestId })
+        assertEquals(listOf(b, c, a).map { it.requestId }, ItemSort.toAnswer(listOf(a, c, b), emptyMap()).map { it.requestId })
     }
 
     @Test
@@ -79,8 +80,8 @@ class ItemListOrderTest {
         val gone = approval(2, t0)
         engine.onSettled(server, Make.settled(gone.requestId, Make.hex(0x70)))
         val all = repo.items(server)
-        assertEquals(listOf(open.requestId), ItemListOrder.toAnswer(all).map { it.requestId })
-        assertEquals(listOf(gone.requestId), ItemListOrder.done(all).map { it.requestId })
+        assertEquals(listOf(open.requestId), ItemSort.toAnswer(all, emptyMap()).map { it.requestId })
+        assertEquals(listOf(gone.requestId), ItemSort.done(all, emptyMap()).map { it.requestId })
     }
 
     @Test
@@ -88,7 +89,7 @@ class ItemListOrderTest {
         val i = approval(1, t0)
         engine.onMessage(server, Make.message(i.requestId, Make.hex(0x71), 1, user = true))
         assertEquals(ItemState.REPLIED, repo.item(server, i.requestId)!!.state)
-        assertEquals(1, ItemListOrder.toAnswer(repo.items(server)).size)
+        assertEquals(1, ItemSort.toAnswer(repo.items(server), emptyMap()).size)
     }
 
     @Test
@@ -97,7 +98,7 @@ class ItemListOrderTest {
         val b = approval(2, t0)
         engine.onSettled(server, Make.settled(a.requestId, Make.hex(0x72), atMs = t0 + 1000))
         engine.onSettled(server, Make.settled(b.requestId, Make.hex(0x73), atMs = t0 + 9000))
-        assertEquals(listOf(b.requestId, a.requestId), ItemListOrder.done(repo.items(server)).map { it.requestId })
+        assertEquals(listOf(b.requestId, a.requestId), ItemSort.done(repo.items(server), emptyMap()).map { it.requestId })
     }
 
     // ------------------------------------------------------------ rows
@@ -129,7 +130,7 @@ class ItemListOrderTest {
         val r = ItemListOrder.row(i, now)
         assertEquals("Invalid request", r.title)
         assertTrue(r.invalid)
-        assertEquals(1, ItemListOrder.toAnswer(listOf(i)).size)
+        assertEquals(1, ItemSort.toAnswer(listOf(i), emptyMap()).size)
     }
 
     @Test

@@ -3,6 +3,7 @@ package app.portalinbox.ui
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
@@ -13,6 +14,8 @@ import android.os.Looper
 import android.text.SpannableStringBuilder
 import android.text.StaticLayout
 import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.view.Gravity
 import android.view.View
@@ -24,6 +27,7 @@ import android.window.OnBackInvokedDispatcher
 import app.portalinbox.R
 import app.portalinbox.alert.Alerter
 import app.portalinbox.data.Store
+import app.portalinbox.portal.PortalIdentity
 
 /**
  * Full-screen alarm, over the lock screen, until it is stopped on the phone.
@@ -146,6 +150,15 @@ class AlarmActivity : Activity() {
         timer.addView(label(getString(R.string.alarm_since_alert), SP_L, dim), lp(WRAP, WRAP).margins(this, l = 10))
         col.addView(timer, lp(MATCH, WRAP).margins(this, t = 8))
 
+        // The portal chip comes first: the alarm page is dark whatever the theme, so the chip uses the dark colors. The name is the
+        // nickname of the phone, never the name that the portal sends (an alarm of a look-alike portal must not pass for another).
+        val identity = server?.let { PortalIdentity.of(it) }
+        identity?.let {
+            col.addView(portalChip(it, night = true).apply {
+                contentDescription = getString(R.string.alarm_portal_description, it.nickname)
+            }, lp(WRAP, WRAP).margins(this, t = 12).apply { gravity = Gravity.CENTER_HORIZONTAL })
+        }
+
         // Group (the one place it is named) and how many others ring.
         val head = lin(vertical = false).apply { gravity = Gravity.CENTER }
         head.addView(label(a.groupName, SP_M, red, MEDIUM, lines = 1).apply {
@@ -162,9 +175,8 @@ class AlarmActivity : Activity() {
                 contentDescription = resources.getQuantityString(R.plurals.alarm_others, others.size, others.size)
             }, lp(WRAP, WRAP).margins(this, l = 6))
         }
-        col.addView(head, lp(MATCH, WRAP).margins(this, t = 12))
+        col.addView(head, lp(MATCH, WRAP).margins(this, t = if (identity != null) 8 else 12))
         val meta = SpannableStringBuilder()
-        server?.nickname?.let { meta.append(it).append("  ·  ") }
         meta.append(getString(R.string.alarm_sent)).append(' ')
         monoSpan(meta, hms(a.createdAtMs))
         meta.append("  ·  ").append(getString(R.string.alarm_received)).append(' ')
@@ -191,6 +203,15 @@ class AlarmActivity : Activity() {
             card.addView(View(this).apply { setBackgroundColor(0x1AFFFFFF) }, lp(MATCH, 1).margins(this, t = 12, b = 8))
             for (o in others.take(3)) {
                 val line = SpannableStringBuilder()
+                // Another alarm may come from another portal: its nickname, in its color, stands before the time.
+                store.server(o.serverId)?.let { os ->
+                    val id = PortalIdentity.of(os)
+                    val start = line.length
+                    line.append(VisibleText.escapeLine(id.nickname))
+                    line.setSpan(ForegroundColorSpan(id.color(true)), start, line.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    line.setSpan(StyleSpan(Typeface.BOLD), start, line.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    line.append("  ")
+                }
                 monoSpan(line, hms(o.createdAtMs))
                 line.append("  ").append(o.title)
                 card.addView(label(line, SP_S, faint, lines = 1), lp().margins(this, t = 4))

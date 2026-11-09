@@ -8,9 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -29,11 +26,18 @@ import app.portalinbox.data.Item
 import app.portalinbox.data.LocalRetention
 import app.portalinbox.data.Server
 import app.portalinbox.data.Store
+import app.portalinbox.portal.FilterStrip
+import app.portalinbox.portal.HomeCounts
+import app.portalinbox.portal.HomeFilter
+import app.portalinbox.portal.HomePortal
+import app.portalinbox.portal.ItemSort
+import app.portalinbox.portal.OfflineSummary
 import app.portalinbox.service.LinkState
 import app.portalinbox.service.InboxService
 import app.portalinbox.service.Items
 import app.portalinbox.service.Registry
 import app.portalinbox.service.ServerClock
+import java.time.ZoneId
 
 /** Home: latest alerts, plus the Servers and Settings screens behind the menu. */
 class MainActivity : BaseActivity() {
@@ -64,6 +68,14 @@ class MainActivity : BaseActivity() {
     private enum class Screen { ALERTS, DONE, SERVERS, SETTINGS }
 
     private var screen = Screen.ALERTS
+
+    /**
+     * The filter of the home list. It is not saved: each start of the app shows All (question Q9), because a saved filter can
+     * hide the request of another portal for days.
+     */
+    private var filter: HomeFilter = HomeFilter.AT_START
+    private lateinit var strip: FrameLayout
+    private val network = NetworkState(this) { render() }
     /** Older alerts loaded with "See more", beyond the configured count and window. */
     private var extra = 0
     private lateinit var root: FrameLayout
@@ -94,6 +106,8 @@ class MainActivity : BaseActivity() {
         main = lin()
         bar = FrameLayout(this)
         main.addView(bar, lp())
+        strip = FrameLayout(this)
+        main.addView(strip, lp())
         body = lin(padH = 10, padV = 4)
         scroller = scroll(body)
         main.addView(scroller, lp(MATCH, 0, 1f))
@@ -120,6 +134,8 @@ class MainActivity : BaseActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // The home list from a notification or a link shows everything: a filter must not hide the item that was tapped.
+        if (intent.getStringExtra(EXTRA_NOTICE) == null) filter = HomeFilter.AT_START
         handleOpen(intent)
     }
 
@@ -141,7 +157,7 @@ class MainActivity : BaseActivity() {
         val store = Store.get(this)
         val a = store.alert(serverId, alertId) ?: return
         if (screen != Screen.ALERTS) go(Screen.ALERTS)
-        showAlert(a, store.server(serverId)?.nickname ?: "")
+        showAlert(a, homePortals().firstOrNull { it.id == serverId })
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -161,6 +177,7 @@ class MainActivity : BaseActivity() {
         super.onResume()
         purgeLocalCopies()
         Registry.addListener(onChange)
+        network.start()
         handler.post(tick)
         InboxService.start(this)
     }
@@ -168,6 +185,7 @@ class MainActivity : BaseActivity() {
     override fun onPause() {
         super.onPause()
         Registry.removeListener(onChange)
+        network.stop()
         handler.removeCallbacks(tick)
     }
 
@@ -256,8 +274,36 @@ class MainActivity : BaseActivity() {
     /** "1/2" when some server is down, null when all are up. */
     private fun downCount(o: Overall): String? = if (o.total > 0 && o.connected < o.total) "${o.connected}/${o.total}" else null
 
+    /** The portals as the home list draws them: identity, state of the link, "New" mark. */
+    private fun homePortals(): List<HomePortal> =
+        HomePortal.build(Store.get(this).servers(), { Registry.status(it) }, System.currentTimeMillis())
+
+    /** The clock offset of each portal, for the order of the items across portals. */
+    private fun clockOffsets(servers: List<Server>): Map<Long, Long> = servers.associate { it.id to ServerClock.offset(this, it.id) }
+
+    /** The items of the portals that the filter shows. */
+    private fun filteredItems(servers: List<Server>): List<Item> = allItems(servers.filter { filter.matches(it.id) })
+
+    /** The strip of filter chips under the top bar. It shows on the alerts screen and on the Done screen. */
+    private fun renderStrip(portals: List<HomePortal>) {
+        strip.removeAllViews()
+        if (screen != Screen.ALERTS && screen != Screen.DONE) return
+        val counts = HomeCounts.build(portals.map { it.id }, Items.repository(this).openCounts(), Store.get(this).unreadCounts())
+        val chips = FilterStrip.chips(portals, counts, filter)
+        if (chips.isEmpty()) return
+        strip.addView(filterStrip(chips) { chip ->
+            filter = HomeFilter.tap(filter, chip.filter)
+            extra = 0
+            scroller.scrollTo(0, 0)
+            render()
+        })
+    }
+
     private fun render() {
         val servers = Store.get(this).servers()
+        val portals = homePortals()
+        // A filter on a portal that was removed falls back to All.
+        filter = filter.resolve(servers.map { it.id })
         val o = overall(servers)
         title = when (screen) {
             Screen.ALERTS -> getString(R.string.nav_inbox)
@@ -266,14 +312,17 @@ class MainActivity : BaseActivity() {
             Screen.SETTINGS -> getString(R.string.settings_title)
         }
         bar.removeAllViews()
-        bar.addView(topBar(R.drawable.ic_menu, getString(R.string.nav_open), { drawer.open() }, statusIndicator(o)))
+        // One dot per portal in its color, hollow when it is down. With no portal, the single status light stays.
+        bar.addView(topBar(R.drawable.ic_menu, getString(R.string.nav_open), { drawer.open() },
+            if (portals.isEmpty()) statusIndicator(o) else portalDots(portals)))
+        renderStrip(portals)
         renderDrawer(servers, o)
 
         val y = scroller.scrollY
         body.removeAllViews()
         when (screen) {
-            Screen.ALERTS -> renderAlerts(servers)
-            Screen.DONE -> renderDone(servers)
+            Screen.ALERTS -> renderAlerts(servers, portals)
+            Screen.DONE -> renderDone(servers, portals)
             Screen.SERVERS -> renderServers(servers)
             Screen.SETTINGS -> renderSettings()
         }
@@ -281,7 +330,7 @@ class MainActivity : BaseActivity() {
         // "Show read" stays pinned under the alerts list, never inside it.
         footer.removeAllViews()
         if (screen == Screen.ALERTS && servers.isNotEmpty()) {
-            val doneCount = allItems(servers).count { !it.isOpen }
+            val doneCount = filteredItems(servers).count { !it.isOpen }
             val row = lin(vertical = false).apply { gravity = Gravity.CENTER_VERTICAL }
             row.addView(showReadToggle(Prefs.showRead(this)))
             if (doneCount > 0) {
@@ -376,9 +425,18 @@ class MainActivity : BaseActivity() {
 
     // ------------------------------------------------------------ alerts
 
-    private fun renderAlerts(servers: List<Server>) {
+    private fun renderAlerts(servers: List<Server>, portals: List<HomePortal>) {
         val store = Store.get(this)
         val missing = Permissions.missing(this)
+        val byId = portals.associateBy { it.id }
+        val nowMs = System.currentTimeMillis()
+        // The banners of the portals that cannot be reached, then the banners of the permissions. They are part of the screen,
+        // not notifications.
+        for (b in OfflineSummary.banners(portals, network.available, nowMs, ZoneId.systemDefault())) {
+            body.addView(statusBanner(b) {
+                if (b.portalId != null) openServer(b.portalId) else go(Screen.SERVERS)
+            }, lp().margins(this, t = 8))
+        }
         val wantsAlarm = servers.any { s -> store.levels(s.id).values.any { it == "alarm" } }
         if (wantsAlarm && !Settings.canDrawOverlays(this)) {
             body.addView(banner(getString(R.string.alert_overlay_missing), getString(R.string.alert_overlay_fix),
@@ -408,32 +466,39 @@ class MainActivity : BaseActivity() {
         val showRead = Prefs.showRead(this)
         val now = System.currentTimeMillis()
         // The configured count within the window, then older ones 10 at a time.
-        val base = store.recentAlerts(now - window, limit, showRead)
-        val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead)
-        val names = servers.associate { it.id to it.nickname }
-        val toAnswer = ItemListOrder.toAnswer(allItems(servers))
+        val only = filter.portalId
+        val base = store.recentAlerts(now - window, limit, showRead, only)
+        val alerts = if (extra == 0) base else store.latestAlerts(base.size + extra, showRead, only)
+        // The items of the portals that the filter shows, the oldest first across portals with the limited time of each portal.
+        val toAnswer = ItemSort.toAnswer(filteredItems(servers), clockOffsets(servers))
+        val filterName = only?.let { byId[it]?.identity?.nickname }
         // Alice's rule: the alerts come first, then the items to answer. A section with no row does not show.
         val sections = ItemListOrder.sections(hasAlerts = alerts.isNotEmpty(), hasItems = toAnswer.isNotEmpty())
         if (sections.isEmpty()) {
-            body.addView(allClear(overall(servers)), lp(MATCH, 0, 1f))
+            if (filterName != null) {
+                body.addView(label(HomeFilter.nothingFrom(filterName), SP_L, color(R.color.text_muted), MEDIUM).apply { gravity = Gravity.CENTER },
+                    lp(MATCH, 0, 1f).margins(this, t = 32))
+            } else {
+                body.addView(allClear(overall(servers)), lp(MATCH, 0, 1f))
+            }
             return
         }
         val titled = ItemListOrder.Section.TO_ANSWER in sections
         for (section in sections) {
             when (section) {
                 ItemListOrder.Section.ALERTS -> {
-                    if (titled) body.addView(sectionTitle(getString(R.string.section_alerts)))
-                    renderAlertCards(alerts, names, showRead, now)
-                    if (store.alertCount(showRead) > alerts.size) {
+                    if (titled) body.addView(sectionTitle(HomeFilter.sectionTitle(getString(R.string.section_alerts), filterName), alerts.size.toString()))
+                    renderAlertCards(alerts, byId, showRead, now)
+                    if (store.alertCount(showRead, only) > alerts.size) {
                         body.addView(seeMore(), lp(WRAP, WRAP).margins(this, t = 2).apply { gravity = Gravity.CENTER_HORIZONTAL })
                     }
                 }
                 ItemListOrder.Section.TO_ANSWER -> {
                     val serverNow = HashMap<Long, Long>()
-                    body.addView(sectionTitle(getString(R.string.section_to_answer), toAnswer.size.toString()))
+                    body.addView(sectionTitle(HomeFilter.sectionTitle(getString(R.string.section_to_answer), filterName), toAnswer.size.toString()))
                     toAnswer.forEachIndexed { i, item ->
                         val at = serverNow.getOrPut(item.serverId) { ServerClock.now(this, item.serverId) }
-                        body.addView(itemCard(item, ItemListOrder.row(item, at)), lp().margins(this, t = if (i == 0) 0 else 8))
+                        body.addView(itemCard(item, ItemListOrder.row(item, at), byId[item.serverId], now), lp().margins(this, t = if (i == 0) 0 else 8))
                     }
                 }
             }
@@ -441,13 +506,13 @@ class MainActivity : BaseActivity() {
     }
 
     /** One card per alert, the severity bar on its left edge. Swipe right: read. */
-    private fun renderAlertCards(alerts: List<Alert>, names: Map<Long, String>, showRead: Boolean, now: Long) {
+    private fun renderAlertCards(alerts: List<Alert>, portals: Map<Long, HomePortal>, showRead: Boolean, now: Long) {
         alerts.forEachIndexed { i, a ->
             val card = lin().apply {
                 background = solidCard()
                 clipToOutline = true
                 outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
-                addView(alertRow(a, names[a.serverId] ?: "", now))
+                addView(alertRow(a, portals[a.serverId], now))
             }
             val swipe = SwipeToRead(this, card, enabled = a.unread, removeOnCommit = !showRead) {
                 val marked = Alerter.markRead(this, a.serverId, a.alertId)
@@ -471,22 +536,29 @@ class MainActivity : BaseActivity() {
     }
 
     /** A card of the list "To answer": age and code | title, sender, ages | kind and state chips. */
-    private fun itemCard(item: Item, r: ItemListOrder.Row): View {
-        val (chipText, fg, bg) = chipStyle(r.chip)
+    private fun itemCard(item: Item, r: ItemListOrder.Row, portal: HomePortal?, nowMs: Long): View {
+        val (chipText, fgKind, bg) = chipStyle(r.chip)
+        // A portal that is down: the row is dimmed and its last line says why. Approve and Decline stay possible when the portal
+        // is only offline: the answer waits in the outbox and the portal decides.
+        val reason = portal?.let { OfflineSummary.rowReason(it, nowMs) }
+        val down = reason != null
+        val bar = if (down) color(R.color.text_subtle) else fgKind
         val card = lin().apply {
             background = solidCard()
             clipToOutline = true
             outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
+            if (down) alpha = 0.62f
         }
         val row = lin(vertical = false).apply {
             minimumHeight = dp(54)
             background = rowRipple()
             isClickable = true
             // The words of a screen reader: full words, the age and the state as text (TalkBackLabels).
-            contentDescription = TalkBackLabels.itemRow(item, ServerClock.now(this@MainActivity, item.serverId))
+            contentDescription = TalkBackLabels.itemRow(item, ServerClock.now(this@MainActivity, item.serverId),
+                portal?.identity?.nickname, reason?.replace(" · ", ". "))
             setOnClickListener { openItem(item, r) }
         }
-        row.addView(View(this).apply { setBackgroundColor(fg) }, lp(dp(3), MATCH))
+        row.addView(View(this).apply { setBackgroundColor(bar) }, lp(dp(3), MATCH))
         val time = lin().apply { setPadding(dp(10), dp(9), 0, dp(9)) }
         time.addView(mono(r.age, SP_S, color(R.color.text_strong), bold = true))
         r.code?.let { time.addView(mono(it, SP_XS, color(R.color.text_subtle)), lp().margins(this, t = 3)) }
@@ -496,14 +568,19 @@ class MainActivity : BaseActivity() {
         titleRow.addView(statusDot(color(R.color.primary), 6), lp(dp(6), dp(6)).margins(this, r = 6))
         titleRow.addView(label(r.title, SP_M, color(R.color.text_strong), BOLD, lines = 1), lp(0, WRAP, 1f))
         content.addView(titleRow)
-        content.addView(label(r.subtitle, SP_S, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
-        content.addView(label(r.detail, SP_S, color(R.color.text_subtle), lines = 1), lp().margins(this, t = 2))
+        // The portal chip comes first on the second line, before the sender: the nickname is the identity, never the sender text.
+        val who = lin(vertical = false)
+        portal?.let { who.addView(portalChip(it), lp(WRAP, WRAP).margins(this, r = 6)) }
+        who.addView(label(r.subtitle, SP_S, color(R.color.text_muted), lines = 1), lp(0, WRAP, 1f))
+        content.addView(who, lp().margins(this, t = 3))
+        content.addView(label(reason ?: r.detail, SP_S, if (portal != null && down) reasonColor(portal.health) else color(R.color.text_subtle), lines = 1),
+            lp().margins(this, t = 2))
         row.addView(content, lp(0, WRAP, 1f))
         val tags = lin().apply {
             gravity = Gravity.END or Gravity.CENTER_VERTICAL
             setPadding(0, dp(8), dp(10), dp(8))
         }
-        tags.addView(chip(chipText, fg, bg))
+        tags.addView(chip(chipText, fgKind, bg))
         if (r.old) tags.addView(chip(getString(R.string.chip_old), color(R.color.warning), color(R.color.warning_soft)), lp(WRAP, WRAP).margins(this, t = 4))
         if (r.invalid) tags.addView(chip(getString(R.string.chip_invalid), color(R.color.danger), color(R.color.danger_soft)), lp(WRAP, WRAP).margins(this, t = 4))
         row.addView(tags, lp(WRAP, MATCH))
@@ -522,11 +599,14 @@ class MainActivity : BaseActivity() {
 
     // ------------------------------------------------------------ done
 
-    private fun renderDone(servers: List<Server>) {
-        val done = ItemListOrder.done(allItems(servers))
-        body.addView(sectionTitle(getString(R.string.done_title), if (done.isEmpty()) null else done.size.toString()))
+    private fun renderDone(servers: List<Server>, portals: List<HomePortal>) {
+        val byId = portals.associateBy { it.id }
+        val done = ItemSort.done(filteredItems(servers), clockOffsets(servers))
+        val filterName = filter.portalId?.let { byId[it]?.identity?.nickname }
+        body.addView(sectionTitle(HomeFilter.sectionTitle(getString(R.string.done_title), filterName), if (done.isEmpty()) null else done.size.toString()))
         if (done.isEmpty()) {
-            body.addView(label(getString(R.string.done_empty), SP_M, color(R.color.text_muted)), lp().margins(this, t = 8, l = 4))
+            body.addView(label(filterName?.let { HomeFilter.nothingFrom(it) } ?: getString(R.string.done_empty), SP_M, color(R.color.text_muted)),
+                lp().margins(this, t = 8, l = 4))
             return
         }
         done.forEachIndexed { i, item ->
@@ -547,7 +627,7 @@ class MainActivity : BaseActivity() {
                 minimumHeight = dp(54)
                 background = rowRipple()
                 isClickable = true
-                contentDescription = listOf(chipText, r.title, r.word, r.detail).joinToString(". ")
+                contentDescription = listOfNotNull(byId[r.serverId]?.identity?.nickname?.let { "Portal $it" }, chipText, r.title, r.word, r.detail).joinToString(". ")
                 setOnClickListener { if (r.openable) startActivity(ApprovalActivity.intent(this@MainActivity, r.serverId, r.requestId)) else root.snackbar(getString(R.string.question_later)) }
             }
             row.addView(View(this).apply { setBackgroundColor(stateFg) }, lp(dp(3), MATCH))
@@ -556,6 +636,8 @@ class MainActivity : BaseActivity() {
             row.addView(time, lp(dp(84), WRAP))
             val content = lin().apply { setPadding(0, dp(9), dp(8), dp(9)) }
             content.addView(label(r.title, SP_M, color(R.color.text), REGULAR, lines = 1))
+            // The same portal chip as on the cards: a finished item names its portal too.
+            byId[r.serverId]?.let { content.addView(portalChip(it.identity, darkTheme(), dashed = false, isNew = it.isNew), lp(WRAP, WRAP).margins(this, t = 3)) }
             content.addView(label(r.detail, SP_S, color(R.color.text_muted), lines = 2), lp().margins(this, t = 3))
             row.addView(content, lp(0, WRAP, 1f))
             val tags = lin().apply {
@@ -625,14 +707,14 @@ class MainActivity : BaseActivity() {
     private fun isRinging(a: Alert) = a.action == "alarm" && a.stoppedAtMs == null
 
     /** Dense event row: severity bar | clock + age | title / group · server — message | tags. */
-    private fun alertRow(a: Alert, serverName: String, now: Long): View {
+    private fun alertRow(a: Alert, portal: HomePortal?, now: Long): View {
         val style = actionStyle(a.action)
         val ringing = isRinging(a)
         val row = lin(vertical = false).apply {
             minimumHeight = dp(54)
             background = if (ringing) pressable(color(R.color.danger_soft), 0f) else rowRipple()
             isClickable = true
-            setOnClickListener { showAlert(a, serverName) }
+            setOnClickListener { showAlert(a, portal) }
             // Long press: mark read without opening.
             isLongClickable = true
             setOnLongClickListener {
@@ -658,10 +740,11 @@ class MainActivity : BaseActivity() {
             if (a.unread) color(R.color.text_strong) else color(R.color.text),
             if (a.unread) BOLD else REGULAR, lines = 1), lp(0, WRAP, 1f))
         content.addView(titleRow)
-        val meta = SpannableStringBuilder()
-        meta.append("${a.groupName} · $serverName")
-        meta.setSpan(ForegroundColorSpan(color(R.color.text_subtle)), 0, meta.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        content.addView(label(meta, SP_S, color(R.color.text_muted), lines = 1), lp().margins(this, t = 3))
+        // The portal chip, then the group. The portal name is the nickname of the phone, never the name that the portal sends.
+        val meta = lin(vertical = false)
+        portal?.let { meta.addView(portalChip(it), lp(WRAP, WRAP).margins(this, r = 6)) }
+        meta.addView(label(a.groupName, SP_S, color(R.color.text_muted), lines = 1), lp(0, WRAP, 1f))
+        content.addView(meta, lp().margins(this, t = 3))
         row.addView(content, lp(0, WRAP, 1f))
 
         val tags = lin().apply {
@@ -679,7 +762,8 @@ class MainActivity : BaseActivity() {
         return row
     }
 
-    private fun showAlert(a: Alert, serverName: String) {
+    private fun showAlert(a: Alert, portal: HomePortal?) {
+        val serverName = portal?.identity?.nickname ?: ""
         if (isRinging(a)) {
             startActivity(AlarmActivity.intent(this, a.serverId, a.alertId))
             return
@@ -693,7 +777,8 @@ class MainActivity : BaseActivity() {
         bottomSheet { sheet, dialog ->
             val head = lin(vertical = false)
             head.addView(chip(style.code, style.fg, style.bg))
-            head.addView(label("${a.groupName} · $serverName", SP_S, color(R.color.text_muted), lines = 1),
+            portal?.let { head.addView(portalChip(it), lp(WRAP, WRAP).margins(this, l = 8)) }
+            head.addView(label(a.groupName, SP_S, color(R.color.text_muted), lines = 1),
                 lp(0, WRAP, 1f).margins(this, l = 8))
             head.addView(mono(shortAge(a.createdAtMs), SP_S, color(R.color.text_subtle)))
             sheet.addView(head)
