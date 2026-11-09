@@ -40,6 +40,8 @@ object AgentScreenModel {
         val mergedNote: String?,
         /** The agent that the screen is about, after the merges: the agent that is asked to act. */
         val agent: Agent,
+        /** The label of the button that allows with the name of the portal: Allow as "ops-key #4". */
+        val allowAsLabel: String,
     )
 
     /**
@@ -70,6 +72,7 @@ object AgentScreenModel {
             pending = pending, open = open, isBucket = agent.isBucket,
             lockLine = if (agent.locksAccept) AgentTexts.LOCK_LINE else null,
             mergedNote = merged.takeIf { agent.state == AgentState.MERGED }, agent = agent,
+            allowAsLabel = "Allow as \"${VisibleText.escapeLine(agent.label)}\"",
         )
     }
 }

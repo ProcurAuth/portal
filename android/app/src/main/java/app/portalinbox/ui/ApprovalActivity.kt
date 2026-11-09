@@ -25,6 +25,7 @@ import app.portalinbox.R
 import app.portalinbox.alert.ItemAlerter
 import app.portalinbox.core.NativeRender
 import app.portalinbox.data.AnswerProgress
+import app.portalinbox.data.AgentDirectory
 import app.portalinbox.data.Item
 import app.portalinbox.data.ItemRepository
 import app.portalinbox.data.OutboxAnswer
@@ -122,6 +123,10 @@ class ApprovalActivity : BaseFragmentActivity() {
     private var commentToggle: View? = null
     private var commentForm: LinearLayout? = null
     private var explanationHolder: LinearLayout? = null
+
+    /** The box "From agent" (lot G4). It changes when the owner allows the agent, with no new request: it has its own holder. */
+    private var agentHolder: LinearLayout? = null
+    private var agentBoxKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -258,11 +263,28 @@ class ApprovalActivity : BaseFragmentActivity() {
                 item = i, nowMs = now(), gate = gate, staleConfirmed = staleConfirmed, answer = progress,
                 canAuthenticate = canAuthenticate(), askAvailable = Nav.ask != null,
                 link = ApprovalState.linkOf(Registry.status(serverId).state), portal = server?.nickname ?: "this portal",
+                agentLocked = agentBox(i).locked,
             ),
         )
     }
 
+    private fun agentDirectory() = AgentDirectory(repo.agents(serverId))
+
+    private fun agentBox(i: Item): FromAgentBox.Box = FromAgentBox.of(i, agentDirectory())
+
+    /** Draws the box "From agent" again when what it says changed: the owner allowed the agent, renamed it, or the agent says another name. */
+    private fun refreshAgentBox(i: Item) {
+        val holder = agentHolder ?: return
+        val b = agentBox(i)
+        val key = listOf(b.name, b.stateWord, b.keyName, b.says, b.saysHere, b.locked, b.warnings, b.canOpenAgent).joinToString("|")
+        if (key == agentBoxKey) return
+        agentBoxKey = key
+        holder.removeAllViews()
+        holder.addView(fromAgentBox(b) { b.agent?.let { startActivity(AgentActivity.intent(this, serverId, it.agentId)) } })
+    }
+
     private fun refreshDynamic(i: Item) {
+        refreshAgentBox(i)
         val s = screenOf(i)
         val progress = OutboxAnswer.progress(repo.outboxOf(serverId, requestId))
         val now = now()
@@ -364,6 +386,7 @@ class ApprovalActivity : BaseFragmentActivity() {
         headerLine = null; notice = null; gateRow = null; gateText = null; gatePercent = null; gateBar = null; gateIcon = null
         contextBox = null; staleBox = null; staleCheck = null; askButton = null; commentToggle = null; commentForm = null
         explanationHolder = null
+        agentHolder = null
         val now = now()
         val zone = ZoneId.systemDefault()
 
@@ -372,7 +395,12 @@ class ApprovalActivity : BaseFragmentActivity() {
         content.addView(label(ItemTexts.title(i), SP_XL, color(R.color.text_strong), MEDIUM).apply {
             if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
         }, lp().margins(this, t = 8, l = 4, r = 4))
-        content.addView(label(ItemTexts.senderLine(i), SP_S, color(R.color.text_muted)), lp().margins(this, t = 4, l = 4, r = 4))
+        content.addView(label(ItemTexts.senderLine(i, agentDirectory().labelOf(i)), SP_S, color(R.color.text_muted)), lp().margins(this, t = 4, l = 4, r = 4))
+        // The box "From agent": the name, the state and the key are the portal's words; what the agent says is marked "Not verified".
+        agentHolder = lin()
+        agentBoxKey = null
+        content.addView(agentHolder, lp().margins(this, t = 8))
+        refreshAgentBox(i)
         val chips = lin(vertical = false).apply { gravity = Gravity.CENTER_VERTICAL }
         chips.addView(chip(getString(R.string.chip_approval), color(R.color.primary), color(R.color.primary_soft)))
         headerLine = label(ItemTexts.headerLine(i, now), SP_S, color(R.color.text_muted))

@@ -11,11 +11,13 @@ import app.portalinbox.proto.RequestKind
  * the oldest request comes first: the one that waits longest is the first to read. [app.portalinbox.portal.ItemSort] sorts the rows.
  */
 object ItemListOrder {
-    enum class Section { ALERTS, TO_ANSWER }
+    enum class Section { ALERTS, NEW_AGENTS, TO_ANSWER }
 
-    /** The sections that show, from the top. A section with no row does not show. Alerts are always above the items. */
-    fun sections(hasAlerts: Boolean, hasItems: Boolean): List<Section> = buildList {
+    /** The sections that show, from the top. A section with no row does not show. Alerts are always above the new agents and the items. */
+    fun sections(hasAlerts: Boolean, hasItems: Boolean, hasNewAgents: Boolean = false): List<Section> = buildList {
         if (hasAlerts) add(Section.ALERTS)
+        // The cards of the new agents sit above "To answer" and below the alerts (lot G4).
+        if (hasNewAgents) add(Section.NEW_AGENTS)
         if (hasItems) add(Section.TO_ANSWER)
     }
 
