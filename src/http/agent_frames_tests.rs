@@ -8,7 +8,7 @@ use super::*;
 use crate::inbox::agents::{AgentCall, AgentMode, Hints};
 use crate::inbox::approvals::IntentOut;
 use crate::inbox::testing::{
-    agent_do_status, agent_frames_for_sync, result_status, AgentOp, Builder, Built,
+    agent_do_status, agent_frames_for_sync, result_status, Builder, Built,
 };
 use inbox_core::proto::{
     AgentDoMsg, AgentKind as WireKind, AgentMsg, AgentOpKind, AgentRef, AgentResultStatus,
@@ -803,29 +803,24 @@ fn agent_do_without_the_block_agents_is_not_enabled() {
 
 #[test]
 fn lock_new_false_the_default_gives_the_frame_without_the_lock_and_the_same_fields() {
-    each_rig(
-        true,
-        "} agents { max_per_key = 8 new_per_hour = 20 lock_new = false",
-        |r, name| {
-            r.device();
-            let key = r.key_a();
-            let who = discover(r, &key, hints("billing-bot"));
-            let (agent, _, _) = first_item(r, &who, &key, 1);
-            let a = agent_frames(frames_as(r, DEVICE, OWNER));
-            assert_eq!(a.len(), 1, "[{name}]");
-            // The agent is `new` and not locked: the owner can approve before the first allow.
-            assert_eq!(
-                (a[0].agent_id.as_str(), a[0].state, a[0].lock_accept),
-                (agent.as_str(), WireState::New, false),
-                "[{name}]"
-            );
-            assert_eq!(a[0].label, "key 2b7c91d0e4a853f6 #1", "[{name}]");
-            assert_eq!(
-                a[0].observed.as_ref().unwrap().says.as_deref(),
-                Some("billing-bot"),
-                "[{name}]"
-            );
-            let _ = AgentOp::Block;
-        },
-    );
+    each_rig(true, OPEN, |r, name| {
+        r.device();
+        let key = r.key_a();
+        let who = discover(r, &key, hints("billing-bot"));
+        let (agent, _, _) = first_item(r, &who, &key, 1);
+        let a = agent_frames(frames_as(r, DEVICE, OWNER));
+        assert_eq!(a.len(), 1, "[{name}]");
+        // The agent is `new` and not locked: the owner can approve before the first allow.
+        assert_eq!(
+            (a[0].agent_id.as_str(), a[0].state, a[0].lock_accept),
+            (agent.as_str(), WireState::New, false),
+            "[{name}]"
+        );
+        assert_eq!(a[0].label, "key 2b7c91d0e4a853f6 #1", "[{name}]");
+        assert_eq!(
+            a[0].observed.as_ref().unwrap().says.as_deref(),
+            Some("billing-bot"),
+            "[{name}]"
+        );
+    });
 }

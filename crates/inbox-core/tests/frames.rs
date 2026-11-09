@@ -1479,10 +1479,34 @@ fn the_protocol_document_names_the_agent_members_and_its_examples_read_with_the_
     }
     // The members of the new frames are in the document.
     for member in [
-        "agent_id", "rev", "key_name", "kind", "state", "label", "named", "merged_into", "created_at_ms",
-        "last_seen_ms", "open", "lock_accept", "observed", "similar", "says", "says_changed", "client",
-        "user_agent", "net", "nets_seen", "client_msg_id", "op", "name", "into", "agent_kind", "agent_state",
-        "agent_label", "status",
+        "agent_id",
+        "rev",
+        "key_name",
+        "kind",
+        "state",
+        "label",
+        "named",
+        "merged_into",
+        "created_at_ms",
+        "last_seen_ms",
+        "open",
+        "lock_accept",
+        "observed",
+        "similar",
+        "says",
+        "says_changed",
+        "client",
+        "user_agent",
+        "net",
+        "nets_seen",
+        "client_msg_id",
+        "op",
+        "name",
+        "into",
+        "agent_kind",
+        "agent_state",
+        "agent_label",
+        "status",
     ] {
         assert!(doc.contains(&format!("`{member}`")), "{member}");
     }
@@ -1518,10 +1542,14 @@ fn the_protocol_document_names_the_agent_members_and_its_examples_read_with_the_
     let frame = example(r#"{"t":"agent_do","#);
     ClientMsg::decode(frame.as_bytes()).unwrap_or_else(|e| panic!("{frame}: {e}"));
     // The example of `sync` is in a line of text: it ends at the full stop that follows it.
-    let at = doc.find(r#"`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}],"agents""#).expect("the example of sync");
+    let at = doc
+        .find(r#"`{"t":"sync","open":[{"request_id":"bbbb...","seq":2}],"agents""#)
+        .expect("the example of sync");
     let line = &doc[at + 1..];
     let frame = whole(&line[..line.find("`.").unwrap()]);
-    let ClientMsg::Sync { open, agents } = ClientMsg::decode(frame.as_bytes()).unwrap() else { panic!() };
+    let ClientMsg::Sync { open, agents } = ClientMsg::decode(frame.as_bytes()).unwrap() else {
+        panic!()
+    };
     assert_eq!((open.len(), agents.map(|a| a.len())), (1, Some(1)));
     // The request example keeps its form and now has the agent in `from`.
     assert!(doc.contains(r#""from":{"label":"claude-laptop","key_name":"claude-laptop","owner":"alice","via":"mcp","interaction":"conversational","agent_id":"#));
