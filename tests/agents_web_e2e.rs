@@ -303,6 +303,22 @@ fn three(pep: &Pep) -> (String, String, String) {
     let (three, _) = pep.submit_intent(&command(3), json!({}), 600);
     give(pep, &one, A1);
     give(pep, &two, A2);
+    // A call without a token makes a new agent in the mode `discover`. The rig leaves these agents with no request, and the
+    // third request stays in the bucket of the key, as for a key that is over its limit.
+    let key = &pep.key_id;
+    let now = now_ms();
+    sql(
+        pep,
+        &format!(
+            "INSERT INTO agents (agent_id, key_id, owner, kind, state, origin, ordinal, rev, created_at, last_seen_at) \
+             SELECT 'b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0', '{key}', '{OWNER}', 'bucket', 'known', 'key', 0, 1, {now}, {now} \
+             WHERE NOT EXISTS (SELECT 1 FROM agents WHERE key_id = '{key}' AND kind = 'bucket'); \
+             UPDATE items SET agent_id = (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'bucket') WHERE request_id = '{three}'; \
+             DELETE FROM approval_intents WHERE agent_id IN (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}')); \
+             DELETE FROM agent_events WHERE agent_id IN (SELECT agent_id FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}')); \
+             DELETE FROM agents WHERE key_id = '{key}' AND kind = 'agent' AND agent_id NOT IN ('{A1}', '{A2}');"
+        ),
+    );
     (one, two, three)
 }
 
@@ -323,7 +339,16 @@ fn two_agents_with_one_key_have_two_groups_new_first_bucket_last() {
     assert_eq!(page.matches("<details class=\"agrp").count(), 3, "{page}");
     let at = |name: &str| {
         page.find(&format!("<span class=\"agrp__name\">{name}</span>"))
-            .unwrap_or_else(|| panic!("no group {name}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no group {name}: {}",
+                    page.split("agrp__name")
+                        .skip(1)
+                        .map(|x| &x[..x.len().min(60)])
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )
+            })
     };
     let order = [
         at(&format!("{KEY} #2")),

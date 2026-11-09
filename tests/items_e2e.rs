@@ -1051,8 +1051,12 @@ async fn requests_name_their_agent_and_sync_brings_the_agents_the_phone_lacks() 
     let bucket = from(&third);
     assert_eq!(
         (bucket.label.as_str(), bucket.agent_kind, bucket.agent_state),
-        ("agent-laptop", AgentKind::Bucket, AgentState::Known),
-        "the bucket of a key is the key name until the key store gives the mode of the key"
+        (
+            "Unattributed · agent-laptop",
+            AgentKind::Bucket,
+            AgentState::Known
+        ),
+        "the bucket of a key in the mode discover is named after the key"
     );
     let bucket_id = bucket.agent_id.clone();
     let open: Vec<OpenRef> = read
@@ -1119,7 +1123,7 @@ async fn requests_name_their_agent_and_sync_brings_the_agents_the_phone_lacks() 
         (
             AgentKind::Bucket,
             AgentState::Known,
-            "agent-laptop",
+            "Unattributed · agent-laptop",
             false,
             false,
             1

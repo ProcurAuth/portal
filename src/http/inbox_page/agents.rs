@@ -44,23 +44,33 @@ pub(super) fn lock_new(ctx: &Context<'_>) -> bool {
 
 // The agents of an owner ------------------------------------------------------------------------------
 
+/// What the key of an agent does with the agents. A portal without the block `inbox.agents`, and a key that the directory
+/// does not know, give the mode `key`: the key is the agent.
+fn key_mode(state: &AppState, key_id: &str) -> AgentMode {
+    if !state
+        .config
+        .inbox
+        .as_ref()
+        .is_some_and(|inbox| inbox.agents.is_some())
+    {
+        return AgentMode::Key;
+    }
+    match state.users.key_by_id(key_id).map(|k| k.agents) {
+        Some(crate::keys::AgentsMode::Discover) => AgentMode::Discover,
+        Some(crate::keys::AgentsMode::Enrolled) => AgentMode::Enrolled,
+        _ => AgentMode::Key,
+    }
+}
+
 /// The agents of one owner, read once for a page.
 pub(super) struct Roster {
     rows: Vec<AgentSummary>,
-    /// The keys that have an agent that is not the bucket. A key that has none is in the mode `key`: its group has the name
-    /// of the key.
-    with_agents: HashSet<String>,
 }
 
 impl Roster {
     pub(super) async fn of(items: &Items<'_>, owner: &str, key_id: Option<&str>) -> Option<Roster> {
         let rows = items.list_agents(owner, key_id).await.ok()?;
-        let with_agents = rows
-            .iter()
-            .filter(|s| s.agent.kind == AgentKind::Agent)
-            .map(|s| s.agent.key_id.clone())
-            .collect();
-        Some(Roster { rows, with_agents })
+        Some(Roster { rows })
     }
 
     pub(super) fn find(&self, id: &str) -> Option<&AgentSummary> {
@@ -76,12 +86,8 @@ impl Roster {
         hints: bool,
     ) -> AgentView {
         let key_name = key_text(state, &row.key_id);
-        let plain = row.is_bucket() && !self.with_agents.contains(&row.key_id);
-        let mode = if plain {
-            AgentMode::Key
-        } else {
-            AgentMode::Discover
-        };
+        let mode = key_mode(state, &row.key_id);
+        let plain = row.is_bucket() && mode == AgentMode::Key;
         AgentView {
             agent_id: row.agent_id.clone(),
             label: row.label(&key_name, mode),
@@ -236,14 +242,7 @@ pub(super) async fn sender(
             };
             (view, lookalike)
         }
-        _ => (
-            Roster {
-                rows: Vec::new(),
-                with_agents: HashSet::new(),
-            }
-            .fallback(state, l),
-            None,
-        ),
+        _ => (Roster { rows: Vec::new() }.fallback(state, l), None),
     };
     Sender {
         agent,
