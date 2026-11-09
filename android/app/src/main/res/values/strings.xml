@@ -6,33 +6,33 @@
     <string name="nav_open">Open menu</string>
     <string name="nav_back">Back</string>
     <string name="nav_inbox">Inbox</string>
-    <string name="nav_servers">Servers</string>
+    <string name="nav_servers">Portals</string>
     <string name="nav_settings">Settings</string>
-    <string name="drawer_servers_none">No server</string>
+    <string name="drawer_servers_none">No portal</string>
     <string name="drawer_servers_all_up">All connected</string>
     <plurals name="servers_connected">
-        <item quantity="one">%1$d/%2$d server connected</item>
-        <item quantity="other">%1$d/%2$d servers connected</item>
+        <item quantity="one">%1$d/%2$d portal connected</item>
+        <item quantity="other">%1$d/%2$d portals connected</item>
     </plurals>
     <plurals name="drawer_servers_down">
-        <item quantity="one">%d server offline</item>
-        <item quantity="other">%d servers offline</item>
+        <item quantity="one">%d portal offline</item>
+        <item quantity="other">%d portals offline</item>
     </plurals>
 
     <!-- Status -->
     <string name="status_online">Online</string>
-    <string name="status_all_online">All servers connected</string>
+    <string name="status_all_online">All portals connected</string>
     <string name="status_offline_since">Offline %1$s</string>
     <string name="status_connecting">Connecting…</string>
     <string name="status_reenroll">Re-enroll</string>
     <string name="status_key_changed">Key changed</string>
-    <string name="status_no_server">No server</string>
+    <string name="status_no_server">No portal</string>
     <string name="chip_ringing">Ringing</string>
 
     <!-- Alerts (home) -->
-    <string name="alerts_no_server_title">No server</string>
-    <string name="alerts_no_server_body">Add a server to start receiving alerts.</string>
-    <string name="alerts_add_server">Add a server</string>
+    <string name="alerts_no_server_title">No portal</string>
+    <string name="alerts_no_server_body">Add a portal to start receiving alerts.</string>
+    <string name="alerts_add_server">Add a portal</string>
     <string name="alerts_see_more">See more</string>
     <string name="alerts_show_read">Show read</string>
     <string name="alerts_none">No messages</string>
@@ -61,43 +61,35 @@
     <string name="seg_ring">Ring</string>
     <string name="seg_alarm">Alarm</string>
 
-    <!-- Servers -->
-    <string name="servers_title">Servers</string>
-    <string name="servers_add">Add a server</string>
+    <!-- Portals -->
+    <string name="servers_title">Portals</string>
+    <string name="servers_add">Add a portal</string>
     <string name="server_last_ping">Last ping</string>
     <string name="server_last_update">Last update</string>
     <string name="server_connected_since">Connected since</string>
     <string name="server_never">never</string>
     <string name="server_ago">%1$s ago</string>
     <string name="server_account">Account</string>
-    <string name="server_account_help">The server assigns this login. It cannot be changed here.</string>
+    <string name="server_account_help">The portal assigns this login. It cannot be changed here.</string>
     <string name="server_groups">Groups</string>
     <string name="server_groups_hint">Choose what this phone does for each group. Notif follows the sound mode of the phone. Ring sounds even in silent mode. Alarm stays on screen until you stop it.</string>
     <string name="server_groups_subscribed">Followed: %1$d/%2$d</string>
-    <string name="server_direct_desc">Alerts sent to your account, not to a group. Ring by default. The server does not know this level.</string>
+    <string name="server_direct_desc">Alerts sent to your account, not to a group. Ring by default. The portal does not know this level.</string>
     <string name="server_groups_none">Groups appear after the first connection.</string>
-    <string name="server_remove">Delete server</string>
-    <string name="server_remove_title">Delete %1$s?</string>
-    <string name="server_remove_body">This phone stops receiving messages from this server. To add it again, you need a new enrollment code.</string>
-    <string name="server_remove_confirm">Delete</string>
-    <string name="server_removed">Server deleted</string>
+    <string name="server_remove">Remove portal</string>
+    <string name="server_remove_title">Remove %1$s?</string>
+    <string name="server_remove_body">The phone erases all of this and stops listening to this portal. To add it again, you need a new code. The name and the color become free.</string>
+    <string name="server_remove_confirm">Remove</string>
+    <string name="server_removed">Portal removed</string>
     <string name="cancel">Cancel</string>
     <string name="edit">Edit</string>
 
-    <!-- Add server -->
-    <string name="add_title">Add a server</string>
+    <!-- Add a portal -->
+    <string name="add_title">Add a portal</string>
     <string name="add_code">Enrollment code</string>
     <string name="add_code_hint">portal-inbox://enroll?s=…&amp;k=…&amp;c=…</string>
-    <string name="add_code_help">Paste the code or the link from the Inbox tab of the portal.</string>
     <string name="add_code_missing">Enter the enrollment code.</string>
-    <string name="add_check_title">Check the server</string>
-    <string name="add_check_help">Compare the address and the fingerprint with the values from your administrator.</string>
-    <string name="add_check_fingerprint">Key fingerprint</string>
     <string name="add_device_name">Name of this device</string>
-    <string name="add_device_name_help">The portal shows this name in its web interface.</string>
-    <string name="add_security_note">The code pins the key of the server. The phone trusts no other key for this server. The secret of the code works one time.</string>
-    <string name="add_connect">Connect</string>
-    <string name="add_connecting">Connecting…</string>
     <string name="add_error">Error: %1$s</string>
 
     <!-- Settings -->
@@ -122,7 +114,7 @@
     <string name="perm_grant">Allow</string>
 
     <!-- Metadata keys (dense key / value rows) -->
-    <string name="meta_server">Server</string>
+    <string name="meta_server">Portal</string>
     <string name="meta_group">Group</string>
     <string name="meta_action">Level</string>
     <string name="meta_sent">Sent</string>
@@ -163,34 +155,34 @@
 
     <!-- Service notifications -->
     <string name="svc_starting">Starting…</string>
-    <string name="svc_no_server">No server configured</string>
+    <string name="svc_no_server">No portal configured</string>
     <string name="svc_connecting">%1$s: connecting…</string>
     <string name="svc_disconnected">%1$s: disconnected %2$s</string>
     <string name="svc_reenroll">%1$s: re-enrollment required</string>
     <string name="svc_key_changed">%1$s: key changed, not connected</string>
     <string name="svc_warning_title">Not connected: %1$s</string>
-    <string name="svc_warning_text">The app is no longer connected to this server.</string>
+    <string name="svc_warning_text">The app is no longer connected to this portal.</string>
     <string name="svc_warning_big">The app cannot receive messages from %1$s. %2$s</string>
 
     <!-- Enrollment errors -->
-    <string name="err_unreachable">Cannot reach the server. Check the address and the network.</string>
-    <string name="err_closed">The server closed the connection (%1$d)</string>
+    <string name="err_unreachable">Cannot reach the portal. Check the address and the network.</string>
+    <string name="err_closed">The portal closed the connection (%1$d)</string>
     <string name="err_lost">Connection lost: %1$s</string>
-    <string name="err_no_answer">The server does not answer</string>
+    <string name="err_no_answer">The portal does not answer</string>
     <string name="err_rate_limited">Too many attempts. Try again later.</string>
     <string name="err_protocol">Incompatible protocol: %1$s</string>
     <string name="err_internal">Internal error</string>
     <string name="err_code_invalid">This is not a valid enrollment code.</string>
     <string name="err_code_refused">The code is not valid. Ask for a new one.</string>
-    <string name="err_update_app">This server needs a newer version. Update the app.</string>
-    <string name="err_server_key">The answer does not come from the server of the code. Nothing was stored.</string>
+    <string name="err_update_app">This portal needs a newer version. Update the app.</string>
+    <string name="err_server_key">The answer does not come from the portal of the code. Nothing was stored.</string>
     <string name="err_device_name">The device name is not valid. Use 1 to 64 characters, with no control character.</string>
-    <string name="portal_duplicate">This Portal is already added as %1$s. Nothing was changed. The code was not used.</string>
-    <string name="portal_cap">This phone can hold %1$d Portals. Remove one before you add another. The code was not used.</string>
-    <string name="portal_add_conflict">The phone did not add this Portal: its key, name or color is already in use. Nothing was stored.</string>
-    <string name="key_changed_handshake">The Portal did not prove the key that this phone pinned. Nothing is sent to it.</string>
-    <string name="key_changed_closed">The Portal does not know this phone with its key. Nothing is sent to it.</string>
-    <string name="enroll_again_notice">The servers of the previous version were removed. Enroll again with a code.</string>
+    <string name="portal_duplicate">This portal is already added as %1$s. Nothing was changed. The code was not used.</string>
+    <string name="portal_cap">This phone can hold %1$d portals. Remove one before you add another. The code was not used.</string>
+    <string name="portal_add_conflict">The phone did not add this portal: its key, name or color is already in use. Nothing was stored.</string>
+    <string name="key_changed_handshake">The portal did not prove the key that this phone pinned. Nothing is sent to it.</string>
+    <string name="key_changed_closed">The portal does not know this phone with its key. Nothing is sent to it.</string>
+    <string name="enroll_again_notice">The portals of the previous version were removed. Enroll again with a code.</string>
     <string name="err_unknown">Unknown error</string>
 
     <!-- Other -->
@@ -209,7 +201,6 @@
     <string name="settings_limit_less">Show fewer messages</string>
     <string name="settings_limit_more">Show more messages</string>
     <string name="status_reconnecting">Reconnecting…</string>
-    <string name="add_device_name_missing">Enter a name for this device.</string>
     <string name="alarm_sent">sent</string>
     <string name="alarm_received">received</string>
     <string name="alarm_more">More ↓</string>
@@ -308,15 +299,15 @@
     <string name="prefs_digest_daily">Daily</string>
     <string name="prefs_digest_every">Every few hours</string>
     <string name="prefs_digest_off">None</string>
-    <string name="prefs_digest_default">The server default applies until you choose.</string>
+    <string name="prefs_digest_default">The portal default applies until you choose.</string>
     <string name="prefs_at">At</string>
     <string name="prefs_every">Every (hours)</string>
     <string name="prefs_every_less">Fewer hours</string>
     <string name="prefs_every_more">More hours</string>
-    <string name="prefs_pending">Saved on this phone. The server did not confirm it yet.</string>
-    <string name="prefs_confirmed">The server has these values.</string>
+    <string name="prefs_pending">Saved on this phone. The portal did not confirm it yet.</string>
+    <string name="prefs_confirmed">The portal has these values.</string>
     <string name="prefs_offline_note">The phone sends the change when it is online.</string>
-    <string name="prefs_not_enabled">This server has no requests and no preferences.</string>
+    <string name="prefs_not_enabled">This portal has no requests and no preferences.</string>
 
     <!-- Items: notifications -->
     <string name="notification_decline">Decline</string>

@@ -41,9 +41,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>: opens the form with the enrollment code filled in. -->
+        <!-- portal-inbox://enroll?s=<address>&k=<server key>&c=<secret>: opens the confirmation of the enrollment. The code is used only when the user confirms. -->
         <activity
             android:name=".ui.AddServerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
@@ -55,7 +56,13 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".ui.ServerActivity"
+            android:name=".ui.PortalActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <!-- Enrolls one portal again, with a new code. Not exported: a link from another app can never replace the key of a portal. -->
+        <activity
+            android:name=".ui.ReenrollActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
         <!-- The approval screen. Only the app and its notifications open it. -->
