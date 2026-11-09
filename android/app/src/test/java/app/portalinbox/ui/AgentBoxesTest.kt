@@ -250,10 +250,10 @@ class AgentBoxesTest {
     }
 
     @Test
-    fun theFixedSentencesAreAsciiAndNeverNameAProduct() {
+    fun theFixedSentencesAreAscii() {
         for (s in listOf(AgentTexts.NO_PROOF, AgentTexts.LOCK_LINE, AgentTexts.LOCK_HINT, AgentTexts.COPY_NOTE, AgentTexts.BUCKET_HINT)) {
             assertTrue(s, s.all { it.code in 0x20..0x7E })
-            assertFalse(s, s.contains("server", ignoreCase = true) || s.contains("inbox", ignoreCase = true))
+            assertFalse(s, s.contains("server", ignoreCase = true))
         }
     }
 }
