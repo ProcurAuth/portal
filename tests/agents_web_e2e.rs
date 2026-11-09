@@ -1860,3 +1860,42 @@ fn agents_demo_for_the_eyes() {
         std::thread::sleep(Duration::from_millis(300));
     }
 }
+
+/// Starts a server whose key is in the mode `enrolled`, with two agents that the owner made and a request that both agents asked
+/// for, and waits until the file `stop` appears in the directory that `INBOX_DEMO_OUT` names. The test is for a look at the
+/// pages with a browser (`tools/dev/ui-check-agents-enrolled.js`). It writes `demo.json` with the port, the login, the password
+/// and the ids. Run it with `cargo test --test agents_web_e2e agents_enrolled_demo_for_the_eyes -- --ignored`.
+#[test]
+#[ignore = "starts a server for a look at the pages"]
+fn agents_enrolled_demo_for_the_eyes() {
+    let out = std::path::PathBuf::from(std::env::var("INBOX_DEMO_OUT").expect("INBOX_DEMO_OUT"));
+    let pep = enrolled_rig(12);
+    let cookie = pep.cookie(OWNER);
+    let enroll = |name: &str| {
+        let (st, _, page) = pep.enroll_via_web(&cookie, name);
+        assert_eq!(st, 200, "{page}");
+        Pep::token_of(&page)
+    };
+    let (night, report) = (enroll("Night ETL"), enroll("Report writer"));
+    let first = pep.agent_request(Some(&night), UA, &command(9), json!({"agent_label": "etl"}));
+    let same = pep.agent_request(Some(&report), UA, &command(9), json!({"agent_label": "rw"}));
+    assert_eq!(first.request_id, same.request_id);
+    let id_of = |name: &str| {
+        pep.s
+            .scalar(&format!(
+                "SELECT agent_id FROM agents WHERE name = '{name}'"
+            ))
+            .unwrap()
+    };
+    std::fs::write(
+        out.join("demo.json"),
+        json!({"port": pep.s.port, "owner": OWNER, "password": common::ACCOUNT_PASSWORD,
+               "ids": {"night": id_of("Night ETL"), "report": id_of("Report writer"),
+                       "request": first.request_id, "key": pep.key_id}})
+        .to_string(),
+    )
+    .unwrap();
+    while !out.join("stop").exists() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
