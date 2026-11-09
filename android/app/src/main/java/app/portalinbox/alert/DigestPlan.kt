@@ -1,6 +1,5 @@
 package app.portalinbox.alert
 
-import app.portalinbox.proto.RequestKind
 import app.portalinbox.ui.Ages
 
 /**
@@ -32,7 +31,7 @@ object DigestPlan {
     )
 
     /** What the phone knows about one listed id. [createdAtMs] is on the clock of the portal. */
-    data class Known(val kind: RequestKind, val open: Boolean, val createdAtMs: Long)
+    data class Known(val open: Boolean, val createdAtMs: Long)
 
     /** What still waits at one portal, after the ids that the phone knows as closed left. [oldestCreatedAtMs] is on the clock of the portal. */
     data class Waiting(val serverId: Long, val deliveryId: String, val count: Long, val oldestCreatedAtMs: Long)
@@ -54,10 +53,10 @@ object DigestPlan {
 
     /**
      * The merged digest: one [Waiting] for each portal that has a current frame with something left. [known] gives what the phone
-     * knows for a portal. The order is the order of [frames]. A frame older than [LIFETIME_MS] is left out.
+     * knows about the ids of a frame. The order is the order of [frames]. A frame older than [LIFETIME_MS] is left out.
      */
-    fun merge(frames: Collection<Frame>, known: (Long) -> Map<String, Known>, phoneNowMs: Long): List<Waiting> =
-        frames.filter { phoneNowMs - it.receivedAtMs < LIFETIME_MS }.mapNotNull { waiting(it, known(it.serverId)) }
+    fun merge(frames: Collection<Frame>, known: (Frame) -> Map<String, Known>, phoneNowMs: Long): List<Waiting> =
+        frames.filter { phoneNowMs - it.receivedAtMs < LIFETIME_MS }.mapNotNull { waiting(it, known(it)) }
 
     /** The text of the waiting part of a line: "3 waiting, oldest 6 days". [ageMs] is on the clock of the portal. */
     fun text(count: Long, ageMs: Long): String = "$count waiting, oldest " + Ages.long(ageMs)

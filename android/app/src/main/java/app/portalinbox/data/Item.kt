@@ -124,7 +124,8 @@ sealed interface ItemEvent {
     /** The item is final: withdraw its notification. */
     data class Settled(val item: Item) : ItemEvent
 
-    data class Digest(val serverId: Long, val count: Long, val oldestCreatedAtMs: Long, val ids: List<String>) : ItemEvent
+    /** A digest of the open items of a portal. [deliveryId] is the `id` of the frame: a new digest has a new one. */
+    data class Digest(val serverId: Long, val deliveryId: String, val count: Long, val oldestCreatedAtMs: Long, val ids: List<String>) : ItemEvent
 
     data class AnswerResult(val serverId: Long, val result: AnswerResultFrame, val entry: OutboxEntry) : ItemEvent
 }

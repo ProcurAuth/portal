@@ -2,7 +2,6 @@ package app.portalinbox.alert
 
 import app.portalinbox.alert.DigestPlan.Known
 import app.portalinbox.data.ItemEvent
-import app.portalinbox.proto.RequestKind
 import app.portalinbox.testsupport.Fixtures
 import app.portalinbox.testsupport.Make
 import org.junit.Assert.assertEquals
@@ -31,7 +30,7 @@ class DigestPlanTest {
 
     @Test
     fun anIdThatThePhoneKnowsAsClosedLeavesTheCount() {
-        val known = mapOf("a" to Known(RequestKind.APPROVAL, false, now - 6 * day), "b" to Known(RequestKind.QUESTION, true, now - day))
+        val known = mapOf("a" to Known(false, now - 6 * day), "b" to Known(true, now - day))
         val w = DigestPlan.waiting(frame(1, "d1", 2, 6 * day, listOf("a", "b")), known)!!
         assertEquals(1, w.count)
         // The oldest item that still waits is the one of the day before.
@@ -40,14 +39,14 @@ class DigestPlanTest {
 
     @Test
     fun noDigestRemainsWhenEveryItemIsClosed() {
-        val known = mapOf("a" to Known(RequestKind.APPROVAL, false, now - day), "b" to Known(RequestKind.QUESTION, false, now - day))
+        val known = mapOf("a" to Known(false, now - day), "b" to Known(false, now - day))
         assertNull(DigestPlan.waiting(frame(1, "d1", 2, day, listOf("a", "b")), known))
     }
 
     @Test
     fun aClosedItemLeavesTheCountEvenWhenTheListIsNotComplete() {
         // The portal holds 5 open items and names the 2 oldest.
-        val known = mapOf("a" to Known(RequestKind.APPROVAL, false, now - 3 * day))
+        val known = mapOf("a" to Known(false, now - 3 * day))
         val w = DigestPlan.waiting(frame(1, "d1", 5, 3 * day, listOf("a", "b")), known)!!
         assertEquals(4, w.count)
         // "b" is not known: the oldest time stays the one of the frame.
@@ -57,8 +56,8 @@ class DigestPlanTest {
     @Test
     fun theOldestTimeIsTheSmallestOfTheKnownOpenItems() {
         val known = mapOf(
-            "a" to Known(RequestKind.APPROVAL, true, now - 2 * day),
-            "b" to Known(RequestKind.QUESTION, true, now - 5 * hour),
+            "a" to Known(true, now - 2 * day),
+            "b" to Known(true, now - 5 * hour),
         )
         assertEquals(now - 2 * day, DigestPlan.waiting(frame(1, "d1", 2, 3 * day, listOf("a", "b")), known)!!.oldestCreatedAtMs)
     }
@@ -85,14 +84,14 @@ class DigestPlanTest {
     @Test
     fun aPortalWhoseItemsAreAllClosedHasNoPart() {
         val frames = listOf(frame(1, "d1", 1, day, listOf("a")), frame(2, "d2", 1, day, listOf("b")))
-        val known = { id: Long -> if (id == 1L) mapOf("a" to Known(RequestKind.APPROVAL, false, now - day)) else emptyMap() }
+        val known = { f: DigestPlan.Frame -> if (f.serverId == 1L) mapOf("a" to Known(false, now - day)) else emptyMap() }
         assertEquals(listOf(2L), DigestPlan.merge(frames, known, now).map { it.serverId })
     }
 
     @Test
     fun noPortalWithAnythingLeftGivesNoDigestAtAll() {
         assertTrue(DigestPlan.merge(emptyList(), { emptyMap() }, now).isEmpty())
-        val known = { _: Long -> mapOf("a" to Known(RequestKind.APPROVAL, false, now - day)) }
+        val known = { _: DigestPlan.Frame -> mapOf("a" to Known(false, now - day)) }
         assertTrue(DigestPlan.merge(listOf(frame(1, "d1", 1, day, listOf("a"))), known, now).isEmpty())
     }
 
@@ -142,8 +141,8 @@ class DigestPlanTest {
     @Test
     fun theGoldenDigestFrameMakesAPart() {
         val f = Make.digest(Make.hex(7))
-        val e = ItemEvent.Digest(1, f.count, f.oldestCreatedAtMs, f.ids)
-        val w = DigestPlan.waiting(DigestPlan.Frame(e.serverId, f.id, e.count, e.oldestCreatedAtMs, e.ids, now), emptyMap())!!
+        val e = ItemEvent.Digest(1, f.id, f.count, f.oldestCreatedAtMs, f.ids)
+        val w = DigestPlan.waiting(DigestPlan.Frame(e.serverId, e.deliveryId, e.count, e.oldestCreatedAtMs, e.ids, now), emptyMap())!!
         assertEquals(3L, w.count)
         assertEquals(3L, Fixtures.golden("server", "digest.json").json.getLong("count"))
     }

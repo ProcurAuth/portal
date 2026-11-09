@@ -10,6 +10,7 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.util.Log
 import app.portalinbox.R
+import app.portalinbox.data.ItemEvent
 import app.portalinbox.data.OutboxType
 import app.portalinbox.portal.PortalIdentity
 import app.portalinbox.portal.PortalPalette
@@ -38,6 +39,7 @@ object AttentionNotifier {
     private const val RED = 0xFFB42318.toInt()
 
     private val replies = LinkedHashSet<Pair<Long, String>>()
+    private val digests = DigestPlan.Memory()
     @Volatile private var alarmDirect = false
     @Volatile private var center: AttentionCenter? = null
 
@@ -75,7 +77,18 @@ object AttentionNotifier {
         if (had) refresh(context)
     }
 
+    /**
+     * A `digest` frame of a portal. The phone keeps it, and the one notification refreshes with a "N waiting" part for that portal.
+     * It makes no notification of its own and no sound. The memory lives as long as the process: the notification that is on
+     * screen stays, and the next digest of the portal brings the part back.
+     */
+    fun onDigest(context: Context, e: ItemEvent.Digest) {
+        val frame = DigestPlan.Frame(e.serverId, e.deliveryId, e.count, e.oldestCreatedAtMs, e.ids, System.currentTimeMillis())
+        if (digests.record(frame)) refresh(context)
+    }
+
     fun forget(context: Context, serverId: Long) {
+        digests.forget(serverId)
         synchronized(replies) { replies.removeAll { it.first == serverId } }
         refresh(context, excludeServer = serverId)
     }
@@ -98,17 +111,25 @@ object AttentionNotifier {
             )
         }
         // An item that the owner answered waits in the outbox for the server: it does not wait for the owner any more.
-        val items = servers.flatMap { s ->
-            val answered = repo.pendingOutbox(s.id).filter { it.type == OutboxType.ANSWER }.map { it.requestId }.toSet()
-            repo.openItems(s.id).filter { it.requestId !in answered }
-        }
+        val answered = servers.associate { s -> s.id to repo.pendingOutbox(s.id).filter { it.type == OutboxType.ANSWER }.map { it.requestId }.toSet() }
+        val items = servers.flatMap { s -> repo.openItems(s.id).filter { it.requestId !in answered.getValue(s.id) } }
         val ids = servers.map { it.id }.toSet()
         val alerts = store.unreadAlerts().filter { it.serverId in ids }
         val pendingReplies = synchronized(replies) { replies.toList() }.mapNotNull { (serverId, requestId) ->
             if (serverId !in ids) return@mapNotNull null
             repo.item(serverId, requestId)?.let { Attention.Reply(serverId, requestId, it.request.urgency) }
         }
-        return Attention.Input(portals, items, alerts, pendingReplies, phoneNow, network = hasNetwork(context))
+        // The digest: an id that the phone knows as closed (or answered) leaves the count of its portal.
+        val waiting = DigestPlan.merge(
+            digests.frames().filter { it.serverId in ids },
+            { f ->
+                f.ids.mapNotNull { id ->
+                    repo.item(f.serverId, id)?.let { id to DigestPlan.Known(it.isOpen && id !in answered.getValue(f.serverId), it.request.createdAtMs) }
+                }.toMap()
+            },
+            phoneNow,
+        )
+        return Attention.Input(portals, items, alerts, pendingReplies, phoneNow, network = hasNetwork(context), digests = waiting)
     }
 
     /** True when the phone has a network. With no network the status notification says it once, and no portal warns. */

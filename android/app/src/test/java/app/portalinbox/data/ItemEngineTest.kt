@@ -95,7 +95,8 @@ class ItemEngineTest {
         assertTrue(engine.onMessage(server, m).events.isEmpty())
         assertEquals(1, repo.turns(server, rid).size)
         val d = Make.digest(Make.hex(4))
-        assertEquals(1, engine.onDigest(server, d).events.size)
+        // The event carries the delivery id: a new digest is a new thing for the one notification.
+        assertEquals(Make.hex(4), (engine.onDigest(server, d).events.single() as ItemEvent.Digest).deliveryId)
         assertEquals(Make.hex(4), engine.onDigest(server, d).ack)
         assertTrue(engine.onDigest(server, d).events.isEmpty())
     }

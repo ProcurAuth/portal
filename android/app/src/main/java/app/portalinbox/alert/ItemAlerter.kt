@@ -16,7 +16,8 @@ import app.portalinbox.ui.OpenScreens
  * - A new request, a request that comes back ("The agent is back") and a change of a request: the aggregate sees the new thing.
  * - A turn of an agent: one more reply, unless the owner reads that discussion now.
  * - A final item: it leaves the aggregate. The notification goes away when nothing waits.
- * - A digest: the same notification gets fresh ages. It never makes a second notification.
+ * - A digest: the portal gets a "N waiting" part in the same notification (see [DigestPlan]). It never makes a second notification
+ *   and it never makes a sound.
  */
 object ItemAlerter {
     fun onEvent(context: Context, event: ItemEvent) {
@@ -27,6 +28,7 @@ object ItemAlerter {
                 AttentionNotifier.onAgentMessage(context, event.serverId, event.requestId)
             }
             is ItemEvent.UserMessage -> AttentionNotifier.clearReply(context, event.serverId, event.requestId)
+            is ItemEvent.Digest -> AttentionNotifier.onDigest(context, event)
             else -> AttentionNotifier.refresh(context)
         }
     }

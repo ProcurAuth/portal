@@ -139,7 +139,7 @@ class ItemEngine(
     fun onDigest(serverId: Long, f: DigestFrame): Outcome = repo.transaction {
         if (repo.hasDelivery(serverId, f.id)) return@transaction Outcome(f.id, emptyList())
         repo.addDelivery(serverId, f.id, clock())
-        Outcome(f.id, listOf(ItemEvent.Digest(serverId, f.count, f.oldestCreatedAtMs, f.ids)))
+        Outcome(f.id, listOf(ItemEvent.Digest(serverId, f.id, f.count, f.oldestCreatedAtMs, f.ids)))
     }
 
     /** The result of an answer or a reply. It has no delivery id: nothing to acknowledge. */
