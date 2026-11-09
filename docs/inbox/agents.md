@@ -1,6 +1,6 @@
 # Agents
 
-This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements 3.8.1 to 3.8.22 and 5.12.6. [`configuration.md`](configuration.md) has the rules of the block `inbox.mcp`.
+This chapter tells how an agent uses the portal. An agent is a program that asks a person to approve an action, or to answer. The root [`README.md`](../../README.md) has the generated reference of the configuration. [`SPEC.md`](SPEC.md) has the numbered requirements 3.8.1 to 3.8.25 and 5.12.6. [`configuration.md`](configuration.md) has the rules of the block `inbox.mcp`.
 
 ## What goes where
 
@@ -105,6 +105,7 @@ Several agents can share one key. An agent is one program, or one conversation o
 - Keep the token. Send it in each later call.
 - The token is not a credential. The key proves who calls. A token of another key is unknown.
 - Never put the token in a text. Never send it to a service. The service does not need it.
+- The portal refuses a text that holds a token (see "A token in a text").
 
 ### Where to send the token
 
@@ -135,6 +136,17 @@ The portal refuses a bad label with `invalid_agent_label`. It never cleans a lab
 | `known` | The owner allowed the agent. |
 | `unattributed` | The key reached `max_per_key` or `new_per_hour`. The call is not an error. The item goes to the bucket "Unattributed" of the key. There is no token. |
 | `key` | The key is in the mode `key`, or the file has no block `inbox.agents`. There is nothing to keep. |
+
+### A token in a text
+
+A token that is in a text is not secret. A person, a phone or another agent can read the text. So the portal checks the texts that an agent writes: `explanation`, `agent_label` and the text of `say`.
+
+- The portal refuses a text that holds a live token of an agent of the same owner. The token can have its prefix `agt_` or not. Other characters of the alphabet can touch it.
+- The error is `agent_token_in_text`, with the status 422. It is not retryable. The message names no value.
+- The check comes before the portal writes anything. The call makes no agent, no intent and no item.
+- A token of any agent of the owner counts: the agent of the call, another agent of the key, and a blocked or merged agent.
+- A text of 43 characters that is not a token passes. The check compares digests, so a random text is safe.
+- The check finds the token as one run of characters. A token that the agent cuts into pieces is not found. Do not do it.
 
 ### What a call can do
 
@@ -173,6 +185,7 @@ The mode is an attribute of the key. The owner sets it in the form of the key, w
 | `agent_token_conflict` | 422 | The header and the argument differ. |
 | `agent_mismatch` | 403 | The token is not the agent of the item, or `previous_id` belongs to another agent. |
 | `invalid_agent_label` | 422 | `agent_label` has a control character, a format character or a bad length. |
+| `agent_token_in_text` | 422 | An `explanation`, an `agent_label` or a message of `say` holds a live token of an agent of the same owner. |
 
 None of these errors is retryable. A call over `max_per_key` or `new_per_hour` is not an error: it gets the status `unattributed`.
 
@@ -289,7 +302,7 @@ A tool error is a result with `isError` set to `true`. Its `structuredContent` h
 | `too_fast`, `rate_limited` | 429 | A limit. `retry_after` gives the seconds. `retryable` is `true`. |
 | `storage_degraded`, `unavailable`, `replication_unavailable` | 503 | The portal cannot write now. `retryable` is `true`. |
 
-The codes of the agents (`agent_unknown`, `agent_blocked`, `agent_token_required`, `agent_token_conflict`, `agent_mismatch` and `invalid_agent_label`) are in "Who is the agent".
+The codes of the agents (`agent_unknown`, `agent_blocked`, `agent_token_required`, `agent_token_conflict`, `agent_mismatch`, `invalid_agent_label` and `agent_token_in_text`) are in "Who is the agent".
 
 A tool that the key cannot see, and a tool that does not exist, give the JSON-RPC error `-32602`.
 

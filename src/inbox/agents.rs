@@ -439,6 +439,43 @@ pub fn token_has_form(token: &str) -> bool {
     })
 }
 
+/// The full tokens that a text could hold, as candidates for a check against the stored digests.
+///
+/// A run is a series of characters of the token alphabet (`A-Z a-z 0-9 - _`). Each window of 43 characters in a run is
+/// a candidate: its token is `agt_` and the window. This covers a token with its prefix and a bare token, also when
+/// other characters of the alphabet touch it. A text with no run of 43 characters has no candidate. The portal compares
+/// the digests of the candidates with the digests of its agents: a candidate that is not a token matches nothing. The
+/// result has no duplicate.
+pub fn token_candidates(text: &str) -> Vec<String> {
+    let alphabet = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    let bytes = text.as_bytes();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !alphabet(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < bytes.len() && alphabet(bytes[end]) {
+            end += 1;
+        }
+        // The run is ASCII, so each index is a boundary of a character.
+        let run = &text[start..end];
+        if run.len() >= TOKEN_CHARS {
+            for at in 0..=(run.len() - TOKEN_CHARS) {
+                let candidate = format!("{TOKEN_PREFIX}{}", &run[at..at + TOKEN_CHARS]);
+                if seen.insert(candidate.clone()) {
+                    out.push(candidate);
+                }
+            }
+        }
+        start = end;
+    }
+    out
+}
+
 // ---------------------------------------------------------------- names and texts
 
 /// Why the portal refuses a name or a text. It never cleans the text.
@@ -701,6 +738,39 @@ mod tests {
             token: Some(token.clone()),
         };
         assert!(!format!("{resolved:?}").contains(&token[4..]));
+    }
+
+    #[test]
+    fn the_candidates_of_a_text_are_the_windows_of_43_characters_of_the_alphabet() {
+        let token = new_token();
+        let bare = &token[4..];
+        // A token with its prefix, a bare token and a token that other characters of the alphabet touch.
+        for text in [
+            format!("use {}", &*token),
+            format!("bare {bare}."),
+            format!("x{bare}y"),
+            format!("a-{}", &*token),
+            format!("{}\n{}", "words", &*token),
+        ] {
+            assert!(
+                token_candidates(&text).contains(&token.to_string()),
+                "{text}"
+            );
+        }
+        // No run of 43 characters: no candidate and no work.
+        assert!(token_candidates("").is_empty());
+        assert!(token_candidates("Run the migration on the staging table.").is_empty());
+        assert!(token_candidates(&format!("{} {}", &bare[..42], &bare[..42])).is_empty());
+        // A space or a character outside the alphabet cuts the run.
+        assert!(token_candidates(&format!("{} {}", &bare[..30], &bare[30..])).is_empty());
+        // Each window is a candidate once. A run of 50 characters has 8 windows.
+        let run = "a".repeat(50);
+        assert_eq!(token_candidates(&run).len(), 1, "equal windows count once");
+        let run: String = (0..50u8).map(|n| char::from(b'A' + n % 26)).collect();
+        assert_eq!(token_candidates(&run).len(), 8);
+        // A text with a non-ASCII character never breaks a boundary.
+        assert!(token_candidates("é".repeat(100).as_str()).is_empty());
+        assert!(token_candidates(&format!("é{bare}é")).contains(&token.to_string()));
     }
 
     #[test]

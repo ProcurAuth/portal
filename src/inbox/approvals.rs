@@ -123,6 +123,8 @@ const INVALID_ARGUMENT: ApprovalError = ApprovalError::new(422, "invalid_argumen
 const INVALID_LEASE: ApprovalError = ApprovalError::new(422, "invalid_lease");
 /// A `previous_id` that belongs to another agent (the table of the channel gives 403).
 const AGENT_MISMATCH: ApprovalError = ApprovalError::new(403, "agent_mismatch");
+/// A text of the agent (an explanation, a label) that holds a live token of an agent of the same owner.
+const AGENT_TOKEN_IN_TEXT: ApprovalError = ApprovalError::new(422, "agent_token_in_text");
 
 fn storage(e: ItemError) -> ApprovalError {
     match e {
@@ -617,6 +619,19 @@ pub async fn intent(
     }
     if input.hint.as_ref().is_some_and(|h| !check_hint(h)) {
         return Err(INVALID_ARGUMENT);
+    }
+    // A token must not go into a text that a person or a phone reads. The check comes before any write.
+    let texts: Vec<&str> = explanation
+        .as_deref()
+        .into_iter()
+        .chain(input.agent_label.as_deref())
+        .collect();
+    if items
+        .text_holds_live_token(&who.owner, &texts)
+        .await
+        .map_err(storage)?
+    {
+        return Err(AGENT_TOKEN_IN_TEXT);
     }
     // A `previous_id` must name a closed item of the same key and of the same agent as this call. A new agent has no
     // item, so it can never borrow the thread of another. The check comes before the agent is made.

@@ -766,7 +766,7 @@ fn intent(s: &Server, key: &str, headers: &[(&str, String)], args: Value) -> (bo
     tool_result(&request(s, "POST", &all, &body.to_string()))
 }
 
-const SENTENCE: &str = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service.";
+const SENTENCE: &str = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service. The portal refuses a text that holds a token.";
 
 #[test]
 fn the_agent_cases_a01_to_a10() {

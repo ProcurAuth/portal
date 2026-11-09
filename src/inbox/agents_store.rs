@@ -222,6 +222,33 @@ impl Items<'_> {
         result
     }
 
+    /// Whether one of the texts holds a token of an agent of this owner, with the prefix `agt_` or bare. A token that is
+    /// in a text that the owner, or another person, reads is not secret any more: the portal refuses the text. The
+    /// check compares digests with the agents of the owner, so a text of 43 characters that is not a token passes.
+    /// It reads the database only when a text has a run of 43 characters of the token alphabet.
+    pub async fn text_holds_live_token(
+        &self,
+        owner: &str,
+        texts: &[&str],
+    ) -> Result<bool, ItemError> {
+        let mut digests = std::collections::HashSet::new();
+        for text in texts {
+            for candidate in super::agents::token_candidates(text) {
+                digests.insert(token_digest(&candidate));
+            }
+        }
+        if digests.is_empty() {
+            return Ok(false);
+        }
+        let agents = self.list_agents(owner, None).await?;
+        Ok(agents.iter().any(|s| {
+            s.agent
+                .token_digest
+                .as_ref()
+                .is_some_and(|d| digests.contains(d))
+        }))
+    }
+
     // ------------------------------------------------------------ the reads
 
     /// The bucket of a key: the pseudo agent "Unattributed". It is made when it does not exist.

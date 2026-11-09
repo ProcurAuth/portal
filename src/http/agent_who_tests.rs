@@ -1528,7 +1528,7 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
         assert_eq!(reply.status, 200, "[{name}] {}", reply.body);
         let tools = reply.json()["result"]["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 6, "[{name}]");
-        let sentence = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service.";
+        let sentence = "approval_intent can return agent_token. Send it in agent_token in each later call. Never put it in a text and never send it to a service. The portal refuses a text that holds a token.";
         for tool in &tools {
             let tool_name = tool["name"].as_str().unwrap();
             let properties = &tool["inputSchema"]["properties"];
@@ -1565,5 +1565,157 @@ fn the_tools_carry_the_token_the_label_and_the_fixed_sentence() {
                 .contains(sentence),
             "[{name}] the instructions"
         );
+    });
+}
+
+// ---------------------------------------------------------------- a token in a text
+
+/// An agent must not leak its token into a text that a person or a phone reads (lot G5). The portal refuses an
+/// explanation, a label or a message that holds a live token of an agent of the same owner, with the prefix or bare.
+#[test]
+fn explanation_with_a_live_token_is_refused() {
+    each(|r, name| {
+        r.fix_clock(T0);
+        r.device();
+        let k = conversational(r, ID_A);
+        let made = ok_h(r, &k, &[], "approval_intent", intent_args());
+        let token = token_of(&made);
+        let bare = &token[4..];
+        let items_before = r.count("SELECT COUNT(*) FROM items");
+        let intents_before = r.count("SELECT COUNT(*) FROM approval_intents");
+        let agents_before = agent_rows(r);
+        // The token with its prefix, bare, and glued to other characters of the alphabet: each one is refused, with the
+        // code of the table and a message that names no value.
+        for text in [
+            format!("please use {token} for the next call"),
+            format!("token: {bare}"),
+            format!("x{bare}y"),
+            format!("{token}{token}"),
+            format!("line one\n{token}"),
+        ] {
+            let e = err_h(
+                r,
+                &k,
+                &[],
+                "approval_intent",
+                with(intent_args(), "explanation", json!(text)),
+            );
+            assert_eq!(e["code"], "agent_token_in_text", "[{name}] {text}");
+            assert_eq!(e["retryable"], false, "[{name}]");
+            assert!(!e["message"].to_string().contains(bare), "[{name}] {e}");
+        }
+        // The label is a text too. It is short, but a token fits in it.
+        let e = err_h(
+            r,
+            &k,
+            &[],
+            "approval_intent",
+            with(intent_args(), "agent_label", json!(token)),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // The refusal comes before any write: no item, no intent, no agent.
+        assert_eq!(r.count("SELECT COUNT(*) FROM items"), items_before, "[{name}]");
+        assert_eq!(
+            r.count("SELECT COUNT(*) FROM approval_intents"),
+            intents_before,
+            "[{name}]"
+        );
+        assert_eq!(agent_rows(r), agents_before, "[{name}]");
+        // A second agent of the same key cannot carry the first token in its text either.
+        let second = ok_h(r, &k, &[], "approval_intent", intent_args());
+        assert_eq!(second["agent_status"], "new", "[{name}]");
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token_of(&second).as_str())],
+            "approval_intent",
+            with(intent_args(), "explanation", json!(format!("copy {bare}"))),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // A text that only looks like a token is fine: 43 characters that are no token, a prefix alone, a short text.
+        for text in [
+            "a".repeat(43),
+            format!("agt_{}", "b".repeat(43)),
+            "agt_".to_string(),
+            format!("{} and more", &bare[..42]),
+            "Run the migration on the staging table.".to_string(),
+        ] {
+            let ok = ok_h(
+                r,
+                &k,
+                &[("Agent-Token", token.as_str())],
+                "approval_intent",
+                with(intent_args(), "explanation", json!(text)),
+            );
+            assert!(ok.get("approval_ref").is_some(), "[{name}] {text}: {ok}");
+        }
+        // A message of the thread (`say`) is checked too. The item allows the talk and the owner asked.
+        let open = {
+            let intent = ok_h(
+                r,
+                &k,
+                &[("Agent-Token", token.as_str())],
+                "approval_intent",
+                with(intent_args(), "allow_ask_back", json!(true)),
+            );
+            item_of(r, &k, 7, &intent)
+        };
+        owner_reply(r, &open, "m1", "Why this table?");
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token.as_str())],
+            "say",
+            json!({"request_id": open, "text": format!("my token is {token}")}),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        let said = ok_h(
+            r,
+            &k,
+            &[("Agent-Token", token.as_str())],
+            "say",
+            json!({"request_id": open, "text": "Because the dry run passed."}),
+        );
+        assert_eq!(said["seq"], 2, "[{name}] {said}");
+        // A token that is blocked or merged is still a stored digest: a text that holds it is refused.
+        let blocked = agent_of(r, &open);
+        owner_op(r, &blocked, AgentOp::Block);
+        let e = err_h(
+            r,
+            &k,
+            &[("Agent-Token", token_of(&second).as_str())],
+            "approval_intent",
+            with(intent_args(), "explanation", json!(format!("old {token}"))),
+        );
+        assert_eq!(e["code"], "agent_token_in_text", "[{name}] {e}");
+        // The REST door has the same rule and the same code.
+        let c = agent_in(
+            r,
+            ID_C,
+            KeyKind::Api,
+            KeyInteraction::Conversational,
+            AgentsMode::Discover,
+        );
+        let first = rest_h(
+            r,
+            &c,
+            &[],
+            "POST",
+            "/api/v1/approval-intents",
+            &intent_args().to_string(),
+        );
+        assert_eq!(first.status, 201, "[{name}] {}", first.body);
+        let rest_token = first.json()["agent_token"].as_str().unwrap().to_string();
+        let leak = rest_h(
+            r,
+            &c,
+            &[("Agent-Token", rest_token.as_str())],
+            "POST",
+            "/api/v1/approval-intents",
+            &with(intent_args(), "explanation", json!(format!("t={rest_token}"))).to_string(),
+        );
+        assert_eq!(leak.status, 422, "[{name}] {}", leak.body);
+        assert_eq!(leak.json()["error"]["code"], "agent_token_in_text", "[{name}]");
+        assert!(!leak.body.contains(&rest_token[4..]), "[{name}]");
     });
 }
