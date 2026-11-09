@@ -10,10 +10,12 @@
 //! # Formats of the sealed texts
 //!
 //! - The body of an approval is the JSON object
-//!   `{op, view, explanation?, explanation_format?, language?, hint?}`. `language` colors the command.
+//!   `{op, view, explanation?, explanation_format?, language?, hint?, agent_label?}`. `language` colors the command.
 //! - The body of a question is the JSON object
-//!   `{title, explanation?, explanation_format?, command?: {text, label?, language?}, input, hint?, as_of_ms?}`.
-//!   The `input` can be a form: its `questions` are in the body.
+//!   `{title, explanation?, explanation_format?, command?: {text, label?, language?}, input, hint?, as_of_ms?,
+//!   agent_label?}`. The `input` can be a form: its `questions` are in the body.
+//! - `agent_label` is what the agent says that it is. It is text of the agent, not verified: the frame carries it
+//!   next to the explanation and never in `from`.
 //! - A turn of the agent (`say`) is the JSON object
 //!   `{explanation?, explanation_format?, command?: {text, label?, language?}}`. A text that is not such an object
 //!   reads as the explanation, in plain text.
@@ -27,13 +29,16 @@
 
 use inbox_core::effect::{Op, View};
 use inbox_core::proto::{
-    ApprovalBody, Author, Channel, Command, DigestMsg, ExplanationFormat, Follows, FormAnswer,
-    Hint, Input, Intent, ItemState, Kind, Language, LeaseMode, MessageMsg, Previous, RequestMsg,
-    Sender, SettledBy, SettledMsg,
+    is_untrusted_line, AgentKind as WireKind, AgentMsg, AgentState as WireState, ApprovalBody,
+    Author, Channel, Command, DigestMsg, ExplanationFormat, Follows, FormAnswer, Hint, Input,
+    Intent, ItemState, Kind, Language, LeaseMode, MessageMsg, Observed as WireObserved, Previous,
+    RequestMsg, Sender, SettledBy, SettledMsg, MAX_AGENT_CLIENT_CHARS, MAX_AGENT_LABEL_CHARS,
+    MAX_AGENT_NET_CHARS, MAX_AGENT_USER_AGENT_CHARS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::agents::{AgentKind, AgentMode, AgentRow, AgentState, Observed};
 use super::items::{ItemRow, Loaded};
 use super::items_ops::TurnRow;
 
@@ -176,22 +181,145 @@ pub struct ApprovalFacts {
 
 // ---------------------------------------------------------------- the frames
 
-/// The line "from": the portal writes it. A label that an agent gives is never here.
-pub fn sender(item: &ItemRow, key_name: Option<&str>) -> Sender {
-    let name = key_name
+/// The name of the key in a frame: the name that the owner gave, else the word "key" and the first 8 characters of its
+/// id. It is portal text.
+pub fn key_display(key_id: &str, key_name: Option<&str>) -> String {
+    key_name
         .map(clean_line)
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| {
-            let short: String = item.requester_key_id.chars().take(8).collect();
+            let short: String = key_id.chars().take(8).collect();
             format!("key {short}")
-        });
-    Sender {
-        label: name.clone(),
+        })
+}
+
+/// The text of the portal for an agent, in a frame: the name that the owner gave, else the key name and the number of the
+/// agent ("ops-key #4"). For the bucket: the key name in the mode `key`, else "Unattributed · <key name>". It has at most
+/// 64 characters: a long key name is cut, never the part of the portal. The text of an agent is never in it.
+pub fn agent_label(agent: &AgentRow, key_name: &str, mode: AgentMode) -> String {
+    let full = agent.label(key_name, mode);
+    let over = full.chars().count().saturating_sub(MAX_AGENT_LABEL_CHARS);
+    if over == 0 {
+        return full;
+    }
+    let keep = key_name.chars().count().saturating_sub(over);
+    agent.label(&key_name.chars().take(keep).collect::<String>(), mode)
+}
+
+/// The state of an agent as `from.agent_state` of a request says it. An item of a `blocked` or a `merged` agent is
+/// never an open request: the action of the owner cancels it or moves it, so there is no value for it.
+fn from_state(agent: &AgentRow) -> Option<WireState> {
+    match agent.state {
+        AgentState::New => Some(WireState::New),
+        AgentState::Known => Some(WireState::Known),
+        AgentState::Blocked | AgentState::Merged => None,
+    }
+}
+
+fn wire_kind(kind: AgentKind) -> WireKind {
+    match kind {
+        AgentKind::Agent => WireKind::Agent,
+        AgentKind::Bucket => WireKind::Bucket,
+    }
+}
+
+/// The line "from": the portal writes it. A label that an agent gives is never here. `agent` is the agent that the item
+/// belongs to, and `mode` is what its key does with the agents. `None` when the agent is `blocked` or `merged`: the item
+/// is not an open request.
+pub fn sender(
+    item: &ItemRow,
+    key_name: Option<&str>,
+    agent: &AgentRow,
+    mode: AgentMode,
+) -> Option<Sender> {
+    let name = key_display(&item.requester_key_id, key_name);
+    Some(Sender {
+        label: agent_label(agent, &name, mode),
         key_name: name,
         owner: clean_line(&item.requester_owner),
         via: item.via,
         interaction: item.interaction,
-    }
+        agent_id: agent.agent_id.clone(),
+        agent_kind: wire_kind(agent.kind),
+        agent_state: from_state(agent)?,
+    })
+}
+
+/// What an `agent` frame needs besides the row of the agent.
+pub struct AgentFacts<'a> {
+    /// The name of the key, as the owner gave it.
+    pub key_name: &'a str,
+    pub mode: AgentMode,
+    /// What the portal remembers of the hints of the agent. Unsealed for this frame only.
+    pub observed: Option<&'a Observed>,
+    /// The open items of the agent now.
+    pub open: i64,
+    /// `inbox.agents.lock_new`.
+    pub lock_new: bool,
+}
+
+/// The hints of an agent as the frame carries them. A hint that the frame would refuse (a control character, a format
+/// character, a length) is left out: a client text never stops the notice of a new agent. `None` for a bucket and for an
+/// agent that shows nothing.
+fn observed_frame(agent: &AgentRow, observed: Option<&Observed>) -> Option<WireObserved> {
+    let o = observed.filter(|_| agent.kind == AgentKind::Agent)?;
+    let keep = |t: &Option<String>, max| t.clone().filter(|t| is_untrusted_line(t, max));
+    let says = keep(&o.says, MAX_AGENT_LABEL_CHARS);
+    let out = WireObserved {
+        says_changed: Some(o.says_changes).filter(|n| *n > 0 && says.is_some()),
+        says,
+        client: keep(&o.client, MAX_AGENT_CLIENT_CHARS),
+        user_agent: keep(&o.user_agent, MAX_AGENT_USER_AGENT_CHARS),
+        net: keep(&o.net, MAX_AGENT_NET_CHARS),
+        nets_seen: o.nets_seen(),
+    };
+    let empty = out.says.is_none()
+        && out.client.is_none()
+        && out.user_agent.is_none()
+        && out.net.is_none()
+        && out.nets_seen == 0;
+    (!empty).then_some(out)
+}
+
+/// The `agent` frame of an agent. `id` is the id of the delivery. The state of the frame is the state of the row now,
+/// whatever `rev` the queue row named.
+pub fn agent_frame(
+    id: &str,
+    agent: &AgentRow,
+    facts: &AgentFacts<'_>,
+) -> Result<AgentMsg, FrameError> {
+    let rev = u64::try_from(agent.rev).map_err(|_| FrameError::Invalid("agent.rev".into()))?;
+    let state = match agent.state {
+        AgentState::New => WireState::New,
+        AgentState::Known => WireState::Known,
+        AgentState::Blocked => WireState::Blocked,
+        AgentState::Merged => WireState::Merged,
+    };
+    let frame = AgentMsg {
+        id: id.to_string(),
+        agent_id: agent.agent_id.clone(),
+        rev,
+        key_name: clean_line(facts.key_name),
+        kind: wire_kind(agent.kind),
+        state,
+        label: agent_label(agent, facts.key_name, facts.mode),
+        named: agent.name.is_some(),
+        merged_into: agent
+            .merged_into
+            .clone()
+            .filter(|_| agent.state == AgentState::Merged),
+        created_at_ms: agent.created_at.max(0),
+        last_seen_ms: agent.last_seen_at.max(0),
+        open: u32::try_from(facts.open.max(0)).unwrap_or(u32::MAX),
+        lock_accept: agent.state == AgentState::New && facts.lock_new,
+        observed: observed_frame(agent, facts.observed),
+        // The hint "looks like another agent" comes with the hardening lot (G5). The member is part of the wire already.
+        similar: None,
+    };
+    inbox_core::proto::ServerMsg::Agent(Box::new(frame.clone()))
+        .validate()
+        .map_err(|e| FrameError::Invalid(e.to_string()))?;
+    Ok(frame)
 }
 
 /// One line of 1 to 64 characters: a control character becomes a space.
@@ -225,6 +353,12 @@ pub fn request_frame(
     let item = &l.item;
     let value: Value =
         serde_json::from_slice(body).map_err(|_| FrameError::Body("the body is not JSON"))?;
+    // What the agent says that it is. The channel checked it, and the frame refuses a text that it does not carry.
+    let agent_label = value
+        .get("agent_label")
+        .and_then(Value::as_str)
+        .filter(|t| is_untrusted_line(t, MAX_AGENT_LABEL_CHARS))
+        .map(str::to_string);
     let (lease_mode, lease_until_ms, until_at_ms) = match (item.lease_s, item.until_at) {
         (Some(_), None) => (LeaseMode::Lease, item.lease_until, None),
         (None, Some(at)) => (LeaseMode::Until, None, Some(at)),
@@ -250,6 +384,7 @@ pub fn request_frame(
         allow_ask_back: item.allow_ask_back,
         supersedes: item.supersedes.clone(),
         previous_id: item.previous_id.clone(),
+        agent_label,
         title: None,
         explanation: None,
         explanation_format: None,
@@ -469,6 +604,33 @@ mod tests {
     use inbox_core::effect::effect_hash;
     use inbox_core::proto::{Decision, InputType, Interaction, Urgency, Via};
 
+    /// The agent of the test item: a known agent that the owner named "Billing bot".
+    fn agent_row(item: &ItemRow) -> AgentRow {
+        AgentRow {
+            agent_id: item.agent_id.clone(),
+            key_id: item.requester_key_id.clone(),
+            owner: item.requester_owner.clone(),
+            kind: AgentKind::Agent,
+            state: AgentState::Known,
+            origin: super::super::agents::AgentOrigin::Call,
+            ordinal: 4,
+            name: Some("Billing bot".into()),
+            name_key: Some("billing bot".into()),
+            token_digest: Some("d".repeat(64)),
+            merged_into: None,
+            rev: 5,
+            created_at: 1_787_000_000_000,
+            named_at: Some(1_787_000_100_000),
+            last_seen_at: 1_788_000_000_000,
+            hints: None,
+        }
+    }
+
+    /// The line "from" of a test item, with the agent of the test.
+    fn sender(item: &ItemRow, key_name: Option<&str>) -> Sender {
+        super::sender(item, key_name, &agent_row(item), AgentMode::Discover).unwrap()
+    }
+
     fn item(kind: Kind) -> ItemRow {
         ItemRow {
             request_id: "b".repeat(32),
@@ -558,7 +720,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.kind, Kind::Approval);
-        assert_eq!(f.from.label, "claude-laptop");
+        assert_eq!(f.from.label, "Billing bot");
+        assert_eq!(f.from.key_name, "claude-laptop");
         assert_eq!(f.lease_mode, LeaseMode::Lease);
         let a = f.approval.unwrap();
         assert!(a.verify(), "the phone computes the same effect");
@@ -572,10 +735,291 @@ mod tests {
     #[test]
     fn the_line_from_never_holds_text_of_an_agent() {
         let l = approval();
+        // The key name falls back to the first characters of the id, and a control character becomes a space.
         let s = sender(&l.item, None);
-        assert_eq!(s.label, "key 2b7c91d0");
+        assert_eq!(s.key_name, "key 2b7c91d0");
         let s = sender(&l.item, Some("bad\nname\u{7}"));
-        assert_eq!(s.label, "bad name");
+        assert_eq!(s.key_name, "bad name");
+        // The label is the name that the owner gave. It never comes from the body of the item: the text of the agent is
+        // in `agent_label`, outside `from`.
+        let (mut body, _) = approval_body();
+        body["agent_label"] = serde_json::json!("billing-bot");
+        let from = sender(&l.item, Some("k"));
+        let f = request_frame(
+            &"a".repeat(32),
+            &l,
+            body.to_string().as_bytes(),
+            from,
+            &ApprovalFacts::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (f.from.label.as_str(), f.agent_label.as_deref()),
+            ("Billing bot", Some("billing-bot"))
+        );
+        // Without a name, the label is the key name and the number of the agent: portal text.
+        let mut unnamed = agent_row(&l.item);
+        unnamed.name = None;
+        unnamed.name_key = None;
+        unnamed.state = AgentState::New;
+        let s = super::sender(&l.item, Some("ops-key"), &unnamed, AgentMode::Discover).unwrap();
+        assert_eq!(
+            (s.label.as_str(), s.agent_kind, s.agent_state),
+            ("ops-key #4", WireKind::Agent, WireState::New)
+        );
+        // The bucket: the key name in the mode `key`, "Unattributed" in the other modes. It is `known`.
+        let mut bucket = unnamed.clone();
+        bucket.kind = AgentKind::Bucket;
+        bucket.state = AgentState::Known;
+        bucket.token_digest = None;
+        let key_mode = super::sender(&l.item, Some("ops-key"), &bucket, AgentMode::Key).unwrap();
+        assert_eq!(
+            (key_mode.label.as_str(), key_mode.agent_kind),
+            ("ops-key", WireKind::Bucket)
+        );
+        let other = super::sender(&l.item, Some("ops-key"), &bucket, AgentMode::Discover).unwrap();
+        assert_eq!(other.label, "Unattributed · ops-key");
+        assert_eq!(other.agent_state, WireState::Known);
+        // An item of a blocked or a merged agent is not an open request: no line "from".
+        for state in [AgentState::Blocked, AgentState::Merged] {
+            let mut gone = unnamed.clone();
+            gone.state = state;
+            assert!(
+                super::sender(&l.item, Some("k"), &gone, AgentMode::Discover).is_none(),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_label_of_an_agent_has_at_most_64_characters_and_cuts_the_key_name_only() {
+        let l = approval();
+        let mut unnamed = agent_row(&l.item);
+        unnamed.name = None;
+        unnamed.ordinal = 12;
+        let long_key = "k".repeat(64);
+        let s = super::sender(&l.item, Some(&long_key), &unnamed, AgentMode::Discover).unwrap();
+        assert_eq!(s.label.chars().count(), 64);
+        assert!(
+            s.label.ends_with(" #12"),
+            "the number of the agent stays: {}",
+            s.label
+        );
+        let mut bucket = unnamed.clone();
+        bucket.kind = AgentKind::Bucket;
+        bucket.token_digest = None;
+        let s = super::sender(&l.item, Some(&long_key), &bucket, AgentMode::Discover).unwrap();
+        assert_eq!(s.label.chars().count(), 64);
+        assert!(s.label.starts_with("Unattributed · k"), "{}", s.label);
+        // In the mode `key`, the label is the key name, and it fits already.
+        let s = super::sender(&l.item, Some(&long_key), &bucket, AgentMode::Key).unwrap();
+        assert_eq!(s.label, long_key);
+        // The frame passes the rules of the core crate for each case.
+        let mut frame = request_frame(
+            &"a".repeat(32),
+            &l,
+            approval_body().0.to_string().as_bytes(),
+            s,
+            &ApprovalFacts::default(),
+        )
+        .unwrap();
+        frame.agent_label = None;
+        inbox_core::proto::ServerMsg::Request(Box::new(frame))
+            .encode()
+            .unwrap();
+    }
+
+    #[test]
+    fn the_text_that_an_agent_says_reaches_the_frame_only_when_the_frame_carries_it() {
+        let l = approval();
+        let (mut body, _) = approval_body();
+        let make = |body: &Value| {
+            request_frame(
+                &"a".repeat(32),
+                &l,
+                body.to_string().as_bytes(),
+                sender(&l.item, Some("k")),
+                &ApprovalFacts::default(),
+            )
+            .unwrap()
+        };
+        assert_eq!(make(&body).agent_label, None);
+        body["agent_label"] = serde_json::json!("Night ETL");
+        assert_eq!(make(&body).agent_label.as_deref(), Some("Night ETL"));
+        // A text that the frame would refuse is left out: the item is still delivered, with no label.
+        for bad in ["a\u{202e}b", "a\nb", "", &"x".repeat(65)] {
+            body["agent_label"] = serde_json::json!(bad);
+            assert_eq!(make(&body).agent_label, None, "{bad:?}");
+        }
+        body["agent_label"] = serde_json::json!(7);
+        assert_eq!(make(&body).agent_label, None);
+    }
+
+    fn facts<'a>(observed: Option<&'a Observed>, open: i64) -> AgentFacts<'a> {
+        AgentFacts {
+            key_name: "ops-key",
+            mode: AgentMode::Discover,
+            observed,
+            open,
+            lock_new: true,
+        }
+    }
+
+    fn observed_all() -> Observed {
+        Observed {
+            says: Some("billing-bot".into()),
+            says_first: Some("report-bot".into()),
+            says_changes: 2,
+            client: Some("claude-code/2.1.0".into()),
+            user_agent: Some("claude-code/2.1.0 (linux)".into()),
+            net: Some("203.0.113.0/24".into()),
+            nets: vec!["203.0.113.0/24".into(), "198.51.100.0/24".into()],
+        }
+    }
+
+    #[test]
+    fn the_agent_frame_is_portal_text_and_the_hints_of_the_row() {
+        let l = approval();
+        let mut row = agent_row(&l.item);
+        row.name = None;
+        row.name_key = None;
+        row.state = AgentState::New;
+        row.rev = 3;
+        let o = observed_all();
+        let f = agent_frame(&"c".repeat(32), &row, &facts(Some(&o), 1)).unwrap();
+        assert_eq!(
+            (f.rev, f.kind, f.state),
+            (3, WireKind::Agent, WireState::New)
+        );
+        assert_eq!(
+            (f.label.as_str(), f.key_name.as_str(), f.named),
+            ("ops-key #4", "ops-key", false)
+        );
+        assert!(f.lock_accept, "a new agent with lock_new");
+        assert_eq!((f.open, f.merged_into.clone()), (1, None));
+        assert_eq!(
+            (f.created_at_ms, f.last_seen_ms),
+            (1_787_000_000_000, 1_788_000_000_000)
+        );
+        let w = f.observed.as_ref().unwrap();
+        assert_eq!(w.says.as_deref(), Some("billing-bot"));
+        // The first text of the agent is for the page of the owner: it is not on the wire.
+        assert_eq!((w.says_changed, w.nets_seen), (Some(2), 2));
+        assert_eq!(w.net.as_deref(), Some("203.0.113.0/24"));
+        assert!(f.similar.is_none());
+        inbox_core::proto::ServerMsg::Agent(Box::new(f))
+            .encode()
+            .unwrap();
+        // `lock_new` false: the owner can approve a new agent. The flag is false.
+        let mut open = facts(Some(&o), 0);
+        open.lock_new = false;
+        assert!(
+            !agent_frame(&"c".repeat(32), &row, &open)
+                .unwrap()
+                .lock_accept
+        );
+        // Known: the flag is false whatever the file says.
+        row.state = AgentState::Known;
+        row.name = Some("Billing bot".into());
+        let f = agent_frame(&"c".repeat(32), &row, &facts(Some(&o), 0)).unwrap();
+        assert_eq!(
+            (f.label.as_str(), f.named, f.lock_accept),
+            ("Billing bot", true, false)
+        );
+        // Merged: the target is on the frame. Blocked: nothing else.
+        row.state = AgentState::Merged;
+        row.merged_into = Some("e".repeat(32));
+        let f = agent_frame(&"c".repeat(32), &row, &facts(None, 0)).unwrap();
+        assert_eq!(
+            (f.state, f.merged_into.as_deref()),
+            (WireState::Merged, Some("e".repeat(32).as_str()))
+        );
+        row.state = AgentState::Blocked;
+        let f = agent_frame(&"c".repeat(32), &row, &facts(None, 0)).unwrap();
+        assert_eq!((f.state, f.merged_into), (WireState::Blocked, None));
+    }
+
+    #[test]
+    fn the_hints_that_the_frame_would_refuse_are_left_out_and_never_stop_the_frame() {
+        let l = approval();
+        let mut row = agent_row(&l.item);
+        row.state = AgentState::New;
+        let mut o = observed_all();
+        o.client = Some("a\u{202e}b".into());
+        o.user_agent = Some("x\ny".into());
+        o.net = Some("n".repeat(44));
+        let f = agent_frame(&"c".repeat(32), &row, &facts(Some(&o), 1)).unwrap();
+        let w = f.observed.unwrap();
+        assert_eq!((w.client, w.user_agent, w.net), (None, None, None));
+        assert_eq!((w.says.as_deref(), w.nets_seen), (Some("billing-bot"), 2));
+        // The text of the agent with a hidden character: left out, and the count of changes goes with it.
+        o.says = Some("a\u{200b}b".into());
+        let w = agent_frame(&"c".repeat(32), &row, &facts(Some(&o), 1))
+            .unwrap()
+            .observed
+            .unwrap();
+        assert_eq!((w.says, w.says_changed), (None, None));
+        // Nothing to show: no member.
+        let empty = Observed::default();
+        assert!(agent_frame(&"c".repeat(32), &row, &facts(Some(&empty), 0))
+            .unwrap()
+            .observed
+            .is_none());
+        assert!(agent_frame(&"c".repeat(32), &row, &facts(None, 0))
+            .unwrap()
+            .observed
+            .is_none());
+        // A count of changes of zero is no member. A count with no text is no member.
+        let mut o = observed_all();
+        o.says_changes = 0;
+        assert_eq!(
+            agent_frame(&"c".repeat(32), &row, &facts(Some(&o), 0))
+                .unwrap()
+                .observed
+                .unwrap()
+                .says_changed,
+            None
+        );
+    }
+
+    #[test]
+    fn the_bucket_frame_has_no_name_no_hints_and_no_lock() {
+        let l = approval();
+        let mut bucket = agent_row(&l.item);
+        bucket.kind = AgentKind::Bucket;
+        bucket.name = None;
+        bucket.name_key = None;
+        bucket.token_digest = None;
+        bucket.state = AgentState::Known;
+        // Even a bucket row that holds hints (it never does) shows none.
+        let o = observed_all();
+        let f = agent_frame(&"c".repeat(32), &bucket, &facts(Some(&o), 2)).unwrap();
+        assert_eq!(
+            (f.kind, f.label.as_str()),
+            (WireKind::Bucket, "Unattributed · ops-key")
+        );
+        assert!(f.observed.is_none() && !f.lock_accept && !f.named);
+        let mut key_mode = facts(None, 0);
+        key_mode.mode = AgentMode::Key;
+        assert_eq!(
+            agent_frame(&"c".repeat(32), &bucket, &key_mode)
+                .unwrap()
+                .label,
+            "ops-key"
+        );
+        // A count above the largest u32 stops there. A negative count is zero.
+        assert_eq!(
+            agent_frame(&"c".repeat(32), &bucket, &facts(None, i64::MAX))
+                .unwrap()
+                .open,
+            u32::MAX
+        );
+        assert_eq!(
+            agent_frame(&"c".repeat(32), &bucket, &facts(None, -3))
+                .unwrap()
+                .open,
+            0
+        );
     }
 
     #[test]

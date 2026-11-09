@@ -536,6 +536,7 @@ async fn sync_reconciles_open_and_closed() {
                 seq: 4,
             },
         ],
+        agents: None,
     })
     .await;
     let mut settled = Vec::new();
@@ -568,7 +569,11 @@ async fn sync_reconciles_open_and_closed() {
     assert!(settled.iter().all(|s| s.request_id != second));
 
     // A phone that holds nothing gets the open item, with a new delivery id.
-    ca.send(&ClientMsg::Sync { open: vec![] }).await;
+    ca.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: None,
+    })
+    .await;
     let again = next_request(&mut ca, WAIT).await;
     assert_eq!(again.request_id, second);
     assert!(
@@ -840,7 +845,11 @@ async fn a_phone_of_another_account_gets_nothing_and_cannot_answer() {
         .await;
     let result = next_result(&mut conn, WAIT).await;
     assert_eq!((result.status, result.state), (AnswerStatus::Closed, None));
-    conn.send(&ClientMsg::Sync { open: vec![] }).await;
+    conn.send(&ClientMsg::Sync {
+        open: vec![],
+        agents: None,
+    })
+    .await;
     nothing_arrives(&mut conn, Duration::from_secs(2)).await;
     assert_eq!(pep.verdict(&id)["verdict"], "pending");
     assert_eq!(pep.resume(&c)["decision"], false);

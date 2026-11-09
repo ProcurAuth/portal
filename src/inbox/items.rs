@@ -355,6 +355,7 @@ pub fn status_str(status: AnswerStatus) -> &'static str {
         AnswerStatus::DeviceRevoked => "device_revoked",
         AnswerStatus::CustomNotAllowed => "custom_not_allowed",
         AnswerStatus::AskBackNotAllowed => "ask_back_not_allowed",
+        AnswerStatus::AgentLocked => "agent_locked",
     }
 }
 
